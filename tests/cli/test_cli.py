@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from pathlib import Path
+from typing import ClassVar
+from unittest import mock
 
 import pytest
 
@@ -74,20 +78,106 @@ class TestRefusalsAreSentences:
 
 
 class TestUnlandedLanesRefuseHonestly:
-    """A missing lane must not look like an empty fleet."""
+    """A missing lane must not look like an empty fleet.
 
-    @pytest.mark.parametrize("command", ["desk", "doctor"])
-    def test_exit_69_and_names_the_lane(self, capsys, command):
+    Absence is simulated rather than assumed. An earlier version of these tests
+    asserted that `doctor` exits 69 because `mosaic.doctor` did not exist yet —
+    which measured the state of a sibling lane rather than this CLI's contract,
+    and started failing the moment Lane B landed. Forcing the ImportError keeps
+    the refusal path under test forever, in both worlds.
+    """
+
+    LANES: ClassVar[dict[str, str]] = {"desk": "mosaic.compose", "doctor": "mosaic.doctor"}
+
+    @pytest.fixture
+    def absent(self, monkeypatch):
+        def _absent(module_path):
+            # sys.modules[name] = None makes `import name` raise ImportError,
+            # which is exactly what a lane that has not landed looks like.
+            monkeypatch.setitem(sys.modules, module_path, None)
+
+        return _absent
+
+    @pytest.mark.parametrize("command", sorted(LANES))
+    def test_exit_69_and_names_the_lane(self, capsys, absent, command):
+        absent(self.LANES[command])
         assert main([command]) == EXIT_UNAVAILABLE
         err = capsys.readouterr().err
         assert "not available yet" in err
         assert "lane" in err.lower()
         assert "Traceback" not in err
 
-    @pytest.mark.parametrize("command", ["desk", "doctor"])
-    def test_prints_nothing_to_stdout(self, capsys, command):
+    @pytest.mark.parametrize("command", sorted(LANES))
+    def test_prints_nothing_to_stdout(self, capsys, absent, command):
+        absent(self.LANES[command])
         main([command])
         assert capsys.readouterr().out == ""
+
+    def test_a_landed_lane_is_distinguishable_from_a_missing_one(self, capsys, absent):
+        """Exit 69 must mean 'not built', never 'built and found nothing'."""
+        absent("mosaic.compose")
+        assert main(["desk"]) == EXIT_UNAVAILABLE
+        capsys.readouterr()
+
+        empty = types.ModuleType("mosaic.compose")
+        empty.compose_desk = lambda: {"schema": "desk.v1", "entries": []}
+        with mock.patch.dict(sys.modules, {"mosaic.compose": empty}):
+            assert main(["desk"]) == EXIT_OK
+        assert "no entries" in capsys.readouterr().out
+
+
+class TestTheSeamsSiblingLanesPlugInto:
+    """The two function names Lanes A and B were told to match."""
+
+    def test_desk_renders_whatever_compose_returns(self, capsys):
+        fake = types.ModuleType("mosaic.compose")
+        fake.compose_desk = lambda: {
+            "schema": "desk.v1",
+            "entries": [
+                {
+                    "source": "janus",
+                    "owner": "kevin",
+                    "title": "seam check",
+                    "authority": "janus-authorized",
+                    "binding": {"kind": "git"},
+                    "binding_holds": True,
+                    "link": "janus://gates/x",
+                }
+            ],
+        }
+        with mock.patch.dict(sys.modules, {"mosaic.compose": fake}):
+            assert main(["desk"]) == EXIT_OK
+        out = capsys.readouterr().out
+        assert "AUTHORITY" in out
+        assert "1 entry renders as authority" in out
+
+    def test_doctor_text_uses_the_lane_renderer_not_json(self, capsys):
+        """Text mode must not silently fall back to dumping JSON."""
+        fake = types.ModuleType("mosaic.doctor")
+        fake.run_doctor = lambda: {"schema": "mosaic.doctor.v1", "adapters": []}
+        fake.render_text = lambda report: f"DOCTOR · {report['schema']} · human-readable"
+        with mock.patch.dict(sys.modules, {"mosaic.doctor": fake}):
+            assert main(["doctor"]) == EXIT_OK
+        out = capsys.readouterr().out
+        assert "human-readable" in out
+        assert "{" not in out
+
+    def test_doctor_json_does_not_need_the_text_renderer(self, capsys):
+        fake = types.ModuleType("mosaic.doctor")
+        fake.run_doctor = lambda: {"schema": "mosaic.doctor.v1", "adapters": []}
+        with mock.patch.dict(sys.modules, {"mosaic.doctor": fake}):
+            assert main(["doctor", "--format", "json"]) == EXIT_OK
+        assert json.loads(capsys.readouterr().out)["schema"] == "mosaic.doctor.v1"
+
+    def test_doctor_text_refuses_when_only_render_text_is_missing(self, capsys):
+        """A half-landed lane refuses in text mode but still works in JSON."""
+        fake = types.ModuleType("mosaic.doctor")
+        fake.run_doctor = lambda: {"schema": "mosaic.doctor.v1", "adapters": []}
+        with mock.patch.dict(sys.modules, {"mosaic.doctor": fake}):
+            assert main(["doctor"]) == EXIT_UNAVAILABLE
+            err = capsys.readouterr().err
+            assert "render_text" in err
+            assert main(["doctor", "--format", "json"]) == EXIT_OK
 
 
 class TestPlumbing:

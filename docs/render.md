@@ -123,6 +123,30 @@ stdout. Malformed input exits **1**. A caller scripting around Mosaic can tell
 An empty desk renders as an explicit statement that it is empty. Blank output
 is indistinguishable from a crash.
 
+## An empty read is not a failed read
+
+A desk is composed **from** modules, so a module that did not answer leaves a
+hole in the document — it does not mean there was nothing to find. The renderer
+reads the document's `unreachable` array and never describes a desk as cleanly
+composed while that array is populated:
+
+- **Empty, everything answered** — "a genuinely empty desk: nothing was hidden
+  by a failed read."
+- **Empty, something did not answer** — "INCOMPLETE, not empty. What is missing
+  is unknown, not nothing", followed by each module and the address tried.
+- **Populated, something did not answer** — the footer's counts are explicitly
+  qualified: entries those modules hold are *missing, not absent*.
+
+Each unreachable module is named with the address it was actually tried at.
+The fleet's modules disagree about whether they live on loopback or the
+tailnet, so "connection refused" without an address is the least useful error
+available.
+
+This is the authority collapse in a different field — "nothing to report" and
+"we could not ask" are opposite facts, and exactly one of them needs an
+operator. It is called out here because it was a real bug in this renderer,
+caught in review by Lane A, not a hypothetical.
+
 ## Adding a renderer
 
 Add it to `RENDERERS` in `render/__init__.py` and it appears as a `--format`
