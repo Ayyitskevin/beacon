@@ -31,7 +31,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from mosaic.contracts.authority import Authority, Lifecycle
+from mosaic.contracts.authority import Authority
 
 SCHEMA = "desk.v1"
 
@@ -69,12 +69,44 @@ class Entry:
 
     Carries every field the roadmap requires of a desk entry: source module,
     owner, status, timestamp, schema version, canonical link, authority label.
+
+    Note the division of labour between `status` and `authority`: `status` is
+    the module's own word for where this thing stands, and `authority` -- when
+    present -- is the approval vocabulary. An entry with no approval is never
+    forced to borrow an approval word to describe itself.
     """
 
     source: str
     owner: str
     title: str
-    status: Lifecycle
+
+    status: str
+    """The module's OWN status word, verbatim: Janus `superseded`, Athena
+    `in_progress`, whatever the module calls it. Never mapped onto Mosaic's
+    vocabulary.
+
+    This was typed `Lifecycle` for four commits and that was wrong twice over.
+
+    It forced every module to borrow an *approval* vocabulary to describe
+    things that are not approvals. An Athena issue is work; its `done` has no
+    honest home in a five-value approval enum, and picking one either
+    understates it or asserts a check nobody ran. Worse, Janus's three
+    terminal-negative states -- `withdrawn`, `expired`, `superseded` -- all
+    collapsed onto `PROPOSED`, so **4 of 13 live gates rendered identically to
+    a live open gate**. A question nobody has answered and a question the
+    world moved past are different facts, and that is this project's own
+    failure mode one level up from the one it was built to prevent.
+
+    It also duplicated `Authority.lifecycle`, which already carries the
+    approval vocabulary and is populated only when there *is* an approval.
+    Two fields holding the same concept can disagree, and one of them was
+    being populated by a lossy mapping table living in adapters -- which is
+    doctrine, in the wrong place.
+
+    Found by Lane B against live data, exactly as agreed: bring the case
+    rather than invent a label.
+    """
+
     timestamp: str
     """ISO-8601 UTC, from the MODULE -- when the fact happened. Distinct from
     `provenance.read_at`, which is when Mosaic looked."""
