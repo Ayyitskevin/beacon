@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
-
 from mosaic.adapters.athena import AthenaAdapter
 from mosaic.adapters.transport import Unreachable
 
@@ -53,25 +51,44 @@ def _adapter(routes: dict[str, object]) -> AthenaAdapter:
     return adapter
 
 
-def test_probe_reports_the_service_commit_and_tree_state() -> None:
+def test_capabilities_report_the_service_commit_and_tree_state() -> None:
     """tree_state is provenance, not trivia.
 
     A module serving from a modified checkout is serving something no commit
     describes. That belongs on the desk beside its answers, not in a log.
     """
 
-    probe = _adapter({"/version": VERSION}).probe()
-    assert probe.reachable is True
-    assert probe.commit == VERSION["commit"]
-    assert probe.tree_state == "clean"
+    capability = _adapter({"/version": VERSION}).capabilities()
+    assert capability.listener is not None
+    assert capability.raw["commit"] == VERSION["commit"]
+    assert capability.raw["tree_state"] == "clean"
 
 
-def test_unreachable_probe_still_names_the_address() -> None:
+def test_capabilities_never_raise_for_an_unreachable_module() -> None:
+    """Discovery failing is information, not an exception.
+
+    `listener=None` is Minerva's own convention for "nothing is serving", and it
+    is the honest answer here too.
+    """
+
     adapter = _adapter({"/version": Unreachable("athena", "http://x.invalid/version", "refused")})
-    probe = adapter.probe()
-    assert probe.reachable is False
-    assert probe.address == "http://x.invalid/version"
-    assert "refused" in probe.detail
+    assert adapter.capabilities().listener is None
+
+
+def test_read_reports_unreachability_instead_of_raising() -> None:
+    adapter = _adapter({"/version": Unreachable("athena", "http://x.invalid/version", "refused")})
+    entries, unreachable = adapter.read()
+    assert entries == ()
+    assert len(unreachable) == 1
+    # The address must survive into the document: "connection refused" without
+    # an address is the least useful error available.
+    assert unreachable[0].detail == "http://x.invalid/version"
+
+
+def test_capabilities_name_the_token_source_never_the_token() -> None:
+    capability = _adapter({"/version": VERSION}).capabilities()
+    assert set(capability.raw) >= {"address_source", "token_source", "identity_scoped"}
+    assert "token" not in {k for k in capability.raw if k != "token_source"}
 
 
 def test_status_is_not_normalised() -> None:
@@ -82,24 +99,34 @@ def test_status_is_not_normalised() -> None:
     with no page to point at and no reviewer looking.
     """
 
-    entry = _adapter({"/version": VERSION, "/issues": ISSUES}).entries()[0]
-    assert entry.status == "open"
+    entries, _ = _adapter({"/version": VERSION, "/issues": ISSUES}).read()
+    entry = entries[0]
+    # Athena's own word survives verbatim; the Lifecycle value is the lossy part.
+    assert entry.payload["module_status"] == "open"
     assert entry.source == "athena"
     assert entry.owner == "Claude"
 
 
 def test_canonical_link_points_at_the_owning_module() -> None:
-    entry = _adapter({"/version": VERSION, "/issues": ISSUES}).entries()[0]
-    assert entry.canonical_link.endswith("/aegis/issues/2")
+    entries, _ = _adapter({"/version": VERSION, "/issues": ISSUES}).read()
+    assert entries[0].link.endswith("/aegis/issues/2")
+    assert entries[0].provenance.tree_state == "clean"
 
 
-def test_entries_carry_no_authority_label() -> None:
-    entry = _adapter({"/version": VERSION, "/issues": ISSUES}).entries()[0]
-    assert entry.authority_label == "unlabelled"
+def test_an_issue_carries_no_authority_at_all() -> None:
+    """An Athena issue is work, not an approval.
+
+    `authority=None` is the contract's common case, and it is deliberately not
+    the same as an approval that failed to verify. Athena's approvals are a
+    separate mechanism on /approvals and are not read here.
+    """
+
+    entries, _ = _adapter({"/version": VERSION, "/issues": ISSUES}).read()
+    assert entries[0].authority is None
 
 
-def test_unexpected_payload_shape_is_reported() -> None:
+def test_unexpected_payload_shape_is_reported_not_raised() -> None:
     adapter = _adapter({"/version": VERSION, "/issues": {"surprise": True}})
-    with pytest.raises(Unreachable) as caught:
-        adapter.entries()
-    assert "neither a list" in str(caught.value)
+    entries, unreachable = adapter.read()
+    assert entries == ()
+    assert "neither a list" in unreachable[0].reason

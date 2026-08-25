@@ -52,33 +52,58 @@ def _probe_all() -> list[dict[str, Any]]:
             "adapter": registration.factory is not None,
         }
         if registration.factory is None:
-            row["reachable"] = None  # unknown, not false -- nobody looked
+            # Unknown, not false. Nobody looked, because there is nothing to look
+            # at -- reporting a repo that was never built as a service that is
+            # down sends someone to restart it.
+            row["reachable"] = None
             row["detail"] = registration.absent_reason
             rows.append(row)
             continue
 
         try:
-            probe = registration.factory().probe()
+            adapter = registration.factory()
+            capability = adapter.capabilities()
+            entries, unreachable = adapter.read()
         except Exception as exc:  # an adapter must never take doctor down with it
             row["reachable"] = False
             row["detail"] = f"adapter raised {type(exc).__name__}: {exc}"
             rows.append(row)
             continue
 
+        raw = capability.raw if isinstance(capability.raw, dict) else {}
         row.update(
             {
-                "reachable": probe.reachable,
-                "address": probe.address,
-                "address_source": probe.address_source,
-                "detail": probe.detail,
-                "version": probe.version,
-                "commit": probe.commit,
-                "tree_state": probe.tree_state,
-                "schema_version": probe.schema_version,
+                "reachable": capability.listener is not None and not unreachable,
+                "address": capability.listener
+                or _describe_endpoint(registration.module).get("address"),
+                "address_source": raw.get("address_source")
+                or _describe_endpoint(registration.module).get("source"),
+                "version": capability.version,
+                "surfaces": list(capability.surfaces),
+                "entries": len(entries),
+                "commit": raw.get("commit"),
+                "tree_state": raw.get("tree_state"),
+                "detail": (
+                    "; ".join(f"{u.reason}" for u in unreachable)
+                    if unreachable
+                    else _read_detail(len(entries), capability)
+                ),
             }
         )
         rows.append(row)
     return rows
+
+
+def _read_detail(count: int, capability: Any) -> str:
+    """Say which of the three read outcomes this was.
+
+    Reachable-with-nothing and unreachable are different facts, and a desk that
+    renders them alike is lying by omission. Doctor says which one happened.
+    """
+
+    if count:
+        return f"{count} entries"
+    return "reachable, and contributes nothing to the desk"
 
 
 def _check_minerva_cli_discovery() -> dict[str, Any]:

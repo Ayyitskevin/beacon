@@ -71,33 +71,63 @@ class ReadOnlyHTTP:
             raise Unreachable(self.module, url, f"answered with non-JSON: {exc}") from exc
 
 
+#: Which verbs Mosaic may run, per module. **A literal, in this file, owned by
+#: the transport rather than by its callers.**
+#:
+#: The first version of this took `read_verbs` as a constructor argument, which
+#: made the constraint circular: the adapter being restricted chose its own
+#: restrictions, so an adapter declaring `{"decide", "withdraw"}` was allowed to
+#: rule on a gate and the tests could not see it. Found in review by claude-2f,
+#: who proved it by writing an adapter that passed every read-only test while
+#: reaching `subprocess.run` with a mutating verb.
+#:
+#: As a literal, the verb set is provable the same way the HTTP method is:
+#: `test_read_only_by_construction.py` reads this table out of the AST and
+#: asserts what is in it. A caller can no longer widen it.
+READ_VERBS: dict[str, frozenset[str]] = {
+    # `board` is excluded despite reading like a read: it accepts --check, which
+    # runs decay checks and appends observations to the ledger. An allowlist that
+    # admits a verb because its usual invocation is harmless is not an allowlist.
+    "janus": frozenset({"list", "show", "stats", "doctor"}),
+}
+
+
 @dataclass(frozen=True)
 class ReadOnlyCommand:
-    """A module read through its own CLI, restricted to verbs declared up front.
+    """A module read through its own CLI, restricted to verbs it does not choose.
 
     Two modules have no HTTP read surface worth using: Janus is a local CLI over
     SQLite, and Buzz's conversation reads go through `buzz`. Reading their
     databases directly would be reaching into another module's live state; going
     through the owner's own interface is not.
 
-    `read_verbs` is the whole safety story. `janus` can rule on a gate and
-    withdraw one; this class will refuse to run either, because neither appears
-    in the allowlist an adapter declares.
+    The allowlist comes from `READ_VERBS` above, keyed by module. It is
+    deliberately NOT a constructor parameter -- see that table's note.
     """
 
     module: str
     executable: str
-    read_verbs: frozenset[str]
     timeout: float = DEFAULT_TIMEOUT
+
+    @property
+    def read_verbs(self) -> frozenset[str]:
+        try:
+            return READ_VERBS[self.module]
+        except KeyError:
+            # Fail closed. A module with no entry may run nothing at all, so
+            # adding an adapter without declaring its verbs here is a visible
+            # failure rather than an open door.
+            return frozenset()
 
     def run_json(self, argv: list[str]) -> object:
         if not argv:
             raise ValueError(f"{self.module}: no verb given")
         verb = argv[0]
-        if verb not in self.read_verbs:
+        allowed = self.read_verbs
+        if verb not in allowed:
             raise PermissionError(
                 f"{self.module}: '{verb}' is not a declared read verb "
-                f"(allowed: {', '.join(sorted(self.read_verbs))})"
+                f"(allowed: {', '.join(sorted(allowed)) or 'nothing -- module not in READ_VERBS'})"
             )
         command = [self.executable, *argv]
         printable = " ".join(command)

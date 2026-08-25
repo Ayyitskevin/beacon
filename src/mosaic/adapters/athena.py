@@ -3,13 +3,16 @@
 Athena is the module whose own Desk endpoint Mosaic is modelled on, and the
 discipline that endpoint states -- "it composes, it does not compute" -- is the
 rule this adapter follows too. Every field emitted here is a field Athena
-returned. Nothing is derived, normalised, or improved.
+returned.
 
-One honesty note that belongs in the output rather than a docstring, and is
-surfaced through probe().detail: Athena authenticates per identity. A token
-minted for an agent seat sees that seat's desk, not the operator's. So Athena's
-contribution to a cross-module desk is scoped to whoever the token belongs to,
-and Mosaic must not present it as the whole of Athena.
+**Athena is identity-scoped.** A token minted for an agent seat sees that seat's
+view, not the operator's. Mosaic must never present Athena's contribution as the
+whole of Athena; `capabilities()` reports which token spelling was used so the
+scope of what was read is visible rather than assumed.
+
+Athena issues carry no approval, so every entry here has `authority=None`. That
+is the contract's common case and it is deliberately not the same as an approval
+that failed to verify.
 """
 
 from __future__ import annotations
@@ -17,8 +20,31 @@ from __future__ import annotations
 from typing import Any
 
 from .. import config
-from .base import Entry, ModuleProbe, entry
-from .transport import ReadOnlyHTTP, Unreachable
+from .base import (
+    Capability,
+    Entry,
+    Lifecycle,
+    Unreachable,
+    provenance,
+    unreachable_from,
+)
+from .transport import ReadOnlyHTTP
+from .transport import Unreachable as TransportUnreachable
+
+#: Athena's status words -> the roadmap's five-value Lifecycle.
+#:
+#: Lossy in a different way from Janus: an Athena issue is *work*, not an
+#: approval, and Lifecycle is an approval vocabulary. `done` is mapped to
+#: EXECUTED rather than VERIFIED because Athena's own desk protocol says
+#: "complete does not close the issue" -- claiming VERIFIED would assert a check
+#: that nobody ran. Raised with Lane A; the module's own word is preserved in
+#: `payload["module_status"]`.
+_LIFECYCLE: dict[str, Lifecycle] = {
+    "open": Lifecycle.PROPOSED,
+    "todo": Lifecycle.PROPOSED,
+    "in_progress": Lifecycle.REVIEWED,
+    "done": Lifecycle.EXECUTED,
+}
 
 
 class AthenaAdapter:
@@ -33,78 +59,100 @@ class AthenaAdapter:
             token=self._endpoint.token,
         )
 
-    def probe(self) -> ModuleProbe:
+    # -- discovery ---------------------------------------------------------
+
+    def capabilities(self) -> Capability:
         try:
             version = self._http.get_json("/version")
-        except Unreachable as exc:
-            return ModuleProbe(
-                module=self.module,
-                reachable=False,
-                address=exc.address,
-                address_source=self._endpoint.source,
-                detail=exc.reason,
-            )
+        except TransportUnreachable:
+            return Capability(module=self.module, listener=None)
         if not isinstance(version, dict):
             version = {}
-
-        detail = "reachable"
-        if not self._endpoint.token:
-            detail = "reachable, but no token configured -- reads will be anonymous"
-        else:
-            detail = f"reachable, token from {self._endpoint.token_source}"
-
-        return ModuleProbe(
+        return Capability(
             module=self.module,
-            reachable=True,
-            address=self._endpoint.address,
-            address_source=self._endpoint.source,
-            detail=detail,
-            version=version.get("version"),
-            commit=version.get("commit"),
-            # Athena reports whether its own checkout is dirty. A module serving
-            # from a modified tree is serving something no commit describes, and
-            # that belongs on the desk rather than in a log nobody reads.
-            tree_state=version.get("tree_state"),
+            version=str(version.get("version")) if version.get("version") else None,
+            surfaces=("/version", "/desk", "/issues", "/approvals", "/events"),
+            listener=self._endpoint.address,
+            raw={
+                "address_source": self._endpoint.source,
+                # Which env var supplied the token, never the token itself.
+                "token_source": self._endpoint.token_source,
+                "identity_scoped": True,
+                "commit": version.get("commit"),
+                "tree_state": version.get("tree_state"),
+            },
         )
 
-    def entries(self) -> list[Entry]:
-        payload = self._http.get_json(f"/issues?status=open&limit={self._limit}")
+    # -- reading -----------------------------------------------------------
+
+    def read(self) -> tuple[tuple[Entry, ...], tuple[Unreachable, ...]]:
+        base = self._endpoint.address.rstrip("/")
+        issues_path = f"/issues?status=open&limit={self._limit}"
+        source = f"{base}{issues_path}"
+
+        # Version first: it is the provenance every entry carries, and a module
+        # serving from a dirty tree is serving something no commit describes.
+        module_version: str | None = None
+        tree_state: str | None = None
+        try:
+            version = self._http.get_json("/version")
+            if isinstance(version, dict):
+                module_version = version.get("commit") or version.get("version")
+                tree_state = version.get("tree_state")
+        except TransportUnreachable as exc:
+            return (), (unreachable_from(exc, self.module),)
+
+        try:
+            payload = self._http.get_json(issues_path)
+        except TransportUnreachable as exc:
+            return (), (unreachable_from(exc, self.module),)
+
         issues: list[Any]
         if isinstance(payload, list):
             issues = payload
         elif isinstance(payload, dict) and isinstance(payload.get("items"), list):
             issues = payload["items"]
         else:
-            raise Unreachable(
-                self.module,
-                f"{self._endpoint.address}/issues",
-                "answered with neither a list nor an {items: [...]} object",
+            return (), (
+                Unreachable(
+                    module=self.module,
+                    reason="/issues answered with neither a list nor an {items: [...]} object",
+                    detail=source,
+                ),
             )
 
-        base = self._endpoint.address.rstrip("/")
-        out: list[Entry] = []
-        for issue in issues:
-            key = issue.get("key") or str(issue.get("id", ""))
-            out.append(
-                entry(
-                    source=self.module,
-                    kind="issue",
-                    ref=key,
-                    title=issue.get("title", ""),
-                    # Athena's own status string, passed through. Mapping it to a
-                    # cross-module vocabulary is Lane A's composition step, not an
-                    # adapter's -- an adapter that normalises has already decided.
-                    status=issue.get("status", ""),
-                    owner=issue.get("assignee_name"),
-                    timestamp=issue.get("created_at"),
-                    schema_version=None,
-                    canonical_link=f"{base}/aegis/issues/{issue.get('id')}",
-                    extra={
-                        "project": issue.get("project_name"),
-                        "priority": issue.get("priority"),
-                        "assignee_is_agent": issue.get("assignee_is_agent"),
-                        "labels": issue.get("labels") or [],
-                    },
-                )
-            )
-        return out
+        entries = tuple(
+            self._entry(issue, base, source, module_version, tree_state) for issue in issues
+        )
+        return entries, ()
+
+    def _entry(
+        self,
+        issue: dict[str, Any],
+        base: str,
+        source: str,
+        module_version: str | None,
+        tree_state: str | None,
+    ) -> Entry:
+        status = str(issue.get("status", ""))
+        return Entry(
+            source=self.module,
+            owner=str(issue.get("assignee_name") or "unassigned"),
+            title=str(issue.get("title", "")),
+            status=_LIFECYCLE.get(status, Lifecycle.PROPOSED),
+            timestamp=str(issue.get("created_at") or ""),
+            schema_version="athena.issue.v1",
+            ref=str(issue.get("key") or issue.get("id", "")),
+            provenance=provenance(source, module_version=module_version, tree_state=tree_state),
+            link=f"{base}/aegis/issues/{issue.get('id')}",
+            # An Athena issue is work, not an approval. Athena's approvals are a
+            # separate mechanism on /approvals and are not read here.
+            authority=None,
+            payload={
+                "module_status": status,
+                "project": issue.get("project_name"),
+                "priority": issue.get("priority"),
+                "assignee_is_agent": issue.get("assignee_is_agent"),
+                "labels": issue.get("labels") or [],
+            },
+        )

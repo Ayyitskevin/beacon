@@ -17,11 +17,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from mosaic.contracts import Adapter, Capability, Entry, Unreachable
+
 from .athena import AthenaAdapter
-from .base import Adapter, Entry, ModuleProbe
 from .janus import JanusAdapter
 from .minerva import MinervaAdapter
-from .transport import ReadOnlyCommand, ReadOnlyHTTP, Unreachable
+from .transport import READ_VERBS, ReadOnlyCommand, ReadOnlyHTTP
 from .vulcan import VulcanAdapter
 
 
@@ -100,18 +101,32 @@ def available() -> list[Registration]:
     return [r for r in REGISTRY if r.factory is not None]
 
 
+def registry() -> tuple[Adapter, ...]:
+    """Every adapter that exists, instantiated.
+
+    This is the name `mosaic.compose.compose_desk` imports lazily, so landing
+    this function is what lights up `mosaic desk`. It returns only the modules
+    with adapters; the ones without are not silently dropped -- `mosaic doctor`
+    reports them from REGISTRY, with a reason each.
+    """
+
+    return tuple(r.factory() for r in REGISTRY if r.factory is not None)
+
+
 __all__ = [
+    "READ_VERBS",
     "REGISTRY",
     "Adapter",
     "AthenaAdapter",
+    "Capability",
     "Entry",
     "JanusAdapter",
     "MinervaAdapter",
-    "ModuleProbe",
     "ReadOnlyCommand",
     "ReadOnlyHTTP",
     "Registration",
     "Unreachable",
     "VulcanAdapter",
     "available",
+    "registry",
 ]

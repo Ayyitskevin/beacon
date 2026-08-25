@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-import pytest
-
-from mosaic.adapters.janus import READ_VERBS, JanusAdapter
+from mosaic.adapters.janus import JanusAdapter
+from mosaic.adapters.transport import READ_VERBS
+from mosaic.contracts import Attachment, Decider, Enforcement, Lifecycle
 
 #: Shapes taken from `janus list --state all --json` on mickey, 2026-08-24.
 #: The live ledger's 13 gates are distributed kind=git 8, kind=none 4, kind=file 1.
@@ -70,7 +70,92 @@ def test_mutating_verbs_are_not_in_the_allowlist() -> None:
     """
 
     for verb in ("decide", "raise", "withdraw", "expire", "supersede", "check", "board"):
-        assert verb not in READ_VERBS, f"{verb!r} can change the ledger"
+        assert verb not in READ_VERBS["janus"], f"{verb!r} can change the ledger"
+
+
+def _entries():
+    entries, unreachable = _adapter().read()
+    assert unreachable == ()
+    return entries
+
+
+def test_read_never_raises_for_an_unreachable_module() -> None:
+    """An empty read and a failed read are different facts about the world.
+
+    The contract requires `((), (Unreachable(...),))` rather than an exception,
+    so a desk can say "Janus did not answer" instead of "Janus had nothing".
+    """
+
+    from mosaic.adapters.transport import Unreachable as TransportUnreachable
+
+    adapter = JanusAdapter()
+
+    class Dead:
+        executable = "janus"
+
+        def run_json(self, argv: list[str]) -> object:
+            raise TransportUnreachable("janus", "janus list", "not on PATH")
+
+    adapter._cli = Dead()  # type: ignore[assignment]
+    entries, unreachable = adapter.read()
+    assert entries == ()
+    assert len(unreachable) == 1
+    assert "not on PATH" in unreachable[0].reason
+
+
+def test_an_unbound_ruling_never_assures() -> None:
+    """4 of 13 live gates are approved and bound to nothing.
+
+    A ruling bound to nothing can never be re-checked against anything, by
+    anyone, ever -- so it must not render as a positive assurance no matter what
+    its lifecycle says.
+    """
+
+    unbound = next(e for e in _entries() if e.ref == "g4deae14ca3d")
+    assert unbound.authority is not None
+    assert unbound.authority.attachment is Attachment.UNBOUND
+    assert unbound.authority.assures() is False
+
+
+def test_a_gate_with_no_ruling_carries_no_authority() -> None:
+    """An open gate is a question, not a weak answer.
+
+    `authority=None` is not the same as an approval that failed to verify, and
+    the contract is explicit that a renderer must not show them alike.
+    """
+
+    open_gate = next(e for e in _entries() if e.ref == "g3410c2cff0f")
+    assert open_gate.authority is None
+    assert open_gate.status is Lifecycle.PROPOSED
+
+
+def test_janus_reports_drift_rather_than_enforcing_it() -> None:
+    """Janus states drift and stops there, so the operator has to act.
+
+    Encoding this as REPORTED rather than ENFORCED is the whole reason the
+    enforcement axis exists: Icarus enforcing and Janus reporting are different
+    obligations for whoever is reading the desk.
+    """
+
+    ruled = next(e for e in _entries() if e.authority is not None)
+    assert ruled.authority.enforcement is Enforcement.REPORTED
+    assert ruled.authority.decider is Decider.HUMAN
+    assert ruled.authority.mechanism == "janus.ruling"
+
+
+def test_module_status_survives_the_lossy_lifecycle_mapping() -> None:
+    """Lifecycle has no terminal-negative value, so the raw word must survive.
+
+    `withdrawn`, `expired` and `superseded` all land on PROPOSED. That is the
+    least misleading mapping available -- none of them claims authorization --
+    but it does mean the module's own word is the only place the difference
+    still exists.
+    """
+
+    for entry in _entries():
+        assert entry.payload["module_status"], f"{entry.ref} lost Janus's own status word"
+    approved = next(e for e in _entries() if e.ref == "g4deae14ca3d")
+    assert approved.payload["module_status"] == "approved"
 
 
 def test_binding_kind_none_is_not_reported_as_bound() -> None:
@@ -81,43 +166,43 @@ def test_binding_kind_none_is_not_reported_as_bound() -> None:
     re-checked against anything.
     """
 
-    entries = _adapter().entries()
-    unbound = [e for e in entries if e.binding["kind"] == "none"]
+    unbound = [e for e in _entries() if e.payload["binding_kind"] == "none"]
     assert len(unbound) == 1
-    assert unbound[0].binding["sha256"] == ""
+    assert unbound[0].payload["binding_sha256"] == ""
 
 
 def test_binding_fields_are_passed_through_verbatim() -> None:
-    entries = _adapter().entries()
-    gate = next(e for e in entries if e.ref == "g3410c2cff0f")
-    assert gate.binding == {
-        "kind": "file",
-        "locator": "docs/adr/0054-gate1.md",
-        "sha256": "9409066ef76a07748761e17dcaed64a67069496379a99f514f67acde1c7133c4",
-    }
+    gate = next(e for e in _entries() if e.ref == "g3410c2cff0f")
+    assert gate.payload["binding_kind"] == "file"
+    assert gate.payload["binding_locator"] == "docs/adr/0054-gate1.md"
+    assert gate.payload["binding_sha256"].startswith("9409066ef76a")
 
 
-def test_adapter_emits_no_authority_label() -> None:
+def test_adapter_uses_only_contract_values() -> None:
     """Adapters describe; the authority page decides.
 
-    An adapter that labelled its own entries would be deciding doctrine at the
-    edge, in six places, with no page to point at.
+    No adapter invents a label. Every value here comes from the contract enums,
+    so the day Lane A changes the vocabulary, this lane changes with it instead
+    of drifting alongside it.
     """
 
-    for entry in _adapter().entries():
-        assert entry.authority_label == "unlabelled"
+    for entry in _entries():
+        assert isinstance(entry.status, Lifecycle)
+        if entry.authority is not None:
+            assert isinstance(entry.authority.attachment, Attachment)
+            assert isinstance(entry.authority.lifecycle, Lifecycle)
 
 
 def test_status_is_the_module_s_own_word() -> None:
-    entries = _adapter().entries()
-    assert {e.status for e in entries} == {"open", "approved"}
+    assert {e.payload["module_status"] for e in _entries()} == {"open", "approved"}
 
 
 def test_canonical_link_is_re_runnable() -> None:
     """Janus has no URL, so its canonical link is the command that shows the gate."""
 
-    gate = next(e for e in _adapter().entries() if e.ref == "g3410c2cff0f")
-    assert gate.canonical_link == "janus show g3410c2cff0f"
+    gate = next(e for e in _entries() if e.ref == "g3410c2cff0f")
+    assert gate.link == "janus show g3410c2cff0f"
+    assert gate.provenance.source.endswith("list --state all --json")
 
 
 def test_non_list_response_is_reported_not_swallowed() -> None:
@@ -130,6 +215,6 @@ def test_non_list_response_is_reported_not_swallowed() -> None:
             return {"unexpected": "object"}
 
     adapter._cli = Broken()  # type: ignore[assignment]
-    with pytest.raises(Exception) as caught:
-        adapter.entries()
-    assert "JSON array" in str(caught.value)
+    entries, unreachable = adapter.read()
+    assert entries == ()
+    assert "JSON array" in unreachable[0].reason
