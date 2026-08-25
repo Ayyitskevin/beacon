@@ -188,3 +188,41 @@ class TestCredentialsAreBoundToTheirEndpoint:
         monkeypatch.setenv("ATHENA_API_TOKEN", "live-token-value")
 
         assert config.resolve("athena").token is None
+
+    def test_a_host_that_merely_starts_with_the_default_is_still_a_redirect(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Prefix confusion. This test is the guard; the comment above it is not.
+
+        `http://100.125.80.91:8300.evil.invalid` starts with the default address
+        and is a completely different host. The relaxation that lets a correct
+        host keep its token compares for EXACT equality, and that exactness is
+        the only thing standing between this case and a live bearer.
+
+        Written after claude-2f demonstrated that swapping `==` for `.startswith()`
+        left the entire suite green while sending the token here -- so the
+        property had a comment behind it and no test. The realistic path to that
+        mutation is benign: someone hits the trailing-slash wrinkle, reaches for a
+        looser comparison to be helpful, sees green, and ships it.
+        """
+
+        self._clear(monkeypatch)
+        default, _ = config._DEFAULTS["athena"]
+        monkeypatch.setenv("ATHENA_BASE_URL", default + ".evil.invalid")
+        monkeypatch.setenv("ATHENA_API_TOKEN", "live-token-value")
+
+        assert config.resolve("athena").token is None, (
+            "a host that merely shares a prefix with the default received the token"
+        )
+
+    def test_a_default_prefixed_path_is_also_a_redirect(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The same trap one character further along: an appended path, not a host."""
+
+        self._clear(monkeypatch)
+        default, _ = config._DEFAULTS["athena"]
+        monkeypatch.setenv("ATHENA_BASE_URL", default + "@evil.invalid")
+        monkeypatch.setenv("ATHENA_API_TOKEN", "live-token-value")
+
+        assert config.resolve("athena").token is None
