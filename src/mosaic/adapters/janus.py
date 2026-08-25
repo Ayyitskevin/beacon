@@ -40,6 +40,26 @@ from .transport import Unreachable as TransportUnreachable
 #: field to `str`; the approval vocabulary now lives only on `Authority.lifecycle`,
 #: where it is populated only when there actually is an approval.
 #:
+#: A ruling's own state -> where it sits in the APPROVAL vocabulary.
+#:
+#: This is a mapping table, and it belongs here in a way the deleted
+#: `Entry.status` one did not: `Authority.lifecycle` *is* the approval axis, so
+#: translating Janus's ruling states into it is the honest job, not a forced fit.
+#:
+#: Only `approved` yields AUTHORIZED. A `superseded` ruling records that the world
+#: moved past the question, and 5 of 13 live gates are in that state -- rendering
+#: them as authorized would claim a human authorized something they did not, which
+#: is the exact collapse this project exists to prevent. Anything unrecognised
+#: falls to REVIEWED: a human engaged and the result was not an authorization.
+_RULING_LIFECYCLE: dict[str, Lifecycle] = {
+    "approved": Lifecycle.AUTHORIZED,
+    "refused": Lifecycle.REVIEWED,
+    "withdrawn": Lifecycle.REVIEWED,
+    "expired": Lifecycle.REVIEWED,
+    "superseded": Lifecycle.REVIEWED,
+}
+
+
 #: Janus binding kinds -> what the ruling is pinned to.
 #:
 #: `none` is the case the live ledger actually exercises and the abstract type
@@ -127,8 +147,8 @@ class JanusAdapter:
         )
 
     def _authority(self, gate: dict[str, Any], state: str, kind: str) -> Authority | None:
-        del state  # the entry carries Janus's own word; authority carries the approval axis
-        if not gate.get("ruling"):
+        ruling = gate.get("ruling")
+        if not ruling:
             # No ruling means no approval at all -- which the contract says must
             # not render like an approval that failed to verify. An open gate is
             # a question, not a weak answer.
@@ -140,7 +160,14 @@ class JanusAdapter:
             # Janus states drift and stops there, on purpose: enforcing would put
             # it in the permission path. So the operator, not the module, acts.
             enforcement=Enforcement.REPORTED,
-            lifecycle=Lifecycle.AUTHORIZED,
+            # Taken from the RULING's own state, not the gate's and never a
+            # constant. A superseded gate still carries a ruling object; reading
+            # "it has a ruling" as "it was authorized" is how five gates claimed
+            # an authorization nobody gave.
+            lifecycle=_RULING_LIFECYCLE.get(
+                str(ruling.get("state") or state) if isinstance(ruling, dict) else state,
+                Lifecycle.REVIEWED,
+            ),
             mechanism="janus.ruling",
             meaning=(
                 "Janus records pending authority; it does not grant authority. "
