@@ -1,18 +1,37 @@
-> # ⚠ VOID — this ADR rules on a boundary that no longer exists
+> # ⚠ NARROWED — a checked precondition for migration readers, not a prohibition
 >
-> ADR 0001 decides **what an adapter may read across module boundaries.** Kevin's
-> 2026-08-25 ruling made Mosaic one unified codebase with its own store, so there are
-> no module boundaries left for it to govern. It is not merely stale: its premise is
-> gone.
+> ADR 0001 decided **what an adapter may read across module boundaries.** Kevin's
+> 2026-08-25 ruling made Mosaic one unified codebase with its own store, so it no
+> longer governs the product. It still governs the **migration readers** in
+> `src/mosaic/adapters/`, which do read old systems across a boundary.
 >
-> Kept because the reasoning still applies to the **migration readers** in
-> `src/mosaic/adapters/`, which do still read old systems across a boundary. It does
-> **not** govern `src/mosaic/store/`, which owns a database by design.
+> **Fable ruled 2026-08-25 on how, and the distinction is the useful part.** This
+> ADR's reason — *opening another system's database bypasses its scopes, its
+> authorization and its activity trail, and observes mid-transaction state* — is a
+> property of a **live** system. A quiesced source (stopped service, frozen snapshot)
+> has no scopes to bypass, no activity trail to skip, and no mid-transaction state to
+> observe. The reason survives verbatim; only its scope is made explicit.
 >
-> This ADR was cited by a test guard after the ruling voided it — the guard forbade
-> `sqlite3` anywhere in the package on ADR 0001's authority, which blocked the unified
-> store from owning its own database. **That is what a void document still instructing
-> looks like in practice.**
+> So: **a migration reader may open a source database only against a verified-quiesced
+> source, fail-closed.** Not "never", and not "whenever convenient".
+>
+> **"Verified" needs a mechanism, or it is a promise in prose** — the failure mode this
+> repository has hit four times. A reader asserting quiescence in a comment has verified
+> nothing. Concrete, cheap checks, in order of strength:
+>   1. the source path is a **copy or snapshot**, not the live file (compare paths);
+>   2. for SQLite, **no `-wal` / `-shm` companions** beside the file — their presence is
+>      positive evidence of a live connection;
+>   3. open with SQLite's `immutable=1`, which makes read-only a property of the handle
+>      rather than of the caller's intent.
+> Fail-closed means an unverifiable source is treated as live and refused, never assumed
+> quiet because nothing looked busy.
+>
+> **Executing a migration against live data remains RED** — a Kevin gate, unchanged.
+>
+> This ADR was cited by a test guard *after* the ruling narrowed it, forbidding `sqlite3`
+> package-wide and blocking the unified store from owning its own database. That is what
+> a document still instructing past its scope looks like when it reaches code, and it is
+> why this banner states the scope rather than just the verdict.
 >
 > 1. `shared/handoffs/2026-08-25_mosaic-scope-ruling-unified-desktop-app.md` — the ruling
 > 2. `shared/handoffs/2026-08-25_mosaic-datamodel-synthesis.md` — the current design
