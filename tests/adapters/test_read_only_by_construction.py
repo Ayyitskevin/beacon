@@ -53,9 +53,35 @@ FORBIDDEN_IN_ADAPTERS = {
     "tempfile",
 }
 
-#: ADR 0001: a module's own interface is readable; its live database is not.
-#: sqlite3 anywhere in Mosaic means someone opened janus.db or athena.db.
+#: ADR 0001, re-grounded 2026-08-25. The rule's SURVIVING premise is narrow and precise:
+#: **do not open a database belonging to a system you do not own.** Opening one bypasses
+#: that system's scopes, its authorization and its activity trail, and observes
+#: mid-transaction state.
+#:
+#: It was originally written as "sqlite3 anywhere in Mosaic", which was correct only
+#: because Mosaic owned no database -- so "anywhere" and "someone else's store" were the
+#: same statement. Under the unified-codebase ruling Mosaic owns its own store and must
+#: import sqlite3 to do its job, so the original wording forbids the correct code. Same
+#: failure as the envelope's dead field justifications: a rule correct in one context
+#: surviving into another whose premise is gone, because it was written down and sounded
+#: right. Found by this test failing on `mosaic/store/vocabularies.py`.
+#:
+#: Scoped as an ALLOWLIST rather than a denylist, deliberately. A denylist naming the
+#: federated packages fails OPEN: any package added later is exempt by default, and the
+#: next person to open an old system's database from a new module gets no warning. This
+#: fails closed -- a new package is banned until someone states that it owns its store.
 FORBIDDEN_EVERYWHERE = {"sqlite3"}
+
+#: The only packages permitted to open a database: the ones that own the unified store.
+#: Migration readers are deliberately NOT here -- they read old systems through those
+#: systems' own interfaces and write the unified store through `store/`, so a migration
+#: reader that needs sqlite3 to open an old database is doing the forbidden thing.
+STORE_OWNED_PACKAGES = ("store",)
+
+
+def _owns_its_database(path: pathlib.Path) -> bool:
+    return any(part in STORE_OWNED_PACKAGES for part in path.parts)
+
 
 WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE", "CONNECT"}
 
@@ -91,14 +117,18 @@ def test_adapters_have_no_io_of_their_own(path: pathlib.Path) -> None:
     )
 
 
-@pytest.mark.parametrize("path", _python_files(PACKAGE), ids=lambda p: p.name)
-def test_no_direct_database_access_anywhere(path: pathlib.Path) -> None:
+NON_STORE_FILES = [p for p in _python_files(PACKAGE) if not _owns_its_database(p)]
+
+
+@pytest.mark.parametrize("path", NON_STORE_FILES, ids=lambda p: p.name)
+def test_only_the_store_may_open_a_database(path: pathlib.Path) -> None:
     imported = _imported_modules(ast.parse(path.read_text()))
     leaked = imported & FORBIDDEN_EVERYWHERE
     assert not leaked, (
         f"{path.name} imports {sorted(leaked)}. Opening another module's database "
         f"bypasses its scopes, its authorization, and its activity trail, and "
-        f"observes mid-transaction state. ADR 0001 forbids it."
+        f"observes mid-transaction state. ADR 0001 permits it only in "
+        f"{STORE_OWNED_PACKAGES}, which own the unified store."
     )
 
 
