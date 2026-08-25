@@ -52,6 +52,7 @@ CREATE TABLE enum_binding_kind      (value TEXT PRIMARY KEY);
 CREATE TABLE enum_capability_state  (value TEXT PRIMARY KEY);
 CREATE TABLE enum_authority_state   (value TEXT PRIMARY KEY);
 CREATE TABLE enum_type_nature       (value TEXT PRIMARY KEY);
+CREATE TABLE enum_status_polarity   (value TEXT PRIMARY KEY);
 
 -- ─────────────────────────────────────────────────────────── vocabularies ──
 -- Per-(capability, kind) closed vocabularies. Stored rather than code-only so
@@ -73,11 +74,18 @@ CREATE TABLE vocabulary_member (
     capability        TEXT NOT NULL,
     kind              TEXT NOT NULL,
     member            TEXT NOT NULL,
-    -- Every LIFECYCLE vocabulary must have at least one terminal-negative
-    -- member. The mandated five-value vocabulary had none, so every capability
-    -- with a terminal state had to fake one -- which is how superseded gates
-    -- rendered as live. Lane C enforces the at-least-one; the column is here.
-    is_terminal_negative INTEGER NOT NULL CHECK (is_terminal_negative IN (0, 1)),
+    -- What this member MEANS. Was `is_terminal_negative INTEGER`, which was
+    -- the `spent: bool` defect inside the column built to prevent collapses:
+    -- `= 0` returned open, in_progress, done AND verified, grouping "has not
+    -- finished" with "finished successfully". A boolean cannot hold those
+    -- apart, and they are the two a caller most needs separated.
+    --
+    -- Four values, and the fourth earns its place by operator action:
+    -- terminal_negative (someone decided against it) vs terminal_unruled
+    -- (expired/withdrawn/superseded -- nobody ruled at all). Janus's own
+    -- supersede prints "NOBODY RULED". A refusal is settled; something that
+    -- lapsed may still matter and can be re-raised.
+    polarity          TEXT NOT NULL REFERENCES enum_status_polarity (value),
     PRIMARY KEY (capability, kind, member),
     FOREIGN KEY (capability, kind) REFERENCES vocabulary (capability, kind)
 );

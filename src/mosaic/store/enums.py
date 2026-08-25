@@ -22,7 +22,7 @@ from enum import StrEnum
 
 from mosaic.store.authority import Check, Decider, Enforcement, Force, Lifecycle
 from mosaic.store.envelope import Capability, Origin, RelationKind, Resolution
-from mosaic.store.vocabulary import TypeNature
+from mosaic.store.vocabulary import StatusPolarity, TypeNature
 
 
 class BindingKind(StrEnum):
@@ -84,6 +84,7 @@ CANONICAL_ENUMS: dict[str, type[StrEnum]] = {
     "enum_capability_state": CapabilityState,
     "enum_authority_state": AuthorityState,
     "enum_type_nature": TypeNature,
+    "enum_status_polarity": StatusPolarity,
 }
 
 
@@ -100,6 +101,53 @@ def seed_enums(conn: sqlite3.Connection) -> None:
             f"INSERT OR IGNORE INTO {table} (value) VALUES (?)",
             [(member.value,) for member in enum],
         )
+
+
+#: The capability registry's canonical rows. **A registry with no rows reports
+#: nothing missing** -- which is the exact failure level 4 exists to prevent,
+#: and the table shipped empty until claude-0d noticed. Seeded from here so
+#: there is one place that knows what does and does not exist, for the same
+#: reason the enum tables are seeded rather than hand-listed.
+#:
+#: `reason` is required on every row: "never built" and "deferred, no run state
+#: on this host" are both "no implementation" and are different facts.
+CANONICAL_CAPABILITIES: tuple[tuple[str, str, str, str | None], ...] = (
+    ("authority", "built", "Janus: the gate ledger, live and measured", "2026-08-25"),
+    ("work", "built", "Athena: issues, desk, approvals; live on the tailnet", "2026-08-25"),
+    ("evidence", "built", "Minerva: claims hang off missions; no scope model", "2026-08-25"),
+    ("provenance", "built", "Vulcan: usage ledger; records only successes", "2026-08-25"),
+    (
+        "conversation",
+        "not_built",
+        "Buzz is Block's upstream OSS, not ours to absorb; no Mosaic-native "
+        "conversation capability exists yet",
+        None,
+    ),
+    (
+        "evaluation",
+        "not_built",
+        "ReplayDeck: ranked first in the portfolio, named in the product trace, "
+        "never built. The row that made 'seven, not six' visible at all",
+        None,
+    ),
+    (
+        "execution",
+        "deferred",
+        "Icarus: repo-only, and there is no run state on this host to read. "
+        "Deferred by decision, NOT unbuilt -- reporting it as unbuilt sends "
+        "someone to look for code that exists",
+        None,
+    ),
+)
+
+
+def seed_capability_registry(conn: sqlite3.Connection) -> None:
+    """Populate the registry, including the capabilities that do not exist."""
+    conn.executemany(
+        "INSERT OR IGNORE INTO capability_registry "
+        "(capability, state, reason, exists_since) VALUES (?, ?, ?, ?)",
+        CANONICAL_CAPABILITIES,
+    )
 
 
 def divergences(conn: sqlite3.Connection) -> dict[str, dict[str, list[str]]]:
