@@ -98,3 +98,67 @@ class TestAddedMembersAreNotDataLoss:
     def test_the_marker_is_read_never_inferred_from_absence(self):
         """Both calls see source_had_value=False; only the marker separates them."""
         assert absent_is_not_loss(True, False) != absent_is_not_loss(False, False)
+
+
+class TestLocalDbRequiresVerifiedQuiescence:
+    """ADR 0001 is a precondition, not a prohibition — but only when checked.
+
+    Opening another system's database bypasses its scopes, authorization and
+    activity trail, and observes mid-transaction state. All four are properties
+    of a LIVE system; a stopped service or frozen copy has none of them. So the
+    surface is permitted and the stillness must be verified.
+    """
+
+    def _db(self, quiescence=None):
+        from mosaic.store.readers import SourceSurface
+
+        return SourceSurface(
+            kind="local_db",
+            boundary="process: uid without write permission on the source file",
+            quiescence=quiescence,
+            justification="Janus is SQLite and its CLI exposes operator-facing "
+            "columns, not every column a faithful migration needs.",
+        )
+
+    def test_a_live_database_is_refused(self):
+        from mosaic.store.readers import SourceNotQuiescent, require_quiescent
+
+        with pytest.raises(SourceNotQuiescent, match="quiescence was not verified"):
+            require_quiescent(self._db())
+
+    def test_claimed_but_unverified_quiescence_is_refused(self):
+        """`verified=False` is the default precisely so the precondition cannot
+        be satisfied by asserting it."""
+        from mosaic.store.readers import (
+            Quiescence,
+            SourceNotQuiescent,
+            require_quiescent,
+        )
+
+        claimed = Quiescence(method="service_stopped", evidence="I think so", verified=False)
+        with pytest.raises(SourceNotQuiescent):
+            require_quiescent(self._db(claimed))
+
+    def test_verified_quiescence_is_allowed(self):
+        from mosaic.store.readers import Quiescence, require_quiescent
+
+        checked = Quiescence(
+            method="frozen_snapshot",
+            evidence="systemctl is-active janus -> inactive; cp -a before read",
+            verified=True,
+        )
+        require_quiescent(self._db(checked))
+
+    def test_non_database_surfaces_are_untouched(self):
+        from mosaic.store.readers import SourceSurface, require_quiescent
+
+        for kind in ("http", "file", "subprocess"):
+            require_quiescent(SourceSurface(kind=kind, boundary="n/a"))
+
+    def test_the_evidence_field_is_a_command_not_an_assertion(self):
+        """A precondition recorded as 'it was stopped' cannot be re-checked by
+        the next person; one recorded as the command they can re-run can."""
+        from mosaic.store.readers import Quiescence
+
+        q = Quiescence("frozen_snapshot", "systemctl is-active janus -> inactive", True)
+        assert "->" in q.evidence

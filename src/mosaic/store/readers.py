@@ -49,10 +49,70 @@ class SourceSurface:
     bearer to read can also POST with it. There the boundary is the credential
     — a read-only-scoped token bound to one endpoint."""
 
-    justification: str
+    quiescence: Quiescence | None = None
+    """Required for `local_db`, meaningless otherwise. `None` means nobody
+    checked, which `require_quiescent` treats as unsafe rather than as
+    probably-fine."""
+
+    justification: str = ""
     """Why this surface rather than another, in evidence. Specifically: which
     derived values this source has, and whether their inputs are reachable
     here. A surface chosen by convention is a decision nobody made."""
+
+
+@dataclass(frozen=True)
+class Quiescence:
+    """Evidence that a `local_db` source is safe to read directly.
+
+    ADR 0001 forbade opening another module's database because doing so
+    bypasses that module's scopes, authorization and activity trail, and
+    observes mid-transaction state. Every one of those is a property of a
+    **live** system. A stopped service or a frozen copy has none of them, so
+    the ADR is a **precondition, not a prohibition** — which is the same
+    re-derivation that kept read-only while changing its reason.
+
+    Fail closed: a reader confirms quiescence and refuses otherwise. It never
+    assumes, because the failure mode of assuming is a torn read that looks
+    like valid data.
+    """
+
+    method: str
+    """`frozen_snapshot` (preferred) or `service_stopped`."""
+
+    evidence: str
+    """How it was CHECKED, re-runnably. Not an assertion that it is true — a
+    command whose output said so."""
+
+    verified: bool
+    """False until something actually checked. A default of True would make
+    the precondition decorative."""
+
+
+class SourceNotQuiescent(Exception):
+    """A `local_db` read was attempted against a source not shown to be still.
+
+    Raised rather than warned. A torn read from a live SQLite file does not
+    announce itself: it produces rows that parse, validate, and are wrong.
+    """
+
+
+def require_quiescent(surface: "SourceSurface") -> None:
+    """Refuse a direct database read unless quiescence was actually verified.
+
+    Raises:
+        SourceNotQuiescent: if the surface is `local_db` and carries no
+            verified quiescence. Non-database surfaces pass through untouched.
+    """
+    if surface.kind != "local_db":
+        return
+    q = surface.quiescence
+    if q is None or not q.verified:
+        raise SourceNotQuiescent(
+            f"refusing to open {surface.kind} directly: quiescence was not "
+            f"verified. Stop the service or read a frozen snapshot, and record "
+            f"how that was checked. Reading a live SQLite file can tear across "
+            f"a write and produce rows that parse and are wrong."
+        )
 
 
 @dataclass(frozen=True)
