@@ -13,6 +13,11 @@ scope of what was read is visible rather than assumed.
 Athena issues carry no approval, so every entry here has `authority=None`. That
 is the contract's common case and it is deliberately not the same as an approval
 that failed to verify.
+
+`status` is Athena's own word -- `open`, `in_progress`, `done` -- passed through
+untouched. It used to be mapped onto the roadmap's five-value approval enum,
+which forced a work item to describe itself in approval vocabulary; Lane A ruled
+the field back to a plain string after this adapter's mapping table showed why.
 """
 
 from __future__ import annotations
@@ -23,28 +28,12 @@ from .. import config
 from .base import (
     Capability,
     Entry,
-    Lifecycle,
     Unreachable,
     provenance,
     unreachable_from,
 )
 from .transport import ReadOnlyHTTP
 from .transport import Unreachable as TransportUnreachable
-
-#: Athena's status words -> the roadmap's five-value Lifecycle.
-#:
-#: Lossy in a different way from Janus: an Athena issue is *work*, not an
-#: approval, and Lifecycle is an approval vocabulary. `done` is mapped to
-#: EXECUTED rather than VERIFIED because Athena's own desk protocol says
-#: "complete does not close the issue" -- claiming VERIFIED would assert a check
-#: that nobody ran. Raised with Lane A; the module's own word is preserved in
-#: `payload["module_status"]`.
-_LIFECYCLE: dict[str, Lifecycle] = {
-    "open": Lifecycle.PROPOSED,
-    "todo": Lifecycle.PROPOSED,
-    "in_progress": Lifecycle.REVIEWED,
-    "done": Lifecycle.EXECUTED,
-}
 
 
 class AthenaAdapter:
@@ -139,7 +128,7 @@ class AthenaAdapter:
             source=self.module,
             owner=str(issue.get("assignee_name") or "unassigned"),
             title=str(issue.get("title", "")),
-            status=_LIFECYCLE.get(status, Lifecycle.PROPOSED),
+            status=status,
             timestamp=str(issue.get("created_at") or ""),
             schema_version="athena.issue.v1",
             ref=str(issue.get("key") or issue.get("id", "")),
@@ -149,7 +138,6 @@ class AthenaAdapter:
             # separate mechanism on /approvals and are not read here.
             authority=None,
             payload={
-                "module_status": status,
                 "project": issue.get("project_name"),
                 "priority": issue.get("priority"),
                 "assignee_is_agent": issue.get("assignee_is_agent"),
