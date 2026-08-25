@@ -1,0 +1,242 @@
+{
+  "note": "SYNTHETIC behavior fixture; no live capture, people, decisions, evidence, credentials or usage. Shapes preserve adapter regression cases only.",
+  "origin": "vulcan",
+  "payload": {
+    "/v1/capabilities": {
+      "api_version": "v1",
+      "callable_capabilities": [
+        "chat",
+        "embeddings"
+      ],
+      "chat_completions": {
+        "message_roles": [
+          "system",
+          "user",
+          "assistant"
+        ],
+        "streaming": true,
+        "supported": true
+      },
+      "embeddings": {
+        "max_input_characters": 8292,
+        "max_inputs": 164,
+        "supported": true
+      },
+      "model_discovery": "Synthetic model_discovery synthetic-00024."
+    },
+    "/v1/models": {
+      "data": [
+        {
+          "availability": "available",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "code",
+          "description": "Synthetic description synthetic-00025.",
+          "id": "synthetic-00001",
+          "object": "model",
+          "provider": "synthetic-00002",
+          "provider_type": "ollama"
+        },
+        {
+          "availability": "available",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "code-fast",
+          "description": "Synthetic description synthetic-00026.",
+          "id": "synthetic-00003",
+          "object": "model",
+          "provider": "synthetic-00002",
+          "provider_type": "ollama"
+        },
+        {
+          "availability": "available",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "simple",
+          "description": "Synthetic description synthetic-00027.",
+          "id": "synthetic-00004",
+          "object": "model",
+          "provider": "synthetic-00002",
+          "provider_type": "ollama"
+        },
+        {
+          "availability": "available",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "utility",
+          "description": "Synthetic description synthetic-00028.",
+          "id": "synthetic-00005",
+          "object": "model",
+          "provider": "synthetic-00002",
+          "provider_type": "ollama"
+        },
+        {
+          "availability": "available",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "vision-work",
+          "description": "Synthetic description synthetic-00029.",
+          "id": "synthetic-00006",
+          "object": "model",
+          "provider": "synthetic-00002",
+          "provider_type": "ollama"
+        },
+        {
+          "availability": "available",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "medical",
+          "description": "Synthetic description synthetic-00030.",
+          "id": "synthetic-00007",
+          "object": "model",
+          "provider": "synthetic-00002",
+          "provider_type": "ollama"
+        },
+        {
+          "availability": "available",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "safety",
+          "description": "Synthetic description synthetic-00031.",
+          "id": "synthetic-00008",
+          "object": "model",
+          "provider": "synthetic-00002",
+          "provider_type": "ollama"
+        },
+        {
+          "availability": "available",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "safety",
+          "description": "Synthetic description synthetic-00032.",
+          "id": "synthetic-00009",
+          "object": "model",
+          "provider": "synthetic-00002",
+          "provider_type": "ollama"
+        },
+        {
+          "availability": "available",
+          "capabilities": [
+            "embeddings"
+          ],
+          "class": "embed",
+          "description": "Synthetic description synthetic-00033.",
+          "id": "synthetic-00010",
+          "object": "model",
+          "provider": "synthetic-00002",
+          "provider_type": "ollama"
+        },
+        {
+          "availability": "available",
+          "capabilities": [
+            "embeddings"
+          ],
+          "class": "embed",
+          "description": "Synthetic description synthetic-00034.",
+          "id": "synthetic-00011",
+          "object": "model",
+          "provider": "synthetic-00002",
+          "provider_type": "ollama"
+        },
+        {
+          "availability": "available",
+          "capabilities": [
+            "embeddings"
+          ],
+          "class": "embed",
+          "description": "Synthetic description synthetic-00035.",
+          "id": "synthetic-00012",
+          "object": "model",
+          "provider": "synthetic-00002",
+          "provider_type": "ollama"
+        },
+        {
+          "availability": "unchecked",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "hosted-chat",
+          "description": "Synthetic description synthetic-00036.",
+          "id": "synthetic-00013",
+          "object": "model",
+          "provider": "synthetic-00014",
+          "provider_type": "anthropic"
+        },
+        {
+          "availability": "unchecked",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "hosted-chat",
+          "description": "Synthetic description synthetic-00036.",
+          "id": "synthetic-00015",
+          "object": "model",
+          "provider": "synthetic-00014",
+          "provider_type": "anthropic"
+        },
+        {
+          "availability": "unchecked",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "hosted-chat",
+          "description": "Synthetic description synthetic-00037.",
+          "id": "synthetic-00016",
+          "object": "model",
+          "provider": "synthetic-00014",
+          "provider_type": "anthropic"
+        },
+        {
+          "availability": "unchecked",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "hosted-chat",
+          "description": "Synthetic description synthetic-00038.",
+          "id": "synthetic-00017",
+          "object": "model",
+          "provider": "synthetic-00018",
+          "provider_type": "openai_compatible"
+        },
+        {
+          "availability": "unchecked",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "hosted-chat",
+          "description": "Synthetic description synthetic-00039.",
+          "id": "synthetic-00019",
+          "object": "model",
+          "provider": "synthetic-00020",
+          "provider_type": "openai_compatible"
+        },
+        {
+          "availability": "unchecked",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "hosted-chat",
+          "description": "Synthetic description synthetic-00040.",
+          "id": "synthetic-00021",
+          "object": "model",
+          "provider": "synthetic-00022",
+          "provider_type": "openai_compatible"
+        }
+      ],
+      "discovery": {
+        "source": "Synthetic source synthetic-00024."
+      },
+      "object": "list"
+    }
+  },
+  "scrubbed": true,
+  "surface": "synthetic vulcan API/CLI response shapes; not a production observation"
+}
