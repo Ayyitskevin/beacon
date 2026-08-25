@@ -219,6 +219,26 @@ class Authority:
     entitled to restate another module's semantics more briefly than the
     module does."""
 
+    spent: bool = False
+    """The owning module considers this decision closed and no longer in
+    force: Janus `refused` / `withdrawn` / `expired` / `superseded`.
+
+    **This exists because `lifecycle` cannot express it.** The mandated
+    roadmap vocabulary (`proposed · reviewed · authorized · executed ·
+    verified`) has no terminal-negative value, so an adapter that refuses to
+    default upward must land all four of those states on REVIEWED -- where
+    they are indistinguishable from a live decision someone is actively
+    reviewing. Reading `lifecycle` therefore cannot answer "is this spent?",
+    and a fix that tried would either silence genuine in-review entries or
+    change nothing.
+
+    So terminality arrives as its own fact, supplied by the adapter that can
+    see the module's own status word. This is a **workaround for a gap in the
+    vocabulary, not a fix for it** -- the gap is `docs/authority.md` open
+    question 5 and remains Kevin's call. If the vocabulary ever gains a spent
+    state, this field should be deleted, not kept alongside it.
+    """
+
     def assures(self) -> bool:
         """Whether this may render without a warning affordance.
 
@@ -247,7 +267,16 @@ class Authority:
         run, not about the decision, and `mosaic doctor` owns that surface.
         In a fleet where most hops are legitimately unreachable, flagging
         every unchecked entry would drown the two values that mean something.
+
+        A `spent` decision needs nothing, whatever it is attached to.
+        Supersession IS the resolution -- asking a human to re-raise a ruling
+        the world has already moved past is not a superfluous prompt, it is
+        wrong advice. This shipped: gate `g1a603e736cb` was `superseded` and
+        still returned DECIDE, indistinguishable from a live open gate,
+        because the predicate read only `attachment` and `enforcement`.
         """
+        if self.spent:
+            return OperatorAction.NONE
         if self.attachment is Attachment.BYTES_DRIFTED:
             # Enforced: the module already refused. The operator investigates,
             # but nothing is unsafe meanwhile.
