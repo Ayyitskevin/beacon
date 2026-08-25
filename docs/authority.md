@@ -147,7 +147,13 @@ any code depending on that string.
 - `human` — a person ruled (Janus ruling; an Athena operator decision; a Buzz
   grant signed by a human pubkey).
 - `policy` — a rule evaluated without a person in the loop at decision time.
-- `agent` — an agent proposed or self-attested. Never rendered as approval.
+- `agent` — an agent proposed or self-attested. **Never renders as an
+  approval, whatever it is attached to** — `assures()` returns False for
+  `agent` before it looks at anything else. An agent verifying content it
+  computed itself is the highest-consequence case in the model, and for one
+  commit this was a docstring promise the code did not keep. No live producer
+  emits `agent` as of 2026-08-24; the value exists so an adapter has a correct
+  thing to reach for instead of reaching for `human`.
 
 **What it is attached to** — how tightly, and what checking it just produced:
 
@@ -190,21 +196,39 @@ This is the question the three axes exist to answer, and the one a renderer
 must make visible. If every mechanism reads as "authorized" with a different
 footnote, the collapse has been rebuilt in a subtler form.
 
-| Situation | What is true | What the operator does |
-|---|---|---|
-| `enforced` + `bytes-verified` | The module checked and proceeded | Nothing. Strongest state in the system |
-| `enforced` + `bytes-drifted` | **The module already refused.** Execution stopped | Investigate at leisure. Nothing is at risk *because* it was enforced |
-| `reported` + `bytes-verified` | Checked and holds, but nothing would stop it if it stopped holding | Nothing now. Re-check before relying on it later |
-| `reported` + `bytes-drifted` | **Nothing is stopping anyone.** The ruling is void and the system does not know it | **Act.** Raise a new gate. This is the only combination that demands a human |
-| `reported` + `bytes-unverifiable` | Cannot ever be confirmed | Accept it as resting on the raiser's word, or re-raise with a checkable binding |
-| any + `bytes-unchecked` | Mosaic could not look | Restore reachability and re-run. `mosaic doctor` names what was missing |
-| `none` + `intent` / `handle` / `step` | Nothing binds content, by design | Read the module's own `meaning`. Safety lives in expiry, single-use, approver checks — not in a digest |
+`Authority.operator_action()` returns one of three values — `act`, `decide`,
+`none` — and is three-valued rather than boolean on purpose. A live breach and
+a standing limitation are both human work, and they are not the same work: one
+is contained by acting, the other is closed by deciding. A boolean forces one
+of them to be silent, and the first version of this table found out which one.
 
-The row that matters is the fourth. **`reported` + `bytes-drifted` is the only
-state where the system is quietly wrong and only a person can fix it** — and
-it is, counter-intuitively, produced by Janus, the mechanism the prior review
-called the strongest. That inversion is the entire reason this page rejects
-ranking.
+| Situation | What is true | Operator does | |
+|---|---|---|---|
+| `enforced` + `bytes-verified` | The module checked and proceeded | Nothing. Strongest state in the system | `none` |
+| `enforced` + `bytes-drifted` | **The module already refused.** Execution stopped | Investigate at leisure. Nothing is at risk *because* it was enforced | `none` |
+| `reported` + `bytes-verified` | Checked and holds, but nothing would stop it if it stopped holding | Nothing now. Re-check before relying on it later | `none` |
+| `reported` + `bytes-drifted` | **Nothing is stopping anyone.** The ruling is void and the system does not know it | **Contain it.** Raise a new gate | `act` |
+| any + `unbound` | **Attached to nothing.** No artifact was ever pinned, so no check can ever be run | **Decide.** Accept it as resting on the raiser's word, or re-raise with a checkable binding | `decide` |
+| `reported` + `bytes-unverifiable` | Binds bytes nobody can re-derive, though it does show them | Same decision, with more to go on than `unbound` gives you | `decide` |
+| any + `bytes-unchecked` | Mosaic could not look **this run** | Restore reachability and re-run. `mosaic doctor` owns this surface | `none` |
+| `none` + `intent` / `handle` / `step` | Nothing binds content, by design | Read the module's own `meaning`. Safety lives in expiry, single-use, approver checks — not in a digest | `none` |
+
+Two rows carry the weight. **`reported` + `bytes-drifted` is the only state
+where the system is quietly wrong and a person must contain it** — and it is,
+counter-intuitively, produced by Janus, the mechanism the prior review called
+the strongest. And **`unbound` is the only state that can never improve on its
+own**, which is why it demands a decision rather than a glance.
+
+`bytes-unchecked` maps to `none` deliberately. It is a fact about this run
+rather than about the decision, and with 2 of 7 product-trace hops joinable
+today, flagging every unchecked entry would drown the two values that mean
+something. It still fails `assures()`, so it keeps its warning affordance.
+
+**This table shipped without an `unbound` row**, and the code faithfully
+implemented the table: `operator_action()`'s boolean ancestor answered "no
+action" for the four live unbound-and-approved gates this page is built
+around. The weakest state in the ledger was also the quietest one. Caught in
+review by Lane C, by executing the predicate rather than reading it.
 
 ### The case that proves it, measured
 

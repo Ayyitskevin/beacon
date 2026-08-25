@@ -31,7 +31,13 @@ class Decider(StrEnum):
     """A rule evaluated with no person in the loop at decision time."""
 
     AGENT = "agent"
-    """An agent proposed or self-attested. NEVER renders as an approval."""
+    """An agent proposed or self-attested. NEVER renders as an approval --
+    enforced by `Authority.assures()`, which returns False for AGENT whatever
+    the attachment says. An agent verifying content it computed itself is the
+    highest-consequence case in this file, and a docstring is not a guarantee.
+
+    No live producer emits AGENT as of 2026-08-24. It exists so an adapter has
+    a correct value to reach for rather than reaching for HUMAN."""
 
 
 class Attachment(StrEnum):
@@ -143,6 +149,35 @@ class Lifecycle(StrEnum):
     VERIFIED = "verified"
 
 
+class OperatorAction(StrEnum):
+    """What a human has to do. Three-valued on purpose.
+
+    A live breach and a standing limitation are both human work, and they are
+    not the same human work: one is contained by acting, the other is closed
+    by deciding. A boolean forces one of them to be silent.
+    """
+
+    ACT = "act"
+    """Something that WAS verified is now broken, and nothing in the system is
+    stopping anyone from relying on it. Contain it: raise a new gate."""
+
+    DECIDE = "decide"
+    """Nothing was ever re-checkable here -- no binding at all, or a binding
+    nobody can re-derive. Not a breach and not urgent, but it will never
+    resolve itself. Accept it as resting on the raiser's word, or re-raise
+    with a checkable binding."""
+
+    NONE = "none"
+    """Nothing for a human to do about this entry right now."""
+
+
+#: Attachments that can never be re-checked by anyone -- a standing property
+#: of the binding, not of this run. These need a human DECISION, never resolve
+#: on their own, and are the reason operator action is not a boolean.
+_NEVER_CHECKABLE: frozenset[Attachment] = frozenset(
+    {Attachment.UNBOUND, Attachment.BYTES_UNVERIFIABLE}
+)
+
 #: Attachments that must never render as a positive assurance, whatever the
 #: lifecycle says. A drifted, uncheckable, or unchecked binding is not green.
 NOT_ASSURING: frozenset[Attachment] = frozenset(
@@ -189,21 +224,38 @@ class Authority:
 
         NOT a judgement that the thing is approved, safe, or ranked above
         another entry. One narrow question, one narrow answer.
+
+        An AGENT decision never assures, whatever it is attached to. The
+        attachment says a digest matched; it says nothing about whether the
+        party that computed it is entitled to approve it.
         """
+        if self.decider is Decider.AGENT:
+            return False
         return self.attachment not in NOT_ASSURING
 
-    def operator_must_act(self) -> bool:
-        """Whether a human has to do something for this entry to be safe.
+    def operator_action(self) -> OperatorAction:
+        """What a human has to do about this entry, if anything.
 
-        True in exactly one case: the binding is known broken and the owning
-        module does not enforce it. Then nothing in the system is stopping
-        anyone from acting on a void approval, and only a person can close
-        that gap.
+        Three-valued rather than boolean, because "something broke" and
+        "nothing was ever checkable" are both human work and are not the same
+        work. Flattening them is the collapse this module exists to prevent,
+        one level down -- an earlier boolean version answered False for the
+        four live UNBOUND gates the doctrine page is built around, which made
+        the weakest state in the ledger the quietest.
 
-        Deliberately False for ENFORCED + BYTES_DRIFTED: the module already
-        refused, so the operator is investigating, not containing.
+        BYTES_UNCHECKED deliberately maps to NONE. It is a fact about this
+        run, not about the decision, and `mosaic doctor` owns that surface.
+        In a fleet where most hops are legitimately unreachable, flagging
+        every unchecked entry would drown the two values that mean something.
         """
-        return (
-            self.attachment is Attachment.BYTES_DRIFTED
-            and self.enforcement is Enforcement.REPORTED
-        )
+        if self.attachment is Attachment.BYTES_DRIFTED:
+            # Enforced: the module already refused. The operator investigates,
+            # but nothing is unsafe meanwhile.
+            return (
+                OperatorAction.ACT
+                if self.enforcement is Enforcement.REPORTED
+                else OperatorAction.NONE
+            )
+        if self.attachment in _NEVER_CHECKABLE:
+            return OperatorAction.DECIDE
+        return OperatorAction.NONE

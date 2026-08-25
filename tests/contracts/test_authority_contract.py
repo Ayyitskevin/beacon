@@ -18,6 +18,7 @@ from mosaic.contracts import (
     Decider,
     Enforcement,
     Lifecycle,
+    OperatorAction,
 )
 
 
@@ -115,26 +116,84 @@ class TestAttachment:
 class TestOperatorAction:
     """The axis that answers "what do I do differently?"."""
 
-    def test_drift_without_enforcement_requires_a_human(self):
+    def test_drift_without_enforcement_must_be_contained(self):
         """Janus reports drift and stops, to stay out of the permission path.
         So nothing in the system prevents acting on a void ruling -- only a
         person can close that gap."""
         a = _authority(
             attachment=Attachment.BYTES_DRIFTED, enforcement=Enforcement.REPORTED
         )
-        assert a.operator_must_act()
+        assert a.operator_action() is OperatorAction.ACT
 
-    def test_drift_with_enforcement_does_not(self):
+    def test_drift_with_enforcement_needs_nothing(self):
         """Icarus re-derives planApprovalDigest on read and calls
         sourceInvalid() on mismatch. The system already refused; the operator
         is investigating, not containing."""
         a = _authority(
             attachment=Attachment.BYTES_DRIFTED, enforcement=Enforcement.ENFORCED
         )
-        assert not a.operator_must_act()
+        assert a.operator_action() is OperatorAction.NONE
 
-    def test_healthy_binding_requires_nothing(self):
-        assert not _authority(attachment=Attachment.BYTES_VERIFIED).operator_must_act()
+    def test_healthy_binding_needs_nothing(self):
+        assert (
+            _authority(attachment=Attachment.BYTES_VERIFIED).operator_action()
+            is OperatorAction.NONE
+        )
+
+    @pytest.mark.parametrize(
+        "attachment", [Attachment.UNBOUND, Attachment.BYTES_UNVERIFIABLE]
+    )
+    def test_never_checkable_needs_a_decision(self, attachment):
+        """The regression this pins: an earlier boolean `operator_must_act()`
+        answered False for UNBOUND, so the four live unbound-and-approved
+        gates the doctrine page is built around asked nobody to look. The
+        weakest state in the ledger was also the quietest.
+
+        These are not breaches and not urgent, but they never resolve on their
+        own -- accept the ruling as resting on the raiser's word, or re-raise
+        with a checkable binding. That is a decision, not a containment."""
+        a = _authority(attachment=attachment)
+        assert a.operator_action() is OperatorAction.DECIDE
+
+    def test_unchecked_is_deliberately_quiet(self):
+        """A stated choice, not an oversight. BYTES_UNCHECKED is a fact about
+        this run rather than about the decision, and `mosaic doctor` owns that
+        surface. Most product-trace hops are legitimately unreachable today
+        (2 of 7 joinable), so flagging every unchecked entry would drown ACT
+        and DECIDE. `assures()` is still False, so it keeps its warning."""
+        a = _authority(attachment=Attachment.BYTES_UNCHECKED)
+        assert a.operator_action() is OperatorAction.NONE
+        assert not a.assures()
+
+    def test_action_is_three_valued(self):
+        """A boolean cannot carry both "something broke" and "nothing was ever
+        checkable" without silencing one of them."""
+        assert len(set(OperatorAction)) == 3
+
+
+class TestAgentNeverApproves:
+    """Doctrine that must be a property of the code, not of a docstring."""
+
+    def test_agent_never_assures_even_when_bytes_verify(self):
+        """The highest-consequence case in the file: an agent self-attesting
+        over content it computed itself. The attachment says a digest matched;
+        it says nothing about whether that party may approve it.
+
+        This shipped wrong for one commit -- `assures()` never consulted
+        `decider`, so agent + bytes-verified returned True while the docstring
+        promised it never would."""
+        a = _authority(decider=Decider.AGENT, attachment=Attachment.BYTES_VERIFIED)
+        assert not a.assures()
+
+    @pytest.mark.parametrize("attachment", list(Attachment))
+    def test_agent_never_assures_for_any_attachment(self, attachment):
+        assert not _authority(decider=Decider.AGENT, attachment=attachment).assures()
+
+    def test_human_and_policy_still_assure_on_a_good_binding(self):
+        for decider in (Decider.HUMAN, Decider.POLICY):
+            assert _authority(
+                decider=decider, attachment=Attachment.BYTES_VERIFIED
+            ).assures()
 
     def test_enforcement_is_independent_of_attachment(self):
         """Binds-to-bytes and enforces-on-read are separate properties, and a
