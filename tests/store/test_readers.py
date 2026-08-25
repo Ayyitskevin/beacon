@@ -6,9 +6,9 @@ import pytest
 
 from mosaic.store.readers import (
     MigrationReader,
-    SurfaceKind,
     SourceRecord,
     SourceSurface,
+    SurfaceKind,
     absent_is_not_loss,
 )
 

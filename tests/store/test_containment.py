@@ -31,8 +31,24 @@ TS = "2026-08-25T00:00:00Z"
 def add_record(conn, rid, capability="evidence", kind="claim", title="a claim"):
     conn.execute(
         f"INSERT INTO record({RECORD_COLS}) VALUES ({','.join('?' * 16)})",
-        (rid, capability, kind, title, "supported", TS, TS,
-         "migrated:minerva", rid, "", "claude-2f", TS, "{}", "{}", "not_required", ""),
+        (
+            rid,
+            capability,
+            kind,
+            title,
+            "supported",
+            TS,
+            TS,
+            "migrated:minerva",
+            rid,
+            "",
+            "claude-2f",
+            TS,
+            "{}",
+            "{}",
+            "not_required",
+            "",
+        ),
     )
 
 

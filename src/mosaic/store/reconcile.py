@@ -20,12 +20,12 @@ precisely the state that produces a silent data sink.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import sqlite3
+from dataclasses import dataclass
 
-from .schema import enum_values, schema_columns
 from . import ownership
 from .ownership import Resolution, Vocabulary, canonical_values
+from .schema import enum_values, schema_columns
 
 
 @dataclass(frozen=True)
@@ -115,9 +115,7 @@ def reconcile_vocabularies(conn: sqlite3.Connection) -> list[VocabularyReport]:
     # the reconciler would otherwise silently check nothing for that entry.
     for table, vocab in sorted(registered.items()):
         if table not in _lookup_tables(conn):
-            reports.append(
-                VocabularyReport(table, vocab.owner, Resolution.UNOWNED)
-            )
+            reports.append(VocabularyReport(table, vocab.owner, Resolution.UNOWNED))
     return reports
 
 

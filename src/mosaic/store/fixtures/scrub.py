@@ -27,7 +27,6 @@ leaked it into a log.
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 
@@ -35,22 +34,32 @@ REDACTED = "[REDACTED]"
 
 #: A field with one of these in its name holds a secret whatever its value is.
 SECRET_KEY_PARTS = (
-    "token", "secret", "password", "passwd", "api_key", "apikey",
-    "authorization", "auth_header", "private_key", "credential", "bearer",
-    "session_id", "cookie",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "api_key",
+    "apikey",
+    "authorization",
+    "auth_header",
+    "private_key",
+    "credential",
+    "bearer",
+    "session_id",
+    "cookie",
 )
 
 #: Value shapes that are secrets regardless of the field they sit in.
 SECRET_VALUE_PATTERNS = (
     re.compile(r"\bBearer\s+\S+", re.I),
-    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"),          # OpenAI-style
-    re.compile(r"\bghp_[A-Za-z0-9]{20,}"),           # GitHub PAT
+    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"),  # OpenAI-style
+    re.compile(r"\bghp_[A-Za-z0-9]{20,}"),  # GitHub PAT
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"),
     re.compile(r"\bxai-[A-Za-z0-9]{16,}"),
-    re.compile(r"\bsk-ant-[A-Za-z0-9_-]{16,}"),      # Anthropic
+    re.compile(r"\bsk-ant-[A-Za-z0-9_-]{16,}"),  # Anthropic
     re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+"),  # JWT
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S),
-    re.compile(r"://[^/\s:@]+:[^/\s@]+@"),           # credentials in a URL
+    re.compile(r"://[^/\s:@]+:[^/\s@]+@"),  # credentials in a URL
 )
 
 #: Files whose values are live secrets on this machine. Read at scrub time so

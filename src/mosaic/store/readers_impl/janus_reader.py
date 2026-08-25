@@ -38,9 +38,7 @@ from ..readers import (
 
 #: Janus's own gate states. Read from the source's vocabulary, not invented:
 #: `janus list --state` accepts exactly these.
-JANUS_STATES = frozenset(
-    {"open", "approved", "refused", "expired", "withdrawn", "superseded"}
-)
+JANUS_STATES = frozenset({"open", "approved", "refused", "expired", "withdrawn", "superseded"})
 
 #: Janus's binding kinds, including the one the live ledger actually
 #: exercises. `none` is not absence of the field — it is Janus recording that

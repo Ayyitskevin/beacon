@@ -22,7 +22,12 @@ from mosaic.store.schema import apply_schema
 
 CORPUS = (
     Path(__file__).resolve().parents[2]
-    / "src" / "mosaic" / "store" / "fixtures" / "corpus" / "janus.json"
+    / "src"
+    / "mosaic"
+    / "store"
+    / "fixtures"
+    / "corpus"
+    / "janus.json"
 )
 
 
@@ -114,7 +119,9 @@ class TestDerivedValuesTravelAsInputs:
 
 class TestTheStackHoldsAfterLoading:
     def test_binding_kinds_survive_intact(self, loaded):
-        kinds = [json.loads(b)["binding_kind"] for (b,) in loaded.execute("SELECT body FROM record")]
+        kinds = [
+            json.loads(b)["binding_kind"] for (b,) in loaded.execute("SELECT body FROM record")
+        ]
         assert kinds.count("git") == 9
         assert kinds.count("file") == 3
         assert kinds.count(None) == 4
