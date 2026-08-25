@@ -1,3 +1,30 @@
+> # ⚠ SUPERSEDED — DO NOT FOLLOW THIS AS INSTRUCTION
+>
+> **Kevin ruled on 2026-08-25 that Mosaic is ONE unified codebase absorbing all seven
+> AI Town capabilities, shipped as a Tauri desktop app with its own SQLite store.**
+> This file describes the *federating read-only desk* that preceded that ruling, and
+> several of its rules are now the exact inverse of the product being built —
+> including "no shared database", "Mosaic holds none", "read-only by construction",
+> and "there is no shell".
+>
+> It is kept, not deleted: the federated adapters it governs are the migration
+> readers, the only code that knows how to read the old systems. **But it must stop
+> instructing.** If you are an agent and this file loaded automatically, stop and read
+> these instead, in order:
+>
+> 1. `shared/handoffs/2026-08-25_mosaic-scope-ruling-unified-desktop-app.md` — the ruling
+> 2. `shared/handoffs/2026-08-25_mosaic-datamodel-synthesis.md` — the current design
+> 3. `src/mosaic/store/` — the actual product; `src/mosaic/{adapters,render,contracts}/`
+>    is the superseded one
+>
+> **Why this banner exists rather than a quiet edit:** three sessions built the wrong
+> product for ten hours because agent-authored documents kept instructing after their
+> premise was deleted. A file that auto-loads is the highest-risk form of that. The
+> rules below were correct for federation; they are not correct now, and the difference
+> is not visible from inside them.
+
+---
+
 # AGENTS.md — Mosaic repository contract
 
 ## Purpose
