@@ -123,24 +123,75 @@ wrapper's allowlist and it is Kevin's call to make.
    than a shell, and a registry that lists only what was built cannot say what
    was not.
 
-## Where the contract does not fit, and what we did about it
+## Where the contract did not fit, and what happened
 
-`Entry.status` is typed as `Lifecycle`, whose five values are mandated by the
-roadmap: proposed / reviewed / authorized / executed / verified. It is an
-*approval* vocabulary, and two of the four live modules have statuses that were
-not drawn from one:
+`Entry.status` used to be typed as `Lifecycle`, the roadmap's five-value approval
+vocabulary. Two of the four live modules have statuses that were not drawn from
+one, and writing the mapping tables was what made the defect visible:
 
-| Module | Its own words | Problem |
-|---|---|---|
-| Janus | `open`, `approved`, `refused`, `withdrawn`, `expired`, `superseded` | No terminal-negative value exists. `withdrawn`, `expired` and `superseded` all land on `PROPOSED`. **4 of 13 live gates are superseded** — a third of the corpus on a forced fit, sharing a value with live open gates. |
-| Athena | `open`, `in_progress`, `done` | An issue is *work*, not an approval. `done` maps to `EXECUTED` rather than `VERIFIED`, because Athena's own desk protocol says "complete does not close the issue" and claiming `VERIFIED` would assert a check nobody ran. |
+- **Janus** has no terminal-negative value to land on. `withdrawn`, `expired` and
+  `superseded` all mapped to `proposed` — so **4 of 13 live gates rendered exactly
+  like a live open gate.** A question the world moved past and a question nobody
+  has answered are different facts, and that is this project's own failure mode
+  one level up: the same shape as `unbound` vs `bytes-unchecked`.
+- **Athena** issues are *work*. `done` mapped to `executed` rather than `verified`,
+  because Athena's own desk protocol says "complete does not close the issue" and
+  `verified` would assert a check nobody ran.
 
-Where an adapter must choose, it chooses the least misleading value — never one
-that claims authorization — and preserves the module's own word verbatim in
-`payload["module_status"]`. A test asserts the raw word survives for every entry.
+Raised to Lane A rather than patched per-adapter, on the grounds that a mapping
+table in six adapter files is a doctrine decision living in the wrong place. Lane A
+ruled the field back to `str` and found a second defect underneath: `Entry.status`
+duplicated `Authority.lifecycle`, so two fields carried one concept and had room
+to disagree.
 
-This is a contract question, not an adapter one, and it is raised with the
-authority page rather than patched per-adapter. The proposal on the table: the
-lifecycle axis already exists on `Authority.lifecycle`, where an approval
-vocabulary belongs; `Entry.status` could carry the module's own string, which is
-also what the renderer displays.
+**Now:** `status` is the owning module's own word, verbatim, mapped by nobody. The
+approval vocabulary lives only on `Authority.lifecycle`, populated only when there
+is an approval — so an entry with no approval borrows no approval word.
+
+## Mosaic's own guarantee
+
+*Written for `docs/authority.md`; lift it whole rather than paraphrasing.*
+
+Mosaic argues that other systems' guarantees should be stated precisely — that
+Icarus enforcing a digest on read and Janus reporting drift without enforcing are
+different obligations, and that collapsing them is the failure to avoid. A tool
+making that argument has no business being vague about its own guarantee.
+
+**What is guaranteed.** Mosaic reads seven modules it does not own and cannot
+write to any of them through its own interfaces. The adapter Protocol has no write
+method, no dispatch, and no generic `call`. All I/O goes through `transport.py`,
+which exposes exactly two entry points: an HTTP client whose method is the literal
+constant `GET`, and a subprocess runner restricted by `transport.READ_VERBS`, a
+literal table keyed by module. A module absent from that table may run nothing at
+all — it fails closed. Tests read both the method and the table out of the AST, so
+the guarantee is checked rather than reviewed.
+
+**How that was established.** The first version was broken, and a non-author
+reviewer broke it. `ReadOnlyCommand` took its verb allowlist as a constructor
+argument, which meant the adapter being restricted chose its own restrictions: an
+adapter declaring `{"decide", "withdraw"}` reached `subprocess.run` and passed
+every read-only test in the suite. With `janus` as the executable, that rules on a
+gate. The control was taking its bounds from the thing it bounded.
+
+The fix moved the allowlist onto the transport. It was then verified by
+re-creating the exploit and re-running it against the fix — `decide` raises
+`PermissionError`, and the AST scan now fails on the proof adapter — rather than
+by accepting the fix on trust.
+
+**What it does not close.** The import scan proves no adapter has an I/O path *of
+its own*. It does not prove no path exists, and the difference matters:
+
+- `open()` is a builtin. No import scan can see it, and it writes.
+- Any future adapter is one unreviewed commit away from a path nobody scanned for.
+- The guarantee covers Mosaic's own code. It says nothing about what a module does
+  with a read request it receives.
+
+`os`, `importlib`, `pathlib`, `shutil` and `tempfile` are banned by name, and the
+`__import__` builtin is caught separately, because banning `importlib` alone would
+have left dynamic import as a one-line bypass. Bare `open()` remains reachable and
+is deliberately not chased: the honest boundary is the transport seam, not the
+language.
+
+The earlier version of this claim said an AST scan "proves no path exists." That
+overstatement was the real hazard, more than the hole it described — someone who
+believes the strong version stops looking.
