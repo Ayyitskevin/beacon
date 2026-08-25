@@ -151,6 +151,10 @@ def read_authority(entry: dict) -> Authority | None:
         lifecycle=_member(Lifecycle, raw["lifecycle"], "lifecycle"),
         mechanism=str(raw.get("mechanism") or "unstated mechanism"),
         meaning=str(raw.get("meaning") or ""),
+        # Only a literal True counts, the same discipline the rest of this
+        # module applies: a truthy string must not silently mark a live ruling
+        # spent, which would drop it out of the worklist entirely.
+        spent=raw.get("spent") is True,
     )
 
 
@@ -171,7 +175,13 @@ def _headline(authority: Authority) -> str:
         and authority.mechanism.startswith("janus.")
     ):
         lifecycle = "janus-authorized"
-    return f"{lifecycle} · decided by {authority.decider.value}"
+    line = f"{lifecycle} · decided by {authority.decider.value}"
+    if authority.spent:
+        # Terminal states all collapse onto REVIEWED in the mandated
+        # vocabulary, so without this the screen cannot show what the contract
+        # knows: this decision has been spent and asks nothing of anyone.
+        line += " · SPENT (the world moved past this)"
+    return line
 
 
 def view(entry: dict) -> AuthorityView:

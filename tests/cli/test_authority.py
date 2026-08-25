@@ -291,3 +291,62 @@ class TestWorklistOrderIsNotAnAuthorityRanking:
         newer = entry(ref="MARK-NEW", timestamp="2026-08-24T00:00:00Z", authority=None)
         out = text.render(doc(older, newer), worklist=True)
         assert out.index("MARK-NEW") < out.index("MARK-OLD")
+
+
+class TestTheReaderNeverSilentlyDropsAField:
+    """The renderer rebuilds `Authority` field by field, so a field added to the
+    contract is dropped silently and takes its dataclass default.
+
+    That happened: `spent` was added to close B1, the adapter set it, the
+    contract honoured it, 198 tests passed — and the renderer reconstructed
+    every entry with `spent=False`, so five superseded gates kept asking for a
+    decision on screen. Two lanes each verified their own half correctly and
+    the composed result was still wrong.
+
+    This is the guard for the general case, not for `spent`.
+    """
+
+    def test_every_contract_field_survives_the_round_trip(self):
+        """Fails the day the contract gains a field `read_authority` ignores."""
+        import dataclasses
+
+        from mosaic.contracts.authority import Authority
+
+        original = Authority(
+            decider=Decider.HUMAN,
+            attachment=Attachment.UNBOUND,
+            enforcement=Enforcement.REPORTED,
+            lifecycle=Lifecycle.AUTHORIZED,
+            mechanism="janus.ruling",
+            meaning="a human ruled",
+            spent=True,
+        )
+        serialized = dataclasses.asdict(original)
+        rebuilt = read_authority({"authority": serialized})
+
+        assert rebuilt is not None
+        for field in dataclasses.fields(Authority):
+            assert getattr(rebuilt, field.name) == getattr(original, field.name), (
+                f"read_authority dropped {field.name!r}. Every field the contract "
+                f"defines must survive reconstruction, or the renderer silently "
+                f"substitutes a default for what the module actually said."
+            )
+
+    def test_a_spent_decision_asks_nothing(self):
+        e = entry(authority=authority(attachment=Attachment.UNBOUND, spent=True))
+        assert view(e).action is OperatorAction.NONE
+
+    def test_an_unspent_one_still_does(self):
+        e = entry(authority=authority(attachment=Attachment.UNBOUND, spent=False))
+        assert view(e).action is OperatorAction.DECIDE
+
+    def test_only_a_literal_true_marks_a_ruling_spent(self):
+        """A truthy string must not silence a live ruling."""
+        for truthy in ["yes", 1, "true", [1]]:
+            e = entry(authority=authority(attachment=Attachment.UNBOUND, spent=truthy))
+            assert view(e).action is OperatorAction.DECIDE, truthy
+
+    def test_the_screen_says_spent_not_just_the_json(self):
+        """The bug was invisible on screen; the fix must be visible there."""
+        out = text.render(doc(entry(authority=authority(spent=True))))
+        assert "SPENT" in out

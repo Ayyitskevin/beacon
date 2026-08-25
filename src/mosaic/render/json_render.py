@@ -46,6 +46,7 @@ def to_dict(document: dict) -> dict:
             "enforcement": resolved.authority.enforcement.value if resolved.authority else None,
             "lifecycle": resolved.authority.lifecycle.value if resolved.authority else None,
             "mechanism": resolved.authority.mechanism if resolved.authority else None,
+            "spent": resolved.authority.spent if resolved.authority else None,
         }
         entries.append(annotated)
 
