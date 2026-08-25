@@ -126,7 +126,8 @@ def test_a_gate_with_no_ruling_carries_no_authority() -> None:
 
     open_gate = next(e for e in _entries() if e.ref == "g3410c2cff0f")
     assert open_gate.authority is None
-    assert open_gate.status is Lifecycle.PROPOSED
+    # It describes itself in Janus's vocabulary, borrowing no approval word.
+    assert open_gate.status == "open"
 
 
 def test_janus_reports_drift_rather_than_enforcing_it() -> None:
@@ -143,19 +144,21 @@ def test_janus_reports_drift_rather_than_enforcing_it() -> None:
     assert ruled.authority.mechanism == "janus.ruling"
 
 
-def test_module_status_survives_the_lossy_lifecycle_mapping() -> None:
-    """Lifecycle has no terminal-negative value, so the raw word must survive.
+def test_status_is_janus_s_own_word_not_an_approval_value() -> None:
+    """The regression this replaced a mapping table to prevent.
 
-    `withdrawn`, `expired` and `superseded` all land on PROPOSED. That is the
-    least misleading mapping available -- none of them claims authorization --
-    but it does mean the module's own word is the only place the difference
-    still exists.
+    `status` used to be typed as the roadmap's five-value approval enum, which
+    had no terminal-negative value: `withdrawn`, `expired` and `superseded` all
+    landed on `proposed`, so a third of the live ledger rendered exactly like a
+    live open gate. The word now survives, and nothing maps it.
     """
 
+    statuses = {e.status for e in _entries()}
+    assert statuses == {"open", "approved"}
     for entry in _entries():
-        assert entry.payload["module_status"], f"{entry.ref} lost Janus's own status word"
-    approved = next(e for e in _entries() if e.ref == "g4deae14ca3d")
-    assert approved.payload["module_status"] == "approved"
+        assert not isinstance(entry.status, Lifecycle), (
+            f"{entry.ref} carries an approval value in a field that holds Janus's own word"
+        )
 
 
 def test_binding_kind_none_is_not_reported_as_bound() -> None:
@@ -187,14 +190,13 @@ def test_adapter_uses_only_contract_values() -> None:
     """
 
     for entry in _entries():
-        assert isinstance(entry.status, Lifecycle)
         if entry.authority is not None:
             assert isinstance(entry.authority.attachment, Attachment)
             assert isinstance(entry.authority.lifecycle, Lifecycle)
 
 
 def test_status_is_the_module_s_own_word() -> None:
-    assert {e.payload["module_status"] for e in _entries()} == {"open", "approved"}
+    assert {e.status for e in _entries()} == {"open", "approved"}
 
 
 def test_canonical_link_is_re_runnable() -> None:

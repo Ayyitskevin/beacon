@@ -101,8 +101,9 @@ def test_status_is_not_normalised() -> None:
 
     entries, _ = _adapter({"/version": VERSION, "/issues": ISSUES}).read()
     entry = entries[0]
-    # Athena's own word survives verbatim; the Lifecycle value is the lossy part.
-    assert entry.payload["module_status"] == "open"
+    # Athena's own word, passed through. An issue is work, and it gets to
+    # describe itself in work vocabulary rather than approval vocabulary.
+    assert entry.status == "open"
     assert entry.source == "athena"
     assert entry.owner == "Claude"
 

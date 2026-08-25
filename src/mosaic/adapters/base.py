@@ -3,13 +3,11 @@
 Every adapter builds its entries through the helpers here, so the contract has a
 single import site in this lane rather than six.
 
-**On `Entry.status`.** The contract types it as `Lifecycle`, whose five values are
-mandated by the roadmap: proposed / reviewed / authorized / executed / verified.
-Two of the four live modules have statuses that do not fit it -- see
-`LIFECYCLE_IS_LOSSY` below. Where an adapter must choose, it chooses the least
-misleading value AND preserves the module's own word verbatim in
-`payload["module_status"]`. No adapter invents a lifecycle value, and no adapter
-silently discards the module's own vocabulary; a test asserts the raw word survives.
+**On `Entry.status`.** It is a plain string: the owning module's own word, passed
+through untouched. No adapter maps it, and no adapter invents one. The approval
+vocabulary lives on `Authority.lifecycle` and is populated only when there is an
+approval, so an entry that carries no approval borrows no approval word to
+describe itself.
 """
 
 from __future__ import annotations
@@ -26,17 +24,6 @@ from mosaic.contracts import (
     Lifecycle,
     Provenance,
     Unreachable,
-)
-
-#: Documented so it is a known cost rather than a silent one. Raised to Lane A
-#: with the live counts; until the contract changes, the mapping tables in each
-#: adapter are the whole of the lossiness and `payload["module_status"]` is the
-#: escape hatch.
-LIFECYCLE_IS_LOSSY = (
-    "Lifecycle has no terminal-negative value. Janus's refused / withdrawn / "
-    "expired / superseded and Athena's open / in_progress / done have to be "
-    "mapped onto an approval vocabulary they were not drawn from. 4 of 13 live "
-    "gates are superseded -- a third of the corpus lands on a forced fit."
 )
 
 
@@ -80,7 +67,6 @@ def unreachable_from(exc: Exception, module: str) -> Unreachable:
 
 
 __all__ = [
-    "LIFECYCLE_IS_LOSSY",
     "Attachment",
     "Authority",
     "Capability",
