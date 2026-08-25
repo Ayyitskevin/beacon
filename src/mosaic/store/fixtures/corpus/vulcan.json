@@ -1,0 +1,242 @@
+{
+  "note": "http://127.0.0.1:8140 via default (measured on mickey 2026-08-24); surfaces captured: ['/v1/capabilities', '/v1/models']",
+  "origin": "vulcan",
+  "payload": {
+    "/v1/capabilities": {
+      "api_version": "v1",
+      "callable_capabilities": [
+        "chat",
+        "embeddings"
+      ],
+      "chat_completions": {
+        "message_roles": [
+          "system",
+          "user",
+          "assistant"
+        ],
+        "streaming": true,
+        "supported": true
+      },
+      "embeddings": {
+        "max_input_characters": 8192,
+        "max_inputs": 64,
+        "supported": true
+      },
+      "model_discovery": "configuration"
+    },
+    "/v1/models": {
+      "data": [
+        {
+          "availability": "available",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "code",
+          "description": "Primary coding class — SOTA agentic coding, 262k ctx",
+          "id": "code",
+          "object": "model",
+          "provider": "local-ollama",
+          "provider_type": "ollama"
+        },
+        {
+          "availability": "available",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "code-fast",
+          "description": "Agentic-coding specialist — direct calls only, NOT a Buzz seat (stalls in agent loops)",
+          "id": "code-fast",
+          "object": "model",
+          "provider": "local-ollama",
+          "provider_type": "ollama"
+        },
+        {
+          "availability": "available",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "simple",
+          "description": "Simple class — muse-glimmer (also serves vision-work; the old trio note named the retired agentic-fast)",
+          "id": "simple",
+          "object": "model",
+          "provider": "local-ollama",
+          "provider_type": "ollama"
+        },
+        {
+          "availability": "available",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "utility",
+          "description": "Utility class — muse-glimmer (repointed 2026-08-24 when command-r:35b was removed from the fleet)",
+          "id": "utility",
+          "object": "model",
+          "provider": "local-ollama",
+          "provider_type": "ollama"
+        },
+        {
+          "availability": "available",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "vision-work",
+          "description": "Vision work lane — automation/clean ONLY (repointed 2026-08-16: qwen3-vl:32b deleted, muse-glimmer genuinely has vision+tools+thinking and is already the `simple` alias — same model, two entry points, not a fabricated capability)",
+          "id": "vision-work",
+          "object": "model",
+          "provider": "local-ollama",
+          "provider_type": "ollama"
+        },
+        {
+          "availability": "available",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "medical",
+          "description": "Medical class",
+          "id": "medical",
+          "object": "model",
+          "provider": "local-ollama",
+          "provider_type": "ollama"
+        },
+        {
+          "availability": "available",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "safety",
+          "description": "Guard model — trust-boundary screening (mickey is the fleet guard host)",
+          "id": "safety",
+          "object": "model",
+          "provider": "local-ollama",
+          "provider_type": "ollama"
+        },
+        {
+          "availability": "available",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "safety",
+          "description": "Second-opinion guard — high-stakes output only",
+          "id": "safety-second",
+          "object": "model",
+          "provider": "local-ollama",
+          "provider_type": "ollama"
+        },
+        {
+          "availability": "available",
+          "capabilities": [
+            "embeddings"
+          ],
+          "class": "embed",
+          "description": "Canon embedding model — never prune",
+          "id": "embed",
+          "object": "model",
+          "provider": "local-ollama",
+          "provider_type": "ollama"
+        },
+        {
+          "availability": "available",
+          "capabilities": [
+            "embeddings"
+          ],
+          "class": "embed",
+          "description": "Multilingual embeddings",
+          "id": "embed-multilingual",
+          "object": "model",
+          "provider": "local-ollama",
+          "provider_type": "ollama"
+        },
+        {
+          "availability": "available",
+          "capabilities": [
+            "embeddings"
+          ],
+          "class": "embed",
+          "description": "Large embeddings",
+          "id": "embed-large",
+          "object": "model",
+          "provider": "local-ollama",
+          "provider_type": "ollama"
+        },
+        {
+          "availability": "unchecked",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "hosted-chat",
+          "description": "BYOK Anthropic — LIVE since 2026-08-21 (key in .env; model id verified against /v1/models)",
+          "id": "claude",
+          "object": "model",
+          "provider": "anthropic",
+          "provider_type": "anthropic"
+        },
+        {
+          "availability": "unchecked",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "hosted-chat",
+          "description": "BYOK Anthropic — LIVE since 2026-08-21 (key in .env; model id verified against /v1/models)",
+          "id": "claude-fast",
+          "object": "model",
+          "provider": "anthropic",
+          "provider_type": "anthropic"
+        },
+        {
+          "availability": "unchecked",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "hosted-chat",
+          "description": "BYOK Anthropic ceiling — Fable 5 (Mythos-class). LIVE since 2026-08-21; model id verified against /v1/models",
+          "id": "fable",
+          "object": "model",
+          "provider": "anthropic",
+          "provider_type": "anthropic"
+        },
+        {
+          "availability": "unchecked",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "hosted-chat",
+          "description": "BYOK Moonshot — LIVE since 2026-08-21 (key in .env; kimi-k3 verified against /v1/models)",
+          "id": "kimi",
+          "object": "model",
+          "provider": "moonshot",
+          "provider_type": "openai_compatible"
+        },
+        {
+          "availability": "unchecked",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "hosted-chat",
+          "description": "BYOK Z.AI glm-5.3 — LIVE 2026-08-23 (key in .env). Adversarial/security lens: preferred first reviewer for security-sensitive changes and post-merge audits — a preference, never a gate. Buzz seat calls Z.AI direct; this meters other calls",
+          "id": "glm",
+          "object": "model",
+          "provider": "zai",
+          "provider_type": "openai_compatible"
+        },
+        {
+          "availability": "unchecked",
+          "capabilities": [
+            "chat"
+          ],
+          "class": "hosted-chat",
+          "description": "BYOK xAI — LIVE since 2026-08-21. grok-4 no longer exists upstream; grok-4.6 is the current mainline chat model per /v1/models",
+          "id": "grok",
+          "object": "model",
+          "provider": "xai",
+          "provider_type": "openai_compatible"
+        }
+      ],
+      "discovery": {
+        "source": "configuration"
+      },
+      "object": "list"
+    }
+  },
+  "scrubbed": true,
+  "surface": "http GET x2"
+}
