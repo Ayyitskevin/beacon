@@ -1,0 +1,63 @@
+{
+  "schema": "desk.v1",
+  "generated_at": "2026-08-24T23:00:00Z",
+  "entries": [
+    {
+      "source": "minerva",
+      "owner": "claude-2f",
+      "title": "Vulcan requires a seat label for every hosted call",
+      "status": "supported",
+      "authority": "verified",
+      "timestamp": "2026-08-24T18:02:11Z",
+      "schema_version": "claim.v2",
+      "ref": "mnv-0231",
+      "link": "http://127.0.0.1:18765/claims/mnv-0231"
+    },
+    {
+      "source": "athena",
+      "owner": "codex",
+      "title": "Wire the Mosaic desk adapters",
+      "status": "in_review",
+      "authority": "reviewed",
+      "timestamp": "2026-08-24T20:15:00Z",
+      "schema_version": "issue.v1",
+      "ref": "ATH-412",
+      "link": "http://127.0.0.1:18300/issues/ATH-412"
+    },
+    {
+      "source": "janus",
+      "owner": "kevin",
+      "title": "Create the public Mosaic repository",
+      "status": "approved",
+      "authority": "janus-authorized",
+      "binding_holds": true,
+      "timestamp": "2026-08-24T21:00:00Z",
+      "schema_version": "gate.v1",
+      "ref": "jns-0007",
+      "link": "janus://gates/jns-0007"
+    },
+    {
+      "source": "janus",
+      "owner": "kevin",
+      "title": "Ship the adapter protocol",
+      "status": "approved",
+      "authority": "janus-authorized",
+      "binding_holds": false,
+      "timestamp": "2026-08-23T09:30:00Z",
+      "schema_version": "gate.v1",
+      "ref": "jns-0004",
+      "link": "janus://gates/jns-0004"
+    },
+    {
+      "source": "icarus",
+      "owner": "claude-0d",
+      "title": "Dispatch envelope for the nightly sweep",
+      "status": "held",
+      "authority": "proposed",
+      "timestamp": "2026-08-24T22:40:00Z",
+      "schema_version": "envelope.v1",
+      "ref": "ICR-88",
+      "link": "icarus://envelopes/ICR-88"
+    }
+  ]
+}
