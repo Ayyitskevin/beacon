@@ -114,6 +114,18 @@ def resolve(module: str) -> Endpoint:
             continue
         token = os.environ.get(token_name) if token_name else None
         unbound = _token_set_in_another_family(families, address_name)
+        if token is None and unbound and address == default:
+            # The address was named explicitly but is byte-identical to the
+            # measured default, so nothing was redirected and there is nothing to
+            # protect the credential from. Blocking here would punish the single
+            # most likely real setup -- ATHENA_BASE_URL is what most fleet tooling
+            # expects, ATHENA_API_TOKEN is what Athena's own token file exports --
+            # with a 401 that reads like an auth problem. Refinement from
+            # claude-2f. It cannot weaken the redirect case: an attacker-supplied
+            # host is not the default, so it still loses the token.
+            token = os.environ[unbound]
+            token_name = unbound
+            unbound = None
         return Endpoint(
             module=module,
             address=address,

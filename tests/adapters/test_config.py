@@ -152,3 +152,39 @@ class TestCredentialsAreBoundToTheirEndpoint:
 
         assert "live-token-value" not in (endpoint.token_source or "")
         assert "live-token-value" not in endpoint.source
+
+    def test_the_correct_host_named_by_another_family_keeps_its_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The most likely real mixture must not 401.
+
+        `ATHENA_BASE_URL` is what most fleet tooling expects; `ATHENA_API_TOKEN` is
+        what Athena's own token file exports. Someone sourcing the token file and
+        setting the fleet-standard URL var names the *correct* host through a
+        different family. Nothing was redirected, so nothing needs protecting.
+        """
+
+        self._clear(monkeypatch)
+        default, _ = config._DEFAULTS["athena"]
+        monkeypatch.setenv("ATHENA_BASE_URL", default)
+        monkeypatch.setenv("ATHENA_API_TOKEN", "live-token-value")
+
+        endpoint = config.resolve("athena")
+
+        assert endpoint.address == default
+        assert endpoint.token == "live-token-value"
+
+    def test_that_relaxation_cannot_rescue_a_redirect(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The guard above keys on equality with the default, and only that.
+
+        An address that is not the default is a redirect regardless of which
+        family named it, so the credential is still withheld.
+        """
+
+        self._clear(monkeypatch)
+        monkeypatch.setenv("ATHENA_BASE_URL", "http://elsewhere.invalid:9999")
+        monkeypatch.setenv("ATHENA_API_TOKEN", "live-token-value")
+
+        assert config.resolve("athena").token is None
