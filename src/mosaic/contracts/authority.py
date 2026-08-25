@@ -54,10 +54,27 @@ class Attachment(StrEnum):
 
     BYTES_UNVERIFIABLE = "bytes-unverifiable"
     """Binds bytes that CAN NEVER be re-checked by anyone -- a permanent
-    property of the binding, not of this run. The live case is a Janus
-    `text`-kind binding, whose own verify_binding returns "inline text binding
-    -- nothing live to re-check". No amount of connectivity fixes it. The
-    approval rests on the raiser's word, and re-running changes nothing."""
+    property of the binding, not of this run. The code path is a Janus
+    `text`-kind binding, whose verify_binding returns "inline text binding --
+    nothing live to re-check". No amount of connectivity fixes it, but the
+    bytes are at least *shown*, so a reader can judge them.
+
+    Measured 2026-08-24: zero of 13 live Janus gates use `text`. This is a
+    real code path with no population yet."""
+
+    UNBOUND = "unbound"
+    """Attached to NOTHING. No binding was ever recorded, so there is no
+    artifact to show and nothing to re-check against -- not now, not ever, by
+    anyone.
+
+    The weakest state in the system, and the easiest to miss, because it
+    arrives wearing the same lifecycle value as the strongest. Measured
+    2026-08-24: **4 of 13 live Janus gates are `binding_kind: null`, and all
+    four are `approved`** -- sitting in the same list as 8 git-bound rulings.
+
+    Distinct from BYTES_UNVERIFIABLE: that binds bytes it cannot re-derive;
+    this binds nothing at all. Collapsing them would hide the more dangerous
+    of the two."""
 
     BYTES_UNCHECKED = "bytes-unchecked"
     """Binds bytes Mosaic DID NOT check this run -- module unreachable, repo
@@ -133,6 +150,7 @@ NOT_ASSURING: frozenset[Attachment] = frozenset(
         Attachment.BYTES_DRIFTED,
         Attachment.BYTES_UNVERIFIABLE,
         Attachment.BYTES_UNCHECKED,
+        Attachment.UNBOUND,
     }
 )
 

@@ -158,10 +158,13 @@ any code depending on that string.
 - `bytes-unverifiable` — binds bytes that **can never be re-checked by
   anyone**. A permanent property of the binding, not of this run: a Janus
   `text`-kind binding has nothing live to re-check, and no amount of
-  connectivity changes that. The approval rests on the raiser's word.
+  connectivity changes that. The bytes are at least *shown*, so a reader can
+  judge them.
 - `bytes-unchecked` — binds bytes Mosaic **did not check this run** (module
   unreachable, repo absent, offline). Transient: re-running may resolve it to
   verified or drifted.
+- `unbound` — attached to **nothing at all**. No artifact to show, nothing to
+  re-check against, ever.
 - `intent` — binds an action against a target, not content (Athena).
 - `handle` — binds a token or record id (Buzz 46030).
 - `step` — binds a position in a run (Buzz 46011).
@@ -202,6 +205,38 @@ state where the system is quietly wrong and only a person can fix it** — and
 it is, counter-intuitively, produced by Janus, the mechanism the prior review
 called the strongest. That inversion is the entire reason this page rejects
 ranking.
+
+### The case that proves it, measured
+
+Lane B counted the binding kinds across all 13 live Janus gates on 2026-08-24:
+
+| `binding_kind` | Count |
+|---|---|
+| `git` | 8 |
+| **`null` (none)** | **4** |
+| `file` | 1 |
+| `text` | 0 |
+
+Two findings, and the second is the one this page exists for:
+
+1. **`text` has never been used.** The tri-state "cannot tell" analysis was
+   built around `verify_binding` returning `None` for `text` bindings. That
+   path is real in the code and has zero population. Worth encoding, but it is
+   not the live problem.
+2. **Four gates are bound to nothing, and all four are `approved`.**
+   `g4deae14ca3d` and `g6b5df553432` among them. A ruling bound to nothing can
+   never be re-checked against anything, by anyone — it is strictly weaker
+   than a `text` binding, which can at least be *shown* to a reader who wants
+   to judge it. And today it renders identically to the eight `git`-bound
+   rulings sitting beside it in the same list.
+
+That is the collapse, already present, in the module the prior review named as
+the sole trustworthy one. It is not a hypothetical about a future shell
+wiring a reaction to an approval. **Four approved rulings in the live ledger
+carry no re-checkable commitment at all, and nothing on screen says so.**
+
+Hence `unbound` as a distinct label, and hence the refusal to let any single
+value stand in for "approved".
 
 ### Consequences
 
