@@ -6,6 +6,7 @@ import pytest
 
 from mosaic.store.readers import (
     MigrationReader,
+    SurfaceKind,
     SourceRecord,
     SourceSurface,
     absent_is_not_loss,
@@ -15,7 +16,7 @@ from mosaic.store.readers import (
 class _Reader:
     origin = "janus"
     surface = SourceSurface(
-        kind="local_db",
+        kind=SurfaceKind.LOCAL_DB,
         boundary="process: uid without write permission on ~/.janus/janus.db",
         justification="Janus has no HTTP surface; its decay checks are derived and "
         "their inputs (binding, ruling state) are columns here.",
@@ -47,10 +48,10 @@ class TestEverySurfaceStatesItsBoundaryAndItsReason:
     @pytest.mark.parametrize(
         "kind,boundary_must_mention",
         [
-            ("file", "process"),
-            ("local_db", "process"),
-            ("http", "credential"),
-            ("subprocess", "allowlist"),
+            (SurfaceKind.FILE, "process"),
+            (SurfaceKind.LOCAL_DB, "process"),
+            (SurfaceKind.HTTP, "credential"),
+            (SurfaceKind.SUBPROCESS, "allowlist"),
         ],
     )
     def test_the_boundary_differs_by_surface(self, kind, boundary_must_mention):
@@ -62,7 +63,7 @@ class TestEverySurfaceStatesItsBoundaryAndItsReason:
             "http": "credential: read-only-scoped token bound to one endpoint",
             "subprocess": "allowlist: verbs the transport owns, not the caller",
         }
-        assert boundary_must_mention in boundaries[kind]
+        assert boundary_must_mention in boundaries[kind.value]
 
 
 class TestTheOriginWordSurvives:
@@ -113,7 +114,7 @@ class TestLocalDbRequiresVerifiedQuiescence:
         from mosaic.store.readers import SourceSurface
 
         return SourceSurface(
-            kind="local_db",
+            kind=SurfaceKind.LOCAL_DB,
             boundary="process: uid without write permission on the source file",
             quiescence=quiescence,
             justification="Janus is SQLite and its CLI exposes operator-facing "
@@ -153,7 +154,7 @@ class TestLocalDbRequiresVerifiedQuiescence:
         from mosaic.store.readers import SourceSurface, require_quiescent
 
         for kind in ("http", "file", "subprocess"):
-            require_quiescent(SourceSurface(kind=kind, boundary="n/a"))
+            require_quiescent(SourceSurface(kind=SurfaceKind(kind), boundary="n/a"))
 
     def test_the_evidence_field_is_a_command_not_an_assertion(self):
         """A precondition recorded as 'it was stopped' cannot be re-checked by
@@ -162,3 +163,33 @@ class TestLocalDbRequiresVerifiedQuiescence:
 
         q = Quiescence("frozen_snapshot", "systemctl is-active janus -> inactive", True)
         assert "->" in q.evidence
+
+
+class TestSurfaceKindIsClosed:
+    """It was a bare str, and require_quiescent keys on it.
+
+    claude-09 caught the cost: a reader declaring `file` while opening SQLite,
+    or simply typing `localdb`, passed straight through the quiescence guard.
+    A typo silently skipped a safety check, in a store whose whole doctrine is
+    closed vocabularies — the guard consulted a self-report and believed it.
+    """
+
+    @pytest.mark.parametrize("typo", ["localdb", "local-db", "LOCAL_DB", "sqlite", ""])
+    def test_an_unrecognised_kind_cannot_be_constructed(self, typo):
+        from mosaic.store.readers import SourceSurface
+
+        with pytest.raises(ValueError, match="closed vocabulary"):
+            SourceSurface(kind=typo, boundary="x")
+
+    def test_it_refuses_rather_than_coercing(self):
+        """A coerced typo becomes a plausible value the guard cannot question."""
+        from mosaic.store.readers import SourceSurface
+
+        with pytest.raises(ValueError):
+            SourceSurface(kind="local_db_", boundary="x")
+
+    def test_the_guard_now_keys_on_a_member_not_a_string(self):
+        from mosaic.store.readers import SourceNotQuiescent, SourceSurface, require_quiescent
+
+        with pytest.raises(SourceNotQuiescent):
+            require_quiescent(SourceSurface(kind=SurfaceKind.LOCAL_DB, boundary="x"))
