@@ -42,6 +42,23 @@ GATES: list[dict[str, Any]] = [
         "decay": None,
         "consumer": None,
     },
+    {
+        "id": "g55daf244a78",
+        "question": "A question the world moved past",
+        "state": "superseded",
+        "kind": "authority",
+        "raised_by": "kevin-lee",
+        "raised_at": "2026-08-22T09:00:00Z",
+        "binding_kind": "git",
+        "binding_locator": "docs/adr/0001.md",
+        "binding_sha256": "a" * 64,
+        # A superseded gate still carries a ruling object. Reading "has a ruling"
+        # as "was authorized" is the bug this fixture exists to catch.
+        "ruling": {"gate_id": "g55daf244a78", "state": "superseded"},
+        "options": [],
+        "decay": None,
+        "consumer": None,
+    },
 ]
 
 
@@ -144,6 +161,36 @@ def test_janus_reports_drift_rather_than_enforcing_it() -> None:
     assert ruled.authority.mechanism == "janus.ruling"
 
 
+def test_a_superseded_ruling_is_never_reported_as_authorized() -> None:
+    """The regression: five live gates once claimed an authorization nobody gave.
+
+    A superseded gate carries a `ruling` object whose own state is "superseded".
+    An adapter that treats the mere presence of a ruling as authorization reports
+    it as `authorized` -- which is the exact collapse this project exists to
+    prevent, committed by the tool that exists to prevent it.
+
+    The lifecycle is read from the RULING's own state, never from a constant and
+    never from "does a ruling exist".
+    """
+
+    superseded = next(e for e in _entries() if e.ref == "g55daf244a78")
+    assert superseded.authority is not None
+    assert superseded.authority.lifecycle is Lifecycle.REVIEWED
+    assert superseded.authority.lifecycle is not Lifecycle.AUTHORIZED
+    # And Janus's own word still reaches the reader untouched.
+    assert superseded.status == "superseded"
+
+
+def test_only_an_approved_ruling_reaches_authorized() -> None:
+    lifecycles = {e.status: e.authority.lifecycle for e in _entries() if e.authority is not None}
+    assert lifecycles["approved"] is Lifecycle.AUTHORIZED
+    for status, lifecycle in lifecycles.items():
+        if status != "approved":
+            assert lifecycle is not Lifecycle.AUTHORIZED, (
+                f"a {status!r} gate is claiming authorization"
+            )
+
+
 def test_status_is_janus_s_own_word_not_an_approval_value() -> None:
     """The regression this replaced a mapping table to prevent.
 
@@ -154,7 +201,7 @@ def test_status_is_janus_s_own_word_not_an_approval_value() -> None:
     """
 
     statuses = {e.status for e in _entries()}
-    assert statuses == {"open", "approved"}
+    assert statuses == {"open", "approved", "superseded"}
     for entry in _entries():
         assert not isinstance(entry.status, Lifecycle), (
             f"{entry.ref} carries an approval value in a field that holds Janus's own word"
@@ -196,7 +243,7 @@ def test_adapter_uses_only_contract_values() -> None:
 
 
 def test_status_is_the_module_s_own_word() -> None:
-    assert {e.status for e in _entries()} == {"open", "approved"}
+    assert {e.status for e in _entries()} == {"open", "approved", "superseded"}
 
 
 def test_canonical_link_is_re_runnable() -> None:
