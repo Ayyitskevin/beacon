@@ -80,12 +80,31 @@ as the whole of Athena.
 
 ### Janus binding kinds, from the live ledger
 
-13 gates: **git 8, none 4, file 1**. There is no `text` kind in the live corpus.
-Four approved gates are bound to nothing at all — a state weaker than a text
-binding, because a ruling bound to nothing can never be re-checked against
-anything. The adapter passes `{kind, locator, sha256}` through verbatim rather
-than collapsing it to a boolean, because that distinction is exactly what a
-reader needs and exactly what a boolean would erase.
+**A dated snapshot of a live, growing population — not a constant.** Two counts
+appear in this project's documents and both were true when taken:
+
+| When | Gates | binding_kind |
+|---|---|---|
+| 2026-08-24, during the Mosaic build | 13 | git 8 · none 4 · file 1 |
+| 2026-08-25, after it | 15 | git 9 · none 4 · file 2 |
+
+The population moved because **our own work moved it**: 6 of the 15 gates were
+raised during or after this session, including two about Mosaic's own authority
+vocabulary. Measuring the ledger and adding to it were the same activity.
+
+That is the reason to record the date and the population beside any distribution,
+rather than the ratio alone — a reader who re-runs `janus list --state all --json`
+should be able to tell "the ledger grew" from "the document was wrong."
+
+What has **not** moved, across both snapshots: **there is no `text` kind in the
+live corpus**, and **four approved gates are bound to nothing at all** — a state
+weaker than a text binding, because a ruling bound to nothing can never be
+re-checked against anything. Those are the two findings the adapter is shaped
+around, and they are stable facts rather than a moment's arithmetic.
+
+The adapter passes `{kind, locator, sha256}` through verbatim rather than
+collapsing it to a boolean, because that distinction is exactly what a reader
+needs and exactly what a boolean would erase.
 
 The adapter does **not** re-check whether a binding still holds; that is a
 per-gate `janus show` and should be opt-in, not a side effect of reading a desk.
