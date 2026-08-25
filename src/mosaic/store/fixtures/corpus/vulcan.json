@@ -22,7 +22,7 @@
         "max_inputs": 164,
         "supported": true
       },
-      "model_discovery": "Synthetic model_discovery synthetic-00024."
+      "model_discovery": "Synthetic model_discovery synthetic-00027."
     },
     "/v1/models": {
       "data": [
@@ -32,7 +32,7 @@
             "chat"
           ],
           "class": "code",
-          "description": "Synthetic description synthetic-00025.",
+          "description": "Synthetic description synthetic-00028.",
           "id": "synthetic-00001",
           "object": "model",
           "provider": "synthetic-00002",
@@ -44,7 +44,7 @@
             "chat"
           ],
           "class": "code-fast",
-          "description": "Synthetic description synthetic-00026.",
+          "description": "Synthetic description synthetic-00029.",
           "id": "synthetic-00003",
           "object": "model",
           "provider": "synthetic-00002",
@@ -56,7 +56,7 @@
             "chat"
           ],
           "class": "simple",
-          "description": "Synthetic description synthetic-00027.",
+          "description": "Synthetic description synthetic-00030.",
           "id": "synthetic-00004",
           "object": "model",
           "provider": "synthetic-00002",
@@ -68,7 +68,7 @@
             "chat"
           ],
           "class": "utility",
-          "description": "Synthetic description synthetic-00028.",
+          "description": "Synthetic description synthetic-00031.",
           "id": "synthetic-00005",
           "object": "model",
           "provider": "synthetic-00002",
@@ -80,7 +80,7 @@
             "chat"
           ],
           "class": "vision-work",
-          "description": "Synthetic description synthetic-00029.",
+          "description": "Synthetic description synthetic-00032.",
           "id": "synthetic-00006",
           "object": "model",
           "provider": "synthetic-00002",
@@ -92,7 +92,7 @@
             "chat"
           ],
           "class": "medical",
-          "description": "Synthetic description synthetic-00030.",
+          "description": "Synthetic description synthetic-00033.",
           "id": "synthetic-00007",
           "object": "model",
           "provider": "synthetic-00002",
@@ -104,7 +104,7 @@
             "chat"
           ],
           "class": "safety",
-          "description": "Synthetic description synthetic-00031.",
+          "description": "Synthetic description synthetic-00034.",
           "id": "synthetic-00008",
           "object": "model",
           "provider": "synthetic-00002",
@@ -116,7 +116,7 @@
             "chat"
           ],
           "class": "safety",
-          "description": "Synthetic description synthetic-00032.",
+          "description": "Synthetic description synthetic-00035.",
           "id": "synthetic-00009",
           "object": "model",
           "provider": "synthetic-00002",
@@ -128,7 +128,7 @@
             "embeddings"
           ],
           "class": "embed",
-          "description": "Synthetic description synthetic-00033.",
+          "description": "Synthetic description synthetic-00036.",
           "id": "synthetic-00010",
           "object": "model",
           "provider": "synthetic-00002",
@@ -140,7 +140,7 @@
             "embeddings"
           ],
           "class": "embed",
-          "description": "Synthetic description synthetic-00034.",
+          "description": "Synthetic description synthetic-00037.",
           "id": "synthetic-00011",
           "object": "model",
           "provider": "synthetic-00002",
@@ -152,7 +152,7 @@
             "embeddings"
           ],
           "class": "embed",
-          "description": "Synthetic description synthetic-00035.",
+          "description": "Synthetic description synthetic-00038.",
           "id": "synthetic-00012",
           "object": "model",
           "provider": "synthetic-00002",
@@ -164,7 +164,7 @@
             "chat"
           ],
           "class": "hosted-chat",
-          "description": "Synthetic description synthetic-00036.",
+          "description": "Synthetic description synthetic-00039.",
           "id": "synthetic-00013",
           "object": "model",
           "provider": "synthetic-00014",
@@ -176,7 +176,7 @@
             "chat"
           ],
           "class": "hosted-chat",
-          "description": "Synthetic description synthetic-00036.",
+          "description": "Synthetic description synthetic-00039.",
           "id": "synthetic-00015",
           "object": "model",
           "provider": "synthetic-00014",
@@ -188,7 +188,7 @@
             "chat"
           ],
           "class": "hosted-chat",
-          "description": "Synthetic description synthetic-00037.",
+          "description": "Synthetic description synthetic-00040.",
           "id": "synthetic-00016",
           "object": "model",
           "provider": "synthetic-00014",
@@ -200,7 +200,7 @@
             "chat"
           ],
           "class": "hosted-chat",
-          "description": "Synthetic description synthetic-00038.",
+          "description": "Synthetic description synthetic-00041.",
           "id": "synthetic-00017",
           "object": "model",
           "provider": "synthetic-00018",
@@ -212,7 +212,7 @@
             "chat"
           ],
           "class": "hosted-chat",
-          "description": "Synthetic description synthetic-00039.",
+          "description": "Synthetic description synthetic-00042.",
           "id": "synthetic-00019",
           "object": "model",
           "provider": "synthetic-00020",
@@ -224,7 +224,7 @@
             "chat"
           ],
           "class": "hosted-chat",
-          "description": "Synthetic description synthetic-00040.",
+          "description": "Synthetic description synthetic-00043.",
           "id": "synthetic-00021",
           "object": "model",
           "provider": "synthetic-00022",
@@ -232,10 +232,640 @@
         }
       ],
       "discovery": {
-        "source": "Synthetic source synthetic-00024."
+        "source": "Synthetic source synthetic-00027."
       },
       "object": "list"
-    }
+    },
+    "/v1/usage": {
+      "budgets": [],
+      "by_model": [
+        {
+          "model": "synthetic-00015",
+          "provider": "synthetic-00014",
+          "totals": {
+            "completion_tokens": 82,
+            "prompt_tokens": 242,
+            "requests": 2,
+            "requests_with_usage": 2,
+            "total_tokens": 324
+          }
+        },
+        {
+          "model": "synthetic-00001",
+          "provider": "synthetic-00002",
+          "totals": {
+            "completion_tokens": 189,
+            "prompt_tokens": 509,
+            "requests": 4,
+            "requests_with_usage": 4,
+            "total_tokens": 698
+          }
+        },
+        {
+          "model": "synthetic-00003",
+          "provider": "synthetic-00002",
+          "totals": {
+            "completion_tokens": 22,
+            "prompt_tokens": 102,
+            "requests": 1,
+            "requests_with_usage": 1,
+            "total_tokens": 124
+          }
+        },
+        {
+          "model": "synthetic-00010",
+          "provider": "synthetic-00002",
+          "totals": {
+            "completion_tokens": 0,
+            "prompt_tokens": 862,
+            "requests": 7,
+            "requests_with_usage": 7,
+            "total_tokens": 862
+          }
+        },
+        {
+          "model": "synthetic-00019",
+          "provider": "synthetic-00020",
+          "totals": {
+            "completion_tokens": 496,
+            "prompt_tokens": 1136,
+            "requests": 8,
+            "requests_with_usage": 8,
+            "total_tokens": 1632
+          }
+        },
+        {
+          "model": "synthetic-00021",
+          "provider": "synthetic-00022",
+          "totals": {
+            "completion_tokens": 85,
+            "prompt_tokens": 245,
+            "requests": 2,
+            "requests_with_usage": 2,
+            "total_tokens": 330
+          }
+        },
+        {
+          "model": "synthetic-00017",
+          "provider": "synthetic-00018",
+          "totals": {
+            "completion_tokens": 168,
+            "prompt_tokens": 568,
+            "requests": 5,
+            "requests_with_usage": 5,
+            "total_tokens": 736
+          }
+        },
+        {
+          "model": "synthetic-00004",
+          "provider": "synthetic-00002",
+          "totals": {
+            "completion_tokens": 446,
+            "prompt_tokens": 1486,
+            "requests": 13,
+            "requests_with_usage": 13,
+            "total_tokens": 1932
+          }
+        },
+        {
+          "model": "synthetic-00005",
+          "provider": "synthetic-00002",
+          "totals": {
+            "completion_tokens": 275,
+            "prompt_tokens": 675,
+            "requests": 5,
+            "requests_with_usage": 5,
+            "total_tokens": 950
+          }
+        },
+        {
+          "model": "synthetic-00006",
+          "provider": "synthetic-00002",
+          "totals": {
+            "completion_tokens": 23,
+            "prompt_tokens": 103,
+            "requests": 1,
+            "requests_with_usage": 1,
+            "total_tokens": 126
+          }
+        }
+      ],
+      "by_provider": [
+        {
+          "provider": "synthetic-00014",
+          "totals": {
+            "completion_tokens": 82,
+            "prompt_tokens": 242,
+            "requests": 2,
+            "requests_with_usage": 2,
+            "total_tokens": 324
+          }
+        },
+        {
+          "provider": "synthetic-00002",
+          "totals": {
+            "completion_tokens": 955,
+            "prompt_tokens": 3737,
+            "requests": 31,
+            "requests_with_usage": 31,
+            "total_tokens": 4692
+          }
+        },
+        {
+          "provider": "synthetic-00018",
+          "totals": {
+            "completion_tokens": 168,
+            "prompt_tokens": 568,
+            "requests": 5,
+            "requests_with_usage": 5,
+            "total_tokens": 736
+          }
+        },
+        {
+          "provider": "synthetic-00022",
+          "totals": {
+            "completion_tokens": 85,
+            "prompt_tokens": 245,
+            "requests": 2,
+            "requests_with_usage": 2,
+            "total_tokens": 330
+          }
+        },
+        {
+          "provider": "synthetic-00020",
+          "totals": {
+            "completion_tokens": 496,
+            "prompt_tokens": 1136,
+            "requests": 8,
+            "requests_with_usage": 8,
+            "total_tokens": 1632
+          }
+        }
+      ],
+      "by_seat": [
+        {
+          "seat": "synthetic-00013",
+          "totals": {
+            "completion_tokens": 292,
+            "prompt_tokens": 1127,
+            "requests": 10,
+            "requests_with_usage": 10,
+            "total_tokens": 1419
+          }
+        },
+        {
+          "seat": "synthetic-00023",
+          "totals": {
+            "completion_tokens": 511,
+            "prompt_tokens": 1412,
+            "requests": 11,
+            "requests_with_usage": 11,
+            "total_tokens": 1923
+          }
+        },
+        {
+          "seat": "synthetic-00016",
+          "totals": {
+            "completion_tokens": 20,
+            "prompt_tokens": 100,
+            "requests": 1,
+            "requests_with_usage": 1,
+            "total_tokens": 120
+          }
+        },
+        {
+          "seat": "synthetic-00024",
+          "totals": {
+            "completion_tokens": 381,
+            "prompt_tokens": 861,
+            "requests": 6,
+            "requests_with_usage": 6,
+            "total_tokens": 1242
+          }
+        },
+        {
+          "seat": "synthetic-00025",
+          "totals": {
+            "completion_tokens": 255,
+            "prompt_tokens": 735,
+            "requests": 6,
+            "requests_with_usage": 6,
+            "total_tokens": 990
+          }
+        },
+        {
+          "seat": "synthetic-00017",
+          "totals": {
+            "completion_tokens": 78,
+            "prompt_tokens": 571,
+            "requests": 5,
+            "requests_with_usage": 5,
+            "total_tokens": 649
+          }
+        }
+      ],
+      "ledger": {
+        "replayed_requests": 141,
+        "skipped_lines": 0,
+        "write_failures": 0
+      },
+      "object": "usage",
+      "scope": "Synthetic scope synthetic-00044.",
+      "started_at": 946684800,
+      "totals": {
+        "completion_tokens": 1786,
+        "prompt_tokens": 5928,
+        "requests": 48,
+        "requests_with_usage": 48,
+        "total_tokens": 7714
+      }
+    },
+    "file:usage-ledger.jsonl": [
+      {
+        "completion_tokens": 20,
+        "model": "synthetic-00004",
+        "prompt_tokens": 100,
+        "provider": "synthetic-00002",
+        "seat": "synthetic-00016",
+        "ts": 946684800
+      },
+      {
+        "completion_tokens": null,
+        "model": "synthetic-00010",
+        "prompt_tokens": 101,
+        "provider": "synthetic-00002",
+        "seat": "synthetic-00023",
+        "ts": 946684860
+      },
+      {
+        "completion_tokens": 22,
+        "model": "synthetic-00003",
+        "prompt_tokens": 102,
+        "provider": "synthetic-00002",
+        "seat": "synthetic-00023",
+        "ts": 946684920
+      },
+      {
+        "completion_tokens": 23,
+        "model": "synthetic-00006",
+        "prompt_tokens": 103,
+        "provider": "synthetic-00002",
+        "seat": "synthetic-00023",
+        "ts": 946684980
+      },
+      {
+        "completion_tokens": 24,
+        "model": "synthetic-00004",
+        "prompt_tokens": 104,
+        "provider": "synthetic-00002",
+        "seat": null,
+        "ts": 946685040
+      },
+      {
+        "completion_tokens": 25,
+        "model": "synthetic-00017",
+        "prompt_tokens": 105,
+        "provider": "synthetic-00018",
+        "seat": "synthetic-00017",
+        "ts": 946685100
+      },
+      {
+        "completion_tokens": 26,
+        "model": "synthetic-00004",
+        "prompt_tokens": 106,
+        "provider": "synthetic-00002",
+        "seat": "synthetic-00017",
+        "ts": 946685160
+      },
+      {
+        "completion_tokens": 27,
+        "model": "synthetic-00017",
+        "prompt_tokens": 107,
+        "provider": "synthetic-00018",
+        "seat": "synthetic-00017",
+        "ts": 946685220
+      },
+      {
+        "completion_tokens": 28,
+        "model": "synthetic-00015",
+        "prompt_tokens": 108,
+        "provider": "synthetic-00014",
+        "seat": "synthetic-00013",
+        "ts": 946685280
+      },
+      {
+        "completion_tokens": 29,
+        "model": "synthetic-00021",
+        "prompt_tokens": 109,
+        "provider": "synthetic-00022",
+        "seat": "synthetic-00013",
+        "ts": 946685340
+      },
+      {
+        "completion_tokens": 30,
+        "model": "synthetic-00017",
+        "prompt_tokens": 110,
+        "provider": "synthetic-00018",
+        "seat": "synthetic-00013",
+        "ts": 946685400
+      },
+      {
+        "completion_tokens": 31,
+        "model": "synthetic-00017",
+        "prompt_tokens": 111,
+        "provider": "synthetic-00018",
+        "seat": "synthetic-00013",
+        "ts": 946685460
+      },
+      {
+        "completion_tokens": 32,
+        "model": "synthetic-00004",
+        "prompt_tokens": 112,
+        "provider": "synthetic-00002",
+        "seat": "synthetic-00013",
+        "ts": 946685520
+      },
+      {
+        "completion_tokens": 33,
+        "model": "synthetic-00004",
+        "prompt_tokens": 113,
+        "provider": "synthetic-00002",
+        "seat": "synthetic-00013",
+        "ts": 946685580
+      },
+      {
+        "completion_tokens": 34,
+        "model": "synthetic-00004",
+        "prompt_tokens": 114,
+        "provider": "synthetic-00002",
+        "seat": "synthetic-00013",
+        "ts": 946685640
+      },
+      {
+        "completion_tokens": null,
+        "model": "synthetic-00010",
+        "prompt_tokens": 115,
+        "provider": "synthetic-00002",
+        "seat": "synthetic-00013",
+        "ts": 946685700
+      },
+      {
+        "completion_tokens": 36,
+        "model": "synthetic-00004",
+        "prompt_tokens": 116,
+        "provider": "synthetic-00002",
+        "seat": null,
+        "ts": 946685760
+      },
+      {
+        "completion_tokens": 37,
+        "model": "synthetic-00004",
+        "prompt_tokens": 117,
+        "provider": "synthetic-00002",
+        "seat": "synthetic-00013",
+        "ts": 946685820
+      },
+      {
+        "completion_tokens": 38,
+        "model": "synthetic-00004",
+        "prompt_tokens": 118,
+        "provider": "synthetic-00002",
+        "seat": "synthetic-00013",
+        "ts": 946685880
+      },
+      {
+        "completion_tokens": 39,
+        "model": "synthetic-00001",
+        "prompt_tokens": 119,
+        "provider": "synthetic-00002",
+        "seat": null,
+        "ts": 946685940
+      },
+      {
+        "completion_tokens": 40,
+        "model": "synthetic-00004",
+        "prompt_tokens": 120,
+        "provider": "synthetic-00002",
+        "seat": "synthetic-00025",
+        "ts": 946686000
+      },
+      {
+        "completion_tokens": 41,
+        "model": "synthetic-00004",
+        "prompt_tokens": 121,
+        "provider": "synthetic-00002",
+        "seat": "synthetic-00025",
+        "ts": 946686060
+      },
+      {
+        "completion_tokens": 42,
+        "model": "synthetic-00004",
+        "prompt_tokens": 122,
+        "provider": "synthetic-00002",
+        "seat": "synthetic-00025",
+        "ts": 946686120
+      },
+      {
+        "completion_tokens": 43,
+        "model": "synthetic-00004",
+        "prompt_tokens": 123,
+        "provider": "synthetic-00002",
+        "seat": "synthetic-00025",
+        "ts": 946686180
+      },
+      {
+        "completion_tokens": 44,
+        "model": "synthetic-00005",
+        "prompt_tokens": 124,
+        "provider": "synthetic-00002",
+        "seat": "synthetic-00025",
+        "ts": 946686240
+      },
+      {
+        "completion_tokens": 45,
+        "model": "synthetic-00005",
+        "prompt_tokens": 125,
+        "provider": "synthetic-00002",
+        "seat": "synthetic-00025",
+        "ts": 946686300
+      },
+      {
+        "completion_tokens": null,
+        "model": "synthetic-00010",
+        "prompt_tokens": 126,
+        "provider": "synthetic-00002",
+        "seat": "synthetic-00017",
+        "ts": 946686360
+      },
+      {
+        "completion_tokens": null,
+        "model": "synthetic-00010",
+        "prompt_tokens": 127,
+        "provider": "synthetic-00002",
+        "seat": "synthetic-00017",
+        "ts": 946686420
+      },
+      {
+        "completion_tokens": 48,
+        "model": "synthetic-00001",
+        "prompt_tokens": 128,
+        "provider": "synthetic-00002",
+        "seat": null,
+        "ts": 946686480
+      },
+      {
+        "completion_tokens": null,
+        "model": "synthetic-00010",
+        "prompt_tokens": 129,
+        "provider": "synthetic-00002",
+        "seat": null,
+        "ts": 946686540
+      },
+      {
+        "completion_tokens": 50,
+        "model": "synthetic-00001",
+        "prompt_tokens": 130,
+        "provider": "synthetic-00002",
+        "seat": null,
+        "ts": 946686600
+      },
+      {
+        "completion_tokens": null,
+        "model": "synthetic-00010",
+        "prompt_tokens": 131,
+        "provider": "synthetic-00002",
+        "seat": null,
+        "ts": 946686660
+      },
+      {
+        "completion_tokens": 52,
+        "model": "synthetic-00001",
+        "prompt_tokens": 132,
+        "provider": "synthetic-00002",
+        "seat": null,
+        "ts": 946686720
+      },
+      {
+        "completion_tokens": null,
+        "model": "synthetic-00010",
+        "prompt_tokens": 133,
+        "provider": "synthetic-00002",
+        "seat": null,
+        "ts": 946686780
+      },
+      {
+        "completion_tokens": 54,
+        "model": "synthetic-00015",
+        "prompt_tokens": 134,
+        "provider": "synthetic-00014",
+        "seat": "synthetic-00023",
+        "ts": 946686840
+      },
+      {
+        "completion_tokens": 55,
+        "model": "synthetic-00017",
+        "prompt_tokens": 135,
+        "provider": "synthetic-00018",
+        "seat": "synthetic-00023",
+        "ts": 946686900
+      },
+      {
+        "completion_tokens": 56,
+        "model": "synthetic-00021",
+        "prompt_tokens": 136,
+        "provider": "synthetic-00022",
+        "seat": "synthetic-00023",
+        "ts": 946686960
+      },
+      {
+        "completion_tokens": 57,
+        "model": "synthetic-00019",
+        "prompt_tokens": 137,
+        "provider": "synthetic-00020",
+        "seat": "synthetic-00023",
+        "ts": 946687020
+      },
+      {
+        "completion_tokens": 58,
+        "model": "synthetic-00019",
+        "prompt_tokens": 138,
+        "provider": "synthetic-00020",
+        "seat": "synthetic-00023",
+        "ts": 946687080
+      },
+      {
+        "completion_tokens": 59,
+        "model": "synthetic-00019",
+        "prompt_tokens": 139,
+        "provider": "synthetic-00020",
+        "seat": "synthetic-00024",
+        "ts": 946687140
+      },
+      {
+        "completion_tokens": 60,
+        "model": "synthetic-00019",
+        "prompt_tokens": 140,
+        "provider": "synthetic-00020",
+        "seat": "synthetic-00024",
+        "ts": 946687200
+      },
+      {
+        "completion_tokens": 61,
+        "model": "synthetic-00005",
+        "prompt_tokens": 141,
+        "provider": "synthetic-00002",
+        "seat": "synthetic-00023",
+        "ts": 946687260
+      },
+      {
+        "completion_tokens": 62,
+        "model": "synthetic-00005",
+        "prompt_tokens": 142,
+        "provider": "synthetic-00002",
+        "seat": "synthetic-00023",
+        "ts": 946687320
+      },
+      {
+        "completion_tokens": 63,
+        "model": "synthetic-00005",
+        "prompt_tokens": 143,
+        "provider": "synthetic-00002",
+        "seat": "synthetic-00023",
+        "ts": 946687380
+      },
+      {
+        "completion_tokens": 64,
+        "model": "synthetic-00019",
+        "prompt_tokens": 144,
+        "provider": "synthetic-00020",
+        "seat": "synthetic-00024",
+        "ts": 946687440
+      },
+      {
+        "completion_tokens": 65,
+        "model": "synthetic-00019",
+        "prompt_tokens": 145,
+        "provider": "synthetic-00020",
+        "seat": "synthetic-00024",
+        "ts": 946687500
+      },
+      {
+        "completion_tokens": 66,
+        "model": "synthetic-00019",
+        "prompt_tokens": 146,
+        "provider": "synthetic-00020",
+        "seat": "synthetic-00024",
+        "ts": 946687560
+      },
+      {
+        "completion_tokens": 67,
+        "model": "synthetic-00019",
+        "prompt_tokens": 147,
+        "provider": "synthetic-00020",
+        "seat": "synthetic-00024",
+        "ts": 946687620
+      }
+    ]
   },
   "scrubbed": true,
   "surface": "synthetic vulcan API/CLI response shapes; not a production observation"

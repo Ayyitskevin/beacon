@@ -118,3 +118,73 @@ class TestTheVerifierIsHonest:
         """But see test_capture: an empty known set must BLOCK a capture, not
         pass it. 'Nothing to check against' is not 'nothing found'."""
         assert contains_known_secret({"x": "y"}, known=set()) is False
+
+
+class TestOverScrubbingIsARealBugNotFreeSafety:
+    """The first version matched key-name SUBSTRINGS and destroyed a fixture.
+
+    `prompt_tokens` and `completion_tokens` contain "token", so Vulcan's usage
+    corpus came back with 155 redactions where the token counts should be — a
+    usage reader cannot be built from that. The failure is silent: the fixture
+    looks scrubbed and careful and is useless. Nothing downstream complains
+    about over-scrubbing the way a leak would be complained about, which is
+    exactly why it needs its own tests.
+    """
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "max_tokens",
+            "sort_key",
+            "api_version",
+            "model",
+            "seat",
+            "ts",
+            "provider",
+            "title",
+        ],
+    )
+    def test_a_count_or_ordinary_field_is_not_redacted(self, key):
+        assert scrub({key: 1234}, known=set())[key] == 1234
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "token",
+            "api_token",
+            "access_token",
+            "ATHENA_API_TOKEN",
+            "api_key",
+            "password",
+            "Authorization",
+            "bearer_token",
+            "session_id",
+            "private_key",
+            "cookie",
+            "client_secret",
+        ],
+    )
+    def test_a_real_secret_field_is_still_redacted(self, key):
+        assert scrub({key: "value"}, known=set())[key] == REDACTED
+
+    def test_the_vulcan_ledger_shape_survives_intact(self):
+        """The exact record that was destroyed."""
+        event = {
+            "seat": "claude-code",
+            "model": "simple",
+            "provider": "local-ollama",
+            "ts": 1786852163,
+            "prompt_tokens": 412,
+            "completion_tokens": 88,
+        }
+        assert scrub(event, known=set()) == event
+
+    def test_singular_and_plural_are_different_words(self):
+        """`token` is a credential; `tokens` is a count. Substring matching
+        cannot tell them apart, which is the whole bug."""
+        out = scrub({"token": "abc", "tokens": 500}, known=set())
+        assert out["token"] == REDACTED
+        assert out["tokens"] == 500
