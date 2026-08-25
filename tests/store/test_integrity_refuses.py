@@ -1,7 +1,10 @@
-"""The store must refuse the collapses, not merely document them.
+"""The integrity layer must refuse, not merely document.
 
-Every case below was found collapsed in live code during the design phase.
-A schema that permits them is a schema that will contain them.
+Scope note. Lane A's schema.sql owns the envelope's shape and its own
+invariants; this lane owns integrity ON TOP of it. So nothing here re-asserts
+something schema.sql already enforces — two layers both enforcing an invariant
+is how they drift. These tests cover only what this lane adds: the concepts the
+envelope does not model, and the columns it deliberately leaves open.
 """
 
 from __future__ import annotations
@@ -12,114 +15,112 @@ import pytest
 
 from mosaic.store.schema import apply_schema, enum_values
 
+RECORD_COLS = (
+    "id, capability, kind, title, status, occurred_at, recorded_at, "
+    "provenance_origin, provenance_source_ref, provenance_source_rev, "
+    "provenance_actor, provenance_imported_at, body, body_unmapped, "
+    "authority_state, authority_id"
+)
+#: Every one of those is NOT NULL with no default, by Lane A's design: a
+#: default is a value nobody chose. So a fixture must state all of them, which
+#: is the schema making its own completeness requirement visible.
+
 
 @pytest.fixture
 def db():
     conn = sqlite3.connect(":memory:")
     apply_schema(conn)
+    # Lane A's prerequisites for a record: the capability must be registered
+    # and the (capability, kind) pair must exist in the vocabulary table. That
+    # a record cannot exist without them is their invariant, enforced there;
+    # this lane does not re-assert it, it just satisfies it.
     conn.execute(
-        "INSERT INTO entity(id,origin,origin_ref,origin_status) VALUES (1,'janus','g1','superseded')"
+        "INSERT INTO capability_registry VALUES ('authority','built','live','2026-08-25')"
+    )
+    conn.execute("INSERT INTO vocabulary VALUES ('authority','gate','lifecycle')")
+    cols = [c.strip() for c in RECORD_COLS.split(",")]
+    conn.execute(
+        f"INSERT INTO record({RECORD_COLS}) VALUES ({','.join('?' * len(cols))})",
+        ("r1", "authority", "gate", "a gate", "superseded",
+         "2026-08-25T00:00:00Z", "2026-08-25T00:00:00Z",
+         "migrated:janus", "g1", "", "claude-2f", "2026-08-25T00:00:00Z",
+         "{}", "{}", "not_required", ""),
     )
     return conn
 
 
-def ref(**over):
+def insert(conn, table, row):
+    conn.execute(
+        f"INSERT INTO {table}({','.join(row)}) VALUES ({','.join('?' * len(row))})",
+        tuple(row.values()),
+    )
+
+
+class TestSeedingActuallyHappened:
+    """A loader that applies DDL and skips seeding leaves every lookup table
+    empty, so every foreign key rejects everything — loudly, but only at the
+    first insert, far from the loader."""
+
+    @pytest.mark.parametrize(
+        "table,expected",
+        [
+            ("enum_replay_outcome", 4),
+            ("enum_derivation_kind", 3),
+            ("enum_instant_encoding", 4),
+            ("enum_digest_algorithm", 2),
+        ],
+    )
+    def test_this_lane_s_vocabularies_are_populated(self, db, table, expected):
+        assert len(enum_values(db, table)) == expected
+
+    def test_lane_a_s_vocabularies_are_populated_too(self, db):
+        """Their seeding runs in the same loader; if it stopped, everything
+        referencing their enums would start failing and it would look like our
+        bug."""
+        assert enum_values(db, "enum_resolution") == {
+            "resolved", "absent", "broken", "unresolved"
+        }
+
+
+class TestUnknownVariantsCannotBeStored:
+    """Totality check 3 at the storage layer: the database is the reader that
+    refuses."""
+
+    @pytest.mark.parametrize("bad", ["maybe", "REPRODUCED", "", "reproduced "])
+    def test_an_unknown_replay_outcome_is_refused(self, db, bad):
+        with pytest.raises(sqlite3.IntegrityError):
+            insert(db, "replay_run", _run(outcome=bad))
+
+    def test_an_unknown_instant_encoding_is_refused(self, db):
+        with pytest.raises(sqlite3.IntegrityError):
+            insert(db, "replay_run", _run(observed_encoding="probably_utc"))
+
+
+def _run(**over):
     row = {
-        "from_entity_id": 1,
-        "capability": "athena",
-        "ref": "MWS-2",
-        "origin": "athena",
-        "state": "pending",
-        "target_entity_id": None,
-        "checked_at": "2026-08-25T00:00:00Z",
-        "checked_encoding": "iso8601z",
+        "id": "run1",
+        "subject_record_id": "r1",
+        "outcome": "reproduced",
+        "environment_digest": "abc",
+        "environment_algorithm": "icarus.stableJson.v1",
+        "inputs_digest": "def",
+        "inputs_algorithm": "icarus.stableJson.v1",
+        "observed_at": "2026-08-25T00:00:00Z",
+        "observed_encoding": "iso8601z",
     }
     row.update(over)
     return row
 
 
-def insert(conn, table, row):
-    cols = ",".join(row)
-    marks = ",".join("?" * len(row))
-    conn.execute(f"INSERT INTO {table}({cols}) VALUES ({marks})", tuple(row.values()))
-
-
-class TestUnknownVariantsCannotBeStored:
-    """Totality check 3 at the storage layer: the database refuses."""
-
-    @pytest.mark.parametrize("bad", ["maybe", "APPROVED", "", "resolved "])
-    def test_an_unknown_reference_state_is_refused(self, db, bad):
-        with pytest.raises(sqlite3.IntegrityError):
-            insert(db, "entity_reference", ref(state=bad))
-
-    def test_an_unknown_origin_system_is_refused(self, db):
-        with pytest.raises(sqlite3.IntegrityError):
-            insert(db, "entity_reference", ref(capability="replaydeck2"))
-
-    def test_the_enum_is_read_from_the_database_not_hardcoded(self, db):
-        """A second copy of an enum is a second source of truth."""
-        assert enum_values(db, "reference_state") == {
-            "resolved",
-            "pending",
-            "dangling",
-            "unchecked",
-        }
-
-
-class TestNullIsNeverTheSignal:
-    def test_resolved_without_a_target_is_refused(self, db):
-        with pytest.raises(sqlite3.IntegrityError):
-            insert(db, "entity_reference", ref(state="resolved"))
-
-    def test_a_target_on_an_unresolved_reference_is_refused(self, db):
-        """Otherwise a row is silently resolved while claiming to be pending."""
-        with pytest.raises(sqlite3.IntegrityError):
-            insert(db, "entity_reference", ref(state="pending", target_entity_id=1))
-
-    @pytest.mark.parametrize("state", ["resolved", "pending", "dangling"])
-    def test_a_claim_about_a_moment_needs_the_moment(self, db, state):
-        target = 1 if state == "resolved" else None
-        with pytest.raises(sqlite3.IntegrityError):
-            insert(
-                db,
-                "entity_reference",
-                ref(state=state, target_entity_id=target, checked_at=None,
-                    checked_encoding=None),
-            )
-
-    def test_unchecked_is_the_one_state_that_needs_no_moment(self, db):
-        """Transient means we did not look — there is no moment to record."""
-        insert(db, "entity_reference", ref(state="unchecked", checked_at=None,
-                                          checked_encoding=None))
-
-    def test_pending_and_dangling_are_distinct_and_both_storable(self, db):
-        """Unresolved is the migration steady state, not a broken reference."""
-        insert(db, "entity_reference", ref(state="pending"))
-        insert(db, "entity_reference", ref(ref="MWS-3", state="dangling"))
-        states = {r[0] for r in db.execute("SELECT state FROM entity_reference")}
-        assert states == {"pending", "dangling"}
-
-
-class TestTheZoneTravelsWithTheInstant:
-    def test_an_instant_without_its_encoding_is_refused(self, db):
-        """Athena's naive timestamps are UTC only because a default happened to be."""
-        with pytest.raises(sqlite3.IntegrityError):
-            insert(db, "entity_reference", ref(checked_encoding=None))
-
-    def test_an_unknown_encoding_is_refused(self, db):
-        with pytest.raises(sqlite3.IntegrityError):
-            insert(db, "entity_reference", ref(checked_encoding="probably_utc"))
-
-
 class TestDerivedVerdicts:
     """Three kinds; only row-derived may be stored."""
 
-    def row(self, **over):
+    def _row(self, **over):
         r = {
-            "entity_id": 1,
+            "id": "d1",
+            "record_id": "r1",
             "field": "attention_reasons",
             "kind": "row_derived",
-            "inputs_present": 1,
             "input_fields": '["status","owner"]',
         }
         r.update(over)
@@ -128,90 +129,46 @@ class TestDerivedVerdicts:
     @pytest.mark.parametrize("kind", ["clock_derived", "cross_table_derived"])
     def test_a_stale_by_construction_verdict_cannot_be_stored(self, db, kind):
         with pytest.raises(sqlite3.IntegrityError):
-            insert(db, "derived_value", self.row(kind=kind, field="claim_state"))
+            insert(db, "derived_value", self._row(kind=kind, field="claim_state"))
 
     def test_row_derived_is_storable_because_it_duplicates_rather_than_lies(self, db):
-        insert(db, "derived_value", self.row())
+        insert(db, "derived_value", self._row())
 
-    def test_a_derived_value_whose_inputs_were_not_migrated_is_refused(self, db):
-        """It could then only be trusted, never recomputed."""
+    def test_a_derived_value_must_name_its_inputs(self, db):
+        """Without them it can be trusted but never recomputed."""
         with pytest.raises(sqlite3.IntegrityError):
-            insert(db, "derived_value", self.row(inputs_present=0, input_fields=None))
+            insert(db, "derived_value", self._row(input_fields=""))
 
-    def test_the_three_kinds_are_not_interchangeable(self, db):
-        storable = dict(db.execute("SELECT name, storable FROM derivation_kind"))
-        assert storable == {
-            "clock_derived": 0,
-            "cross_table_derived": 0,
-            "row_derived": 1,
+    def test_all_three_kinds_remain_nameable_even_though_two_are_unstorable(self, db):
+        """The vocabulary describes reality; the CHECK decides what may be
+        written. Deleting the unstorable kinds would lose the ability to say
+        what a value IS."""
+        assert enum_values(db, "enum_derivation_kind") == {
+            "clock_derived", "cross_table_derived", "row_derived"
         }
 
 
-class TestDigestsCarryTheirAlgorithm:
-    """Re-deriving a migrated digest with a new implementation reads as DRIFT."""
-
-    def run(self, **over):
-        r = {
-            "subject_entity_id": 1,
-            "outcome": "reproduced",
-            "environment_digest": "abc",
-            "environment_digest_algo": "icarus.stableJson.v1",
-            "inputs_digest": "def",
-            "inputs_digest_algo": "icarus.stableJson.v1",
-            "observed_at": "2026-08-25T00:00:00Z",
-            "observed_encoding": "iso8601z",
-        }
-        r.update(over)
-        return r
-
-    def test_a_digest_without_its_algorithm_is_refused(self, db):
+class TestReplayRunsAreHonestAboutWhatTheyDid:
+    def test_a_run_that_executed_must_say_what_it_ran_against(self, db):
         with pytest.raises(sqlite3.IntegrityError):
-            insert(db, "replay_run", self.run(environment_digest_algo=None))
+            insert(db, "replay_run", _run(inputs_digest="", environment_digest=""))
 
-    def test_an_unknown_algorithm_is_refused(self, db):
-        with pytest.raises(sqlite3.IntegrityError):
-            insert(db, "replay_run", self.run(inputs_digest_algo="python.json.dumps"))
-
-    def test_the_frozen_icarus_canonicaliser_is_registered(self, db):
-        names = enum_values(db, "digest_algorithm")
-        assert "icarus.stableJson.v1" in names
-
-
-class TestReplayOutcomeIsFourValued:
-    def test_a_run_that_executed_must_name_what_it_ran_against(self, db):
-        with pytest.raises(sqlite3.IntegrityError):
-            insert(
-                db,
-                "replay_run",
-                {
-                    "subject_entity_id": 1,
-                    "outcome": "diverged",
-                    "observed_at": "2026-08-25T00:00:00Z",
-                    "observed_encoding": "iso8601z",
-                },
-            )
-
-    def test_not_attempted_is_transient_and_records_no_observation(self, db):
-        insert(db, "replay_run", {"subject_entity_id": 1, "outcome": "not_attempted"})
+    def test_not_attempted_claims_nothing(self, db):
+        insert(db, "replay_run", _run(
+            outcome="not_attempted", environment_digest="", inputs_digest="", observed_at=""))
 
     def test_not_attempted_with_an_observation_is_refused(self, db):
         """'We did not run it' and 'we ran it at 3pm' cannot both be true."""
         with pytest.raises(sqlite3.IntegrityError):
-            insert(
-                db,
-                "replay_run",
-                {
-                    "subject_entity_id": 1,
-                    "outcome": "not_attempted",
-                    "observed_at": "2026-08-25T00:00:00Z",
-                    "observed_encoding": "iso8601z",
-                },
-            )
+            insert(db, "replay_run", _run(outcome="not_attempted"))
 
-    def test_all_four_outcomes_exist_and_are_distinct(self, db):
-        assert enum_values(db, "replay_outcome") == {
-            "reproduced",
-            "diverged",
-            "not_replayable",
-            "not_attempted",
-        }
+    def test_a_digest_without_its_algorithm_is_refused(self, db):
+        with pytest.raises(sqlite3.IntegrityError):
+            insert(db, "replay_run", _run(inputs_algorithm=""))
+
+    def test_identity_is_text_never_a_rowid(self, db):
+        """record is not WITHOUT ROWID, so an INTEGER FK to its rowid would
+        pass every test here and break once, on VACUUM, when rowids renumber."""
+        info = {r[1]: r[2] for r in db.execute("PRAGMA table_info(replay_run)")}
+        assert info["subject_record_id"] == "TEXT"
+        assert info["id"] == "TEXT"
