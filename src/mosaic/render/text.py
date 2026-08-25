@@ -72,6 +72,31 @@ def render_entry(entry: dict) -> list[str]:
     return lines
 
 
+def _unreachable_lines(document: dict) -> list[str]:
+    """Describe the modules that did not answer, or return an empty list.
+
+    A desk is composed FROM modules, so a module that did not answer is a hole
+    in the document, not an absence of records. Rendering the two the same way
+    is the same collapse this file exists to prevent — "nothing to report" and
+    "we could not ask" are opposite facts and one of them needs an operator.
+    """
+    raw = document.get("unreachable") or []
+    if not raw:
+        return []
+
+    lines = []
+    for item in raw:
+        if isinstance(item, dict):
+            name = item.get("module") or item.get("name") or "unknown module"
+            address = item.get("address")
+            reason = item.get("reason") or item.get("detail")
+            trail = " · ".join(str(x) for x in (address, reason) if x)
+            lines.append(f"  {name}" + (f" — {trail}" if trail else ""))
+        else:
+            lines.append(f"  {item}")
+    return lines
+
+
 def render(document: dict) -> str:
     """Render a full ``desk.v1`` document as text.
 
@@ -94,13 +119,24 @@ def render(document: dict) -> str:
         header += f" · composed {generated}"
 
     out = [header, ""]
+    unreachable = _unreachable_lines(document)
 
     if not entries:
-        out.append("(no entries — the desk composed cleanly and found nothing to show)")
-        out.append("")
-        out.append(
-            "Run `mosaic doctor` to see whether that is an empty fleet or an unreachable one."
-        )
+        if unreachable:
+            # The bug this replaces claimed "composed cleanly" while the
+            # document it was rendering named modules that never answered.
+            n = len(unreachable)
+            subject = "module" if n == 1 else "modules"
+            out.append(f"(no entries — but {n} {subject} did not answer, so this desk is")
+            out.append(" INCOMPLETE, not empty. What is missing is unknown, not nothing.)")
+            out.append("")
+            out.extend(unreachable)
+            out.append("")
+            out.append("Run `mosaic doctor` for the address each one was tried at.")
+        else:
+            out.append("(no entries — every module answered and none had anything to show)")
+            out.append("")
+            out.append("This is a genuinely empty desk: nothing was hidden by a failed read.")
         return "\n".join(out)
 
     verdicts = [resolve(e) for e in entries]
@@ -147,5 +183,15 @@ def render(document: dict) -> str:
         out.append("")
         out.append(f"? {n} {subject} an unrecognised authority label.")
         out.append("  Reported, not guessed. Fix the adapter rather than the renderer.")
+
+    # A partial read misleads exactly as much as an empty one: the counts above
+    # describe what was seen, and this is what was not.
+    if unreachable:
+        n = len(unreachable)
+        subject = "module" if n == 1 else "modules"
+        out.append("")
+        out.append(f"✖ {n} {subject} did not answer. The counts above are incomplete —")
+        out.append("  entries these modules hold are missing, not absent.")
+        out.extend(unreachable)
 
     return "\n".join(out)

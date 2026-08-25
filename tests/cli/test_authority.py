@@ -287,3 +287,63 @@ class TestFooterAdviceIsFollowable:
         assert "re-check the ruling in Janus" in out
         assert "can never be re-checked" in out
         assert "0 entries render as authority" in out
+
+
+class TestFailedReadIsNotAnEmptyRead:
+    """The same collapse as the authority one, in a different field.
+
+    A desk is composed FROM modules. A module that did not answer leaves a hole
+    in the document; it does not mean there was nothing to find. "Nothing to
+    report" and "we could not ask" are opposite facts, and exactly one of them
+    needs an operator.
+    """
+
+    def test_empty_and_clean_says_so(self):
+        out = text.render({"schema": "desk.v1", "entries": []})
+        assert "genuinely empty desk" in out
+        assert "INCOMPLETE" not in out
+
+    def test_empty_with_unreachable_never_claims_it_composed_cleanly(self):
+        out = text.render(
+            {
+                "schema": "desk.v1",
+                "entries": [],
+                "unreachable": [{"module": "buzz", "address": "ws://192.0.2.10:13000"}],
+            }
+        )
+        assert "INCOMPLETE" in out
+        assert "genuinely empty desk" not in out
+        assert "buzz" in out
+        # The address matters: "connection refused" without one is useless.
+        assert "192.0.2.10:13000" in out
+
+    def test_a_partial_read_is_flagged_alongside_the_counts(self):
+        out = text.render(
+            {
+                "schema": "desk.v1",
+                "entries": [entry(source="athena", authority="reviewed")],
+                "unreachable": [{"module": "icarus", "reason": "not on PATH"}],
+            }
+        )
+        assert "did not answer" in out
+        assert "incomplete" in out.lower()
+        assert "icarus" in out
+
+    def test_accepts_bare_strings_as_well_as_dicts(self):
+        out = text.render({"schema": "desk.v1", "entries": [], "unreachable": ["replaydeck"]})
+        assert "replaydeck" in out
+        assert "INCOMPLETE" in out
+
+    def test_counts_are_never_presented_as_complete_when_a_read_failed(self):
+        """Regression: the footer's counts describe what was seen, not what is."""
+        doc = {
+            "schema": "desk.v1",
+            "entries": [entry(source="athena", authority="reviewed")],
+            "unreachable": [{"module": "janus"}],
+        }
+        out = text.render(doc)
+        counts_at = out.index("0 entries render as authority")
+        warning_at = out.index("did not answer")
+        assert warning_at > counts_at, (
+            "the incompleteness warning must follow the counts it qualifies"
+        )
