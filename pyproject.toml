@@ -1,0 +1,39 @@
+[project]
+name = "mosaic-desk"
+version = "0.1.0"
+description = "A read-only cross-module desk for AI Town: composes what each module already publishes, and never collapses five kinds of approval into one"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+readme = "README.md"
+# Zero runtime dependencies, deliberately. Mosaic reads other modules over
+# their own published surfaces; stdlib urllib covers every read v0 needs. A
+# runtime dependency here would be a dependency the whole fleet inherits.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<9",
+  "ruff>=0.8,<1",
+]
+
+[project.scripts]
+mosaic = "mosaic.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = ["--strict-config", "--strict-markers", "-ra"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
