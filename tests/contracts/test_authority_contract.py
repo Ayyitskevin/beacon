@@ -95,7 +95,7 @@ class TestAttachment:
         ],
     )
     def test_unassuring_attachments_never_assure(self, attachment):
-        """"Cannot tell" must never read as "fine" -- Janus's own
+        """ "Cannot tell" must never read as "fine" -- Janus's own
         verify_binding docstring says exactly this about its None return."""
         assert not _authority(attachment=attachment).assures()
         assert attachment in NOT_ASSURING
@@ -108,9 +108,7 @@ class TestAttachment:
         a stored mutation would re-execute a stale payload under authorization
         evaluated at a different moment. That is a different promise, not a
         weaker one, and must not render as a warning."""
-        assert _authority(
-            attachment=Attachment.INTENT, enforcement=Enforcement.NONE
-        ).assures()
+        assert _authority(attachment=Attachment.INTENT, enforcement=Enforcement.NONE).assures()
 
 
 class TestOperatorAction:
@@ -120,18 +118,14 @@ class TestOperatorAction:
         """Janus reports drift and stops, to stay out of the permission path.
         So nothing in the system prevents acting on a void ruling -- only a
         person can close that gap."""
-        a = _authority(
-            attachment=Attachment.BYTES_DRIFTED, enforcement=Enforcement.REPORTED
-        )
+        a = _authority(attachment=Attachment.BYTES_DRIFTED, enforcement=Enforcement.REPORTED)
         assert a.operator_action() is OperatorAction.ACT
 
     def test_drift_with_enforcement_needs_nothing(self):
         """Icarus re-derives planApprovalDigest on read and calls
         sourceInvalid() on mismatch. The system already refused; the operator
         is investigating, not containing."""
-        a = _authority(
-            attachment=Attachment.BYTES_DRIFTED, enforcement=Enforcement.ENFORCED
-        )
+        a = _authority(attachment=Attachment.BYTES_DRIFTED, enforcement=Enforcement.ENFORCED)
         assert a.operator_action() is OperatorAction.NONE
 
     def test_healthy_binding_needs_nothing(self):
@@ -140,9 +134,7 @@ class TestOperatorAction:
             is OperatorAction.NONE
         )
 
-    @pytest.mark.parametrize(
-        "attachment", [Attachment.UNBOUND, Attachment.BYTES_UNVERIFIABLE]
-    )
+    @pytest.mark.parametrize("attachment", [Attachment.UNBOUND, Attachment.BYTES_UNVERIFIABLE])
     def test_never_checkable_needs_a_decision(self, attachment):
         """The regression this pins: an earlier boolean `operator_must_act()`
         answered False for UNBOUND, so the four live unbound-and-approved
@@ -191,9 +183,7 @@ class TestAgentNeverApproves:
 
     def test_human_and_policy_still_assure_on_a_good_binding(self):
         for decider in (Decider.HUMAN, Decider.POLICY):
-            assert _authority(
-                decider=decider, attachment=Attachment.BYTES_VERIFIED
-            ).assures()
+            assert _authority(decider=decider, attachment=Attachment.BYTES_VERIFIED).assures()
 
     def test_enforcement_is_independent_of_attachment(self):
         """Binds-to-bytes and enforces-on-read are separate properties, and a
