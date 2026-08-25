@@ -17,7 +17,12 @@ import sqlite3
 
 import pytest
 
-from mosaic.store.enums import CANONICAL_ENUMS, divergences, seed_enums
+from mosaic.store.enums import (
+    CANONICAL_ENUMS,
+    divergences,
+    seed_capability_registry,
+    seed_enums,
+)
 from mosaic.store.models import CANONICAL_MODELS, column_divergences, expected_columns
 
 SCHEMA = pathlib.Path(__file__).resolve().parents[2] / "src" / "mosaic" / "store" / "schema.sql"
@@ -28,7 +33,7 @@ def db() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.executescript(SCHEMA.read_text())
     seed_enums(conn)
-    conn.execute("INSERT INTO capability_registry VALUES ('authority','built','live','2026-08-25')")
+    seed_capability_registry(conn)
     conn.execute("INSERT INTO vocabulary VALUES ('authority','gate','lifecycle')")
     return conn
 
@@ -213,11 +218,25 @@ class TestResolutionIsNotDestructive:
 class TestCapabilityRegistry:
     """Level 4: a registry derived from what exists cannot report what does not."""
 
-    def test_a_capability_that_was_never_built_is_storable(self, db):
-        db.execute(
-            "INSERT INTO capability_registry VALUES "
-            "('evaluation','not_built','ReplayDeck: ranked first, never built',NULL)"
-        )
+    def test_the_registry_is_seeded_not_empty(self, db):
+        """A registry with no rows reports nothing missing -- the exact failure
+        level 4 exists to prevent. It shipped empty until claude-0d noticed."""
+        assert db.execute("SELECT count(*) FROM capability_registry").fetchone()[0] == 7
+
+    def test_capabilities_that_do_not_exist_have_rows(self, db):
+        missing = {
+            r[0]
+            for r in db.execute("SELECT capability FROM capability_registry WHERE state != 'built'")
+        }
+        assert {"evaluation", "conversation", "execution"} <= missing
+
+    def test_never_built_and_deferred_are_distinguished(self, db):
+        """Both are "no implementation" and they are different facts: reporting
+        a deferred capability as unbuilt sends someone looking for code that
+        exists."""
+        states = dict(db.execute("SELECT capability, state FROM capability_registry"))
+        assert states["evaluation"] == "not_built"
+        assert states["execution"] == "deferred"
 
     def test_reason_is_required(self, db):
         """'never built' and 'deferred, no run state on this host' are both
@@ -225,6 +244,32 @@ class TestCapabilityRegistry:
         the second sends someone to restart a service nobody wrote."""
         with pytest.raises(sqlite3.IntegrityError):
             db.execute("INSERT INTO capability_registry VALUES ('execution','not_built','',NULL)")
+
+
+class TestStatusPolarity:
+    """`is_terminal_negative: bool` held two absences -- claude-0d showed `= 0`
+    returning open, in_progress, done AND verified."""
+
+    def test_polarity_separates_not_finished_from_finished_well(self, db):
+        db.execute("INSERT INTO vocabulary VALUES ('work','issue','lifecycle')")
+        for word, pol in [("open", "active"), ("done", "terminal_positive")]:
+            db.execute("INSERT INTO vocabulary_member VALUES ('work','issue',?,?)", (word, pol))
+        got = dict(db.execute("SELECT member, polarity FROM vocabulary_member WHERE kind='issue'"))
+        assert got["open"] != got["done"]
+
+    def test_refused_and_superseded_are_distinguished(self, db):
+        """A refusal is a decision; expired/withdrawn/superseded are the absence
+        of one. Janus's own supersede prints "NOBODY RULED"."""
+        for word, pol in [("refused", "terminal_negative"), ("superseded", "terminal_unruled")]:
+            db.execute("INSERT INTO vocabulary_member VALUES ('authority','gate',?,?)", (word, pol))
+        got = dict(db.execute("SELECT member, polarity FROM vocabulary_member WHERE kind='gate'"))
+        assert got["refused"] != got["superseded"]
+
+    def test_a_boolean_polarity_is_refused(self, db):
+        """The legacy shape must not be storable."""
+        db.execute("INSERT INTO vocabulary VALUES ('work','issue','lifecycle')")
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute("INSERT INTO vocabulary_member VALUES ('work','issue','open',0)")
 
 
 class TestRelationsAreTyped:
