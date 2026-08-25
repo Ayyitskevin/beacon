@@ -1,3 +1,24 @@
+> # ⚠ VOID — this ADR rules on a boundary that no longer exists
+>
+> ADR 0001 decides **what an adapter may read across module boundaries.** Kevin's
+> 2026-08-25 ruling made Mosaic one unified codebase with its own store, so there are
+> no module boundaries left for it to govern. It is not merely stale: its premise is
+> gone.
+>
+> Kept because the reasoning still applies to the **migration readers** in
+> `src/mosaic/adapters/`, which do still read old systems across a boundary. It does
+> **not** govern `src/mosaic/store/`, which owns a database by design.
+>
+> This ADR was cited by a test guard after the ruling voided it — the guard forbade
+> `sqlite3` anywhere in the package on ADR 0001's authority, which blocked the unified
+> store from owning its own database. **That is what a void document still instructing
+> looks like in practice.**
+>
+> 1. `private-evidence/2026-08-25_mosaic-scope-ruling-unified-desktop-app.md` — the ruling
+> 2. `private-evidence/2026-08-25_mosaic-datamodel-synthesis.md` — the current design
+
+---
+
 # ADR 0001: What an adapter may read
 
 - **Status:** Accepted (v0)
@@ -82,3 +103,6 @@ in-progress state.
   us to decide what is ours to decide. The one place this thread does defer is
   the `janus-authorized` rename (`docs/authority.md`), which changes a boundary
   rather than interpreting one.
+
+
+> Privacy rewrite: machine names, paths and endpoint examples in this document are illustrative, not a live infrastructure map. Historical measurements and prior byte-hash/review claims refer to retained original evidence, not these edited public bytes; no authority transfers through this rewrite.

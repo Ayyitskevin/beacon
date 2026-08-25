@@ -1,8 +1,40 @@
+> # ⚠ SUPERSEDED — DO NOT FOLLOW THIS AS INSTRUCTION
+>
+> **Kevin ruled on 2026-08-25 that Mosaic is ONE unified codebase absorbing all seven
+> AI Town capabilities, shipped as a Tauri desktop app with its own SQLite store.**
+> This file describes the *federating read-only desk* that preceded that ruling, and
+> several of its rules are now the exact inverse of the product being built —
+> including "no shared database", "Mosaic holds none", "read-only by construction",
+> and "there is no shell".
+>
+> It is kept, not deleted: the federated adapters it governs are the migration
+> readers, the only code that knows how to read the old systems. **But it must stop
+> instructing.** If you are an agent and this file loaded automatically, stop and read
+> these instead, in order:
+>
+> 1. `private-evidence/2026-08-25_mosaic-scope-ruling-unified-desktop-app.md` — the ruling
+> 2. `private-evidence/2026-08-25_mosaic-datamodel-synthesis.md` — the current design
+> 3. `src/mosaic/store/` — the actual product; `src/mosaic/{adapters,render,contracts}/`
+>    is the superseded one
+>
+> **Why this banner exists rather than a quiet edit:** three sessions built the wrong
+> product for ten hours because agent-authored documents kept instructing after their
+> premise was deleted. A file that auto-loads is the highest-risk form of that. The
+> rules below were correct for federation; they are not correct now, and the difference
+> is not visible from inside them.
+
+---
+
 # CONTEXT.md — what Mosaic is
 
-The definition of record. `AGENTS.md` and `README.md` both defer here; if any
+~~The definition of record. `AGENTS.md` and `README.md` both defer here; if any
 of them disagree, this file wins and the other should be cut rather than
-reconciled.
+reconciled.~~
+
+**No longer the definition of record.** That sentence is why this file is dangerous
+rather than merely stale: it instructs a reader to prefer it over anything that
+disagrees, which now includes the ruling itself. The definition of record is the
+scope ruling plus the data-model synthesis, both linked in the banner above.
 
 ## The one-sentence version
 
@@ -118,3 +150,6 @@ matching Janus and Minerva.
 
 No `gh repo create`, no `git push`. Kevin has not authorized a public repo;
 that is his call and it is RED. Local commits only.
+
+
+> Privacy rewrite: machine names, paths and endpoint examples in this document are illustrative, not a live infrastructure map. Historical measurements and prior byte-hash/review claims refer to retained original evidence, not these edited public bytes; no authority transfers through this rewrite.

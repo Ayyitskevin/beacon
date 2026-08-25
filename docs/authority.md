@@ -1,3 +1,24 @@
+> # ⚠ REFRAMED — the findings hold, the framing is superseded
+>
+> This page was written for a **federating read-only desk** that displayed seven other
+> systems' approvals. Kevin's 2026-08-25 ruling replaced that with one unified codebase.
+>
+> **The findings survive and are load-bearing** — the seven mechanisms' shapes, the
+> corrections to the prior review (Icarus binds wider than Janus *and* enforces; Janus
+> deliberately does not), the four axes, the measured `unbound` case, and the
+> operator-action table are the **specification of what the single authority mechanism
+> must preserve.** They are cited that way in the data-model design.
+>
+> **The framing does not survive.** Wherever this page says "render", "display" or "the
+> owning module", read it as a requirement on *our own* mechanism rather than a rule for
+> showing someone else's. There is no owning module any more; we are it, which makes
+> these obligations stronger rather than weaker.
+>
+> 1. `private-evidence/2026-08-25_mosaic-scope-ruling-unified-desktop-app.md` — the ruling
+> 2. `private-evidence/2026-08-25_mosaic-datamodel-synthesis.md` — the current design
+
+---
+
 # Authority in Mosaic
 
 **Status:** adopted for v0 · **Owner:** Lane A (contracts & doctrine) · **Last verified:** 2026-08-24
