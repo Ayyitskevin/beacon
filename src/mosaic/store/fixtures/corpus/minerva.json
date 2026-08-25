@@ -1,0 +1,176 @@
+{
+  "note": "http://127.0.0.1:8765 via default (measured on mickey 2026-08-24); surfaces captured: ['/api/v1/capabilities']",
+  "origin": "minerva",
+  "payload": {
+    "/api/v1/capabilities": {
+      "api_version": "v1",
+      "brief_schema_version": "minerva.research-brief.v2",
+      "capabilities": [
+        "capability.manifest.v3.cli",
+        "capability.manifest.v3.http",
+        "mission.create",
+        "question.create",
+        "claim.create",
+        "claim.status.append",
+        "source.utf8_bytes.import",
+        "evidence.exact_byte_span.create",
+        "evidence.withdraw.cli",
+        "finding.create",
+        "finding.retract.cli",
+        "claim.evidence_ledger.read",
+        "brief.preview.markdown_json",
+        "brief.export.markdown_json",
+        "research.packet.v2.canonical",
+        "research.packet.v2.verify.cli",
+        "research.packet.v2.inspect.cli",
+        "research.request.v1.canonical",
+        "research.request.v1.verify.cli",
+        "research.request.v1.fulfill.cli",
+        "research.result.v1.canonical",
+        "web.review",
+        "assist.finding_candidates.preview.cli",
+        "assist.finding_candidates.invoke.cli.byok.optional",
+        "assist.inference.adopt.cli",
+        "assist.inference.retract.cli",
+        "finding.create.from_inference.cli"
+      ],
+      "citation_scheme": "utf8-byte-offset-v1",
+      "external_egress": "disabled_by_default_cli_only",
+      "identity_boundary": "local_os_user",
+      "limits": {
+        "assistant_candidates": 3,
+        "assistant_context_bytes": 65536,
+        "assistant_evidence_cards": 50,
+        "mission_page_size": 200,
+        "request_body_bytes": 5242880,
+        "research_request_bytes": 65536,
+        "source_bytes": 1048576
+      },
+      "listener": {
+        "access_scope": "host_local_unauthenticated",
+        "application_authentication": false,
+        "mode": "loopback_tcp",
+        "network_listener": true,
+        "transport": "tcp_ipv4_loopback"
+      },
+      "research_request_schema_version": "minerva.research-request.v1",
+      "schema_version": "minerva.capabilities.v3",
+      "supported_external_providers": [
+        "openai",
+        "anthropic"
+      ],
+      "supported_listener_modes": [
+        {
+          "access_scope": "socket_owner",
+          "application_authentication": false,
+          "argv": [
+            "serve",
+            "owner-uds"
+          ],
+          "mode": "owner_uds",
+          "network_listener": false,
+          "requires_acknowledgement": false,
+          "transport": "unix_socket"
+        },
+        {
+          "access_scope": "host_local_unauthenticated",
+          "application_authentication": false,
+          "argv": [
+            "serve",
+            "loopback-tcp"
+          ],
+          "mode": "loopback_tcp",
+          "network_listener": true,
+          "requires_acknowledgement": true,
+          "transport": "tcp_ipv4_loopback"
+        }
+      ],
+      "surfaces": {
+        "cli": {
+          "capabilities_argv": [
+            "capabilities"
+          ],
+          "capability_commands": {
+            "assist.finding_candidates.invoke.cli.byok.optional": [
+              "assist",
+              "finding-candidates"
+            ],
+            "assist.finding_candidates.preview.cli": [
+              "assist",
+              "finding-candidates"
+            ],
+            "assist.inference.adopt.cli": [
+              "assist",
+              "adopt"
+            ],
+            "assist.inference.retract.cli": [
+              "assist",
+              "retract-inference"
+            ],
+            "capability.manifest.v3.cli": [
+              "capabilities"
+            ],
+            "evidence.withdraw.cli": [
+              "evidence",
+              "withdraw"
+            ],
+            "finding.create.from_inference.cli": [
+              "finding",
+              "add"
+            ],
+            "finding.retract.cli": [
+              "finding",
+              "retract"
+            ],
+            "research.packet.v2.inspect.cli": [
+              "packet",
+              "inspect"
+            ],
+            "research.packet.v2.verify.cli": [
+              "packet",
+              "verify"
+            ],
+            "research.request.v1.fulfill.cli": [
+              "request",
+              "fulfill"
+            ],
+            "research.request.v1.verify.cli": [
+              "request",
+              "verify"
+            ]
+          },
+          "entrypoint": "minerva",
+          "stderr_contract": "single_json_error_document",
+          "stdout_contract": "single_json_document"
+        },
+        "http": {
+          "api_base_path": "/api/v1",
+          "capabilities_path": "/api/v1/capabilities",
+          "health_path": "/healthz",
+          "logical_base_url": "http://localhost",
+          "openapi_path": "/api/v1/openapi.json",
+          "readiness_path": "/readyz",
+          "web_path": "/"
+        }
+      },
+      "unavailable": [
+        "network.fetch",
+        "model.invoke.api",
+        "model.invoke.web",
+        "model.output.auto_adopt",
+        "provider.credential.persist",
+        "mcp",
+        "multi_user_auth",
+        "publish",
+        "remote_actor_headers",
+        "sibling_artifact_exchange",
+        "shared_run_envelope",
+        "orchestration",
+        "experiment_execution",
+        "approval_authority"
+      ]
+    }
+  },
+  "scrubbed": true,
+  "surface": "http GET x1"
+}

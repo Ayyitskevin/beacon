@@ -1,0 +1,1637 @@
+{
+  "note": "every state captured, not the default open-only view",
+  "origin": "janus",
+  "payload": {
+    "list --state all": [
+      {
+        "binding_kind": null,
+        "binding_locator": null,
+        "binding_sha256": null,
+        "check_revisions": [
+          {
+            "at": "2026-08-25T02:10:58Z",
+            "command": "test \"$(sqlite3 -readonly /home/kevin-lee/deploy/athena-data/athena.db \"SELECT COUNT(*) FROM automation_rules WHERE enabled=1\")\" -ge 2",
+            "gate_id": "g4deae14ca3d",
+            "id": 2,
+            "kind": "delivery",
+            "reason": "The original curled /automation/rules with a [REDACTED] read from the ambient environment, so it sent an empty credential from any board run. Worse, it could never have passed even with the token: that endpoint is admin-gated and the seat token is MEMBER role, so it returns 403 on GET as well as POST — measured today. The replacement reads the durable state the rules actually live in. Stated limit: it counts ENABLED rules and does not verify they are the right two or that they fire; claude-f7 verifies that separately per the gate consumer.",
+            "revised_by": "kevin-lee+claude-code"
+          }
+        ],
+        "cites": null,
+        "consumer": "claude-code: creates both rules if given an admin token; otherwise Kevin creates them from /admin/automation and claude-code verifies they fire",
+        "decay": "Until one happens, the board's in-app reflexes do not exist: criteria-less issues keep being filed and only the daily janitor notices staleness",
+        "decay_check": null,
+        "delivery_check": "test -n \"$(curl -s -H \"Authorization: [REDACTED] http://100.125.80.91:8300/automation/rules 2>/dev/null | grep -o stale)\"",
+        "effective_decay_check": null,
+        "effective_delivery_check": "test \"$(sqlite3 -readonly /home/kevin-lee/deploy/athena-data/athena.db \"SELECT COUNT(*) FROM automation_rules WHERE enabled=1\")\" -ge 2",
+        "horizon": null,
+        "id": "g4deae14ca3d",
+        "kind": "resource",
+        "observations": [
+          {
+            "at": "2026-08-25T02:11:02Z",
+            "command": "test \"$(sqlite3 -readonly /home/kevin-lee/deploy/athena-data/athena.db \"SELECT COUNT(*) FROM automation_rules WHERE enabled=1\")\" -ge 2",
+            "exit_code": 1,
+            "gate_id": "g4deae14ca3d",
+            "id": 4,
+            "kind": "delivery",
+            "note": ""
+          }
+        ],
+        "options": [
+          {
+            "detail": "Recommended - no new admin credential exists, two minutes of clicking",
+            "gate_id": "g4deae14ca3d",
+            "label": "Kevin creates both rules in /admin/automation",
+            "option_id": "kevin-ui",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Faster and repeatable, but widens what an agent token can do",
+            "gate_id": "g4deae14ca3d",
+            "label": "Mint claude-code an admin token",
+            "option_id": "admin-token",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Create the two admin-gated Athena automation rules (stale nudge + filed-without-criteria nudge), or mint claude-code an admin token to do it?",
+        "raised_at": "2026-08-24T12:56:06Z",
+        "raised_by": "kevin-lee+claude-code",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "g4deae14ca3d",
+          "option_id": "kevin-ui",
+          "reason": "Kevin's call in session, 2026-08-24. He creates both rules from /admin/automation rather than minting an agent admin token; claude-code then verifies both actually fire. No new credential is created, and an agent token does not gain the power to rewrite board automation.",
+          "ruled_at": "2026-08-24T23:58:32Z",
+          "ruled_by": "kevin-lee+claude-code",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": null,
+        "binding_locator": null,
+        "binding_sha256": null,
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "claude-code: adds /readyz to _ANONYMOUS_ALWAYS_ALLOWED, sets ATHENA_ANONYMOUS_READS=0, verifies the uptime check survives",
+        "decay": "Unauthenticated GET /issues returns real issue bodies to anything on the tailnet, including the isolated qwen/muse service users; measured live 2026-08-24, returns 200",
+        "decay_check": "test \"$(curl -s -o /dev/null -w %{http_code} http://100.125.80.91:8300/issues)\" = 200",
+        "delivery_check": null,
+        "effective_decay_check": "test \"$(curl -s -o /dev/null -w %{http_code} http://100.125.80.91:8300/issues)\" = 200",
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "g6b5df553432",
+        "kind": "irreversible",
+        "observations": [
+          {
+            "at": "2026-08-24T22:31:51Z",
+            "command": "test \"$(curl -s -o /dev/null -w %{http_code} http://100.125.80.91:8300/issues)\" = 200",
+            "exit_code": 0,
+            "gate_id": "g6b5df553432",
+            "id": 2,
+            "kind": "decay",
+            "note": ""
+          },
+          {
+            "at": "2026-08-24T12:56:32Z",
+            "command": "test \"$(curl -s -o /dev/null -w %{http_code} http://100.125.80.91:8300/issues)\" = 200",
+            "exit_code": 0,
+            "gate_id": "g6b5df553432",
+            "id": 1,
+            "kind": "decay",
+            "note": ""
+          }
+        ],
+        "options": [
+          {
+            "detail": "Recommended - the measured clean fix; readyz discloses only status+database",
+            "gate_id": "g6b5df553432",
+            "label": "Add /readyz to the allowed set, then close reads",
+            "option_id": "close-with-readyz-fix",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Simplest, but the local workers can read every issue body",
+            "gate_id": "g6b5df553432",
+            "label": "Accept tailnet-scoped exposure",
+            "option_id": "leave-open",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Close Athena's anonymous reads on the tailnet, accepting that /readyz needs adding to the always-allowed set first?",
+        "raised_at": "2026-08-24T12:56:24Z",
+        "raised_by": "kevin-lee+claude-code",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "g6b5df553432",
+          "option_id": "close-with-readyz-fix",
+          "reason": "Kevin's call in session, 2026-08-24. Re-verified live at ruling time, not from the recorded observation: unauthenticated GET http://100.125.80.91:8300/issues returns 200 with real issue bodies, and /readyz also returns 200 unauthenticated — so /readyz must join the always-allowed set before reads close or the uptime check breaks.",
+          "ruled_at": "2026-08-24T23:58:32Z",
+          "ruled_by": "kevin-lee+claude-code",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "/home/kevin-lee/ai-workspace/janus@HEAD",
+        "binding_sha256": "a477bae57d3e6dc1b2958a3b490170a47330e6e8c1d06e2a68554b6944fccbf2",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "claude-code: writes migration 0002 if the review objects to the model; otherwise records the review as the M0 exit and moves to M2",
+        "decay": "Every gate raised into the M1 ledger raises the cost of a schema change; today it is one migration, in a month it is a migration plus a data rewrite",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "g55daf244a78",
+        "kind": "taste",
+        "observations": [],
+        "options": [],
+        "question": "Should kimi's M0 review verdict be able to change the Janus schema after M1 shipped?",
+        "raised_at": "2026-08-24T12:56:24Z",
+        "raised_by": "kevin-lee+claude-code",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "g55daf244a78",
+          "option_id": null,
+          "reason": "Void by Janus's own rule, not by a ruling: it bound '<repo>@HEAD', a moving name, so commit fb7b762 (an unrelated fix) made janus show report BINDING NO LONGER MATCHES. The question is still live and is re-raised below, bound to a concrete commit. PR #1 stops the next gate dying this way.",
+          "ruled_at": "2026-08-24T13:50:02Z",
+          "ruled_by": "kevin-lee+claude-code",
+          "state": "superseded"
+        },
+        "state": "superseded"
+      },
+      {
+        "binding_kind": "file",
+        "binding_locator": "docs/adr/0054-gate1-separate-approval-and-restart-recovery.md",
+        "binding_sha256": "9409066ef76a07748761e17dcaed64a67069496379a99f514f67acde1c7133c4",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "claude-code: on allowlist, ADR 0054 merges as-is and sizing proceeds to the ledger/coordinator seam. On per-occurrence, ADR 0054 is rewritten, new browser-action kinds + a gate1-schema CHECK migration are scoped, and the live-evidence profile needs re-approval.",
+        "decay": "Every executor estimate stays dishonest while this is open, and the ledger-to-coordinator wiring cannot start without knowing which approval surface it targets.",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "g3410c2cff0f",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "1086-1088:recommended — no migration, no re-approval, and a digest-bound allowlist is reviewable after the fact",
+            "gate_id": "g3410c2cff0f",
+            "label": "The profile names and separately approves each effect kind; already the documented reading at OPERATIONS.md",
+            "option_id": "allowlist",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "costs new BROWSER_ACTION_KINDS, a table CHECK migration, and re-approval of a digest-bound profile",
+            "gate_id": "g3410c2cff0f",
+            "label": "An operator action gates each individual external mutation",
+            "option_id": "per-occurrence",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Does Gate 1's separate_approval_for_each_external_mutation mean the profile's digest-bound named effect allowlist (ADR 0054 D1), or a per-occurrence operator approval at each of the three GitHub mutations?",
+        "raised_at": "2026-08-24T13:05:52Z",
+        "raised_by": "kevin-lee+claude-code",
+        "ruling": null,
+        "state": "open"
+      },
+      {
+        "binding_kind": null,
+        "binding_locator": null,
+        "binding_sha256": null,
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "claude-code: on delivery, claims issues before editing (the Athena claim-before-touching-files rule) and closes the stale cards with evidence. Until then, board state is maintained by hand by Kevin.",
+        "decay": "Every Athena issue I work stays stale-open, and the 7 already-shipped high-priority cards keep overstating the board's workload to whoever plans off it.",
+        "decay_check": null,
+        "delivery_check": "test -n \"$ATHENA_TOKEN\" || test -f ~/.athena.env",
+        "effective_decay_check": null,
+        "effective_delivery_check": "test -n \"$ATHENA_TOKEN\" || test -f ~/.athena.env",
+        "horizon": null,
+        "id": "g1a603e736cb",
+        "kind": "resource",
+        "observations": [],
+        "options": [],
+        "question": "Where is the Claude seat's Athena API token, or should one be minted? Without it I cannot claim, update, or close board issues programmatically.",
+        "raised_at": "2026-08-24T13:06:00Z",
+        "raised_by": "kevin-lee+claude-code",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "g1a603e736cb",
+          "option_id": null,
+          "reason": "The premise was wrong. Athena token row 4 (Claude) is LIVE, scoped read+issue:write+docs:write, role member, and was last used 2026-08-24T13:08 — minutes after this gate was raised. Codex's row 5 was used at 13:11. Nothing needs minting; the scoped-agent-token model Kevin wants already exists and is in daily use. The real question is narrower and is re-raised.",
+          "ruled_at": "2026-08-24T13:13:10Z",
+          "ruled_by": "kevin-lee",
+          "state": "superseded"
+        },
+        "state": "superseded"
+      },
+      {
+        "binding_kind": null,
+        "binding_locator": null,
+        "binding_sha256": null,
+        "check_revisions": [
+          {
+            "at": "2026-08-25T02:10:47Z",
+            "command": "test -s /home/kevin-lee/ai-workspace/claude/.secrets/athena-token",
+            "gate_id": "g43344426bdb",
+            "id": 1,
+            "kind": "delivery",
+            "reason": "The original was test -n on $ATHENA_API_TOKEN, which measures the ambient environment of whatever process runs the board rather than whether the token reached anywhere. It reads not-landed from any board run and would have passed for anyone who happened to have that variable set. The ruling chose point-at-file, so the durable fact is that the named file exists and is non-empty.",
+            "revised_by": "kevin-lee+claude-code"
+          }
+        ],
+        "cites": "g1a603e736cb",
+        "consumer": "claude-code: on delivery, claims issues before editing per the Athena claim-before-touching-files rule, and closes the 7 stale-done cards with re-runnable evidence. Read-only sqlite triage continues meanwhile.",
+        "decay": "Interactive sessions keep triaging the board read-only via sqlite while the scoped token that would let them claim and close issues sits unused. Stale-done cards accumulate: 7 high-priority ones are open today with their work already shipped.",
+        "decay_check": null,
+        "delivery_check": "test -n \"$ATHENA_API_TOKEN\"",
+        "effective_decay_check": null,
+        "effective_delivery_check": "test -s /home/kevin-lee/ai-workspace/claude/.secrets/athena-token",
+        "horizon": null,
+        "id": "g43344426bdb",
+        "kind": "resource",
+        "observations": [
+          {
+            "at": "2026-08-25T02:11:02Z",
+            "command": "test -s /home/kevin-lee/ai-workspace/claude/.secrets/athena-token",
+            "exit_code": 0,
+            "gate_id": "g43344426bdb",
+            "id": 5,
+            "kind": "delivery",
+            "note": ""
+          },
+          {
+            "at": "2026-08-25T00:07:37Z",
+            "command": "test -n \"$ATHENA_API_TOKEN\"",
+            "exit_code": 1,
+            "gate_id": "g43344426bdb",
+            "id": 3,
+            "kind": "delivery",
+            "note": ""
+          }
+        ],
+        "options": [
+          {
+            "detail": "recommended — no rotation, no new credential, and it stays out of anything that syncs",
+            "gate_id": "g43344426bdb",
+            "label": "Kevin names the untracked per-machine file already holding it (a service unit reads it today)",
+            "option_id": "point-at-file",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "write token for the seat and revoke row 4:clean provenance, but invalidates whatever service unit is using row 4 right now",
+            "gate_id": "g43344426bdb",
+            "label": "Mint a fresh read+issue",
+            "option_id": "rotate",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "How should the Claude seat's existing Athena token value reach an interactive Claude Code session on mickey? Athena stores only the SHA-256 hash, so the 2026-08-16 value cannot be recovered — only re-read from wherever it was saved, or rotated.",
+        "raised_at": "2026-08-24T13:13:21Z",
+        "raised_by": "kevin-lee+claude-code",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "g43344426bdb",
+          "option_id": "point-at-file",
+          "reason": "Kevin's call in session, 2026-08-24: point at the existing per-machine file rather than rotate, so no credential changes and nothing breaks the service unit reading row 4 today. APPROVED BUT NOT DELIVERED — the path has not been named yet, so the delivery check (test -n $ATHENA_API_TOKEN) still fails. An approved resource gate is a promise, not a delivery.",
+          "ruled_at": "2026-08-24T23:58:32Z",
+          "ruled_by": "kevin-lee+claude-code",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "/home/kevin-lee/ai-workspace/janus@fb7b76295caadffafd6425cbcae2909a8d6e8862",
+        "binding_sha256": "2f5b889e211a14bfd7252d22bdfd19298da2365cfd8aa9851fb3b2de53a74e2c",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "claude-code: writes migration 0002 if the review objects to the model; otherwise records the review as the M0 exit and moves to M2",
+        "decay": "Every gate raised into the ledger raises the cost of a schema change: today one migration, in a month a migration plus a data rewrite",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "g79954c624af",
+        "kind": "taste",
+        "observations": [],
+        "options": [
+          {
+            "detail": "one migration now is the cheapest this will ever be",
+            "gate_id": "g79954c624af",
+            "label": "A review objection can still change the schema",
+            "option_id": "schema-open",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "no rework risk, but M0's stated exit becomes a formality",
+            "gate_id": "g79954c624af",
+            "label": "The M0 review is advisory only; the schema is fixed",
+            "option_id": "frozen",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Now that M1 has shipped and real gates are in the ledger, may a non-author seat's M0 review verdict still change the Janus schema?",
+        "raised_at": "2026-08-24T13:50:26Z",
+        "raised_by": "kevin-lee+claude-code",
+        "ruling": {
+          "bound_sha256": "2f5b889e211a14bfd7252d22bdfd19298da2365cfd8aa9851fb3b2de53a74e2c",
+          "gate_id": "g79954c624af",
+          "option_id": "frozen",
+          "reason": "Kevin's call in session, 2026-08-24. The four-value kind enum stands; codex's HOLD is recorded in ADR 0001 as a stated known limitation rather than acted on. Rationale: the objection is about validation, not about an observed failure — no real gate has yet failed to classify. Revisit when one does, which is a cheaper trigger than guessing at a fifth value now.",
+          "ruled_at": "2026-08-24T14:08:36Z",
+          "ruled_by": "kevin-lee+claude-code",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "/home/kevin-lee/ai-workspace/janus@3892faf555f46366613231a0f18251e5bea030d0",
+        "binding_sha256": "ee0946fdc6bc507e80afe36e6f59c03f069a03bf0e8660a22e0c08c99c9f7198",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "claude-code: merges PR #1 and deletes the branch on approve; closes the PR and leaves main untouched on refuse",
+        "decay": "The fleet's janus CLI is an editable install of this working tree, so every gate raised meanwhile can still bind a moving ref and go void on the next commit, needing a re-raise",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "g67ec2949476",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "the drift signal stops crying wolf",
+            "gate_id": "g67ec2949476",
+            "label": "Merge as-is; 24 tests green, 2 of 3 new ones proven to fail pre-fix",
+            "option_id": "merge",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "slower, and it is the contract as written",
+            "gate_id": "g67ec2949476",
+            "label": "Hold until a non-author seat reviews it, since fb7b762 skipped that",
+            "option_id": "review-first",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Merge PR #1 (pin git bindings at raise time)? AGENTS.md puts binding semantics behind human review before merge, and the earlier half of this fix went to main directly without one.",
+        "raised_at": "2026-08-24T13:50:34Z",
+        "raised_by": "kevin-lee+claude-code",
+        "ruling": {
+          "bound_sha256": "ee0946fdc6bc507e80afe36e6f59c03f069a03bf0e8660a22e0c08c99c9f7198",
+          "gate_id": "g67ec2949476",
+          "option_id": "merge",
+          "reason": "Kevin's call in session, 2026-08-24. codex passed PR #1 on standards and spec as a non-author seat, its test-quality follow-up was applied in 6fe78fa, and 30 tests are green. Merging with --merge rather than --squash or --rebase so the bound commit 3892faf survives verbatim on the mainline: a project whose thesis is byte-bound rulings should not rewrite the bytes it just ruled on.",
+          "ruled_at": "2026-08-24T14:08:36Z",
+          "ruled_by": "kevin-lee+claude-code",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "/home/kevin-lee/ai-workspace/codex/minerva@c80d29b7c6127beced7e5da757c85a065c03e1ee",
+        "binding_sha256": "01e9cf860797ea4dc2e1ce213fbfb21b7d02be6fec8433293b560519154e0c6c",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "codex: implements the selected boundary in a new reviewed security slice; if accept-local is chosen, documents the expanded trust and leaves transport unchanged",
+        "decay": "Until ruled, every merge or deploy of c80d29b stays held and loopback TCP continues trusting every local UID.",
+        "decay_check": "ss -ltnH 'sport = :8765' | grep -q '127.0.0.1:8765'",
+        "delivery_check": null,
+        "effective_decay_check": "ss -ltnH 'sport = :8765' | grep -q '127.0.0.1:8765'",
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "g774d9eb4174",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "Serve through a 0600 Unix socket inside a 0700 directory.",
+            "gate_id": "g774d9eb4174",
+            "label": "Owner-only Unix socket",
+            "option_id": "uds",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Add a real authentication boundary for TCP and browser clients.",
+            "gate_id": "g774d9eb4174",
+            "label": "Authenticated TCP",
+            "option_id": "tcp-auth",
+            "position": 1,
+            "recommended": 0
+          },
+          {
+            "detail": "Keep loopback TCP within a single trusted runtime or host account.",
+            "gate_id": "g774d9eb4174",
+            "label": "Isolated loopback",
+            "option_id": "isolated",
+            "position": 2,
+            "recommended": 0
+          },
+          {
+            "detail": "Explicitly accept that every host-local account may call the API.",
+            "gate_id": "g774d9eb4174",
+            "label": "Trust all local users",
+            "option_id": "accept-local",
+            "position": 3,
+            "recommended": 0
+          }
+        ],
+        "question": "What transport boundary should Minerva use for its same-host API?",
+        "raised_at": "2026-08-24T16:18:25Z",
+        "raised_by": "kevin-lee+codex",
+        "ruling": {
+          "bound_sha256": "01e9cf860797ea4dc2e1ce213fbfb21b7d02be6fec8433293b560519154e0c6c",
+          "gate_id": "g774d9eb4174",
+          "option_id": "uds",
+          "reason": "Kevin approved the recommended owner-only Unix-socket option in the Codex conversation on 2026-08-24.",
+          "ruled_at": "2026-08-24T22:22:47Z",
+          "ruled_by": "kevin-lee+codex",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "/home/kevin-lee/ai-workspace/codex/minerva@02a4244d3ff9d13b0982ef00f34d07d3d475bd85",
+        "binding_sha256": "e6613e55cae0dbc5be14527cdeda142e158636a9362413cef09421aa3729386c",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "codex: hold does nothing; push rechecks and pushes only; deploy requires live preflight, supervised deployment, and health verification",
+        "decay": "The legacy unauthenticated loopback listener remains reachable to every host-local account while deployment waits.",
+        "decay_check": "ss -ltn | grep -q '127.0.0.1:8765'",
+        "delivery_check": null,
+        "effective_decay_check": "ss -ltn | grep -q '127.0.0.1:8765'",
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "g3de7967c729",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "no shared or live mutation",
+            "gate_id": "g3de7967c729",
+            "label": "Keep the verified commit local",
+            "option_id": "hold",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "no live deployment",
+            "gate_id": "g3de7967c729",
+            "label": "Push the commit to shared main",
+            "option_id": "push",
+            "position": 1,
+            "recommended": 0
+          },
+          {
+            "detail": "requires supervised live verification",
+            "gate_id": "g3de7967c729",
+            "label": "Push then deploy to mickey",
+            "option_id": "deploy",
+            "position": 2,
+            "recommended": 0
+          }
+        ],
+        "question": "What should happen to verified Minerva commit 02a4244: keep local, push only, or push and deploy to mickey?",
+        "raised_at": "2026-08-24T23:57:24Z",
+        "raised_by": "kevin-lee+codex",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "g3de7967c729",
+          "option_id": null,
+          "reason": "Superseded by g268675c0b42 after final review required the fail-closed no-follow chmod portability fix; 02a4244 is no longer the shipping candidate.",
+          "ruled_at": "2026-08-25T00:19:30Z",
+          "ruled_by": "kevin-lee",
+          "state": "superseded"
+        },
+        "state": "superseded"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "/home/kevin-lee/ai-workspace/codex/minerva@acdca454672ae6fbf3e72b9ee89ef586872507a4",
+        "binding_sha256": "780f9fa1bb039ab9f3bbe36d5b93d84895025178a319b0d20c6bc6976db9db0e",
+        "check_revisions": [],
+        "cites": "g3de7967c729",
+        "consumer": "codex: hold does nothing; push rechecks and pushes only; deploy requires live preflight, supervised deployment, and health verification",
+        "decay": "The legacy unauthenticated loopback listener remains reachable to every host-local account while deployment waits.",
+        "decay_check": "ss -ltn | grep -q '127.0.0.1:8765'",
+        "delivery_check": null,
+        "effective_decay_check": "ss -ltn | grep -q '127.0.0.1:8765'",
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "g268675c0b42",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "no shared or live mutation",
+            "gate_id": "g268675c0b42",
+            "label": "Keep the verified commit local",
+            "option_id": "hold",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "no live deployment",
+            "gate_id": "g268675c0b42",
+            "label": "Push the commit to shared main",
+            "option_id": "push",
+            "position": 1,
+            "recommended": 0
+          },
+          {
+            "detail": "requires supervised live verification",
+            "gate_id": "g268675c0b42",
+            "label": "Push then deploy to mickey",
+            "option_id": "deploy",
+            "position": 2,
+            "recommended": 0
+          }
+        ],
+        "question": "What should happen to verified Minerva commit acdca45: keep local, push only, or push and deploy to mickey?",
+        "raised_at": "2026-08-25T00:19:17Z",
+        "raised_by": "kevin-lee",
+        "ruling": {
+          "bound_sha256": "780f9fa1bb039ab9f3bbe36d5b93d84895025178a319b0d20c6bc6976db9db0e",
+          "gate_id": "g268675c0b42",
+          "option_id": "push",
+          "reason": "Kevin explicitly instructed Codex to push the reviewed commit and merge it into main; no deployment was requested.",
+          "ruled_at": "2026-08-25T00:34:38Z",
+          "ruled_by": "kevin-lee",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "/home/kevin-lee/ai-workspace/janus@005ab3735ce0ade945931b3d0c8918c661cc07ce",
+        "binding_sha256": "dd0c1e684e8a207560431f3716b17304bf93e580d9251b47508d9f0ca760718d",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "claude-code: merges PR #2, republishes the fleet CLI with janus-update, then revises the two broken checks on g43344426bdb and g4deae14ca3d",
+        "decay": "Two live gates carry checks that can never pass, so the board reports a delivered promise as outstanding and will do the same for the automation rules the moment they land",
+        "decay_check": "test -n \"$(sqlite3 /home/kevin-lee/.janus/janus.db \"SELECT 1 FROM rulings WHERE gate_id='g43344426bdb' AND state='approved'\")\"",
+        "delivery_check": null,
+        "effective_decay_check": "test -n \"$(sqlite3 /home/kevin-lee/.janus/janus.db \"SELECT 1 FROM rulings WHERE gate_id='g43344426bdb' AND state='approved'\")\"",
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "ge59d100de2f",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "the board stops misreporting delivered promises",
+            "gate_id": "ge59d100de2f",
+            "label": "Merge as-is; 67 tests green, 3 properties mutation-checked",
+            "option_id": "merge",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "slower, and the schema is a high-integrity surface",
+            "gate_id": "ge59d100de2f",
+            "label": "Hold for a non-author seat, as PR #1 did",
+            "option_id": "review-first",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Merge PR #2 (migration 0002: check revisions)? AGENTS.md puts migration history behind human review before merge.",
+        "raised_at": "2026-08-25T01:35:45Z",
+        "raised_by": "kevin-lee+claude-code",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "ge59d100de2f",
+          "option_id": null,
+          "reason": "Superseded by the bytes moving, not by a decision. It bound 005ab37; codex's non-author review returned HOLD on that commit (a lying revision receipt, plus trailing whitespace), both fixed at 1f0b6311d0e55a7ffa9d2dedb5f6dc42e281b53d. Ruling on this gate would have approved one set of bytes while a different set merged — the replay failure the binding exists to prevent. Re-raised against the actual head.",
+          "ruled_at": "2026-08-25T02:08:47Z",
+          "ruled_by": "kevin-lee+claude-code",
+          "state": "superseded"
+        },
+        "state": "superseded"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "/home/kevin-lee/ai-workspace/janus@1f0b6311d0e55a7ffa9d2dedb5f6dc42e281b53d",
+        "binding_sha256": "1d51bd548eef841632b9ec3ee5786f0ca785e32e8c6fe0771dd0b3ae577fab7a",
+        "check_revisions": [],
+        "cites": "ge59d100de2f",
+        "consumer": "claude-code: merges PR #2, republishes the fleet CLI with janus-update, then revises the broken checks on g43344426bdb and g4deae14ca3d",
+        "decay": "Two live gates carry checks that can never pass, so the board reports a delivered promise as outstanding and will do the same for the automation rules the moment they land",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "g3689e1cf957",
+        "kind": "authority",
+        "observations": [],
+        "options": [],
+        "question": "Merge PR #2 (migration 0002: check revisions) at the post-review head, now that codex's HOLD is cleared?",
+        "raised_at": "2026-08-25T02:08:47Z",
+        "raised_by": "kevin-lee+claude-code",
+        "ruling": {
+          "bound_sha256": "1d51bd548eef841632b9ec3ee5786f0ca785e32e8c6fe0771dd0b3ae577fab7a",
+          "gate_id": "g3689e1cf957",
+          "option_id": null,
+          "reason": "Kevin's call in session, 2026-08-25, given after being shown codex's HOLD and the two fixes. This gate is seconds old by design and is not a rubber stamp: it re-pins the decision to the bytes actually merging (1f0b631) after its predecessor ge59d100de2f was superseded for binding pre-review bytes (005ab37). Kevin had already ruled 'take it' on the earlier head; I returned it rather than merge bytes he had not seen.",
+          "ruled_at": "2026-08-25T02:08:58Z",
+          "ruled_by": "kevin-lee+claude-code",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": "file",
+        "binding_locator": "/home/kevin-lee/ai-workspace/mosaic-a/docs/authority.md",
+        "binding_sha256": "0c05e188d112dfb07ed77d67ae042f7f65c40a321297a008958051456a740c7b",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "Lane A (claude-09) updates mosaic.contracts.authority.Lifecycle and docs/authority.md; Lane B re-emits adapter labels; Lane C's render/authority.py table follows. By agreement no code depends on the string yet, so the change stays cheap until someone ships against it.",
+        "decay": "Three Mosaic lanes are shipping against this vocabulary now: Lane C's renderer resolves authority from it, Lane B's adapters emit into it, Lane A's Lifecycle enum encodes it. Each commit against the mandated spelling deepens rework, and the label teaches operators a false claim.",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "gda8569d0227",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "Value goes module-neutral; which module decided moves to the decider field where it belongs. Evidence: policy.ts:136 planApprovalDigest, enforced at change-handoff-reader.ts:2740; Janus core.py:141 reports without enforcing",
+            "gate_id": "gda8569d0227",
+            "label": "Rename to 'authorized' + decider field",
+            "option_id": "a",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Boundary stands; Mosaic must then render Icarus plan approvals as not-authorized, or as janus-authorized when Janus never decided",
+            "gate_id": "gda8569d0227",
+            "label": "Keep 'janus-authorized' as mandated",
+            "option_id": "b",
+            "position": 1,
+            "recommended": 0
+          },
+          {
+            "detail": "Cheapest edit, but the name says Janus while meaning something else",
+            "gate_id": "gda8569d0227",
+            "label": "Keep the string, redefine it to mean any byte-binding authorization",
+            "option_id": "c",
+            "position": 2,
+            "recommended": 0
+          }
+        ],
+        "question": "Rename the desk vocabulary's 'janus-authorized' to 'authorized' plus a decider field? It encodes a claim live code disproves: Icarus binds a wider digest than Janus AND enforces it, while Janus deliberately does not. Renaming a roadmap boundary is yours, not a lane's.",
+        "raised_at": "2026-08-25T03:24:56Z",
+        "raised_by": "kevin-lee+claude-code",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "gda8569d0227",
+          "option_id": null,
+          "reason": "Re-raised as gf430f95f410 with a durable binding. The original bound a file inside the transient lane/a worktree (~/ai-workspace/mosaic-a/docs/authority.md), which would read CANNOT VERIFY once that worktree is removed — the exact 'binding depends on where the raiser was standing' failure ADR 0001 and janus core.py:105 both warn about. Same question, bound to git:~/ai-workspace/mosaic@503a33e.",
+          "ruled_at": "2026-08-25T03:28:08Z",
+          "ruled_by": "kevin-lee",
+          "state": "superseded"
+        },
+        "state": "superseded"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "/home/kevin-lee/ai-workspace/mosaic@503a33e740d4c43296df4c4037116672ae3564e1",
+        "binding_sha256": "16b2c23d08a5233ef5367c1a6b802a2606bf39a6144d729556ac4de9d7d72b88",
+        "check_revisions": [],
+        "cites": "gda8569d0227",
+        "consumer": "Lane A (claude-09) updates mosaic.contracts.authority.Lifecycle and docs/authority.md; Lane B re-emits adapter labels; Lane C's render/authority.py table follows. By agreement no code depends on the string yet, so the change stays cheap until someone ships against it.",
+        "decay": "Three Mosaic lanes are shipping against this vocabulary now: Lane C's renderer resolves authority from it, Lane B's adapters emit into it, Lane A's Lifecycle enum encodes it. Each commit against the mandated spelling deepens rework, and the label teaches operators a false claim.",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "gf430f95f410",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "Value goes module-neutral; which module decided moves to the decider field where it belongs. Evidence: policy.ts:136 planApprovalDigest, enforced at change-handoff-reader.ts:2740; Janus core.py:141 reports without enforcing",
+            "gate_id": "gf430f95f410",
+            "label": "Rename to 'authorized' + decider field",
+            "option_id": "a",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Boundary stands; Mosaic must then render Icarus plan approvals as not-authorized, or as janus-authorized when Janus never decided",
+            "gate_id": "gf430f95f410",
+            "label": "Keep 'janus-authorized' as mandated",
+            "option_id": "b",
+            "position": 1,
+            "recommended": 0
+          },
+          {
+            "detail": "Cheapest edit, but the name says Janus while meaning something else",
+            "gate_id": "gf430f95f410",
+            "label": "Keep the string, redefine it to mean any byte-binding authorization",
+            "option_id": "c",
+            "position": 2,
+            "recommended": 0
+          }
+        ],
+        "question": "Rename the desk vocabulary's 'janus-authorized' to 'authorized' plus a decider field? It encodes a claim live code disproves: Icarus binds a wider digest than Janus AND enforces it, while Janus deliberately does not. Renaming a roadmap boundary is yours, not a lane's.",
+        "raised_at": "2026-08-25T03:28:01Z",
+        "raised_by": "kevin-lee+claude-code",
+        "ruling": null,
+        "state": "open"
+      },
+      {
+        "binding_kind": "file",
+        "binding_locator": "/home/kevin-lee/.local/bin/minerva",
+        "binding_sha256": "1cb499a23c8f4d7fa6a8b86c46e2253f63919efe6f9e770ce7f05131cc3b8e17",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "claude-code: on approve, add the verb to the wrapper's no-db case with a timestamped backup, then verify wrapper and venv binary return the same manifest. On refuse, file the discrepancy in ORACLE so the next agent reading Minerva's manifest is not misled by it.",
+        "decay": "Minerva's capability manifest advertises capabilities_argv=[\"capabilities\"] as its CLI discovery path, so the module correctly declares how to discover it and the fleet's canonical entrypoint makes that declaration false. Any agent following the manifest gets usage_error and has no way to tell a broken wrapper from a module that cannot self-describe.",
+        "decay_check": "/home/kevin-lee/deploy/minerva/.venv/bin/minerva capabilities >/dev/null 2>&1 && ! /home/kevin-lee/.local/bin/minerva capabilities >/dev/null 2>&1",
+        "delivery_check": null,
+        "effective_decay_check": "/home/kevin-lee/deploy/minerva/.venv/bin/minerva capabilities >/dev/null 2>&1 && ! /home/kevin-lee/.local/bin/minerva capabilities >/dev/null 2>&1",
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "g483aa17cb1e",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "one line, reversible, restores the module's own advertised discovery path",
+            "gate_id": "g483aa17cb1e",
+            "label": "Add capabilities to the wrapper allowlist",
+            "option_id": "fix",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "no infra change, but Minerva's manifest keeps asserting something false",
+            "gate_id": "g483aa17cb1e",
+            "label": "Leave the wrapper and record the discrepancy",
+            "option_id": "document",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Add `capabilities` to the ~/.local/bin/minerva wrapper's no-db allowlist? The wrapper injects --db into every verb outside a small allowlist and `capabilities` accepts none, so Minerva's own advertised CLI discovery path fails while the venv binary works.",
+        "raised_at": "2026-08-25T13:31:11Z",
+        "raised_by": "kevin-lee+claude-code",
+        "ruling": null,
+        "state": "open"
+      }
+    ],
+    "list --state approved": [
+      {
+        "binding_kind": null,
+        "binding_locator": null,
+        "binding_sha256": null,
+        "check_revisions": [
+          {
+            "at": "2026-08-25T02:10:58Z",
+            "command": "test \"$(sqlite3 -readonly /home/kevin-lee/deploy/athena-data/athena.db \"SELECT COUNT(*) FROM automation_rules WHERE enabled=1\")\" -ge 2",
+            "gate_id": "g4deae14ca3d",
+            "id": 2,
+            "kind": "delivery",
+            "reason": "The original curled /automation/rules with a [REDACTED] read from the ambient environment, so it sent an empty credential from any board run. Worse, it could never have passed even with the token: that endpoint is admin-gated and the seat token is MEMBER role, so it returns 403 on GET as well as POST — measured today. The replacement reads the durable state the rules actually live in. Stated limit: it counts ENABLED rules and does not verify they are the right two or that they fire; claude-f7 verifies that separately per the gate consumer.",
+            "revised_by": "kevin-lee+claude-code"
+          }
+        ],
+        "cites": null,
+        "consumer": "claude-code: creates both rules if given an admin token; otherwise Kevin creates them from /admin/automation and claude-code verifies they fire",
+        "decay": "Until one happens, the board's in-app reflexes do not exist: criteria-less issues keep being filed and only the daily janitor notices staleness",
+        "decay_check": null,
+        "delivery_check": "test -n \"$(curl -s -H \"Authorization: [REDACTED] http://100.125.80.91:8300/automation/rules 2>/dev/null | grep -o stale)\"",
+        "effective_decay_check": null,
+        "effective_delivery_check": "test \"$(sqlite3 -readonly /home/kevin-lee/deploy/athena-data/athena.db \"SELECT COUNT(*) FROM automation_rules WHERE enabled=1\")\" -ge 2",
+        "horizon": null,
+        "id": "g4deae14ca3d",
+        "kind": "resource",
+        "observations": [
+          {
+            "at": "2026-08-25T02:11:02Z",
+            "command": "test \"$(sqlite3 -readonly /home/kevin-lee/deploy/athena-data/athena.db \"SELECT COUNT(*) FROM automation_rules WHERE enabled=1\")\" -ge 2",
+            "exit_code": 1,
+            "gate_id": "g4deae14ca3d",
+            "id": 4,
+            "kind": "delivery",
+            "note": ""
+          }
+        ],
+        "options": [
+          {
+            "detail": "Recommended - no new admin credential exists, two minutes of clicking",
+            "gate_id": "g4deae14ca3d",
+            "label": "Kevin creates both rules in /admin/automation",
+            "option_id": "kevin-ui",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Faster and repeatable, but widens what an agent token can do",
+            "gate_id": "g4deae14ca3d",
+            "label": "Mint claude-code an admin token",
+            "option_id": "admin-token",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Create the two admin-gated Athena automation rules (stale nudge + filed-without-criteria nudge), or mint claude-code an admin token to do it?",
+        "raised_at": "2026-08-24T12:56:06Z",
+        "raised_by": "kevin-lee+claude-code",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "g4deae14ca3d",
+          "option_id": "kevin-ui",
+          "reason": "Kevin's call in session, 2026-08-24. He creates both rules from /admin/automation rather than minting an agent admin token; claude-code then verifies both actually fire. No new credential is created, and an agent token does not gain the power to rewrite board automation.",
+          "ruled_at": "2026-08-24T23:58:32Z",
+          "ruled_by": "kevin-lee+claude-code",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": null,
+        "binding_locator": null,
+        "binding_sha256": null,
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "claude-code: adds /readyz to _ANONYMOUS_ALWAYS_ALLOWED, sets ATHENA_ANONYMOUS_READS=0, verifies the uptime check survives",
+        "decay": "Unauthenticated GET /issues returns real issue bodies to anything on the tailnet, including the isolated qwen/muse service users; measured live 2026-08-24, returns 200",
+        "decay_check": "test \"$(curl -s -o /dev/null -w %{http_code} http://100.125.80.91:8300/issues)\" = 200",
+        "delivery_check": null,
+        "effective_decay_check": "test \"$(curl -s -o /dev/null -w %{http_code} http://100.125.80.91:8300/issues)\" = 200",
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "g6b5df553432",
+        "kind": "irreversible",
+        "observations": [
+          {
+            "at": "2026-08-24T22:31:51Z",
+            "command": "test \"$(curl -s -o /dev/null -w %{http_code} http://100.125.80.91:8300/issues)\" = 200",
+            "exit_code": 0,
+            "gate_id": "g6b5df553432",
+            "id": 2,
+            "kind": "decay",
+            "note": ""
+          },
+          {
+            "at": "2026-08-24T12:56:32Z",
+            "command": "test \"$(curl -s -o /dev/null -w %{http_code} http://100.125.80.91:8300/issues)\" = 200",
+            "exit_code": 0,
+            "gate_id": "g6b5df553432",
+            "id": 1,
+            "kind": "decay",
+            "note": ""
+          }
+        ],
+        "options": [
+          {
+            "detail": "Recommended - the measured clean fix; readyz discloses only status+database",
+            "gate_id": "g6b5df553432",
+            "label": "Add /readyz to the allowed set, then close reads",
+            "option_id": "close-with-readyz-fix",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Simplest, but the local workers can read every issue body",
+            "gate_id": "g6b5df553432",
+            "label": "Accept tailnet-scoped exposure",
+            "option_id": "leave-open",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Close Athena's anonymous reads on the tailnet, accepting that /readyz needs adding to the always-allowed set first?",
+        "raised_at": "2026-08-24T12:56:24Z",
+        "raised_by": "kevin-lee+claude-code",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "g6b5df553432",
+          "option_id": "close-with-readyz-fix",
+          "reason": "Kevin's call in session, 2026-08-24. Re-verified live at ruling time, not from the recorded observation: unauthenticated GET http://100.125.80.91:8300/issues returns 200 with real issue bodies, and /readyz also returns 200 unauthenticated — so /readyz must join the always-allowed set before reads close or the uptime check breaks.",
+          "ruled_at": "2026-08-24T23:58:32Z",
+          "ruled_by": "kevin-lee+claude-code",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": null,
+        "binding_locator": null,
+        "binding_sha256": null,
+        "check_revisions": [
+          {
+            "at": "2026-08-25T02:10:47Z",
+            "command": "test -s /home/kevin-lee/ai-workspace/claude/.secrets/athena-token",
+            "gate_id": "g43344426bdb",
+            "id": 1,
+            "kind": "delivery",
+            "reason": "The original was test -n on $ATHENA_API_TOKEN, which measures the ambient environment of whatever process runs the board rather than whether the token reached anywhere. It reads not-landed from any board run and would have passed for anyone who happened to have that variable set. The ruling chose point-at-file, so the durable fact is that the named file exists and is non-empty.",
+            "revised_by": "kevin-lee+claude-code"
+          }
+        ],
+        "cites": "g1a603e736cb",
+        "consumer": "claude-code: on delivery, claims issues before editing per the Athena claim-before-touching-files rule, and closes the 7 stale-done cards with re-runnable evidence. Read-only sqlite triage continues meanwhile.",
+        "decay": "Interactive sessions keep triaging the board read-only via sqlite while the scoped token that would let them claim and close issues sits unused. Stale-done cards accumulate: 7 high-priority ones are open today with their work already shipped.",
+        "decay_check": null,
+        "delivery_check": "test -n \"$ATHENA_API_TOKEN\"",
+        "effective_decay_check": null,
+        "effective_delivery_check": "test -s /home/kevin-lee/ai-workspace/claude/.secrets/athena-token",
+        "horizon": null,
+        "id": "g43344426bdb",
+        "kind": "resource",
+        "observations": [
+          {
+            "at": "2026-08-25T02:11:02Z",
+            "command": "test -s /home/kevin-lee/ai-workspace/claude/.secrets/athena-token",
+            "exit_code": 0,
+            "gate_id": "g43344426bdb",
+            "id": 5,
+            "kind": "delivery",
+            "note": ""
+          },
+          {
+            "at": "2026-08-25T00:07:37Z",
+            "command": "test -n \"$ATHENA_API_TOKEN\"",
+            "exit_code": 1,
+            "gate_id": "g43344426bdb",
+            "id": 3,
+            "kind": "delivery",
+            "note": ""
+          }
+        ],
+        "options": [
+          {
+            "detail": "recommended — no rotation, no new credential, and it stays out of anything that syncs",
+            "gate_id": "g43344426bdb",
+            "label": "Kevin names the untracked per-machine file already holding it (a service unit reads it today)",
+            "option_id": "point-at-file",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "write token for the seat and revoke row 4:clean provenance, but invalidates whatever service unit is using row 4 right now",
+            "gate_id": "g43344426bdb",
+            "label": "Mint a fresh read+issue",
+            "option_id": "rotate",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "How should the Claude seat's existing Athena token value reach an interactive Claude Code session on mickey? Athena stores only the SHA-256 hash, so the 2026-08-16 value cannot be recovered — only re-read from wherever it was saved, or rotated.",
+        "raised_at": "2026-08-24T13:13:21Z",
+        "raised_by": "kevin-lee+claude-code",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "g43344426bdb",
+          "option_id": "point-at-file",
+          "reason": "Kevin's call in session, 2026-08-24: point at the existing per-machine file rather than rotate, so no credential changes and nothing breaks the service unit reading row 4 today. APPROVED BUT NOT DELIVERED — the path has not been named yet, so the delivery check (test -n $ATHENA_API_TOKEN) still fails. An approved resource gate is a promise, not a delivery.",
+          "ruled_at": "2026-08-24T23:58:32Z",
+          "ruled_by": "kevin-lee+claude-code",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "/home/kevin-lee/ai-workspace/janus@fb7b76295caadffafd6425cbcae2909a8d6e8862",
+        "binding_sha256": "2f5b889e211a14bfd7252d22bdfd19298da2365cfd8aa9851fb3b2de53a74e2c",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "claude-code: writes migration 0002 if the review objects to the model; otherwise records the review as the M0 exit and moves to M2",
+        "decay": "Every gate raised into the ledger raises the cost of a schema change: today one migration, in a month a migration plus a data rewrite",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "g79954c624af",
+        "kind": "taste",
+        "observations": [],
+        "options": [
+          {
+            "detail": "one migration now is the cheapest this will ever be",
+            "gate_id": "g79954c624af",
+            "label": "A review objection can still change the schema",
+            "option_id": "schema-open",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "no rework risk, but M0's stated exit becomes a formality",
+            "gate_id": "g79954c624af",
+            "label": "The M0 review is advisory only; the schema is fixed",
+            "option_id": "frozen",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Now that M1 has shipped and real gates are in the ledger, may a non-author seat's M0 review verdict still change the Janus schema?",
+        "raised_at": "2026-08-24T13:50:26Z",
+        "raised_by": "kevin-lee+claude-code",
+        "ruling": {
+          "bound_sha256": "2f5b889e211a14bfd7252d22bdfd19298da2365cfd8aa9851fb3b2de53a74e2c",
+          "gate_id": "g79954c624af",
+          "option_id": "frozen",
+          "reason": "Kevin's call in session, 2026-08-24. The four-value kind enum stands; codex's HOLD is recorded in ADR 0001 as a stated known limitation rather than acted on. Rationale: the objection is about validation, not about an observed failure — no real gate has yet failed to classify. Revisit when one does, which is a cheaper trigger than guessing at a fifth value now.",
+          "ruled_at": "2026-08-24T14:08:36Z",
+          "ruled_by": "kevin-lee+claude-code",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "/home/kevin-lee/ai-workspace/janus@3892faf555f46366613231a0f18251e5bea030d0",
+        "binding_sha256": "ee0946fdc6bc507e80afe36e6f59c03f069a03bf0e8660a22e0c08c99c9f7198",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "claude-code: merges PR #1 and deletes the branch on approve; closes the PR and leaves main untouched on refuse",
+        "decay": "The fleet's janus CLI is an editable install of this working tree, so every gate raised meanwhile can still bind a moving ref and go void on the next commit, needing a re-raise",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "g67ec2949476",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "the drift signal stops crying wolf",
+            "gate_id": "g67ec2949476",
+            "label": "Merge as-is; 24 tests green, 2 of 3 new ones proven to fail pre-fix",
+            "option_id": "merge",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "slower, and it is the contract as written",
+            "gate_id": "g67ec2949476",
+            "label": "Hold until a non-author seat reviews it, since fb7b762 skipped that",
+            "option_id": "review-first",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Merge PR #1 (pin git bindings at raise time)? AGENTS.md puts binding semantics behind human review before merge, and the earlier half of this fix went to main directly without one.",
+        "raised_at": "2026-08-24T13:50:34Z",
+        "raised_by": "kevin-lee+claude-code",
+        "ruling": {
+          "bound_sha256": "ee0946fdc6bc507e80afe36e6f59c03f069a03bf0e8660a22e0c08c99c9f7198",
+          "gate_id": "g67ec2949476",
+          "option_id": "merge",
+          "reason": "Kevin's call in session, 2026-08-24. codex passed PR #1 on standards and spec as a non-author seat, its test-quality follow-up was applied in 6fe78fa, and 30 tests are green. Merging with --merge rather than --squash or --rebase so the bound commit 3892faf survives verbatim on the mainline: a project whose thesis is byte-bound rulings should not rewrite the bytes it just ruled on.",
+          "ruled_at": "2026-08-24T14:08:36Z",
+          "ruled_by": "kevin-lee+claude-code",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "/home/kevin-lee/ai-workspace/codex/minerva@c80d29b7c6127beced7e5da757c85a065c03e1ee",
+        "binding_sha256": "01e9cf860797ea4dc2e1ce213fbfb21b7d02be6fec8433293b560519154e0c6c",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "codex: implements the selected boundary in a new reviewed security slice; if accept-local is chosen, documents the expanded trust and leaves transport unchanged",
+        "decay": "Until ruled, every merge or deploy of c80d29b stays held and loopback TCP continues trusting every local UID.",
+        "decay_check": "ss -ltnH 'sport = :8765' | grep -q '127.0.0.1:8765'",
+        "delivery_check": null,
+        "effective_decay_check": "ss -ltnH 'sport = :8765' | grep -q '127.0.0.1:8765'",
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "g774d9eb4174",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "Serve through a 0600 Unix socket inside a 0700 directory.",
+            "gate_id": "g774d9eb4174",
+            "label": "Owner-only Unix socket",
+            "option_id": "uds",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Add a real authentication boundary for TCP and browser clients.",
+            "gate_id": "g774d9eb4174",
+            "label": "Authenticated TCP",
+            "option_id": "tcp-auth",
+            "position": 1,
+            "recommended": 0
+          },
+          {
+            "detail": "Keep loopback TCP within a single trusted runtime or host account.",
+            "gate_id": "g774d9eb4174",
+            "label": "Isolated loopback",
+            "option_id": "isolated",
+            "position": 2,
+            "recommended": 0
+          },
+          {
+            "detail": "Explicitly accept that every host-local account may call the API.",
+            "gate_id": "g774d9eb4174",
+            "label": "Trust all local users",
+            "option_id": "accept-local",
+            "position": 3,
+            "recommended": 0
+          }
+        ],
+        "question": "What transport boundary should Minerva use for its same-host API?",
+        "raised_at": "2026-08-24T16:18:25Z",
+        "raised_by": "kevin-lee+codex",
+        "ruling": {
+          "bound_sha256": "01e9cf860797ea4dc2e1ce213fbfb21b7d02be6fec8433293b560519154e0c6c",
+          "gate_id": "g774d9eb4174",
+          "option_id": "uds",
+          "reason": "Kevin approved the recommended owner-only Unix-socket option in the Codex conversation on 2026-08-24.",
+          "ruled_at": "2026-08-24T22:22:47Z",
+          "ruled_by": "kevin-lee+codex",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "/home/kevin-lee/ai-workspace/codex/minerva@acdca454672ae6fbf3e72b9ee89ef586872507a4",
+        "binding_sha256": "780f9fa1bb039ab9f3bbe36d5b93d84895025178a319b0d20c6bc6976db9db0e",
+        "check_revisions": [],
+        "cites": "g3de7967c729",
+        "consumer": "codex: hold does nothing; push rechecks and pushes only; deploy requires live preflight, supervised deployment, and health verification",
+        "decay": "The legacy unauthenticated loopback listener remains reachable to every host-local account while deployment waits.",
+        "decay_check": "ss -ltn | grep -q '127.0.0.1:8765'",
+        "delivery_check": null,
+        "effective_decay_check": "ss -ltn | grep -q '127.0.0.1:8765'",
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "g268675c0b42",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "no shared or live mutation",
+            "gate_id": "g268675c0b42",
+            "label": "Keep the verified commit local",
+            "option_id": "hold",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "no live deployment",
+            "gate_id": "g268675c0b42",
+            "label": "Push the commit to shared main",
+            "option_id": "push",
+            "position": 1,
+            "recommended": 0
+          },
+          {
+            "detail": "requires supervised live verification",
+            "gate_id": "g268675c0b42",
+            "label": "Push then deploy to mickey",
+            "option_id": "deploy",
+            "position": 2,
+            "recommended": 0
+          }
+        ],
+        "question": "What should happen to verified Minerva commit acdca45: keep local, push only, or push and deploy to mickey?",
+        "raised_at": "2026-08-25T00:19:17Z",
+        "raised_by": "kevin-lee",
+        "ruling": {
+          "bound_sha256": "780f9fa1bb039ab9f3bbe36d5b93d84895025178a319b0d20c6bc6976db9db0e",
+          "gate_id": "g268675c0b42",
+          "option_id": "push",
+          "reason": "Kevin explicitly instructed Codex to push the reviewed commit and merge it into main; no deployment was requested.",
+          "ruled_at": "2026-08-25T00:34:38Z",
+          "ruled_by": "kevin-lee",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "/home/kevin-lee/ai-workspace/janus@1f0b6311d0e55a7ffa9d2dedb5f6dc42e281b53d",
+        "binding_sha256": "1d51bd548eef841632b9ec3ee5786f0ca785e32e8c6fe0771dd0b3ae577fab7a",
+        "check_revisions": [],
+        "cites": "ge59d100de2f",
+        "consumer": "claude-code: merges PR #2, republishes the fleet CLI with janus-update, then revises the broken checks on g43344426bdb and g4deae14ca3d",
+        "decay": "Two live gates carry checks that can never pass, so the board reports a delivered promise as outstanding and will do the same for the automation rules the moment they land",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "g3689e1cf957",
+        "kind": "authority",
+        "observations": [],
+        "options": [],
+        "question": "Merge PR #2 (migration 0002: check revisions) at the post-review head, now that codex's HOLD is cleared?",
+        "raised_at": "2026-08-25T02:08:47Z",
+        "raised_by": "kevin-lee+claude-code",
+        "ruling": {
+          "bound_sha256": "1d51bd548eef841632b9ec3ee5786f0ca785e32e8c6fe0771dd0b3ae577fab7a",
+          "gate_id": "g3689e1cf957",
+          "option_id": null,
+          "reason": "Kevin's call in session, 2026-08-25, given after being shown codex's HOLD and the two fixes. This gate is seconds old by design and is not a rubber stamp: it re-pins the decision to the bytes actually merging (1f0b631) after its predecessor ge59d100de2f was superseded for binding pre-review bytes (005ab37). Kevin had already ruled 'take it' on the earlier head; I returned it rather than merge bytes he had not seen.",
+          "ruled_at": "2026-08-25T02:08:58Z",
+          "ruled_by": "kevin-lee+claude-code",
+          "state": "approved"
+        },
+        "state": "approved"
+      }
+    ],
+    "list --state expired": [],
+    "list --state open": [
+      {
+        "binding_kind": "file",
+        "binding_locator": "docs/adr/0054-gate1-separate-approval-and-restart-recovery.md",
+        "binding_sha256": "9409066ef76a07748761e17dcaed64a67069496379a99f514f67acde1c7133c4",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "claude-code: on allowlist, ADR 0054 merges as-is and sizing proceeds to the ledger/coordinator seam. On per-occurrence, ADR 0054 is rewritten, new browser-action kinds + a gate1-schema CHECK migration are scoped, and the live-evidence profile needs re-approval.",
+        "decay": "Every executor estimate stays dishonest while this is open, and the ledger-to-coordinator wiring cannot start without knowing which approval surface it targets.",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "g3410c2cff0f",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "1086-1088:recommended — no migration, no re-approval, and a digest-bound allowlist is reviewable after the fact",
+            "gate_id": "g3410c2cff0f",
+            "label": "The profile names and separately approves each effect kind; already the documented reading at OPERATIONS.md",
+            "option_id": "allowlist",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "costs new BROWSER_ACTION_KINDS, a table CHECK migration, and re-approval of a digest-bound profile",
+            "gate_id": "g3410c2cff0f",
+            "label": "An operator action gates each individual external mutation",
+            "option_id": "per-occurrence",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Does Gate 1's separate_approval_for_each_external_mutation mean the profile's digest-bound named effect allowlist (ADR 0054 D1), or a per-occurrence operator approval at each of the three GitHub mutations?",
+        "raised_at": "2026-08-24T13:05:52Z",
+        "raised_by": "kevin-lee+claude-code",
+        "ruling": null,
+        "state": "open"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "/home/kevin-lee/ai-workspace/mosaic@503a33e740d4c43296df4c4037116672ae3564e1",
+        "binding_sha256": "16b2c23d08a5233ef5367c1a6b802a2606bf39a6144d729556ac4de9d7d72b88",
+        "check_revisions": [],
+        "cites": "gda8569d0227",
+        "consumer": "Lane A (claude-09) updates mosaic.contracts.authority.Lifecycle and docs/authority.md; Lane B re-emits adapter labels; Lane C's render/authority.py table follows. By agreement no code depends on the string yet, so the change stays cheap until someone ships against it.",
+        "decay": "Three Mosaic lanes are shipping against this vocabulary now: Lane C's renderer resolves authority from it, Lane B's adapters emit into it, Lane A's Lifecycle enum encodes it. Each commit against the mandated spelling deepens rework, and the label teaches operators a false claim.",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "gf430f95f410",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "Value goes module-neutral; which module decided moves to the decider field where it belongs. Evidence: policy.ts:136 planApprovalDigest, enforced at change-handoff-reader.ts:2740; Janus core.py:141 reports without enforcing",
+            "gate_id": "gf430f95f410",
+            "label": "Rename to 'authorized' + decider field",
+            "option_id": "a",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Boundary stands; Mosaic must then render Icarus plan approvals as not-authorized, or as janus-authorized when Janus never decided",
+            "gate_id": "gf430f95f410",
+            "label": "Keep 'janus-authorized' as mandated",
+            "option_id": "b",
+            "position": 1,
+            "recommended": 0
+          },
+          {
+            "detail": "Cheapest edit, but the name says Janus while meaning something else",
+            "gate_id": "gf430f95f410",
+            "label": "Keep the string, redefine it to mean any byte-binding authorization",
+            "option_id": "c",
+            "position": 2,
+            "recommended": 0
+          }
+        ],
+        "question": "Rename the desk vocabulary's 'janus-authorized' to 'authorized' plus a decider field? It encodes a claim live code disproves: Icarus binds a wider digest than Janus AND enforces it, while Janus deliberately does not. Renaming a roadmap boundary is yours, not a lane's.",
+        "raised_at": "2026-08-25T03:28:01Z",
+        "raised_by": "kevin-lee+claude-code",
+        "ruling": null,
+        "state": "open"
+      },
+      {
+        "binding_kind": "file",
+        "binding_locator": "/home/kevin-lee/.local/bin/minerva",
+        "binding_sha256": "1cb499a23c8f4d7fa6a8b86c46e2253f63919efe6f9e770ce7f05131cc3b8e17",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "claude-code: on approve, add the verb to the wrapper's no-db case with a timestamped backup, then verify wrapper and venv binary return the same manifest. On refuse, file the discrepancy in ORACLE so the next agent reading Minerva's manifest is not misled by it.",
+        "decay": "Minerva's capability manifest advertises capabilities_argv=[\"capabilities\"] as its CLI discovery path, so the module correctly declares how to discover it and the fleet's canonical entrypoint makes that declaration false. Any agent following the manifest gets usage_error and has no way to tell a broken wrapper from a module that cannot self-describe.",
+        "decay_check": "/home/kevin-lee/deploy/minerva/.venv/bin/minerva capabilities >/dev/null 2>&1 && ! /home/kevin-lee/.local/bin/minerva capabilities >/dev/null 2>&1",
+        "delivery_check": null,
+        "effective_decay_check": "/home/kevin-lee/deploy/minerva/.venv/bin/minerva capabilities >/dev/null 2>&1 && ! /home/kevin-lee/.local/bin/minerva capabilities >/dev/null 2>&1",
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "g483aa17cb1e",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "one line, reversible, restores the module's own advertised discovery path",
+            "gate_id": "g483aa17cb1e",
+            "label": "Add capabilities to the wrapper allowlist",
+            "option_id": "fix",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "no infra change, but Minerva's manifest keeps asserting something false",
+            "gate_id": "g483aa17cb1e",
+            "label": "Leave the wrapper and record the discrepancy",
+            "option_id": "document",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Add `capabilities` to the ~/.local/bin/minerva wrapper's no-db allowlist? The wrapper injects --db into every verb outside a small allowlist and `capabilities` accepts none, so Minerva's own advertised CLI discovery path fails while the venv binary works.",
+        "raised_at": "2026-08-25T13:31:11Z",
+        "raised_by": "kevin-lee+claude-code",
+        "ruling": null,
+        "state": "open"
+      }
+    ],
+    "list --state refused": [],
+    "list --state superseded": [
+      {
+        "binding_kind": "git",
+        "binding_locator": "/home/kevin-lee/ai-workspace/janus@HEAD",
+        "binding_sha256": "a477bae57d3e6dc1b2958a3b490170a47330e6e8c1d06e2a68554b6944fccbf2",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "claude-code: writes migration 0002 if the review objects to the model; otherwise records the review as the M0 exit and moves to M2",
+        "decay": "Every gate raised into the M1 ledger raises the cost of a schema change; today it is one migration, in a month it is a migration plus a data rewrite",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "g55daf244a78",
+        "kind": "taste",
+        "observations": [],
+        "options": [],
+        "question": "Should kimi's M0 review verdict be able to change the Janus schema after M1 shipped?",
+        "raised_at": "2026-08-24T12:56:24Z",
+        "raised_by": "kevin-lee+claude-code",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "g55daf244a78",
+          "option_id": null,
+          "reason": "Void by Janus's own rule, not by a ruling: it bound '<repo>@HEAD', a moving name, so commit fb7b762 (an unrelated fix) made janus show report BINDING NO LONGER MATCHES. The question is still live and is re-raised below, bound to a concrete commit. PR #1 stops the next gate dying this way.",
+          "ruled_at": "2026-08-24T13:50:02Z",
+          "ruled_by": "kevin-lee+claude-code",
+          "state": "superseded"
+        },
+        "state": "superseded"
+      },
+      {
+        "binding_kind": null,
+        "binding_locator": null,
+        "binding_sha256": null,
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "claude-code: on delivery, claims issues before editing (the Athena claim-before-touching-files rule) and closes the stale cards with evidence. Until then, board state is maintained by hand by Kevin.",
+        "decay": "Every Athena issue I work stays stale-open, and the 7 already-shipped high-priority cards keep overstating the board's workload to whoever plans off it.",
+        "decay_check": null,
+        "delivery_check": "test -n \"$ATHENA_TOKEN\" || test -f ~/.athena.env",
+        "effective_decay_check": null,
+        "effective_delivery_check": "test -n \"$ATHENA_TOKEN\" || test -f ~/.athena.env",
+        "horizon": null,
+        "id": "g1a603e736cb",
+        "kind": "resource",
+        "observations": [],
+        "options": [],
+        "question": "Where is the Claude seat's Athena API token, or should one be minted? Without it I cannot claim, update, or close board issues programmatically.",
+        "raised_at": "2026-08-24T13:06:00Z",
+        "raised_by": "kevin-lee+claude-code",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "g1a603e736cb",
+          "option_id": null,
+          "reason": "The premise was wrong. Athena token row 4 (Claude) is LIVE, scoped read+issue:write+docs:write, role member, and was last used 2026-08-24T13:08 — minutes after this gate was raised. Codex's row 5 was used at 13:11. Nothing needs minting; the scoped-agent-token model Kevin wants already exists and is in daily use. The real question is narrower and is re-raised.",
+          "ruled_at": "2026-08-24T13:13:10Z",
+          "ruled_by": "kevin-lee",
+          "state": "superseded"
+        },
+        "state": "superseded"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "/home/kevin-lee/ai-workspace/codex/minerva@02a4244d3ff9d13b0982ef00f34d07d3d475bd85",
+        "binding_sha256": "e6613e55cae0dbc5be14527cdeda142e158636a9362413cef09421aa3729386c",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "codex: hold does nothing; push rechecks and pushes only; deploy requires live preflight, supervised deployment, and health verification",
+        "decay": "The legacy unauthenticated loopback listener remains reachable to every host-local account while deployment waits.",
+        "decay_check": "ss -ltn | grep -q '127.0.0.1:8765'",
+        "delivery_check": null,
+        "effective_decay_check": "ss -ltn | grep -q '127.0.0.1:8765'",
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "g3de7967c729",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "no shared or live mutation",
+            "gate_id": "g3de7967c729",
+            "label": "Keep the verified commit local",
+            "option_id": "hold",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "no live deployment",
+            "gate_id": "g3de7967c729",
+            "label": "Push the commit to shared main",
+            "option_id": "push",
+            "position": 1,
+            "recommended": 0
+          },
+          {
+            "detail": "requires supervised live verification",
+            "gate_id": "g3de7967c729",
+            "label": "Push then deploy to mickey",
+            "option_id": "deploy",
+            "position": 2,
+            "recommended": 0
+          }
+        ],
+        "question": "What should happen to verified Minerva commit 02a4244: keep local, push only, or push and deploy to mickey?",
+        "raised_at": "2026-08-24T23:57:24Z",
+        "raised_by": "kevin-lee+codex",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "g3de7967c729",
+          "option_id": null,
+          "reason": "Superseded by g268675c0b42 after final review required the fail-closed no-follow chmod portability fix; 02a4244 is no longer the shipping candidate.",
+          "ruled_at": "2026-08-25T00:19:30Z",
+          "ruled_by": "kevin-lee",
+          "state": "superseded"
+        },
+        "state": "superseded"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "/home/kevin-lee/ai-workspace/janus@005ab3735ce0ade945931b3d0c8918c661cc07ce",
+        "binding_sha256": "dd0c1e684e8a207560431f3716b17304bf93e580d9251b47508d9f0ca760718d",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "claude-code: merges PR #2, republishes the fleet CLI with janus-update, then revises the two broken checks on g43344426bdb and g4deae14ca3d",
+        "decay": "Two live gates carry checks that can never pass, so the board reports a delivered promise as outstanding and will do the same for the automation rules the moment they land",
+        "decay_check": "test -n \"$(sqlite3 /home/kevin-lee/.janus/janus.db \"SELECT 1 FROM rulings WHERE gate_id='g43344426bdb' AND state='approved'\")\"",
+        "delivery_check": null,
+        "effective_decay_check": "test -n \"$(sqlite3 /home/kevin-lee/.janus/janus.db \"SELECT 1 FROM rulings WHERE gate_id='g43344426bdb' AND state='approved'\")\"",
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "ge59d100de2f",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "the board stops misreporting delivered promises",
+            "gate_id": "ge59d100de2f",
+            "label": "Merge as-is; 67 tests green, 3 properties mutation-checked",
+            "option_id": "merge",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "slower, and the schema is a high-integrity surface",
+            "gate_id": "ge59d100de2f",
+            "label": "Hold for a non-author seat, as PR #1 did",
+            "option_id": "review-first",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Merge PR #2 (migration 0002: check revisions)? AGENTS.md puts migration history behind human review before merge.",
+        "raised_at": "2026-08-25T01:35:45Z",
+        "raised_by": "kevin-lee+claude-code",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "ge59d100de2f",
+          "option_id": null,
+          "reason": "Superseded by the bytes moving, not by a decision. It bound 005ab37; codex's non-author review returned HOLD on that commit (a lying revision receipt, plus trailing whitespace), both fixed at 1f0b6311d0e55a7ffa9d2dedb5f6dc42e281b53d. Ruling on this gate would have approved one set of bytes while a different set merged — the replay failure the binding exists to prevent. Re-raised against the actual head.",
+          "ruled_at": "2026-08-25T02:08:47Z",
+          "ruled_by": "kevin-lee+claude-code",
+          "state": "superseded"
+        },
+        "state": "superseded"
+      },
+      {
+        "binding_kind": "file",
+        "binding_locator": "/home/kevin-lee/ai-workspace/mosaic-a/docs/authority.md",
+        "binding_sha256": "0c05e188d112dfb07ed77d67ae042f7f65c40a321297a008958051456a740c7b",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "Lane A (claude-09) updates mosaic.contracts.authority.Lifecycle and docs/authority.md; Lane B re-emits adapter labels; Lane C's render/authority.py table follows. By agreement no code depends on the string yet, so the change stays cheap until someone ships against it.",
+        "decay": "Three Mosaic lanes are shipping against this vocabulary now: Lane C's renderer resolves authority from it, Lane B's adapters emit into it, Lane A's Lifecycle enum encodes it. Each commit against the mandated spelling deepens rework, and the label teaches operators a false claim.",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "gda8569d0227",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "Value goes module-neutral; which module decided moves to the decider field where it belongs. Evidence: policy.ts:136 planApprovalDigest, enforced at change-handoff-reader.ts:2740; Janus core.py:141 reports without enforcing",
+            "gate_id": "gda8569d0227",
+            "label": "Rename to 'authorized' + decider field",
+            "option_id": "a",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Boundary stands; Mosaic must then render Icarus plan approvals as not-authorized, or as janus-authorized when Janus never decided",
+            "gate_id": "gda8569d0227",
+            "label": "Keep 'janus-authorized' as mandated",
+            "option_id": "b",
+            "position": 1,
+            "recommended": 0
+          },
+          {
+            "detail": "Cheapest edit, but the name says Janus while meaning something else",
+            "gate_id": "gda8569d0227",
+            "label": "Keep the string, redefine it to mean any byte-binding authorization",
+            "option_id": "c",
+            "position": 2,
+            "recommended": 0
+          }
+        ],
+        "question": "Rename the desk vocabulary's 'janus-authorized' to 'authorized' plus a decider field? It encodes a claim live code disproves: Icarus binds a wider digest than Janus AND enforces it, while Janus deliberately does not. Renaming a roadmap boundary is yours, not a lane's.",
+        "raised_at": "2026-08-25T03:24:56Z",
+        "raised_by": "kevin-lee+claude-code",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "gda8569d0227",
+          "option_id": null,
+          "reason": "Re-raised as gf430f95f410 with a durable binding. The original bound a file inside the transient lane/a worktree (~/ai-workspace/mosaic-a/docs/authority.md), which would read CANNOT VERIFY once that worktree is removed — the exact 'binding depends on where the raiser was standing' failure ADR 0001 and janus core.py:105 both warn about. Same question, bound to git:~/ai-workspace/mosaic@503a33e.",
+          "ruled_at": "2026-08-25T03:28:08Z",
+          "ruled_by": "kevin-lee",
+          "state": "superseded"
+        },
+        "state": "superseded"
+      }
+    ],
+    "list --state withdrawn": []
+  },
+  "scrubbed": true,
+  "surface": "subprocess: janus list --state <s> --json"
+}
