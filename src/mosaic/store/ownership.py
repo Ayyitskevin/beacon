@@ -77,6 +77,7 @@ REGISTRY: tuple[Vocabulary, ...] = (
     Vocabulary("enum_lifecycle", "claude-09", "mosaic.store.authority", "Lifecycle"),
     Vocabulary("enum_force", "claude-09", "mosaic.store.authority", "Force"),
     Vocabulary("enum_type_nature", "claude-09", "mosaic.store.vocabulary", "TypeNature"),
+    Vocabulary("enum_status_polarity", "claude-09", "mosaic.store.vocabulary", "StatusPolarity"),
 )
 
 
