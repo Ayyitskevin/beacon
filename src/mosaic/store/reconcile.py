@@ -24,7 +24,7 @@ from dataclasses import dataclass
 import sqlite3
 
 from .schema import enum_values, schema_columns
-from .vocabulary import REGISTRY, Resolution, Vocabulary, canonical_values
+from .ownership import REGISTRY, Resolution, Vocabulary, canonical_values
 
 
 @dataclass(frozen=True)
