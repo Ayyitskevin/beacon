@@ -32,15 +32,39 @@ Mosaic decided it meant.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Protocol, runtime_checkable
+
+
+class SurfaceKind(StrEnum):
+    """How a reader reaches its source. A CLOSED vocabulary, not a free string.
+
+    It was a bare `str`, and claude-09 caught what that costs: `require_quiescent`
+    keys on it, so a reader declaring `kind="file"` while opening SQLite — or
+    simply typing `"localdb"` — passed straight through the guard and never
+    triggered the quiescence check. A typo silently skipped a safety check, in
+    a store whose entire doctrine is closed vocabularies. The guard consulted a
+    self-report and believed it.
+
+    Closing it is only half. The other half is structural: 0d keys their AST
+    contract on the `sqlite3.connect` capability rather than on this declared
+    kind, so a mislabeled reader cannot dodge it either. Runtime and structure
+    have to agree, because each alone is evadable by a different mistake.
+    """
+
+    FILE = "file"
+    LOCAL_DB = "local_db"
+    HTTP = "http"
+    SUBPROCESS = "subprocess"
 
 
 @dataclass(frozen=True)
 class SourceSurface:
     """How one reader reaches its source, and why that surface was chosen."""
 
-    kind: str
-    """`file` | `local_db` | `http` | `subprocess`."""
+    kind: SurfaceKind
+    """Closed. `__post_init__` refuses anything outside the vocabulary rather
+    than coercing it: coercion is how a typo becomes a plausible value."""
 
     boundary: str
     """How read-only is enforced *for this surface*. Not one uniform rule:
@@ -58,6 +82,17 @@ class SourceSurface:
     """Why this surface rather than another, in evidence. Specifically: which
     derived values this source has, and whether their inputs are reachable
     here. A surface chosen by convention is a decision nobody made."""
+
+    def __post_init__(self) -> None:
+        # Refuse rather than coerce. A coerced typo becomes a plausible value,
+        # and the guard downstream cannot tell it from a deliberate one.
+        if not isinstance(self.kind, SurfaceKind):
+            raise ValueError(
+                f"surface kind {self.kind!r} is not one of "
+                f"{[k.value for k in SurfaceKind]}. It is a closed vocabulary "
+                f"because require_quiescent keys on it: an unrecognised kind "
+                f"would skip the quiescence check silently."
+            )
 
 
 @dataclass(frozen=True)
@@ -103,7 +138,7 @@ def require_quiescent(surface: "SourceSurface") -> None:
         SourceNotQuiescent: if the surface is `local_db` and carries no
             verified quiescence. Non-database surfaces pass through untouched.
     """
-    if surface.kind != "local_db":
+    if surface.kind is not SurfaceKind.LOCAL_DB:
         return
     q = surface.quiescence
     if q is None or not q.verified:
