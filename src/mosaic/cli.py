@@ -112,11 +112,22 @@ def cmd_doctor(args) -> int:
         lane="B (adapters and doctor)",
         provides="Diagnosing module reachability",
     )
-    report = run_doctor()
     if args.format == "json":
-        print(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False))
-    else:
-        print(report if isinstance(report, str) else json.dumps(report, indent=2))
+        print(json.dumps(run_doctor(), indent=2, sort_keys=True, ensure_ascii=False))
+        return EXIT_OK
+
+    # The doctor's text rendering lives in doctor.py rather than render/,
+    # because it describes adapter state rather than desk entries. It is
+    # *required* here rather than falling back to JSON: "text mode quietly
+    # printed JSON" is the kind of thing nobody notices until a script starts
+    # depending on it.
+    render_text = _require(
+        "mosaic.doctor",
+        "render_text",
+        lane="B (adapters and doctor)",
+        provides="Human-readable doctor output",
+    )
+    print(render_text(run_doctor()))
     return EXIT_OK
 
 

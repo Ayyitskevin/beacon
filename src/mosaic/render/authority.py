@@ -87,6 +87,25 @@ class AuthorityVerdict:
     note: str | None = None
 
 
+def binding_kind(entry: dict) -> str | None:
+    """Return the kind of thing a Janus ruling is bound to, if stated.
+
+    The adapter passes Janus's own ``binding`` through verbatim as
+    ``{kind, locator, sha256}``. A flat ``binding_kind`` is accepted as well,
+    because a caller assembling a document by hand should not have to nest one
+    field. Returns None when nothing said.
+
+    ``"none"`` is a real, common value — on the live ledger it is 4 of 13
+    gates — and it is not the same as "not stated". It means Janus recorded a
+    ruling bound to nothing at all.
+    """
+    binding = entry.get("binding")
+    if isinstance(binding, dict) and binding.get("kind"):
+        return str(binding["kind"]).strip().lower()
+    flat = entry.get("binding_kind")
+    return str(flat).strip().lower() if flat else None
+
+
 def resolve(entry: dict) -> AuthorityVerdict:
     """Resolve one ``desk.v1`` entry into a display-safe authority verdict.
 
@@ -148,6 +167,25 @@ def resolve(entry: dict) -> AuthorityVerdict:
             ),
         )
 
+    # Checked before binding_holds deliberately. A ruling bound to nothing
+    # cannot be re-checked against anything, ever — so no field claiming the
+    # binding "holds" can make it authority. The conservative order is the
+    # correct one: the absence of something to check beats any claim about
+    # having checked it.
+    if binding_kind(entry) == "none":
+        return AuthorityVerdict(
+            label=label,
+            badge="⊘",
+            display="janus-authorized (bound to nothing — no binding to re-check, ever)",
+            is_authority=False,
+            rechecked=False,
+            note=(
+                "A human ruled, but the ruling was recorded against no "
+                "artifact. It cannot be shown to still cover anything. This is "
+                "a standing condition, not a gap someone can close by looking."
+            ),
+        )
+
     binding_holds = entry.get("binding_holds")
 
     if binding_holds is True:
@@ -180,7 +218,8 @@ def resolve(entry: dict) -> AuthorityVerdict:
         is_authority=False,
         rechecked=None,
         note=(
-            "Janus recorded a ruling, but nothing re-verified the binding for "
-            "this view. An unchecked binding is a claim about the past."
+            "Janus recorded a ruling against something, but nothing "
+            "re-verified the binding for this view. Unlike a ruling bound to "
+            "nothing, this one can be settled — re-check it in Janus."
         ),
     )

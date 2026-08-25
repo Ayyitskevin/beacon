@@ -13,6 +13,7 @@ from mosaic.render import json_render, text
 from mosaic.render.authority import (
     AUTHORITY_LABELS,
     FORBIDDEN_RENDERINGS,
+    binding_kind,
     resolve,
 )
 
@@ -176,3 +177,113 @@ class TestRenderersHoldTheLine:
             as_text = text.render(doc)
             assert as_json["is_authority"] is expected
             assert ("AUTHORITY" in as_text) is expected
+
+
+class TestBoundToNothing:
+    """`binding.kind == "none"` is 4 of 13 live gates, not a hypothetical.
+
+    A ruling bound to nothing is a permanently different thing from a ruling
+    nobody has re-checked yet: the second can be settled by looking, the first
+    can never be settled at all.
+    """
+
+    def _janus(self, **overrides):
+        e = entry(source="janus", authority="janus-authorized")
+        e.update(overrides)
+        return e
+
+    def test_bound_to_nothing_is_not_authority(self):
+        verdict = resolve(self._janus(binding={"kind": "none", "locator": None, "sha256": None}))
+        assert verdict.is_authority is False
+        assert "bound to nothing" in verdict.display
+
+    def test_it_beats_a_binding_holds_claim(self):
+        """Nothing to check against outranks any claim of having checked."""
+        verdict = resolve(self._janus(binding={"kind": "none"}, binding_holds=True))
+        assert verdict.is_authority is False
+        assert "bound to nothing" in verdict.display
+
+    def test_distinguishable_from_merely_unchecked(self):
+        nothing = resolve(self._janus(binding={"kind": "none"}))
+        unchecked = resolve(self._janus(binding={"kind": "git", "sha256": "abc"}))
+        assert nothing.display != unchecked.display
+        assert nothing.badge != unchecked.badge
+        # "can never be settled" vs "not settled yet" — the two must not share
+        # a rechecked value, or a machine consumer cannot tell them apart.
+        assert nothing.rechecked is False
+        assert unchecked.rechecked is None
+
+    def test_distinguishable_from_stale(self):
+        nothing = resolve(self._janus(binding={"kind": "none"}))
+        stale = resolve(self._janus(binding={"kind": "git"}, binding_holds=False))
+        assert nothing.display != stale.display
+        assert nothing.badge != stale.badge
+
+    def test_real_bindings_still_reach_authority(self):
+        """The live corpus is git: 8, none: 4, file: 1 — git must still work."""
+        for kind in ("git", "file"):
+            verdict = resolve(self._janus(binding={"kind": kind}, binding_holds=True))
+            assert verdict.is_authority is True, kind
+
+    def test_all_four_janus_states_render_distinctly(self):
+        states = [
+            self._janus(binding={"kind": "git"}, binding_holds=True),
+            self._janus(binding={"kind": "git"}, binding_holds=False),
+            self._janus(binding={"kind": "git"}),
+            self._janus(binding={"kind": "none"}),
+        ]
+        displays = {resolve(e).display for e in states}
+        assert len(displays) == 4
+        assert sum(resolve(e).is_authority for e in states) == 1
+
+
+class TestBindingKindHelper:
+    def test_reads_the_nested_adapter_shape(self):
+        assert binding_kind({"binding": {"kind": "git", "sha256": "x"}}) == "git"
+
+    def test_accepts_a_flat_key(self):
+        assert binding_kind({"binding_kind": "none"}) == "none"
+
+    def test_nested_wins_over_flat(self):
+        assert binding_kind({"binding": {"kind": "git"}, "binding_kind": "none"}) == "git"
+
+    def test_not_stated_is_none(self):
+        assert binding_kind({}) is None
+        assert binding_kind({"binding": {}}) is None
+
+    def test_normalises_case_and_space(self):
+        assert binding_kind({"binding": {"kind": "  GIT "}}) == "git"
+
+
+class TestFooterAdviceIsFollowable:
+    """Advice that cannot be acted on trains people to ignore the footer."""
+
+    def _janus(self, **overrides):
+        e = entry(source="janus", authority="janus-authorized")
+        e.update(overrides)
+        return e
+
+    def test_unbindable_is_not_told_to_recheck(self):
+        doc = {"schema": "desk.v1", "entries": [self._janus(binding={"kind": "none"})]}
+        out = text.render(doc)
+        assert "can never be re-checked" in out
+        assert "re-check the ruling in Janus" not in out
+
+    def test_recheckable_is_told_to_recheck(self):
+        doc = {"schema": "desk.v1", "entries": [self._janus(binding={"kind": "git"})]}
+        out = text.render(doc)
+        assert "re-check the ruling in Janus" in out
+        assert "can never be re-checked" not in out
+
+    def test_both_present_gets_both_lines(self):
+        doc = {
+            "schema": "desk.v1",
+            "entries": [
+                self._janus(binding={"kind": "none"}),
+                self._janus(binding={"kind": "git"}),
+            ],
+        }
+        out = text.render(doc)
+        assert "re-check the ruling in Janus" in out
+        assert "can never be re-checked" in out
+        assert "0 entries render as authority" in out

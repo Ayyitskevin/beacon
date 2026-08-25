@@ -34,7 +34,12 @@
       "timestamp": "2026-08-24T21:00:00Z",
       "schema_version": "gate.v1",
       "ref": "jns-0007",
-      "link": "janus://gates/jns-0007"
+      "link": "janus://gates/jns-0007",
+      "binding": {
+        "kind": "git",
+        "locator": "repo@jns-0007",
+        "sha256": "3f1c000000000000000000000000000000000000000000000000000000000000"
+      }
     },
     {
       "source": "janus",
@@ -46,7 +51,28 @@
       "timestamp": "2026-08-23T09:30:00Z",
       "schema_version": "gate.v1",
       "ref": "jns-0004",
-      "link": "janus://gates/jns-0004"
+      "link": "janus://gates/jns-0004",
+      "binding": {
+        "kind": "git",
+        "locator": "repo@jns-0004",
+        "sha256": "3f1c000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "source": "janus",
+      "owner": "kevin",
+      "title": "Adopt the round-table review model",
+      "status": "approved",
+      "authority": "janus-authorized",
+      "binding": {
+        "kind": "none",
+        "locator": null,
+        "sha256": null
+      },
+      "timestamp": "2026-08-15T14:00:00Z",
+      "schema_version": "gate.v1",
+      "ref": "jns-0002",
+      "link": "janus://gates/jns-0002"
     },
     {
       "source": "icarus",
