@@ -32,22 +32,66 @@ from pathlib import Path
 
 REDACTED = "[REDACTED]"
 
-#: A field with one of these in its name holds a secret whatever its value is.
-SECRET_KEY_PARTS = (
-    "token",
-    "secret",
-    "password",
-    "passwd",
-    "api_key",
-    "apikey",
-    "authorization",
-    "auth_header",
-    "private_key",
-    "credential",
-    "bearer",
-    "session_id",
-    "cookie",
+#: Key-name words meaning "secret", matched as WHOLE underscore-separated
+#: parts rather than as substrings.
+#:
+#: Substring matching was the first version and it destroyed a real fixture:
+#: `prompt_tokens` and `completion_tokens` contain "token", so Vulcan's entire
+#: usage corpus came back with 155 redactions where the token COUNTS should
+#: be. A usage reader cannot be built from that, and the failure is silent --
+#: the fixture looks scrubbed and careful, and is useless.
+#:
+#: This is the over-scrubbing cost the module docstring warns about, shipped
+#: by the module that warns about it. Over-scrubbing is not free safety: it
+#: destroys what the corpus exists to preserve, and unlike under-scrubbing
+#: nothing downstream ever complains.
+SECRET_KEY_WORDS = frozenset(
+    {
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "authorization",
+        "bearer",
+        "cookie",
+        "credential",
+        "credentials",
+    }
 )
+
+#: Whole key names that are secrets. Separate because their PARTS are too
+#: common to match on: "key" alone would redact `sort_key`, "api" would redact
+#: `api_version`.
+SECRET_KEY_NAMES = frozenset(
+    {
+        "api_key",
+        "apikey",
+        "api_keys",
+        "private_key",
+        "privatekey",
+        "secret_key",
+        "access_key",
+        "auth_header",
+        "session_id",
+        "sessionid",
+        "auth",
+        "authentication",
+    }
+)
+
+
+def _is_secret_key(key: str) -> bool:
+    """Whether a field name means its value is a secret.
+
+    Parts are compared exactly, so `tokens` (a count) does not match `token`
+    (a credential) -- the whole difference between a usable fixture and 155
+    redactions.
+    """
+    lowered = str(key).lower()
+    if lowered in SECRET_KEY_NAMES:
+        return True
+    return any(part in SECRET_KEY_WORDS for part in lowered.split("_"))
+
 
 #: Value shapes that are secrets regardless of the field they sit in.
 SECRET_VALUE_PATTERNS = (
@@ -113,7 +157,7 @@ def scrub(value, known: set[str] | None = None):
     if isinstance(value, dict):
         out = {}
         for key, inner in value.items():
-            if any(part in str(key).lower() for part in SECRET_KEY_PARTS):
+            if _is_secret_key(key):
                 # Redact by key regardless of the value's shape, but keep the
                 # key: a fixture that silently drops fields no longer describes
                 # the source's actual response shape.
