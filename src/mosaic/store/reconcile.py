@@ -24,7 +24,8 @@ from dataclasses import dataclass
 import sqlite3
 
 from .schema import enum_values, schema_columns
-from .ownership import REGISTRY, Resolution, Vocabulary, canonical_values
+from . import ownership
+from .ownership import Resolution, Vocabulary, canonical_values
 
 
 @dataclass(frozen=True)
@@ -70,18 +71,23 @@ def _lookup_tables(conn: sqlite3.Connection) -> set[str]:
     Naming conventions are a convention living in the reader's head.
     """
     found = set()
-    for table, columns in schema_columns(conn).items():
-        if "name" not in columns:
-            continue
+    for table in schema_columns(conn):
         pk = [row for row in conn.execute(f"PRAGMA table_info({table})") if row[5]]
-        if len(pk) == 1 and pk[0][1] == "name":
+        # Lane A spells the key column `value`; this lane originally used
+        # `name`. Both are accepted rather than one being imposed — a detector
+        # that only knew one convention would silently skip half the store's
+        # vocabularies and report a clean reconciliation over nothing.
+        if len(pk) == 1 and pk[0][1] in {"name", "value"}:
             found.add(table)
     return found
 
 
 def reconcile_vocabularies(conn: sqlite3.Connection) -> list[VocabularyReport]:
     """Compare every SQL lookup table against its owner's canonical definition."""
-    registered: dict[str, Vocabulary] = {v.table: v for v in REGISTRY}
+    # Read through the module, not a name bound at import: a registry
+    # captured at import time can never be swapped, so a caller that
+    # changes it is silently ignored rather than obeyed.
+    registered: dict[str, Vocabulary] = {v.table: v for v in ownership.REGISTRY}
     reports: list[VocabularyReport] = []
 
     for table in sorted(_lookup_tables(conn)):

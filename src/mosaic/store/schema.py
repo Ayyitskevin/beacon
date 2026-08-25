@@ -30,11 +30,31 @@ from pathlib import Path
 MIGRATIONS = Path(__file__).parent / "migrations"
 
 
+#: Lane A's envelope core. Applied FIRST: the integrity layer constrains its
+#: tables and cannot be loaded without them. Two schema sources is deliberate
+#: (shape and integrity are owned by different lanes), but only one loader
+#: knows about both, and it lives here.
+CORE = Path(__file__).parent / "schema.sql"
+
+
 def apply_schema(conn: sqlite3.Connection) -> None:
-    """Apply every migration in filename order."""
+    """Apply Lane A's envelope, then this lane's integrity migrations."""
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.executescript(CORE.read_text())
     for path in sorted(MIGRATIONS.glob("*.sql")):
         conn.executescript(path.read_text())
+
+    # Both lanes seed their own vocabularies from their own definitions. A
+    # loader that applied the DDL and skipped the seeding would produce a
+    # schema whose every lookup table is empty and whose every foreign key
+    # therefore rejects everything -- which fails loudly, but only at the first
+    # insert, far from here.
+    from . import ownership
+    from .enums import seed_enums
+
+    seed_enums(conn)
+    ownership.seed(conn)
+    conn.commit()
     conn.execute("PRAGMA foreign_keys = ON")
 
 
@@ -59,4 +79,6 @@ def enum_values(conn: sqlite3.Connection, table: str) -> set[str]:
     direction nobody notices — the schema keeps accepting a value the code
     stopped handling.
     """
-    return {row[0] for row in conn.execute(f"SELECT name FROM {table}")}
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    key = "value" if "value" in columns else "name"
+    return {row[0] for row in conn.execute(f"SELECT {key} FROM {table}")}
