@@ -157,6 +157,55 @@ class TestOperatorAction:
         assert a.operator_action() is OperatorAction.NONE
         assert not a.assures()
 
+    def test_spent_decision_needs_nothing(self):
+        """Gate g1a603e736cb shipped `superseded` and still returned DECIDE.
+        Supersession IS the resolution, so the advice it produced ("re-raise
+        with a checkable binding") was wrong, not merely superfluous."""
+        a = _authority(attachment=Attachment.UNBOUND, spent=True)
+        assert a.operator_action() is OperatorAction.NONE
+
+    @pytest.mark.parametrize("attachment", list(Attachment))
+    @pytest.mark.parametrize(
+        "enforcement", [Enforcement.ENFORCED, Enforcement.REPORTED, Enforcement.NONE]
+    )
+    def test_spent_beats_every_other_axis(self, attachment, enforcement):
+        """Whatever it is attached to and whoever enforces it, a closed
+        decision asks nothing. Includes spent+drifted, which would otherwise
+        be the one ACT case."""
+        a = _authority(attachment=attachment, enforcement=enforcement, spent=True)
+        assert a.operator_action() is OperatorAction.NONE
+
+    def test_unspent_still_asks_the_same_questions(self):
+        """The guard against the mutation that makes the test above pass for
+        the wrong reason: code returning NONE unconditionally would satisfy
+        every `spent` assertion. These pin that the OTHER answers survive."""
+        assert (
+            _authority(
+                attachment=Attachment.BYTES_DRIFTED, enforcement=Enforcement.REPORTED
+            ).operator_action()
+            is OperatorAction.ACT
+        )
+        assert _authority(attachment=Attachment.UNBOUND).operator_action() is OperatorAction.DECIDE
+
+    def test_spent_is_not_derivable_from_lifecycle(self):
+        """Why `spent` is a field rather than a lifecycle check.
+
+        The mandated vocabulary has no terminal-negative value, so an adapter
+        that refuses to default upward lands refused/withdrawn/expired/
+        superseded ALL on REVIEWED. A live in-review decision carries the same
+        lifecycle as a superseded one, so reading `lifecycle` cannot separate
+        them -- it would silence genuine in-review entries or change nothing.
+        If this test ever fails, the vocabulary gained a spent state and
+        `spent` should be deleted rather than kept alongside it.
+        """
+        live = _authority(lifecycle=Lifecycle.REVIEWED, attachment=Attachment.UNBOUND)
+        dead = _authority(lifecycle=Lifecycle.REVIEWED, attachment=Attachment.UNBOUND, spent=True)
+        assert live.lifecycle is dead.lifecycle
+        assert live.operator_action() is not dead.operator_action()
+        assert not any(
+            v.value in {"superseded", "withdrawn", "expired", "refused", "spent"} for v in Lifecycle
+        )
+
     def test_action_is_three_valued(self):
         """A boolean cannot carry both "something broke" and "nothing was ever
         checkable" without silencing one of them."""
