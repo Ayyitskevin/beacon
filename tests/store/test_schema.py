@@ -18,6 +18,7 @@ import sqlite3
 import pytest
 
 from mosaic.store.enums import CANONICAL_ENUMS, divergences, seed_enums
+from mosaic.store.models import CANONICAL_MODELS, column_divergences, expected_columns
 
 SCHEMA = pathlib.Path(__file__).resolve().parents[2] / "src" / "mosaic" / "store" / "schema.sql"
 
@@ -79,6 +80,51 @@ class TestEnumsHaveOneCanonicalSource:
             )
         }
         assert tables == set(CANONICAL_ENUMS)
+
+
+class TestModelMapMatchesTheSchema:
+    """Totality check 2, wired to Lane C's reconciler.
+
+    Check 1 (a field added to a type) cannot see a column added to the schema
+    that no type models. This is that direction.
+    """
+
+    def test_no_column_divergence(self, db):
+        assert column_divergences(db) == {}
+
+    def test_divergence_is_detected_in_the_silent_direction(self, db):
+        """A column no model knows about: nothing fails, the schema simply
+        carries a field nothing maintains, and it accumulates."""
+        db.execute("ALTER TABLE record ADD COLUMN orphan TEXT NOT NULL DEFAULT ''")
+        assert column_divergences(db)["record"]["in_db_not_model"] == ["orphan"]
+
+    def test_expected_columns_is_derived_not_listed(self, db):
+        """If this were a hand-written list it would be a second copy of the
+        model, free to drift -- the defect the enum lookup tables removed."""
+        assert "provenance_origin" in expected_columns("record")
+        assert "provenance" not in expected_columns("record")
+
+    def test_every_non_enum_table_has_a_canonical_model_or_is_declared(self, db):
+        """An unmapped table has no canonical owner. Listed explicitly so
+        adding a table forces a decision rather than silently opting out."""
+        known_unmapped = {
+            "authority",
+            "vocabulary",
+            "vocabulary_member",
+            "capability_registry",
+            "binding_digest",
+            "binding_intent",
+            "binding_handle",
+            "binding_step",
+            "binding_none",
+        }
+        tables = {
+            r[0]
+            for r in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'enum_%'"
+            )
+        }
+        assert tables - set(CANONICAL_MODELS) == known_unmapped
 
 
 class TestSchemaLoads:
