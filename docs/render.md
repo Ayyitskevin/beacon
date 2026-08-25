@@ -10,147 +10,100 @@ only describes how the renderer makes that visible. Where the two disagree,
 
 ## The seam
 
-Renderers consume the desk **document as a plain mapping** — not the contract
-classes, not adapter objects. That is deliberate. The display layer depends on
-the document, so any shell that later renders a desk inherits the authority
-rules without importing Mosaic's internals, and neither the contracts lane nor
-the adapters lane is coupled to the display layer.
+Renderers consume the desk **document as a plain mapping** and rebuild the
+contract's `Authority` from it via `render.authority.read_authority`. The
+policy is never re-implemented here — it is imported from
+`mosaic.contracts.authority` and *asked*, so the renderer and the contract
+cannot drift apart. A test walks every `Attachment` x `Enforcement` pair and
+asserts the view agrees with `Authority.operator_action()`.
 
 ```
-adapters  ->  desk.v1 document (plain dict)  ->  resolve()  ->  text | json
+adapters -> desk.v1 document -> read_authority() -> Authority -> text | json
 ```
 
-`resolve()` in `render/authority.py` is the single place the authority
-question is answered. Both renderers call it, so the text and JSON paths
-cannot drift apart on what counts as authority — a test asserts they agree.
+## The four axes
 
-### Fields read per entry
+An approval is rendered across four orthogonal axes and never summarised:
 
-| Field | Meaning |
+| Axis | Question |
 |---|---|
-| `source` | Owning module. Only this decides whether an entry *can* render as authority. |
-| `owner` | Who within that module holds it. |
-| `title` | One-line human description. |
-| `status` | The module's **own** status word, rendered verbatim and attributed. |
-| `timestamp` | When the observation was taken. |
-| `schema_version` | The owning module's schema for this entry. |
-| `ref` / `id` | The module-local identifier. |
-| `link` | Canonical link back to the owning module. |
-| `authority` | The authority label. |
-| `binding` | Janus entries only. Passed through verbatim from Janus as `{kind, locator, sha256}`. |
-| `binding_holds` | Janus entries only. Tri-state — see below. |
+| `decider` | who made the decision — `human` / `policy` / `agent` |
+| `attachment` | what it is pinned to, and what checking it just produced |
+| `enforcement` | who acts when the binding stops holding |
+| `lifecycle` | where the thing is in its journey |
 
-### The four Janus states
+The operationally important pair is `enforcement` x `attachment`, and the
+contract answers it with `operator_action()`:
 
-A Janus entry resolves into one of four renderings, and none of them is
-interchangeable with another:
-
-| State | Source | Renders |
+| | Meaning | Rendered |
 |---|---|---|
-| Re-checked, still binds | `binding_holds: true` | `✔` **authority** |
-| Re-checked, no longer binds | `binding_holds: false` | `⚠` stale |
-| Bound to something, nobody checked | `binding.kind` set, `binding_holds` absent | `?` unchecked |
-| Bound to **nothing** | `binding.kind == "none"` | `⊘` never re-checkable |
+| `ACT` | `reported` + `bytes-drifted`. Nothing is stopping anyone. | `║ ⚑` loud |
+| `DECIDE` | `unbound` or `bytes-unverifiable`. Never resolvable. | `┆ ◈` |
+| `NONE` | including `enforced` + `bytes-drifted` — the module already refused. | `│ ·` quiet |
 
-Only a literal `true` for `binding_holds` counts. A truthy string like `"yes"`
-does not, and a test asserts it does not: the difference between "we checked"
-and "something was there" is the entire value of the field.
+**Visual weight tracks what a human must do, never how strong an approval
+is.** It is deliberately anti-correlated with authority strength: a Janus
+ruling with a broken binding is the loudest thing on the page, and an Icarus
+plan approval that correctly refused is quiet. Styling that made the strongest
+mechanism the loudest would be the banned ranking wearing a stylesheet.
 
-`binding.kind == "none"` is checked **before** `binding_holds`, deliberately.
-A ruling bound to nothing cannot be re-checked against anything ever, so no
-field claiming the binding "holds" can promote it to authority. The absence of
-something to check beats any claim about having checked it.
+There is no `is_authority`, no score, and no "N entries are approved" count
+anywhere. An earlier version of this renderer had all three, and they were the
+binary axis `docs/authority.md` refuses.
 
-This is not a hypothetical case: on the live Janus ledger the distribution is
-`git: 8, none: 4, file: 1` — roughly a third of rulings are bound to nothing.
-Collapsing that into "nobody checked yet" would tell an operator to go look at
-an absence, so the footer splits its advice by what the reader can actually
-do: re-check the ruling, versus raise a new gate against the artifact.
+## Three collapses, each a real defect
 
-A flat `binding_kind` key is accepted as an alias so a hand-written document
-need not nest one field; the nested form wins if both appear.
+Every one of these was found in this renderer, not hypothesised.
 
-## The rule
+**1. Four axes into one verdict word.** The original renderer resolved a
+single string label and answered "is this authority?" That premise was wrong:
+Icarus binds a wider digest than Janus *and enforces it*, while Janus
+deliberately does not enforce so it stays out of the permission path.
 
-> The output must distinguish **proposed / reviewed / janus-authorized /
-> executed / verified**, and must never collapse them into a generic
-> "approved".
+**2. "No approval" rendered as "approval could not be verified."** `authority`
+is `None` for most entries — work, evidence, conversation — and that is the
+common case, not a failed check. `AuthorityView.problem` is what separates
+*absent* from *unreadable*; callers must check it rather than treating
+`authority is None` as one thing.
 
-The failure this prevents is a *visual* one. AI Town has several legitimate
-approval mechanisms that bind to different objects and are revoked
-differently. The risk was never that someone wires a reaction to an approval;
-it is that several legitimate approvals become indistinguishable on screen, so
-an operator can no longer tell which one carries authority over what.
+**3. "Nothing to report" rendered as "we could not ask."** The renderer reads
+`unreachable` and never describes a desk as cleanly composed while it is
+populated. Each module is named with the address actually tried, because the
+fleet disagrees about loopback versus tailnet.
 
-So the layout does real work:
+An unreadable authority value is **reported, never guessed**. Mapping an
+unknown value onto a known one is the collapse this file exists to prevent.
+`view()` never raises: a renderer that crashes on one bad entry hides the
+other forty.
 
-| Rule | Meaning |
-|---|---|
-| `║` heavy | Renders as authority. Carries an explicit `AUTHORITY` tag. |
-| `┆` dashed | Claims authority it cannot demonstrate — stale, unchecked, bound to nothing, or asserted by a module that does not own rulings. |
-| `│` light | A module-local fact wearing its owner's badge. |
+## The worklist view
 
-An operator can count the heavy rules without reading a word. That is the
-point: the summary line reports how many entries render as authority, because
-**"0 entries render as authority" is the single most important thing this tool
-can say**, and it must be legible without reading the list.
+`--worklist` orders by `ACT` -> `DECIDE` -> `NONE`, ties broken by recency so
+no secondary sort smuggles in an authority ordering. `docs/authority.md`
+permits this: the ban is on ordering that *correlates with authority
+strength*, and this is anti-correlated with it.
 
-The module's own `status` is always rendered verbatim and attributed to its
-module (`athena status: in_review`). It is never merged into the authority
-line — "merged", "closed" and "ruled" mean different things in different
-modules, and flattening them is how a module-local status starts reading like
-a fleet-wide verdict. The sample desk contains two entries whose module status
-is both literally `approved` and which render completely differently; that is
-the rule working.
+Three conditions, all pinned by tests:
 
-## Unrecognised labels
-
-An unrecognised label is reported as unrecognised. It is never mapped onto the
-nearest known label, because that mapping **is** the collapse this renderer
-exists to prevent. `resolve()` does not raise on a bad label either — a
-renderer that crashes on one malformed entry hides the other forty.
-
-Fix the adapter, not the renderer.
+1. The document keeps its own order — the worklist is a **view**, not a
+   reordering. Default rendering preserves compose's recency order.
+2. Ties break on recency.
+3. **The heading says "needs you first", never "most important" or
+   "priority".** A reader who learns top-means-important will conclude
+   top-means-trustworthy, rebuilding the binary in the one place nobody thinks
+   to look. This is the condition most likely to be lost in a future edit.
 
 ## Refusals
 
-Following the sibling convention in Janus: refusals are sentences, not
-tracebacks. `mosaic desk` and `mosaic doctor` exit **69** (`EX_UNAVAILABLE`)
-naming what is missing when their lane has not landed, and print nothing to
-stdout. Malformed input exits **1**. A caller scripting around Mosaic can tell
-"not built yet" from "you gave me garbage".
-
-An empty desk renders as an explicit statement that it is empty. Blank output
-is indistinguishable from a crash.
-
-## An empty read is not a failed read
-
-A desk is composed **from** modules, so a module that did not answer leaves a
-hole in the document — it does not mean there was nothing to find. The renderer
-reads the document's `unreachable` array and never describes a desk as cleanly
-composed while that array is populated:
-
-- **Empty, everything answered** — "a genuinely empty desk: nothing was hidden
-  by a failed read."
-- **Empty, something did not answer** — "INCOMPLETE, not empty. What is missing
-  is unknown, not nothing", followed by each module and the address tried.
-- **Populated, something did not answer** — the footer's counts are explicitly
-  qualified: entries those modules hold are *missing, not absent*.
-
-Each unreachable module is named with the address it was actually tried at.
-The fleet's modules disagree about whether they live on loopback or the
-tailnet, so "connection refused" without an address is the least useful error
-available.
-
-This is the authority collapse in a different field — "nothing to report" and
-"we could not ask" are opposite facts, and exactly one of them needs an
-operator. It is called out here because it was a real bug in this renderer,
-caught in review by Lane A, not a hypothetical.
+Refusals are sentences, not tracebacks. `mosaic desk` / `mosaic doctor` exit
+**69** (`EX_UNAVAILABLE`) naming what is missing; malformed input exits **1**.
+`mosaic desk` exits **0** even when the desk is incomplete: Buzz, ReplayDeck
+and Icarus are expected unreachable in normal conditions, and a command that
+almost always fails trains people to ignore it. Incompleteness is carried in
+the document and the footer instead.
 
 ## Adding a renderer
 
-Add it to `RENDERERS` in `render/__init__.py` and it appears as a `--format`
-choice everywhere. Call `resolve()`; do not re-derive the authority question,
-and do not add a code path that can present two different labels identically.
-`tests/cli/test_authority.py::TestRenderersHoldTheLine` is the guard, and a
-new renderer belongs under it.
+Add it to `RENDERERS` in `render/__init__.py`. Call `view()`; never re-derive
+the operator action, and never add a path that can present two different axes
+identically. `tests/cli/test_authority.py` is the guard.

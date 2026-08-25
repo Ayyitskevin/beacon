@@ -1,14 +1,16 @@
 """Renderers for the ``desk.v1`` document.
 
-Renderers consume the document as a plain mapping rather than the contract
-classes, so that whatever shell eventually renders a desk inherits the
-authority rules without importing Mosaic's internals.
+Renderers consume the document as a plain mapping and rebuild the contract's
+`Authority` from it, so any shell that later renders a desk inherits the
+authority rules without depending on how Mosaic assembled the document. The
+policy itself is never re-implemented here — it is imported from
+`mosaic.contracts.authority` and asked.
 """
 
 from __future__ import annotations
 
 from . import json_render, text
-from .authority import AUTHORITY_LABELS, AuthorityVerdict, resolve
+from .authority import AuthorityView, has_approval, read_authority, view, worklist_key
 
 #: Renderer name -> callable taking a ``desk.v1`` document and returning str.
 RENDERERS = {
@@ -19,11 +21,13 @@ RENDERERS = {
 DEFAULT_RENDERER = "text"
 
 __all__ = [
-    "AUTHORITY_LABELS",
     "DEFAULT_RENDERER",
     "RENDERERS",
-    "AuthorityVerdict",
+    "AuthorityView",
+    "has_approval",
     "json_render",
-    "resolve",
+    "read_authority",
     "text",
+    "view",
+    "worklist_key",
 ]

@@ -1,225 +1,273 @@
-"""Resolving an entry's authority label into something safe to display.
+"""Turning one entry's authority into something safe to display.
 
-This module is the executable form of Mosaic's governing rule:
+This module used to own a five-value label vocabulary and a boolean,
+`is_authority`, that answered "does this count as approved?". Both are gone.
+`docs/authority.md` re-derived the fleet's approval mechanisms from live code
+and showed the premise was wrong: Icarus binds a wider digest than Janus *and
+enforces it on read*, while Janus deliberately does not enforce so that it
+stays out of the permission path. Ranking on "binds to bytes" put those two in
+the same bucket and separated Athena from Buzz for what turned out to be a
+deliberate safety property in Athena's favour.
 
-    The output must distinguish proposed / reviewed / janus-authorized /
-    executed / verified, and must NEVER collapse them into a generic
-    "approved".
+So the vocabulary is imported, never redefined here, and this module renders
+four orthogonal axes without summarising them:
 
-The rule exists because AI Town has *five* legitimate approval mechanisms
-(Buzz ``KIND_APPROVAL_GRANT``, Buzz workflow approval, Athena action
-approvals, Icarus ``approval_state``/``policy_digest``, and a Janus ruling)
-and only one of them — the Janus ruling — binds to exact bytes and can be
-re-checked afterwards. The danger was never that someone wires a reaction to
-an approval. It is that five legitimate approvals become *visually
-interchangeable*, and an operator can no longer tell which one carries
-authority. See ``docs/render.md``.
+    decider      who made the decision
+    attachment   what it is pinned to, and what checking it just produced
+    enforcement  who acts when the binding stops holding
+    lifecycle    where the thing is in its journey
 
-So the resolver holds one line, in one place, for every renderer:
+The operationally important pair is `enforcement` x `attachment`, and the
+contract answers it: `Authority.operator_action()` returns ACT for the one
+combination where the system is quietly wrong and nothing is stopping anyone
+(`reported` + `bytes-drifted`), DECIDE for a standing limitation nobody can
+re-check (`unbound`, `bytes-unverifiable`), and NONE otherwise.
 
-* Only Janus can render as authority.
-* Janus renders as authority only while its binding is known to still hold.
-* Everything else renders as a module-local fact wearing its owner's badge.
-* An unrecognised label is reported as unrecognised — never downgraded into
-  a generic affordance, which is exactly the collapse this rule forbids.
-
-Renderers consume a plain ``desk.v1`` mapping, not the contract classes. That
-is deliberate: the display layer must depend on the *document*, so any shell
-that later renders the document inherits these guarantees for free.
+This module computes no policy of its own. Every judgement below is the
+contract's, reconstructed from the document and asked directly, so the
+renderer and the contract cannot drift apart.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-#: The five authority labels, in lifecycle order. This tuple is the whole
-#: vocabulary; anything else is unrecognised, not a synonym.
-AUTHORITY_LABELS: tuple[str, ...] = (
-    "proposed",
-    "reviewed",
-    "janus-authorized",
-    "executed",
-    "verified",
+from mosaic.contracts.authority import (
+    Attachment,
+    Authority,
+    Decider,
+    Enforcement,
+    Lifecycle,
+    OperatorAction,
 )
 
-#: The module that owns rulings. Only an entry sourced from here can ever
-#: resolve to authority, no matter what label it carries.
-AUTHORITY_SOURCE = "janus"
-
-#: Words a rendered authority line must never contain. "Approved" is the
-#: collapse itself: it is the one word that reads as authority while saying
-#: nothing about which of the five mechanisms produced it. ``tests/cli``
-#: asserts no renderer emits these.
+#: Words that must never appear as a rendered authority state. "Approved" is
+#: the collapse itself: the one word that reads as authority while saying
+#: nothing about which mechanism produced it, what it is pinned to, or whether
+#: anything would stop you if it stopped holding.
 FORBIDDEN_RENDERINGS: frozenset[str] = frozenset({"approved", "approval", "ok to ship"})
 
-_BADGES: dict[str, str] = {
-    "proposed": "○",
-    "reviewed": "◐",
-    "janus-authorized": "✔",
-    "executed": "▶",
-    "verified": "◆",
+#: Left rule and glyph by operator action. The visual weight tracks WHAT A
+#: HUMAN MUST DO, and is deliberately anti-correlated with authority strength:
+#: a Janus ruling with a broken binding is loud, and an Icarus plan approval
+#: that correctly refused is quiet. Anything that made the strongest mechanism
+#: the loudest would be the banned ranking wearing a stylesheet.
+_ACTION_STYLE: dict[OperatorAction, tuple[str, str]] = {
+    OperatorAction.ACT: ("║", "⚑"),
+    OperatorAction.DECIDE: ("┆", "◈"),
+    OperatorAction.NONE: ("│", "·"),
+}
+
+_ATTACHMENT_GLOSS: dict[Attachment, str] = {
+    Attachment.BYTES_VERIFIED: "re-derived just now, matched",
+    Attachment.BYTES_DRIFTED: "re-derived, DID NOT match",
+    Attachment.BYTES_UNVERIFIABLE: "can never be re-checked by anyone",
+    Attachment.BYTES_UNCHECKED: "not checked this run",
+    Attachment.UNBOUND: "pinned to nothing at all",
+    Attachment.INTENT: "an action against a target, not its content",
+    Attachment.HANDLE: "a token or record id",
+    Attachment.STEP: "a position in a run",
+}
+
+_ENFORCEMENT_GLOSS: dict[Enforcement, str] = {
+    Enforcement.ENFORCED: "the module refuses to proceed on drift",
+    Enforcement.REPORTED: "the module reports drift but does not stop anyone",
+    Enforcement.NONE: "binds no content, so nothing can drift",
 }
 
 
+class UnreadableAuthority(Exception):
+    """An entry's authority block could not be read as the contract's shape."""
+
+
 @dataclass(frozen=True)
-class AuthorityVerdict:
-    """How one desk entry is allowed to present itself.
+class AuthorityView:
+    """One entry's authority, ready to display, with nothing summarised.
 
-    Attributes:
-        label: The raw authority label carried by the entry, verbatim.
-        badge: A single glyph for the label, or "?" when unrecognised.
-        display: The text a renderer prints. Never a generic affordance.
-        is_authority: True only for a Janus ruling whose binding is known to
-            still hold. Every other combination is False — including a Janus
-            ruling whose binding was never checked, because an unchecked
-            binding is a claim about the past, not a fact about now.
-        rechecked: Whether the binding was actually re-verified. ``None``
-            means nobody checked, which is distinct from "checked, broken".
-        note: Why this is not authority, when it is not. ``None`` when the
-            display line already says everything.
+    There is deliberately no `is_authority`, no score, and no ordering. Any
+    code reducing this to one boolean is the thing the contract and this
+    renderer exist to prevent.
     """
 
-    label: str
-    badge: str
-    display: str
-    is_authority: bool
-    rechecked: bool | None
-    note: str | None = None
+    authority: Authority | None
+    """The reconstructed contract object, or None when the entry's authority
+    block was unreadable."""
+
+    rule: str
+    glyph: str
+    headline: str
+    axes: tuple[str, ...]
+    action: OperatorAction
+    assures: bool
+    problem: str | None = None
+    """Set when the authority block could not be read. Reported, never guessed
+    into a known value."""
 
 
-def binding_kind(entry: dict) -> str | None:
-    """Return the kind of thing a Janus ruling is bound to, if stated.
+def _member(enum_cls, raw, field: str):
+    try:
+        return enum_cls(str(raw))
+    except ValueError as exc:
+        raise UnreadableAuthority(
+            f"{field}={raw!r} is not one of {[m.value for m in enum_cls]}"
+        ) from exc
 
-    The adapter passes Janus's own ``binding`` through verbatim as
-    ``{kind, locator, sha256}``. A flat ``binding_kind`` is accepted as well,
-    because a caller assembling a document by hand should not have to nest one
-    field. Returns None when nothing said.
 
-    ``"none"`` is a real, common value — on the live ledger it is 4 of 13
-    gates — and it is not the same as "not stated". It means Janus recorded a
-    ruling bound to nothing at all.
+def read_authority(entry: dict) -> Authority | None:
+    """Rebuild the contract's `Authority` from a serialized desk entry.
+
+    Returns None when the entry carries no approval at all. That is the common
+    case — most desk entries are work, evidence or conversation, and nothing
+    ever ruled on them — and it is emphatically NOT a failed check. Collapsing
+    "no approval was ever sought" into "an approval could not be verified" is
+    the same absent-versus-broken confusion this renderer exists to prevent,
+    and it would fire on the majority of a real desk.
+
+    `compose.to_document` emits the desk through `dataclasses.asdict`, so the
+    authority block arrives as a nested mapping whose values are `StrEnum`
+    members before a JSON round-trip and plain strings after one. Both are
+    accepted; neither is guessed at.
+
+    Raises:
+        UnreadableAuthority: if the block is missing, is not a mapping, or
+            carries a value outside the contract's vocabulary. Never falls back
+            to a default — inventing an authority value is strictly worse than
+            reporting that one could not be read.
     """
-    binding = entry.get("binding")
-    if isinstance(binding, dict) and binding.get("kind"):
-        return str(binding["kind"]).strip().lower()
-    flat = entry.get("binding_kind")
-    return str(flat).strip().lower() if flat else None
+    raw = entry.get("authority")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise UnreadableAuthority(f"authority is a {type(raw).__name__}, not an object")
 
+    missing = {"decider", "attachment", "enforcement", "lifecycle"} - set(raw)
+    if missing:
+        raise UnreadableAuthority(f"authority is missing {sorted(missing)}")
 
-def resolve(entry: dict) -> AuthorityVerdict:
-    """Resolve one ``desk.v1`` entry into a display-safe authority verdict.
-
-    Args:
-        entry: A ``desk.v1`` entry mapping. Reads ``authority`` (the label),
-            ``source`` (owning module), and — for Janus entries only —
-            ``binding_holds``, a tri-state: True (re-checked, still binds),
-            False (re-checked, no longer binds), or absent/None (not checked).
-
-    Returns:
-        An :class:`AuthorityVerdict`. This function never raises on a
-        malformed label; it reports the malformation, because a renderer that
-        crashes on one bad entry hides the other forty.
-    """
-    label = str(entry.get("authority") or "").strip().lower()
-    source = str(entry.get("source") or "").strip().lower()
-
-    if label not in AUTHORITY_LABELS:
-        shown = label or "(missing)"
-        return AuthorityVerdict(
-            label=label,
-            badge="?",
-            display=f"unrecognised authority label {shown!r}",
-            is_authority=False,
-            rechecked=None,
-            note=(
-                "Not one of the five known labels. Reported rather than "
-                "guessed — mapping an unknown label onto a known one is the "
-                "collapse this resolver exists to prevent."
-            ),
-        )
-
-    badge = _BADGES[label]
-
-    if label != "janus-authorized":
-        # A module-local fact. It is true, it is useful, and it is not
-        # authority — so it renders wearing its owner's badge and nothing more.
-        return AuthorityVerdict(
-            label=label,
-            badge=badge,
-            display=label,
-            is_authority=False,
-            rechecked=None,
-        )
-
-    if source != AUTHORITY_SOURCE:
-        # Some other module claims a Janus ruling. It may well be telling the
-        # truth, but it cannot be re-checked from here, so it renders as a
-        # claim about Janus rather than as a ruling by Janus.
-        return AuthorityVerdict(
-            label=label,
-            badge="?",
-            display=f"claims janus-authorized (unverifiable: sourced from {source or 'unknown'})",
-            is_authority=False,
-            rechecked=None,
-            note=(
-                "Only an entry sourced from Janus can render as authority. "
-                "Follow the canonical link and re-check the ruling there."
-            ),
-        )
-
-    # Checked before binding_holds deliberately. A ruling bound to nothing
-    # cannot be re-checked against anything, ever — so no field claiming the
-    # binding "holds" can make it authority. The conservative order is the
-    # correct one: the absence of something to check beats any claim about
-    # having checked it.
-    if binding_kind(entry) == "none":
-        return AuthorityVerdict(
-            label=label,
-            badge="⊘",
-            display="janus-authorized (bound to nothing — no binding to re-check, ever)",
-            is_authority=False,
-            rechecked=False,
-            note=(
-                "A human ruled, but the ruling was recorded against no "
-                "artifact. It cannot be shown to still cover anything. This is "
-                "a standing condition, not a gap someone can close by looking."
-            ),
-        )
-
-    binding_holds = entry.get("binding_holds")
-
-    if binding_holds is True:
-        # The only path to authority in the whole system.
-        return AuthorityVerdict(
-            label=label,
-            badge=badge,
-            display="janus-authorized (binding re-checked, still holds)",
-            is_authority=True,
-            rechecked=True,
-        )
-
-    if binding_holds is False:
-        return AuthorityVerdict(
-            label=label,
-            badge="⚠",
-            display="AUTHORIZATION STALE — a human ruled, but the bytes changed since",
-            is_authority=False,
-            rechecked=True,
-            note=(
-                "A Janus ruling binds exact bytes. The binding no longer "
-                "holds, so the ruling does not cover what is there now."
-            ),
-        )
-
-    return AuthorityVerdict(
-        label=label,
-        badge="?",
-        display="janus-authorized (binding NOT re-checked)",
-        is_authority=False,
-        rechecked=None,
-        note=(
-            "Janus recorded a ruling against something, but nothing "
-            "re-verified the binding for this view. Unlike a ruling bound to "
-            "nothing, this one can be settled — re-check it in Janus."
-        ),
+    return Authority(
+        decider=_member(Decider, raw["decider"], "decider"),
+        attachment=_member(Attachment, raw["attachment"], "attachment"),
+        enforcement=_member(Enforcement, raw["enforcement"], "enforcement"),
+        lifecycle=_member(Lifecycle, raw["lifecycle"], "lifecycle"),
+        mechanism=str(raw.get("mechanism") or "unstated mechanism"),
+        meaning=str(raw.get("meaning") or ""),
     )
+
+
+def _headline(authority: Authority) -> str:
+    """The one line above the axes. Never a bare verdict word.
+
+    The lifecycle value is always paired with its decider, because `authorized`
+    alone is the collapse: it says a decision happened without saying who made
+    it or what it is pinned to.
+    """
+    lifecycle = authority.lifecycle.value
+    # Displayed spelling only. Nothing in code depends on this string, and the
+    # contract's value stays neutral until Kevin rules on the rename (gates
+    # gf430f95f410 / gda8569d0227).
+    if (
+        authority.lifecycle is Lifecycle.AUTHORIZED
+        and authority.decider is Decider.HUMAN
+        and authority.mechanism.startswith("janus.")
+    ):
+        lifecycle = "janus-authorized"
+    return f"{lifecycle} · decided by {authority.decider.value}"
+
+
+def view(entry: dict) -> AuthorityView:
+    """Resolve one desk entry into a display-safe view of its authority.
+
+    Three outcomes, deliberately distinct:
+
+    * **No approval** — nothing ever ruled on this entry. The common case.
+      Renders plainly, needs nothing from anyone, and must never look like a
+      check that failed.
+    * **An approval** — rendered across all four axes, with the operator
+      action the contract computes.
+    * **An unreadable approval block** — reported as unreadable and sorted as
+      needing a human decision, because an entry Mosaic cannot describe is
+      exactly the sort of thing a person should look at. Never guessed into a
+      known value.
+
+    Never raises.
+    """
+    try:
+        authority = read_authority(entry)
+    except UnreadableAuthority as exc:
+        rule, _ = _ACTION_STYLE[OperatorAction.DECIDE]
+        return AuthorityView(
+            authority=None,
+            rule=rule,
+            glyph="?",
+            headline="authority block unreadable",
+            axes=(f"! {exc}",),
+            action=OperatorAction.DECIDE,
+            assures=False,
+            problem=str(exc),
+        )
+
+    if authority is None:
+        rule, glyph = _ACTION_STYLE[OperatorAction.NONE]
+        return AuthorityView(
+            authority=None,
+            rule=rule,
+            glyph=glyph,
+            headline="",
+            axes=(),
+            action=OperatorAction.NONE,
+            assures=True,
+            problem=None,
+        )
+
+    action = authority.operator_action()
+    rule, glyph = _ACTION_STYLE[action]
+
+    axes = (
+        f"attached to: {authority.attachment.value} ({_ATTACHMENT_GLOSS[authority.attachment]})",
+        f"on drift:    {authority.enforcement.value} ({_ENFORCEMENT_GLOSS[authority.enforcement]})",
+        f"mechanism:   {authority.mechanism}",
+    )
+
+    return AuthorityView(
+        authority=authority,
+        rule=rule,
+        glyph=glyph,
+        headline=_headline(authority),
+        axes=axes,
+        action=action,
+        assures=authority.assures(),
+    )
+
+
+def has_approval(entry: dict) -> bool:
+    """Whether this entry carries an approval at all, readable or not."""
+    return entry.get("authority") is not None
+
+
+#: Worklist order: what a human must do, hardest first. This is NOT an
+#: authority ranking and must never be labelled as importance or priority —
+#: see docs/authority.md. A reader who learns that top-means-important will
+#: conclude that top-means-trustworthy, which rebuilds the binary in the one
+#: place nobody thinks to look for it.
+WORKLIST_ORDER: dict[OperatorAction, int] = {
+    OperatorAction.ACT: 0,
+    OperatorAction.DECIDE: 1,
+    OperatorAction.NONE: 2,
+}
+
+
+def worklist_key(entry: dict) -> tuple[int, str]:
+    """Sort key for the worklist view: action first, then most recent.
+
+    Recency breaks ties so that no secondary sort can smuggle an authority
+    ordering into the tiebreak.
+    """
+    resolved = view(entry)
+    return (WORKLIST_ORDER[resolved.action], _negated_timestamp(entry))
+
+
+def _negated_timestamp(entry: dict) -> str:
+    # ISO-8601 sorts lexicographically; invert each character's ordinal so a
+    # plain ascending sort puts the most recent first without a second pass.
+    stamp = str(entry.get("timestamp") or "")
+    return "".join(chr(0x10FFFF - ord(c)) if ord(c) < 0x10FFFF else c for c in stamp)

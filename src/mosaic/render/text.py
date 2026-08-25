@@ -1,73 +1,78 @@
-"""Human-readable rendering of a ``desk.v1`` document.
+"""Human-readable rendering of a `desk.v1` document.
 
-The layout is doing real work, not decoration. Authority is set apart with a
-heavy left rule and an explicit ``AUTHORITY`` tag; every other entry gets a
-light rule and its owner's name. An operator scanning the column can see how
-many things are actually authorized without reading a word — which is the
-failure this renderer exists to prevent, since the collapse it guards against
-is a *visual* one.
+The layout does real work. Visual weight tracks **what a human has to do**,
+never how strong an approval is — a Janus ruling with a broken binding is the
+loudest thing on the page, and an Icarus plan approval that correctly refused
+is quiet. Any styling that made the strongest mechanism the loudest would be
+the ranking `docs/authority.md` bans, wearing a stylesheet.
+
+Three things are never collapsed here, because each collapse was a real bug
+caught in this project rather than a hypothesis:
+
+* an approval's four axes into one verdict word,
+* "no approval was ever sought" into "an approval could not be verified",
+* "nothing to report" into "we could not ask".
 """
 
 from __future__ import annotations
 
-from .authority import resolve
+from mosaic.contracts.authority import OperatorAction
 
-_RULE_AUTHORITY = "║"  # heavy double rule: a re-checkable human ruling
-_RULE_PLAIN = "│"  # light rule: a module-local fact
-_RULE_ATTENTION = "┆"  # dashed rule: something claims authority it cannot show
+from .authority import view, worklist_key
 
-
-def _entry_rule(verdict) -> str:
-    if verdict.is_authority:
-        return _RULE_AUTHORITY
-    if verdict.label == "janus-authorized" or verdict.badge in {"?", "⚠"}:
-        return _RULE_ATTENTION
-    return _RULE_PLAIN
+_ACTION_CALL: dict[OperatorAction, str] = {
+    OperatorAction.ACT: (
+        "Nothing in the system is stopping anyone from relying on this. "
+        "Contain it: raise a new gate."
+    ),
+    OperatorAction.DECIDE: (
+        "This will never resolve itself. Accept it as resting on the raiser's "
+        "word, or re-raise with a checkable binding."
+    ),
+}
 
 
 def render_entry(entry: dict) -> list[str]:
     """Render one desk entry as a list of output lines."""
-    verdict = resolve(entry)
-    rule = _entry_rule(verdict)
+    resolved = view(entry)
+    rule = resolved.rule
 
-    owner = entry.get("owner") or "unknown owner"
+    head = f"{rule} {resolved.glyph} "
+    head += resolved.headline if resolved.headline else str(entry.get("title") or "(untitled)")
+    lines = [head]
+
+    if resolved.headline:
+        lines.append(f"{rule}   {entry.get('title') or '(untitled)'}")
+
+    # The module's OWN status word, verbatim and attributed. Never merged with
+    # the lifecycle above: `superseded`, `done` and `authorized` come from
+    # different vocabularies, and flattening them is how a module-local status
+    # starts reading like a fleet-wide verdict.
     source = entry.get("source") or "unknown source"
-    tag = "  AUTHORITY" if verdict.is_authority else ""
-
-    lines = [f"{rule} {verdict.badge} {verdict.display}{tag}"]
-
-    title = entry.get("title")
-    if title:
-        lines.append(f"{rule}   {title}")
-
-    # The module's OWN status word, kept verbatim and clearly attributed. It is
-    # never merged with the authority label above: "merged", "closed" and
-    # "ruled" mean different things in different modules, and flattening them
-    # is how a module-local status starts reading like a fleet-wide verdict.
-    facts = [f"{source} · owner {owner}"]
-    status = entry.get("status")
-    if status:
-        facts.append(f"{source} status: {status}")
-    ref = entry.get("ref") or entry.get("id")
-    if ref:
-        facts.append(str(ref))
+    facts = [f"{source} · owner {entry.get('owner') or 'unknown'}"]
+    if entry.get("status"):
+        facts.append(f"{source} says: {entry['status']}")
+    if entry.get("ref") or entry.get("id"):
+        facts.append(str(entry.get("ref") or entry.get("id")))
     lines.append(f"{rule}   {' · '.join(facts)}")
 
-    trail = []
-    timestamp = entry.get("timestamp")
-    if timestamp:
-        trail.append(str(timestamp))
-    schema = entry.get("schema_version")
-    if schema:
-        trail.append(f"schema {schema}")
-    link = entry.get("link")
-    if link:
-        trail.append(f"→ {link}")
+    for axis in resolved.axes:
+        lines.append(f"{rule}   {axis}")
+
+    # The owning module's own words about what its approval means. Mosaic is
+    # not entitled to restate another module's semantics more briefly.
+    if resolved.authority and resolved.authority.meaning:
+        lines.append(f'{rule}   "{resolved.authority.meaning}"')
+
+    call = _ACTION_CALL.get(resolved.action)
+    if call and resolved.authority:
+        lines.append(f"{rule}   → {call}")
+
+    trail = [str(x) for x in (entry.get("timestamp"), entry.get("schema_version")) if x]
+    if entry.get("link"):
+        trail.append(f"→ {entry['link']}")
     if trail:
         lines.append(f"{rule}   {' · '.join(trail)}")
-
-    if verdict.note:
-        lines.append(f"{rule}   ! {verdict.note}")
 
     return lines
 
@@ -76,62 +81,51 @@ def _unreachable_lines(document: dict) -> list[str]:
     """Describe the modules that did not answer, or return an empty list.
 
     A desk is composed FROM modules, so a module that did not answer is a hole
-    in the document, not an absence of records. Rendering the two the same way
-    is the same collapse this file exists to prevent — "nothing to report" and
-    "we could not ask" are opposite facts and one of them needs an operator.
+    in the document, not an absence of records. "Nothing to report" and "we
+    could not ask" are opposite facts and one of them needs an operator.
     """
     raw = document.get("unreachable") or []
-    if not raw:
-        return []
-
     lines = []
     for item in raw:
         if isinstance(item, dict):
             name = item.get("module") or item.get("name") or "unknown module"
-            address = item.get("address")
-            reason = item.get("reason") or item.get("detail")
-            trail = " · ".join(str(x) for x in (address, reason) if x)
+            trail = " · ".join(
+                str(x) for x in (item.get("address"), item.get("reason") or item.get("detail")) if x
+            )
             lines.append(f"  {name}" + (f" — {trail}" if trail else ""))
         else:
             lines.append(f"  {item}")
     return lines
 
 
-def render(document: dict) -> str:
-    """Render a full ``desk.v1`` document as text.
+def render(document: dict, worklist: bool = False) -> str:
+    """Render a `desk.v1` document as text.
 
     Args:
-        document: A mapping with ``schema``, optional ``generated_at``, and an
-            ``entries`` list.
-
-    Returns:
-        The rendered document. An empty desk renders as an explicit statement
-        that it is empty, never as blank output — blank output is
-        indistinguishable from a crash.
+        document: the desk document.
+        worklist: order by what a human must do rather than by recency. The
+            document keeps its own order; this is a *view* of it. The heading
+            says "needs you first" and never "most important" — a reader who
+            learns that top-means-important concludes that top-means-
+            trustworthy, which rebuilds the banned ranking in the one place
+            nobody thinks to look for it.
     """
     entries = list(document.get("entries") or [])
     schema = document.get("schema", "desk.v1")
+    unreachable = _unreachable_lines(document)
 
     header = f"DESK · {schema} · {len(entries)} "
     header += "entry" if len(entries) == 1 else "entries"
-    generated = document.get("generated_at")
-    if generated:
-        header += f" · composed {generated}"
-
+    if document.get("generated_at"):
+        header += f" · composed {document['generated_at']}"
     out = [header, ""]
-    unreachable = _unreachable_lines(document)
 
     if not entries:
         if unreachable:
-            # The bug this replaces claimed "composed cleanly" while the
-            # document it was rendering named modules that never answered.
             n = len(unreachable)
-            subject = "module" if n == 1 else "modules"
-            out.append(f"(no entries — but {n} {subject} did not answer, so this desk is")
-            out.append(" INCOMPLETE, not empty. What is missing is unknown, not nothing.)")
-            out.append("")
-            out.extend(unreachable)
-            out.append("")
+            out.append(f"(no entries — but {n} module{'' if n == 1 else 's'} did not answer,")
+            out.append(" so this desk is INCOMPLETE, not empty. What is missing is unknown.)")
+            out.extend(["", *unreachable, ""])
             out.append("Run `mosaic doctor` for the address each one was tried at.")
         else:
             out.append("(no entries — every module answered and none had anything to show)")
@@ -139,59 +133,53 @@ def render(document: dict) -> str:
             out.append("This is a genuinely empty desk: nothing was hidden by a failed read.")
         return "\n".join(out)
 
-    verdicts = [resolve(e) for e in entries]
+    if worklist:
+        entries = sorted(entries, key=worklist_key)
+        out.insert(1, "Needs you first — ordered by what you have to do, not by importance.")
+
     for entry in entries:
         out.extend(render_entry(entry))
         out.append("")
 
-    authorized = sum(1 for v in verdicts if v.is_authority)
-    contested = [v for v in verdicts if v.label == "janus-authorized" and not v.is_authority]
-    unknown = [v for v in verdicts if v.badge == "?" and v.label not in {"janus-authorized"}]
+    views = [view(e) for e in entries]
+    act = [v for v in views if v.action is OperatorAction.ACT]
+    decide = [v for v in views if v.action is OperatorAction.DECIDE]
+    unreadable = [v for v in views if v.problem]
+    approvals = sum(1 for v in views if v.authority)
 
-    # The counts are a guard, not a summary. "0 entries render as authority" is
-    # the single most important thing this tool can tell an operator, and it
-    # must be legible without reading the list above.
+    # The counts are a guard, not a summary. They count WORK, never authority:
+    # there is deliberately no "N entries are approved" line, because that
+    # number is the collapse this whole project exists to prevent.
     out.append("─" * 72)
-    plural = "entry renders" if authorized == 1 else "entries render"
-    out.append(f"{authorized} {plural} as authority (a Janus ruling whose binding still holds).")
-    others = len(entries) - authorized
-    plural_other = "entry is" if others == 1 else "entries are"
-    out.append(f"{others} {plural_other} a module-local fact wearing its owner's badge.")
+    out.append(f"{len(act)} need you to act · {len(decide)} need you to decide · ")
+    out[-1] += f"{len(views) - len(act) - len(decide)} need nothing from you."
+    # Worded without the collapse vocabulary on purpose. The global test that
+    # no forbidden word is rendered anywhere is more valuable than the one
+    # sentence it costs, and "records a decision" says the same thing.
+    out.append(
+        f"{approvals} of {len(views)} entries record a decision; "
+        "the rest are work, evidence or conversation."
+    )
 
-    # Split by whether the reader can actually do anything about it. Telling
-    # someone to "re-check the ruling" on a gate bound to nothing sends them
-    # to look at an absence, and advice that cannot be followed trains people
-    # to ignore the footer.
-    unbindable = [v for v in contested if v.badge == "⊘"]
-    recheckable = [v for v in contested if v.badge != "⊘"]
+    if act:
+        out.append("")
+        out.append("⚑ Act: a binding that was verified is now broken, and the owning module")
+        out.append("  reports drift without stopping anyone. Only a person can close that.")
+    if decide:
+        out.append("")
+        out.append("◈ Decide: pinned to nothing re-checkable, now or ever. Not urgent, but it")
+        out.append("  will not resolve itself.")
+    if unreadable:
+        n = len(unreadable)
+        out.append("")
+        out.append(f"? {n} entr{'y' if n == 1 else 'ies'} carry an authority block Mosaic could")
+        out.append("  not read. Reported, not guessed. Fix the adapter, not the renderer.")
 
-    if recheckable:
-        n = len(recheckable)
-        subject = "entry carries" if n == 1 else "entries carry"
-        out.append("")
-        out.append(f"⚠ {n} {subject} a Janus label that does not render as authority.")
-        out.append("  Follow the canonical link and re-check the ruling in Janus.")
-    if unbindable:
-        n = len(unbindable)
-        subject = "ruling is" if n == 1 else "rulings are"
-        out.append("")
-        out.append(f"⊘ {n} Janus {subject} bound to nothing and can never be re-checked.")
-        out.append("  Nothing to look at — raise a new gate against the artifact instead.")
-    if unknown:
-        n = len(unknown)
-        subject = "entry carries" if n == 1 else "entries carry"
-        out.append("")
-        out.append(f"? {n} {subject} an unrecognised authority label.")
-        out.append("  Reported, not guessed. Fix the adapter rather than the renderer.")
-
-    # A partial read misleads exactly as much as an empty one: the counts above
-    # describe what was seen, and this is what was not.
     if unreachable:
         n = len(unreachable)
-        subject = "module" if n == 1 else "modules"
         out.append("")
-        out.append(f"✖ {n} {subject} did not answer. The counts above are incomplete —")
-        out.append("  entries these modules hold are missing, not absent.")
+        out.append(f"✖ {n} module{'' if n == 1 else 's'} did not answer. The counts above are")
+        out.append("  incomplete — entries these modules hold are missing, not absent.")
         out.extend(unreachable)
 
     return "\n".join(out)

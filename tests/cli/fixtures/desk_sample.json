@@ -5,40 +5,77 @@
     {
       "source": "minerva",
       "owner": "claude-2f",
-      "title": "Vulcan requires a seat label for every hosted call",
+      "title": "Vulcan requires a seat label for hosted calls",
       "status": "supported",
-      "authority": "verified",
       "timestamp": "2026-08-24T18:02:11Z",
-      "schema_version": "claim.v2",
+      "schema_version": "minerva.claim.v2",
       "ref": "mnv-0231",
-      "link": "http://127.0.0.1:8765/claims/mnv-0231"
+      "link": "http://127.0.0.1:8765/claims/mnv-0231",
+      "authority": null
     },
     {
       "source": "athena",
       "owner": "codex",
       "title": "Wire the Mosaic desk adapters",
       "status": "in_review",
-      "authority": "reviewed",
       "timestamp": "2026-08-24T20:15:00Z",
-      "schema_version": "issue.v1",
+      "schema_version": "athena.issue.v1",
       "ref": "ATH-412",
-      "link": "http://127.0.0.1:8300/issues/ATH-412"
+      "link": "http://100.125.80.91:8300/aegis/issues/412",
+      "authority": null
+    },
+    {
+      "source": "icarus",
+      "owner": "kevin",
+      "title": "Nightly sweep dispatch envelope",
+      "status": "approved",
+      "timestamp": "2026-08-24T22:40:00Z",
+      "schema_version": "icarus.envelope.v1",
+      "ref": "ICR-88",
+      "link": "icarus://envelopes/ICR-88",
+      "authority": {
+        "decider": "human",
+        "attachment": "bytes-verified",
+        "enforcement": "enforced",
+        "lifecycle": "authorized",
+        "mechanism": "icarus.plan_approval",
+        "meaning": "The plan digest is re-derived on read; a mismatch invalidates the source."
+      }
+    },
+    {
+      "source": "icarus",
+      "owner": "kevin",
+      "title": "Migration runner envelope",
+      "status": "invalidated",
+      "timestamp": "2026-08-23T11:00:00Z",
+      "schema_version": "icarus.envelope.v1",
+      "ref": "ICR-71",
+      "link": "icarus://envelopes/ICR-71",
+      "authority": {
+        "decider": "human",
+        "attachment": "bytes-drifted",
+        "enforcement": "enforced",
+        "lifecycle": "authorized",
+        "mechanism": "icarus.plan_approval",
+        "meaning": "The plan digest is re-derived on read; a mismatch invalidates the source."
+      }
     },
     {
       "source": "janus",
       "owner": "kevin",
-      "title": "Create the public Mosaic repository",
+      "title": "Merge PR #2 at the post-review head",
       "status": "approved",
-      "authority": "janus-authorized",
-      "binding_holds": true,
       "timestamp": "2026-08-24T21:00:00Z",
-      "schema_version": "gate.v1",
-      "ref": "jns-0007",
-      "link": "janus://gates/jns-0007",
-      "binding": {
-        "kind": "git",
-        "locator": "repo@jns-0007",
-        "sha256": "3f1c000000000000000000000000000000000000000000000000000000000000"
+      "schema_version": "janus.gate.v1",
+      "ref": "g3689e1cf957",
+      "link": "janus show g3689e1cf957",
+      "authority": {
+        "decider": "human",
+        "attachment": "bytes-verified",
+        "enforcement": "reported",
+        "lifecycle": "authorized",
+        "mechanism": "janus.ruling",
+        "meaning": "Janus records pending authority; it does not grant authority."
       }
     },
     {
@@ -46,16 +83,17 @@
       "owner": "kevin",
       "title": "Ship the adapter protocol",
       "status": "approved",
-      "authority": "janus-authorized",
-      "binding_holds": false,
       "timestamp": "2026-08-23T09:30:00Z",
-      "schema_version": "gate.v1",
-      "ref": "jns-0004",
-      "link": "janus://gates/jns-0004",
-      "binding": {
-        "kind": "git",
-        "locator": "repo@jns-0004",
-        "sha256": "3f1c000000000000000000000000000000000000000000000000000000000000"
+      "schema_version": "janus.gate.v1",
+      "ref": "g4deae14ca3d",
+      "link": "janus show g4deae14ca3d",
+      "authority": {
+        "decider": "human",
+        "attachment": "bytes-drifted",
+        "enforcement": "reported",
+        "lifecycle": "authorized",
+        "mechanism": "janus.ruling",
+        "meaning": "Janus records pending authority; it does not grant authority."
       }
     },
     {
@@ -63,27 +101,72 @@
       "owner": "kevin",
       "title": "Adopt the round-table review model",
       "status": "approved",
-      "authority": "janus-authorized",
-      "binding": {
-        "kind": "none",
-        "locator": null,
-        "sha256": null
-      },
       "timestamp": "2026-08-15T14:00:00Z",
-      "schema_version": "gate.v1",
-      "ref": "jns-0002",
-      "link": "janus://gates/jns-0002"
+      "schema_version": "janus.gate.v1",
+      "ref": "g6b5df553432",
+      "link": "janus show g6b5df553432",
+      "authority": {
+        "decider": "human",
+        "attachment": "unbound",
+        "enforcement": "reported",
+        "lifecycle": "authorized",
+        "mechanism": "janus.ruling",
+        "meaning": "Janus records pending authority; it does not grant authority."
+      }
     },
     {
-      "source": "icarus",
-      "owner": "claude-0d",
-      "title": "Dispatch envelope for the nightly sweep",
-      "status": "held",
-      "authority": "proposed",
-      "timestamp": "2026-08-24T22:40:00Z",
-      "schema_version": "envelope.v1",
-      "ref": "ICR-88",
-      "link": "icarus://envelopes/ICR-88"
+      "source": "janus",
+      "owner": "kevin",
+      "title": "An earlier call, since replaced",
+      "status": "superseded",
+      "timestamp": "2026-08-10T08:00:00Z",
+      "schema_version": "janus.gate.v1",
+      "ref": "g0000000dead",
+      "link": "janus show g0000000dead",
+      "authority": {
+        "decider": "human",
+        "attachment": "bytes-unchecked",
+        "enforcement": "reported",
+        "lifecycle": "authorized",
+        "mechanism": "janus.ruling",
+        "meaning": "Janus records pending authority; it does not grant authority."
+      }
+    },
+    {
+      "source": "buzz",
+      "owner": "kimi",
+      "title": "Approve the nightly workflow step",
+      "status": "granted",
+      "timestamp": "2026-08-22T16:00:00Z",
+      "schema_version": "buzz.kind.46030",
+      "ref": "46030/abc",
+      "link": "buzz://events/abc",
+      "authority": {
+        "decider": "human",
+        "attachment": "handle",
+        "enforcement": "none",
+        "lifecycle": "authorized",
+        "mechanism": "buzz.kind.46030",
+        "meaning": "A single-use, time-limited grant naming an approval token."
+      }
+    },
+    {
+      "source": "athena",
+      "owner": "kevin",
+      "title": "Retry the gated write on issue 412",
+      "status": "consumed",
+      "timestamp": "2026-08-22T10:00:00Z",
+      "schema_version": "athena.approval.v1",
+      "ref": "ATH-AR-9",
+      "link": "http://100.125.80.91:8300/aegis/approvals/9",
+      "authority": {
+        "decider": "human",
+        "attachment": "intent",
+        "enforcement": "none",
+        "lifecycle": "authorized",
+        "mechanism": "athena.approval_request",
+        "meaning": "The operator approves an intent; the agent's retry supplies the change and re-validates."
+      }
     }
   ]
 }
