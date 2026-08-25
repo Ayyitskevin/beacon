@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+#
+# Run every gate and exit non-zero if ANY of them fails.
+#
+# Use it as the left side of a commit:
+#
+#     scripts/gate && git commit -m "..."
+#
+# WHY THIS EXISTS. Five times in one session a gate failed and the work proceeded
+# anyway, every time because a shell construct's failure mode is "quietly does
+# nothing":
+#
+#   `a && b`         b silently skipped when a fails for an unrelated reason
+#   `ruff | tail -1` the pipe's exit status is tail's, so a failing ruff reads as 0
+#   `ls | head -3`   truncated a listing and a present file looked missing
+#   `str.replace()`  no-op'd against text that was not there, reporting nothing
+#   `a ; b`          b runs regardless — this one let an unformatted commit through
+#
+# None of those were in the code under test. All were in the tooling that was
+# supposed to be checking it. The code failed loudly; the harness failed silently.
+#
+# So this script has no pipes into anything that consumes an exit status, no `;`
+# chaining between checks, and `set -euo pipefail` on top. Each check prints its own
+# name and its own status, so a passing run is legible rather than merely quiet.
+#
+# Run one stage only:  scripts/gate lint | scripts/gate format | scripts/gate test
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+PY=".venv/bin/python"
+RUFF=".venv/bin/ruff"
+
+if [ ! -x "$PY" ]; then
+    echo "gate: no .venv in $(pwd) -- create one and install this worktree editable." >&2
+    echo "gate: importing another checkout's copy is the false-green this repo has hit." >&2
+    exit 2
+fi
+
+stage="${1:-all}"
+failed=0
+
+run() {
+    local name="$1"; shift
+    if "$@"; then
+        printf '  ok    %s\n' "$name"
+    else
+        printf '  FAIL  %s\n' "$name"
+        failed=1
+    fi
+}
+
+echo "gate: $(git rev-parse --abbrev-ref HEAD) @ $(git rev-parse --short HEAD)"
+
+# `run` must not abort the script on a failure, so the remaining checks still report.
+set +e
+case "$stage" in
+    lint)   run "ruff check"        "$RUFF" check src tests ;;
+    format) run "ruff format"       "$RUFF" format --check src tests ;;
+    test)   run "pytest"            "$PY" -m pytest -q ;;
+    all)
+        run "ruff check"  "$RUFF" check src tests
+        run "ruff format" "$RUFF" format --check src tests
+        run "pytest"      "$PY" -m pytest -q
+        ;;
+    *) echo "gate: unknown stage '$stage' (lint|format|test|all)" >&2; exit 2 ;;
+esac
+set -e
+
+if [ "$failed" -ne 0 ]; then
+    echo "gate: FAILED -- not safe to commit." >&2
+    exit 1
+fi
+
+echo "gate: all checks passed."
