@@ -37,17 +37,38 @@ cannot drift apart on what counts as authority — a test asserts they agree.
 | `ref` / `id` | The module-local identifier. |
 | `link` | Canonical link back to the owning module. |
 | `authority` | The authority label. |
+| `binding` | Janus entries only. Passed through verbatim from Janus as `{kind, locator, sha256}`. |
 | `binding_holds` | Janus entries only. Tri-state — see below. |
 
-`binding_holds` is tri-state and the three states are **not** interchangeable:
+### The four Janus states
 
-- `true` — re-checked, still binds
-- `false` — re-checked, no longer binds
-- absent / `null` — nobody checked
+A Janus entry resolves into one of four renderings, and none of them is
+interchangeable with another:
 
-Only a literal `true` counts. A truthy string like `"yes"` does not, and a
-test asserts it does not: the difference between "we checked" and "something
-was there" is the entire value of the field.
+| State | Source | Renders |
+|---|---|---|
+| Re-checked, still binds | `binding_holds: true` | `✔` **authority** |
+| Re-checked, no longer binds | `binding_holds: false` | `⚠` stale |
+| Bound to something, nobody checked | `binding.kind` set, `binding_holds` absent | `?` unchecked |
+| Bound to **nothing** | `binding.kind == "none"` | `⊘` never re-checkable |
+
+Only a literal `true` for `binding_holds` counts. A truthy string like `"yes"`
+does not, and a test asserts it does not: the difference between "we checked"
+and "something was there" is the entire value of the field.
+
+`binding.kind == "none"` is checked **before** `binding_holds`, deliberately.
+A ruling bound to nothing cannot be re-checked against anything ever, so no
+field claiming the binding "holds" can promote it to authority. The absence of
+something to check beats any claim about having checked it.
+
+This is not a hypothetical case: on the live Janus ledger the distribution is
+`git: 8, none: 4, file: 1` — roughly a third of rulings are bound to nothing.
+Collapsing that into "nobody checked yet" would tell an operator to go look at
+an absence, so the footer splits its advice by what the reader can actually
+do: re-check the ruling, versus raise a new gate against the artifact.
+
+A flat `binding_kind` key is accepted as an alias so a hand-written document
+need not nest one field; the nested form wins if both appear.
 
 ## The rule
 
@@ -66,7 +87,7 @@ So the layout does real work:
 | Rule | Meaning |
 |---|---|
 | `║` heavy | Renders as authority. Carries an explicit `AUTHORITY` tag. |
-| `┆` dashed | Claims authority it cannot demonstrate — stale, unchecked, or asserted by a module that does not own rulings. |
+| `┆` dashed | Claims authority it cannot demonstrate — stale, unchecked, bound to nothing, or asserted by a module that does not own rulings. |
 | `│` light | A module-local fact wearing its owner's badge. |
 
 An operator can count the heavy rules without reading a word. That is the

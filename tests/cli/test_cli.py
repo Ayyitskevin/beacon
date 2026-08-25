@@ -16,7 +16,7 @@ class TestRender:
     def test_renders_a_file(self, capsys):
         assert main(["render", str(FIXTURE)]) == EXIT_OK
         out = capsys.readouterr().out
-        assert "DESK · desk.v1 · 5 entries" in out
+        assert "DESK · desk.v1 · 6 entries" in out
         assert "1 entry renders as authority" in out
 
     def test_renders_stdin(self, capsys, monkeypatch):
@@ -29,7 +29,7 @@ class TestRender:
     def test_json_format_is_valid_json(self, capsys):
         assert main(["render", str(FIXTURE), "--format", "json"]) == EXIT_OK
         parsed = json.loads(capsys.readouterr().out)
-        assert parsed["authority_summary"]["total"] == 5
+        assert parsed["authority_summary"]["total"] == 6
         assert parsed["authority_summary"]["renders_as_authority"] == 1
 
     def test_the_sample_desk_exercises_every_authority_path(self, capsys):
@@ -39,7 +39,12 @@ class TestRender:
         verdicts = [e["authority_verdict"] for e in entries]
         assert any(v["is_authority"] for v in verdicts)
         assert any("STALE" in v["display"] for v in verdicts)
+        assert any("bound to nothing" in v["display"] for v in verdicts)
         assert any(not v["is_authority"] and v["label"] == "verified" for v in verdicts)
+        # Three Janus entries, exactly one of which is authority.
+        janus = [v for v in verdicts if v["label"] == "janus-authorized"]
+        assert len(janus) == 3
+        assert sum(v["is_authority"] for v in janus) == 1
 
 
 class TestRefusalsAreSentences:

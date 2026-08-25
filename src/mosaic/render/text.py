@@ -122,12 +122,25 @@ def render(document: dict) -> str:
     plural_other = "entry is" if others == 1 else "entries are"
     out.append(f"{others} {plural_other} a module-local fact wearing its owner's badge.")
 
-    if contested:
-        n = len(contested)
+    # Split by whether the reader can actually do anything about it. Telling
+    # someone to "re-check the ruling" on a gate bound to nothing sends them
+    # to look at an absence, and advice that cannot be followed trains people
+    # to ignore the footer.
+    unbindable = [v for v in contested if v.badge == "⊘"]
+    recheckable = [v for v in contested if v.badge != "⊘"]
+
+    if recheckable:
+        n = len(recheckable)
         subject = "entry carries" if n == 1 else "entries carry"
         out.append("")
         out.append(f"⚠ {n} {subject} a Janus label that does not render as authority.")
         out.append("  Follow the canonical link and re-check the ruling in Janus.")
+    if unbindable:
+        n = len(unbindable)
+        subject = "ruling is" if n == 1 else "rulings are"
+        out.append("")
+        out.append(f"⊘ {n} Janus {subject} bound to nothing and can never be re-checked.")
+        out.append("  Nothing to look at — raise a new gate against the artifact instead.")
     if unknown:
         n = len(unknown)
         subject = "entry carries" if n == 1 else "entries carry"
