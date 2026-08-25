@@ -280,6 +280,44 @@ value stand in for "approved".
    on this gate as void."*
 5. **Zero cross-module write controls in v0.** Not even a disabled one.
 
+### Ordering by operator action is allowed. Ordering by authority is not.
+
+"Mosaic ranks nothing" bans one specific thing: **ordering that correlates
+with how much authority an entry carries.** It does not ban ordering.
+
+A view may sort by `OperatorAction` — `act`, then `decide`, then `none` —
+because that answers *what does this reader have to do*, which is a different
+question from *which of these approvals is strongest*. The test is whether the
+ordering tracks authority strength, and this one demonstrably does not; it
+runs against it:
+
+- `reported` + `bytes-drifted` sorts **first** (`act`). That is a Janus
+  ruling — the mechanism the prior review called the strongest — with a broken
+  binding.
+- `enforced` + `bytes-drifted` sorts **last** (`none`). That is Icarus, the
+  widest byte-binding in the fleet, having correctly refused.
+
+An authority ranking would order those two the other way round. A worklist
+puts the thing nobody is containing above the thing the system already
+stopped. That inversion is the proof it is not the banned ranking sneaking
+back in through sort order.
+
+Three conditions on any such view:
+
+1. **The document itself keeps its own order.** `compose()` sorts by recency
+   and is the record. A worklist is a *view* of the document, never a
+   re-ordering of it — `tests/contracts/test_compose.py` pins this.
+2. **Order within a bucket by recency,** so no secondary sort can smuggle an
+   authority ordering into the tiebreak.
+3. **Name the ordering for what it is.** "Needs you first" is honest;
+   "most important first" or "highest priority" is the collapse in a sort key,
+   because a reader who learns that top means important will conclude that top
+   means most trustworthy.
+
+The same reasoning bans a summary count. `renders_as_authority: 1` is not an
+ordering at all — it is the binary verdict this page rejects, stated as a
+number.
+
 ---
 
 ## Open questions — Kevin's, not ours
