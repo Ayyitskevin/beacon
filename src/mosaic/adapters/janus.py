@@ -40,6 +40,16 @@ from .transport import Unreachable as TransportUnreachable
 #: field to `str`; the approval vocabulary now lives only on `Authority.lifecycle`,
 #: where it is populated only when there actually is an approval.
 #:
+#: Janus's own state words that mean the decision is closed and no longer in force.
+#:
+#: This is the fact `Lifecycle` cannot carry. All four land on REVIEWED — correctly,
+#: because the mandated vocabulary has no terminal-negative value and an adapter must
+#: not default upward — which leaves them indistinguishable from a decision somebody
+#: is actively reviewing. The adapter is the only place that can still see the
+#: difference, because it is the only place holding Janus's own word.
+_TERMINAL_STATES: frozenset[str] = frozenset({"refused", "withdrawn", "expired", "superseded"})
+
+
 #: A ruling's own state -> where it sits in the APPROVAL vocabulary.
 #:
 #: This is a mapping table, and it belongs here in a way the deleted
@@ -168,6 +178,12 @@ class JanusAdapter:
                 str(ruling.get("state") or state) if isinstance(ruling, dict) else state,
                 Lifecycle.REVIEWED,
             ),
+            # Supplied here rather than derived downstream: by the time an entry
+            # reaches composition its terminality has already been flattened into
+            # REVIEWED, and nothing downstream can recover it.
+            spent=str(ruling.get("state") or state) in _TERMINAL_STATES
+            if isinstance(ruling, dict)
+            else state in _TERMINAL_STATES,
             mechanism="janus.ruling",
             meaning=(
                 "Janus records pending authority; it does not grant authority. "

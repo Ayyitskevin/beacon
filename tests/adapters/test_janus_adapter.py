@@ -267,3 +267,43 @@ def test_non_list_response_is_reported_not_swallowed() -> None:
     entries, unreachable = adapter.read()
     assert entries == ()
     assert "JSON array" in unreachable[0].reason
+
+
+def test_a_terminal_ruling_is_marked_spent() -> None:
+    """Terminality is the fact `Lifecycle` cannot carry.
+
+    `refused`, `withdrawn`, `expired` and `superseded` all land on REVIEWED --
+    correctly, since the mandated vocabulary has no terminal-negative value and an
+    adapter must not default upward. That leaves them indistinguishable from a
+    decision somebody is actively reviewing, so a superseded gate kept asking a
+    human to decide about it when supersession *is* the resolution.
+
+    The adapter is the only place that can still tell, because it is the only
+    place holding Janus's own word.
+    """
+
+    superseded = next(e for e in _entries() if e.ref == "g55daf244a78")
+    assert superseded.authority is not None
+    assert superseded.authority.spent is True
+
+
+def test_a_live_ruling_is_not_marked_spent() -> None:
+    """The half that stops the fix passing for the wrong reason.
+
+    Without this, `spent=True` unconditionally satisfies the assertion above --
+    which would silence every approved ruling on the desk instead of only the
+    closed ones.
+    """
+
+    approved = next(e for e in _entries() if e.ref == "g4deae14ca3d")
+    assert approved.authority is not None
+    assert approved.authority.spent is False
+
+
+def test_spent_reads_the_ruling_state_not_the_gate_state() -> None:
+    """Same discipline as the lifecycle fix: the ruling carries its own verdict."""
+
+    for entry in _entries():
+        if entry.authority is None:
+            continue
+        assert entry.authority.spent is (entry.status in {"superseded", "refused"})
