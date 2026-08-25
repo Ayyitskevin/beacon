@@ -8,6 +8,7 @@ is the only thing that settles it.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 
@@ -140,3 +141,57 @@ class TestTheStackHoldsAfterLoading:
         rows = list(loaded.execute("SELECT provenance_origin, provenance_source_ref FROM record"))
         assert len(rows) == 16
         assert all(o == "migrated:janus" and ref for o, ref in rows)
+
+
+class TestTheReadersCopyOfTheSourceVocabularyIsVerified:
+    """A reader necessarily holds a copy of its source's vocabulary.
+
+    `JANUS_STATES` is a hand-written frozenset of another system's states. We
+    cannot import it — Janus is a separate program — so this is the one place
+    a second copy is unavoidable rather than a defect. What is avoidable is
+    leaving it unchecked.
+
+    The source can verify it, and only while the source still exists: `janus
+    list --help` prints its own state vocabulary. After Janus retires, this
+    test becomes unrunnable and the copy becomes unverifiable forever, which
+    is precisely the argument for the fixture corpus.
+    """
+
+    def test_the_readers_state_set_matches_what_janus_declares(self):
+        import shutil
+        import subprocess
+
+        from mosaic.store.readers_impl.janus_reader import JANUS_STATES
+
+        if not shutil.which("janus"):
+            pytest.skip("janus is not on PATH; cannot verify against the source")
+
+        help_text = subprocess.run(
+            ["janus", "list", "--help"], capture_output=True, text=True, timeout=10
+        ).stdout
+        match = re.search(r"\{([a-z,]+)\}", help_text)
+        assert match, "janus list --help no longer prints its state vocabulary"
+
+        declared = set(match.group(1).split(","))
+        # `all` is a filter alias meaning "every state", not a state a gate can
+        # be in. Excluded deliberately: a reader that accepted it as a status
+        # would store a filter keyword as a fact about a record.
+        declared.discard("all")
+
+        assert declared == JANUS_STATES, (
+            f"the reader's copy of Janus's states has drifted. "
+            f"Janus declares {sorted(declared)}; the reader holds "
+            f"{sorted(JANUS_STATES)}. Fix the reader, not this test."
+        )
+
+    def test_a_truncated_title_is_recoverable_from_the_body(self, loaded):
+        """Titles are capped at 200; five real gates exceed it. That is only
+        acceptable because the full text survives in `body` — a cap that
+        discarded the remainder would be silent loss in the field a human
+        reads first."""
+        rows = list(loaded.execute("SELECT title, body FROM record"))
+        truncated = [(t, json.loads(b)["question"]) for t, b in rows if len(t) == 200]
+        assert truncated, "the fixture should contain at least one long question"
+        for title, question in truncated:
+            assert question.startswith(title)
+            assert len(question) > len(title)
