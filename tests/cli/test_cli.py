@@ -20,8 +20,8 @@ class TestRender:
     def test_renders_a_file(self, capsys):
         assert main(["render", str(FIXTURE)]) == EXIT_OK
         out = capsys.readouterr().out
-        assert "DESK · desk.v1 · 6 entries" in out
-        assert "1 entry renders as authority" in out
+        assert "DESK · desk.v1 · 10 entries" in out
+        assert "need you to act" in out
 
     def test_renders_stdin(self, capsys, monkeypatch):
         import io
@@ -33,22 +33,31 @@ class TestRender:
     def test_json_format_is_valid_json(self, capsys):
         assert main(["render", str(FIXTURE), "--format", "json"]) == EXIT_OK
         parsed = json.loads(capsys.readouterr().out)
-        assert parsed["authority_summary"]["total"] == 6
-        assert parsed["authority_summary"]["renders_as_authority"] == 1
+        assert sum(parsed["operator_actions"].values()) == 10
+        assert parsed["operator_actions"]["act"] == 1
 
-    def test_the_sample_desk_exercises_every_authority_path(self, capsys):
-        """The fixture is a worked example, so it must cover the hard cases."""
+    def test_the_sample_desk_covers_the_states_that_matter(self, capsys):
         main(["render", str(FIXTURE), "--format", "json"])
-        entries = json.loads(capsys.readouterr().out)["entries"]
-        verdicts = [e["authority_verdict"] for e in entries]
-        assert any(v["is_authority"] for v in verdicts)
-        assert any("STALE" in v["display"] for v in verdicts)
-        assert any("bound to nothing" in v["display"] for v in verdicts)
-        assert any(not v["is_authority"] and v["label"] == "verified" for v in verdicts)
-        # Three Janus entries, exactly one of which is authority.
-        janus = [v for v in verdicts if v["label"] == "janus-authorized"]
-        assert len(janus) == 3
-        assert sum(v["is_authority"] for v in janus) == 1
+        views = [e["authority_view"] for e in json.loads(capsys.readouterr().out)["entries"]]
+        actions = {v["operator_action"] for v in views}
+        assert actions == {"act", "decide", "none"}, "fixture must exercise all three"
+        # The inversion the whole doctrine turns on: a reported drift demands a
+        # human, an enforced drift does not.
+        assert any(
+            v["operator_action"] == "act"
+            and v["attachment"] == "bytes-drifted"
+            and v["enforcement"] == "reported"
+            for v in views
+        )
+        assert any(
+            v["operator_action"] == "none"
+            and v["attachment"] == "bytes-drifted"
+            and v["enforcement"] == "enforced"
+            for v in views
+        )
+        assert any(v["attachment"] == "unbound" for v in views)
+        # Most entries carry no decision at all, and that is not a failure.
+        assert any(not v["has_approval"] and not v["unreadable"] for v in views)
 
 
 class TestRefusalsAreSentences:
@@ -138,18 +147,24 @@ class TestTheSeamsSiblingLanesPlugInto:
                     "source": "janus",
                     "owner": "kevin",
                     "title": "seam check",
-                    "authority": "janus-authorized",
-                    "binding": {"kind": "git"},
-                    "binding_holds": True,
+                    "status": "approved",
                     "link": "janus://gates/x",
+                    "authority": {
+                        "decider": "human",
+                        "attachment": "bytes-drifted",
+                        "enforcement": "reported",
+                        "lifecycle": "authorized",
+                        "mechanism": "janus.ruling",
+                        "meaning": "a human ruled on specific bytes",
+                    },
                 }
             ],
         }
         with mock.patch.dict(sys.modules, {"mosaic.compose": fake}):
             assert main(["desk"]) == EXIT_OK
         out = capsys.readouterr().out
-        assert "AUTHORITY" in out
-        assert "1 entry renders as authority" in out
+        assert "seam check" in out
+        assert "need you to act" in out
 
     def test_doctor_text_uses_the_lane_renderer_not_json(self, capsys):
         """Text mode must not silently fall back to dumping JSON."""

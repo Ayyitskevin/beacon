@@ -27,7 +27,7 @@ import sys
 from typing import Any
 
 from . import __version__
-from .render import DEFAULT_RENDERER, RENDERERS
+from .render import DEFAULT_RENDERER, RENDERERS, text
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -87,9 +87,15 @@ def _require(module_path: str, attribute: str, lane: str, provides: str):
         ) from exc
 
 
+def _render(document, args) -> None:
+    if args.format == "text":
+        print(text.render(document, worklist=getattr(args, "worklist", False)))
+    else:
+        print(RENDERERS[args.format](document))
+
+
 def cmd_render(args) -> int:
-    document = _load_document(args.source)
-    print(RENDERERS[args.format](document))
+    _render(_load_document(args.source), args)
     return EXIT_OK
 
 
@@ -100,8 +106,7 @@ def cmd_desk(args) -> int:
         lane="A (contracts and composition)",
         provides="Composing a live desk",
     )
-    document = compose()
-    print(RENDERERS[args.format](document))
+    _render(compose(), args)
     return EXIT_OK
 
 
@@ -156,6 +161,17 @@ def build_parser() -> argparse.ArgumentParser:
             help="output format (default: %(default)s)",
         )
 
+    def add_worklist(sub):
+        sub.add_argument(
+            "--worklist",
+            action="store_true",
+            help=(
+                "order by what you have to do (act, then decide, then nothing), "
+                "most recent first within each. A view of the document, not a "
+                "reordering of it, and not a ranking of importance."
+            ),
+        )
+
     p_render = subparsers.add_parser(
         "render",
         help="render a desk.v1 document from a file or stdin",
@@ -167,10 +183,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="path to a desk.v1 JSON document, or '-' for stdin (default: -)",
     )
     add_format(p_render)
+    add_worklist(p_render)
     p_render.set_defaults(func=cmd_render)
 
     p_desk = subparsers.add_parser("desk", help="compose a live desk and render it")
     add_format(p_desk)
+    add_worklist(p_desk)
     p_desk.set_defaults(func=cmd_desk)
 
     p_doctor = subparsers.add_parser(

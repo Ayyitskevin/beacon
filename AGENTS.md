@@ -31,6 +31,16 @@ model, the desk schema, or anything touching authority labels.
   one to make output look complete.
 - **Every entry carries its provenance**: source module, owner, status,
   timestamp, schema version, canonical link, authority label.
+- **`status` is the owning module's own word.** Render it verbatim and never
+  switch on it — it is an open set (`superseded`, `withdrawn`, `in_progress`,
+  `done`), not Mosaic's vocabulary. Everything Mosaic *decides* from lives in
+  `authority`, whose axes are closed enums. An unknown status is displayed
+  quietly; an unknown authority value must stay loud.
+- **Scope whole-tree tools to your own paths.** `ruff format src tests`, a
+  bulk codemod, a find-and-replace across the repo — each is a quiet way to
+  write into another lane's files. Two lanes did exactly this on 2026-08-24;
+  one landed two of another lane's files in its commit and had to back them
+  out. Name your own directories explicitly.
 
 ## Red and green boundaries
 

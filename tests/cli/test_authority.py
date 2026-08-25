@@ -1,349 +1,293 @@
-"""The never-collapse rule, as tests.
+"""The never-collapse rules, as tests.
 
-If these pass, Mosaic cannot present five different approval mechanisms as one
-generic affordance. If any of them is ever deleted to make a change go
-through, the change is the problem.
+Three collapses are pinned here. Each was a real defect in this project, not a
+hypothesis:
+
+1. An approval's four axes reduced to one verdict word.
+2. "No approval was ever sought" rendered as "an approval could not be
+   verified" — which would fire on the majority of a real desk.
+3. "Nothing to report" rendered as "we could not ask".
+
+If any of these is ever deleted to make a change go through, the change is the
+problem.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from mosaic.render import json_render, text
-from mosaic.render.authority import (
-    AUTHORITY_LABELS,
-    FORBIDDEN_RENDERINGS,
-    binding_kind,
-    resolve,
+from mosaic.contracts.authority import (
+    Attachment,
+    Decider,
+    Enforcement,
+    Lifecycle,
+    OperatorAction,
 )
+from mosaic.render import json_render, text
+from mosaic.render.authority import FORBIDDEN_RENDERINGS, read_authority, view
 
 
-def entry(**overrides):
+def authority(**overrides):
     base = {
-        "source": "athena",
-        "owner": "codex",
-        "status": "open",
-        "authority": "proposed",
-        "timestamp": "2026-08-24T00:00:00Z",
-        "schema_version": "issue.v1",
-        "link": "http://example.invalid/1",
+        "decider": Decider.HUMAN,
+        "attachment": Attachment.BYTES_VERIFIED,
+        "enforcement": Enforcement.REPORTED,
+        "lifecycle": Lifecycle.AUTHORIZED,
+        "mechanism": "janus.ruling",
+        "meaning": "a human ruled on specific bytes",
     }
     base.update(overrides)
     return base
 
 
-class TestTheFiveLabels:
-    def test_all_five_are_recognised(self):
-        for label in AUTHORITY_LABELS:
-            verdict = resolve(entry(authority=label, source="janus"))
-            assert verdict.label == label
-            assert verdict.badge != "?" or label == "janus-authorized"
-
-    def test_the_five_never_render_identically(self):
-        """The whole rule in one assertion: five labels, five distinct displays."""
-        displays = {
-            resolve(entry(authority=label, source="janus", binding_holds=True)).display
-            for label in AUTHORITY_LABELS
-        }
-        assert len(displays) == len(AUTHORITY_LABELS)
-
-    @pytest.mark.parametrize("label", AUTHORITY_LABELS)
-    def test_no_label_renders_a_forbidden_word(self, label):
-        verdict = resolve(entry(authority=label, source="janus", binding_holds=True))
-        lowered = verdict.display.lower()
-        for word in FORBIDDEN_RENDERINGS:
-            assert word not in lowered, f"{label!r} rendered as {verdict.display!r}"
+def entry(**overrides):
+    base = {
+        "source": "janus",
+        "owner": "kevin",
+        "title": "a thing",
+        "status": "approved",
+        "timestamp": "2026-08-24T00:00:00Z",
+        "schema_version": "janus.gate.v1",
+        "ref": "g0001",
+        "link": "janus://gates/g0001",
+        "authority": authority(),
+    }
+    base.update(overrides)
+    return base
 
 
-class TestOnlyJanusIsAuthority:
-    def test_janus_with_holding_binding_is_the_only_authority(self):
-        verdict = resolve(entry(source="janus", authority="janus-authorized", binding_holds=True))
-        assert verdict.is_authority is True
-        assert verdict.rechecked is True
-
-    @pytest.mark.parametrize("label", [x for x in AUTHORITY_LABELS if x != "janus-authorized"])
-    def test_no_other_label_is_authority(self, label):
-        assert resolve(entry(source="janus", authority=label)).is_authority is False
-
-    @pytest.mark.parametrize("source", ["athena", "buzz", "icarus", "minerva", "vulcan", ""])
-    def test_another_module_cannot_claim_janus_authority(self, source):
-        """A module asserting a Janus ruling renders as a claim, not a ruling."""
-        verdict = resolve(entry(source=source, authority="janus-authorized", binding_holds=True))
-        assert verdict.is_authority is False
-        assert "claims" in verdict.display
-        assert verdict.note is not None
+def doc(*entries, **extra):
+    return {"schema": "desk.v1", "entries": list(entries), **extra}
 
 
-class TestBindingIsRecheckable:
-    def test_broken_binding_is_loud_and_not_authority(self):
-        verdict = resolve(entry(source="janus", authority="janus-authorized", binding_holds=False))
-        assert verdict.is_authority is False
-        assert verdict.rechecked is True
-        assert "STALE" in verdict.display
+class TestPolicyIsImportedNeverReimplemented:
+    """The renderer must ask the contract, not encode a second opinion."""
 
-    def test_unchecked_binding_is_not_authority(self):
-        verdict = resolve(entry(source="janus", authority="janus-authorized"))
-        assert verdict.is_authority is False
-        assert verdict.rechecked is None
+    def test_every_axis_value_round_trips(self):
+        for att in Attachment:
+            for enf in Enforcement:
+                resolved = view(entry(authority=authority(attachment=att, enforcement=enf)))
+                assert resolved.authority is not None
+                assert resolved.authority.attachment is att
+                assert resolved.authority.enforcement is enf
+                # The contract owns the verdict; the view must not disagree.
+                assert resolved.action is resolved.authority.operator_action()
+                assert resolved.assures is resolved.authority.assures()
 
-    def test_unchecked_is_distinguishable_from_broken(self):
-        unchecked = resolve(entry(source="janus", authority="janus-authorized"))
-        broken = resolve(entry(source="janus", authority="janus-authorized", binding_holds=False))
-        assert unchecked.display != broken.display
-        assert unchecked.rechecked != broken.rechecked
-
-    def test_truthy_is_not_true(self):
-        """`binding_holds: "yes"` must not sneak past as authority."""
-        for truthy in ["yes", 1, "true", [1]]:
-            verdict = resolve(
-                entry(source="janus", authority="janus-authorized", binding_holds=truthy)
+    def test_string_values_are_accepted_after_a_json_round_trip(self):
+        """asdict gives StrEnum members; json.loads gives plain strings."""
+        plain = view(
+            entry(
+                authority={
+                    "decider": "human",
+                    "attachment": "unbound",
+                    "enforcement": "reported",
+                    "lifecycle": "authorized",
+                    "mechanism": "janus.ruling",
+                    "meaning": "x",
+                }
             )
-            assert verdict.is_authority is False
-
-
-class TestUnknownLabels:
-    @pytest.mark.parametrize("label", ["approved", "signed-off", "", None, "JANUS_AUTHORIZED"])
-    def test_unknown_label_is_reported_not_guessed(self, label):
-        verdict = resolve(entry(source="janus", authority=label))
-        assert verdict.is_authority is False
-        assert verdict.badge == "?"
-        assert "unrecognised" in verdict.display
-
-    def test_missing_authority_key_does_not_raise(self):
-        bare = {"source": "athena", "owner": "codex"}
-        verdict = resolve(bare)
-        assert verdict.is_authority is False
-        assert "(missing)" in verdict.display
-
-
-class TestRenderersHoldTheLine:
-    """The rule must survive the trip through both renderers, not just the resolver."""
-
-    def _doc(self, **overrides):
-        return {"schema": "desk.v1", "entries": [entry(**overrides)]}
-
-    @pytest.mark.parametrize("label", AUTHORITY_LABELS)
-    def test_text_render_never_emits_a_forbidden_word_as_status(self, label):
-        out = text.render(self._doc(authority=label, source="janus", binding_holds=True))
-        # The module's own status field is rendered verbatim and attributed, so
-        # only the authority lines are checked for the collapse vocabulary.
-        authority_lines = [
-            ln for ln in out.splitlines() if "status:" not in ln and not ln.startswith("─")
-        ]
-        for word in FORBIDDEN_RENDERINGS:
-            assert word not in "\n".join(authority_lines).lower()
-
-    def test_text_marks_authority_and_only_authority(self):
-        authorised = text.render(
-            self._doc(source="janus", authority="janus-authorized", binding_holds=True)
         )
-        assert "AUTHORITY" in authorised
-        assert "1 entry renders as authority" in authorised
+        assert plain.authority is not None
+        assert plain.action is OperatorAction.DECIDE
 
-        for label in [x for x in AUTHORITY_LABELS if x != "janus-authorized"]:
-            out = text.render(self._doc(source="janus", authority=label))
-            assert "0 entries render as authority" in out
+    def test_the_live_unbound_gates_ask_for_a_decision(self):
+        """4 of 13 live Janus gates are unbound and carry an approval word."""
+        resolved = view(entry(authority=authority(attachment=Attachment.UNBOUND)))
+        assert resolved.action is OperatorAction.DECIDE
+        assert resolved.assures is False
 
-    def test_json_annotates_without_overwriting(self):
-        doc = self._doc(source="janus", authority="janus-authorized", binding_holds=True)
-        rendered = json_render.to_dict(doc)
-        original = doc["entries"][0]
-        annotated = rendered["entries"][0]
-        for key, value in original.items():
-            assert annotated[key] == value
-        assert annotated["authority_verdict"]["is_authority"] is True
-        assert rendered["authority_summary"]["renders_as_authority"] == 1
+    def test_the_one_state_that_demands_action(self):
+        resolved = view(
+            entry(
+                authority=authority(
+                    attachment=Attachment.BYTES_DRIFTED, enforcement=Enforcement.REPORTED
+                )
+            )
+        )
+        assert resolved.action is OperatorAction.ACT
 
-    def test_json_does_not_mutate_the_input(self):
-        doc = self._doc()
-        before = repr(doc)
-        json_render.to_dict(doc)
-        assert repr(doc) == before
-
-    def test_both_renderers_agree_on_authority(self):
-        """Two renderers, one resolver — they cannot drift apart."""
-        cases = [
-            ("janus", "janus-authorized", True, True),
-            ("janus", "janus-authorized", False, False),
-            ("athena", "janus-authorized", True, False),
-            ("minerva", "verified", None, False),
-        ]
-        for source, label, binding, expected in cases:
-            e = entry(source=source, authority=label)
-            if binding is not None:
-                e["binding_holds"] = binding
-            doc = {"schema": "desk.v1", "entries": [e]}
-            as_json = json_render.to_dict(doc)["entries"][0]["authority_verdict"]
-            as_text = text.render(doc)
-            assert as_json["is_authority"] is expected
-            assert ("AUTHORITY" in as_text) is expected
+    def test_a_module_that_already_refused_does_not_demand_action(self):
+        resolved = view(
+            entry(
+                authority=authority(
+                    attachment=Attachment.BYTES_DRIFTED, enforcement=Enforcement.ENFORCED
+                )
+            )
+        )
+        assert resolved.action is OperatorAction.NONE
 
 
-class TestBoundToNothing:
-    """`binding.kind == "none"` is 4 of 13 live gates, not a hypothetical.
+class TestCollapse1_TheAxesAreNeverSummarised:
+    def test_no_forbidden_word_is_rendered_anywhere(self):
+        """Global, not scoped to entry lines. The renderer's own prose has to
+        hold the same vocabulary line it enforces on the modules it renders."""
+        for att in Attachment:
+            for lifecycle in Lifecycle:
+                out = text.render(
+                    doc(entry(status="", authority=authority(attachment=att, lifecycle=lifecycle)))
+                )
+                for word in FORBIDDEN_RENDERINGS:
+                    assert word not in out.lower(), f"{att}/{lifecycle} rendered {word!r}"
 
-    A ruling bound to nothing is a permanently different thing from a ruling
-    nobody has re-checked yet: the second can be settled by looking, the first
-    can never be settled at all.
-    """
+    def test_the_module_status_word_is_rendered_verbatim_and_attributed(self):
+        """status is open-ended module vocabulary; never mapped, never switched on."""
+        for word in ("superseded", "withdrawn", "in_progress", "done", "wat"):
+            out = text.render(doc(entry(status=word)))
+            assert f"janus says: {word}" in out
 
-    def _janus(self, **overrides):
-        e = entry(source="janus", authority="janus-authorized")
-        e.update(overrides)
-        return e
+    def test_all_four_axes_appear(self):
+        out = text.render(doc(entry(authority=authority(attachment=Attachment.UNBOUND))))
+        assert "unbound" in out
+        assert "reported" in out
+        assert "decided by human" in out
+        assert "janus.ruling" in out
 
-    def test_bound_to_nothing_is_not_authority(self):
-        verdict = resolve(self._janus(binding={"kind": "none", "locator": None, "sha256": None}))
-        assert verdict.is_authority is False
-        assert "bound to nothing" in verdict.display
+    def test_the_modules_own_meaning_is_quoted_not_paraphrased(self):
+        out = text.render(doc(entry(authority=authority(meaning="a very specific promise"))))
+        assert "a very specific promise" in out
 
-    def test_it_beats_a_binding_holds_claim(self):
-        """Nothing to check against outranks any claim of having checked."""
-        verdict = resolve(self._janus(binding={"kind": "none"}, binding_holds=True))
-        assert verdict.is_authority is False
-        assert "bound to nothing" in verdict.display
+    def test_no_authority_count_is_emitted(self):
+        """There is deliberately no 'N entries are approved' number anywhere."""
+        out = text.render(doc(entry(), entry()))
+        assert "renders as authority" not in out
+        assert "need you to act" in out
 
-    def test_distinguishable_from_merely_unchecked(self):
-        nothing = resolve(self._janus(binding={"kind": "none"}))
-        unchecked = resolve(self._janus(binding={"kind": "git", "sha256": "abc"}))
-        assert nothing.display != unchecked.display
-        assert nothing.badge != unchecked.badge
-        # "can never be settled" vs "not settled yet" — the two must not share
-        # a rechecked value, or a machine consumer cannot tell them apart.
-        assert nothing.rechecked is False
-        assert unchecked.rechecked is None
+    def test_json_emits_axes_not_a_verdict(self):
+        rendered = json_render.to_dict(doc(entry()))
+        v = rendered["entries"][0]["authority_view"]
+        assert "is_authority" not in v
+        assert "authority_summary" not in rendered
+        assert set(rendered["operator_actions"]) == {a.value for a in OperatorAction}
+        assert v["attachment"] == "bytes-verified"
 
-    def test_distinguishable_from_stale(self):
-        nothing = resolve(self._janus(binding={"kind": "none"}))
-        stale = resolve(self._janus(binding={"kind": "git"}, binding_holds=False))
-        assert nothing.display != stale.display
-        assert nothing.badge != stale.badge
-
-    def test_real_bindings_still_reach_authority(self):
-        """The live corpus is git: 8, none: 4, file: 1 — git must still work."""
-        for kind in ("git", "file"):
-            verdict = resolve(self._janus(binding={"kind": kind}, binding_holds=True))
-            assert verdict.is_authority is True, kind
-
-    def test_all_four_janus_states_render_distinctly(self):
-        states = [
-            self._janus(binding={"kind": "git"}, binding_holds=True),
-            self._janus(binding={"kind": "git"}, binding_holds=False),
-            self._janus(binding={"kind": "git"}),
-            self._janus(binding={"kind": "none"}),
-        ]
-        displays = {resolve(e).display for e in states}
-        assert len(displays) == 4
-        assert sum(resolve(e).is_authority for e in states) == 1
+    def test_json_does_not_mutate_or_overwrite(self):
+        d = doc(entry())
+        before = repr(d)
+        rendered = json_render.to_dict(d)
+        assert repr(d) == before
+        for key, value in d["entries"][0].items():
+            assert rendered["entries"][0][key] == value
 
 
-class TestBindingKindHelper:
-    def test_reads_the_nested_adapter_shape(self):
-        assert binding_kind({"binding": {"kind": "git", "sha256": "x"}}) == "git"
+class TestCollapse2_NoApprovalIsNotAFailedCheck:
+    """The common case: most desk entries are work, not approvals."""
 
-    def test_accepts_a_flat_key(self):
-        assert binding_kind({"binding_kind": "none"}) == "none"
+    def test_an_entry_without_an_approval_needs_nothing(self):
+        resolved = view(entry(source="athena", authority=None))
+        assert resolved.authority is None
+        assert resolved.problem is None
+        assert resolved.action is OperatorAction.NONE
 
-    def test_nested_wins_over_flat(self):
-        assert binding_kind({"binding": {"kind": "git"}, "binding_kind": "none"}) == "git"
+    def test_a_missing_authority_key_behaves_the_same(self):
+        bare = {"source": "athena", "owner": "x", "title": "an issue", "status": "open"}
+        assert view(bare).action is OperatorAction.NONE
+        assert view(bare).problem is None
 
-    def test_not_stated_is_none(self):
-        assert binding_kind({}) is None
-        assert binding_kind({"binding": {}}) is None
+    def test_it_does_not_render_as_a_problem(self):
+        out = text.render(doc(entry(source="athena", title="an issue", authority=None)))
+        assert "unreadable" not in out.lower()
+        assert "0 need you to act" in out
+        assert "an issue" in out
 
-    def test_normalises_case_and_space(self):
-        assert binding_kind({"binding": {"kind": "  GIT "}}) == "git"
+    def test_a_malformed_block_is_distinguishable_from_an_absent_one(self):
+        absent = view(entry(authority=None))
+        broken = view(entry(authority={"decider": "human"}))
+        assert absent.problem is None
+        assert broken.problem is not None
+        assert absent.action is not broken.action
 
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            {"decider": "human"},
+            "a string",
+            {**authority(), "attachment": "made-up"},
+            {**authority(), "decider": "nobody"},
+        ],
+    )
+    def test_a_bad_value_is_reported_never_guessed(self, bad):
+        resolved = view(entry(authority=bad))
+        assert resolved.problem is not None
+        assert resolved.glyph == "?"
+        assert resolved.action is OperatorAction.DECIDE
 
-class TestFooterAdviceIsFollowable:
-    """Advice that cannot be acted on trains people to ignore the footer."""
+    def test_read_authority_returns_none_rather_than_raising_for_absent(self):
+        assert read_authority({"source": "athena"}) is None
 
-    def _janus(self, **overrides):
-        e = entry(source="janus", authority="janus-authorized")
-        e.update(overrides)
-        return e
-
-    def test_unbindable_is_not_told_to_recheck(self):
-        doc = {"schema": "desk.v1", "entries": [self._janus(binding={"kind": "none"})]}
-        out = text.render(doc)
-        assert "can never be re-checked" in out
-        assert "re-check the ruling in Janus" not in out
-
-    def test_recheckable_is_told_to_recheck(self):
-        doc = {"schema": "desk.v1", "entries": [self._janus(binding={"kind": "git"})]}
-        out = text.render(doc)
-        assert "re-check the ruling in Janus" in out
-        assert "can never be re-checked" not in out
-
-    def test_both_present_gets_both_lines(self):
-        doc = {
-            "schema": "desk.v1",
-            "entries": [
-                self._janus(binding={"kind": "none"}),
-                self._janus(binding={"kind": "git"}),
-            ],
-        }
-        out = text.render(doc)
-        assert "re-check the ruling in Janus" in out
-        assert "can never be re-checked" in out
-        assert "0 entries render as authority" in out
+    def test_the_counts_separate_approvals_from_everything_else(self):
+        out = text.render(doc(entry(), entry(authority=None), entry(authority=None)))
+        assert "1 of 3 entries record a decision" in out
 
 
-class TestFailedReadIsNotAnEmptyRead:
-    """The same collapse as the authority one, in a different field.
-
-    A desk is composed FROM modules. A module that did not answer leaves a hole
-    in the document; it does not mean there was nothing to find. "Nothing to
-    report" and "we could not ask" are opposite facts, and exactly one of them
-    needs an operator.
-    """
-
+class TestCollapse3_FailedReadIsNotAnEmptyRead:
     def test_empty_and_clean_says_so(self):
-        out = text.render({"schema": "desk.v1", "entries": []})
+        out = text.render(doc())
         assert "genuinely empty desk" in out
         assert "INCOMPLETE" not in out
 
-    def test_empty_with_unreachable_never_claims_it_composed_cleanly(self):
-        out = text.render(
-            {
-                "schema": "desk.v1",
-                "entries": [],
-                "unreachable": [{"module": "buzz", "address": "ws://192.0.2.10:13000"}],
-            }
-        )
+    def test_empty_with_unreachable_never_claims_a_clean_compose(self):
+        out = text.render(doc(unreachable=[{"module": "buzz", "address": "ws://100.x:13000"}]))
         assert "INCOMPLETE" in out
         assert "genuinely empty desk" not in out
-        assert "buzz" in out
-        # The address matters: "connection refused" without one is useless.
-        assert "192.0.2.10:13000" in out
+        assert "100.x:13000" in out
 
-    def test_a_partial_read_is_flagged_alongside_the_counts(self):
-        out = text.render(
-            {
-                "schema": "desk.v1",
-                "entries": [entry(source="athena", authority="reviewed")],
-                "unreachable": [{"module": "icarus", "reason": "not on PATH"}],
-            }
-        )
+    def test_a_partial_read_qualifies_the_counts(self):
+        out = text.render(doc(entry(), unreachable=[{"module": "icarus", "reason": "no PATH"}]))
         assert "did not answer" in out
         assert "incomplete" in out.lower()
-        assert "icarus" in out
+        counts_at = out.index("need you to act")
+        assert out.index("did not answer") > counts_at
 
-    def test_accepts_bare_strings_as_well_as_dicts(self):
-        out = text.render({"schema": "desk.v1", "entries": [], "unreachable": ["replaydeck"]})
-        assert "replaydeck" in out
-        assert "INCOMPLETE" in out
 
-    def test_counts_are_never_presented_as_complete_when_a_read_failed(self):
-        """Regression: the footer's counts describe what was seen, not what is."""
-        doc = {
-            "schema": "desk.v1",
-            "entries": [entry(source="athena", authority="reviewed")],
-            "unreachable": [{"module": "janus"}],
-        }
-        out = text.render(doc)
-        counts_at = out.index("0 entries render as authority")
-        warning_at = out.index("did not answer")
-        assert warning_at > counts_at, (
-            "the incompleteness warning must follow the counts it qualifies"
+class TestWorklistOrderIsNotAnAuthorityRanking:
+    """docs/authority.md permits ordering by operator action, and only that."""
+
+    def _mixed(self):
+        act = entry(
+            ref="MARK-ACT",
+            authority=authority(
+                attachment=Attachment.BYTES_DRIFTED, enforcement=Enforcement.REPORTED
+            ),
         )
+        decide = entry(ref="MARK-DECIDE", authority=authority(attachment=Attachment.UNBOUND))
+        nothing = entry(
+            ref="MARK-NONE",
+            authority=authority(
+                attachment=Attachment.BYTES_VERIFIED, enforcement=Enforcement.ENFORCED
+            ),
+        )
+        return doc(nothing, decide, act)
+
+    def test_worklist_orders_act_then_decide_then_none(self):
+        out = text.render(self._mixed(), worklist=True)
+        assert out.index("MARK-ACT") < out.index("MARK-DECIDE") < out.index("MARK-NONE")
+
+    def test_the_ordering_is_anti_correlated_with_authority_strength(self):
+        """The proof it is not the banned ranking wearing a sort key.
+
+        A Janus ruling that reports drift sorts FIRST; an Icarus-style approval
+        that enforced and refused sorts LAST. An authority ranking inverts both.
+        """
+        out = text.render(self._mixed(), worklist=True)
+        drifted_reported = out.index("MARK-ACT")
+        drifted_enforced = out.index("MARK-NONE")
+        assert drifted_reported < drifted_enforced
+
+    def test_the_heading_never_says_importance_or_priority(self):
+        out = text.render(self._mixed(), worklist=True)
+        heading = out.splitlines()[1].lower()
+        assert "needs you first" in heading
+        for banned in ("important", "priority", "critical", "severity", "ranked"):
+            assert banned not in heading
+
+    def test_the_document_keeps_its_own_order_by_default(self):
+        d = self._mixed()
+        default = text.render(d)
+        assert default.index("MARK-NONE") < default.index("MARK-DECIDE") < default.index("MARK-ACT")
+
+    def test_ties_break_on_recency(self):
+        older = entry(ref="MARK-OLD", timestamp="2026-08-01T00:00:00Z", authority=None)
+        newer = entry(ref="MARK-NEW", timestamp="2026-08-24T00:00:00Z", authority=None)
+        out = text.render(doc(older, newer), worklist=True)
+        assert out.index("MARK-NEW") < out.index("MARK-OLD")
