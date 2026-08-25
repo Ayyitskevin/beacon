@@ -1,5 +1,5 @@
 {
-  "note": "http://127.0.0.1:8765 via default (measured on mickey 2026-08-24); surfaces captured: ['/api/v1/capabilities']",
+  "note": "Mission-scoped: claims and findings hang off missions, so a capabilities-only capture gives an evidence reader nothing to read. Minerva advertises CLI surfaces in capabilities.v3, not HTTP claim paths -- these were found by probing and are recorded here so the next reader does not have to rediscover them. 7 missions.",
   "origin": "minerva",
   "payload": {
     "/api/v1/capabilities": {
@@ -169,8 +169,969 @@
         "experiment_execution",
         "approval_authority"
       ]
+    },
+    "/api/v1/missions": {
+      "items": [
+        {
+          "created_at": "2026-08-21T03:29:01.437842Z",
+          "id": "mis_eb0813343b1a463d8b226b0a407c91f5",
+          "objective": "Map what Minerva, Athena, Buzz, ORACLE, Chronos, Icarus, and Vulcan each own, and record claims that are still made without citations.",
+          "title": "Mickey AI workspace — sibling ownership"
+        },
+        {
+          "created_at": "2026-08-21T15:53:01.114166Z",
+          "id": "mis_6103f5a185d4420b954cb6d2e7d2d691",
+          "objective": "Record whether the VISION.md and WORKSPACE.md snapshots already cited by the sibling-ownership mission still match the live Minerva checkout after PRs #41-#43, without opening D-2 or inventing product.",
+          "title": "Cited workspace identity vs live checkout after 2026-08-21 GREEN slices"
+        },
+        {
+          "created_at": "2026-08-22T01:09:57.743311Z",
+          "id": "mis_ecf8bb02986247f18fc1695ba2707146",
+          "objective": "Record whether the next-level working change improves operator legibility, safe intake, and recoverability without opening D-2 or turning structural cues into tasks.",
+          "title": "Minerva next-level pillar readiness"
+        },
+        {
+          "created_at": "2026-08-22T13:28:16.603782Z",
+          "id": "mis_041019ad09834b5497381a70c4bd8373",
+          "objective": "Record observed behavior of the models behind Vulcan aliases, with byte-span evidence, so alias descriptions in ~/deploy/vulcan-data/vulcan.toml (surfaced via GET /v1/models) stay honest. Consumer loop: finding here -> alias description there.",
+          "title": "Vulcan alias fitness — empirical model behavior"
+        },
+        {
+          "created_at": "2026-08-23T22:37:55.141910Z",
+          "id": "mis_f5c5f386ddf64ee28fbee9b93abb0f7e",
+          "objective": "Record whether the 2026-08-23 discoverability change (fleet skill + PATH wrapper) increases genuine non-build filings, with the pre-intervention baseline pinned as immutable bytes, so the effect is checked against the record rather than remembered charitably. Consumer loop: the outcome decides whether L4 (a doctrinal trigger) and a finding-consumer loop are needed, or whether discovery alone was sufficient.",
+          "title": "Minerva adoption intervention — did fixing discovery change usage?"
+        },
+        {
+          "created_at": "2026-08-24T04:30:47.056700Z",
+          "id": "mis_1753772a0b8f4bf8b4a23da0965e213e",
+          "objective": "Record measured mechanical reasons that requested cross-seat reviews do not arrive, so the fix targets the cause rather than the reviewer. Consumer: the run-*-agent.sh seat configs and the routing choice between a Buzz turn and a direct Vulcan call.",
+          "title": "Fleet review pipeline — why cross-seat reviews fail to land"
+        },
+        {
+          "created_at": "2026-08-25T01:57:31.457718Z",
+          "id": "mis_18f4bbed7f0745c79e375011186ca0a5",
+          "objective": "Record measured Athena runtime behavior (filed by the claude-code seat, session claude-f7) so deploy decisions rest on measurements, not remembered reports.",
+          "title": "Athena runtime behavior — measured contracts"
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/mis_041019ad09834b5497381a70c4bd8373": {
+      "created_at": "2026-08-22T13:28:16.603782Z",
+      "id": "mis_041019ad09834b5497381a70c4bd8373",
+      "objective": "Record observed behavior of the models behind Vulcan aliases, with byte-span evidence, so alias descriptions in ~/deploy/vulcan-data/vulcan.toml (surfaced via GET /v1/models) stay honest. Consumer loop: finding here -> alias description there.",
+      "title": "Vulcan alias fitness — empirical model behavior"
+    },
+    "/api/v1/missions/mis_041019ad09834b5497381a70c4bd8373/claims": {
+      "items": [
+        {
+          "created_at": "2026-08-22T13:28:16.624334Z",
+          "etag": "\"claim-clm_7979decbebe640e6b4c903e8c6dd444b-v1\"",
+          "falsification_criteria": "A cited run log of ornith completing a multi-turn tool-using session inside an agent harness (buzz-agent, opencode, or similar) without stalling.",
+          "id": "clm_7979decbebe640e6b4c903e8c6dd444b",
+          "mission_id": "mis_041019ad09834b5497381a70c4bd8373",
+          "question_id": "que_52c3a9e0fa984d898c55a6d4bbbaba2d",
+          "statement": "The ornith model served as Vulcan's code-fast alias stalls inside agent loops (observed in both buzz-agent and opencode harnesses on 2026-08-16) and is fit only for direct, single-shot calls.",
+          "status": "open",
+          "status_changed_at": "2026-08-22T13:28:16.624334Z",
+          "status_creator_id": "os-user:kevin-lee",
+          "status_evidence_valid": true,
+          "status_reason": "Claim registered for evaluation.",
+          "status_run_id": "run_b57cbb56f6d3461681fe915a99c1fc1e",
+          "version": 1
+        },
+        {
+          "created_at": "2026-08-24T02:47:30.684042Z",
+          "etag": "\"claim-clm_3306a0b42b264daca77397e3a5ab2f43-v1\"",
+          "falsification_criteria": "A glm call through Vulcan with a small max_tokens returns non-empty content, or the provider is shown to report no reasoning_tokens, or Vulcan is shown to surface reasoning_content.",
+          "id": "clm_3306a0b42b264daca77397e3a5ab2f43",
+          "mission_id": "mis_041019ad09834b5497381a70c4bd8373",
+          "question_id": "que_f976f5f33667409abf44035d2c97c8f3",
+          "statement": "The Vulcan glm alias can bill a caller a full completion budget and return empty content, because glm-5.3 spends completion tokens on a reasoning_content field that Vulcan does not surface.",
+          "status": "open",
+          "status_changed_at": "2026-08-24T02:47:30.684042Z",
+          "status_creator_id": "os-user:kevin-lee",
+          "status_evidence_valid": true,
+          "status_reason": "Claim registered for evaluation.",
+          "status_run_id": "run_7ac35d9161ab4abcb895c51239be013b",
+          "version": 1
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/mis_041019ad09834b5497381a70c4bd8373/findings": {
+      "agent_inferences": [],
+      "items": [
+        {
+          "citation_status": "active",
+          "claim_id": "clm_7979decbebe640e6b4c903e8c6dd444b",
+          "created_at": "2026-08-22T13:28:16.649409Z",
+          "evidence_ids": [
+            "evd_1306b493cda249dda04f23327e6ffa3f"
+          ],
+          "id": "fnd_70035504a8bc406d81aa1dfeb99e09cd",
+          "mission_id": "mis_041019ad09834b5497381a70c4bd8373",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "code-fast's alias description ('direct calls only, NOT a Buzz seat (stalls in agent loops)') already reflects this finding — the alias-description consumer loop is closed for it. Future alias-affecting findings should land here first, then in the TOML description.",
+          "statement_kind": "observed_fact",
+          "status": "supported",
+          "uncertainty": "Stall evidence is a single dated operator observation (2026-08-16); ornith-1.5 may behave differently — retest on model upgrades."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "clm_3306a0b42b264daca77397e3a5ab2f43",
+          "created_at": "2026-08-24T02:47:48.454140Z",
+          "evidence_ids": [
+            "evd_0dad4c43f07a4154a576496afe541aed",
+            "evd_1046806ea9844f419a725dfee740fecc",
+            "evd_4c0e5cea23c24482a8d661e1abece89b",
+            "evd_4fae047bd21f4988a95b3cb5512df0cf"
+          ],
+          "id": "fnd_330e91044c554cc194e9ae4c3941b16b",
+          "mission_id": "mis_041019ad09834b5497381a70c4bd8373",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Vulcan's glm alias must be called with generous max_tokens; a small budget is billed in full and returns empty content.",
+          "statement_kind": "observed_fact",
+          "status": "supported",
+          "uncertainty": "Measured on one prompt shape on 2026-08-23, the day the alias went live. Whether reasoning share scales with prompt complexity is untested, and the provider may change reasoning defaults without notice. The mitigation (raise max_tokens) is verified; surfacing reasoning_content in Vulcan is proposed but unbuilt."
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/mis_1753772a0b8f4bf8b4a23da0965e213e": {
+      "created_at": "2026-08-24T04:30:47.056700Z",
+      "id": "mis_1753772a0b8f4bf8b4a23da0965e213e",
+      "objective": "Record measured mechanical reasons that requested cross-seat reviews do not arrive, so the fix targets the cause rather than the reviewer. Consumer: the run-*-agent.sh seat configs and the routing choice between a Buzz turn and a direct Vulcan call.",
+      "title": "Fleet review pipeline — why cross-seat reviews fail to land"
+    },
+    "/api/v1/missions/mis_1753772a0b8f4bf8b4a23da0965e213e/claims": {
+      "items": [
+        {
+          "created_at": "2026-08-24T04:31:12.914704Z",
+          "etag": "\"claim-clm_323a606cecaa4924b13800ee6c4d6622-v1\"",
+          "falsification_criteria": "A deep repo review completes inside 900s on a seat, or a hard_timeout is shown to arise from something other than BUZZ_ACP_MAX_TURN_DURATION, or raising the cap does not change completion rate.",
+          "id": "clm_323a606cecaa4924b13800ee6c4d6622",
+          "mission_id": "mis_1753772a0b8f4bf8b4a23da0965e213e",
+          "question_id": "que_5521cad9befa4b39af4314356279fdf9",
+          "statement": "The 900-second Buzz seat turn cap is shorter than a thorough repository review, so deep reviews systematically fail while shallow ones succeed.",
+          "status": "open",
+          "status_changed_at": "2026-08-24T04:31:12.914704Z",
+          "status_creator_id": "os-user:kevin-lee+seat:claude-code",
+          "status_evidence_valid": true,
+          "status_reason": "Claim registered for evaluation.",
+          "status_run_id": "run_8045f99c36744d1d9979212271a2f58f",
+          "version": 1
+        },
+        {
+          "created_at": "2026-08-24T04:31:13.144732Z",
+          "etag": "\"claim-clm_8e031c518ef04fa881b6d3e9f4fff612-v1\"",
+          "falsification_criteria": "A 429 is shown to be quota rather than rate, or the same review completes without rate limiting while the token budget is materially consumed.",
+          "id": "clm_8e031c518ef04fa881b6d3e9f4fff612",
+          "mission_id": "mis_1753772a0b8f4bf8b4a23da0965e213e",
+          "question_id": "que_5521cad9befa4b39af4314356279fdf9",
+          "statement": "The binding constraint on document-scale review through the GLM seat is provider request rate, not its token budget.",
+          "status": "open",
+          "status_changed_at": "2026-08-24T04:31:13.144732Z",
+          "status_creator_id": "os-user:kevin-lee+seat:claude-code",
+          "status_evidence_valid": true,
+          "status_reason": "Claim registered for evaluation.",
+          "status_run_id": "run_f315b785954545b28576239f4fd7ca52",
+          "version": 1
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/mis_1753772a0b8f4bf8b4a23da0965e213e/findings": {
+      "agent_inferences": [],
+      "items": [
+        {
+          "citation_status": "active",
+          "claim_id": "clm_323a606cecaa4924b13800ee6c4d6622",
+          "created_at": "2026-08-24T04:31:14.166707Z",
+          "evidence_ids": [
+            "evd_08b11c3d04dd489b822f66252147abe6",
+            "evd_2fe634f5cda547c3a5ca935f863c28a1",
+            "evd_967a6a87274a4bfdbe00716d71316c04"
+          ],
+          "id": "fnd_5e918ecebba64b0c908b45ad406bcdbc",
+          "mission_id": "mis_1753772a0b8f4bf8b4a23da0965e213e",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Raise the seat turn cap for audit lanes; a 900s cap selects for shallow reviews.",
+          "statement_kind": "observed_fact",
+          "status": "supported",
+          "uncertainty": "One timeout on one seat on one repo. That the cap fired at exactly 900s is certain; that it is the dominant cause of late reviews is inference — the merge-ahead-of-review pattern predates this measurement and has other plausible causes."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "clm_8e031c518ef04fa881b6d3e9f4fff612",
+          "created_at": "2026-08-24T04:31:14.360171Z",
+          "evidence_ids": [
+            "evd_8a4c2ce45f4240c4a9108dc46e68e350"
+          ],
+          "id": "fnd_8b9d77639b4141e19c2ae8fb71732dc4",
+          "mission_id": "mis_1753772a0b8f4bf8b4a23da0965e213e",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Pace GLM or route long reviews through the Vulcan alias; rate, not budget, is the limit.",
+          "statement_kind": "observed_fact",
+          "status": "supported",
+          "uncertainty": "Observed once, and my own preflight probes contributed to the request rate that triggered it. The provider's actual RPM/TPM limits are undocumented here."
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/mis_18f4bbed7f0745c79e375011186ca0a5": {
+      "created_at": "2026-08-25T01:57:31.457718Z",
+      "id": "mis_18f4bbed7f0745c79e375011186ca0a5",
+      "objective": "Record measured Athena runtime behavior (filed by the claude-code seat, session claude-f7) so deploy decisions rest on measurements, not remembered reports.",
+      "title": "Athena runtime behavior — measured contracts"
+    },
+    "/api/v1/missions/mis_18f4bbed7f0745c79e375011186ca0a5/claims": {
+      "items": [
+        {
+          "created_at": "2026-08-25T01:57:31.917161Z",
+          "etag": "\"claim-clm_7c43477cdf484b93877c417bc848ee15-v1\"",
+          "falsification_criteria": "A boundary-configured instance at current HEAD with ATHENA_ANONYMOUS_READS=0 returns 200 from unauthenticated GET /readyz.",
+          "id": "clm_7c43477cdf484b93877c417bc848ee15",
+          "mission_id": "mis_18f4bbed7f0745c79e375011186ca0a5",
+          "question_id": "que_6f54fa11a4824673b38a1011c5cc500d",
+          "statement": "Claim by seat claude-4e (2026-08-22, throwaway :8399 instance): setting ATHENA_ANONYMOUS_READS=0 causes unauthenticated GET /readyz to return 401, so /readyz must join _ANONYMOUS_ALWAYS_ALLOWED before the live flip.",
+          "status": "open",
+          "status_changed_at": "2026-08-25T01:57:31.917161Z",
+          "status_creator_id": "os-user:kevin-lee",
+          "status_evidence_valid": true,
+          "status_reason": "Claim registered for evaluation.",
+          "status_run_id": "run_93790a82d7aa4f99aadf23fecb9ddcb2",
+          "version": 1
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/mis_18f4bbed7f0745c79e375011186ca0a5/findings": {
+      "agent_inferences": [],
+      "items": [
+        {
+          "citation_status": "active",
+          "claim_id": "clm_7c43477cdf484b93877c417bc848ee15",
+          "created_at": "2026-08-25T01:57:46.366473Z",
+          "evidence_ids": [
+            "evd_44cd1136fcae4e46934ce0f4940d98e2"
+          ],
+          "id": "fnd_a7f48ef30ddb4e008c0533e24bb4e4ad",
+          "mission_id": "mis_18f4bbed7f0745c79e375011186ca0a5",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Not reproduced at athena main 2c18544 (measured 2026-08-24 by seat claude-code/claude-f7): with ATHENA_ANONYMOUS_READS=0 and the deployment boundary configured, /readyz answers 200 while /issues and /desk answer 401. /readyz is registered directly on the app with no browser dependency, so the anonymous-reads gate structurally cannot touch it; both relevant commits predate the 08-22 claim. Likely mis-measurement source: an under-configured probe yields 503 on every path from the deployment boundary. Consumers: tests/test_anonymous_reads_closed.py and the _ANONYMOUS_ALWAYS_ALLOWED deliberate-absence comment (athena PR #393).",
+          "statement_kind": "observed_fact",
+          "status": "unsupported",
+          "uncertainty": ""
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/mis_6103f5a185d4420b954cb6d2e7d2d691": {
+      "created_at": "2026-08-21T15:53:01.114166Z",
+      "id": "mis_6103f5a185d4420b954cb6d2e7d2d691",
+      "objective": "Record whether the VISION.md and WORKSPACE.md snapshots already cited by the sibling-ownership mission still match the live Minerva checkout after PRs #41-#43, without opening D-2 or inventing product.",
+      "title": "Cited workspace identity vs live checkout after 2026-08-21 GREEN slices"
+    },
+    "/api/v1/missions/mis_6103f5a185d4420b954cb6d2e7d2d691/claims": {
+      "items": [
+        {
+          "created_at": "2026-08-21T15:53:02.359177Z",
+          "etag": "\"claim-clm_5447f3086e1d4d5b92004f8b3a55b200-v1\"",
+          "falsification_criteria": "The live docs/VISION.md bytes are identical to snapshot snp_a461183f30784e6d8094235c1947bcc3, or the live file still has item 4 with no Done marker.",
+          "id": "clm_5447f3086e1d4d5b92004f8b3a55b200",
+          "mission_id": "mis_6103f5a185d4420b954cb6d2e7d2d691",
+          "question_id": "que_19116bb546674f76a68a4cb4b94e0a5c",
+          "statement": "The VISION.md snapshot imported 2026-08-21T03:29Z is an earlier edition than the live checkout: item 4 has no Done marker in that snapshot and is marked Done in the live file.",
+          "status": "open",
+          "status_changed_at": "2026-08-21T15:53:02.359177Z",
+          "status_creator_id": "os-user:kevin-lee",
+          "status_evidence_valid": true,
+          "status_reason": "Claim registered for evaluation.",
+          "status_run_id": "run_72375563b8784f73bdbce0032deb9e44",
+          "version": 1
+        },
+        {
+          "created_at": "2026-08-21T15:53:02.523801Z",
+          "etag": "\"claim-clm_c7feac51327d4ccea2a444b222fd3f33-v1\"",
+          "falsification_criteria": "The live docs/WORKSPACE.md contains `cd ~/ai-workspace/grok/minerva` as an install path or `--output ~/data/minerva/backups/research.db` as the nightly backup example.",
+          "id": "clm_c7feac51327d4ccea2a444b222fd3f33",
+          "mission_id": "mis_6103f5a185d4420b954cb6d2e7d2d691",
+          "question_id": "que_19116bb546674f76a68a4cb4b94e0a5c",
+          "statement": "The WORKSPACE.md snapshot imported 2026-08-21T03:29Z still tells seats to cd into the Grok clone and to back up onto a fixed research.db path; the live file does not.",
+          "status": "open",
+          "status_changed_at": "2026-08-21T15:53:02.523801Z",
+          "status_creator_id": "os-user:kevin-lee",
+          "status_evidence_valid": true,
+          "status_reason": "Claim registered for evaluation.",
+          "status_run_id": "run_240b62e411b94f929e737438ef65e8c5",
+          "version": 1
+        },
+        {
+          "created_at": "2026-08-21T15:53:02.682487Z",
+          "etag": "\"claim-clm_6e71098d5b4b4377930d4bc48c3fe8ac-v2\"",
+          "falsification_criteria": "The live WORKSPACE.md still describes persistent DB creation, the first real mission, and systemd as later phases.",
+          "id": "clm_6e71098d5b4b4377930d4bc48c3fe8ac",
+          "mission_id": "mis_6103f5a185d4420b954cb6d2e7d2d691",
+          "question_id": "que_19116bb546674f76a68a4cb4b94e0a5c",
+          "statement": "On 2026-08-21 the mickey workspace already has a persistent database and a seeded sibling-ownership mission.",
+          "status": "contested",
+          "status_changed_at": "2026-08-21T15:53:05.640587Z",
+          "status_creator_id": "os-user:kevin-lee",
+          "status_evidence_valid": true,
+          "status_reason": "The 03:29Z WORKSPACE.md snapshot says DB creation is a later phase; the live file says the persistent database and seeded mission already exist. Both spans are active.",
+          "status_run_id": "run_d3bb663b2dd341dfb48803c7122bd110",
+          "version": 2
+        },
+        {
+          "created_at": "2026-08-21T15:53:02.849326Z",
+          "etag": "\"claim-clm_913f6cbbd11c4ed29530db59595a0f09-v1\"",
+          "falsification_criteria": "The live VISION.md drops the Decision 0 research-memory sentence or lists D-2 implementation as this season's next increment.",
+          "id": "clm_913f6cbbd11c4ed29530db59595a0f09",
+          "mission_id": "mis_6103f5a185d4420b954cb6d2e7d2d691",
+          "question_id": "que_060d472f193342a890aa4d1b5f8c12e9",
+          "statement": "The live VISION.md still records Decision 0 as research-memory and still names D-2 as a non-goal this season.",
+          "status": "open",
+          "status_changed_at": "2026-08-21T15:53:02.849326Z",
+          "status_creator_id": "os-user:kevin-lee",
+          "status_evidence_valid": true,
+          "status_reason": "Claim registered for evaluation.",
+          "status_run_id": "run_4a7e2478d0a34685a6b017ea1c1bc1e0",
+          "version": 1
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/mis_6103f5a185d4420b954cb6d2e7d2d691/findings": {
+      "agent_inferences": [],
+      "items": [
+        {
+          "citation_status": "active",
+          "claim_id": "clm_5447f3086e1d4d5b92004f8b3a55b200",
+          "created_at": "2026-08-21T15:53:05.075094Z",
+          "evidence_ids": [
+            "evd_063c1d8afab14ccca506affad75eaa94",
+            "evd_68f239fb07004ada8a13f8e5ce7ff99d"
+          ],
+          "id": "fnd_f27af014e0c946f193ba80f7d3bc654d",
+          "mission_id": "mis_6103f5a185d4420b954cb6d2e7d2d691",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "VISION.md item 4 has no Done marker in the 03:29Z snapshot and is marked Done in the live file after PR #43.",
+          "statement_kind": "source_assertion",
+          "status": "supported",
+          "uncertainty": "Neither file is a signed historical edition. The 03:29Z snapshot remains immutable; the live file is the later checkout."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "clm_c7feac51327d4ccea2a444b222fd3f33",
+          "created_at": "2026-08-21T15:53:05.273574Z",
+          "evidence_ids": [
+            "evd_a32c7814dacf41fa941ee7fb52b6a066",
+            "evd_b3d6892dbc3240bda005f3c8f92a0b89",
+            "evd_c57f5a8ecd12405cbfc5db40cb487f68",
+            "evd_e5867c0bd0ab408a8441706ff566c992",
+            "evd_f86dae79124e496889325a2aed1354a5"
+          ],
+          "id": "fnd_b49a583fb64e40dc9f83af8c2a89136e",
+          "mission_id": "mis_6103f5a185d4420b954cb6d2e7d2d691",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "The 03:29Z WORKSPACE.md snapshot still uses a Grok-clone cd and a fixed backup path; the live file uses a seat-neutral clone path and a dated backup destination.",
+          "statement_kind": "source_assertion",
+          "status": "supported",
+          "uncertainty": "The live file is the current checkout after PRs #41 and #43. The earlier snapshot is not rewritten."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "clm_6e71098d5b4b4377930d4bc48c3fe8ac",
+          "created_at": "2026-08-21T15:53:05.451910Z",
+          "evidence_ids": [
+            "evd_245ef5bbba6c42988b09a2653a4df388",
+            "evd_7116b0a3b112440abe107254dfecaa8a"
+          ],
+          "id": "fnd_1b3ebbdc52414b29bc100e82e6ffecd8",
+          "mission_id": "mis_6103f5a185d4420b954cb6d2e7d2d691",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "The 03:29Z WORKSPACE.md snapshot says persistent DB creation and the first mission are later phases; the live file says the Grok seat already created the database and seeded the sibling-ownership mission.",
+          "statement_kind": "source_assertion",
+          "status": "contested",
+          "uncertainty": "These are sequential editions of the same operator map, not contemporaneous sources. The later Decision 0 checkout does not delete the earlier snapshot."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "clm_913f6cbbd11c4ed29530db59595a0f09",
+          "created_at": "2026-08-21T15:53:05.803508Z",
+          "evidence_ids": [
+            "evd_13780819f91249c8b445f85a5a346fc0",
+            "evd_8a9c0627240d40b3a8d654fbb71a9cd3",
+            "evd_98d23eef17424bddbb08ee891dd542d0"
+          ],
+          "id": "fnd_ff6d88d0bef64f7f8917328e088d29d6",
+          "mission_id": "mis_6103f5a185d4420b954cb6d2e7d2d691",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Live VISION.md still states Decision 0 as research-memory and does not reopen D-2; live WORKSPACE.md still rejects a non-loopback host.",
+          "statement_kind": "source_assertion",
+          "status": "supported",
+          "uncertainty": "Docs are not a running bind. healthz is observed separately and is not a citation."
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/mis_eb0813343b1a463d8b226b0a407c91f5": {
+      "created_at": "2026-08-21T03:29:01.437842Z",
+      "id": "mis_eb0813343b1a463d8b226b0a407c91f5",
+      "objective": "Map what Minerva, Athena, Buzz, ORACLE, Chronos, Icarus, and Vulcan each own, and record claims that are still made without citations.",
+      "title": "Mickey AI workspace — sibling ownership"
+    },
+    "/api/v1/missions/mis_eb0813343b1a463d8b226b0a407c91f5/claims": {
+      "items": [
+        {
+          "created_at": "2026-08-21T03:29:01.985707Z",
+          "etag": "\"claim-clm_dcad949defbb41db89a76ba2b18b1ed4-v1\"",
+          "falsification_criteria": "A shipped Minerva surface assigns a truth value or derives confidence from evidence counts.",
+          "id": "clm_dcad949defbb41db89a76ba2b18b1ed4",
+          "mission_id": "mis_eb0813343b1a463d8b226b0a407c91f5",
+          "question_id": "que_db8f6852af0a45978cb06d8b6a74d3c9",
+          "statement": "Minerva records evidence and uncertainty; it does not manufacture certainty.",
+          "status": "open",
+          "status_changed_at": "2026-08-21T03:29:01.985707Z",
+          "status_creator_id": "os-user:kevin-lee",
+          "status_evidence_valid": true,
+          "status_reason": "Claim registered for evaluation.",
+          "status_run_id": "run_a5a364a20a0a4f9cb8ca8dc71d607a08",
+          "version": 1
+        },
+        {
+          "created_at": "2026-08-21T03:29:02.169897Z",
+          "etag": "\"claim-clm_ad930bdd77ee4337b9431094acdde0fc-v1\"",
+          "falsification_criteria": "An accepted Decision 0 or ADR authorizes Tailscale, 0.0.0.0, or treating loopback as identity.",
+          "id": "clm_ad930bdd77ee4337b9431094acdde0fc",
+          "mission_id": "mis_eb0813343b1a463d8b226b0a407c91f5",
+          "question_id": "que_db8f6852af0a45978cb06d8b6a74d3c9",
+          "statement": "This season Minerva binds review traffic only to 127.0.0.1; loopback is not authentication.",
+          "status": "open",
+          "status_changed_at": "2026-08-21T03:29:02.169897Z",
+          "status_creator_id": "os-user:kevin-lee",
+          "status_evidence_valid": true,
+          "status_reason": "Claim registered for evaluation.",
+          "status_run_id": "run_881e41a395254c55b2c8b6e8ae2a161d",
+          "version": 1
+        },
+        {
+          "created_at": "2026-08-21T03:29:02.359911Z",
+          "etag": "\"claim-clm_3acfdfc75b2a4061a6b7f4a7bfc957cc-v1\"",
+          "falsification_criteria": "Athena is documented as the system of record for falsifiable claims with byte-span citations.",
+          "id": "clm_3acfdfc75b2a4061a6b7f4a7bfc957cc",
+          "mission_id": "mis_eb0813343b1a463d8b226b0a407c91f5",
+          "question_id": "que_a43da0d48a424154b880e2fa0b5fc5c6",
+          "statement": "Athena owns operator work coordination, not Minerva's research-memory kernel.",
+          "status": "open",
+          "status_changed_at": "2026-08-21T03:29:02.359911Z",
+          "status_creator_id": "os-user:kevin-lee",
+          "status_evidence_valid": true,
+          "status_reason": "Claim registered for evaluation.",
+          "status_run_id": "run_c30011897a08403095f3b954844279a8",
+          "version": 1
+        },
+        {
+          "created_at": "2026-08-21T03:29:02.547198Z",
+          "etag": "\"claim-clm_7eda5886cf5349008cb24816bb0fa29e-v1\"",
+          "falsification_criteria": "Decision 0 or fleet doctrine names Buzz messages as durable evidence.",
+          "id": "clm_7eda5886cf5349008cb24816bb0fa29e",
+          "mission_id": "mis_eb0813343b1a463d8b226b0a407c91f5",
+          "question_id": "que_a43da0d48a424154b880e2fa0b5fc5c6",
+          "statement": "Buzz is the conversation surface; it is not the research record.",
+          "status": "open",
+          "status_changed_at": "2026-08-21T03:29:02.547198Z",
+          "status_creator_id": "os-user:kevin-lee",
+          "status_evidence_valid": true,
+          "status_reason": "Claim registered for evaluation.",
+          "status_run_id": "run_add7c133f30a4227b7be55a5c7cc1d62",
+          "version": 1
+        },
+        {
+          "created_at": "2026-08-21T11:56:08.734200Z",
+          "etag": "\"claim-clm_a27f54608a35463294de106461fefb1e-v2\"",
+          "falsification_criteria": "An accepted Decision 0 amendment or later accepted ADR names D-2 implementation as this season's next increment of value.",
+          "id": "clm_a27f54608a35463294de106461fefb1e",
+          "mission_id": "mis_eb0813343b1a463d8b226b0a407c91f5",
+          "question_id": "que_db8f6852af0a45978cb06d8b6a74d3c9",
+          "statement": "This season's next increment of value is local research-memory (Decision 0), not opening gate D-2.",
+          "status": "contested",
+          "status_changed_at": "2026-08-21T11:56:10.913989Z",
+          "status_creator_id": "os-user:kevin-lee",
+          "status_evidence_valid": true,
+          "status_reason": "Supporting Decision 0 spans and an opposing Fable plan 3 span are both active; the later Decision 0 does not delete the earlier plan text.",
+          "status_run_id": "run_a95292e6060e4acaaab3a72ca6e8bef9",
+          "version": 2
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/mis_eb0813343b1a463d8b226b0a407c91f5/findings": {
+      "agent_inferences": [],
+      "items": [
+        {
+          "citation_status": "active",
+          "claim_id": "clm_dcad949defbb41db89a76ba2b18b1ed4",
+          "created_at": "2026-08-21T03:29:05.179305Z",
+          "evidence_ids": [
+            "evd_036b536a6ba54948a727bb86888f9e3d",
+            "evd_28b889740f3e442e966a8d627a5c0799",
+            "evd_5ea0a3df62a949cdb4fb9fa7adf86561"
+          ],
+          "id": "fnd_84170cedf90a4cff8c25a76253376f62",
+          "mission_id": "mis_eb0813343b1a463d8b226b0a407c91f5",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Decision 0 restates the governing rule in VISION.md without assigning truth values.",
+          "statement_kind": "source_assertion",
+          "status": "supported",
+          "uncertainty": "The snapshot is the current checkout of VISION.md, not a signed historical edition."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "clm_ad930bdd77ee4337b9431094acdde0fc",
+          "created_at": "2026-08-21T03:29:05.368926Z",
+          "evidence_ids": [
+            "evd_93f04e1431cc4ccea7cf104052f608ec",
+            "evd_f1ec0f2879664102b1c7903b26109a1e"
+          ],
+          "id": "fnd_7ee3e35eb10c40d6b776671cbd451f8e",
+          "mission_id": "mis_eb0813343b1a463d8b226b0a407c91f5",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "VISION.md and WORKSPACE.md both state loopback is not authentication.",
+          "statement_kind": "source_assertion",
+          "status": "supported",
+          "uncertainty": "A future systemd unit could still be misconfigured; this finding cites docs, not a running bind."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "clm_3acfdfc75b2a4061a6b7f4a7bfc957cc",
+          "created_at": "2026-08-21T03:29:05.560803Z",
+          "evidence_ids": [
+            "evd_2412a0c61d324a86bb0ab5584722b987",
+            "evd_8625008102d84a6a8fc6a6f6c6ea5f4a"
+          ],
+          "id": "fnd_c020f96eb7854641a9e41a9f3ad15b34",
+          "mission_id": "mis_eb0813343b1a463d8b226b0a407c91f5",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Athena is named as operator workspace; a future adapter is explicitly not Minerva becoming orchestrator.",
+          "statement_kind": "source_assertion",
+          "status": "supported",
+          "uncertainty": "ADR 0002 describes a future Athena seam that does not exist; readers may still conflate coordination with evidence."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "clm_7eda5886cf5349008cb24816bb0fa29e",
+          "created_at": "2026-08-21T03:29:05.740531Z",
+          "evidence_ids": [
+            "evd_63e2db988157471884c8d989f3108e74",
+            "evd_d5b04bee7c484ee3a0e6866bc14d1e6e"
+          ],
+          "id": "fnd_6098e7b9c956426281d70b193c36314f",
+          "mission_id": "mis_eb0813343b1a463d8b226b0a407c91f5",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Buzz is conversation; durable transfer is named as shared/handoffs.",
+          "statement_kind": "source_assertion",
+          "status": "supported",
+          "uncertainty": "Fleet practice can still paste findings into Buzz; the docs forbid treating that as evidence, they cannot prevent it."
+        },
+        {
+          "citation_status": "not_applicable",
+          "claim_id": "clm_dcad949defbb41db89a76ba2b18b1ed4",
+          "created_at": "2026-08-21T03:29:05.944108Z",
+          "evidence_ids": [],
+          "id": "fnd_3389c9e76f304d99b39cbdce1db50df0",
+          "mission_id": "mis_eb0813343b1a463d8b226b0a407c91f5",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Whether every seat will actually file evidence through the CLI remains an open operational question.",
+          "statement_kind": "unresolved_question",
+          "status": "inconclusive",
+          "uncertainty": "No observation yet that a non-Grok seat wrote a card into this database."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "clm_a27f54608a35463294de106461fefb1e",
+          "created_at": "2026-08-21T11:56:10.753737Z",
+          "evidence_ids": [
+            "evd_3878e93492b94e9eb60262ba825b5e53",
+            "evd_b501ed26e17543debb8bf09855658ad6",
+            "evd_cfbd41423bc74b9da7525f462f6d48d2",
+            "evd_eeb8a325117342ea8ba8d49578cd8715"
+          ],
+          "id": "fnd_508dc15b648447a08250ea96aacdaa70",
+          "mission_id": "mis_eb0813343b1a463d8b226b0a407c91f5",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Decision 0 (2026-08-20) and Fable plan 3 (2026-08-09) disagree on whether the next increment of value is research-memory or D-2.",
+          "statement_kind": "source_assertion",
+          "status": "contested",
+          "uncertainty": "Plan 3 is older and also says it does not begin D-2; Decision 0 is the later season identity. Neither source is a signed historical edition."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "clm_ad930bdd77ee4337b9431094acdde0fc",
+          "created_at": "2026-08-21T11:56:11.079393Z",
+          "evidence_ids": [
+            "evd_16252215c40b4e1e9ad16226c78887fb",
+            "evd_1740d6ea0e2940da91ea6a1987c4cbb8",
+            "evd_814252a086294871bc49ad34bf7e9097",
+            "evd_9d16eff9721642c28620aec5b0d42236"
+          ],
+          "id": "fnd_9c8e559153f54c5680947553ec882100",
+          "mission_id": "mis_eb0813343b1a463d8b226b0a407c91f5",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Shipped bind examples stay on 127.0.0.1; ADR 0009 proposes a later identity boundary and is explicitly not accepted.",
+          "statement_kind": "source_assertion",
+          "status": "supported",
+          "uncertainty": "A proposed ADR is not an accepted authorization of Tailscale or 0.0.0.0. No imported snapshot currently meets the falsification criterion."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "clm_dcad949defbb41db89a76ba2b18b1ed4",
+          "created_at": "2026-08-21T11:56:11.244039Z",
+          "evidence_ids": [
+            "evd_36f30df72f3e455a9adcdd23ec484ad7",
+            "evd_6500b25f3c7547a2937bd34107897d62"
+          ],
+          "id": "fnd_ba4b2166f3bb4e809e6f7ff6babd72b1",
+          "mission_id": "mis_eb0813343b1a463d8b226b0a407c91f5",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "PRD restates that Minerva never claims to determine truth; ORACLE's Minerva page still assigns confidence: high, which is a sibling wiki field, not a Minerva surface.",
+          "statement_kind": "source_assertion",
+          "status": "supported",
+          "uncertainty": "ORACLE frontmatter is not a Minerva API or CLI output. No imported snapshot currently shows a shipped Minerva surface assigning a truth value or deriving confidence from evidence counts."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "clm_3acfdfc75b2a4061a6b7f4a7bfc957cc",
+          "created_at": "2026-08-21T11:56:11.408563Z",
+          "evidence_ids": [
+            "evd_d96d77e1fa0e48b1b7ab8703fb0929d1"
+          ],
+          "id": "fnd_b3ef2e23b4234a189ba231489a64dcd3",
+          "mission_id": "mis_eb0813343b1a463d8b226b0a407c91f5",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "No imported snapshot currently documents Athena as the system of record for falsifiable claims with byte-span citations.",
+          "statement_kind": "unresolved_question",
+          "status": "inconclusive",
+          "uncertainty": "Absence of a falsifying span is not proof Athena has never been described that way outside this corpus. Fable plan 3 only names D-2 as remaining gated work."
+        },
+        {
+          "citation_status": "not_applicable",
+          "claim_id": "clm_7eda5886cf5349008cb24816bb0fa29e",
+          "created_at": "2026-08-21T11:56:11.575969Z",
+          "evidence_ids": [],
+          "id": "fnd_148254e50ce74e09af2c1e56fd83b776",
+          "mission_id": "mis_eb0813343b1a463d8b226b0a407c91f5",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "No imported snapshot currently names Buzz messages as durable evidence; the gap is recorded rather than filled with an invented quote.",
+          "statement_kind": "unresolved_question",
+          "status": "inconclusive",
+          "uncertainty": "Fleet practice can still paste findings into Buzz. This finding does not observe a live Buzz message."
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/mis_ecf8bb02986247f18fc1695ba2707146": {
+      "created_at": "2026-08-22T01:09:57.743311Z",
+      "id": "mis_ecf8bb02986247f18fc1695ba2707146",
+      "objective": "Record whether the next-level working change improves operator legibility, safe intake, and recoverability without opening D-2 or turning structural cues into tasks.",
+      "title": "Minerva next-level pillar readiness"
+    },
+    "/api/v1/missions/mis_ecf8bb02986247f18fc1695ba2707146/claims": {
+      "items": [
+        {
+          "created_at": "2026-08-22T01:10:13.008841Z",
+          "etag": "\"claim-clm_886d33e329ed4d488e6b2293c59df1d4-v1\"",
+          "falsification_criteria": "Any workbench route mutates the database, creates a task, or presents a structural cue as required work.",
+          "id": "clm_886d33e329ed4d488e6b2293c59df1d4",
+          "mission_id": "mis_ecf8bb02986247f18fc1695ba2707146",
+          "question_id": "que_a0dc38e9ffaa476a9560d5cd39d2c8a5",
+          "statement": "The next-level workbench exposes deterministic receipts without creating tasks or changing research state.",
+          "status": "open",
+          "status_changed_at": "2026-08-22T01:10:13.008841Z",
+          "status_creator_id": "os-user:kevin-lee",
+          "status_evidence_valid": true,
+          "status_reason": "Claim registered for evaluation.",
+          "status_run_id": "run_12bd4cfa340f47468fb8642f61bc6049",
+          "version": 1
+        },
+        {
+          "created_at": "2026-08-22T01:10:13.318995Z",
+          "etag": "\"claim-clm_8e616146c95d49cfb79c1877d3badd1c-v1\"",
+          "falsification_criteria": "The recorded backup cannot be restored to a new destination or deep doctor reports any failed check.",
+          "id": "clm_8e616146c95d49cfb79c1877d3badd1c",
+          "mission_id": "mis_ecf8bb02986247f18fc1695ba2707146",
+          "question_id": "que_a0dc38e9ffaa476a9560d5cd39d2c8a5",
+          "statement": "The live recovery baseline demonstrates that an existing Minerva backup can be restored and deep-verified to a fresh path.",
+          "status": "open",
+          "status_changed_at": "2026-08-22T01:10:13.318995Z",
+          "status_creator_id": "os-user:kevin-lee",
+          "status_evidence_valid": true,
+          "status_reason": "Claim registered for evaluation.",
+          "status_run_id": "run_736c207954154cfca3c70450a1f314b9",
+          "version": 1
+        },
+        {
+          "created_at": "2026-08-22T01:10:13.556250Z",
+          "etag": "\"claim-clm_8ff89d9ff41f4d30b7e0d36111bbcc1f-v1\"",
+          "falsification_criteria": "A digest mismatch writes a source, snapshot, or success audit event, or changed bytes import successfully.",
+          "id": "clm_8ff89d9ff41f4d30b7e0d36111bbcc1f",
+          "mission_id": "mis_ecf8bb02986247f18fc1695ba2707146",
+          "question_id": "que_a0dc38e9ffaa476a9560d5cd39d2c8a5",
+          "statement": "The working branch can pin reviewed local source bytes and refuse changed bytes before persistence.",
+          "status": "open",
+          "status_changed_at": "2026-08-22T01:10:13.556250Z",
+          "status_creator_id": "os-user:kevin-lee",
+          "status_evidence_valid": true,
+          "status_reason": "Claim registered for evaluation.",
+          "status_run_id": "run_4c7664e75c37404faccb461b226c5bd2",
+          "version": 1
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/mis_ecf8bb02986247f18fc1695ba2707146/findings": {
+      "agent_inferences": [],
+      "items": [
+        {
+          "citation_status": "active",
+          "claim_id": "clm_886d33e329ed4d488e6b2293c59df1d4",
+          "created_at": "2026-08-22T01:11:47.929994Z",
+          "evidence_ids": [
+            "evd_05aa8e03eb0645d491fab0ccccd11212"
+          ],
+          "id": "fnd_48eb0826e45348b8b931618a066ff313",
+          "mission_id": "mis_ecf8bb02986247f18fc1695ba2707146",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "The working branch exposes queue, review, and lineage receipts as read-only operator views and explicitly preserves the cue-not-task boundary.",
+          "statement_kind": "observed_fact",
+          "status": "supported",
+          "uncertainty": "The branch is not deployed and still requires full gates plus non-author review."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "clm_8e616146c95d49cfb79c1877d3badd1c",
+          "created_at": "2026-08-22T01:11:48.125239Z",
+          "evidence_ids": [
+            "evd_afd8c5feefca4b1281ad00cdbd5154c9"
+          ],
+          "id": "fnd_59819ec8d3404864bca71ba3b2d9b1ed",
+          "mission_id": "mis_ecf8bb02986247f18fc1695ba2707146",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "One 503,808-byte Minerva backup restored to a fresh path in 0.22 seconds and passed deep doctor in 0.21 seconds.",
+          "statement_kind": "observed_fact",
+          "status": "supported",
+          "uncertainty": "This is one backup and one drill, not an RTO distribution or SLA."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "clm_8ff89d9ff41f4d30b7e0d36111bbcc1f",
+          "created_at": "2026-08-22T01:11:48.313011Z",
+          "evidence_ids": [
+            "evd_511240e72f724589866652b2af4dea5a",
+            "evd_fe8f300c47fd4d2ebf2187692fc31763"
+          ],
+          "id": "fnd_6ba8d242aca14453884b8f629adb7dbd",
+          "mission_id": "mis_ecf8bb02986247f18fc1695ba2707146",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Focused source and CLI tests exercise digest-pinned intake and assert that a preview mismatch leaves no snapshot state.",
+          "statement_kind": "observed_fact",
+          "status": "supported",
+          "uncertainty": "This controlled test evidence does not replace repeated operator use on varied real files."
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/mis_f5c5f386ddf64ee28fbee9b93abb0f7e": {
+      "created_at": "2026-08-23T22:37:55.141910Z",
+      "id": "mis_f5c5f386ddf64ee28fbee9b93abb0f7e",
+      "objective": "Record whether the 2026-08-23 discoverability change (fleet skill + PATH wrapper) increases genuine non-build filings, with the pre-intervention baseline pinned as immutable bytes, so the effect is checked against the record rather than remembered charitably. Consumer loop: the outcome decides whether L4 (a doctrinal trigger) and a finding-consumer loop are needed, or whether discovery alone was sufficient.",
+      "title": "Minerva adoption intervention — did fixing discovery change usage?"
+    },
+    "/api/v1/missions/mis_f5c5f386ddf64ee28fbee9b93abb0f7e/claims": {
+      "items": [
+        {
+          "created_at": "2026-08-23T22:38:25.601059Z",
+          "etag": "\"claim-clm_3f83526394db462f89d6c237102d2cd5-v1\"",
+          "falsification_criteria": "On 2026-09-06, no research run exists after 2026-08-23T21:33Z whose author was a seat doing work other than building or reviewing Minerva. Build-driven runs and automated backups do not count.",
+          "id": "clm_3f83526394db462f89d6c237102d2cd5",
+          "mission_id": "mis_f5c5f386ddf64ee28fbee9b93abb0f7e",
+          "question_id": "que_be6ab88df90840f296e1cdb2eae52144",
+          "statement": "At least one genuine non-build Minerva filing occurs by 2026-09-06, by a seat that is not working on Minerva itself.",
+          "status": "open",
+          "status_changed_at": "2026-08-23T22:38:25.601059Z",
+          "status_creator_id": "os-user:kevin-lee",
+          "status_evidence_valid": true,
+          "status_reason": "Claim registered for evaluation.",
+          "status_run_id": "run_3aac72990fb14aaf9b577da934198073",
+          "version": 1
+        },
+        {
+          "created_at": "2026-08-23T22:38:25.765034Z",
+          "etag": "\"claim-clm_83a131afe3fd4156b0d71acb38d67945-v1\"",
+          "falsification_criteria": "Each of the four weeks ending 2026-08-30, 09-06, 09-13 and 09-20 contains at least one genuine non-build filing while no downstream consumer of Minerva findings has been built. Any such week with zero filings supports the claim instead.",
+          "id": "clm_83a131afe3fd4156b0d71acb38d67945",
+          "mission_id": "mis_f5c5f386ddf64ee28fbee9b93abb0f7e",
+          "question_id": "que_be6ab88df90840f296e1cdb2eae52144",
+          "statement": "Without a finding-consumer loop, filings do not sustain at one or more per week for four consecutive weeks through 2026-09-20.",
+          "status": "open",
+          "status_changed_at": "2026-08-23T22:38:25.765034Z",
+          "status_creator_id": "os-user:kevin-lee",
+          "status_evidence_valid": true,
+          "status_reason": "Claim registered for evaluation.",
+          "status_run_id": "run_01ca78f807284d6d8cb7071802788c24",
+          "version": 1
+        },
+        {
+          "created_at": "2026-08-23T22:38:25.948289Z",
+          "etag": "\"claim-clm_0a85a55d1fea4fd695b6681773a89445-v1\"",
+          "falsification_criteria": "A service's usage rises durably after a discoverability change while no project work targets that service, or Vulcan's per-day call peak turns out to postdate rather than predate its skill.",
+          "id": "clm_0a85a55d1fea4fd695b6681773a89445",
+          "mission_id": "mis_f5c5f386ddf64ee28fbee9b93abb0f7e",
+          "question_id": "que_48c2a45d7b5447e8a05c316ec630c23d",
+          "statement": "Agent usage of a fleet service tracks which project is being worked on, not whether the service is discoverable.",
+          "status": "open",
+          "status_changed_at": "2026-08-23T22:38:25.948289Z",
+          "status_creator_id": "os-user:kevin-lee",
+          "status_evidence_valid": true,
+          "status_reason": "Claim registered for evaluation.",
+          "status_run_id": "run_c6b3485bae5044de97eb9905eca7e458",
+          "version": 1
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/mis_f5c5f386ddf64ee28fbee9b93abb0f7e/findings": {
+      "agent_inferences": [],
+      "items": [
+        {
+          "citation_status": "active",
+          "claim_id": "clm_0a85a55d1fea4fd695b6681773a89445",
+          "created_at": "2026-08-23T22:40:05.675658Z",
+          "evidence_ids": [
+            "evd_59d76abc8fca4cbc964f6805964f3df9",
+            "evd_bb36633f8ee14b7892a14444845f7086"
+          ],
+          "id": "fnd_767e71012a85446394e37b124fae8086",
+          "mission_id": "mis_f5c5f386ddf64ee28fbee9b93abb0f7e",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Vulcan's usage peak predates its skill by about 24 hours, and its per-seat labels track the project being worked on, so discoverability did not drive its usage.",
+          "statement_kind": "observed_fact",
+          "status": "supported",
+          "uncertainty": "One service, six days, and single-digit daily counts. This is an observation about Vulcan, not an established law about fleet services; a second service showing the opposite would overturn it."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "clm_3f83526394db462f89d6c237102d2cd5",
+          "created_at": "2026-08-23T22:40:05.852349Z",
+          "evidence_ids": [
+            "evd_1dbb7eaf009042b6ae3923318475823f",
+            "evd_782bed72d7a248e08a5937028550d290",
+            "evd_869f4f8fcbfc4ee9a2bab2b7e2f06316"
+          ],
+          "id": "fnd_fdcb043dbe1b4d4c909f5bbfd7ed2511",
+          "mission_id": "mis_f5c5f386ddf64ee28fbee9b93abb0f7e",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Predicted at roughly 65 percent: at least one genuine non-build filing occurs by 2026-09-06.",
+          "statement_kind": "assumption",
+          "status": "inconclusive",
+          "uncertainty": "A forecast, not an observation, and not checkable before 2026-09-06. Baseline is a single genuine filing, so no rate can be fitted and the probability is subjective. The author designed and shipped the intervention being measured and is the worst-placed observer of it."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "clm_83a131afe3fd4156b0d71acb38d67945",
+          "created_at": "2026-08-23T22:40:06.041367Z",
+          "evidence_ids": [
+            "evd_7f51493ad869432bb826f38bd657618c"
+          ],
+          "id": "fnd_431e523434a34b1f958f78ae57dbe7f6",
+          "mission_id": "mis_f5c5f386ddf64ee28fbee9b93abb0f7e",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Predicted at roughly 70 percent that filings do NOT sustain weekly through 2026-09-20 while no consumer of findings exists.",
+          "statement_kind": "assumption",
+          "status": "inconclusive",
+          "uncertainty": "A forecast about a counterfactual: it only resolves cleanly if no consumer loop is built in the window. If one is built, the claim becomes unresolvable rather than false, and should be retracted with that reason rather than scored."
+        }
+      ],
+      "next_cursor": null
     }
   },
   "scrubbed": true,
-  "surface": "http GET x1"
+  "surface": "http GET x23"
 }

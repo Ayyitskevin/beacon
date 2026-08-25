@@ -1,5 +1,5 @@
 {
-  "note": "http://127.0.0.1:8140 via default (measured on mickey 2026-08-24); surfaces captured: ['/v1/capabilities', '/v1/models']",
+  "note": "The AGGREGATE (/v1/usage) has no per-event timestamps -- started_at is a window origin -- and occurred_at is required, so a usage reader must replay file:usage-ledger.jsonl. RECAPTURED after a scrubber bug redacted prompt_tokens and completion_tokens as if they were credentials.",
   "origin": "vulcan",
   "payload": {
     "/v1/capabilities": {
@@ -235,8 +235,638 @@
         "source": "configuration"
       },
       "object": "list"
-    }
+    },
+    "/v1/usage": {
+      "budgets": [],
+      "by_model": [
+        {
+          "model": "claude-fast",
+          "provider": "anthropic",
+          "totals": {
+            "completion_tokens": 5,
+            "prompt_tokens": 26,
+            "requests": 2,
+            "requests_with_usage": 2,
+            "total_tokens": 31
+          }
+        },
+        {
+          "model": "code",
+          "provider": "local-ollama",
+          "totals": {
+            "completion_tokens": 97,
+            "prompt_tokens": 56,
+            "requests": 4,
+            "requests_with_usage": 4,
+            "total_tokens": 153
+          }
+        },
+        {
+          "model": "code-fast",
+          "provider": "local-ollama",
+          "totals": {
+            "completion_tokens": 28,
+            "prompt_tokens": 75,
+            "requests": 1,
+            "requests_with_usage": 1,
+            "total_tokens": 103
+          }
+        },
+        {
+          "model": "embed",
+          "provider": "local-ollama",
+          "totals": {
+            "completion_tokens": 0,
+            "prompt_tokens": 32,
+            "requests": 7,
+            "requests_with_usage": 7,
+            "total_tokens": 32
+          }
+        },
+        {
+          "model": "glm",
+          "provider": "zai",
+          "totals": {
+            "completion_tokens": 960,
+            "prompt_tokens": 182,
+            "requests": 8,
+            "requests_with_usage": 8,
+            "total_tokens": 1142
+          }
+        },
+        {
+          "model": "grok",
+          "provider": "xai",
+          "totals": {
+            "completion_tokens": 2,
+            "prompt_tokens": 850,
+            "requests": 2,
+            "requests_with_usage": 2,
+            "total_tokens": 852
+          }
+        },
+        {
+          "model": "kimi",
+          "provider": "moonshot",
+          "totals": {
+            "completion_tokens": 89,
+            "prompt_tokens": 451,
+            "requests": 5,
+            "requests_with_usage": 5,
+            "total_tokens": 540
+          }
+        },
+        {
+          "model": "simple",
+          "provider": "local-ollama",
+          "totals": {
+            "completion_tokens": 1547,
+            "prompt_tokens": 881,
+            "requests": 13,
+            "requests_with_usage": 13,
+            "total_tokens": 2428
+          }
+        },
+        {
+          "model": "utility",
+          "provider": "local-ollama",
+          "totals": {
+            "completion_tokens": 164,
+            "prompt_tokens": 338,
+            "requests": 5,
+            "requests_with_usage": 5,
+            "total_tokens": 502
+          }
+        },
+        {
+          "model": "vision-work",
+          "provider": "local-ollama",
+          "totals": {
+            "completion_tokens": 71,
+            "prompt_tokens": 64,
+            "requests": 1,
+            "requests_with_usage": 1,
+            "total_tokens": 135
+          }
+        }
+      ],
+      "by_provider": [
+        {
+          "provider": "anthropic",
+          "totals": {
+            "completion_tokens": 5,
+            "prompt_tokens": 26,
+            "requests": 2,
+            "requests_with_usage": 2,
+            "total_tokens": 31
+          }
+        },
+        {
+          "provider": "local-ollama",
+          "totals": {
+            "completion_tokens": 1907,
+            "prompt_tokens": 1446,
+            "requests": 31,
+            "requests_with_usage": 31,
+            "total_tokens": 3353
+          }
+        },
+        {
+          "provider": "moonshot",
+          "totals": {
+            "completion_tokens": 89,
+            "prompt_tokens": 451,
+            "requests": 5,
+            "requests_with_usage": 5,
+            "total_tokens": 540
+          }
+        },
+        {
+          "provider": "xai",
+          "totals": {
+            "completion_tokens": 2,
+            "prompt_tokens": 850,
+            "requests": 2,
+            "requests_with_usage": 2,
+            "total_tokens": 852
+          }
+        },
+        {
+          "provider": "zai",
+          "totals": {
+            "completion_tokens": 960,
+            "prompt_tokens": 182,
+            "requests": 8,
+            "requests_with_usage": 8,
+            "total_tokens": 1142
+          }
+        }
+      ],
+      "by_seat": [
+        {
+          "seat": "claude",
+          "totals": {
+            "completion_tokens": 334,
+            "prompt_tokens": 729,
+            "requests": 10,
+            "requests_with_usage": 10,
+            "total_tokens": 1063
+          }
+        },
+        {
+          "seat": "claude-code",
+          "totals": {
+            "completion_tokens": 885,
+            "prompt_tokens": 1134,
+            "requests": 11,
+            "requests_with_usage": 11,
+            "total_tokens": 2019
+          }
+        },
+        {
+          "seat": "fable",
+          "totals": {
+            "completion_tokens": 102,
+            "prompt_tokens": 63,
+            "requests": 1,
+            "requests_with_usage": 1,
+            "total_tokens": 165
+          }
+        },
+        {
+          "seat": "glm-preflight",
+          "totals": {
+            "completion_tokens": 320,
+            "prompt_tokens": 108,
+            "requests": 6,
+            "requests_with_usage": 6,
+            "total_tokens": 428
+          }
+        },
+        {
+          "seat": "icarus",
+          "totals": {
+            "completion_tokens": 1081,
+            "prompt_tokens": 468,
+            "requests": 6,
+            "requests_with_usage": 6,
+            "total_tokens": 1549
+          }
+        },
+        {
+          "seat": "kimi",
+          "totals": {
+            "completion_tokens": 28,
+            "prompt_tokens": 256,
+            "requests": 5,
+            "requests_with_usage": 5,
+            "total_tokens": 284
+          }
+        }
+      ],
+      "ledger": {
+        "replayed_requests": 41,
+        "skipped_lines": 0,
+        "write_failures": 0
+      },
+      "object": "usage",
+      "scope": "ledger",
+      "started_at": 1786852163,
+      "totals": {
+        "completion_tokens": 2963,
+        "prompt_tokens": 2955,
+        "requests": 48,
+        "requests_with_usage": 48,
+        "total_tokens": 5918
+      }
+    },
+    "file:usage-ledger.jsonl": [
+      {
+        "completion_tokens": 102,
+        "model": "simple",
+        "prompt_tokens": 63,
+        "provider": "local-ollama",
+        "seat": "fable",
+        "ts": 1786852163
+      },
+      {
+        "completion_tokens": null,
+        "model": "embed",
+        "prompt_tokens": 4,
+        "provider": "local-ollama",
+        "seat": "claude-code",
+        "ts": 1786852163
+      },
+      {
+        "completion_tokens": 28,
+        "model": "code-fast",
+        "prompt_tokens": 75,
+        "provider": "local-ollama",
+        "seat": "claude-code",
+        "ts": 1786911155
+      },
+      {
+        "completion_tokens": 71,
+        "model": "vision-work",
+        "prompt_tokens": 64,
+        "provider": "local-ollama",
+        "seat": "claude-code",
+        "ts": 1786911755
+      },
+      {
+        "completion_tokens": 20,
+        "model": "simple",
+        "prompt_tokens": 66,
+        "provider": "local-ollama",
+        "seat": null,
+        "ts": 1787282265
+      },
+      {
+        "completion_tokens": 16,
+        "model": "kimi",
+        "prompt_tokens": 94,
+        "provider": "moonshot",
+        "seat": "kimi",
+        "ts": 1787319957
+      },
+      {
+        "completion_tokens": 8,
+        "model": "simple",
+        "prompt_tokens": 63,
+        "provider": "local-ollama",
+        "seat": "kimi",
+        "ts": 1787327389
+      },
+      {
+        "completion_tokens": 4,
+        "model": "kimi",
+        "prompt_tokens": 87,
+        "provider": "moonshot",
+        "seat": "kimi",
+        "ts": 1787327748
+      },
+      {
+        "completion_tokens": 4,
+        "model": "claude-fast",
+        "prompt_tokens": 18,
+        "provider": "anthropic",
+        "seat": "claude",
+        "ts": 1787360712
+      },
+      {
+        "completion_tokens": 1,
+        "model": "grok",
+        "prompt_tokens": 213,
+        "provider": "xai",
+        "seat": "claude",
+        "ts": 1787360713
+      },
+      {
+        "completion_tokens": 16,
+        "model": "kimi",
+        "prompt_tokens": 92,
+        "provider": "moonshot",
+        "seat": "claude",
+        "ts": 1787360716
+      },
+      {
+        "completion_tokens": 49,
+        "model": "kimi",
+        "prompt_tokens": 92,
+        "provider": "moonshot",
+        "seat": "claude",
+        "ts": 1787360729
+      },
+      {
+        "completion_tokens": 10,
+        "model": "simple",
+        "prompt_tokens": 63,
+        "provider": "local-ollama",
+        "seat": "claude",
+        "ts": 1787361740
+      },
+      {
+        "completion_tokens": 4,
+        "model": "simple",
+        "prompt_tokens": 58,
+        "provider": "local-ollama",
+        "seat": "claude",
+        "ts": 1787361741
+      },
+      {
+        "completion_tokens": 40,
+        "model": "simple",
+        "prompt_tokens": 63,
+        "provider": "local-ollama",
+        "seat": "claude",
+        "ts": 1787361772
+      },
+      {
+        "completion_tokens": null,
+        "model": "embed",
+        "prompt_tokens": 4,
+        "provider": "local-ollama",
+        "seat": "claude",
+        "ts": 1787361773
+      },
+      {
+        "completion_tokens": 96,
+        "model": "simple",
+        "prompt_tokens": 63,
+        "provider": "local-ollama",
+        "seat": null,
+        "ts": 1787361884
+      },
+      {
+        "completion_tokens": 102,
+        "model": "simple",
+        "prompt_tokens": 63,
+        "provider": "local-ollama",
+        "seat": "claude",
+        "ts": 1787361892
+      },
+      {
+        "completion_tokens": 108,
+        "model": "simple",
+        "prompt_tokens": 63,
+        "provider": "local-ollama",
+        "seat": "claude",
+        "ts": 1787361902
+      },
+      {
+        "completion_tokens": 1,
+        "model": "code",
+        "prompt_tokens": 11,
+        "provider": "local-ollama",
+        "seat": null,
+        "ts": 1787362418
+      },
+      {
+        "completion_tokens": 1,
+        "model": "simple",
+        "prompt_tokens": 58,
+        "provider": "local-ollama",
+        "seat": "icarus",
+        "ts": 1787405967
+      },
+      {
+        "completion_tokens": 32,
+        "model": "simple",
+        "prompt_tokens": 86,
+        "provider": "local-ollama",
+        "seat": "icarus",
+        "ts": 1787408004
+      },
+      {
+        "completion_tokens": 512,
+        "model": "simple",
+        "prompt_tokens": 86,
+        "provider": "local-ollama",
+        "seat": "icarus",
+        "ts": 1787408331
+      },
+      {
+        "completion_tokens": 512,
+        "model": "simple",
+        "prompt_tokens": 86,
+        "provider": "local-ollama",
+        "seat": "icarus",
+        "ts": 1787408396
+      },
+      {
+        "completion_tokens": 18,
+        "model": "utility",
+        "prompt_tokens": 73,
+        "provider": "local-ollama",
+        "seat": "icarus",
+        "ts": 1787408454
+      },
+      {
+        "completion_tokens": 6,
+        "model": "utility",
+        "prompt_tokens": 79,
+        "provider": "local-ollama",
+        "seat": "icarus",
+        "ts": 1787408620
+      },
+      {
+        "completion_tokens": null,
+        "model": "embed",
+        "prompt_tokens": 6,
+        "provider": "local-ollama",
+        "seat": "kimi",
+        "ts": 1787498942
+      },
+      {
+        "completion_tokens": null,
+        "model": "embed",
+        "prompt_tokens": 6,
+        "provider": "local-ollama",
+        "seat": "kimi",
+        "ts": 1787504675
+      },
+      {
+        "completion_tokens": 32,
+        "model": "code",
+        "prompt_tokens": 15,
+        "provider": "local-ollama",
+        "seat": null,
+        "ts": 1787521006
+      },
+      {
+        "completion_tokens": null,
+        "model": "embed",
+        "prompt_tokens": 4,
+        "provider": "local-ollama",
+        "seat": null,
+        "ts": 1787521007
+      },
+      {
+        "completion_tokens": 32,
+        "model": "code",
+        "prompt_tokens": 15,
+        "provider": "local-ollama",
+        "seat": null,
+        "ts": 1787521044
+      },
+      {
+        "completion_tokens": null,
+        "model": "embed",
+        "prompt_tokens": 4,
+        "provider": "local-ollama",
+        "seat": null,
+        "ts": 1787521044
+      },
+      {
+        "completion_tokens": 32,
+        "model": "code",
+        "prompt_tokens": 15,
+        "provider": "local-ollama",
+        "seat": null,
+        "ts": 1787521458
+      },
+      {
+        "completion_tokens": null,
+        "model": "embed",
+        "prompt_tokens": 4,
+        "provider": "local-ollama",
+        "seat": null,
+        "ts": 1787521458
+      },
+      {
+        "completion_tokens": 1,
+        "model": "claude-fast",
+        "prompt_tokens": 8,
+        "provider": "anthropic",
+        "seat": "claude-code",
+        "ts": 1787521797
+      },
+      {
+        "completion_tokens": 4,
+        "model": "kimi",
+        "prompt_tokens": 86,
+        "provider": "moonshot",
+        "seat": "claude-code",
+        "ts": 1787521812
+      },
+      {
+        "completion_tokens": 1,
+        "model": "grok",
+        "prompt_tokens": 637,
+        "provider": "xai",
+        "seat": "claude-code",
+        "ts": 1787521814
+      },
+      {
+        "completion_tokens": 40,
+        "model": "glm",
+        "prompt_tokens": 37,
+        "provider": "zai",
+        "seat": "claude-code",
+        "ts": 1787539057
+      },
+      {
+        "completion_tokens": 600,
+        "model": "glm",
+        "prompt_tokens": 37,
+        "provider": "zai",
+        "seat": "claude-code",
+        "ts": 1787539104
+      },
+      {
+        "completion_tokens": 59,
+        "model": "glm",
+        "prompt_tokens": 18,
+        "provider": "zai",
+        "seat": "glm-preflight",
+        "ts": 1787539582
+      },
+      {
+        "completion_tokens": 63,
+        "model": "glm",
+        "prompt_tokens": 18,
+        "provider": "zai",
+        "seat": "glm-preflight",
+        "ts": 1787544049
+      },
+      {
+        "completion_tokens": 10,
+        "model": "utility",
+        "prompt_tokens": 61,
+        "provider": "local-ollama",
+        "seat": "claude-code",
+        "ts": 1787547377
+      },
+      {
+        "completion_tokens": 30,
+        "model": "utility",
+        "prompt_tokens": 58,
+        "provider": "local-ollama",
+        "seat": "claude-code",
+        "ts": 1787547387
+      },
+      {
+        "completion_tokens": 100,
+        "model": "utility",
+        "prompt_tokens": 67,
+        "provider": "local-ollama",
+        "seat": "claude-code",
+        "ts": 1787547408
+      },
+      {
+        "completion_tokens": 68,
+        "model": "glm",
+        "prompt_tokens": 18,
+        "provider": "zai",
+        "seat": "glm-preflight",
+        "ts": 1787581003
+      },
+      {
+        "completion_tokens": 64,
+        "model": "glm",
+        "prompt_tokens": 18,
+        "provider": "zai",
+        "seat": "glm-preflight",
+        "ts": 1787583755
+      },
+      {
+        "completion_tokens": 25,
+        "model": "glm",
+        "prompt_tokens": 18,
+        "provider": "zai",
+        "seat": "glm-preflight",
+        "ts": 1787588393
+      },
+      {
+        "completion_tokens": 41,
+        "model": "glm",
+        "prompt_tokens": 18,
+        "provider": "zai",
+        "seat": "glm-preflight",
+        "ts": 1787613473
+      }
+    ]
   },
   "scrubbed": true,
-  "surface": "http GET x2"
+  "surface": "http GET + ledger file"
 }
