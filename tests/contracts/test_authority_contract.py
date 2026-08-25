@@ -71,12 +71,26 @@ class TestAttachment:
         assert Attachment.BYTES_UNVERIFIABLE is not Attachment.BYTES_UNCHECKED
         assert Attachment.BYTES_UNVERIFIABLE.value != Attachment.BYTES_UNCHECKED.value
 
+    def test_unbound_is_not_unverifiable(self):
+        """Fitted to real data, not to the code path. Of 13 live Janus gates:
+        8 git, 1 file, 4 bound to NOTHING, and 0 text. So the state that
+        actually occurs is UNBOUND -- a ruling attached to no artifact at all
+        -- while the `text` path the tri-state analysis was built around has
+        never been exercised.
+
+        UNBOUND binds nothing; BYTES_UNVERIFIABLE binds bytes it cannot
+        re-derive but can still show a reader. Collapsing them hides the more
+        dangerous one, and all four live UNBOUND gates are `approved`."""
+        assert Attachment.UNBOUND is not Attachment.BYTES_UNVERIFIABLE
+        assert not _authority(attachment=Attachment.UNBOUND).assures()
+
     @pytest.mark.parametrize(
         "attachment",
         [
             Attachment.BYTES_DRIFTED,
             Attachment.BYTES_UNVERIFIABLE,
             Attachment.BYTES_UNCHECKED,
+            Attachment.UNBOUND,
         ],
     )
     def test_unassuring_attachments_never_assure(self, attachment):
