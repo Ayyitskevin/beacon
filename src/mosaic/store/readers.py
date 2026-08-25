@@ -131,7 +131,7 @@ class SourceNotQuiescent(Exception):
     """
 
 
-def require_quiescent(surface: "SourceSurface") -> None:
+def require_quiescent(surface: SourceSurface) -> None:
     """Refuse a direct database read unless quiescence was actually verified.
 
     Raises:

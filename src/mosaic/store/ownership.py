@@ -56,10 +56,13 @@ REGISTRY: tuple[Vocabulary, ...] = (
     Vocabulary("enum_replay_outcome", "claude-2f", "mosaic.store.ownership", "ReplayOutcome"),
     Vocabulary("enum_instant_encoding", "claude-2f", "mosaic.store.ownership", "InstantEncoding"),
     Vocabulary(
-        "enum_digest_algorithm", "claude-2f", "mosaic.store.ownership", "DigestAlgorithm",
+        "enum_digest_algorithm",
+        "claude-2f",
+        "mosaic.store.ownership",
+        "DigestAlgorithm",
         note="Closes binding_digest.algorithm, which schema.sql leaves as any "
-             "non-empty string. The difference between recording an algorithm "
-             "and recording a typo.",
+        "non-empty string. The difference between recording an algorithm "
+        "and recording a typo.",
     ),
     # Lane A (claude-09) — the envelope's vocabularies. Registered here so the
     # reconciler covers the whole store, but the DEFINITIONS are theirs and are
@@ -111,8 +114,8 @@ class Resolution(Enum):
 
     MATCHED = "matched"
     DIVERGED = "diverged"
-    PENDING = "pending"      # owner's module has not landed — real, not a skip
-    UNOWNED = "unowned"      # a lookup table with no registry entry
+    PENDING = "pending"  # owner's module has not landed — real, not a skip
+    UNOWNED = "unowned"  # a lookup table with no registry entry
 
 
 def canonical_values(vocab: Vocabulary) -> set[str] | None:

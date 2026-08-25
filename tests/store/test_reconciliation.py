@@ -11,13 +11,13 @@ import sqlite3
 
 import pytest
 
+from mosaic.store.ownership import REGISTRY
 from mosaic.store.reconcile import (
     Resolution,
     reconcile_columns,
     reconcile_vocabularies,
 )
 from mosaic.store.schema import apply_schema
-from mosaic.store.ownership import REGISTRY
 
 
 @pytest.fixture
@@ -66,9 +66,7 @@ class TestEveryVocabularyIsOwned:
         assert ownership.canonical_values(ghost) is None
 
         original = ownership.REGISTRY
-        ownership.REGISTRY = tuple(
-            ghost if v.table == "enum_resolution" else v for v in original
-        )
+        ownership.REGISTRY = tuple(ghost if v.table == "enum_resolution" else v for v in original)
         try:
             report = {r.table: r for r in reconcile_vocabularies(db)}["enum_resolution"]
         finally:

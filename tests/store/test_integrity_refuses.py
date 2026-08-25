@@ -34,17 +34,29 @@ def db():
     # and the (capability, kind) pair must exist in the vocabulary table. That
     # a record cannot exist without them is their invariant, enforced there;
     # this lane does not re-assert it, it just satisfies it.
-    conn.execute(
-        "INSERT INTO capability_registry VALUES ('authority','built','live','2026-08-25')"
-    )
+    conn.execute("INSERT INTO capability_registry VALUES ('authority','built','live','2026-08-25')")
     conn.execute("INSERT INTO vocabulary VALUES ('authority','gate','lifecycle')")
     cols = [c.strip() for c in RECORD_COLS.split(",")]
     conn.execute(
         f"INSERT INTO record({RECORD_COLS}) VALUES ({','.join('?' * len(cols))})",
-        ("r1", "authority", "gate", "a gate", "superseded",
-         "2026-08-25T00:00:00Z", "2026-08-25T00:00:00Z",
-         "migrated:janus", "g1", "", "claude-2f", "2026-08-25T00:00:00Z",
-         "{}", "{}", "not_required", ""),
+        (
+            "r1",
+            "authority",
+            "gate",
+            "a gate",
+            "superseded",
+            "2026-08-25T00:00:00Z",
+            "2026-08-25T00:00:00Z",
+            "migrated:janus",
+            "g1",
+            "",
+            "claude-2f",
+            "2026-08-25T00:00:00Z",
+            "{}",
+            "{}",
+            "not_required",
+            "",
+        ),
     )
     return conn
 
@@ -77,9 +89,7 @@ class TestSeedingActuallyHappened:
         """Their seeding runs in the same loader; if it stopped, everything
         referencing their enums would start failing and it would look like our
         bug."""
-        assert enum_values(db, "enum_resolution") == {
-            "resolved", "absent", "broken", "unresolved"
-        }
+        assert enum_values(db, "enum_resolution") == {"resolved", "absent", "broken", "unresolved"}
 
 
 class TestUnknownVariantsCannotBeStored:
@@ -144,7 +154,9 @@ class TestDerivedVerdicts:
         written. Deleting the unstorable kinds would lose the ability to say
         what a value IS."""
         assert enum_values(db, "enum_derivation_kind") == {
-            "clock_derived", "cross_table_derived", "row_derived"
+            "clock_derived",
+            "cross_table_derived",
+            "row_derived",
         }
 
 
@@ -154,8 +166,11 @@ class TestReplayRunsAreHonestAboutWhatTheyDid:
             insert(db, "replay_run", _run(inputs_digest="", environment_digest=""))
 
     def test_not_attempted_claims_nothing(self, db):
-        insert(db, "replay_run", _run(
-            outcome="not_attempted", environment_digest="", inputs_digest="", observed_at=""))
+        insert(
+            db,
+            "replay_run",
+            _run(outcome="not_attempted", environment_digest="", inputs_digest="", observed_at=""),
+        )
 
     def test_not_attempted_with_an_observation_is_refused(self, db):
         """'We did not run it' and 'we ran it at 3pm' cannot both be true."""
