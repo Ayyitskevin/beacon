@@ -34,9 +34,9 @@
         "assist.inference.retract.cli",
         "finding.create.from_inference.cli"
       ],
-      "citation_scheme": "Synthetic citation_scheme synthetic-00002.",
-      "external_egress": "Synthetic external_egress synthetic-00003.",
-      "identity_boundary": "Synthetic identity_boundary synthetic-00004.",
+      "citation_scheme": "Synthetic citation_scheme synthetic-00139.",
+      "external_egress": "Synthetic external_egress synthetic-00140.",
+      "identity_boundary": "Synthetic identity_boundary synthetic-00141.",
       "limits": {
         "assistant_candidates": 103,
         "assistant_context_bytes": 65636,
@@ -47,7 +47,7 @@
         "source_bytes": 1048676
       },
       "listener": {
-        "access_scope": "Synthetic access_scope synthetic-00005.",
+        "access_scope": "Synthetic access_scope synthetic-00142.",
         "application_authentication": false,
         "mode": "loopback_tcp",
         "network_listener": true,
@@ -56,12 +56,12 @@
       "research_request_schema_version": "minerva.research-request.v1",
       "schema_version": "minerva.capabilities.v3",
       "supported_external_providers": [
-        "Synthetic supported_external_providers synthetic-00006.",
-        "Synthetic supported_external_providers synthetic-00007."
+        "Synthetic supported_external_providers synthetic-00143.",
+        "Synthetic supported_external_providers synthetic-00144."
       ],
       "supported_listener_modes": [
         {
-          "access_scope": "Synthetic access_scope synthetic-00008.",
+          "access_scope": "Synthetic access_scope synthetic-00145.",
           "application_authentication": false,
           "argv": [
             "serve",
@@ -73,7 +73,7 @@
           "transport": "unix_socket"
         },
         {
-          "access_scope": "Synthetic access_scope synthetic-00005.",
+          "access_scope": "Synthetic access_scope synthetic-00142.",
           "application_authentication": false,
           "argv": [
             "serve",
@@ -139,36 +139,997 @@
               "verify"
             ]
           },
-          "entrypoint": "Synthetic entrypoint synthetic-00009.",
-          "stderr_contract": "Synthetic stderr_contract synthetic-00010.",
-          "stdout_contract": "Synthetic stdout_contract synthetic-00011."
+          "entrypoint": "Synthetic entrypoint synthetic-00146.",
+          "stderr_contract": "Synthetic stderr_contract synthetic-00147.",
+          "stdout_contract": "Synthetic stdout_contract synthetic-00148."
         },
         "http": {
           "api_base_path": "/api/v1",
           "capabilities_path": "/api/v1/capabilities",
           "health_path": "/healthz",
-          "logical_base_url": "https://example.invalid/synthetic-00012",
+          "logical_base_url": "https://example.invalid/synthetic-00149",
           "openapi_path": "/api/v1/openapi.json",
           "readiness_path": "/readyz",
           "web_path": "/"
         }
       },
       "unavailable": [
-        "Synthetic unavailable synthetic-00013.",
-        "Synthetic unavailable synthetic-00014.",
-        "Synthetic unavailable synthetic-00015.",
-        "Synthetic unavailable synthetic-00016.",
-        "Synthetic unavailable synthetic-00017.",
-        "Synthetic unavailable synthetic-00018.",
-        "Synthetic unavailable synthetic-00019.",
-        "Synthetic unavailable synthetic-00020.",
-        "Synthetic unavailable synthetic-00021.",
-        "Synthetic unavailable synthetic-00022.",
-        "Synthetic unavailable synthetic-00023.",
-        "Synthetic unavailable synthetic-00024.",
-        "Synthetic unavailable synthetic-00025.",
-        "Synthetic unavailable synthetic-00026."
+        "Synthetic unavailable synthetic-00150.",
+        "Synthetic unavailable synthetic-00151.",
+        "Synthetic unavailable synthetic-00152.",
+        "Synthetic unavailable synthetic-00153.",
+        "Synthetic unavailable synthetic-00154.",
+        "Synthetic unavailable synthetic-00155.",
+        "Synthetic unavailable synthetic-00156.",
+        "Synthetic unavailable synthetic-00157.",
+        "Synthetic unavailable synthetic-00158.",
+        "Synthetic unavailable synthetic-00159.",
+        "Synthetic unavailable synthetic-00160.",
+        "Synthetic unavailable synthetic-00161.",
+        "Synthetic unavailable synthetic-00162.",
+        "Synthetic unavailable synthetic-00163."
       ]
+    },
+    "/api/v1/missions": {
+      "items": [
+        {
+          "created_at": "2000-01-01T00:00:00.000Z",
+          "id": "synthetic-00001",
+          "objective": "Synthetic objective synthetic-00164.",
+          "title": "Synthetic title synthetic-00165."
+        },
+        {
+          "created_at": "2000-01-01T00:17:00.000Z",
+          "id": "synthetic-00002",
+          "objective": "Synthetic objective synthetic-00166.",
+          "title": "Synthetic title synthetic-00167."
+        },
+        {
+          "created_at": "2000-01-01T00:27:00.000Z",
+          "id": "synthetic-00003",
+          "objective": "Synthetic objective synthetic-00168.",
+          "title": "Synthetic title synthetic-00169."
+        },
+        {
+          "created_at": "2000-01-01T00:34:00.000Z",
+          "id": "synthetic-00004",
+          "objective": "Synthetic objective synthetic-00170.",
+          "title": "Synthetic title synthetic-00171."
+        },
+        {
+          "created_at": "2000-01-01T00:37:00.000Z",
+          "id": "synthetic-00005",
+          "objective": "Synthetic objective synthetic-00172.",
+          "title": "Synthetic title synthetic-00173."
+        },
+        {
+          "created_at": "2000-01-01T00:46:00.000Z",
+          "id": "synthetic-00006",
+          "objective": "Synthetic objective synthetic-00174.",
+          "title": "Synthetic title synthetic-00175."
+        },
+        {
+          "created_at": "2000-01-01T00:51:00.000Z",
+          "id": "synthetic-00007",
+          "objective": "Synthetic objective synthetic-00176.",
+          "title": "Synthetic title synthetic-00177."
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/synthetic-00004": {
+      "created_at": "2000-01-01T00:34:00.000Z",
+      "id": "synthetic-00004",
+      "objective": "Synthetic objective synthetic-00170.",
+      "title": "Synthetic title synthetic-00171."
+    },
+    "/api/v1/missions/synthetic-00004/claims": {
+      "items": [
+        {
+          "created_at": "2000-01-01T00:35:00.000Z",
+          "etag": "b45f80273ce287532ed6c5215e85571b97978ca2cc832db011793e570f295693",
+          "falsification_criteria": "Synthetic falsification_criteria synthetic-00179.",
+          "id": "synthetic-00008",
+          "mission_id": "synthetic-00004",
+          "question_id": "synthetic-00009",
+          "statement": "Synthetic statement synthetic-00180.",
+          "status": "open",
+          "status_changed_at": "2000-01-01T00:35:00.000Z",
+          "status_creator_id": "synthetic-00010",
+          "status_evidence_valid": true,
+          "status_reason": "Synthetic status_reason synthetic-00181.",
+          "status_run_id": "synthetic-00011",
+          "version": 1
+        },
+        {
+          "created_at": "2000-01-01T00:44:00.000Z",
+          "etag": "caa4ea758fd2ee00e594311f59edafed7d88db9a43d1f743ad4983fe1f04238d",
+          "falsification_criteria": "Synthetic falsification_criteria synthetic-00183.",
+          "id": "synthetic-00012",
+          "mission_id": "synthetic-00004",
+          "question_id": "synthetic-00013",
+          "statement": "Synthetic statement synthetic-00184.",
+          "status": "open",
+          "status_changed_at": "2000-01-01T00:44:00.000Z",
+          "status_creator_id": "synthetic-00010",
+          "status_evidence_valid": true,
+          "status_reason": "Synthetic status_reason synthetic-00181.",
+          "status_run_id": "synthetic-00014",
+          "version": 1
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/synthetic-00004/findings": {
+      "agent_inferences": [],
+      "items": [
+        {
+          "citation_status": "active",
+          "claim_id": "synthetic-00008",
+          "created_at": "2000-01-01T00:36:00.000Z",
+          "evidence_ids": [
+            "synthetic-00015"
+          ],
+          "id": "synthetic-00016",
+          "mission_id": "synthetic-00004",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Synthetic statement synthetic-00185.",
+          "statement_kind": "observed_fact",
+          "status": "supported",
+          "uncertainty": "Synthetic uncertainty synthetic-00186."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "synthetic-00012",
+          "created_at": "2000-01-01T00:45:00.000Z",
+          "evidence_ids": [
+            "synthetic-00017",
+            "synthetic-00018",
+            "synthetic-00019",
+            "synthetic-00020"
+          ],
+          "id": "synthetic-00021",
+          "mission_id": "synthetic-00004",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Synthetic statement synthetic-00187.",
+          "statement_kind": "observed_fact",
+          "status": "supported",
+          "uncertainty": "Synthetic uncertainty synthetic-00188."
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/synthetic-00006": {
+      "created_at": "2000-01-01T00:46:00.000Z",
+      "id": "synthetic-00006",
+      "objective": "Synthetic objective synthetic-00174.",
+      "title": "Synthetic title synthetic-00175."
+    },
+    "/api/v1/missions/synthetic-00006/claims": {
+      "items": [
+        {
+          "created_at": "2000-01-01T00:47:00.000Z",
+          "etag": "bff782c27d70de02c44c58bb7851bcb0f0a912291dde8209125f0c80f9163d54",
+          "falsification_criteria": "Synthetic falsification_criteria synthetic-00190.",
+          "id": "synthetic-00022",
+          "mission_id": "synthetic-00006",
+          "question_id": "synthetic-00023",
+          "statement": "Synthetic statement synthetic-00191.",
+          "status": "open",
+          "status_changed_at": "2000-01-01T00:47:00.000Z",
+          "status_creator_id": "synthetic-00024",
+          "status_evidence_valid": true,
+          "status_reason": "Synthetic status_reason synthetic-00181.",
+          "status_run_id": "synthetic-00025",
+          "version": 1
+        },
+        {
+          "created_at": "2000-01-01T00:48:00.000Z",
+          "etag": "b452abd72da60d158faff337e5d0642a33aeabc9783496adf225ae83d7c27e2e",
+          "falsification_criteria": "Synthetic falsification_criteria synthetic-00193.",
+          "id": "synthetic-00026",
+          "mission_id": "synthetic-00006",
+          "question_id": "synthetic-00023",
+          "statement": "Synthetic statement synthetic-00194.",
+          "status": "open",
+          "status_changed_at": "2000-01-01T00:48:00.000Z",
+          "status_creator_id": "synthetic-00024",
+          "status_evidence_valid": true,
+          "status_reason": "Synthetic status_reason synthetic-00181.",
+          "status_run_id": "synthetic-00027",
+          "version": 1
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/synthetic-00006/findings": {
+      "agent_inferences": [],
+      "items": [
+        {
+          "citation_status": "active",
+          "claim_id": "synthetic-00022",
+          "created_at": "2000-01-01T00:49:00.000Z",
+          "evidence_ids": [
+            "synthetic-00028",
+            "synthetic-00029",
+            "synthetic-00030"
+          ],
+          "id": "synthetic-00031",
+          "mission_id": "synthetic-00006",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Synthetic statement synthetic-00195.",
+          "statement_kind": "observed_fact",
+          "status": "supported",
+          "uncertainty": "Synthetic uncertainty synthetic-00196."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "synthetic-00026",
+          "created_at": "2000-01-01T00:50:00.000Z",
+          "evidence_ids": [
+            "synthetic-00032"
+          ],
+          "id": "synthetic-00033",
+          "mission_id": "synthetic-00006",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Synthetic statement synthetic-00197.",
+          "statement_kind": "observed_fact",
+          "status": "supported",
+          "uncertainty": "Synthetic uncertainty synthetic-00198."
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/synthetic-00007": {
+      "created_at": "2000-01-01T00:51:00.000Z",
+      "id": "synthetic-00007",
+      "objective": "Synthetic objective synthetic-00176.",
+      "title": "Synthetic title synthetic-00177."
+    },
+    "/api/v1/missions/synthetic-00007/claims": {
+      "items": [
+        {
+          "created_at": "2000-01-01T00:52:00.000Z",
+          "etag": "dd89fa250334d91fac52f453cdd6cdbcc2eaeb017f54e55184e5b366b00d929f",
+          "falsification_criteria": "Synthetic falsification_criteria synthetic-00200.",
+          "id": "synthetic-00034",
+          "mission_id": "synthetic-00007",
+          "question_id": "synthetic-00035",
+          "statement": "Synthetic statement synthetic-00201.",
+          "status": "open",
+          "status_changed_at": "2000-01-01T00:52:00.000Z",
+          "status_creator_id": "synthetic-00010",
+          "status_evidence_valid": true,
+          "status_reason": "Synthetic status_reason synthetic-00181.",
+          "status_run_id": "synthetic-00036",
+          "version": 1
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/synthetic-00007/findings": {
+      "agent_inferences": [],
+      "items": [
+        {
+          "citation_status": "active",
+          "claim_id": "synthetic-00034",
+          "created_at": "2000-01-01T00:53:00.000Z",
+          "evidence_ids": [
+            "synthetic-00037"
+          ],
+          "id": "synthetic-00038",
+          "mission_id": "synthetic-00007",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Synthetic statement synthetic-00202.",
+          "statement_kind": "observed_fact",
+          "status": "unsupported",
+          "uncertainty": ""
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/synthetic-00002": {
+      "created_at": "2000-01-01T00:17:00.000Z",
+      "id": "synthetic-00002",
+      "objective": "Synthetic objective synthetic-00166.",
+      "title": "Synthetic title synthetic-00167."
+    },
+    "/api/v1/missions/synthetic-00002/claims": {
+      "items": [
+        {
+          "created_at": "2000-01-01T00:18:00.000Z",
+          "etag": "1605546b231b8bd58134e3fc2cfbb47e56dc3f4b9c38f1b657725c1e627a0e4f",
+          "falsification_criteria": "Synthetic falsification_criteria synthetic-00204.",
+          "id": "synthetic-00039",
+          "mission_id": "synthetic-00002",
+          "question_id": "synthetic-00040",
+          "statement": "Synthetic statement synthetic-00205.",
+          "status": "open",
+          "status_changed_at": "2000-01-01T00:18:00.000Z",
+          "status_creator_id": "synthetic-00010",
+          "status_evidence_valid": true,
+          "status_reason": "Synthetic status_reason synthetic-00181.",
+          "status_run_id": "synthetic-00041",
+          "version": 1
+        },
+        {
+          "created_at": "2000-01-01T00:19:00.000Z",
+          "etag": "309c8d39825cc637ff465c5c5ed345681be0f52d47545559647dd89301c242d5",
+          "falsification_criteria": "Synthetic falsification_criteria synthetic-00207.",
+          "id": "synthetic-00042",
+          "mission_id": "synthetic-00002",
+          "question_id": "synthetic-00040",
+          "statement": "Synthetic statement synthetic-00208.",
+          "status": "open",
+          "status_changed_at": "2000-01-01T00:19:00.000Z",
+          "status_creator_id": "synthetic-00010",
+          "status_evidence_valid": true,
+          "status_reason": "Synthetic status_reason synthetic-00181.",
+          "status_run_id": "synthetic-00043",
+          "version": 1
+        },
+        {
+          "created_at": "2000-01-01T00:20:00.000Z",
+          "etag": "e6e0d2c22fdaade8d0f0c914187f02127bba66411408aa9b89b405e973012c29",
+          "falsification_criteria": "Synthetic falsification_criteria synthetic-00210.",
+          "id": "synthetic-00044",
+          "mission_id": "synthetic-00002",
+          "question_id": "synthetic-00040",
+          "statement": "Synthetic statement synthetic-00211.",
+          "status": "contested",
+          "status_changed_at": "2000-01-01T00:25:00.000Z",
+          "status_creator_id": "synthetic-00010",
+          "status_evidence_valid": true,
+          "status_reason": "Synthetic status_reason synthetic-00212.",
+          "status_run_id": "synthetic-00045",
+          "version": 2
+        },
+        {
+          "created_at": "2000-01-01T00:21:00.000Z",
+          "etag": "7eb03cafd2b144947b166c06679c0617af885521f3d646f25be2f6b48ef3ca18",
+          "falsification_criteria": "Synthetic falsification_criteria synthetic-00214.",
+          "id": "synthetic-00046",
+          "mission_id": "synthetic-00002",
+          "question_id": "synthetic-00047",
+          "statement": "Synthetic statement synthetic-00215.",
+          "status": "open",
+          "status_changed_at": "2000-01-01T00:21:00.000Z",
+          "status_creator_id": "synthetic-00010",
+          "status_evidence_valid": true,
+          "status_reason": "Synthetic status_reason synthetic-00181.",
+          "status_run_id": "synthetic-00048",
+          "version": 1
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/synthetic-00002/findings": {
+      "agent_inferences": [],
+      "items": [
+        {
+          "citation_status": "active",
+          "claim_id": "synthetic-00039",
+          "created_at": "2000-01-01T00:22:00.000Z",
+          "evidence_ids": [
+            "synthetic-00049",
+            "synthetic-00050"
+          ],
+          "id": "synthetic-00051",
+          "mission_id": "synthetic-00002",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Synthetic statement synthetic-00216.",
+          "statement_kind": "source_assertion",
+          "status": "supported",
+          "uncertainty": "Synthetic uncertainty synthetic-00217."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "synthetic-00042",
+          "created_at": "2000-01-01T00:23:00.000Z",
+          "evidence_ids": [
+            "synthetic-00052",
+            "synthetic-00053",
+            "synthetic-00054",
+            "synthetic-00055",
+            "synthetic-00056"
+          ],
+          "id": "synthetic-00057",
+          "mission_id": "synthetic-00002",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Synthetic statement synthetic-00218.",
+          "statement_kind": "source_assertion",
+          "status": "supported",
+          "uncertainty": "Synthetic uncertainty synthetic-00219."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "synthetic-00044",
+          "created_at": "2000-01-01T00:24:00.000Z",
+          "evidence_ids": [
+            "synthetic-00058",
+            "synthetic-00059"
+          ],
+          "id": "synthetic-00060",
+          "mission_id": "synthetic-00002",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Synthetic statement synthetic-00220.",
+          "statement_kind": "source_assertion",
+          "status": "contested",
+          "uncertainty": "Synthetic uncertainty synthetic-00221."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "synthetic-00046",
+          "created_at": "2000-01-01T00:26:00.000Z",
+          "evidence_ids": [
+            "synthetic-00061",
+            "synthetic-00062",
+            "synthetic-00063"
+          ],
+          "id": "synthetic-00064",
+          "mission_id": "synthetic-00002",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Synthetic statement synthetic-00222.",
+          "statement_kind": "source_assertion",
+          "status": "supported",
+          "uncertainty": "Synthetic uncertainty synthetic-00223."
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/synthetic-00001": {
+      "created_at": "2000-01-01T00:00:00.000Z",
+      "id": "synthetic-00001",
+      "objective": "Synthetic objective synthetic-00164.",
+      "title": "Synthetic title synthetic-00165."
+    },
+    "/api/v1/missions/synthetic-00001/claims": {
+      "items": [
+        {
+          "created_at": "2000-01-01T00:01:00.000Z",
+          "etag": "f9cd8e18fcb258e24d66bac4acf15a4f7463098600f420b66536cf36d9bd4e94",
+          "falsification_criteria": "Synthetic falsification_criteria synthetic-00225.",
+          "id": "synthetic-00065",
+          "mission_id": "synthetic-00001",
+          "question_id": "synthetic-00066",
+          "statement": "Synthetic statement synthetic-00226.",
+          "status": "open",
+          "status_changed_at": "2000-01-01T00:01:00.000Z",
+          "status_creator_id": "synthetic-00010",
+          "status_evidence_valid": true,
+          "status_reason": "Synthetic status_reason synthetic-00181.",
+          "status_run_id": "synthetic-00067",
+          "version": 1
+        },
+        {
+          "created_at": "2000-01-01T00:02:00.000Z",
+          "etag": "bdda93fb021ae38bc01cfa4c4bff335d2a0107e83b4d61c0cb1eeb8be2b0f41e",
+          "falsification_criteria": "Synthetic falsification_criteria synthetic-00228.",
+          "id": "synthetic-00068",
+          "mission_id": "synthetic-00001",
+          "question_id": "synthetic-00066",
+          "statement": "Synthetic statement synthetic-00229.",
+          "status": "open",
+          "status_changed_at": "2000-01-01T00:02:00.000Z",
+          "status_creator_id": "synthetic-00010",
+          "status_evidence_valid": true,
+          "status_reason": "Synthetic status_reason synthetic-00181.",
+          "status_run_id": "synthetic-00069",
+          "version": 1
+        },
+        {
+          "created_at": "2000-01-01T00:03:00.000Z",
+          "etag": "f2404dcbf7aec6e4788719ad0ad2204419d342c0c4390b6c64a0a8835a85f694",
+          "falsification_criteria": "Synthetic falsification_criteria synthetic-00231.",
+          "id": "synthetic-00070",
+          "mission_id": "synthetic-00001",
+          "question_id": "synthetic-00071",
+          "statement": "Synthetic statement synthetic-00232.",
+          "status": "open",
+          "status_changed_at": "2000-01-01T00:03:00.000Z",
+          "status_creator_id": "synthetic-00010",
+          "status_evidence_valid": true,
+          "status_reason": "Synthetic status_reason synthetic-00181.",
+          "status_run_id": "synthetic-00072",
+          "version": 1
+        },
+        {
+          "created_at": "2000-01-01T00:04:00.000Z",
+          "etag": "c2a52f0ee613d2510828b2bd9b027e49672b4320067667af28aa5251964a29af",
+          "falsification_criteria": "Synthetic falsification_criteria synthetic-00234.",
+          "id": "synthetic-00073",
+          "mission_id": "synthetic-00001",
+          "question_id": "synthetic-00071",
+          "statement": "Synthetic statement synthetic-00235.",
+          "status": "open",
+          "status_changed_at": "2000-01-01T00:04:00.000Z",
+          "status_creator_id": "synthetic-00010",
+          "status_evidence_valid": true,
+          "status_reason": "Synthetic status_reason synthetic-00181.",
+          "status_run_id": "synthetic-00074",
+          "version": 1
+        },
+        {
+          "created_at": "2000-01-01T00:10:00.000Z",
+          "etag": "7f17d20c69984ac35ec559a7efd3b38479e57fcb781057008063bd7175b27f7b",
+          "falsification_criteria": "Synthetic falsification_criteria synthetic-00237.",
+          "id": "synthetic-00075",
+          "mission_id": "synthetic-00001",
+          "question_id": "synthetic-00066",
+          "statement": "Synthetic statement synthetic-00238.",
+          "status": "contested",
+          "status_changed_at": "2000-01-01T00:12:00.000Z",
+          "status_creator_id": "synthetic-00010",
+          "status_evidence_valid": true,
+          "status_reason": "Synthetic status_reason synthetic-00239.",
+          "status_run_id": "synthetic-00076",
+          "version": 2
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/synthetic-00001/findings": {
+      "agent_inferences": [],
+      "items": [
+        {
+          "citation_status": "active",
+          "claim_id": "synthetic-00065",
+          "created_at": "2000-01-01T00:05:00.000Z",
+          "evidence_ids": [
+            "synthetic-00077",
+            "synthetic-00078",
+            "synthetic-00079"
+          ],
+          "id": "synthetic-00080",
+          "mission_id": "synthetic-00001",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Synthetic statement synthetic-00240.",
+          "statement_kind": "source_assertion",
+          "status": "supported",
+          "uncertainty": "Synthetic uncertainty synthetic-00241."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "synthetic-00068",
+          "created_at": "2000-01-01T00:06:00.000Z",
+          "evidence_ids": [
+            "synthetic-00081",
+            "synthetic-00082"
+          ],
+          "id": "synthetic-00083",
+          "mission_id": "synthetic-00001",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Synthetic statement synthetic-00242.",
+          "statement_kind": "source_assertion",
+          "status": "supported",
+          "uncertainty": "Synthetic uncertainty synthetic-00243."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "synthetic-00070",
+          "created_at": "2000-01-01T00:07:00.000Z",
+          "evidence_ids": [
+            "synthetic-00084",
+            "synthetic-00085"
+          ],
+          "id": "synthetic-00086",
+          "mission_id": "synthetic-00001",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Synthetic statement synthetic-00244.",
+          "statement_kind": "source_assertion",
+          "status": "supported",
+          "uncertainty": "Synthetic uncertainty synthetic-00245."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "synthetic-00073",
+          "created_at": "2000-01-01T00:08:00.000Z",
+          "evidence_ids": [
+            "synthetic-00087",
+            "synthetic-00088"
+          ],
+          "id": "synthetic-00089",
+          "mission_id": "synthetic-00001",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Synthetic statement synthetic-00246.",
+          "statement_kind": "source_assertion",
+          "status": "supported",
+          "uncertainty": "Synthetic uncertainty synthetic-00247."
+        },
+        {
+          "citation_status": "not_applicable",
+          "claim_id": "synthetic-00065",
+          "created_at": "2000-01-01T00:09:00.000Z",
+          "evidence_ids": [],
+          "id": "synthetic-00090",
+          "mission_id": "synthetic-00001",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Synthetic statement synthetic-00248.",
+          "statement_kind": "unresolved_question",
+          "status": "inconclusive",
+          "uncertainty": "Synthetic uncertainty synthetic-00249."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "synthetic-00075",
+          "created_at": "2000-01-01T00:11:00.000Z",
+          "evidence_ids": [
+            "synthetic-00091",
+            "synthetic-00092",
+            "synthetic-00093",
+            "synthetic-00094"
+          ],
+          "id": "synthetic-00095",
+          "mission_id": "synthetic-00001",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Synthetic statement synthetic-00250.",
+          "statement_kind": "source_assertion",
+          "status": "contested",
+          "uncertainty": "Synthetic uncertainty synthetic-00251."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "synthetic-00068",
+          "created_at": "2000-01-01T00:13:00.000Z",
+          "evidence_ids": [
+            "synthetic-00096",
+            "synthetic-00097",
+            "synthetic-00098",
+            "synthetic-00099"
+          ],
+          "id": "synthetic-00100",
+          "mission_id": "synthetic-00001",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Synthetic statement synthetic-00252.",
+          "statement_kind": "source_assertion",
+          "status": "supported",
+          "uncertainty": "Synthetic uncertainty synthetic-00253."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "synthetic-00065",
+          "created_at": "2000-01-01T00:14:00.000Z",
+          "evidence_ids": [
+            "synthetic-00101",
+            "synthetic-00102"
+          ],
+          "id": "synthetic-00103",
+          "mission_id": "synthetic-00001",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Synthetic statement synthetic-00254.",
+          "statement_kind": "source_assertion",
+          "status": "supported",
+          "uncertainty": "Synthetic uncertainty synthetic-00255."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "synthetic-00070",
+          "created_at": "2000-01-01T00:15:00.000Z",
+          "evidence_ids": [
+            "synthetic-00104"
+          ],
+          "id": "synthetic-00105",
+          "mission_id": "synthetic-00001",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Synthetic statement synthetic-00256.",
+          "statement_kind": "unresolved_question",
+          "status": "inconclusive",
+          "uncertainty": "Synthetic uncertainty synthetic-00257."
+        },
+        {
+          "citation_status": "not_applicable",
+          "claim_id": "synthetic-00073",
+          "created_at": "2000-01-01T00:16:00.000Z",
+          "evidence_ids": [],
+          "id": "synthetic-00106",
+          "mission_id": "synthetic-00001",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Synthetic statement synthetic-00258.",
+          "statement_kind": "unresolved_question",
+          "status": "inconclusive",
+          "uncertainty": "Synthetic uncertainty synthetic-00259."
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/synthetic-00003": {
+      "created_at": "2000-01-01T00:27:00.000Z",
+      "id": "synthetic-00003",
+      "objective": "Synthetic objective synthetic-00168.",
+      "title": "Synthetic title synthetic-00169."
+    },
+    "/api/v1/missions/synthetic-00003/claims": {
+      "items": [
+        {
+          "created_at": "2000-01-01T00:28:00.000Z",
+          "etag": "7bfd17d16be3daaafe4fce1484fa5836422cf7b25e7a3be9b10dc5b37d6d34c4",
+          "falsification_criteria": "Synthetic falsification_criteria synthetic-00261.",
+          "id": "synthetic-00107",
+          "mission_id": "synthetic-00003",
+          "question_id": "synthetic-00108",
+          "statement": "Synthetic statement synthetic-00262.",
+          "status": "open",
+          "status_changed_at": "2000-01-01T00:28:00.000Z",
+          "status_creator_id": "synthetic-00010",
+          "status_evidence_valid": true,
+          "status_reason": "Synthetic status_reason synthetic-00181.",
+          "status_run_id": "synthetic-00109",
+          "version": 1
+        },
+        {
+          "created_at": "2000-01-01T00:29:00.000Z",
+          "etag": "e9886922050f3101a811dfb778636f26d162cd2f5a061b0a806e9b400792df67",
+          "falsification_criteria": "Synthetic falsification_criteria synthetic-00264.",
+          "id": "synthetic-00110",
+          "mission_id": "synthetic-00003",
+          "question_id": "synthetic-00108",
+          "statement": "Synthetic statement synthetic-00265.",
+          "status": "open",
+          "status_changed_at": "2000-01-01T00:29:00.000Z",
+          "status_creator_id": "synthetic-00010",
+          "status_evidence_valid": true,
+          "status_reason": "Synthetic status_reason synthetic-00181.",
+          "status_run_id": "synthetic-00111",
+          "version": 1
+        },
+        {
+          "created_at": "2000-01-01T00:30:00.000Z",
+          "etag": "946e3627eb7fe08a3978fb7a9d6f6aa9e3b44aa492a5612f1a5b5599af28e699",
+          "falsification_criteria": "Synthetic falsification_criteria synthetic-00267.",
+          "id": "synthetic-00112",
+          "mission_id": "synthetic-00003",
+          "question_id": "synthetic-00108",
+          "statement": "Synthetic statement synthetic-00268.",
+          "status": "open",
+          "status_changed_at": "2000-01-01T00:30:00.000Z",
+          "status_creator_id": "synthetic-00010",
+          "status_evidence_valid": true,
+          "status_reason": "Synthetic status_reason synthetic-00181.",
+          "status_run_id": "synthetic-00113",
+          "version": 1
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/synthetic-00003/findings": {
+      "agent_inferences": [],
+      "items": [
+        {
+          "citation_status": "active",
+          "claim_id": "synthetic-00107",
+          "created_at": "2000-01-01T00:31:00.000Z",
+          "evidence_ids": [
+            "synthetic-00114"
+          ],
+          "id": "synthetic-00115",
+          "mission_id": "synthetic-00003",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Synthetic statement synthetic-00269.",
+          "statement_kind": "observed_fact",
+          "status": "supported",
+          "uncertainty": "Synthetic uncertainty synthetic-00270."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "synthetic-00110",
+          "created_at": "2000-01-01T00:32:00.000Z",
+          "evidence_ids": [
+            "synthetic-00116"
+          ],
+          "id": "synthetic-00117",
+          "mission_id": "synthetic-00003",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Synthetic statement synthetic-00271.",
+          "statement_kind": "observed_fact",
+          "status": "supported",
+          "uncertainty": "Synthetic uncertainty synthetic-00272."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "synthetic-00112",
+          "created_at": "2000-01-01T00:33:00.000Z",
+          "evidence_ids": [
+            "synthetic-00118",
+            "synthetic-00119"
+          ],
+          "id": "synthetic-00120",
+          "mission_id": "synthetic-00003",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Synthetic statement synthetic-00273.",
+          "statement_kind": "observed_fact",
+          "status": "supported",
+          "uncertainty": "Synthetic uncertainty synthetic-00274."
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/synthetic-00005": {
+      "created_at": "2000-01-01T00:37:00.000Z",
+      "id": "synthetic-00005",
+      "objective": "Synthetic objective synthetic-00172.",
+      "title": "Synthetic title synthetic-00173."
+    },
+    "/api/v1/missions/synthetic-00005/claims": {
+      "items": [
+        {
+          "created_at": "2000-01-01T00:38:00.000Z",
+          "etag": "0bfd66ba7d8f16b76b54f74b93fde73ea301c65e98fc1f49dfa8e350bfa8c774",
+          "falsification_criteria": "Synthetic falsification_criteria synthetic-00276.",
+          "id": "synthetic-00121",
+          "mission_id": "synthetic-00005",
+          "question_id": "synthetic-00122",
+          "statement": "Synthetic statement synthetic-00277.",
+          "status": "open",
+          "status_changed_at": "2000-01-01T00:38:00.000Z",
+          "status_creator_id": "synthetic-00010",
+          "status_evidence_valid": true,
+          "status_reason": "Synthetic status_reason synthetic-00181.",
+          "status_run_id": "synthetic-00123",
+          "version": 1
+        },
+        {
+          "created_at": "2000-01-01T00:39:00.000Z",
+          "etag": "312008c114ca1c8f0351cc33443c39784e8ec7008f7db9bc64e8d315e3724554",
+          "falsification_criteria": "Synthetic falsification_criteria synthetic-00279.",
+          "id": "synthetic-00124",
+          "mission_id": "synthetic-00005",
+          "question_id": "synthetic-00122",
+          "statement": "Synthetic statement synthetic-00280.",
+          "status": "open",
+          "status_changed_at": "2000-01-01T00:39:00.000Z",
+          "status_creator_id": "synthetic-00010",
+          "status_evidence_valid": true,
+          "status_reason": "Synthetic status_reason synthetic-00181.",
+          "status_run_id": "synthetic-00125",
+          "version": 1
+        },
+        {
+          "created_at": "2000-01-01T00:40:00.000Z",
+          "etag": "204341a29a16dfff3714c648846851f96eb309786c920f9d93b34be57a0613d8",
+          "falsification_criteria": "Synthetic falsification_criteria synthetic-00282.",
+          "id": "synthetic-00126",
+          "mission_id": "synthetic-00005",
+          "question_id": "synthetic-00127",
+          "statement": "Synthetic statement synthetic-00283.",
+          "status": "open",
+          "status_changed_at": "2000-01-01T00:40:00.000Z",
+          "status_creator_id": "synthetic-00010",
+          "status_evidence_valid": true,
+          "status_reason": "Synthetic status_reason synthetic-00181.",
+          "status_run_id": "synthetic-00128",
+          "version": 1
+        }
+      ],
+      "next_cursor": null
+    },
+    "/api/v1/missions/synthetic-00005/findings": {
+      "agent_inferences": [],
+      "items": [
+        {
+          "citation_status": "active",
+          "claim_id": "synthetic-00126",
+          "created_at": "2000-01-01T00:41:00.000Z",
+          "evidence_ids": [
+            "synthetic-00129",
+            "synthetic-00130"
+          ],
+          "id": "synthetic-00131",
+          "mission_id": "synthetic-00005",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Synthetic statement synthetic-00284.",
+          "statement_kind": "observed_fact",
+          "status": "supported",
+          "uncertainty": "Synthetic uncertainty synthetic-00285."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "synthetic-00121",
+          "created_at": "2000-01-01T00:42:00.000Z",
+          "evidence_ids": [
+            "synthetic-00132",
+            "synthetic-00133",
+            "synthetic-00134"
+          ],
+          "id": "synthetic-00135",
+          "mission_id": "synthetic-00005",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Synthetic statement synthetic-00286.",
+          "statement_kind": "assumption",
+          "status": "inconclusive",
+          "uncertainty": "Synthetic uncertainty synthetic-00287."
+        },
+        {
+          "citation_status": "active",
+          "claim_id": "synthetic-00124",
+          "created_at": "2000-01-01T00:43:00.000Z",
+          "evidence_ids": [
+            "synthetic-00136"
+          ],
+          "id": "synthetic-00137",
+          "mission_id": "synthetic-00005",
+          "retracted": false,
+          "retracted_at": null,
+          "retracted_by": null,
+          "retraction_reason": null,
+          "statement": "Synthetic statement synthetic-00288.",
+          "statement_kind": "assumption",
+          "status": "inconclusive",
+          "uncertainty": "Synthetic uncertainty synthetic-00289."
+        }
+      ],
+      "next_cursor": null
     }
   },
   "scrubbed": true,
