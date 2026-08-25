@@ -17,7 +17,7 @@ from mosaic.store.reconcile import (
     reconcile_vocabularies,
 )
 from mosaic.store.schema import apply_schema
-from mosaic.store.vocabulary import REGISTRY
+from mosaic.store.ownership import REGISTRY
 
 
 @pytest.fixture
