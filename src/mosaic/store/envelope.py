@@ -72,17 +72,33 @@ class Resolution(StrEnum):
 
     RESOLVED = "resolved"
     ABSENT = "absent"
-    """We know what it names and do not hold it -- never imported, or never
-    will be. **The common, healthy state**, not an error. This is what keeps
-    "2 of 7 trace hops joinable" measurable: a foreign key that refused an
-    un-imported reference would delete the measurement, and a nullable that
-    swallowed it would hide it."""
+    """We know what it names and do not hold it. **The quiet steady state**,
+    and during a multi-month migration it is the common one -- it must never
+    fire an alarm.
+
+    This is what keeps "2 of 7 trace hops joinable" measurable: a foreign key
+    that refused an un-imported reference would delete the measurement, and a
+    nullable that swallowed it would hide it.
+
+    **Whether an ABSENT reference will EVER resolve is deliberately not stored
+    here.** It is answered by `capability_registry.state` for the referenced
+    capability: absent + `built` means the import has not reached it yet;
+    absent + `retired` or `not_built` means it never will. Storing that on the
+    reference too would be a second copy of a fact the registry already owns,
+    free to drift -- and the registry is where the *reason* lives, which is
+    what distinguishes "not yet" from "never" for an operator."""
 
     BROKEN = "broken"
-    """It named something that should exist and does not."""
+    """It named something that should exist and does not. **The alarm.** A
+    defect, not a steady state: distinct from ABSENT precisely because ABSENT
+    is expected and this is not."""
 
     UNRESOLVED = "unresolved"
-    """Not resolved this run. Transient."""
+    """Not resolved THIS RUN -- nobody looked. Transient: a fact about the
+    evaluation, not about the reference, and a later pass may move it to any
+    of the other three. Quiet, like ABSENT, but for a different reason, and
+    the distinction matters because re-running changes this one and cannot
+    change ABSENT."""
 
 
 @dataclass(frozen=True, slots=True)
