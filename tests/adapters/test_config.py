@@ -56,3 +56,99 @@ def test_mosaic_prefixed_name_wins(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ATHENA_URL", "http://loser.invalid")
     monkeypatch.setenv("MOSAIC_ATHENA_URL", "http://winner.invalid")
     assert config.resolve("athena").address == "http://winner.invalid"
+
+
+class TestCredentialsAreBoundToTheirEndpoint:
+    """A credential is bound to the endpoint it was issued for.
+
+    Changing the endpoint must invalidate the credential rather than send it
+    somewhere new. Found in review by claude-2f: address and token were resolved
+    from two independent env lists, so overriding only the address redirected a
+    live Athena bearer to whatever host that variable named.
+
+    A footgun rather than a vulnerability -- anyone who can set the environment
+    already owns the machine. The realistic failure is a typo or a copied config,
+    and a credential leaving the fleet silently.
+    """
+
+    NAMES = (
+        "MOSAIC_ATHENA_URL",
+        "ATHENA_BASE_URL",
+        "ATHENA_URL",
+        "MOSAIC_ATHENA_TOKEN",
+        "ATHENA_TOKEN",
+        "ATHENA_API_TOKEN",
+    )
+
+    def _clear(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for name in self.NAMES:
+            monkeypatch.delenv(name, raising=False)
+
+    def test_a_token_does_not_follow_an_address_from_another_family(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._clear(monkeypatch)
+        monkeypatch.setenv("MOSAIC_ATHENA_URL", "http://elsewhere.invalid:9999")
+        monkeypatch.setenv("ATHENA_API_TOKEN", "live-token-value")
+
+        endpoint = config.resolve("athena")
+
+        assert endpoint.address == "http://elsewhere.invalid:9999"
+        assert endpoint.token is None, "a live bearer followed the address to another host"
+
+    def test_it_says_why_the_token_was_withheld(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Silence here produces a 401 nobody can explain."""
+
+        self._clear(monkeypatch)
+        monkeypatch.setenv("MOSAIC_ATHENA_URL", "http://elsewhere.invalid:9999")
+        monkeypatch.setenv("ATHENA_API_TOKEN", "live-token-value")
+
+        source = config.resolve("athena").token_source or ""
+
+        assert "ATHENA_API_TOKEN" in source
+        assert "MOSAIC_ATHENA_URL" in source
+
+    def test_a_paired_address_and_token_are_still_accepted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The real token file's own pairing must keep working.
+
+        `~/ai-workspace/claude/.secrets/athena-token` exports ATHENA_URL and
+        ATHENA_API_TOKEN together. Breaking that would have traded a footgun for
+        an outage.
+        """
+
+        self._clear(monkeypatch)
+        monkeypatch.setenv("ATHENA_URL", "http://athena.invalid:8300")
+        monkeypatch.setenv("ATHENA_API_TOKEN", "live-token-value")
+
+        endpoint = config.resolve("athena")
+
+        assert endpoint.address == "http://athena.invalid:8300"
+        assert endpoint.token == "live-token-value"
+        assert endpoint.token_source == "ATHENA_API_TOKEN"
+
+    def test_a_token_alone_still_reaches_the_default_address(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No address override means no chosen endpoint to contradict."""
+
+        self._clear(monkeypatch)
+        monkeypatch.setenv("ATHENA_API_TOKEN", "live-token-value")
+
+        endpoint = config.resolve("athena")
+
+        assert endpoint.token == "live-token-value"
+        assert endpoint.source.startswith("default")
+
+    def test_the_endpoint_never_carries_the_token_value_in_its_source(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._clear(monkeypatch)
+        monkeypatch.setenv("MOSAIC_ATHENA_URL", "http://elsewhere.invalid:9999")
+        monkeypatch.setenv("ATHENA_API_TOKEN", "live-token-value")
+
+        endpoint = config.resolve("athena")
+
+        assert "live-token-value" not in (endpoint.token_source or "")
+        assert "live-token-value" not in endpoint.source
