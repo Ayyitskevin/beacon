@@ -1,86 +1,96 @@
-"""What every adapter is, and the one seam where Lane A's contracts plug in.
+"""Shared machinery for adapters, and the one place Lane B talks to the contract.
 
-An adapter answers two questions about one module and nothing else:
+Every adapter builds its entries through the helpers here, so the contract has a
+single import site in this lane rather than six.
 
-    probe()   -- are you there, at the address I tried, and what are you running?
-    entries() -- what do you currently hold that belongs on the operator's desk?
-
-Deliberately absent: any method that changes anything. The adapter protocol has
-no write verb, so "Mosaic cannot write to your module" is enforced by the shape
-of the interface rather than by everyone remembering.
-
-CONTRACT SEAM: `Entry` below is provisional and owned by Lane A
-(src/mosaic/contracts/). When that lands, this file's `Entry` and `entry()` are
-replaced by an import, and no adapter changes -- every adapter builds entries
-through `entry()` and never constructs one directly. The churn is one function.
+**On `Entry.status`.** The contract types it as `Lifecycle`, whose five values are
+mandated by the roadmap: proposed / reviewed / authorized / executed / verified.
+Two of the four live modules have statuses that do not fit it -- see
+`LIFECYCLE_IS_LOSSY` below. Where an adapter must choose, it chooses the least
+misleading value AND preserves the module's own word verbatim in
+`payload["module_status"]`. No adapter invents a lifecycle value, and no adapter
+silently discards the module's own vocabulary; a test asserts the raw word survives.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from datetime import UTC, datetime
 
-# Provisional. Lane A's docs/authority.md decides the real label set; adapters
-# must not invent labels or hardcode these strings anywhere but here.
-UNLABELLED = "unlabelled"
+from mosaic.contracts import (
+    Attachment,
+    Authority,
+    Capability,
+    Decider,
+    Enforcement,
+    Entry,
+    Lifecycle,
+    Provenance,
+    Unreachable,
+)
+
+#: Documented so it is a known cost rather than a silent one. Raised to Lane A
+#: with the live counts; until the contract changes, the mapping tables in each
+#: adapter are the whole of the lossiness and `payload["module_status"]` is the
+#: escape hatch.
+LIFECYCLE_IS_LOSSY = (
+    "Lifecycle has no terminal-negative value. Janus's refused / withdrawn / "
+    "expired / superseded and Athena's open / in_progress / done have to be "
+    "mapped onto an approval vocabulary they were not drawn from. 4 of 13 live "
+    "gates are superseded -- a third of the corpus lands on a forced fit."
+)
 
 
-@dataclass(frozen=True)
-class ModuleProbe:
-    """Whether a module answered, and what it says it is.
+def now_iso() -> str:
+    """When Mosaic looked. Distinct from when the fact happened."""
 
-    `address` is always populated, including on failure -- see transport.Unreachable.
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def provenance(
+    source: str,
+    *,
+    module_version: str | None = None,
+    tree_state: str | None = None,
+) -> Provenance:
+    """Name the exact endpoint or revision this came from (ADR 0001).
+
+    `source` is the endpoint, command, or pinned revision -- never just the
+    module name. An entry that cannot say where it came from is a bug.
     """
 
-    module: str
-    reachable: bool
-    address: str
-    address_source: str
-    detail: str = ""
-    version: str | None = None
-    commit: str | None = None
-    tree_state: str | None = None
-    schema_version: str | None = None
+    return Provenance(
+        source=source,
+        read_at=now_iso(),
+        module_version=module_version,
+        tree_state=tree_state,
+    )
 
 
-@dataclass(frozen=True)
-class Entry:
-    """One thing a module holds, described in the module's own terms.
+def unreachable_from(exc: Exception, module: str) -> Unreachable:
+    """Turn a transport failure into the document's own failure type.
 
-    Every field the roadmap requires of a desk entry is mandatory here except
-    `authority_label`, which defaults to UNLABELLED precisely so that an adapter
-    that has not thought about authority produces a visibly unlabelled entry
-    rather than a plausible-looking wrong one.
+    Adapters never raise out of `read()`. An empty read and a failed read are
+    different facts about the world, and a desk that renders them alike is lying
+    by omission.
     """
 
-    source: str  # owning module
-    kind: str  # what the module calls this thing
-    ref: str  # the module's own identifier
-    title: str
-    status: str  # the module's own status string, never normalised away
-    owner: str | None
-    timestamp: str | None
-    schema_version: str | None
-    canonical_link: str
-    authority_label: str = UNLABELLED
-    binding: dict[str, str] = field(default_factory=dict)
-    extra: dict[str, object] = field(default_factory=dict)
+    reason = getattr(exc, "reason", None) or str(exc)
+    address = getattr(exc, "address", None)
+    return Unreachable(module=module, reason=str(reason), detail=address)
 
 
-def entry(**kwargs: object) -> Entry:
-    """The single construction site for entries.
-
-    Adapters call this, never `Entry(...)`. When Lane A's contract lands, this
-    body changes and six adapters do not.
-    """
-
-    return Entry(**kwargs)  # type: ignore[arg-type]
-
-
-@runtime_checkable
-class Adapter(Protocol):
-    module: str
-
-    def probe(self) -> ModuleProbe: ...
-
-    def entries(self) -> list[Entry]: ...
+__all__ = [
+    "LIFECYCLE_IS_LOSSY",
+    "Attachment",
+    "Authority",
+    "Capability",
+    "Decider",
+    "Enforcement",
+    "Entry",
+    "Lifecycle",
+    "Provenance",
+    "Unreachable",
+    "now_iso",
+    "provenance",
+    "unreachable_from",
+]

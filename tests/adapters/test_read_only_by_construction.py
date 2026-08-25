@@ -4,8 +4,17 @@ Mosaic reads six modules it does not own, and its entire licence to do so rests
 on being unable to change them. "We were careful" does not survive a refactor by
 someone who has not read the doctrine, so these tests fail the build instead.
 
-They are structural on purpose. A behavioural test proves the paths we thought of
-never write; an AST scan proves no path exists.
+**What these tests actually prove, stated precisely.** They prove no adapter has
+an I/O path *of its own* -- no declared import of a transport, a database driver,
+or a process launcher -- so every effect must go through `transport.py`, whose two
+entry points are then pinned by AST. They do NOT prove "no path exists": Python
+can always reach the filesystem, and `open()` and `pathlib` are reachable without
+any import at all. The transport seam is the thing under test, not the language.
+
+Overstating that guarantee is its own risk, because someone who believes the
+strong version stops looking. This wording is the correction after claude-2f
+reviewed the first version and broke it: the original allowlist was supplied by
+the adapter being constrained, which made it circular. See `transport.READ_VERBS`.
 """
 
 from __future__ import annotations
@@ -32,6 +41,16 @@ FORBIDDEN_IN_ADAPTERS = {
     "urllib.request",
     "requests",
     "httpx",
+    # `os.system` and `os.popen` are a full shell with no subprocess import.
+    "os",
+    # Indirection defeats an import scan unless the indirection itself is
+    # banned: `importlib.import_module("sqlite3")` opened and wrote to a
+    # database while passing every other check in this file.
+    "importlib",
+    # A filesystem write path that an import scan would otherwise wave through.
+    "pathlib",
+    "shutil",
+    "tempfile",
 }
 
 #: ADR 0001: a module's own interface is readable; its live database is not.
@@ -83,6 +102,52 @@ def test_no_direct_database_access_anywhere(path: pathlib.Path) -> None:
     )
 
 
+def test_adapters_do_not_reach_for_dynamic_import() -> None:
+    """`__import__` is a builtin, so it has no import statement to scan for.
+
+    Banning the `importlib` module is not enough on its own: the builtin reaches
+    the same place with no import at all.
+    """
+
+    for path in ADAPTER_FILES:
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                assert node.func.id != "__import__", (
+                    f"{path.name} calls __import__, which reaches any module without "
+                    f"an import statement for this scan to find"
+                )
+
+
+def test_the_cli_allowlist_is_owned_by_the_transport_not_its_callers() -> None:
+    """The verb allowlist must be a literal here, not an argument from the caller.
+
+    The first version took `read_verbs` as a constructor parameter, so the adapter
+    being restricted chose its own restrictions. claude-2f broke it in review by
+    writing an adapter that declared `{"decide", "withdraw"}` and reached
+    `subprocess.run` while passing every test in this file.
+
+    Reading the table out of the AST is the same technique that already worked for
+    the HTTP method: the guarantee is only as good as the thing the test can see.
+    """
+
+    from mosaic.adapters.transport import READ_VERBS, ReadOnlyCommand
+
+    mutating = {"decide", "raise", "withdraw", "expire", "supersede", "check", "board"}
+    for module, verbs in READ_VERBS.items():
+        assert not (verbs & mutating), f"{module} may run {sorted(verbs & mutating)}"
+
+    # A caller must not be able to widen it.
+    fields = getattr(ReadOnlyCommand, "__dataclass_fields__", {})
+    assert "read_verbs" not in fields, (
+        "ReadOnlyCommand accepts read_verbs as a field again, which puts the "
+        "allowlist back in the hands of the code it constrains"
+    )
+
+    # A module with no entry may run nothing -- fail closed, not open.
+    assert ReadOnlyCommand(module="unregistered", executable="true").read_verbs == frozenset()
+
+
 def test_transport_sends_no_verb_but_get() -> None:
     """The HTTP method is a literal, not a parameter, and it is GET.
 
@@ -127,12 +192,12 @@ def test_adapter_protocol_exposes_no_write_verb() -> None:
     stronger guarantee than every adapter independently declining to implement one.
     """
 
-    from mosaic.adapters.base import Adapter
+    from mosaic.contracts import Adapter
 
     callables = {name for name in dir(Adapter) if not name.startswith("_")}
     attributes = set(getattr(Adapter, "__annotations__", {}))
     surface = callables | attributes
-    assert surface == {"module", "probe", "entries"}, (
+    assert surface == {"module", "capabilities", "read"}, (
         f"the Adapter protocol grew a member: {sorted(surface)}. Every addition here "
         f"is a new thing Mosaic can ask of a module it does not own."
     )

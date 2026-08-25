@@ -1,91 +1,162 @@
 """Janus -- the gates a human has not yet ruled on.
 
-Read through the `janus` CLI, not by opening ~/.janus/janus.db. Going through a
-module's own interface is not filesystem reach-through; opening its database is.
-The allowlist below is where that line is drawn in code: `janus` can rule on a
-gate, withdraw one, expire one, and run decay checks that append observations.
-None of those verbs are here, so no argv this adapter can assemble will reach them.
+Read through the `janus` CLI, not by opening `~/.janus/janus.db`. Going through a
+module's own interface is not filesystem reach-through; opening its database is
+(ADR 0001). The verb allowlist lives in `transport.READ_VERBS`, not here -- an
+adapter does not get to choose its own restrictions.
 
-`board` is deliberately excluded despite reading like a read: it accepts `--check`,
-which runs decay checks and writes observations to the ledger. An allowlist that
-admits a verb because its usual invocation is harmless is not an allowlist.
+Janus is where the authority axes are most visible, so this adapter is the one
+that populates `Authority` most fully. It reports what the ledger says and
+nothing more: it does not re-check whether a binding still holds, because that is
+a `janus show` per gate and should be a deliberate act, not a side effect of
+reading a desk. Every bound gate therefore reports `BYTES_UNCHECKED` -- a fact
+about this run, honestly labelled, rather than an assurance nobody earned.
 """
 
 from __future__ import annotations
 
-from .base import Entry, ModuleProbe, entry
-from .transport import ReadOnlyCommand, Unreachable
+from typing import Any
 
-READ_VERBS = frozenset({"list", "show", "stats", "doctor"})
+from .base import (
+    Attachment,
+    Authority,
+    Capability,
+    Decider,
+    Enforcement,
+    Entry,
+    Lifecycle,
+    Unreachable,
+    provenance,
+    unreachable_from,
+)
+from .transport import ReadOnlyCommand
+from .transport import Unreachable as TransportUnreachable
+
+#: Janus's own state words -> the roadmap's five-value Lifecycle.
+#:
+#: Lossy, and worth stating plainly: Lifecycle has no terminal-negative value, so
+#: `withdrawn`, `expired` and `superseded` all land on PROPOSED -- a gate nobody
+#: ever ruled on. That is the least misleading of five bad options (it never
+#: claims authorization), but it does mean a superseded gate and a live open gate
+#: share a lifecycle value. 4 of 13 live gates are superseded. The module's own
+#: word is preserved verbatim in `payload["module_status"]`, and the gap is
+#: raised with Lane A.
+_LIFECYCLE: dict[str, Lifecycle] = {
+    "open": Lifecycle.PROPOSED,
+    "approved": Lifecycle.AUTHORIZED,
+    "refused": Lifecycle.REVIEWED,
+    "withdrawn": Lifecycle.PROPOSED,
+    "expired": Lifecycle.PROPOSED,
+    "superseded": Lifecycle.PROPOSED,
+}
+
+#: Janus binding kinds -> what the ruling is pinned to.
+#:
+#: `none` is the case the live ledger actually exercises and the abstract type
+#: system would have missed: 4 of 13 gates are bound to nothing, and all four are
+#: approved. A ruling bound to nothing can never be re-checked against anything,
+#: by anyone, ever -- which is why it is UNBOUND rather than merely unchecked.
+_ATTACHMENT: dict[str, Attachment] = {
+    "git": Attachment.BYTES_UNCHECKED,
+    "file": Attachment.BYTES_UNCHECKED,
+    "text": Attachment.BYTES_UNVERIFIABLE,
+    "none": Attachment.UNBOUND,
+}
 
 
 class JanusAdapter:
     module = "janus"
 
     def __init__(self, executable: str = "janus") -> None:
-        self._cli = ReadOnlyCommand(
-            module=self.module,
-            executable=executable,
-            read_verbs=READ_VERBS,
-        )
+        self._cli = ReadOnlyCommand(module=self.module, executable=executable)
 
-    def probe(self) -> ModuleProbe:
+    # -- discovery ---------------------------------------------------------
+
+    def capabilities(self) -> Capability:
         try:
             gates = self._cli.run_json(["list", "--state", "all", "--json"])
-        except Unreachable as exc:
-            return ModuleProbe(
-                module=self.module,
-                reachable=False,
-                address=exc.address,
-                address_source="PATH",
-                detail=exc.reason,
-            )
+        except TransportUnreachable:
+            # Discovery failing is information, not an exception. `listener=None`
+            # is Minerva's convention for "nothing is serving" and it is the
+            # honest answer for a CLI that is not on PATH.
+            return Capability(module=self.module, listener=None)
         count = len(gates) if isinstance(gates, list) else 0
-        return ModuleProbe(
+        return Capability(
             module=self.module,
-            reachable=True,
-            address=f"{self._cli.executable} (local CLI)",
-            address_source="PATH",
-            detail=f"{count} gates in the ledger",
+            surfaces=("list", "show", "stats", "doctor"),
+            listener=f"{self._cli.executable} (local CLI)",
+            raw={"gate_count": count},
         )
 
-    def entries(self) -> list[Entry]:
-        gates = self._cli.run_json(["list", "--state", "all", "--json"])
-        if not isinstance(gates, list):
-            raise Unreachable(self.module, self._cli.executable, "list --json was not a JSON array")
+    # -- reading -----------------------------------------------------------
 
-        out: list[Entry] = []
-        for gate in gates:
-            gate_id = gate.get("id", "")
-            # binding_* is passed through verbatim rather than collapsed into a
-            # boolean. Lane A's label set is fitted to these values: a gate bound
-            # to a git object is not the same claim as one bound to nothing, and
-            # an adapter that reported only "bound: true" would erase the
-            # difference before the doctrine could act on it.
-            binding = {
-                "kind": gate.get("binding_kind") or "none",
-                "locator": gate.get("binding_locator") or "",
-                "sha256": gate.get("binding_sha256") or "",
-            }
-            out.append(
-                entry(
-                    source=self.module,
-                    kind="gate",
-                    ref=gate_id,
-                    title=gate.get("question", ""),
-                    status=gate.get("state", ""),
-                    owner=gate.get("raised_by"),
-                    timestamp=gate.get("raised_at"),
-                    schema_version=None,  # janus list --json carries no schema field
-                    canonical_link=f"janus show {gate_id}",
-                    binding=binding,
-                    extra={
-                        "gate_kind": gate.get("kind"),
-                        "decay": gate.get("decay"),
-                        "consumer": gate.get("consumer"),
-                        "ruling": gate.get("ruling"),
-                        "option_count": len(gate.get("options") or []),
-                    },
-                )
+    def read(self) -> tuple[tuple[Entry, ...], tuple[Unreachable, ...]]:
+        source = f"{self._cli.executable} list --state all --json"
+        try:
+            gates = self._cli.run_json(["list", "--state", "all", "--json"])
+        except TransportUnreachable as exc:
+            return (), (unreachable_from(exc, self.module),)
+
+        if not isinstance(gates, list):
+            return (), (
+                Unreachable(
+                    module=self.module,
+                    reason="`janus list --json` did not answer with a JSON array",
+                    detail=source,
+                ),
             )
-        return out
+
+        return tuple(self._entry(gate, source) for gate in gates), ()
+
+    def _entry(self, gate: dict[str, Any], source: str) -> Entry:
+        gate_id = str(gate.get("id", ""))
+        state = str(gate.get("state", ""))
+        kind = gate.get("binding_kind") or "none"
+
+        return Entry(
+            source=self.module,
+            owner=str(gate.get("raised_by") or "unknown"),
+            title=str(gate.get("question", "")),
+            status=_LIFECYCLE.get(state, Lifecycle.PROPOSED),
+            timestamp=str(gate.get("raised_at") or ""),
+            schema_version="janus.gate.v1",
+            ref=gate_id,
+            provenance=provenance(source),
+            link=f"janus show {gate_id}",
+            authority=self._authority(gate, state, kind),
+            payload={
+                # The module's own word, never discarded. Lifecycle is lossy;
+                # this is where the loss is recoverable.
+                "module_status": state,
+                "binding_kind": kind,
+                "binding_locator": gate.get("binding_locator") or "",
+                "binding_sha256": gate.get("binding_sha256") or "",
+                "gate_kind": gate.get("kind"),
+                "decay": gate.get("decay"),
+                "consumer": gate.get("consumer"),
+                "ruling": gate.get("ruling"),
+                "option_count": len(gate.get("options") or []),
+            },
+        )
+
+    def _authority(self, gate: dict[str, Any], state: str, kind: str) -> Authority | None:
+        if not gate.get("ruling"):
+            # No ruling means no approval at all -- which the contract says must
+            # not render like an approval that failed to verify. An open gate is
+            # a question, not a weak answer.
+            return None
+
+        return Authority(
+            decider=Decider.HUMAN,
+            attachment=_ATTACHMENT.get(kind, Attachment.UNBOUND),
+            # Janus states drift and stops there, on purpose: enforcing would put
+            # it in the permission path. So the operator, not the module, acts.
+            enforcement=Enforcement.REPORTED,
+            lifecycle=_LIFECYCLE.get(state, Lifecycle.PROPOSED),
+            mechanism="janus.ruling",
+            meaning=(
+                "Janus records pending authority; it does not grant authority. "
+                "A ruling binds a SHA-256 rather than a name, and reading a "
+                "ruling is not authority."
+            ),
+        )
