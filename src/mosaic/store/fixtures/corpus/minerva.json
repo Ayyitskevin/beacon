@@ -1,0 +1,176 @@
+{
+  "note": "SYNTHETIC behavior fixture; no live capture, people, decisions, evidence, credentials or usage. Shapes preserve adapter regression cases only.",
+  "origin": "minerva",
+  "payload": {
+    "/api/v1/capabilities": {
+      "api_version": "v1",
+      "brief_schema_version": "minerva.research-brief.v2",
+      "capabilities": [
+        "capability.manifest.v3.cli",
+        "capability.manifest.v3.http",
+        "mission.create",
+        "question.create",
+        "claim.create",
+        "claim.status.append",
+        "source.utf8_bytes.import",
+        "evidence.exact_byte_span.create",
+        "evidence.withdraw.cli",
+        "finding.create",
+        "finding.retract.cli",
+        "claim.evidence_ledger.read",
+        "brief.preview.markdown_json",
+        "brief.export.markdown_json",
+        "research.packet.v2.canonical",
+        "research.packet.v2.verify.cli",
+        "research.packet.v2.inspect.cli",
+        "research.request.v1.canonical",
+        "research.request.v1.verify.cli",
+        "research.request.v1.fulfill.cli",
+        "research.result.v1.canonical",
+        "web.review",
+        "assist.finding_candidates.preview.cli",
+        "assist.finding_candidates.invoke.cli.byok.optional",
+        "assist.inference.adopt.cli",
+        "assist.inference.retract.cli",
+        "finding.create.from_inference.cli"
+      ],
+      "citation_scheme": "Synthetic citation_scheme synthetic-00002.",
+      "external_egress": "Synthetic external_egress synthetic-00003.",
+      "identity_boundary": "Synthetic identity_boundary synthetic-00004.",
+      "limits": {
+        "assistant_candidates": 103,
+        "assistant_context_bytes": 65636,
+        "assistant_evidence_cards": 150,
+        "mission_page_size": 300,
+        "request_body_bytes": 5242980,
+        "research_request_bytes": 65636,
+        "source_bytes": 1048676
+      },
+      "listener": {
+        "access_scope": "Synthetic access_scope synthetic-00005.",
+        "application_authentication": false,
+        "mode": "loopback_tcp",
+        "network_listener": true,
+        "transport": "tcp_ipv4_loopback"
+      },
+      "research_request_schema_version": "minerva.research-request.v1",
+      "schema_version": "minerva.capabilities.v3",
+      "supported_external_providers": [
+        "Synthetic supported_external_providers synthetic-00006.",
+        "Synthetic supported_external_providers synthetic-00007."
+      ],
+      "supported_listener_modes": [
+        {
+          "access_scope": "Synthetic access_scope synthetic-00008.",
+          "application_authentication": false,
+          "argv": [
+            "serve",
+            "owner-uds"
+          ],
+          "mode": "owner_uds",
+          "network_listener": false,
+          "requires_acknowledgement": false,
+          "transport": "unix_socket"
+        },
+        {
+          "access_scope": "Synthetic access_scope synthetic-00005.",
+          "application_authentication": false,
+          "argv": [
+            "serve",
+            "loopback-tcp"
+          ],
+          "mode": "loopback_tcp",
+          "network_listener": true,
+          "requires_acknowledgement": true,
+          "transport": "tcp_ipv4_loopback"
+        }
+      ],
+      "surfaces": {
+        "cli": {
+          "capabilities_argv": [
+            "capabilities"
+          ],
+          "capability_commands": {
+            "assist.finding_candidates.invoke.cli.byok.optional": [
+              "assist",
+              "finding-candidates"
+            ],
+            "assist.finding_candidates.preview.cli": [
+              "assist",
+              "finding-candidates"
+            ],
+            "assist.inference.adopt.cli": [
+              "assist",
+              "adopt"
+            ],
+            "assist.inference.retract.cli": [
+              "assist",
+              "retract-inference"
+            ],
+            "capability.manifest.v3.cli": [
+              "capabilities"
+            ],
+            "evidence.withdraw.cli": [
+              "evidence",
+              "withdraw"
+            ],
+            "finding.create.from_inference.cli": [
+              "finding",
+              "add"
+            ],
+            "finding.retract.cli": [
+              "finding",
+              "retract"
+            ],
+            "research.packet.v2.inspect.cli": [
+              "packet",
+              "inspect"
+            ],
+            "research.packet.v2.verify.cli": [
+              "packet",
+              "verify"
+            ],
+            "research.request.v1.fulfill.cli": [
+              "request",
+              "fulfill"
+            ],
+            "research.request.v1.verify.cli": [
+              "request",
+              "verify"
+            ]
+          },
+          "entrypoint": "Synthetic entrypoint synthetic-00009.",
+          "stderr_contract": "Synthetic stderr_contract synthetic-00010.",
+          "stdout_contract": "Synthetic stdout_contract synthetic-00011."
+        },
+        "http": {
+          "api_base_path": "/api/v1",
+          "capabilities_path": "/api/v1/capabilities",
+          "health_path": "/healthz",
+          "logical_base_url": "https://example.invalid/synthetic-00012",
+          "openapi_path": "/api/v1/openapi.json",
+          "readiness_path": "/readyz",
+          "web_path": "/"
+        }
+      },
+      "unavailable": [
+        "Synthetic unavailable synthetic-00013.",
+        "Synthetic unavailable synthetic-00014.",
+        "Synthetic unavailable synthetic-00015.",
+        "Synthetic unavailable synthetic-00016.",
+        "Synthetic unavailable synthetic-00017.",
+        "Synthetic unavailable synthetic-00018.",
+        "Synthetic unavailable synthetic-00019.",
+        "Synthetic unavailable synthetic-00020.",
+        "Synthetic unavailable synthetic-00021.",
+        "Synthetic unavailable synthetic-00022.",
+        "Synthetic unavailable synthetic-00023.",
+        "Synthetic unavailable synthetic-00024.",
+        "Synthetic unavailable synthetic-00025.",
+        "Synthetic unavailable synthetic-00026."
+      ]
+    }
+  },
+  "scrubbed": true,
+  "surface": "synthetic minerva API/CLI response shapes; not a production observation"
+}

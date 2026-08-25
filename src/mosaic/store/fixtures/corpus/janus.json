@@ -1,0 +1,1637 @@
+{
+  "note": "SYNTHETIC behavior fixture; no live capture, people, decisions, evidence, credentials or usage. Shapes preserve adapter regression cases only.",
+  "origin": "janus",
+  "payload": {
+    "list --state all": [
+      {
+        "binding_kind": null,
+        "binding_locator": null,
+        "binding_sha256": null,
+        "check_revisions": [
+          {
+            "at": "2000-01-01T00:24:00.000Z",
+            "command": "printf 'synthetic check\\n'",
+            "gate_id": "synthetic-00001",
+            "id": 10002,
+            "kind": "delivery",
+            "reason": "Synthetic reason synthetic-00045.",
+            "revised_by": "synthetic-00002"
+          }
+        ],
+        "cites": null,
+        "consumer": "Synthetic consumer synthetic-00046.",
+        "decay": "Synthetic decay synthetic-00047.",
+        "decay_check": null,
+        "delivery_check": "printf 'synthetic check\\n'",
+        "effective_decay_check": null,
+        "effective_delivery_check": "printf 'synthetic check\\n'",
+        "horizon": null,
+        "id": "synthetic-00001",
+        "kind": "resource",
+        "observations": [
+          {
+            "at": "2000-01-01T00:25:00.000Z",
+            "command": "printf 'synthetic check\\n'",
+            "exit_code": 1,
+            "gate_id": "synthetic-00001",
+            "id": 10004,
+            "kind": "delivery",
+            "note": ""
+          }
+        ],
+        "options": [
+          {
+            "detail": "Synthetic detail synthetic-00048.",
+            "gate_id": "synthetic-00001",
+            "label": "Synthetic label synthetic-00049.",
+            "option_id": "synthetic-00003",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Synthetic detail synthetic-00050.",
+            "gate_id": "synthetic-00001",
+            "label": "Synthetic label synthetic-00051.",
+            "option_id": "synthetic-00004",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Synthetic question synthetic-00052.",
+        "raised_at": "2000-01-01T00:00:00.000Z",
+        "raised_by": "synthetic-00002",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "synthetic-00001",
+          "option_id": "synthetic-00003",
+          "reason": "Synthetic reason synthetic-00053.",
+          "ruled_at": "2000-01-01T00:15:00.000Z",
+          "ruled_by": "synthetic-00002",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": null,
+        "binding_locator": null,
+        "binding_sha256": null,
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "Synthetic consumer synthetic-00054.",
+        "decay": "Synthetic decay synthetic-00055.",
+        "decay_check": "printf 'synthetic check\\n'",
+        "delivery_check": null,
+        "effective_decay_check": "printf 'synthetic check\\n'",
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "synthetic-00005",
+        "kind": "irreversible",
+        "observations": [
+          {
+            "at": "2000-01-01T00:13:00.000Z",
+            "command": "printf 'synthetic check\\n'",
+            "exit_code": 0,
+            "gate_id": "synthetic-00005",
+            "id": 10002,
+            "kind": "decay",
+            "note": ""
+          },
+          {
+            "at": "2000-01-01T00:02:00.000Z",
+            "command": "printf 'synthetic check\\n'",
+            "exit_code": 0,
+            "gate_id": "synthetic-00005",
+            "id": 10001,
+            "kind": "decay",
+            "note": ""
+          }
+        ],
+        "options": [
+          {
+            "detail": "Synthetic detail synthetic-00056.",
+            "gate_id": "synthetic-00005",
+            "label": "Synthetic label synthetic-00057.",
+            "option_id": "synthetic-00006",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Synthetic detail synthetic-00058.",
+            "gate_id": "synthetic-00005",
+            "label": "Synthetic label synthetic-00059.",
+            "option_id": "synthetic-00007",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Synthetic question synthetic-00060.",
+        "raised_at": "2000-01-01T00:01:00.000Z",
+        "raised_by": "synthetic-00002",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "synthetic-00005",
+          "option_id": "synthetic-00006",
+          "reason": "Synthetic reason synthetic-00061.",
+          "ruled_at": "2000-01-01T00:15:00.000Z",
+          "ruled_by": "synthetic-00002",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "./example-project/synthetic-00062",
+        "binding_sha256": "eaf7c148e5be5679c6ece321c6fd3ff47608ffbde1370b73502af37fd8f95291",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "Synthetic consumer synthetic-00064.",
+        "decay": "Synthetic decay synthetic-00065.",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "synthetic-00008",
+        "kind": "taste",
+        "observations": [],
+        "options": [],
+        "question": "Synthetic question synthetic-00066.",
+        "raised_at": "2000-01-01T00:01:00.000Z",
+        "raised_by": "synthetic-00002",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "synthetic-00008",
+          "option_id": null,
+          "reason": "Synthetic reason synthetic-00067.",
+          "ruled_at": "2000-01-01T00:07:00.000Z",
+          "ruled_by": "synthetic-00002",
+          "state": "superseded"
+        },
+        "state": "superseded"
+      },
+      {
+        "binding_kind": "file",
+        "binding_locator": "./example-project/synthetic-00068",
+        "binding_sha256": "ee2538378db918c3832481e2c2b40263d2af4ccc6086ad7b34b9fd79c7ccb03a",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "Synthetic consumer synthetic-00070.",
+        "decay": "Synthetic decay synthetic-00071.",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "synthetic-00009",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "Synthetic detail synthetic-00072.",
+            "gate_id": "synthetic-00009",
+            "label": "Synthetic label synthetic-00073.",
+            "option_id": "synthetic-00010",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Synthetic detail synthetic-00074.",
+            "gate_id": "synthetic-00009",
+            "label": "Synthetic label synthetic-00075.",
+            "option_id": "synthetic-00011",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Synthetic long decision synthetic-00076: The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. ",
+        "raised_at": "2000-01-01T00:03:00.000Z",
+        "raised_by": "synthetic-00002",
+        "ruling": null,
+        "state": "open"
+      },
+      {
+        "binding_kind": null,
+        "binding_locator": null,
+        "binding_sha256": null,
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "Synthetic consumer synthetic-00077.",
+        "decay": "Synthetic decay synthetic-00078.",
+        "decay_check": null,
+        "delivery_check": "printf 'synthetic check\\n'",
+        "effective_decay_check": null,
+        "effective_delivery_check": "printf 'synthetic check\\n'",
+        "horizon": null,
+        "id": "synthetic-00012",
+        "kind": "resource",
+        "observations": [],
+        "options": [],
+        "question": "Synthetic question synthetic-00079.",
+        "raised_at": "2000-01-01T00:04:00.000Z",
+        "raised_by": "synthetic-00002",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "synthetic-00012",
+          "option_id": null,
+          "reason": "Synthetic reason synthetic-00080.",
+          "ruled_at": "2000-01-01T00:05:00.000Z",
+          "ruled_by": "synthetic-00013",
+          "state": "superseded"
+        },
+        "state": "superseded"
+      },
+      {
+        "binding_kind": null,
+        "binding_locator": null,
+        "binding_sha256": null,
+        "check_revisions": [
+          {
+            "at": "2000-01-01T00:23:00.000Z",
+            "command": "printf 'synthetic check\\n'",
+            "gate_id": "synthetic-00014",
+            "id": 10001,
+            "kind": "delivery",
+            "reason": "Synthetic reason synthetic-00081.",
+            "revised_by": "synthetic-00002"
+          }
+        ],
+        "cites": "Synthetic cites synthetic-00012.",
+        "consumer": "Synthetic consumer synthetic-00082.",
+        "decay": "Synthetic decay synthetic-00083.",
+        "decay_check": null,
+        "delivery_check": "printf 'synthetic check\\n'",
+        "effective_decay_check": null,
+        "effective_delivery_check": "printf 'synthetic check\\n'",
+        "horizon": null,
+        "id": "synthetic-00014",
+        "kind": "resource",
+        "observations": [
+          {
+            "at": "2000-01-01T00:25:00.000Z",
+            "command": "printf 'synthetic check\\n'",
+            "exit_code": 0,
+            "gate_id": "synthetic-00014",
+            "id": 10005,
+            "kind": "delivery",
+            "note": ""
+          },
+          {
+            "at": "2000-01-01T00:16:00.000Z",
+            "command": "printf 'synthetic check\\n'",
+            "exit_code": 1,
+            "gate_id": "synthetic-00014",
+            "id": 10003,
+            "kind": "delivery",
+            "note": ""
+          }
+        ],
+        "options": [
+          {
+            "detail": "Synthetic detail synthetic-00084.",
+            "gate_id": "synthetic-00014",
+            "label": "Synthetic label synthetic-00085.",
+            "option_id": "synthetic-00015",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Synthetic detail synthetic-00086.",
+            "gate_id": "synthetic-00014",
+            "label": "Synthetic label synthetic-00087.",
+            "option_id": "synthetic-00016",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Synthetic long decision synthetic-00088: The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. ",
+        "raised_at": "2000-01-01T00:06:00.000Z",
+        "raised_by": "synthetic-00002",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "synthetic-00014",
+          "option_id": "synthetic-00015",
+          "reason": "Synthetic reason synthetic-00089.",
+          "ruled_at": "2000-01-01T00:15:00.000Z",
+          "ruled_by": "synthetic-00002",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "./example-project/synthetic-00090",
+        "binding_sha256": "fe8fe459c618b689c454da7bde60219b8141eef68fa9bcf1a29d3f4feb725e73",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "Synthetic consumer synthetic-00064.",
+        "decay": "Synthetic decay synthetic-00092.",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "synthetic-00017",
+        "kind": "taste",
+        "observations": [],
+        "options": [
+          {
+            "detail": "Synthetic detail synthetic-00093.",
+            "gate_id": "synthetic-00017",
+            "label": "Synthetic label synthetic-00094.",
+            "option_id": "synthetic-00018",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Synthetic detail synthetic-00095.",
+            "gate_id": "synthetic-00017",
+            "label": "Synthetic label synthetic-00096.",
+            "option_id": "synthetic-00019",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Synthetic question synthetic-00097.",
+        "raised_at": "2000-01-01T00:08:00.000Z",
+        "raised_by": "synthetic-00002",
+        "ruling": {
+          "bound_sha256": "fe8fe459c618b689c454da7bde60219b8141eef68fa9bcf1a29d3f4feb725e73",
+          "gate_id": "synthetic-00017",
+          "option_id": "synthetic-00019",
+          "reason": "Synthetic reason synthetic-00098.",
+          "ruled_at": "2000-01-01T00:10:00.000Z",
+          "ruled_by": "synthetic-00002",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "./example-project/synthetic-00099",
+        "binding_sha256": "91fad01fc4a8edd03a4ffe01bafe41663ac560020d6d786099ba03ceef1d3b85",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "Synthetic consumer synthetic-00101.",
+        "decay": "Synthetic decay synthetic-00102.",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "synthetic-00020",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "Synthetic detail synthetic-00103.",
+            "gate_id": "synthetic-00020",
+            "label": "Synthetic label synthetic-00104.",
+            "option_id": "synthetic-00021",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Synthetic detail synthetic-00105.",
+            "gate_id": "synthetic-00020",
+            "label": "Synthetic label synthetic-00106.",
+            "option_id": "synthetic-00022",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Synthetic question synthetic-00107.",
+        "raised_at": "2000-01-01T00:09:00.000Z",
+        "raised_by": "synthetic-00002",
+        "ruling": {
+          "bound_sha256": "91fad01fc4a8edd03a4ffe01bafe41663ac560020d6d786099ba03ceef1d3b85",
+          "gate_id": "synthetic-00020",
+          "option_id": "synthetic-00021",
+          "reason": "Synthetic reason synthetic-00108.",
+          "ruled_at": "2000-01-01T00:10:00.000Z",
+          "ruled_by": "synthetic-00002",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "./example-project/synthetic-00109",
+        "binding_sha256": "729db15d965bb087ec0d2bd643286fafaa1371acc4bdf00cf42fdbc114e2ebdc",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "Synthetic consumer synthetic-00111.",
+        "decay": "Synthetic decay synthetic-00112.",
+        "decay_check": "printf 'synthetic check\\n'",
+        "delivery_check": null,
+        "effective_decay_check": "printf 'synthetic check\\n'",
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "synthetic-00023",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "Synthetic detail synthetic-00113.",
+            "gate_id": "synthetic-00023",
+            "label": "Synthetic label synthetic-00114.",
+            "option_id": "synthetic-00024",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Synthetic detail synthetic-00115.",
+            "gate_id": "synthetic-00023",
+            "label": "Synthetic label synthetic-00116.",
+            "option_id": "synthetic-00025",
+            "position": 1,
+            "recommended": 0
+          },
+          {
+            "detail": "Synthetic detail synthetic-00117.",
+            "gate_id": "synthetic-00023",
+            "label": "Synthetic label synthetic-00118.",
+            "option_id": "synthetic-00026",
+            "position": 2,
+            "recommended": 0
+          },
+          {
+            "detail": "Synthetic detail synthetic-00119.",
+            "gate_id": "synthetic-00023",
+            "label": "Synthetic label synthetic-00120.",
+            "option_id": "synthetic-00027",
+            "position": 3,
+            "recommended": 0
+          }
+        ],
+        "question": "Synthetic question synthetic-00121.",
+        "raised_at": "2000-01-01T00:11:00.000Z",
+        "raised_by": "synthetic-00028",
+        "ruling": {
+          "bound_sha256": "729db15d965bb087ec0d2bd643286fafaa1371acc4bdf00cf42fdbc114e2ebdc",
+          "gate_id": "synthetic-00023",
+          "option_id": "synthetic-00024",
+          "reason": "Synthetic reason synthetic-00122.",
+          "ruled_at": "2000-01-01T00:12:00.000Z",
+          "ruled_by": "synthetic-00028",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "./example-project/synthetic-00123",
+        "binding_sha256": "67d7ec03988587082a369a6fad11953136b0e169393fbfa42081d4e36bbe8b82",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "Synthetic consumer synthetic-00125.",
+        "decay": "Synthetic decay synthetic-00126.",
+        "decay_check": "printf 'synthetic check\\n'",
+        "delivery_check": null,
+        "effective_decay_check": "printf 'synthetic check\\n'",
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "synthetic-00029",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "Synthetic detail synthetic-00127.",
+            "gate_id": "synthetic-00029",
+            "label": "Synthetic label synthetic-00128.",
+            "option_id": "synthetic-00030",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Synthetic detail synthetic-00129.",
+            "gate_id": "synthetic-00029",
+            "label": "Synthetic label synthetic-00130.",
+            "option_id": "synthetic-00031",
+            "position": 1,
+            "recommended": 0
+          },
+          {
+            "detail": "Synthetic detail synthetic-00131.",
+            "gate_id": "synthetic-00029",
+            "label": "Synthetic label synthetic-00132.",
+            "option_id": "synthetic-00032",
+            "position": 2,
+            "recommended": 0
+          }
+        ],
+        "question": "Synthetic question synthetic-00133.",
+        "raised_at": "2000-01-01T00:14:00.000Z",
+        "raised_by": "synthetic-00028",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "synthetic-00029",
+          "option_id": null,
+          "reason": "Synthetic reason synthetic-00134.",
+          "ruled_at": "2000-01-01T00:18:00.000Z",
+          "ruled_by": "synthetic-00013",
+          "state": "superseded"
+        },
+        "state": "superseded"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "./example-project/synthetic-00135",
+        "binding_sha256": "0c8744879254320d178eb935ad1cd9a110360a7d116b407f2ed38f4bc36d26e9",
+        "check_revisions": [],
+        "cites": "Synthetic cites synthetic-00029.",
+        "consumer": "Synthetic consumer synthetic-00125.",
+        "decay": "Synthetic decay synthetic-00126.",
+        "decay_check": "printf 'synthetic check\\n'",
+        "delivery_check": null,
+        "effective_decay_check": "printf 'synthetic check\\n'",
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "synthetic-00033",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "Synthetic detail synthetic-00127.",
+            "gate_id": "synthetic-00033",
+            "label": "Synthetic label synthetic-00128.",
+            "option_id": "synthetic-00030",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Synthetic detail synthetic-00129.",
+            "gate_id": "synthetic-00033",
+            "label": "Synthetic label synthetic-00130.",
+            "option_id": "synthetic-00031",
+            "position": 1,
+            "recommended": 0
+          },
+          {
+            "detail": "Synthetic detail synthetic-00131.",
+            "gate_id": "synthetic-00033",
+            "label": "Synthetic label synthetic-00132.",
+            "option_id": "synthetic-00032",
+            "position": 2,
+            "recommended": 0
+          }
+        ],
+        "question": "Synthetic question synthetic-00137.",
+        "raised_at": "2000-01-01T00:17:00.000Z",
+        "raised_by": "synthetic-00013",
+        "ruling": {
+          "bound_sha256": "0c8744879254320d178eb935ad1cd9a110360a7d116b407f2ed38f4bc36d26e9",
+          "gate_id": "synthetic-00033",
+          "option_id": "synthetic-00031",
+          "reason": "Synthetic reason synthetic-00138.",
+          "ruled_at": "2000-01-01T00:19:00.000Z",
+          "ruled_by": "synthetic-00013",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "./example-project/synthetic-00139",
+        "binding_sha256": "47c75f07bc2ee688a8bd131457e079ddf2dc1d416fcf624d451f404d12c99a18",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "Synthetic consumer synthetic-00141.",
+        "decay": "Synthetic decay synthetic-00142.",
+        "decay_check": "printf 'synthetic check\\n'",
+        "delivery_check": null,
+        "effective_decay_check": "printf 'synthetic check\\n'",
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "synthetic-00034",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "Synthetic detail synthetic-00143.",
+            "gate_id": "synthetic-00034",
+            "label": "Synthetic label synthetic-00144.",
+            "option_id": "synthetic-00021",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Synthetic detail synthetic-00145.",
+            "gate_id": "synthetic-00034",
+            "label": "Synthetic label synthetic-00146.",
+            "option_id": "synthetic-00022",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Synthetic question synthetic-00147.",
+        "raised_at": "2000-01-01T00:20:00.000Z",
+        "raised_by": "synthetic-00002",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "synthetic-00034",
+          "option_id": null,
+          "reason": "Synthetic reason synthetic-00148.",
+          "ruled_at": "2000-01-01T00:21:00.000Z",
+          "ruled_by": "synthetic-00002",
+          "state": "superseded"
+        },
+        "state": "superseded"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "./example-project/synthetic-00149",
+        "binding_sha256": "2f839a2e25b46ba623d650e63545d487a99b51d1bcba4ecdddfa7fc45b3f778a",
+        "check_revisions": [],
+        "cites": "Synthetic cites synthetic-00034.",
+        "consumer": "Synthetic consumer synthetic-00151.",
+        "decay": "Synthetic decay synthetic-00142.",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "synthetic-00035",
+        "kind": "authority",
+        "observations": [],
+        "options": [],
+        "question": "Synthetic question synthetic-00152.",
+        "raised_at": "2000-01-01T00:21:00.000Z",
+        "raised_by": "synthetic-00002",
+        "ruling": {
+          "bound_sha256": "2f839a2e25b46ba623d650e63545d487a99b51d1bcba4ecdddfa7fc45b3f778a",
+          "gate_id": "synthetic-00035",
+          "option_id": null,
+          "reason": "Synthetic reason synthetic-00153.",
+          "ruled_at": "2000-01-01T00:22:00.000Z",
+          "ruled_by": "synthetic-00002",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": "file",
+        "binding_locator": "./example-project/synthetic-00154",
+        "binding_sha256": "049e19966e14ac89a5232247e3c982e989db7afadb82c50171013c2ce88eb6c7",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "Synthetic consumer synthetic-00156.",
+        "decay": "Synthetic decay synthetic-00157.",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "synthetic-00036",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "Synthetic detail synthetic-00158.",
+            "gate_id": "synthetic-00036",
+            "label": "Synthetic label synthetic-00159.",
+            "option_id": "synthetic-00037",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Synthetic detail synthetic-00160.",
+            "gate_id": "synthetic-00036",
+            "label": "Synthetic label synthetic-00161.",
+            "option_id": "synthetic-00038",
+            "position": 1,
+            "recommended": 0
+          },
+          {
+            "detail": "Synthetic detail synthetic-00162.",
+            "gate_id": "synthetic-00036",
+            "label": "Synthetic label synthetic-00163.",
+            "option_id": "synthetic-00039",
+            "position": 2,
+            "recommended": 0
+          }
+        ],
+        "question": "Synthetic long decision synthetic-00164: The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. ",
+        "raised_at": "2000-01-01T00:26:00.000Z",
+        "raised_by": "synthetic-00002",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "synthetic-00036",
+          "option_id": null,
+          "reason": "Synthetic reason synthetic-00165.",
+          "ruled_at": "2000-01-01T00:28:00.000Z",
+          "ruled_by": "synthetic-00013",
+          "state": "superseded"
+        },
+        "state": "superseded"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "./example-project/synthetic-00166",
+        "binding_sha256": "f8f20b67323c659d6c189810c7147dfc6d49dddc6e28bff34730ecf0cbf477be",
+        "check_revisions": [],
+        "cites": "Synthetic cites synthetic-00036.",
+        "consumer": "Synthetic consumer synthetic-00156.",
+        "decay": "Synthetic decay synthetic-00157.",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "synthetic-00040",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "Synthetic detail synthetic-00158.",
+            "gate_id": "synthetic-00040",
+            "label": "Synthetic label synthetic-00159.",
+            "option_id": "synthetic-00037",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Synthetic detail synthetic-00160.",
+            "gate_id": "synthetic-00040",
+            "label": "Synthetic label synthetic-00161.",
+            "option_id": "synthetic-00038",
+            "position": 1,
+            "recommended": 0
+          },
+          {
+            "detail": "Synthetic detail synthetic-00162.",
+            "gate_id": "synthetic-00040",
+            "label": "Synthetic label synthetic-00163.",
+            "option_id": "synthetic-00039",
+            "position": 2,
+            "recommended": 0
+          }
+        ],
+        "question": "Synthetic long decision synthetic-00164: The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. ",
+        "raised_at": "2000-01-01T00:27:00.000Z",
+        "raised_by": "synthetic-00002",
+        "ruling": null,
+        "state": "open"
+      },
+      {
+        "binding_kind": "file",
+        "binding_locator": "./example-project/synthetic-00168",
+        "binding_sha256": "f3bce6a29e745fde4189ed66e8c39da8ef38d927b975339fbb337ed04711b2d9",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "Synthetic consumer synthetic-00170.",
+        "decay": "Synthetic decay synthetic-00171.",
+        "decay_check": "printf 'synthetic check\\n'",
+        "delivery_check": null,
+        "effective_decay_check": "printf 'synthetic check\\n'",
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "synthetic-00041",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "Synthetic detail synthetic-00172.",
+            "gate_id": "synthetic-00041",
+            "label": "Synthetic label synthetic-00173.",
+            "option_id": "synthetic-00042",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Synthetic detail synthetic-00174.",
+            "gate_id": "synthetic-00041",
+            "label": "Synthetic label synthetic-00175.",
+            "option_id": "synthetic-00043",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Synthetic long decision synthetic-00176: The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. ",
+        "raised_at": "2000-01-01T00:29:00.000Z",
+        "raised_by": "synthetic-00002",
+        "ruling": null,
+        "state": "open"
+      }
+    ],
+    "list --state approved": [
+      {
+        "binding_kind": null,
+        "binding_locator": null,
+        "binding_sha256": null,
+        "check_revisions": [
+          {
+            "at": "2000-01-01T00:24:00.000Z",
+            "command": "printf 'synthetic check\\n'",
+            "gate_id": "synthetic-00001",
+            "id": 10002,
+            "kind": "delivery",
+            "reason": "Synthetic reason synthetic-00045.",
+            "revised_by": "synthetic-00002"
+          }
+        ],
+        "cites": null,
+        "consumer": "Synthetic consumer synthetic-00046.",
+        "decay": "Synthetic decay synthetic-00047.",
+        "decay_check": null,
+        "delivery_check": "printf 'synthetic check\\n'",
+        "effective_decay_check": null,
+        "effective_delivery_check": "printf 'synthetic check\\n'",
+        "horizon": null,
+        "id": "synthetic-00001",
+        "kind": "resource",
+        "observations": [
+          {
+            "at": "2000-01-01T00:25:00.000Z",
+            "command": "printf 'synthetic check\\n'",
+            "exit_code": 1,
+            "gate_id": "synthetic-00001",
+            "id": 10004,
+            "kind": "delivery",
+            "note": ""
+          }
+        ],
+        "options": [
+          {
+            "detail": "Synthetic detail synthetic-00048.",
+            "gate_id": "synthetic-00001",
+            "label": "Synthetic label synthetic-00049.",
+            "option_id": "synthetic-00003",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Synthetic detail synthetic-00050.",
+            "gate_id": "synthetic-00001",
+            "label": "Synthetic label synthetic-00051.",
+            "option_id": "synthetic-00004",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Synthetic question synthetic-00052.",
+        "raised_at": "2000-01-01T00:00:00.000Z",
+        "raised_by": "synthetic-00002",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "synthetic-00001",
+          "option_id": "synthetic-00003",
+          "reason": "Synthetic reason synthetic-00053.",
+          "ruled_at": "2000-01-01T00:15:00.000Z",
+          "ruled_by": "synthetic-00002",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": null,
+        "binding_locator": null,
+        "binding_sha256": null,
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "Synthetic consumer synthetic-00054.",
+        "decay": "Synthetic decay synthetic-00055.",
+        "decay_check": "printf 'synthetic check\\n'",
+        "delivery_check": null,
+        "effective_decay_check": "printf 'synthetic check\\n'",
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "synthetic-00005",
+        "kind": "irreversible",
+        "observations": [
+          {
+            "at": "2000-01-01T00:13:00.000Z",
+            "command": "printf 'synthetic check\\n'",
+            "exit_code": 0,
+            "gate_id": "synthetic-00005",
+            "id": 10002,
+            "kind": "decay",
+            "note": ""
+          },
+          {
+            "at": "2000-01-01T00:02:00.000Z",
+            "command": "printf 'synthetic check\\n'",
+            "exit_code": 0,
+            "gate_id": "synthetic-00005",
+            "id": 10001,
+            "kind": "decay",
+            "note": ""
+          }
+        ],
+        "options": [
+          {
+            "detail": "Synthetic detail synthetic-00056.",
+            "gate_id": "synthetic-00005",
+            "label": "Synthetic label synthetic-00057.",
+            "option_id": "synthetic-00006",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Synthetic detail synthetic-00058.",
+            "gate_id": "synthetic-00005",
+            "label": "Synthetic label synthetic-00059.",
+            "option_id": "synthetic-00007",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Synthetic question synthetic-00060.",
+        "raised_at": "2000-01-01T00:01:00.000Z",
+        "raised_by": "synthetic-00002",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "synthetic-00005",
+          "option_id": "synthetic-00006",
+          "reason": "Synthetic reason synthetic-00061.",
+          "ruled_at": "2000-01-01T00:15:00.000Z",
+          "ruled_by": "synthetic-00002",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": null,
+        "binding_locator": null,
+        "binding_sha256": null,
+        "check_revisions": [
+          {
+            "at": "2000-01-01T00:23:00.000Z",
+            "command": "printf 'synthetic check\\n'",
+            "gate_id": "synthetic-00014",
+            "id": 10001,
+            "kind": "delivery",
+            "reason": "Synthetic reason synthetic-00081.",
+            "revised_by": "synthetic-00002"
+          }
+        ],
+        "cites": "Synthetic cites synthetic-00012.",
+        "consumer": "Synthetic consumer synthetic-00082.",
+        "decay": "Synthetic decay synthetic-00083.",
+        "decay_check": null,
+        "delivery_check": "printf 'synthetic check\\n'",
+        "effective_decay_check": null,
+        "effective_delivery_check": "printf 'synthetic check\\n'",
+        "horizon": null,
+        "id": "synthetic-00014",
+        "kind": "resource",
+        "observations": [
+          {
+            "at": "2000-01-01T00:25:00.000Z",
+            "command": "printf 'synthetic check\\n'",
+            "exit_code": 0,
+            "gate_id": "synthetic-00014",
+            "id": 10005,
+            "kind": "delivery",
+            "note": ""
+          },
+          {
+            "at": "2000-01-01T00:16:00.000Z",
+            "command": "printf 'synthetic check\\n'",
+            "exit_code": 1,
+            "gate_id": "synthetic-00014",
+            "id": 10003,
+            "kind": "delivery",
+            "note": ""
+          }
+        ],
+        "options": [
+          {
+            "detail": "Synthetic detail synthetic-00084.",
+            "gate_id": "synthetic-00014",
+            "label": "Synthetic label synthetic-00085.",
+            "option_id": "synthetic-00015",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Synthetic detail synthetic-00086.",
+            "gate_id": "synthetic-00014",
+            "label": "Synthetic label synthetic-00087.",
+            "option_id": "synthetic-00016",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Synthetic long decision synthetic-00088: The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. ",
+        "raised_at": "2000-01-01T00:06:00.000Z",
+        "raised_by": "synthetic-00002",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "synthetic-00014",
+          "option_id": "synthetic-00015",
+          "reason": "Synthetic reason synthetic-00089.",
+          "ruled_at": "2000-01-01T00:15:00.000Z",
+          "ruled_by": "synthetic-00002",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "./example-project/synthetic-00090",
+        "binding_sha256": "fe8fe459c618b689c454da7bde60219b8141eef68fa9bcf1a29d3f4feb725e73",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "Synthetic consumer synthetic-00064.",
+        "decay": "Synthetic decay synthetic-00092.",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "synthetic-00017",
+        "kind": "taste",
+        "observations": [],
+        "options": [
+          {
+            "detail": "Synthetic detail synthetic-00093.",
+            "gate_id": "synthetic-00017",
+            "label": "Synthetic label synthetic-00094.",
+            "option_id": "synthetic-00018",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Synthetic detail synthetic-00095.",
+            "gate_id": "synthetic-00017",
+            "label": "Synthetic label synthetic-00096.",
+            "option_id": "synthetic-00019",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Synthetic question synthetic-00097.",
+        "raised_at": "2000-01-01T00:08:00.000Z",
+        "raised_by": "synthetic-00002",
+        "ruling": {
+          "bound_sha256": "fe8fe459c618b689c454da7bde60219b8141eef68fa9bcf1a29d3f4feb725e73",
+          "gate_id": "synthetic-00017",
+          "option_id": "synthetic-00019",
+          "reason": "Synthetic reason synthetic-00098.",
+          "ruled_at": "2000-01-01T00:10:00.000Z",
+          "ruled_by": "synthetic-00002",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "./example-project/synthetic-00099",
+        "binding_sha256": "91fad01fc4a8edd03a4ffe01bafe41663ac560020d6d786099ba03ceef1d3b85",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "Synthetic consumer synthetic-00101.",
+        "decay": "Synthetic decay synthetic-00102.",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "synthetic-00020",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "Synthetic detail synthetic-00103.",
+            "gate_id": "synthetic-00020",
+            "label": "Synthetic label synthetic-00104.",
+            "option_id": "synthetic-00021",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Synthetic detail synthetic-00105.",
+            "gate_id": "synthetic-00020",
+            "label": "Synthetic label synthetic-00106.",
+            "option_id": "synthetic-00022",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Synthetic question synthetic-00107.",
+        "raised_at": "2000-01-01T00:09:00.000Z",
+        "raised_by": "synthetic-00002",
+        "ruling": {
+          "bound_sha256": "91fad01fc4a8edd03a4ffe01bafe41663ac560020d6d786099ba03ceef1d3b85",
+          "gate_id": "synthetic-00020",
+          "option_id": "synthetic-00021",
+          "reason": "Synthetic reason synthetic-00108.",
+          "ruled_at": "2000-01-01T00:10:00.000Z",
+          "ruled_by": "synthetic-00002",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "./example-project/synthetic-00109",
+        "binding_sha256": "729db15d965bb087ec0d2bd643286fafaa1371acc4bdf00cf42fdbc114e2ebdc",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "Synthetic consumer synthetic-00111.",
+        "decay": "Synthetic decay synthetic-00112.",
+        "decay_check": "printf 'synthetic check\\n'",
+        "delivery_check": null,
+        "effective_decay_check": "printf 'synthetic check\\n'",
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "synthetic-00023",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "Synthetic detail synthetic-00113.",
+            "gate_id": "synthetic-00023",
+            "label": "Synthetic label synthetic-00114.",
+            "option_id": "synthetic-00024",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Synthetic detail synthetic-00115.",
+            "gate_id": "synthetic-00023",
+            "label": "Synthetic label synthetic-00116.",
+            "option_id": "synthetic-00025",
+            "position": 1,
+            "recommended": 0
+          },
+          {
+            "detail": "Synthetic detail synthetic-00117.",
+            "gate_id": "synthetic-00023",
+            "label": "Synthetic label synthetic-00118.",
+            "option_id": "synthetic-00026",
+            "position": 2,
+            "recommended": 0
+          },
+          {
+            "detail": "Synthetic detail synthetic-00119.",
+            "gate_id": "synthetic-00023",
+            "label": "Synthetic label synthetic-00120.",
+            "option_id": "synthetic-00027",
+            "position": 3,
+            "recommended": 0
+          }
+        ],
+        "question": "Synthetic question synthetic-00121.",
+        "raised_at": "2000-01-01T00:11:00.000Z",
+        "raised_by": "synthetic-00028",
+        "ruling": {
+          "bound_sha256": "729db15d965bb087ec0d2bd643286fafaa1371acc4bdf00cf42fdbc114e2ebdc",
+          "gate_id": "synthetic-00023",
+          "option_id": "synthetic-00024",
+          "reason": "Synthetic reason synthetic-00122.",
+          "ruled_at": "2000-01-01T00:12:00.000Z",
+          "ruled_by": "synthetic-00028",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "./example-project/synthetic-00135",
+        "binding_sha256": "0c8744879254320d178eb935ad1cd9a110360a7d116b407f2ed38f4bc36d26e9",
+        "check_revisions": [],
+        "cites": "Synthetic cites synthetic-00029.",
+        "consumer": "Synthetic consumer synthetic-00125.",
+        "decay": "Synthetic decay synthetic-00126.",
+        "decay_check": "printf 'synthetic check\\n'",
+        "delivery_check": null,
+        "effective_decay_check": "printf 'synthetic check\\n'",
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "synthetic-00033",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "Synthetic detail synthetic-00127.",
+            "gate_id": "synthetic-00033",
+            "label": "Synthetic label synthetic-00128.",
+            "option_id": "synthetic-00030",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Synthetic detail synthetic-00129.",
+            "gate_id": "synthetic-00033",
+            "label": "Synthetic label synthetic-00130.",
+            "option_id": "synthetic-00031",
+            "position": 1,
+            "recommended": 0
+          },
+          {
+            "detail": "Synthetic detail synthetic-00131.",
+            "gate_id": "synthetic-00033",
+            "label": "Synthetic label synthetic-00132.",
+            "option_id": "synthetic-00032",
+            "position": 2,
+            "recommended": 0
+          }
+        ],
+        "question": "Synthetic question synthetic-00137.",
+        "raised_at": "2000-01-01T00:17:00.000Z",
+        "raised_by": "synthetic-00013",
+        "ruling": {
+          "bound_sha256": "0c8744879254320d178eb935ad1cd9a110360a7d116b407f2ed38f4bc36d26e9",
+          "gate_id": "synthetic-00033",
+          "option_id": "synthetic-00031",
+          "reason": "Synthetic reason synthetic-00138.",
+          "ruled_at": "2000-01-01T00:19:00.000Z",
+          "ruled_by": "synthetic-00013",
+          "state": "approved"
+        },
+        "state": "approved"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "./example-project/synthetic-00149",
+        "binding_sha256": "2f839a2e25b46ba623d650e63545d487a99b51d1bcba4ecdddfa7fc45b3f778a",
+        "check_revisions": [],
+        "cites": "Synthetic cites synthetic-00034.",
+        "consumer": "Synthetic consumer synthetic-00151.",
+        "decay": "Synthetic decay synthetic-00142.",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "synthetic-00035",
+        "kind": "authority",
+        "observations": [],
+        "options": [],
+        "question": "Synthetic question synthetic-00152.",
+        "raised_at": "2000-01-01T00:21:00.000Z",
+        "raised_by": "synthetic-00002",
+        "ruling": {
+          "bound_sha256": "2f839a2e25b46ba623d650e63545d487a99b51d1bcba4ecdddfa7fc45b3f778a",
+          "gate_id": "synthetic-00035",
+          "option_id": null,
+          "reason": "Synthetic reason synthetic-00153.",
+          "ruled_at": "2000-01-01T00:22:00.000Z",
+          "ruled_by": "synthetic-00002",
+          "state": "approved"
+        },
+        "state": "approved"
+      }
+    ],
+    "list --state expired": [],
+    "list --state open": [
+      {
+        "binding_kind": "file",
+        "binding_locator": "./example-project/synthetic-00068",
+        "binding_sha256": "ee2538378db918c3832481e2c2b40263d2af4ccc6086ad7b34b9fd79c7ccb03a",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "Synthetic consumer synthetic-00070.",
+        "decay": "Synthetic decay synthetic-00071.",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "synthetic-00009",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "Synthetic detail synthetic-00072.",
+            "gate_id": "synthetic-00009",
+            "label": "Synthetic label synthetic-00073.",
+            "option_id": "synthetic-00010",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Synthetic detail synthetic-00074.",
+            "gate_id": "synthetic-00009",
+            "label": "Synthetic label synthetic-00075.",
+            "option_id": "synthetic-00011",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Synthetic long decision synthetic-00076: The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. ",
+        "raised_at": "2000-01-01T00:03:00.000Z",
+        "raised_by": "synthetic-00002",
+        "ruling": null,
+        "state": "open"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "./example-project/synthetic-00166",
+        "binding_sha256": "f8f20b67323c659d6c189810c7147dfc6d49dddc6e28bff34730ecf0cbf477be",
+        "check_revisions": [],
+        "cites": "Synthetic cites synthetic-00036.",
+        "consumer": "Synthetic consumer synthetic-00156.",
+        "decay": "Synthetic decay synthetic-00157.",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "synthetic-00040",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "Synthetic detail synthetic-00158.",
+            "gate_id": "synthetic-00040",
+            "label": "Synthetic label synthetic-00159.",
+            "option_id": "synthetic-00037",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Synthetic detail synthetic-00160.",
+            "gate_id": "synthetic-00040",
+            "label": "Synthetic label synthetic-00161.",
+            "option_id": "synthetic-00038",
+            "position": 1,
+            "recommended": 0
+          },
+          {
+            "detail": "Synthetic detail synthetic-00162.",
+            "gate_id": "synthetic-00040",
+            "label": "Synthetic label synthetic-00163.",
+            "option_id": "synthetic-00039",
+            "position": 2,
+            "recommended": 0
+          }
+        ],
+        "question": "Synthetic long decision synthetic-00164: The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. ",
+        "raised_at": "2000-01-01T00:27:00.000Z",
+        "raised_by": "synthetic-00002",
+        "ruling": null,
+        "state": "open"
+      },
+      {
+        "binding_kind": "file",
+        "binding_locator": "./example-project/synthetic-00168",
+        "binding_sha256": "f3bce6a29e745fde4189ed66e8c39da8ef38d927b975339fbb337ed04711b2d9",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "Synthetic consumer synthetic-00170.",
+        "decay": "Synthetic decay synthetic-00171.",
+        "decay_check": "printf 'synthetic check\\n'",
+        "delivery_check": null,
+        "effective_decay_check": "printf 'synthetic check\\n'",
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "synthetic-00041",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "Synthetic detail synthetic-00172.",
+            "gate_id": "synthetic-00041",
+            "label": "Synthetic label synthetic-00173.",
+            "option_id": "synthetic-00042",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Synthetic detail synthetic-00174.",
+            "gate_id": "synthetic-00041",
+            "label": "Synthetic label synthetic-00175.",
+            "option_id": "synthetic-00043",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Synthetic long decision synthetic-00176: The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. ",
+        "raised_at": "2000-01-01T00:29:00.000Z",
+        "raised_by": "synthetic-00002",
+        "ruling": null,
+        "state": "open"
+      }
+    ],
+    "list --state refused": [],
+    "list --state superseded": [
+      {
+        "binding_kind": "git",
+        "binding_locator": "./example-project/synthetic-00062",
+        "binding_sha256": "eaf7c148e5be5679c6ece321c6fd3ff47608ffbde1370b73502af37fd8f95291",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "Synthetic consumer synthetic-00064.",
+        "decay": "Synthetic decay synthetic-00065.",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "synthetic-00008",
+        "kind": "taste",
+        "observations": [],
+        "options": [],
+        "question": "Synthetic question synthetic-00066.",
+        "raised_at": "2000-01-01T00:01:00.000Z",
+        "raised_by": "synthetic-00002",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "synthetic-00008",
+          "option_id": null,
+          "reason": "Synthetic reason synthetic-00067.",
+          "ruled_at": "2000-01-01T00:07:00.000Z",
+          "ruled_by": "synthetic-00002",
+          "state": "superseded"
+        },
+        "state": "superseded"
+      },
+      {
+        "binding_kind": null,
+        "binding_locator": null,
+        "binding_sha256": null,
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "Synthetic consumer synthetic-00077.",
+        "decay": "Synthetic decay synthetic-00078.",
+        "decay_check": null,
+        "delivery_check": "printf 'synthetic check\\n'",
+        "effective_decay_check": null,
+        "effective_delivery_check": "printf 'synthetic check\\n'",
+        "horizon": null,
+        "id": "synthetic-00012",
+        "kind": "resource",
+        "observations": [],
+        "options": [],
+        "question": "Synthetic question synthetic-00079.",
+        "raised_at": "2000-01-01T00:04:00.000Z",
+        "raised_by": "synthetic-00002",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "synthetic-00012",
+          "option_id": null,
+          "reason": "Synthetic reason synthetic-00080.",
+          "ruled_at": "2000-01-01T00:05:00.000Z",
+          "ruled_by": "synthetic-00013",
+          "state": "superseded"
+        },
+        "state": "superseded"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "./example-project/synthetic-00123",
+        "binding_sha256": "67d7ec03988587082a369a6fad11953136b0e169393fbfa42081d4e36bbe8b82",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "Synthetic consumer synthetic-00125.",
+        "decay": "Synthetic decay synthetic-00126.",
+        "decay_check": "printf 'synthetic check\\n'",
+        "delivery_check": null,
+        "effective_decay_check": "printf 'synthetic check\\n'",
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "synthetic-00029",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "Synthetic detail synthetic-00127.",
+            "gate_id": "synthetic-00029",
+            "label": "Synthetic label synthetic-00128.",
+            "option_id": "synthetic-00030",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Synthetic detail synthetic-00129.",
+            "gate_id": "synthetic-00029",
+            "label": "Synthetic label synthetic-00130.",
+            "option_id": "synthetic-00031",
+            "position": 1,
+            "recommended": 0
+          },
+          {
+            "detail": "Synthetic detail synthetic-00131.",
+            "gate_id": "synthetic-00029",
+            "label": "Synthetic label synthetic-00132.",
+            "option_id": "synthetic-00032",
+            "position": 2,
+            "recommended": 0
+          }
+        ],
+        "question": "Synthetic question synthetic-00133.",
+        "raised_at": "2000-01-01T00:14:00.000Z",
+        "raised_by": "synthetic-00028",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "synthetic-00029",
+          "option_id": null,
+          "reason": "Synthetic reason synthetic-00134.",
+          "ruled_at": "2000-01-01T00:18:00.000Z",
+          "ruled_by": "synthetic-00013",
+          "state": "superseded"
+        },
+        "state": "superseded"
+      },
+      {
+        "binding_kind": "git",
+        "binding_locator": "./example-project/synthetic-00139",
+        "binding_sha256": "47c75f07bc2ee688a8bd131457e079ddf2dc1d416fcf624d451f404d12c99a18",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "Synthetic consumer synthetic-00141.",
+        "decay": "Synthetic decay synthetic-00142.",
+        "decay_check": "printf 'synthetic check\\n'",
+        "delivery_check": null,
+        "effective_decay_check": "printf 'synthetic check\\n'",
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "synthetic-00034",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "Synthetic detail synthetic-00143.",
+            "gate_id": "synthetic-00034",
+            "label": "Synthetic label synthetic-00144.",
+            "option_id": "synthetic-00021",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Synthetic detail synthetic-00145.",
+            "gate_id": "synthetic-00034",
+            "label": "Synthetic label synthetic-00146.",
+            "option_id": "synthetic-00022",
+            "position": 1,
+            "recommended": 0
+          }
+        ],
+        "question": "Synthetic question synthetic-00147.",
+        "raised_at": "2000-01-01T00:20:00.000Z",
+        "raised_by": "synthetic-00002",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "synthetic-00034",
+          "option_id": null,
+          "reason": "Synthetic reason synthetic-00148.",
+          "ruled_at": "2000-01-01T00:21:00.000Z",
+          "ruled_by": "synthetic-00002",
+          "state": "superseded"
+        },
+        "state": "superseded"
+      },
+      {
+        "binding_kind": "file",
+        "binding_locator": "./example-project/synthetic-00154",
+        "binding_sha256": "049e19966e14ac89a5232247e3c982e989db7afadb82c50171013c2ce88eb6c7",
+        "check_revisions": [],
+        "cites": null,
+        "consumer": "Synthetic consumer synthetic-00156.",
+        "decay": "Synthetic decay synthetic-00157.",
+        "decay_check": null,
+        "delivery_check": null,
+        "effective_decay_check": null,
+        "effective_delivery_check": null,
+        "horizon": null,
+        "id": "synthetic-00036",
+        "kind": "authority",
+        "observations": [],
+        "options": [
+          {
+            "detail": "Synthetic detail synthetic-00158.",
+            "gate_id": "synthetic-00036",
+            "label": "Synthetic label synthetic-00159.",
+            "option_id": "synthetic-00037",
+            "position": 0,
+            "recommended": 1
+          },
+          {
+            "detail": "Synthetic detail synthetic-00160.",
+            "gate_id": "synthetic-00036",
+            "label": "Synthetic label synthetic-00161.",
+            "option_id": "synthetic-00038",
+            "position": 1,
+            "recommended": 0
+          },
+          {
+            "detail": "Synthetic detail synthetic-00162.",
+            "gate_id": "synthetic-00036",
+            "label": "Synthetic label synthetic-00163.",
+            "option_id": "synthetic-00039",
+            "position": 2,
+            "recommended": 0
+          }
+        ],
+        "question": "Synthetic long decision synthetic-00164: The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. The example operator compares two inert alternatives for a disposable project. ",
+        "raised_at": "2000-01-01T00:26:00.000Z",
+        "raised_by": "synthetic-00002",
+        "ruling": {
+          "bound_sha256": null,
+          "gate_id": "synthetic-00036",
+          "option_id": null,
+          "reason": "Synthetic reason synthetic-00165.",
+          "ruled_at": "2000-01-01T00:28:00.000Z",
+          "ruled_by": "synthetic-00013",
+          "state": "superseded"
+        },
+        "state": "superseded"
+      }
+    ],
+    "list --state withdrawn": []
+  },
+  "scrubbed": true,
+  "surface": "synthetic janus API/CLI response shapes; not a production observation"
+}
