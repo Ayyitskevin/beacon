@@ -42,27 +42,32 @@ def _first_env(names: tuple[str, ...]) -> tuple[str | None, str | None]:
     return None, None
 
 
-# module -> (default address, address env names, token env names)
-_DEFAULTS: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {
+#: module -> (default address, ordered (address_env, token_env) PAIRS)
+#:
+#: The names are **paired**, not two independent lists, and that pairing is the
+#: whole of the credential rule below. Each pair is one naming family: the
+#: `MOSAIC_*` family, the family most fleet tooling uses, and the family Athena's
+#: own token file exports.
+_DEFAULTS: dict[str, tuple[str, tuple[tuple[str, str | None], ...]]] = {
     "athena": (
         "http://192.0.2.10:18300",
-        ("MOSAIC_ATHENA_URL", "ATHENA_BASE_URL", "ATHENA_URL"),
-        ("MOSAIC_ATHENA_TOKEN", "ATHENA_TOKEN", "ATHENA_API_TOKEN"),
+        (
+            ("MOSAIC_ATHENA_URL", "MOSAIC_ATHENA_TOKEN"),
+            ("ATHENA_BASE_URL", "ATHENA_TOKEN"),
+            ("ATHENA_URL", "ATHENA_API_TOKEN"),
+        ),
     ),
     "minerva": (
         "http://127.0.0.1:18765",
-        ("MOSAIC_MINERVA_URL", "MINERVA_BASE_URL", "MINERVA_URL"),
-        (),
+        (("MOSAIC_MINERVA_URL", None), ("MINERVA_BASE_URL", None), ("MINERVA_URL", None)),
     ),
     "vulcan": (
         "http://127.0.0.1:18140",
-        ("MOSAIC_VULCAN_URL", "VULCAN_BASE_URL", "VULCAN_URL"),
-        (),
+        (("MOSAIC_VULCAN_URL", None), ("VULCAN_BASE_URL", None), ("VULCAN_URL", None)),
     ),
     "buzz": (
         "http://192.0.2.10:13000",
-        ("MOSAIC_BUZZ_URL", "BUZZ_RELAY_URL"),
-        (),
+        (("MOSAIC_BUZZ_URL", None), ("BUZZ_RELAY_URL", None)),
     ),
 }
 
@@ -74,11 +79,7 @@ def resolve(module: str) -> Endpoint:
     explicitly does not convert it into an authorized credential recipient.
     """
 
-    default, address_names, token_names = _DEFAULTS[module]
-    families = tuple(
-        (name, token_names[i] if i < len(token_names) else None)
-        for i, name in enumerate(address_names)
-    )
+    default, families = _DEFAULTS[module]
 
     for address_name, token_name in families:
         address = os.environ.get(address_name)
