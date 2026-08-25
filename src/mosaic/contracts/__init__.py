@@ -11,6 +11,7 @@ from mosaic.contracts.authority import (
     Decider,
     Enforcement,
     Lifecycle,
+    OperatorAction,
 )
 from mosaic.contracts.desk import SCHEMA, Desk, Entry, Provenance, Unreachable
 
@@ -26,6 +27,7 @@ __all__ = [
     "Enforcement",
     "Entry",
     "Lifecycle",
+    "OperatorAction",
     "Provenance",
     "Unreachable",
 ]
