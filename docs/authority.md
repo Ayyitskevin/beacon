@@ -118,6 +118,19 @@ The ORACLE roadmap fixes a five-value display vocabulary and calls it a hard
 boundary: the UI *"must distinguish proposed, reviewed, Janus-authorized,
 executed, and verified; it must never collapse them into a generic 'approved.'"*
 
+**That vocabulary governs approvals, not every entry.** It is an approval
+lifecycle, and only entries that carry an approval are described by it. An
+entry's own `status` field carries the owning module's word verbatim — Janus
+`superseded`, Athena `in_progress` — and is never mapped onto this list.
+
+Forcing it everywhere collapses exactly what this page forbids. Janus's three
+terminal-negative states (`withdrawn`, `expired`, `superseded`) have no home
+in a five-value approval enum, so all three land on `proposed`, and **4 of 13
+live gates then render identically to a live open gate**. A question nobody
+answered and a question the world moved past are different facts. An Athena
+issue is not an approval at all: its `done` either understates the work or
+asserts a check nobody ran. Found by Lane B against live data.
+
 That vocabulary is a **lifecycle** — where a thing is in its journey. The two
 axes above are **provenance** — who decided and what the decision is pinned to.
 They are orthogonal and both are needed: `executed` says nothing about who
