@@ -153,6 +153,36 @@ class TestCredentialsAreBoundToTheirEndpoint:
         assert "live-token-value" not in (endpoint.token_source or "")
         assert "live-token-value" not in endpoint.source
 
+    def test_example_default_does_not_borrow_another_family_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An example address never establishes credential authority."""
+
+        self._clear(monkeypatch)
+        default, _ = config._DEFAULTS["athena"]
+        monkeypatch.setenv("ATHENA_BASE_URL", default)
+        monkeypatch.setenv("ATHENA_API_TOKEN", "live-token-value")
+
+        endpoint = config.resolve("athena")
+
+        assert endpoint.address == default
+        assert endpoint.token is None
+
+    def test_that_relaxation_cannot_rescue_a_redirect(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The guard above keys on equality with the default, and only that.
+
+        An address that is not the default is a redirect regardless of which
+        family named it, so the credential is still withheld.
+        """
+
+        self._clear(monkeypatch)
+        monkeypatch.setenv("ATHENA_BASE_URL", "http://elsewhere.invalid:9999")
+        monkeypatch.setenv("ATHENA_API_TOKEN", "live-token-value")
+
+        assert config.resolve("athena").token is None
+
 
 @pytest.mark.parametrize("suffix", ["", "/", "/api", "?query=1", "#fragment"])
 def test_example_destination_never_receives_an_explicitly_paired_token(
