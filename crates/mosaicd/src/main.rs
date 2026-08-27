@@ -13,14 +13,20 @@ Defaults:
 ";
 
 fn main() -> ExitCode {
-    match run(std::env::args().skip(1)) {
+    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if matches!(arguments.as_slice(), [help] if help == "-h" || help == "--help") {
+        print!("{USAGE}");
+        return ExitCode::SUCCESS;
+    }
+
+    match run(arguments.into_iter()) {
         Ok(output) => {
             println!("{output}");
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("mosaicd: ${error}");
-            eprintln!("${USAGE}");
+            eprintln!("mosaicd: {error}");
+            eprintln!("{USAGE}");
             ExitCode::from(2)
         }
     }
@@ -35,7 +41,6 @@ fn run(arguments: impl Iterator<Item = String>) -> Result<String, String> {
 fn parse_arguments(mut arguments: impl Iterator<Item = String>) -> Result<StartupConfig, String> {
     match arguments.next().as_deref() {
         Some("bootstrap") => {}
-        Some("-h" | "--help") => return Err("help requested".to_owned()),
         Some(command) => return Err(format!("unknown command: {command}")),
         None => return Err("a command is required".to_owned()),
     }
