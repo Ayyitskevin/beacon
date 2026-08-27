@@ -302,7 +302,7 @@ fn has_user_schema(connection: &Connection) -> Result<bool, SupervisorError> {
         SELECT EXISTS (
             SELECT 1
             FROM sqlite_schema
-            WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+            WHERE name NOT LIKE 'sqlite_%'
         )
         ",
         [],
@@ -327,7 +327,7 @@ fn schema_signature(connection: &Connection) -> Result<Vec<SchemaObject>, Superv
         "
         SELECT type, name, tbl_name, sql
         FROM sqlite_schema
-        WHERE name NOT LIKE 'sqlite_%' AND type IN ('table', 'index')
+        WHERE name NOT LIKE 'sqlite_%'
         ORDER BY type, name
         ",
     )?;
@@ -357,6 +357,7 @@ fn nonnegative_u64(value: i64) -> Result<u64, SupervisorError> {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct WorkspaceCreatedPayload {
     workspace_id: Uuid,
     name: String,
@@ -653,6 +654,42 @@ mod tests {
     }
 
     #[test]
+    fn unexpected_view_is_refused_without_creating_application_tables() {
+        let store = TestStore::new("unexpected-view");
+        let connection = Connection::open(&store.path).unwrap();
+        connection
+            .execute("CREATE VIEW unexpected AS SELECT 1 AS value", [])
+            .unwrap();
+        drop(connection);
+
+        let result = Supervisor::bootstrap(config(&store.path, "Personal"));
+
+        assert!(
+            result.is_err(),
+            "a view-only store was accepted and mutated"
+        );
+        let connection = Connection::open(&store.path).unwrap();
+        let mut statement = connection
+            .prepare(
+                "
+                SELECT type, name
+                FROM sqlite_schema
+                WHERE name NOT LIKE 'sqlite_%'
+                ORDER BY type, name
+                ",
+            )
+            .unwrap();
+        let objects = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(objects, [("view".to_owned(), "unexpected".to_owned())]);
+    }
+
+    #[test]
     fn foreign_key_corruption_is_refused_instead_of_reported_ready() {
         let store = TestStore::new("foreign-key-corruption");
         Supervisor::bootstrap(config(&store.path, "Personal")).unwrap();
@@ -795,5 +832,35 @@ mod tests {
             error,
             SupervisorError::EventPayloadScopeMismatch(2)
         ));
+    }
+
+    #[test]
+    fn event_payload_rejects_unknown_fields() {
+        let store = TestStore::new("event-unknown-field");
+        let report = Supervisor::bootstrap(config(&store.path, "Personal")).unwrap();
+        let connection = Connection::open(&store.path).unwrap();
+        connection
+            .execute(
+                "
+                UPDATE events
+                SET payload_json = ?1
+                WHERE sequence = 1
+                ",
+                [serde_json::json!({
+                    "workspace_id": report.workspace.id,
+                    "name": report.workspace.name,
+                    "unexpected": true
+                })
+                .to_string()],
+            )
+            .unwrap();
+        drop(connection);
+
+        let result = Supervisor::bootstrap(config(&store.path, "Personal"));
+
+        assert!(
+            result.is_err(),
+            "an event payload with an undeclared field was accepted"
+        );
     }
 }
