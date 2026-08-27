@@ -302,7 +302,7 @@ fn has_user_schema(connection: &Connection) -> Result<bool, SupervisorError> {
         SELECT EXISTS (
             SELECT 1
             FROM sqlite_schema
-            WHERE name NOT LIKE 'sqlite_%'
+            WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\'
         )
         ",
         [],
@@ -327,7 +327,7 @@ fn schema_signature(connection: &Connection) -> Result<Vec<SchemaObject>, Superv
         "
         SELECT type, name, tbl_name, sql
         FROM sqlite_schema
-        WHERE name NOT LIKE 'sqlite_%'
+        WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\'
         ORDER BY type, name
         ",
     )?;
@@ -687,6 +687,36 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(objects, [("view".to_owned(), "unexpected".to_owned())]);
+    }
+
+    #[test]
+    fn sqlite_internal_prefix_filter_treats_underscore_literally() {
+        let store = TestStore::new("sqlite-prefix-wildcard");
+        let connection = Connection::open(&store.path).unwrap();
+        connection
+            .execute("CREATE VIEW sqlitexunexpected AS SELECT 1 AS value", [])
+            .unwrap();
+        drop(connection);
+
+        let result = Supervisor::bootstrap(config(&store.path, "Personal"));
+
+        assert!(
+            result.is_err(),
+            "a user view matching an unescaped SQLite prefix pattern was accepted"
+        );
+        let connection = Connection::open(&store.path).unwrap();
+        let object_count: i64 = connection
+            .query_row(
+                "
+                SELECT COUNT(*)
+                FROM sqlite_schema
+                WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\'
+                ",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(object_count, 1, "bootstrap mutated the rejected store");
     }
 
     #[test]
