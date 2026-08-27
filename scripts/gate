@@ -23,23 +23,23 @@
 # chaining between checks, and `set -euo pipefail` on top. Each check prints its own
 # name and its own status, so a passing run is legible rather than merely quiet.
 #
-# Run one stage only:  scripts/gate lint | scripts/gate format | scripts/gate test
+# Run one stage only:
+#   scripts/gate lint | scripts/gate format | scripts/gate test | scripts/gate rust
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+stage="${1:-all}"
+failed=0
 PY=".venv/bin/python"
 RUFF=".venv/bin/ruff"
 
-if [ ! -x "$PY" ]; then
+if [ "$stage" != "rust" ] && [ ! -x "$PY" ]; then
     echo "gate: no .venv in $(pwd) -- create one and install this worktree editable." >&2
     echo "gate: importing another checkout's copy is the false-green this repo has hit." >&2
     exit 2
 fi
-
-stage="${1:-all}"
-failed=0
 
 run() {
     local name="$1"; shift
@@ -59,12 +59,22 @@ case "$stage" in
     lint)   run "ruff check"        "$RUFF" check src tests ;;
     format) run "ruff format"       "$RUFF" format --check src tests ;;
     test)   run "pytest"            "$PY" -m pytest -q ;;
+    rust)
+        run "cargo fmt"    cargo fmt --all --check
+        run "cargo clippy" cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run "cargo test"   cargo test --workspace --all-targets
+        run "cargo build"  cargo build --workspace --all-targets
+        ;;
     all)
         run "ruff check"  "$RUFF" check src tests
         run "ruff format" "$RUFF" format --check src tests
         run "pytest"      "$PY" -m pytest -q
+        run "cargo fmt"    cargo fmt --all --check
+        run "cargo clippy" cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run "cargo test"   cargo test --workspace --all-targets
+        run "cargo build"  cargo build --workspace --all-targets
         ;;
-    *) echo "gate: unknown stage '$stage' (lint|format|test|all)" >&2; exit 2 ;;
+    *) echo "gate: unknown stage '$stage' (lint|format|test|rust|all)" >&2; exit 2 ;;
 esac
 set -e
 

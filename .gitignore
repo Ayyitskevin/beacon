@@ -8,6 +8,11 @@ build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.mosaic-alpha/
+/target/
 *.db
 *.db-wal
 *.db-shm
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
