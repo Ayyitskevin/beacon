@@ -35,6 +35,9 @@ The initial schema is plain SQL in `crates/mosaicd/migrations/0001_initial.sql`.
 applies that versioned file inside the same immediate transaction that creates the first Workspace.
 Workspace names are parameterized, capped at 120 characters, and reject control characters before
 the store file is created. The SQL schema independently enforces the length bound.
+The schema contains only the Workspace and its typed creation Event; Project persistence waits for
+the Phase 1 Project interface. Startup reconciles the exact schema before mutating a non-empty store
+and reads every persisted Event back into its closed kind and typed payload before reporting ready.
 
 ## Development command
 
