@@ -1,155 +1,319 @@
-> # ⚠ SUPERSEDED — DO NOT FOLLOW THIS AS INSTRUCTION
->
-> **Kevin ruled on 2026-08-25 that Mosaic is ONE unified codebase absorbing all seven
-> AI Town capabilities, shipped as a Tauri desktop app with its own SQLite store.**
-> This file describes the *federating read-only desk* that preceded that ruling, and
-> several of its rules are now the exact inverse of the product being built —
-> including "no shared database", "Mosaic holds none", "read-only by construction",
-> and "there is no shell".
->
-> It is kept, not deleted: the federated adapters it governs are the migration
-> readers, the only code that knows how to read the old systems. **But it must stop
-> instructing.** If you are an agent and this file loaded automatically, stop and read
-> these instead, in order:
->
-> 1. `private-evidence/2026-08-25_mosaic-scope-ruling-unified-desktop-app.md` — the ruling
-> 2. `private-evidence/2026-08-25_mosaic-datamodel-synthesis.md` — the current design
-> 3. `src/mosaic/store/` — the actual product; `src/mosaic/{adapters,render,contracts}/`
->    is the superseded one
->
-> **Why this banner exists rather than a quiet edit:** three sessions built the wrong
-> product for ten hours because agent-authored documents kept instructing after their
-> premise was deleted. A file that auto-loads is the highest-risk form of that. The
-> rules below were correct for federation; they are not correct now, and the difference
-> is not visible from inside them.
+# Beacon
 
----
+Beacon is an office suite where AI agent teams perform project work under one human operator.
+This glossary defines the product language shared by every capability and interface.
+Beacon is a temporary working title; the domain language does not depend on the final brand.
 
-# CONTEXT.md — what Mosaic is
+## Organization
 
-~~The definition of record. `AGENTS.md` and `README.md` both defer here; if any
-of them disagree, this file wins and the other should be cut rather than
-reconciled.~~
+**Operator**:
+The human who owns a Workspace, sets its policy, and holds final authority over gated actions.
+_Avoid_: Admin, user, approver
 
-**No longer the definition of record.** That sentence is why this file is dangerous
-rather than merely stale: it instructs a reader to prefer it over anything that
-disagrees, which now includes the ruling itself. The definition of record is the
-scope ruling plus the data-model synthesis, both linked in the banner above.
+**Owner**:
+The sole human role in a future multi-operator Workspace. Each Owner acts as an individually
+attributable Operator rather than through a shared identity.
+_Avoid_: Steward, Observer, Admin
 
-## The one-sentence version
+**Operator Account**:
+The local authenticated human identity required to enter an Installation and act as its Operator.
+_Avoid_: Workspace, tenant, subscription, model-provider account
 
-**Mosaic composes what the seven AI Town modules already publish into one
-read-only document, and refuses to summarize their authority.**
+**Cloud Link**:
+An optional association that synchronizes an explicit set of non-secret interface preferences for
+a local Operator Account without carrying work records, notification contents, secrets, or
+authority.
+_Avoid_: Cloud Workspace, synchronization, remote authority
 
-## Domain vocabulary
+**Linked Device**:
+A device participating in Cloud Link preference synchronization without receiving remote access,
+Worker identity, or authority.
+_Avoid_: Paired Device, Worker, trusted device
 
-Words below are used in exactly this sense throughout the codebase. Where a
-word already means something specific to an owning module, that module's
-meaning wins and Mosaic adopts it rather than coining a synonym.
+**Recovery Key**:
+An Operator-held offline credential whose safekeeping is required to recover access to a local
+Operator Account.
+_Avoid_: Password, Cloud Link, Workspace key
 
-**Module** — one of the seven AI Town capabilities: Buzz (conversation),
-Athena (work), Minerva (evidence), Vulcan (provenance), ReplayDeck
-(evaluation, the existing `fleet-eval` repo), Janus (pending human authority),
-Icarus (bounded execution). Seven, not six — the roadmap's product trace
-includes ReplayDeck at the evaluation step, and every early Mosaic handoff
-omitted it.
+**Session Lock**:
+A human-access boundary that hides Workspace data and blocks Operator Commands while authorized
+Agent work continues.
+_Avoid_: Pause Work, sign-out, shutdown
 
-**Adapter** — a read-only reader for one module. Lives in
-`src/mosaic/adapters/`. Has no write method, by protocol shape rather than by
-convention.
+**Paired Device**:
+A remote human-access device explicitly verified and approved from the local Installation and
+independently revocable.
+_Avoid_: Worker, Cloud Link, trusted network
 
-**Entry** — one fact from one module, carrying its source, owner, status,
-timestamp, the owning module's schema version, a canonical link, provenance,
-and optionally an authority label.
+**Agent**:
+A non-human actor with an identity, role, capabilities, budget, and accountable activity history.
+_Avoid_: Bot, worker, model
 
-**Desk** — the composed document. Flat, ranked by recency, `desk.v1`.
+**Agent Role**:
+A professional functional responsibility, such as Lead, Researcher, or Builder, that remains
+visible independently of an Agent's optional Display Name.
+_Avoid_: Persona, title, name
 
-**Join** — a link between two modules' facts (a Janus gate to the Athena issue
-that commissioned it). Mosaic never invents one. **A missing join is a result,
-not an error** — naming precisely which joins do not exist is the point of v0.
+**Display Name**:
+An optional human-friendly name for an Agent that never serves as identity or authority.
+_Avoid_: Agent ID, role, persona
 
-**Authority label** — the four-axis description of one approval: who decided,
-what it is pinned to, who acts on drift, and where it sits in its lifecycle.
-See `docs/authority.md`, which is the reasoning; `contracts/authority.py` is
-the executable form.
+**Resident Agent**:
+An Operator-admitted persistent Agent whose identity, role, history, and Track Record continue
+across Missions.
+_Avoid_: Permanent agent, primary agent
 
-**Provenance** — the exact endpoint or pinned revision an entry was read from,
-plus what the module reported about its own version and tree state. An entry
-that cannot name its source is a bug.
+**Specialist Agent**:
+A temporary Agent created for one bounded purpose, with Mission-scoped capabilities and budget.
+_Avoid_: Subagent, disposable agent, helper
 
-## Invariants
+**Worker**:
+A local or remote machine runtime that carries out leased Runs without owning authority or truth.
+_Avoid_: Agent, node, executor
 
-These are the things that make Mosaic safe to look at. A change that breaks
-one of them is wrong here regardless of how much nicer it makes the output.
+**Discovered Resource**:
+A local model or Worker Beacon can identify but cannot schedule or invoke until the Operator
+activates it.
+_Avoid_: Available resource, eligible Route, installed Agent
 
-1. **Read-only by construction.** The adapter protocol has no write method,
-   no dispatch, no generic `call`. Zero cross-module write controls in v0 —
-   not even a disabled one.
-2. **It composes, it does not compute.** Every entry is the owning module's
-   own read. Mosaic never derives a fact, reconciles a disagreement between
-   two modules, or fills in a missing value. If two modules disagree, both
-   statements appear.
-3. **Never collapse authority.** No cross-module "Approved ✓" affordance
-   exists — not styled differently, *absent*. Every approval wears its
-   owner's badge and carries the owning module's own `meaning` string.
-4. **A missing join is reported, never synthesized.** Papering over an absent
-   link is the single most damaging thing this tool could do.
-5. **An empty read is not a failed read.** They are different facts about the
-   world, and rendering them alike lies by omission.
-6. **Mosaic ranks nothing.** Ordering is recency, explicitly not importance.
-7. **Committed is readable; live is not.** ADR 0001. Reading a pinned commit
-   or a module's published interface is fine; opening a live database or a
-   working tree is the reach-through the roadmap forbids.
-8. **Mosaic holds no credentials of its own.** It reads with the operator's,
-   and a module that refuses the operator refuses Mosaic.
-9. **Reading Mosaic is never grounds to act.** It displays who decided what.
-   It grants nothing.
+**Resource Preset**:
+A reusable, non-secret suggestion of resource requirements and settings that carries no activation
+or authority into a Workspace.
+_Avoid_: Shared grant, credential bundle, active configuration
 
-## What Mosaic is not
+**Team**:
+A named group of Agents assembled to pursue Missions together.
+_Avoid_: Swarm, pool
 
-Not a database, not an orchestrator, not a second chat, not a second model
-gateway, not a work tracker, not a writer, and not an authority. It is not
-permission to fork Buzz or duplicate Athena. Mosaic earns a repo only if it
-owns distribution, session/reference composition, and the cross-module desk
-contract; otherwise it should stay a client/adapter layer.
+**Team Lead**:
+The Resident Agent accountable for coordinating one Mission, selected under Policy from eligible
+Agents using capability fit, availability, and attributable Track Record.
+_Avoid_: Manager, supervisor, orchestrator
 
-## Why there is no shell
+**Starter Organization**:
+An editable onboarding proposal of Resident roles, Policies, and resource mappings that creates no
+Agent or authority until the Operator accepts it.
+_Avoid_: Default team, canned crew, preinstalled Agents
 
-The first slice is a document, not an application. Choosing a shell is the
-most expensive, least reversible decision available, and nothing has yet
-shown the seven modules can produce one coherent cross-module document at
-all. Whatever shell eventually wins just renders this document, so none of
-this work is thrown away.
+**Workspace**:
+An isolated local trust and authority domain containing Projects, Agents, Policy, credentials,
+budgets, memory, and activity.
+_Avoid_: Tenant, account, installation
 
-**v0 is done when** `mosaic desk` composes a real document from at least two
-live modules and `mosaic doctor` names precisely which joins in the product
-trace do not exist yet. As of 2026-08-24 that number is 2 of 7 hops joinable.
+**Installation**:
+One independent Beacon control plane and managed store hosting one or more isolated Workspaces and
+their leased Workers.
+_Avoid_: Worker, fleet, federation
 
-## Layout
+**Project**:
+A long-lived body of related purpose, context, artifacts, and Missions.
+_Avoid_: Workspace, repository, initiative
 
-| Path | Holds |
-|---|---|
-| `src/mosaic/contracts/` | The desk envelope, authority labels, adapter protocol |
-| `src/mosaic/compose.py` | Pure composition — zero I/O |
-| `src/mosaic/adapters/` | One read-only reader per module |
-| `src/mosaic/doctor.py` | What is reachable, what is missing, what a join fails on |
-| `src/mosaic/render/` | JSON and text renderers; consume the document, never the classes |
-| `docs/authority.md` | Why the labels are shaped as they are, with citations |
-| `docs/adr/` | Decisions, with the alternatives considered |
+**Sample Project**:
+An optional disposable onboarding Project for learning Beacon's complete work loop without
+touching the Operator's real work.
+_Avoid_: Demo mode, tutorial Workspace, mandatory example
 
-Renderers take the document as a plain mapping rather than the contract
-classes, deliberately: the display layer depends on the *document*, so any
-shell that later renders a desk inherits these rules without importing
-Mosaic's internals.
+**Project Charter**:
+The Operator-authored purpose, desired outcomes, constraints, prohibitions, and authority envelope
+that determine which self-created Missions belong in a Project.
+_Avoid_: Prompt, brief, Mission description
 
-## Standing constraints
+**Mission**:
+A finite desired outcome owned by one Team, with explicit success conditions and lifecycle.
+_Avoid_: Task, ticket, job
 
-Python 3.11+, src layout, ruff line-length 100, Apache-2.0, and **zero runtime
-dependencies** (CI fails if a clean install pulls in any other distribution) —
-matching Janus and Minerva.
+**Assignment**:
+The accountable relationship between an Agent and work within a Mission.
+_Avoid_: Lease, ownership
 
-No `gh repo create`, no `git push`. Kevin has not authorized a public repo;
-that is his call and it is RED. Local commits only.
+**Handoff**:
+A durable transfer packet that gives a new Agent the Assignment state, relevant context, Artifacts,
+open risks, and prior verification without changing authorship.
+_Avoid_: Summary, message, prompt
 
+**Handoff Package**:
+An immutable, provenance-preserving selection of records offered by one Workspace for explicit
+adoption by another without transferring secrets, identity, or authority.
+_Avoid_: Live link, shared Workspace, synchronization
 
-> Privacy rewrite: machine names, paths and endpoint examples in this document are illustrative, not a live infrastructure map. Historical measurements and prior byte-hash/review claims refer to retained original evidence, not these edited public bytes; no authority transfers through this rewrite.
+**Recovery Attempt**:
+One bounded continuation of failed or interrupted work under unchanged authority and remaining
+budget before Beacon requires reassignment or intervention.
+_Avoid_: Retry loop, rerun, restart
+
+**Track Record**:
+An Agent's evidence-linked history of outcomes, Evaluations, policy compliance, spend, and Receipts
+used for future selection without collapsing into one score or becoming ambient authority.
+_Avoid_: Score, rank, reputation
+
+**Budget Envelope**:
+A hard ceiling on money, tokens, time, or another measured resource, delegated from a broader scope
+to a Workspace, Project, Mission, or Agent.
+_Avoid_: Balance, credit, estimate
+
+## Knowledge and communication
+
+**Thread**:
+An ordered conversation attached to a Project, Mission, Artifact, Claim, or Run.
+_Avoid_: Chat, channel
+
+**Claim**:
+A statement that can be supported, contradicted, superseded, or left uncertain.
+_Avoid_: Fact, note, assertion
+
+**Evidence**:
+A precisely identified source used to evaluate a Claim.
+_Avoid_: Context, citation, proof
+
+**Finding**:
+The recorded result of evaluating a Claim against Evidence, including uncertainty.
+_Avoid_: Insight, answer, conclusion
+
+**Artifact**:
+A versioned work product with content identity and provenance, such as a plan, source tree, diff,
+document, dataset, evaluation fixture, or receipt.
+_Avoid_: File, attachment, output
+
+**Material Artifact**:
+An Artifact used to support a Ruling, authorize effects, claim Mission success, or become a durable
+shared deliverable.
+_Avoid_: Important file, final output, approved Artifact
+
+**Outcome Document**:
+The human-readable Artifact that closes a completed Mission by summarizing its result, evidence,
+spend, unfinished work, and linked Receipts.
+_Avoid_: Status update, Receipt, activity summary
+
+**Export Package**:
+A complete, versioned, openly documented Workspace transfer that preserves provenance and excludes
+secret values.
+_Avoid_: Backup, database copy, proprietary archive
+
+**Reconnect Plan**:
+An Operator-reviewable mapping from an imported Workspace's required Routes, Workers, Plugins, and
+Connectors to eligible resources on the current Installation.
+_Avoid_: Automatic restore, credential migration, silent activation
+
+**Private Memory**:
+Agent-scoped working knowledge visible to its owning Agent and to the Operator through deliberate
+inspection, but not automatically visible to other Agents.
+_Avoid_: Hidden memory, scratchpad, chain of thought
+
+**Shared Memory**:
+Durable knowledge intentionally available within a named Workspace, Project, Mission, or Team,
+with its source and promotion history preserved.
+_Avoid_: Global memory, context dump, common prompt
+
+**Memory Promotion**:
+The explicit creation of a Shared Memory record from Private Memory or another source without
+altering or erasing the source record.
+_Avoid_: Sync, publish, copy
+
+## Models and evaluation
+
+**Invocation**:
+One recorded request to a model and its response, provider, model identity, inputs, usage, cost,
+and timing.
+_Avoid_: Prompt, call, completion
+
+**Route**:
+A policy that selects an eligible model for a purpose under capability, privacy, and budget bounds.
+_Avoid_: Model alias, fallback
+
+**Evaluation**:
+A repeatable procedure that judges an Artifact or Run against declared criteria.
+_Avoid_: Test, review, check
+
+**Replay**:
+A new Run of an Evaluation against pinned inputs and a recorded environment.
+_Avoid_: Retry, rerun
+
+## Authority and execution
+
+**Policy**:
+Operator-authored rules that classify and bound actions before execution.
+_Avoid_: Settings, guardrail, prompt
+
+**Autonomy Profile**:
+The Project-level posture that determines which classes of actions may proceed automatically.
+_Avoid_: Mode, trust level
+
+**Proposal**:
+An immutable description of intended effects, inputs, bounds, checks, and budget, identified by its
+digest.
+_Avoid_: Plan, request, action
+
+**Gate**:
+A point where a Proposal cannot proceed until an eligible decider records a Ruling.
+_Avoid_: Approval, prompt, confirmation
+
+**Ruling**:
+An allow or deny decision bound to one exact Proposal digest and one policy version.
+_Avoid_: Approval, permission, vote
+
+**Run**:
+One attempt to carry out a Proposal or Evaluation in a named environment.
+_Avoid_: Job, execution, session
+
+**Receipt**:
+An immutable account of a Run's inputs, effects, checks, usage, result, and content identities.
+_Avoid_: Log, result, report
+
+**Attention Item**:
+An unresolved condition for which the Operator or a named Agent can take a concrete next action.
+Only this object may request an operating-system notification.
+_Avoid_: Notification, alert, inbox item
+
+**Pause Work**:
+An Operator-controlled Installation state that prevents new work from starting and asks active
+Runs to reach an honest terminal state before work resumes.
+_Avoid_: Kill switch, shutdown, cancel all
+
+**Resume Work**:
+The Operator's decision to end Pause Work after reviewing every stopping or unconfirmed Run and
+its known residual effects.
+_Avoid_: Unpause, automatic restart, reconnect
+
+**Briefing**:
+The Operator's compact, evidence-linked view of outcomes, risk, spend, health, and the few matters
+that need contribution or authority.
+_Avoid_: Dashboard, activity feed, status wall
+
+## Integrity
+
+**Safety Snapshot**:
+An encrypted, integrity-checked recovery point for a Workspace and the declared mutable targets
+Beacon can restore before a risky transition.
+_Avoid_: Export Package, rollback guarantee, backup promise
+
+**Trace**:
+The ordered low-level record of prompts, responses, tool activity, decisions, and outputs behind a
+summary or Receipt.
+_Avoid_: Chain of thought, transcript, log
+
+**Provenance**:
+The identity and history needed to answer how a record or Artifact came to exist.
+_Avoid_: Metadata, source
+
+**Binding**:
+The exact object, intent, handle, step, or bytes to which a Ruling applies.
+_Avoid_: Link, reference, scope
+
+**Drift**:
+A measured mismatch between a Binding and the object currently presented in its place.
+_Avoid_: Change, staleness, difference
+
+**Capability**:
+A named class of operations an actor is allowed to request through Beacon's authority interface.
+_Avoid_: Permission, role, tool
+
+**Plugin**:
+A versioned extension package that declares its capabilities, permissions, settings, and compatible
+Beacon interfaces and runs without direct access to Beacon's store or authority internals.
+_Avoid_: Add-on script, database extension, in-process module
+
+**Agent Pack**:
+A Plugin that contributes versioned Agent roles, instructions, tools, evaluation criteria, and
+recommended Policies without granting those Agents authority.
+_Avoid_: Persona, prompt bundle, autonomous app
