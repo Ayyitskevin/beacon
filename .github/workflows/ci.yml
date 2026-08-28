@@ -78,12 +78,12 @@ jobs:
       - name: Import and run the CLI from a clean directory
         run: |
           cd "$(mktemp -d)"
-          python -c "import mosaic, mosaic.cli, mosaic.render; print(mosaic.__version__)"
-          mosaic version
-          mosaic --help > /dev/null
+          python -c "import beacon_legacy, beacon_legacy.cli, beacon_legacy.render; print(beacon_legacy.__version__)"
+          beacon-legacy-desk version
+          beacon-legacy-desk --help > /dev/null
       - name: Assert nothing but the package itself was installed
         run: |
-          extra=$(pip freeze --exclude-editable | grep -iv '^mosaic-desk' || true)
+          extra=$(pip freeze --exclude-editable | grep -iv '^beacon-legacy-desk' || true)
           if [ -n "$extra" ]; then
             echo "Unexpected runtime dependencies installed:"
             echo "$extra"

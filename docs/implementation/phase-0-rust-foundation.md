@@ -4,7 +4,7 @@ This checkpoint creates the first new-trunk module beside the preserved Python p
 
 ## Interface
 
-`mosaicd::Supervisor::bootstrap` owns four startup behaviors behind one interface:
+`beacond::Supervisor::bootstrap` owns four startup behaviors behind one interface:
 
 1. open or create the managed SQLite store;
 2. apply the first idempotent schema;
@@ -12,7 +12,7 @@ This checkpoint creates the first new-trunk module beside the preserved Python p
 4. return a serializable startup and diagnostic report.
 
 The desktop, recovery tooling, and tests should call this interface rather than learn SQLite
-tables. The implementation currently keeps the store inside `mosaicd`; a store adapter is not
+tables. The implementation currently keeps the store inside `beacond`; a store adapter is not
 introduced until a second real implementation exists.
 
 ## Verified dependency baseline
@@ -32,7 +32,7 @@ packages. They are now present on the development host, and the follow-on signed
 documented in [phase-0-desktop-shell.md](phase-0-desktop-shell.md). The supervisor remains
 independently buildable and does not gain a UI dependency.
 
-The initial schema is plain SQL in `crates/mosaicd/migrations/0001_initial.sql`. Rust includes and
+The initial schema is plain SQL in `crates/beacond/migrations/0001_initial.sql`. Rust includes and
 applies that versioned file inside the same immediate transaction that creates the first Workspace.
 Workspace names are parameterized, capped at 120 characters, and reject control characters before
 the store file is created. The SQL schema independently enforces the length bound.
@@ -45,8 +45,8 @@ and reads every persisted Event back into its closed kind and typed payload befo
 From the repository root:
 
 ```sh
-cargo run -p mosaicd -- bootstrap
+cargo run -p beacond -- bootstrap
 ```
 
-The command creates `.mosaic-alpha/mosaic.sqlite3`, creates the `Personal` Workspace only on first
+The command creates `.beacon-alpha/beacon.sqlite3`, creates the `Personal` Workspace only on first
 run, and prints the diagnostic event feed as JSON. Repeating it reuses the same Workspace.

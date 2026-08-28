@@ -1,14 +1,14 @@
 [package]
-name = "mosaic-desktop"
+name = "beacon-desktop"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Internal Tauri shell for the Beacon working-title application"
+description = "Internal Tauri shell for the Beacon local-alpha application"
 publish = false
 
 [lib]
-name = "mosaic_desktop"
+name = "beacon_desktop"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [build-dependencies]
@@ -16,7 +16,7 @@ tauri-build = { version = "=2.6.3", features = [] }
 
 [dependencies]
 libc.workspace = true
-mosaicd = { path = "../../../crates/mosaicd" }
+beacond = { path = "../../../crates/beacond" }
 serde.workspace = true
 tauri = { version = "=2.11.5", features = [] }
 

@@ -1,4 +1,7 @@
-# Adapters
+# Beacon Legacy Desk adapters
+
+> Historical research originally built under the Mosaic name. The maintained compatibility
+> package is now `beacon_legacy` and its command is `beacon-legacy-desk`.
 
 An adapter answers two questions about one module and nothing else:
 
@@ -45,7 +48,7 @@ a result. A plausible lane that cannot be traced back is a lie.
 ## What was measured, and when
 
 All of this was measured on mickey on 2026-08-24 with `ss -ltnp`, `curl`, and the
-modules' own CLIs. It is perishable; `mosaic doctor` re-measures rather than
+modules' own CLIs. It is perishable; `beacon-legacy-desk doctor` re-measures rather than
 trusting this table.
 
 | Module | Owns | Read via | Address |
@@ -63,7 +66,7 @@ trusting this table.
 Athena and Buzz refuse loopback. Minerva and Vulcan only accept it. A config that
 defaults everything to one or the other silently loses half the fleet, and the
 failure is indistinguishable from a dead service. So the address is a per-module
-fact in `src/mosaic/config.py`, overridable per module, and `mosaic doctor` prints
+fact in `src/beacon_legacy/config.py`, overridable per module, and `beacon-legacy-desk doctor` prints
 the address it actually tried **including when it worked** — a wrong default
 should be visible, not inferred from a refusal.
 
@@ -117,7 +120,7 @@ boundary, per-surface argv); Vulcan serves `/v1/capabilities` (`api_version` +
 `callable_capabilities`, no `schema_version`). Mosaic normalises. It does not
 declare a standard that its only two adopters already differ on.
 
-**Known defect, re-measured by `mosaic doctor` on every run:** the fleet
+**Known defect, re-measured by `beacon-legacy-desk doctor` on every run:** the fleet
 entrypoint `~/.local/bin/minerva` injects `--db` into every verb outside a small
 allowlist, and `capabilities` accepts none — so `minerva capabilities` fails on
 PATH while `~/deploy/minerva/.venv/bin/minerva capabilities` succeeds. Minerva's

@@ -6,8 +6,8 @@ import json
 
 import pytest
 
-from mosaic.store.fixtures.capture import Capture, CaptureRefused, write_fixture
-from mosaic.store.fixtures.scrub import REDACTED
+from beacon_legacy.store.fixtures.capture import Capture, CaptureRefused, write_fixture
+from beacon_legacy.store.fixtures.scrub import REDACTED
 
 FAKE = {"FAKE_SECRET_VALUE_abcdef123456"}
 

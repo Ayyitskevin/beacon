@@ -1,6 +1,6 @@
 """Read-only has to be a property of the code, not a line in the README.
 
-Mosaic reads six modules it does not own, and its entire licence to do so rests
+Beacon legacy desk reads six modules it does not own, and its entire licence to do so rests
 on being unable to change them. "We were careful" does not survive a refactor by
 someone who has not read the doctrine, so these tests fail the build instead.
 
@@ -24,7 +24,7 @@ import pathlib
 
 import pytest
 
-PACKAGE = pathlib.Path(__file__).resolve().parents[2] / "src" / "mosaic"
+PACKAGE = pathlib.Path(__file__).resolve().parents[2] / "src" / "beacon_legacy"
 ADAPTER_DIR = PACKAGE / "adapters"
 TRANSPORT = ADAPTER_DIR / "transport.py"
 
@@ -58,13 +58,13 @@ FORBIDDEN_IN_ADAPTERS = {
 #: that system's scopes, its authorization and its activity trail, and observes
 #: mid-transaction state.
 #:
-#: It was originally written as "sqlite3 anywhere in Mosaic", which was correct only
-#: because Mosaic owned no database -- so "anywhere" and "someone else's store" were the
-#: same statement. Under the unified-codebase ruling Mosaic owns its own store and must
+#: It was originally written as "sqlite3 anywhere in Beacon legacy desk", which was correct only
+#: because Beacon legacy desk owned no database -- so "anywhere" and "someone else's store" were the
+#: same statement. Under the unified-codebase ruling Beacon legacy desk owns its own store and must
 #: import sqlite3 to do its job, so the original wording forbids the correct code. Same
 #: failure as the envelope's dead field justifications: a rule correct in one context
 #: surviving into another whose premise is gone, because it was written down and sounded
-#: right. Found by this test failing on `mosaic/store/vocabularies.py`.
+#: right. Found by this test failing on `beacon_legacy/store/vocabularies.py`.
 #:
 #: Scoped as an ALLOWLIST rather than a denylist, deliberately. A denylist naming the
 #: federated packages fails OPEN: any package added later is exempt by default, and the
@@ -161,7 +161,7 @@ def test_the_cli_allowlist_is_owned_by_the_transport_not_its_callers() -> None:
     the HTTP method: the guarantee is only as good as the thing the test can see.
     """
 
-    from mosaic.adapters.transport import READ_VERBS, ReadOnlyCommand
+    from beacon_legacy.adapters.transport import READ_VERBS, ReadOnlyCommand
 
     mutating = {"decide", "raise", "withdraw", "expire", "supersede", "check", "board"}
     for module, verbs in READ_VERBS.items():
@@ -222,12 +222,12 @@ def test_adapter_protocol_exposes_no_write_verb() -> None:
     stronger guarantee than every adapter independently declining to implement one.
     """
 
-    from mosaic.contracts import Adapter
+    from beacon_legacy.contracts import Adapter
 
     callables = {name for name in dir(Adapter) if not name.startswith("_")}
     attributes = set(getattr(Adapter, "__annotations__", {}))
     surface = callables | attributes
     assert surface == {"module", "capabilities", "read"}, (
         f"the Adapter protocol grew a member: {sorted(surface)}. Every addition here "
-        f"is a new thing Mosaic can ask of a module it does not own."
+        f"is a new thing Beacon legacy desk can ask of a module it does not own."
     )

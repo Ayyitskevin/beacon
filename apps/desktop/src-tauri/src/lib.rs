@@ -1,12 +1,13 @@
 #![cfg(unix)]
 
 use std::fs::{self, OpenOptions};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use mosaicd::{
+use beacond::{
     AccessOrigin, LocalErrorCode, LocalSupervisorClient, LocalTransportError,
     OperatorSessionPolicy, OperatorSessionStatus, PlatformSessionMonitorStatus, SecretString,
     initialize_local_auth_token,
@@ -330,13 +331,127 @@ fn prepare_runtime_directory(path: &Path) -> Result<(), std::io::Error> {
     Ok(())
 }
 
+fn migrate_legacy_app_data(data_dir: &Path) -> Result<(), std::io::Error> {
+    let Some(parent) = data_dir.parent() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Beacon app-data path has no parent directory",
+        ));
+    };
+    if data_dir.file_name().and_then(|name| name.to_str()) != Some("dev.beacon.phase0") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Beacon app-data path has an unexpected identifier",
+        ));
+    }
+
+    let legacy_dir = parent.join("dev.mosaic.phase0");
+    let legacy_metadata = match fs::symlink_metadata(&legacy_dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if data_dir.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "Both Beacon and legacy Mosaic app-data directories exist; refusing to choose",
+        ));
+    }
+    if legacy_metadata.file_type().is_symlink() || !legacy_metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Legacy Mosaic app-data path is not a real directory",
+        ));
+    }
+    if legacy_metadata.uid() != unsafe { libc::geteuid() }
+        || legacy_metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Legacy Mosaic app-data directory is not private to the current user",
+        ));
+    }
+
+    let _supervisor_guard = acquire_legacy_supervisor_guard(&legacy_dir)?;
+    let legacy_names = [
+        ("mosaic.sqlite3", "beacon.sqlite3"),
+        ("mosaic.sqlite3-wal", "beacon.sqlite3-wal"),
+        ("mosaic.sqlite3-shm", "beacon.sqlite3-shm"),
+        ("runtime/mosaicd.log", "runtime/beacond.log"),
+    ];
+    for (old_name, new_name) in legacy_names {
+        if legacy_dir.join(old_name).exists() && legacy_dir.join(new_name).exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("legacy app data contains both {old_name} and {new_name}"),
+            ));
+        }
+    }
+
+    let mut renamed = Vec::new();
+    for (old_name, new_name) in legacy_names {
+        let old_path = legacy_dir.join(old_name);
+        let new_path = legacy_dir.join(new_name);
+        if old_path.exists() && !new_path.exists() {
+            if let Err(error) = fs::rename(&old_path, &new_path) {
+                rollback_legacy_names(&renamed);
+                return Err(error);
+            }
+            renamed.push((old_path, new_path));
+        }
+    }
+    if let Err(error) = fs::rename(&legacy_dir, data_dir) {
+        rollback_legacy_names(&renamed);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn acquire_legacy_supervisor_guard(legacy_dir: &Path) -> Result<Option<fs::File>, std::io::Error> {
+    let lock_path = legacy_dir.join("runtime/supervisor.lock");
+    let metadata = match fs::symlink_metadata(&lock_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Legacy supervisor lock is not a private regular file",
+        ));
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(lock_path)?;
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "Close the legacy Mosaic desktop before Beacon adopts its app data",
+        ));
+    }
+    Ok(Some(file))
+}
+
+fn rollback_legacy_names(renamed: &[(PathBuf, PathBuf)]) {
+    for (old_path, new_path) in renamed.iter().rev() {
+        let _ = fs::rename(new_path, old_path);
+    }
+}
+
 fn supervisor_binary() -> Result<PathBuf, std::io::Error> {
     #[cfg(debug_assertions)]
-    if let Some(path) = std::env::var_os("BEACON_MOSAICD_BIN") {
+    if let Some(path) = std::env::var_os("BEACON_SUPERVISOR_BIN") {
         return Ok(PathBuf::from(path));
     }
     let current = std::env::current_exe()?;
-    Ok(current.with_file_name("mosaicd"))
+    Ok(current.with_file_name("beacond"))
 }
 
 fn start_or_connect_supervisor(
@@ -344,7 +459,7 @@ fn start_or_connect_supervisor(
 ) -> Result<LocalSupervisorClient, Box<dyn std::error::Error>> {
     let runtime_dir = data_dir.join("runtime");
     prepare_runtime_directory(&runtime_dir)?;
-    let socket_path = runtime_dir.join("mosaicd.sock");
+    let socket_path = runtime_dir.join("beacond.sock");
     let token_path = runtime_dir.join("client.token");
     let lock_path = runtime_dir.join("supervisor.lock");
     let store_path = data_dir.join("beacon.sqlite3");
@@ -360,7 +475,7 @@ fn start_or_connect_supervisor(
         .append(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW);
-    let log = log_options.open(runtime_dir.join("mosaicd.log"))?;
+    let log = log_options.open(runtime_dir.join("beacond.log"))?;
     log.set_permissions(fs::Permissions::from_mode(0o600))?;
     let log_error = log.try_clone()?;
     let mut child = Command::new(supervisor_binary()?)
@@ -384,7 +499,7 @@ fn start_or_connect_supervisor(
         }
         if let Some(status) = child.try_wait()? {
             return Err(std::io::Error::other(format!(
-                "mosaicd exited before accepting local commands: {status}"
+                "beacond exited before accepting local commands: {status}"
             ))
             .into());
         }
@@ -392,7 +507,7 @@ fn start_or_connect_supervisor(
     }
     Err(std::io::Error::new(
         std::io::ErrorKind::TimedOut,
-        "mosaicd did not accept local commands within five seconds",
+        "beacond did not accept local commands within five seconds",
     )
     .into())
 }
@@ -404,6 +519,7 @@ pub fn run() {
             // Tauri 2.11 resolves an application-specific local-data directory from the bundle
             // identifier: https://docs.rs/tauri/2.11.5/tauri/path/struct.PathResolver.html#method.app_local_data_dir
             let data_dir = app.path().app_local_data_dir()?;
+            migrate_legacy_app_data(&data_dir)?;
             prepare_runtime_directory(&data_dir)?;
             let supervisor = start_or_connect_supervisor(&data_dir)?;
             app.manage(DesktopState { supervisor });
@@ -435,7 +551,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread::JoinHandle;
 
-    use mosaicd::{
+    use beacond::{
         LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer, SecretString,
         initialize_local_auth_token,
     };
@@ -444,10 +560,107 @@ mod tests {
 
     use super::{
         DesktopState, authentication_capabilities_value, begin_password_setup_value,
-        complete_operator_setup_value, platform_session_monitor_status_value,
-        prepare_runtime_directory, session_policy_value, session_status_value,
-        set_session_timeout_value,
+        complete_operator_setup_value, migrate_legacy_app_data,
+        platform_session_monitor_status_value, prepare_runtime_directory, session_policy_value,
+        session_status_value, set_session_timeout_value,
     };
+
+    #[test]
+    fn legacy_app_data_moves_once_and_keeps_the_existing_store() {
+        let parent = std::env::temp_dir().join(format!("beacon-migration-{}", Uuid::new_v4()));
+        let legacy = parent.join("dev.mosaic.phase0");
+        let current = parent.join("dev.beacon.phase0");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::set_permissions(&legacy, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(legacy.join("mosaic.sqlite3"), b"existing workspace").unwrap();
+        fs::write(legacy.join("mosaic.sqlite3-wal"), b"existing wal").unwrap();
+
+        migrate_legacy_app_data(&current).unwrap();
+
+        assert!(!legacy.exists());
+        assert_eq!(
+            fs::read(current.join("beacon.sqlite3")).unwrap(),
+            b"existing workspace"
+        );
+        assert_eq!(
+            fs::read(current.join("beacon.sqlite3-wal")).unwrap(),
+            b"existing wal"
+        );
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn legacy_app_data_migration_refuses_ambiguous_dual_directories() {
+        let parent = std::env::temp_dir().join(format!("beacon-migration-{}", Uuid::new_v4()));
+        let legacy = parent.join("dev.mosaic.phase0");
+        let current = parent.join("dev.beacon.phase0");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&current).unwrap();
+        fs::set_permissions(&legacy, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let error = migrate_legacy_app_data(&current).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(legacy.is_dir());
+        assert!(current.is_dir());
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn legacy_app_data_migration_refuses_a_symlink_source() {
+        use std::os::unix::fs::symlink;
+
+        let parent = std::env::temp_dir().join(format!("beacon-migration-{}", Uuid::new_v4()));
+        let target = parent.join("target");
+        let legacy = parent.join("dev.mosaic.phase0");
+        let current = parent.join("dev.beacon.phase0");
+        fs::create_dir_all(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+        symlink(&target, &legacy).unwrap();
+
+        let error = migrate_legacy_app_data(&current).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(legacy.is_symlink());
+        assert!(target.is_dir());
+        fs::remove_file(legacy).unwrap();
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn legacy_app_data_migration_refuses_a_running_supervisor() {
+        use std::fs::OpenOptions;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let parent = std::env::temp_dir().join(format!("beacon-migration-{}", Uuid::new_v4()));
+        let legacy = parent.join("dev.mosaic.phase0");
+        let current = parent.join("dev.beacon.phase0");
+        let runtime = legacy.join("runtime");
+        fs::create_dir_all(&runtime).unwrap();
+        fs::set_permissions(&legacy, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(runtime.join("supervisor.lock"))
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+
+        let error = migrate_legacy_app_data(&current).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        assert!(legacy.is_dir());
+        assert!(!current.exists());
+        drop(lock);
+        fs::remove_dir_all(parent).unwrap();
+    }
 
     #[test]
     fn app_data_directory_is_owner_only() {
@@ -503,7 +716,7 @@ mod tests {
         fn new() -> Self {
             let root = std::env::temp_dir().join(format!("beacon-desktop-{}", Uuid::new_v4()));
             prepare_runtime_directory(&root).unwrap();
-            let socket = root.join("mosaicd.sock");
+            let socket = root.join("beacond.sock");
             let token = root.join("client.token");
             initialize_local_auth_token(&token).unwrap();
             let server = LocalSupervisorServer::bind(LocalServerConfig {

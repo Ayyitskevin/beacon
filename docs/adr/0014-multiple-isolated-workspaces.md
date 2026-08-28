@@ -6,7 +6,7 @@ status: accepted
 
 One Beacon Installation may host several Workspaces so one operator can maintain separate agent
 organizations and bodies of work in the same desktop suite. Each Workspace is its own trust and
-authority boundary even though mosaicd and the managed store are shared infrastructure.
+authority boundary even though beacond and the managed store are shared infrastructure.
 
 ## Consequences
 

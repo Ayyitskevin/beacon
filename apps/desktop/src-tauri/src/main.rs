@@ -1,3 +1,3 @@
 fn main() {
-    mosaic_desktop::run();
+    beacon_desktop::run();
 }

@@ -1,11 +1,11 @@
 [project]
-name = "mosaic-desk"
+name = "beacon-legacy-desk"
 version = "0.1.0"
 description = "A read-only cross-module desk for AI Town: composes what each module already publishes, and never collapses five kinds of approval into one"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 readme = "README.md"
-# Zero runtime dependencies, deliberately. Mosaic reads other modules over
+# Zero runtime dependencies, deliberately. The Beacon legacy desk reads other modules over
 # their own published surfaces; stdlib urllib covers every read v0 needs. A
 # runtime dependency here would be a dependency the whole fleet inherits.
 dependencies = []
@@ -17,7 +17,7 @@ dev = [
 ]
 
 [project.scripts]
-mosaic = "mosaic.cli:main"
+beacon-legacy-desk = "beacon_legacy.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]

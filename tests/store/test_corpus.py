@@ -14,9 +14,11 @@ from pathlib import Path
 
 import pytest
 
-from mosaic.store.fixtures.scrub import known_secret_values
+from beacon_legacy.store.fixtures.scrub import known_secret_values
 
-CORPUS = Path(__file__).resolve().parents[2] / "src" / "mosaic" / "store" / "fixtures" / "corpus"
+CORPUS = (
+    Path(__file__).resolve().parents[2] / "src" / "beacon_legacy" / "store" / "fixtures" / "corpus"
+)
 FIXTURES = sorted(CORPUS.glob("*.json"))
 
 SECRET_SHAPES = re.compile(

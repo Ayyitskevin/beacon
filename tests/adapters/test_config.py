@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from mosaic import config
+from beacon_legacy import config
 
 
 def test_defaults_are_not_uniformly_localhost() -> None:
@@ -23,7 +23,12 @@ def test_defaults_are_not_uniformly_localhost() -> None:
 
 
 def test_default_source_says_it_is_a_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("MOSAIC_ATHENA_URL", "ATHENA_BASE_URL", "ATHENA_URL"):
+    for name in (
+        "BEACON_LEGACY_ATHENA_URL",
+        "MOSAIC_ATHENA_URL",
+        "ATHENA_BASE_URL",
+        "ATHENA_URL",
+    ):
         monkeypatch.delenv(name, raising=False)
     endpoint = config.resolve("athena")
     assert endpoint.source.startswith("default"), (
@@ -44,7 +49,12 @@ def test_both_token_file_and_tooling_spellings_are_accepted(
     reporting which one was used is what stops it recurring silently.
     """
 
-    for name in ("MOSAIC_ATHENA_URL", "ATHENA_BASE_URL", "ATHENA_URL"):
+    for name in (
+        "BEACON_LEGACY_ATHENA_URL",
+        "MOSAIC_ATHENA_URL",
+        "ATHENA_BASE_URL",
+        "ATHENA_URL",
+    ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv(spelling, "http://example.invalid:1234")
     endpoint = config.resolve("athena")
@@ -52,10 +62,24 @@ def test_both_token_file_and_tooling_spellings_are_accepted(
     assert endpoint.source == spelling
 
 
-def test_mosaic_prefixed_name_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_beacon_legacy_prefixed_name_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MOSAIC_ATHENA_URL", "http://deprecated.invalid")
     monkeypatch.setenv("ATHENA_URL", "http://loser.invalid")
-    monkeypatch.setenv("MOSAIC_ATHENA_URL", "http://winner.invalid")
+    monkeypatch.setenv("BEACON_LEGACY_ATHENA_URL", "http://winner.invalid")
     assert config.resolve("athena").address == "http://winner.invalid"
+
+
+def test_pre_rename_name_remains_an_explicit_compatibility_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in ("BEACON_LEGACY_ATHENA_URL", "ATHENA_BASE_URL", "ATHENA_URL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("MOSAIC_ATHENA_URL", "http://legacy.invalid")
+
+    endpoint = config.resolve("athena")
+
+    assert endpoint.address == "http://legacy.invalid"
+    assert endpoint.source == "MOSAIC_ATHENA_URL"
 
 
 class TestCredentialsAreBoundToTheirEndpoint:
@@ -72,9 +96,11 @@ class TestCredentialsAreBoundToTheirEndpoint:
     """
 
     NAMES = (
-        "MOSAIC_ATHENA_URL",
+        "BEACON_LEGACY_ATHENA_URL",
         "ATHENA_BASE_URL",
         "ATHENA_URL",
+        "BEACON_LEGACY_ATHENA_TOKEN",
+        "MOSAIC_ATHENA_URL",
         "MOSAIC_ATHENA_TOKEN",
         "ATHENA_TOKEN",
         "ATHENA_API_TOKEN",
@@ -88,7 +114,7 @@ class TestCredentialsAreBoundToTheirEndpoint:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         self._clear(monkeypatch)
-        monkeypatch.setenv("MOSAIC_ATHENA_URL", "http://elsewhere.invalid:9999")
+        monkeypatch.setenv("BEACON_LEGACY_ATHENA_URL", "http://elsewhere.invalid:9999")
         monkeypatch.setenv("ATHENA_API_TOKEN", "live-token-value")
 
         endpoint = config.resolve("athena")
@@ -100,13 +126,13 @@ class TestCredentialsAreBoundToTheirEndpoint:
         """Silence here produces a 401 nobody can explain."""
 
         self._clear(monkeypatch)
-        monkeypatch.setenv("MOSAIC_ATHENA_URL", "http://elsewhere.invalid:9999")
+        monkeypatch.setenv("BEACON_LEGACY_ATHENA_URL", "http://elsewhere.invalid:9999")
         monkeypatch.setenv("ATHENA_API_TOKEN", "live-token-value")
 
         source = config.resolve("athena").token_source or ""
 
         assert "ATHENA_API_TOKEN" in source
-        assert "MOSAIC_ATHENA_URL" in source
+        assert "BEACON_LEGACY_ATHENA_URL" in source
 
     def test_a_paired_address_and_token_are_still_accepted(
         self, monkeypatch: pytest.MonkeyPatch
@@ -145,7 +171,7 @@ class TestCredentialsAreBoundToTheirEndpoint:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         self._clear(monkeypatch)
-        monkeypatch.setenv("MOSAIC_ATHENA_URL", "http://elsewhere.invalid:9999")
+        monkeypatch.setenv("BEACON_LEGACY_ATHENA_URL", "http://elsewhere.invalid:9999")
         monkeypatch.setenv("ATHENA_API_TOKEN", "live-token-value")
 
         endpoint = config.resolve("athena")

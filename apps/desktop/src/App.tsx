@@ -8,7 +8,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 
 import {
   type AuthenticationCapabilities,
@@ -152,6 +152,8 @@ export function App() {
   const [sessionAttempt, setSessionAttempt] = useState(0);
   const [session, setSession] = useState<DesktopSessionStatus | null>(null);
   const [foregroundVerified, setForegroundVerified] = useState(false);
+  const foregroundEpoch = useRef(0);
+  const foregroundEligible = useRef(true);
   const [capabilities, setCapabilities] = useState<AuthenticationCapabilities | null>(null);
   const [password, setPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
@@ -174,14 +176,24 @@ export function App() {
     themeChoice === "system" ? (systemPrefersDark ? "dark" : "light") : themeChoice;
   const unlocked = session?.phase === "unlocked" && foregroundVerified;
 
+  function applyVerifiedSession(nextSession: DesktopSessionStatus, expectedEpoch: number) {
+    setSession(nextSession);
+    setForegroundVerified(
+      nextSession.phase === "unlocked" &&
+        foregroundEligible.current &&
+        foregroundEpoch.current === expectedEpoch &&
+        document.visibilityState !== "hidden",
+    );
+  }
+
   useEffect(() => {
     let active = true;
+    const verificationEpoch = foregroundEpoch.current;
     setViewState("loading");
     Promise.all([loadSessionStatus(), loadAuthenticationCapabilities()]).then(
       ([nextSession, nextCapabilities]) => {
         if (!active) return;
-        setSession(nextSession);
-        setForegroundVerified(nextSession.phase === "unlocked");
+        applyVerifiedSession(nextSession, verificationEpoch);
         setCapabilities(nextCapabilities);
         setViewState("ready");
       },
@@ -279,17 +291,20 @@ export function App() {
 
   useEffect(() => {
     let active = true;
-    let checking = false;
-    const conceal = () => setForegroundVerified(false);
+    const conceal = () => {
+      foregroundEligible.current = false;
+      foregroundEpoch.current += 1;
+      setForegroundVerified(false);
+    };
     const verifyBeforeReveal = () => {
-      if (checking || document.visibilityState === "hidden") return;
-      checking = true;
+      if (document.visibilityState === "hidden") return;
+      foregroundEligible.current = true;
+      const verificationEpoch = ++foregroundEpoch.current;
       setForegroundVerified(false);
       void loadSessionStatus().then(
         (nextSession) => {
           if (!active) return;
-          setSession(nextSession);
-          setForegroundVerified(nextSession.phase === "unlocked");
+          applyVerifiedSession(nextSession, verificationEpoch);
         },
         () => {
           if (!active) return;
@@ -297,9 +312,7 @@ export function App() {
           setForegroundVerified(false);
           setViewState("error");
         },
-      ).finally(() => {
-        checking = false;
-      });
+      );
     };
     const handleVisibilityChange = () => {
       if (document.visibilityState === "hidden") conceal();
@@ -344,11 +357,11 @@ export function App() {
 
   async function finishSetup() {
     await runAction(async () => {
+      const verificationEpoch = foregroundEpoch.current;
       const nextSession = await completeLocalOperatorSetup(recoverySaved);
       setRecoveryKey("");
       setRecoverySaved(false);
-      setSession(nextSession);
-      setForegroundVerified(nextSession.phase === "unlocked");
+      applyVerifiedSession(nextSession, verificationEpoch);
     });
   }
 
@@ -357,9 +370,9 @@ export function App() {
     const submittedPassword = password;
     setPassword("");
     await runAction(async () => {
+      const verificationEpoch = foregroundEpoch.current;
       const nextSession = await signInWithLocalPassword(submittedPassword);
-      setSession(nextSession);
-      setForegroundVerified(nextSession.phase === "unlocked");
+      applyVerifiedSession(nextSession, verificationEpoch);
     });
   }
 
@@ -372,6 +385,7 @@ export function App() {
     setPassword("");
     setConfirmation("");
     await runAction(async () => {
+      const verificationEpoch = foregroundEpoch.current;
       const output = await recoverLocalOperatorAccount(
         submittedKey,
         submittedPassword,
@@ -379,8 +393,7 @@ export function App() {
       );
       setReplacementKey(output.recoveryKey);
       const nextSession = await loadSessionStatus();
-      setSession(nextSession);
-      setForegroundVerified(nextSession.phase === "unlocked");
+      applyVerifiedSession(nextSession, verificationEpoch);
     });
   }
 

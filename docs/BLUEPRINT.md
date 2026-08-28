@@ -374,7 +374,7 @@ widens authority, refreshes budget, hides the failed attempt, or becomes an unli
 
 ### Pause Work
 
-The Operator can place the entire Installation into **Pause Work**. mosaicd records the paused
+The Operator can place the entire Installation into **Pause Work**. beacond records the paused
 state before sending interruption requests. While paused, Beacon rejects new Proposal dispatches
 and new or renewed Worker leases. Active Runs receive a bounded interruption request.
 
@@ -389,7 +389,7 @@ resume work automatically.
 
 Pause Work remains available in the desktop, from the system tray, and through a configurable
 global shortcut when the main window is closed. Every entry point sends the same attributable,
-Operator-only Command to mosaicd. Closing the main window neither stops the supervisor nor creates
+Operator-only Command to beacond. Closing the main window neither stops the supervisor nor creates
 a second authority path. Beacon supplies a platform-appropriate default shortcut that the Operator
 may change or disable.
 
@@ -482,7 +482,7 @@ These values are never compressed into a generic Approved state.
 
 One Installation may host several Workspaces. A Workspace is the isolation boundary for Agents,
 Projects, Policy, budgets, credential references, memory, Artifacts, events, Plugin grants, and
-authority. Every Command and Query carries one Workspace identity, and mosaicd authorizes it before
+authority. Every Command and Query carries one Workspace identity, and beacond authorizes it before
 resolving any other object. Cross-Workspace visibility, spending, execution, and reuse are denied by
 default.
 
@@ -511,7 +511,7 @@ Beacon ships as one product with multiple cooperating binaries from one Rust wor
                └──────────────┬───────────────┘
                               ▼
                      ┌───────────────────┐
-                     │ mosaicd           │
+                     │ beacond           │
                      │ local supervisor  │
                      ├───────────────────┤
                      │ command interface │
@@ -528,7 +528,7 @@ Beacon ships as one product with multiple cooperating binaries from one Rust wor
                      │ SQLite + artifacts│
                      └───────────────────┘
 
-mosaicd is the single writer and authority process. The desktop never owns a database handle.
+beacond is the single writer and authority process. The desktop never owns a database handle.
 Agents never receive one. Local clients connect over an authenticated Unix-domain socket. Tauri
 starts or reconnects to the supervisor; closing a window does not corrupt or orphan an active Run.
 Operating-system-login startup is optional and disabled until the Operator selects it during
@@ -547,7 +547,7 @@ Beacon may discover a compatible local or remote Worker, but discovery leaves it
 Operator must activate the Worker and approve its capability advertisement before it can receive a
 lease.
 
-One operator workstation hosts the authoritative mosaicd control plane, store, policy engine, and
+One operator workstation hosts the authoritative beacond control plane, store, policy engine, and
 operator desktop. Fleet machines run a small Beacon Worker, not another complete Beacon instance.
 A Worker can advertise resources and execute a leased Run, but it cannot create policy, grant
 authority, rewrite Project truth, or approve its own work.
@@ -607,7 +607,7 @@ new transport or ambient execution path. Every Plugin has a versioned manifest d
 compatibility, settings, commands or views, required Capabilities, data scopes, network
 destinations, and integrity metadata.
 
-Plugins never receive raw SQLite access or load arbitrary native Rust into mosaicd. Untrusted code
+Plugins never receive raw SQLite access or load arbitrary native Rust into beacond. Untrusted code
 runs out of process or in a sandboxed portable runtime and communicates through the public Command,
 Query, Event, or Worker lease interfaces. Plugin install and permission expansion require operator
 review; ordinary use remains subject to the same Policy, Proposal, and Receipt rules as built-in

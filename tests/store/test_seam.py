@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from mosaic.store.authority import (
+from beacon_legacy.store.authority import (
     Authority,
     Check,
     Decider,
@@ -21,8 +21,8 @@ from mosaic.store.authority import (
     Lifecycle,
     NoBinding,
 )
-from mosaic.store.envelope import Capability
-from mosaic.store.seam import (
+from beacon_legacy.store.envelope import Capability
+from beacon_legacy.store.seam import (
     Decision,
     Disposition,
     OperationSpec,

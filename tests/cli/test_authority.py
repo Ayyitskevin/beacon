@@ -16,15 +16,15 @@ from __future__ import annotations
 
 import pytest
 
-from mosaic.contracts.authority import (
+from beacon_legacy.contracts.authority import (
     Attachment,
     Decider,
     Enforcement,
     Lifecycle,
     OperatorAction,
 )
-from mosaic.render import json_render, text
-from mosaic.render.authority import FORBIDDEN_RENDERINGS, read_authority, view
+from beacon_legacy.render import json_render, text
+from beacon_legacy.render.authority import FORBIDDEN_RENDERINGS, read_authority, view
 
 
 def authority(**overrides):
@@ -310,7 +310,7 @@ class TestTheReaderNeverSilentlyDropsAField:
         """Fails the day the contract gains a field `read_authority` ignores."""
         import dataclasses
 
-        from mosaic.contracts.authority import Authority
+        from beacon_legacy.contracts.authority import Authority
 
         original = Authority(
             decider=Decider.HUMAN,

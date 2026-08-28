@@ -13,7 +13,7 @@ import sqlite3
 
 import pytest
 
-from mosaic.store.schema import apply_schema, enum_values
+from beacon_legacy.store.schema import apply_schema, enum_values
 
 RECORD_COLS = (
     "id, capability, kind, title, status, occurred_at, recorded_at, "

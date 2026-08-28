@@ -1,13 +1,13 @@
-"""Pin `sys.path` to THIS worktree before anything imports `mosaic`.
+"""Pin `sys.path` to THIS worktree before anything imports `beacon_legacy`.
 
 This has to live at the tests/ root, and per-directory conftests cannot
 replace it. pytest collects alphabetically, so `tests/adapters/` is walked
-first; it has no conftest, `mosaic` is imported from whatever is already on
+first; it has no conftest, `beacon_legacy` is imported from whatever is already on
 `sys.path` — the sibling checkout's editable install — and it lands in
 `sys.modules`. Every later conftest inserting this worktree's `src/` is then
 too late: the package object already exists, bound to the other tree, and
-`mosaic.store` does not exist there. The failure reads as "no module named
-mosaic.store", which sounds like a missing file rather than a wrong tree.
+`beacon_legacy.store` does not exist there. The failure reads as "no module named
+beacon_legacy.store", which sounds like a missing file rather than a wrong tree.
 
 The same trap in its quieter form has now caught three sessions today: a
 mutation applied to one checkout while the suite imported another, so the

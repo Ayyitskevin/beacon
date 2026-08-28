@@ -11,7 +11,7 @@ from unittest import mock
 
 import pytest
 
-from mosaic.cli import EXIT_ERROR, EXIT_OK, EXIT_UNAVAILABLE, EXIT_USAGE, main
+from beacon_legacy.cli import EXIT_ERROR, EXIT_OK, EXIT_UNAVAILABLE, EXIT_USAGE, main
 
 FIXTURE = Path(__file__).parent / "fixtures" / "desk_sample.json"
 
@@ -90,13 +90,16 @@ class TestUnlandedLanesRefuseHonestly:
     """A missing lane must not look like an empty fleet.
 
     Absence is simulated rather than assumed. An earlier version of these tests
-    asserted that `doctor` exits 69 because `mosaic.doctor` did not exist yet —
+    asserted that `doctor` exits 69 because `beacon_legacy.doctor` did not exist yet —
     which measured the state of a sibling lane rather than this CLI's contract,
     and started failing the moment Lane B landed. Forcing the ImportError keeps
     the refusal path under test forever, in both worlds.
     """
 
-    LANES: ClassVar[dict[str, str]] = {"desk": "mosaic.compose", "doctor": "mosaic.doctor"}
+    LANES: ClassVar[dict[str, str]] = {
+        "desk": "beacon_legacy.compose",
+        "doctor": "beacon_legacy.doctor",
+    }
 
     @pytest.fixture
     def absent(self, monkeypatch):
@@ -124,13 +127,13 @@ class TestUnlandedLanesRefuseHonestly:
 
     def test_a_landed_lane_is_distinguishable_from_a_missing_one(self, capsys, absent):
         """Exit 69 must mean 'not built', never 'built and found nothing'."""
-        absent("mosaic.compose")
+        absent("beacon_legacy.compose")
         assert main(["desk"]) == EXIT_UNAVAILABLE
         capsys.readouterr()
 
-        empty = types.ModuleType("mosaic.compose")
+        empty = types.ModuleType("beacon_legacy.compose")
         empty.compose_desk = lambda: {"schema": "desk.v1", "entries": []}
-        with mock.patch.dict(sys.modules, {"mosaic.compose": empty}):
+        with mock.patch.dict(sys.modules, {"beacon_legacy.compose": empty}):
             assert main(["desk"]) == EXIT_OK
         assert "no entries" in capsys.readouterr().out
 
@@ -139,7 +142,7 @@ class TestTheSeamsSiblingLanesPlugInto:
     """The two function names Lanes A and B were told to match."""
 
     def test_desk_renders_whatever_compose_returns(self, capsys):
-        fake = types.ModuleType("mosaic.compose")
+        fake = types.ModuleType("beacon_legacy.compose")
         fake.compose_desk = lambda: {
             "schema": "desk.v1",
             "entries": [
@@ -160,7 +163,7 @@ class TestTheSeamsSiblingLanesPlugInto:
                 }
             ],
         }
-        with mock.patch.dict(sys.modules, {"mosaic.compose": fake}):
+        with mock.patch.dict(sys.modules, {"beacon_legacy.compose": fake}):
             assert main(["desk"]) == EXIT_OK
         out = capsys.readouterr().out
         assert "seam check" in out
@@ -168,27 +171,27 @@ class TestTheSeamsSiblingLanesPlugInto:
 
     def test_doctor_text_uses_the_lane_renderer_not_json(self, capsys):
         """Text mode must not silently fall back to dumping JSON."""
-        fake = types.ModuleType("mosaic.doctor")
-        fake.run_doctor = lambda: {"schema": "mosaic.doctor.v1", "adapters": []}
+        fake = types.ModuleType("beacon_legacy.doctor")
+        fake.run_doctor = lambda: {"schema": "beacon_legacy.doctor.v1", "adapters": []}
         fake.render_text = lambda report: f"DOCTOR · {report['schema']} · human-readable"
-        with mock.patch.dict(sys.modules, {"mosaic.doctor": fake}):
+        with mock.patch.dict(sys.modules, {"beacon_legacy.doctor": fake}):
             assert main(["doctor"]) == EXIT_OK
         out = capsys.readouterr().out
         assert "human-readable" in out
         assert "{" not in out
 
     def test_doctor_json_does_not_need_the_text_renderer(self, capsys):
-        fake = types.ModuleType("mosaic.doctor")
-        fake.run_doctor = lambda: {"schema": "mosaic.doctor.v1", "adapters": []}
-        with mock.patch.dict(sys.modules, {"mosaic.doctor": fake}):
+        fake = types.ModuleType("beacon_legacy.doctor")
+        fake.run_doctor = lambda: {"schema": "beacon_legacy.doctor.v1", "adapters": []}
+        with mock.patch.dict(sys.modules, {"beacon_legacy.doctor": fake}):
             assert main(["doctor", "--format", "json"]) == EXIT_OK
-        assert json.loads(capsys.readouterr().out)["schema"] == "mosaic.doctor.v1"
+        assert json.loads(capsys.readouterr().out)["schema"] == "beacon_legacy.doctor.v1"
 
     def test_doctor_text_refuses_when_only_render_text_is_missing(self, capsys):
         """A half-landed lane refuses in text mode but still works in JSON."""
-        fake = types.ModuleType("mosaic.doctor")
-        fake.run_doctor = lambda: {"schema": "mosaic.doctor.v1", "adapters": []}
-        with mock.patch.dict(sys.modules, {"mosaic.doctor": fake}):
+        fake = types.ModuleType("beacon_legacy.doctor")
+        fake.run_doctor = lambda: {"schema": "beacon_legacy.doctor.v1", "adapters": []}
+        with mock.patch.dict(sys.modules, {"beacon_legacy.doctor": fake}):
             assert main(["doctor"]) == EXIT_UNAVAILABLE
             err = capsys.readouterr().err
             assert "render_text" in err
@@ -206,7 +209,7 @@ class TestPlumbing:
 
     def test_version(self, capsys):
         assert main(["version"]) == EXIT_OK
-        assert "mosaic" in capsys.readouterr().out
+        assert "beacon-legacy-desk" in capsys.readouterr().out
 
     def test_no_command_prints_help(self, capsys):
         assert main([]) == EXIT_USAGE

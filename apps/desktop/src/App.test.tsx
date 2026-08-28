@@ -186,6 +186,39 @@ describe("Beacon desktop shell", () => {
     expect(screen.queryByRole("heading", { name: "Owner workspace" })).not.toBeInTheDocument();
   });
 
+  it("stays concealed when focus is lost during an in-flight session verification", async () => {
+    let resolveForegroundCheck: ((value: ReturnType<typeof status>) => void) | undefined;
+    let sessionChecks = 0;
+    invokeMock.mockImplementation((command) => {
+      if (command === "session_status") {
+        sessionChecks += 1;
+        if (sessionChecks === 1) return Promise.resolve(status("unlocked"));
+        return new Promise((resolve) => {
+          resolveForegroundCheck = resolve;
+        });
+      }
+      if (command === "authentication_capabilities") return Promise.resolve(capabilities);
+      if (command === "session_policy") return Promise.resolve(sessionPolicy);
+      if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+      if (command === "record_operator_activity") return Promise.resolve(null);
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Owner workspace" })).toBeVisible();
+
+    fireEvent.focus(window);
+    expect(screen.getByRole("heading", { name: "Beacon is concealed" })).toBeVisible();
+    fireEvent.blur(window);
+    await act(async () => {
+      resolveForegroundCheck?.(status("unlocked"));
+      await Promise.resolve();
+    });
+
+    expect(screen.getByRole("heading", { name: "Beacon is concealed" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "Owner workspace" })).not.toBeInTheDocument();
+  });
+
   it("explains a session check failure and can retry without reloading", async () => {
     let sessionChecks = 0;
     invokeMock.mockImplementation((command) => {
@@ -221,7 +254,7 @@ describe("Beacon desktop shell", () => {
       name: "Lock after inactivity in minutes",
     });
     expect(timeout).toHaveValue(30);
-    expect(screen.getByText("OS lock monitoring active")).toBeVisible();
+    expect(await screen.findByText("OS lock monitoring active")).toBeVisible();
     expect(invokeMock).not.toHaveBeenCalledWith("record_operator_activity");
 
     fireEvent.keyDown(document, { key: "Tab" });

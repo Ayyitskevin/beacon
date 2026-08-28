@@ -17,15 +17,17 @@ import sqlite3
 
 import pytest
 
-from mosaic.store.enums import (
+from beacon_legacy.store.enums import (
     CANONICAL_ENUMS,
     divergences,
     seed_capability_registry,
     seed_enums,
 )
-from mosaic.store.models import CANONICAL_MODELS, column_divergences, expected_columns
+from beacon_legacy.store.models import CANONICAL_MODELS, column_divergences, expected_columns
 
-SCHEMA = pathlib.Path(__file__).resolve().parents[2] / "src" / "mosaic" / "store" / "schema.sql"
+SCHEMA = (
+    pathlib.Path(__file__).resolve().parents[2] / "src" / "beacon_legacy" / "store" / "schema.sql"
+)
 
 
 @pytest.fixture

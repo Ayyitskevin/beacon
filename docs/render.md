@@ -1,4 +1,7 @@
-# Rendering a desk
+# Beacon Legacy Desk rendering
+
+> Historical research originally built under the Mosaic name. The maintained compatibility
+> package is now `beacon_legacy` and its command is `beacon-legacy-desk`.
 
 How Mosaic turns a `desk.v1` document into output, and the one rule that
 shapes every decision here.
@@ -13,7 +16,7 @@ only describes how the renderer makes that visible. Where the two disagree,
 Renderers consume the desk **document as a plain mapping** and rebuild the
 contract's `Authority` from it via `render.authority.read_authority`. The
 policy is never re-implemented here — it is imported from
-`mosaic.contracts.authority` and *asked*, so the renderer and the contract
+`beacon_legacy.contracts.authority` and *asked*, so the renderer and the contract
 cannot drift apart. A test walks every `Attachment` x `Enforcement` pair and
 asserts the view agrees with `Authority.operator_action()`.
 
@@ -95,9 +98,9 @@ Three conditions, all pinned by tests:
 
 ## Refusals
 
-Refusals are sentences, not tracebacks. `mosaic desk` / `mosaic doctor` exit
+Refusals are sentences, not tracebacks. `beacon-legacy-desk desk` / `beacon-legacy-desk doctor` exit
 **69** (`EX_UNAVAILABLE`) naming what is missing; malformed input exits **1**.
-`mosaic desk` exits **0** even when the desk is incomplete: Buzz, ReplayDeck
+`beacon-legacy-desk desk` exits **0** even when the desk is incomplete: Buzz, ReplayDeck
 and Icarus are expected unreachable in normal conditions, and a command that
 almost always fails trains people to ignore it. Incompleteness is carried in
 the document and the footer instead.

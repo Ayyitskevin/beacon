@@ -3,9 +3,10 @@
 ## Definition of record
 
 Beacon is one local-first office suite for AI agent teams supervised by one human operator.
-Beacon is a temporary product-facing working title. Do not create Beacon application IDs, CLI
-commands, package namespaces, domains, or public releases until the permanent name clears the
-recorded naming gates. Existing `mosaicd` references remain internal implementation placeholders.
+Beacon is the canonical project and local-alpha product name. Application IDs, CLI commands, and
+package namespaces use Beacon so active work has one identity. Domains, public releases, and other
+irreversible brand commitments still wait for the recorded naming and release gates. `beacond` is
+the canonical internal supervisor name.
 
 Read these before changing the product:
 
@@ -114,7 +115,8 @@ unified Rust product wins.
 - Permanent names exclude animals and assistant personas. The final brand must be an uncommon real
   word that is easy to pronounce and spell after hearing it once.
 - A clean application, CLI, and package namespace is a hard gate for the permanent name.
-- Alpha architecture proceeds under the temporary Beacon title while permanent naming continues.
+- Alpha architecture and local identifiers proceed under the Beacon name while public naming
+  clearance remains a separate release gate.
 - The command palette reaches every app and safe action through the ordinary Command and authority
   path.
 - Pause Work is Installation-wide and Operator-only. It blocks new dispatches and lease renewals,
@@ -130,8 +132,8 @@ unified Rust product wins.
 - Linux Alpha ships AppImage first. A signed native `.deb` follows at beta.
 - Rust is the canonical source of domain commands, queries, results, and events.
 - The desktop, MCP adapter, and recovery CLI cross the same typed interfaces.
-- mosaicd is the only store writer and the only process that may authorize external effects.
-- One mosaicd control plane may lease Runs to remote Workers; Workers hold no independent authority
+- beacond is the only store writer and the only process that may authorize external effects.
+- One beacond control plane may lease Runs to remote Workers; Workers hold no independent authority
   and cannot report success without a verified Receipt.
 - Every external effect passes through Execution as a digest-bound Proposal.
 - Plugins have no raw store access or ambient authority and use the public typed interfaces.
@@ -227,8 +229,9 @@ on a tagged legacy branch before removal or relocation.
 
 ## Current state
 
-The expanded Alpha blueprint is accepted design. Phase 0 has begun beside the preserved Python
-prototype. The Rust workspace contains the first `mosaicd` supervisor interface: it opens the
-managed SQLite store, creates one initial empty Workspace, and returns a typed diagnostic event
-report. The Tauri shell, Operator Account, and broader domain kernel do not exist yet. Do not
-describe this checkpoint as a usable Alpha.
+The expanded Alpha blueprint is accepted design. Phase 0 has begun beside the preserved Beacon
+Legacy Desk. The Rust workspace contains the `beacond` supervisor, managed SQLite store, local
+Owner account and Recovery Key boundary, authenticated local transport, configurable human-session
+lock, Linux screen-lock/suspend monitor, and a signed-out Tauri/React shell. Cloud Link, passkeys,
+Starter Organization, agent work, and a downloadable installer do not exist yet. Do not describe
+this checkpoint as a usable Alpha.

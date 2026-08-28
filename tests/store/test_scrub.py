@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from mosaic.store.fixtures.scrub import (
+from beacon_legacy.store.fixtures.scrub import (
     REDACTED,
     contains_known_secret,
     known_secret_values,

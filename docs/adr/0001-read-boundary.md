@@ -3,7 +3,7 @@
 > ADR 0001 decided **what an adapter may read across module boundaries.** Kevin's
 > 2026-08-25 ruling made Mosaic one unified codebase with its own store, so it no
 > longer governs the product. It still governs the **migration readers** in
-> `src/mosaic/adapters/`, which do read old systems across a boundary.
+> `src/beacon_legacy/adapters/`, which do read old systems across a boundary.
 >
 > **Fable ruled 2026-08-25 on how, and the distinction is the useful part.** This
 > ADR's reason — *opening another system's database bypasses its scopes, its
