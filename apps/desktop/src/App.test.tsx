@@ -240,7 +240,7 @@ describe("Beacon desktop shell", () => {
       return Promise.reject(new Error(`unexpected command: ${command}`));
     });
 
-    render(<App />);
+    const { container } = render(<App />);
     await screen.findByRole("heading", { name: "Briefing" });
     await user.click(screen.getByRole("button", { name: "Check local models" }));
     await user.click(await screen.findByRole("button", { name: "Review qwen3.8:27b" }));
@@ -248,6 +248,8 @@ describe("Beacon desktop shell", () => {
     expect(await screen.findByRole("heading", { name: "Review qwen3.8:27b" })).toBeVisible();
     expect(screen.getByText(/advertised by Ollama, not Beacon permissions/i)).toBeVisible();
     expect(screen.getByText(/future_audio.*cannot be approved/i)).toBeVisible();
+    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
+    expect(results.violations).toEqual([]);
     await user.click(screen.getByRole("checkbox", { name: "Approve tools" }));
     await user.click(screen.getByRole("button", { name: "Activate for this Workspace" }));
 
@@ -259,6 +261,49 @@ describe("Beacon desktop shell", () => {
     expect(screen.getByText(/does not create a Route or run the model/i)).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: "Deactivate qwen3.8:27b" }));
+    expect(invokeMock).toHaveBeenCalledWith("deactivate_local_model", {
+      expectedActivationId: activeLocalModel.id,
+    });
+    expect(await screen.findByText("Inactive")).toBeVisible();
+  });
+
+  it("keeps an active decision visible and revocable while Ollama is offline", async () => {
+    const user = userEvent.setup();
+    const unavailable = {
+      status: "unavailable",
+      endpoint: localModelReport.endpoint,
+      observedAtMs: 125,
+      models: [],
+    } as const;
+    const inactive = {
+      ...activeLocalModel,
+      id: "55555555-5555-4555-8555-555555555555",
+      state: "inactive",
+      predecessorId: activeLocalModel.id,
+      decidedAtMs: 126,
+    } as const;
+    mockInitialState("unlocked");
+    invokeMock.mockImplementation((command) => {
+      if (command === "session_status") return Promise.resolve(status("unlocked"));
+      if (command === "authentication_capabilities") return Promise.resolve(capabilities);
+      if (command === "session_policy") return Promise.resolve(sessionPolicy);
+      if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+      if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
+      if (command === "record_operator_activity") return Promise.resolve(null);
+      if (command === "discover_local_models") return Promise.resolve(unavailable);
+      if (command === "local_model_activations") return Promise.resolve([activeLocalModel]);
+      if (command === "deactivate_local_model") return Promise.resolve(inactive);
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.click(screen.getByRole("button", { name: "Check local models" }));
+
+    expect(await screen.findByText("Active")).toBeVisible();
+    expect(screen.getByText(/Ollama is not available/i)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Deactivate qwen3.8:27b" }));
+
     expect(invokeMock).toHaveBeenCalledWith("deactivate_local_model", {
       expectedActivationId: activeLocalModel.id,
     });
