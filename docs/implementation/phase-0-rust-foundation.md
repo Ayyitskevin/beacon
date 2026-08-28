@@ -27,9 +27,10 @@ introduced until a second real implementation exists.
 - The accepted desktop target remains Tauri v2. Its current Linux prerequisites are documented at
   <https://v2.tauri.app/start/prerequisites/>.
 
-The current host does not have every Tauri Linux development package installed. That host mutation
-is not hidden inside the Rust gate. The headless supervisor foundation builds independently while
-the desktop shell remains the next Phase 0 slice.
+This foundation checkpoint originally stopped before installing the Tauri Linux development
+packages. They are now present on the development host, and the follow-on signed-out shell is
+documented in [phase-0-desktop-shell.md](phase-0-desktop-shell.md). The supervisor remains
+independently buildable and does not gain a UI dependency.
 
 The initial schema is plain SQL in `crates/mosaicd/migrations/0001_initial.sql`. Rust includes and
 applies that versioned file inside the same immediate transaction that creates the first Workspace.
