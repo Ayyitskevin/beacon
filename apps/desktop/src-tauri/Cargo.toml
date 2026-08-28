@@ -19,7 +19,7 @@ libc.workspace = true
 beacond = { path = "../../../crates/beacond" }
 serde.workspace = true
 tauri = { version = "=2.11.5", features = [] }
+uuid.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
-uuid.workspace = true

@@ -17,8 +17,9 @@ use zeroize::Zeroizing;
 
 use crate::{
     AccessOrigin, OperatorAccountError, OperatorAccountService, OperatorSessionPolicy,
-    OperatorSessionStatus, PlatformSessionMonitor, PlatformSessionMonitorStatus, RecoveryKey,
-    SecretString, StarterOrganizationError, StarterOrganizationService, StarterOrganizationView,
+    OperatorSessionStatus, PlatformSessionMonitor, PlatformSessionMonitorStatus, ProjectDraft,
+    ProjectError, ProjectService, ProjectSummary, ProjectView, RecoveryKey, SecretString,
+    StarterOrganizationError, StarterOrganizationService, StarterOrganizationView,
     StarterResidentDraft, StartupConfig, Supervisor,
 };
 
@@ -57,6 +58,9 @@ pub enum LocalErrorCode {
     InvalidStarterRoster,
     StarterDecisionRecorded,
     StarterOrganizationUnavailable,
+    InvalidProject,
+    ProjectNotFound,
+    ProjectUnavailable,
     AccountServiceUnavailable,
     UnauthorizedClient,
     ProtocolError,
@@ -76,6 +80,7 @@ pub enum LocalTransportError {
     Supervisor(crate::SupervisorError),
     Account(OperatorAccountError),
     StarterOrganization(StarterOrganizationError),
+    Project(ProjectError),
 }
 
 impl fmt::Display for LocalTransportError {
@@ -97,6 +102,7 @@ impl fmt::Display for LocalTransportError {
             Self::StarterOrganization(error) => {
                 write!(formatter, "starter organization failed: {error}")
             }
+            Self::Project(error) => write!(formatter, "Project operation failed: {error}"),
         }
     }
 }
@@ -130,6 +136,12 @@ impl From<OperatorAccountError> for LocalTransportError {
 impl From<StarterOrganizationError> for LocalTransportError {
     fn from(error: StarterOrganizationError) -> Self {
         Self::StarterOrganization(error)
+    }
+}
+
+impl From<ProjectError> for LocalTransportError {
+    fn from(error: ProjectError) -> Self {
+        Self::Project(error)
     }
 }
 
@@ -313,6 +325,13 @@ enum LocalCommand {
     DiscardStarterOrganization {
         proposal_version: u16,
     },
+    Projects,
+    Project {
+        project_id: uuid::Uuid,
+    },
+    CreateProject {
+        draft: ProjectDraft,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -341,6 +360,12 @@ enum LocalResult {
     StarterOrganization {
         organization: StarterOrganizationView,
     },
+    Projects {
+        projects: Vec<ProjectSummary>,
+    },
+    Project {
+        project: ProjectView,
+    },
     Empty,
 }
 
@@ -358,6 +383,7 @@ pub struct LocalSupervisorServer {
     token: LocalAuthToken,
     accounts: Arc<OperatorAccountService>,
     starter_organization: StarterOrganizationService,
+    projects: ProjectService,
     platform_monitor: PlatformSessionMonitor,
 }
 
@@ -380,6 +406,7 @@ impl LocalSupervisorServer {
         let accounts = Arc::new(OperatorAccountService::open(&config.store_path)?);
         let starter_organization =
             StarterOrganizationService::new(Arc::clone(&accounts), report.workspace.id);
+        let projects = ProjectService::new(Arc::clone(&accounts), report.workspace.id);
         let token = load_local_auth_token(&config.auth_token_path)?;
         let listener = UnixListener::bind(&config.socket_path)?;
         fs::set_permissions(&config.socket_path, fs::Permissions::from_mode(0o600))?;
@@ -394,6 +421,7 @@ impl LocalSupervisorServer {
             token,
             accounts,
             starter_organization,
+            projects,
             platform_monitor: PlatformSessionMonitor::new(),
         })
     }
@@ -523,6 +551,15 @@ impl LocalSupervisorServer {
                     organization: self.starter_organization.discard(proposal_version)?,
                 }
             }
+            LocalCommand::Projects => LocalResult::Projects {
+                projects: self.projects.list()?,
+            },
+            LocalCommand::Project { project_id } => LocalResult::Project {
+                project: self.projects.get(project_id)?,
+            },
+            LocalCommand::CreateProject { draft } => LocalResult::Project {
+                project: self.projects.create(draft)?,
+            },
         };
         Ok(ResponseEnvelope {
             protocol: PROTOCOL_VERSION,
@@ -682,6 +719,18 @@ impl LocalSupervisorClient {
         )
     }
 
+    pub fn projects(&self) -> Result<Vec<ProjectSummary>, LocalTransportError> {
+        expect_projects(self.send(LocalCommand::Projects)?)
+    }
+
+    pub fn project(&self, project_id: uuid::Uuid) -> Result<ProjectView, LocalTransportError> {
+        expect_project(self.send(LocalCommand::Project { project_id })?)
+    }
+
+    pub fn create_project(&self, draft: ProjectDraft) -> Result<ProjectView, LocalTransportError> {
+        expect_project(self.send(LocalCommand::CreateProject { draft })?)
+    }
+
     fn send(&self, command: LocalCommand) -> Result<LocalResult, LocalTransportError> {
         let token = load_local_auth_token(&self.token_path)?;
         let request = RequestEnvelope {
@@ -753,10 +802,25 @@ fn expect_starter_organization(
     }
 }
 
+fn expect_projects(result: LocalResult) -> Result<Vec<ProjectSummary>, LocalTransportError> {
+    match result {
+        LocalResult::Projects { projects } => Ok(projects),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
+fn expect_project(result: LocalResult) -> Result<ProjectView, LocalTransportError> {
+    match result {
+        LocalResult::Project { project } => Ok(project),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
 fn response_from_transport_error(error: LocalTransportError) -> ResponseEnvelope {
     let wire_error = match error {
         LocalTransportError::Account(error) => wire_error_from_account(error),
         LocalTransportError::StarterOrganization(error) => wire_error_from_starter(error),
+        LocalTransportError::Project(error) => wire_error_from_project(error),
         LocalTransportError::Remote {
             code,
             retry_after_ms,
@@ -773,6 +837,26 @@ fn response_from_transport_error(error: LocalTransportError) -> ResponseEnvelope
         protocol: PROTOCOL_VERSION,
         result: None,
         error: Some(wire_error),
+    }
+}
+
+fn wire_error_from_project(error: ProjectError) -> WireError {
+    let code = match error {
+        ProjectError::Account(error) => return wire_error_from_account(error),
+        ProjectError::InvalidName
+        | ProjectError::InvalidPurpose
+        | ProjectError::InvalidDesiredOutcomes
+        | ProjectError::InvalidConstraint
+        | ProjectError::InvalidProhibition
+        | ProjectError::DuplicateCharterEntry => LocalErrorCode::InvalidProject,
+        ProjectError::NotFound => LocalErrorCode::ProjectNotFound,
+        ProjectError::InvalidStore | ProjectError::Store(_) | ProjectError::Json(_) => {
+            LocalErrorCode::ProjectUnavailable
+        }
+    };
+    WireError {
+        code,
+        retry_after_ms: None,
     }
 }
 

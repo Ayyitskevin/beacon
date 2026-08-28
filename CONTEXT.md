@@ -120,6 +120,11 @@ The Operator-authored purpose, desired outcomes, constraints, prohibitions, and 
 that determine which self-created Missions belong in a Project.
 _Avoid_: Prompt, brief, Mission description
 
+**Charter Revision**:
+An immutable Operator-authored version of a Project Charter to which Missions and alignment
+decisions bind exactly.
+_Avoid_: Current prompt, live brief, mutable instructions
+
 **Mission**:
 A finite desired outcome owned by one Team, with explicit success conditions and lifecycle.
 _Avoid_: Task, ticket, job

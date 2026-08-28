@@ -131,9 +131,83 @@ describe("Beacon desktop shell", () => {
     expect(await screen.findByRole("heading", { name: "Briefing" })).toBeVisible();
     expect(invokeMock).toHaveBeenCalledWith("complete_operator_setup", { recoverySaved: true });
     const suiteNavigation = screen.getByRole("navigation", { name: "Beacon applications" });
-    for (const button of within(suiteNavigation).getAllByRole("button")) {
-      expect(button).toBeEnabled();
-    }
+    expect(within(suiteNavigation).getByRole("button", { name: "Briefing" })).toBeEnabled();
+    expect(within(suiteNavigation).getByRole("button", { name: "Projects" })).toBeEnabled();
+    expect(within(suiteNavigation).getByRole("button", { name: "Conversations" })).toBeDisabled();
+    expect(within(suiteNavigation).getByRole("button", { name: "Knowledge" })).toBeDisabled();
+    expect(within(suiteNavigation).getByRole("button", { name: "Software" })).toBeDisabled();
+  });
+
+  it("creates a Project from an explicit Charter without granting effects or spend", async () => {
+    const user = userEvent.setup();
+    const created = {
+      id: "33333333-3333-4333-8333-333333333333",
+      workspaceId: proposedOrganization.workspaceId,
+      name: "Beacon Alpha",
+      charter: {
+        revision: 1,
+        purpose: "Build a trustworthy local software product.",
+        desiredOutcomes: ["Ship a verified vertical slice", "Preserve operator control"],
+        constraints: ["Keep Workspace data local"],
+        prohibitions: ["Do not deploy publicly"],
+        autonomyProfile: "supervised",
+        budgetBoundary: "no_spend",
+        externalEffects: "prohibited",
+        authoredAtMs: 123,
+      },
+      createdAtMs: 123,
+    } as const;
+    mockInitialState("unlocked");
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "session_status") return Promise.resolve(status("unlocked"));
+      if (command === "authentication_capabilities") return Promise.resolve(capabilities);
+      if (command === "session_policy") return Promise.resolve(sessionPolicy);
+      if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+      if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
+      if (command === "projects") return Promise.resolve([]);
+      if (command === "create_project") return Promise.resolve(created);
+      if (command === "record_operator_activity") return Promise.resolve(null);
+      return Promise.reject(new Error(`unexpected command: ${command} ${JSON.stringify(args)}`));
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    expect(await screen.findByRole("heading", { name: "Projects" })).toBeVisible();
+    expect(screen.getByText("No Projects yet")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Create Project" }));
+
+    await user.type(screen.getByLabelText("Project name"), "Beacon Alpha");
+    await user.type(
+      screen.getByLabelText("Purpose"),
+      "Build a trustworthy local software product.",
+    );
+    await user.type(
+      screen.getByLabelText("Desired outcomes"),
+      "Ship a verified vertical slice{enter}Preserve operator control",
+    );
+    await user.type(screen.getByLabelText("Constraints"), "Keep Workspace data local");
+    await user.type(screen.getByLabelText("Prohibitions"), "Do not deploy publicly");
+    expect(screen.getByRole("radio", { name: /Supervised/i })).toBeChecked();
+    expect(screen.getByText("No spend")).toBeVisible();
+    expect(screen.getByText("External effects prohibited")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Create Project" }));
+
+    expect(invokeMock).toHaveBeenCalledWith("create_project", {
+      draft: {
+        name: "Beacon Alpha",
+        charter: {
+          purpose: "Build a trustworthy local software product.",
+          desiredOutcomes: ["Ship a verified vertical slice", "Preserve operator control"],
+          constraints: ["Keep Workspace data local"],
+          prohibitions: ["Do not deploy publicly"],
+          autonomyProfile: "supervised",
+        },
+      },
+    });
+    expect(await screen.findByRole("heading", { name: "Beacon Alpha" })).toBeVisible();
+    expect(screen.getByText("Charter revision 1")).toBeVisible();
+    expect(screen.getByText("No work has started.")).toBeVisible();
   });
 
   it("edits and explicitly admits the recommended Starter Organization", async () => {
@@ -495,6 +569,28 @@ describe("Beacon desktop shell", () => {
     });
     const { container } = render(<App />);
     await screen.findByRole("heading", { name: "Build your starter organization" });
+
+    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
+    expect(results.violations).toEqual([]);
+  });
+
+  it("has no automated accessibility violations in the Project Charter composer", async () => {
+    const user = userEvent.setup();
+    invokeMock.mockImplementation((command) => {
+      if (command === "session_status") return Promise.resolve(status("unlocked"));
+      if (command === "authentication_capabilities") return Promise.resolve(capabilities);
+      if (command === "session_policy") return Promise.resolve(sessionPolicy);
+      if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+      if (command === "record_operator_activity") return Promise.resolve(null);
+      if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
+      if (command === "projects") return Promise.resolve([]);
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    await screen.findByText("No Projects yet");
+    await user.click(screen.getByRole("button", { name: "Create Project" }));
 
     const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
     expect(results.violations).toEqual([]);

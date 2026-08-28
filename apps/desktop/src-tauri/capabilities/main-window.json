@@ -16,6 +16,9 @@
     "allow-lock-session",
     "allow-starter-organization",
     "allow-accept-starter-organization",
-    "allow-discard-starter-organization"
+    "allow-discard-starter-organization",
+    "allow-projects",
+    "allow-project",
+    "allow-create-project"
   ]
 }

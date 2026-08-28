@@ -9,8 +9,9 @@ use std::time::Duration;
 
 use beacond::{
     AccessOrigin, LocalErrorCode, LocalSupervisorClient, LocalTransportError,
-    OperatorSessionPolicy, OperatorSessionStatus, PlatformSessionMonitorStatus, SecretString,
-    StarterOrganizationView, StarterResidentDraft, initialize_local_auth_token,
+    OperatorSessionPolicy, OperatorSessionStatus, PlatformSessionMonitorStatus, ProjectDraft,
+    ProjectSummary, ProjectView, SecretString, StarterOrganizationView, StarterResidentDraft,
+    initialize_local_auth_token,
 };
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -170,6 +171,30 @@ impl From<LocalTransportError> for CommandError {
                 "The Starter Organization state could not be verified.",
                 None,
             ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::InvalidProject,
+                ..
+            } => (
+                "invalid_project",
+                "Review the Project name and every Charter field.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::ProjectNotFound,
+                ..
+            } => (
+                "project_not_found",
+                "That Project is no longer available in this Workspace.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::ProjectUnavailable,
+                ..
+            } => (
+                "project_unavailable",
+                "Beacon could not verify the Project state.",
+                None,
+            ),
             _ => (
                 "account_service_unavailable",
                 "The local account service is unavailable.",
@@ -278,6 +303,24 @@ fn discard_starter_organization_value(
         .supervisor
         .discard_starter_organization(proposal_version)
         .map_err(Into::into)
+}
+
+fn projects_value(state: &DesktopState) -> Result<Vec<ProjectSummary>, CommandError> {
+    state.supervisor.projects().map_err(Into::into)
+}
+
+fn project_value(
+    state: &DesktopState,
+    project_id: uuid::Uuid,
+) -> Result<ProjectView, CommandError> {
+    state.supervisor.project(project_id).map_err(Into::into)
+}
+
+fn create_project_value(
+    state: &DesktopState,
+    draft: ProjectDraft,
+) -> Result<ProjectView, CommandError> {
+    state.supervisor.create_project(draft).map_err(Into::into)
 }
 
 // Tauri command registration and typed Result/value transport:
@@ -400,6 +443,27 @@ fn discard_starter_organization(
     proposal_version: u16,
 ) -> Result<StarterOrganizationView, CommandError> {
     discard_starter_organization_value(&state, proposal_version)
+}
+
+#[tauri::command]
+fn projects(state: State<'_, DesktopState>) -> Result<Vec<ProjectSummary>, CommandError> {
+    projects_value(&state)
+}
+
+#[tauri::command]
+fn project(
+    state: State<'_, DesktopState>,
+    project_id: uuid::Uuid,
+) -> Result<ProjectView, CommandError> {
+    project_value(&state, project_id)
+}
+
+#[tauri::command]
+fn create_project(
+    state: State<'_, DesktopState>,
+    draft: ProjectDraft,
+) -> Result<ProjectView, CommandError> {
+    create_project_value(&state, draft)
 }
 
 fn prepare_runtime_directory(path: &Path) -> Result<(), std::io::Error> {
@@ -622,7 +686,10 @@ pub fn run() {
             lock_session,
             starter_organization,
             accept_starter_organization,
-            discard_starter_organization
+            discard_starter_organization,
+            projects,
+            project,
+            create_project
         ])
         .run(tauri::generate_context!())
         .expect("failed to run the Beacon Phase 0 desktop shell");
@@ -638,17 +705,19 @@ mod tests {
     use std::thread::JoinHandle;
 
     use beacond::{
-        LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer, SecretString,
-        StarterResidentDraft, StarterRole, initialize_local_auth_token,
+        AutonomyProfile, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
+        ProjectCharterDraft, ProjectDraft, SecretString, StarterResidentDraft, StarterRole,
+        initialize_local_auth_token,
     };
     use serde_json::Value;
     use uuid::Uuid;
 
     use super::{
         DesktopState, accept_starter_organization_value, authentication_capabilities_value,
-        begin_password_setup_value, complete_operator_setup_value, migrate_legacy_app_data,
-        platform_session_monitor_status_value, prepare_runtime_directory, session_policy_value,
-        session_status_value, set_session_timeout_value, starter_organization_value,
+        begin_password_setup_value, complete_operator_setup_value, create_project_value,
+        migrate_legacy_app_data, platform_session_monitor_status_value, prepare_runtime_directory,
+        project_value, projects_value, session_policy_value, session_status_value,
+        set_session_timeout_value, starter_organization_value,
     };
 
     #[test]
@@ -790,6 +859,9 @@ mod tests {
                 "allow-starter-organization",
                 "allow-accept-starter-organization",
                 "allow-discard-starter-organization",
+                "allow-projects",
+                "allow-project",
+                "allow-create-project",
             ]
         );
     }
@@ -961,6 +1033,41 @@ mod tests {
         assert_eq!(value["decision"], "accepted");
         assert_eq!(value["residents"].as_array().unwrap().len(), 3);
         assert_eq!(value["residents"][0]["lifecycle"], "inactive");
+    }
+
+    #[test]
+    fn command_adapter_creates_and_reads_an_exact_project_charter() {
+        let state = TestState::new();
+        begin_password_setup_value(
+            &state.state,
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+        complete_operator_setup_value(&state.state, true).unwrap();
+
+        assert!(projects_value(&state.state).unwrap().is_empty());
+        let created = create_project_value(
+            &state.state,
+            ProjectDraft {
+                name: "Beacon Alpha".to_owned(),
+                charter: ProjectCharterDraft {
+                    purpose: "Build the agent office.".to_owned(),
+                    desired_outcomes: vec!["Ship a verified vertical slice".to_owned()],
+                    constraints: vec!["Keep Workspace data local".to_owned()],
+                    prohibitions: vec!["Do not deploy publicly".to_owned()],
+                    autonomy_profile: AutonomyProfile::Supervised,
+                },
+            },
+        )
+        .unwrap();
+        let value = serde_json::to_value(&created).unwrap();
+        assert_eq!(value["name"], "Beacon Alpha");
+        assert_eq!(value["charter"]["revision"], 1);
+        assert_eq!(value["charter"]["budgetBoundary"], "no_spend");
+        assert_eq!(value["charter"]["externalEffects"], "prohibited");
+        assert_eq!(project_value(&state.state, created.id).unwrap(), created);
+        assert_eq!(projects_value(&state.state).unwrap().len(), 1);
     }
 
     fn contains_workspace_material(value: &Value) -> bool {
