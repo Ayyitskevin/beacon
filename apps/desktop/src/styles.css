@@ -1,0 +1,54 @@
+:root {
+  font-family: Geist, "Segoe UI", system-ui, sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-width: 320px;
+  min-height: 100%;
+  margin: 0;
+}
+
+a[href="#main-content"] {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 10;
+  padding: 8px 12px;
+  background: Canvas;
+  color: CanvasText;
+  transform: translateY(-180%);
+}
+
+a[href="#main-content"]:focus {
+  transform: translateY(0);
+}
+
+@media (max-width: 900px) {
+  .desktop-shell {
+    grid-template-columns: 180px minmax(0, 1fr);
+  }
+
+  .desktop-inspector {
+    grid-column: 1 / -1;
+    border-top: 1px solid currentColor;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto;
+    transition-duration: 0.01ms;
+    animation-duration: 0.01ms;
+    animation-iteration-count: 1;
+  }
+}

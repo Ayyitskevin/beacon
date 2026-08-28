@@ -169,17 +169,23 @@ The shared vocabulary is in [CONTEXT.md](CONTEXT.md). Architectural decisions li
 
 ## Development foundation
 
-Phase 0 now includes the first Rust supervisor and managed-store interface beside the preserved
-Python prototype. It creates one empty local Workspace and returns an inspectable SQLite diagnostic
-report:
+Phase 0 now includes the first Rust supervisor and a native Tauri desktop shell beside the
+preserved Python prototype. The supervisor creates one empty local Workspace and returns an
+inspectable SQLite diagnostic report:
 
 ```sh
 cargo run -p mosaicd -- bootstrap
 ```
 
-The implementation checkpoint and verified dependency sources are recorded in
-[docs/implementation/phase-0-rust-foundation.md](docs/implementation/phase-0-rust-foundation.md).
-Run `scripts/gate` to verify both the preserved Python prototype and the new Rust foundation.
+The desktop intentionally opens in a locked setup-required state. Until the separately reviewed
+Operator Account work exists, its only command returns a closed three-field session status; the UI
+receives no Workspace material and exposes no Operator Command.
+
+From `apps/desktop`, use `npm run tauri dev` to launch the development shell. The implementation
+checkpoints and verified dependency sources are recorded in
+[the Rust foundation](docs/implementation/phase-0-rust-foundation.md) and
+[the desktop shell](docs/implementation/phase-0-desktop-shell.md). Run `scripts/gate` to verify the
+preserved Python prototype, the Rust workspace, the web bundle, and the native desktop build.
 
 ## License
 
