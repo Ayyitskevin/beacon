@@ -13,6 +13,9 @@ const COMMANDS: &[&str] = &[
     "starter_organization",
     "accept_starter_organization",
     "discard_starter_organization",
+    "projects",
+    "project",
+    "create_project",
 ];
 
 fn main() {

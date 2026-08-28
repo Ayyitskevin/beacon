@@ -11,9 +11,10 @@ use std::thread;
 use std::time::Duration;
 
 use beacond::{
-    AccessOrigin, LocalErrorCode, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
-    LocalTransportError, OperatorSessionPhase, PlatformMonitorState, SecretString,
-    StarterOrganizationDecision, StarterResidentDraft, StarterRole, initialize_local_auth_token,
+    AccessOrigin, AutonomyProfile, LocalErrorCode, LocalServerConfig, LocalSupervisorClient,
+    LocalSupervisorServer, LocalTransportError, OperatorSessionPhase, PlatformMonitorState,
+    ProjectCharterDraft, ProjectDraft, SecretString, StarterOrganizationDecision,
+    StarterResidentDraft, StarterRole, initialize_local_auth_token,
 };
 use uuid::Uuid;
 
@@ -239,10 +240,116 @@ fn authenticated_client_discards_the_starter_organization_over_the_real_socket()
     thread.join().unwrap().unwrap();
 }
 
+#[test]
+fn authenticated_client_creates_and_reads_projects_over_the_real_socket() {
+    let runtime = TestRuntime::new("projects");
+    let server = runtime.server();
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+
+    assert_remote_code(client.projects(), LocalErrorCode::NotAuthenticated);
+    assert_remote_code(
+        client.create_project(project_draft("Refused", AutonomyProfile::Supervised)),
+        LocalErrorCode::NotAuthenticated,
+    );
+    client
+        .begin_password_setup(
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+    client.complete_operator_setup(true).unwrap();
+    assert!(client.projects().unwrap().is_empty());
+
+    let mut invalid_drafts = Vec::new();
+    invalid_drafts.push(ProjectDraft {
+        name: "   ".to_owned(),
+        ..project_draft("Valid", AutonomyProfile::Observe)
+    });
+    invalid_drafts.push(ProjectDraft {
+        name: "line\nbreak".to_owned(),
+        ..project_draft("Valid", AutonomyProfile::Observe)
+    });
+    let mut empty_purpose = project_draft("Empty purpose", AutonomyProfile::Observe);
+    empty_purpose.charter.purpose = "   ".to_owned();
+    invalid_drafts.push(empty_purpose);
+    let mut too_many_outcomes = project_draft("Too many", AutonomyProfile::Observe);
+    too_many_outcomes.charter.desired_outcomes = vec!["Outcome".to_owned(); 21];
+    invalid_drafts.push(too_many_outcomes);
+    let mut duplicate_outcome = project_draft("Duplicate", AutonomyProfile::Observe);
+    duplicate_outcome.charter.desired_outcomes =
+        vec!["One result".to_owned(), "  One result  ".to_owned()];
+    invalid_drafts.push(duplicate_outcome);
+    let mut control_constraint = project_draft("Control", AutonomyProfile::Observe);
+    control_constraint.charter.constraints = vec!["No hidden\u{0000}state".to_owned()];
+    invalid_drafts.push(control_constraint);
+    for invalid in invalid_drafts {
+        assert_remote_code(
+            client.create_project(invalid),
+            LocalErrorCode::InvalidProject,
+        );
+        assert!(client.projects().unwrap().is_empty());
+    }
+
+    let created = client
+        .create_project(project_draft("Beacon Alpha", AutonomyProfile::Supervised))
+        .unwrap();
+    assert_eq!(created.name, "Beacon Alpha");
+    assert_eq!(created.charter.revision, 1);
+    assert_eq!(client.project(created.id).unwrap(), created);
+    assert_eq!(client.projects().unwrap()[0].id, created.id);
+    let observed = client
+        .create_project(project_draft("Research only", AutonomyProfile::Observe))
+        .unwrap();
+    assert_eq!(observed.charter.autonomy_profile, AutonomyProfile::Observe);
+    assert_remote_code(
+        client.project(Uuid::new_v4()),
+        LocalErrorCode::ProjectNotFound,
+    );
+    assert_eq!(client.projects().unwrap().len(), 2);
+
+    client.lock().unwrap();
+    assert_remote_code(client.projects(), LocalErrorCode::NotAuthenticated);
+    running.store(false, Ordering::Release);
+    thread.join().unwrap().unwrap();
+
+    let server = runtime.server();
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+    assert_remote_code(client.projects(), LocalErrorCode::NotAuthenticated);
+    client
+        .authenticate_password(
+            SecretString::new("a long local passphrase".to_owned()),
+            AccessOrigin::SameMachine,
+        )
+        .unwrap();
+    assert_eq!(client.projects().unwrap().len(), 2);
+    assert_eq!(client.project(created.id).unwrap(), created);
+    running.store(false, Ordering::Release);
+    thread.join().unwrap().unwrap();
+}
+
 fn draft(role: StarterRole, display_name: Option<&str>) -> StarterResidentDraft {
     StarterResidentDraft {
         role,
         display_name: display_name.map(str::to_owned),
+    }
+}
+
+fn project_draft(name: &str, autonomy_profile: AutonomyProfile) -> ProjectDraft {
+    ProjectDraft {
+        name: name.to_owned(),
+        charter: ProjectCharterDraft {
+            purpose: "Build a trustworthy local software product.".to_owned(),
+            desired_outcomes: vec!["Ship a verified vertical slice".to_owned()],
+            constraints: vec!["Keep Workspace data local".to_owned()],
+            prohibitions: vec!["Do not deploy publicly".to_owned()],
+            autonomy_profile,
+        },
     }
 }
 

@@ -4,11 +4,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   beginLocalPasswordSetup,
   acceptStarterOrganization,
+  createProject,
   completeLocalOperatorSetup,
   describeLocalAccountError,
   discardStarterOrganization,
   loadAuthenticationCapabilities,
   loadPlatformSessionMonitorStatus,
+  loadProject,
+  loadProjects,
   loadSessionPolicy,
   loadSessionStatus,
   loadStarterOrganization,
@@ -169,6 +172,90 @@ describe("desktop session transport", () => {
       ["discard_starter_organization", { proposalVersion: 1 }],
       ["starter_organization"],
     ]);
+  });
+
+  it("maps Project commands and accepts only the closed Charter shape", async () => {
+    const project = {
+      id: "33333333-3333-4333-8333-333333333333",
+      workspaceId: "11111111-1111-4111-8111-111111111111",
+      name: "Beacon Alpha",
+      charter: {
+        revision: 1,
+        purpose: "Build a trustworthy local software product.",
+        desiredOutcomes: ["Ship a verified vertical slice"],
+        constraints: ["Keep Workspace data local"],
+        prohibitions: ["Do not deploy publicly"],
+        autonomyProfile: "supervised",
+        budgetBoundary: "no_spend",
+        externalEffects: "prohibited",
+        authoredAtMs: 123,
+      },
+      createdAtMs: 123,
+    } as const;
+    const summary = {
+      id: project.id,
+      name: project.name,
+      charterRevision: 1,
+      autonomyProfile: "supervised",
+      createdAtMs: 123,
+    } as const;
+    const draft = {
+      name: project.name,
+      charter: {
+        purpose: project.charter.purpose,
+        desiredOutcomes: [...project.charter.desiredOutcomes],
+        constraints: [...project.charter.constraints],
+        prohibitions: [...project.charter.prohibitions],
+        autonomyProfile: "supervised" as const,
+      },
+    };
+    invokeMock
+      .mockResolvedValueOnce([summary])
+      .mockResolvedValueOnce(project)
+      .mockResolvedValueOnce(project)
+      .mockResolvedValueOnce({ ...project, executionAuthority: "ambient" });
+
+    await expect(loadProjects()).resolves.toEqual([summary]);
+    await expect(loadProject(project.id)).resolves.toEqual(project);
+    await expect(createProject(draft)).resolves.toEqual(project);
+    await expect(loadProject(project.id)).rejects.toThrow("invalid Project");
+    expect(invokeMock.mock.calls).toEqual([
+      ["projects"],
+      ["project", { projectId: project.id }],
+      ["create_project", { draft }],
+      ["project", { projectId: project.id }],
+    ]);
+  });
+
+  it.each([
+    ["a widened safety boundary", { budgetBoundary: "unlimited" }],
+    ["a changed external-effects boundary", { externalEffects: "allowed" }],
+    ["an unsupported autonomy profile", { autonomyProfile: "bounded" }],
+    ["a control character in the name", { name: "Beacon\nAlpha" }],
+  ])("rejects Project responses with %s", async (_label, change) => {
+    const project = {
+      id: "33333333-3333-4333-8333-333333333333",
+      workspaceId: "11111111-1111-4111-8111-111111111111",
+      name: "Beacon Alpha",
+      charter: {
+        revision: 1,
+        purpose: "Build a trustworthy local software product.",
+        desiredOutcomes: ["Ship a verified vertical slice"],
+        constraints: [],
+        prohibitions: [],
+        autonomyProfile: "supervised",
+        budgetBoundary: "no_spend",
+        externalEffects: "prohibited",
+        authoredAtMs: 123,
+      },
+      createdAtMs: 123,
+    };
+    const response = "name" in change
+      ? { ...project, ...change }
+      : { ...project, charter: { ...project.charter, ...change } };
+    invokeMock.mockResolvedValue(response);
+
+    await expect(loadProject(project.id)).rejects.toThrow("invalid Project");
   });
 
   it.each([

@@ -16,15 +16,21 @@ import {
   type DesktopSessionStatus,
   beginLocalPasswordSetup,
   completeLocalOperatorSetup,
+  createProject,
   describeLocalAccountError,
   discardStarterOrganization,
   loadAuthenticationCapabilities,
   loadPlatformSessionMonitorStatus,
+  loadProject,
+  loadProjects,
   loadSessionPolicy,
   loadSessionStatus,
   loadStarterOrganization,
   lockLocalSession,
   type PlatformSessionMonitorStatus,
+  type ProjectDraft,
+  type ProjectSummary,
+  type ProjectView,
   recordLocalOperatorActivity,
   recoverLocalOperatorAccount,
   setLocalSessionTimeout,
@@ -33,9 +39,12 @@ import {
   type StarterResidentDraft,
   type StarterRole,
 } from "./session";
+import { ProjectsWorkspace } from "./Projects";
 import { darkTheme, lightTheme } from "./theme";
 
-const applications = ["Briefing", "Projects", "Conversations", "Knowledge", "Software"];
+const applications = ["Briefing", "Projects", "Conversations", "Knowledge", "Software"] as const;
+type Application = (typeof applications)[number];
+const availableApplications = new Set<Application>(["Briefing", "Projects"]);
 const themeChoices = [
   { value: "light", label: "Light", accessibleLabel: "Use light theme" },
   { value: "dark", label: "Dark", accessibleLabel: "Use dark theme" },
@@ -199,6 +208,10 @@ export function App() {
     useState<PlatformSessionMonitorStatus | null>(null);
   const [starterOrganization, setStarterOrganization] =
     useState<StarterOrganizationView | null>(null);
+  const [activeApplication, setActiveApplication] = useState<Application>("Briefing");
+  const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
+  const [selectedProject, setSelectedProject] = useState<ProjectView | null>(null);
+  const [projectComposerOpen, setProjectComposerOpen] = useState(false);
   const [themeChoice, setThemeChoice] = useState<ThemeChoice>("light");
   const [systemPrefersDark, setSystemPrefersDark] = useState(
     () =>
@@ -211,7 +224,13 @@ export function App() {
 
   function applyVerifiedSession(nextSession: DesktopSessionStatus, expectedEpoch: number) {
     setSession(nextSession);
-    if (nextSession.phase !== "unlocked") setStarterOrganization(null);
+    if (nextSession.phase !== "unlocked") {
+      setStarterOrganization(null);
+      setProjects(null);
+      setSelectedProject(null);
+      setProjectComposerOpen(false);
+      setActiveApplication("Briefing");
+    }
     setForegroundVerified(
       nextSession.phase === "unlocked" &&
         foregroundEligible.current &&
@@ -244,6 +263,10 @@ export function App() {
     if (!unlocked) return;
     let active = true;
     setStarterOrganization(null);
+    setProjects(null);
+    setSelectedProject(null);
+    setProjectComposerOpen(false);
+    setActiveApplication("Briefing");
     Promise.all([
       loadSessionPolicy(),
       loadPlatformSessionMonitorStatus(),
@@ -260,6 +283,8 @@ export function App() {
         setSession(null);
         setForegroundVerified(false);
         setStarterOrganization(null);
+        setProjects(null);
+        setSelectedProject(null);
         setViewState("error");
       },
     );
@@ -267,6 +292,30 @@ export function App() {
       active = false;
     };
   }, [unlocked]);
+
+  useEffect(() => {
+    if (
+      !unlocked ||
+      activeApplication !== "Projects" ||
+      !starterOrganization ||
+      starterOrganization.decision === "proposed" ||
+      projects !== null
+    ) {
+      return;
+    }
+    let active = true;
+    void loadProjects().then(
+      (loaded) => {
+        if (active) setProjects(loaded);
+      },
+      (error) => {
+        if (active) setActionError(describeLocalAccountError(error));
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [activeApplication, projects, starterOrganization, unlocked]);
 
   useEffect(() => {
     if (!unlocked) return;
@@ -282,6 +331,10 @@ export function App() {
           if (nextSession.phase !== "unlocked") {
             setForegroundVerified(false);
             setStarterOrganization(null);
+            setProjects(null);
+            setSelectedProject(null);
+            setProjectComposerOpen(false);
+            setActiveApplication("Briefing");
           }
           setPlatformMonitor(monitor);
         },
@@ -290,6 +343,8 @@ export function App() {
           setSession(null);
           setForegroundVerified(false);
           setStarterOrganization(null);
+          setProjects(null);
+          setSelectedProject(null);
           setViewState("error");
         },
       ).finally(() => {
@@ -320,6 +375,8 @@ export function App() {
           setSession(null);
           setForegroundVerified(false);
           setStarterOrganization(null);
+          setProjects(null);
+          setSelectedProject(null);
           setViewState("error");
         },
       ).finally(() => {
@@ -448,6 +505,10 @@ export function App() {
       setSession(await lockLocalSession());
       setForegroundVerified(false);
       setStarterOrganization(null);
+      setProjects(null);
+      setSelectedProject(null);
+      setProjectComposerOpen(false);
+      setActiveApplication("Briefing");
       setRecoveryMode(false);
       setReplacementKey("");
     });
@@ -480,6 +541,31 @@ export function App() {
     });
   }
 
+  async function openProject(projectId: string) {
+    await runAction(async () => {
+      setSelectedProject(await loadProject(projectId));
+      setProjectComposerOpen(false);
+    });
+  }
+
+  async function createProjectFromCharter(draft: ProjectDraft) {
+    await runAction(async () => {
+      const created = await createProject(draft);
+      setProjects((current) => [
+        {
+          id: created.id,
+          name: created.name,
+          charterRevision: created.charter.revision,
+          autonomyProfile: created.charter.autonomyProfile,
+          createdAtMs: created.createdAtMs,
+        },
+        ...(current ?? []),
+      ]);
+      setSelectedProject(created);
+      setProjectComposerOpen(false);
+    });
+  }
+
   async function runAction(action: () => Promise<void>) {
     setBusy(true);
     setActionError("");
@@ -506,7 +592,17 @@ export function App() {
               key={application}
               className={classes.navigationButton}
               appearance="subtle"
-              disabled={!unlocked}
+              aria-current={activeApplication === application ? "page" : undefined}
+              disabled={
+                !unlocked ||
+                !availableApplications.has(application) ||
+                !starterOrganization ||
+                starterOrganization.decision === "proposed"
+              }
+              onClick={() => {
+                setActionError("");
+                setActiveApplication(application);
+              }}
             >
               {application}
             </Button>
@@ -633,6 +729,21 @@ export function App() {
               error={actionError}
               onAccept={acceptStarterRoster}
               onDiscard={discardStarterRoster}
+            />
+          ) : activeApplication === "Projects" ? (
+            <ProjectsWorkspace
+              projects={projects}
+              selectedProject={selectedProject}
+              composerOpen={projectComposerOpen}
+              busy={busy}
+              error={actionError}
+              onCreate={() => {
+                setSelectedProject(null);
+                setProjectComposerOpen(true);
+              }}
+              onCancelCreate={() => setProjectComposerOpen(false)}
+              onOpenProject={openProject}
+              onSubmitProject={createProjectFromCharter}
             />
           ) : (
             <Briefing

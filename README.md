@@ -182,12 +182,20 @@ offers the editable Starter Organization. The Owner may admit any non-empty sele
 Builder, Reviewer, and Researcher identities or explicitly discard the proposal. Every admitted
 Resident remains inactive and receives no authority.
 
+The Projects application is the first working suite surface after Briefing. The Owner can create
+a Project from a structured Charter containing its purpose, desired outcomes, constraints,
+prohibitions, and an Observe or Supervised autonomy profile. Beacon preserves Charter revision 1
+immutably, assigns no spending boundary, prohibits external effects, and starts no work as a side
+effect of creation.
+
 From `apps/desktop`, use `npm run tauri dev` to launch the development shell. The implementation
 checkpoints and verified dependency sources are recorded in
 [the Rust foundation](docs/implementation/phase-0-rust-foundation.md) and
 [the desktop shell](docs/implementation/phase-0-desktop-shell.md). The closed proposal and
 admission boundary is recorded in
 [the Starter Organization checkpoint](docs/implementation/phase-0-starter-organization.md).
+The Project and immutable Charter boundary is recorded in
+[the Projects checkpoint](docs/implementation/phase-0-projects.md).
 Run `scripts/gate` to verify the
 preserved Beacon Legacy Desk, the Rust workspace, the web bundle, and the native desktop build.
 The exact pre-Beacon compatibility boundary is recorded in the

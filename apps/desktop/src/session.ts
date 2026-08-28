@@ -57,6 +57,36 @@ export type StarterOrganizationView = {
   residents: ResidentAgentSummary[];
 };
 
+export type AutonomyProfile = "observe" | "supervised";
+export type ProjectCharterDraft = {
+  purpose: string;
+  desiredOutcomes: string[];
+  constraints: string[];
+  prohibitions: string[];
+  autonomyProfile: AutonomyProfile;
+};
+export type ProjectDraft = { name: string; charter: ProjectCharterDraft };
+export type ProjectCharter = ProjectCharterDraft & {
+  revision: number;
+  budgetBoundary: "no_spend";
+  externalEffects: "prohibited";
+  authoredAtMs: number;
+};
+export type ProjectView = {
+  id: string;
+  workspaceId: string;
+  name: string;
+  charter: ProjectCharter;
+  createdAtMs: number;
+};
+export type ProjectSummary = {
+  id: string;
+  name: string;
+  charterRevision: number;
+  autonomyProfile: AutonomyProfile;
+  createdAtMs: number;
+};
+
 // Tauri's current frontend command adapter returns a Promise for the Rust value.
 // Source: https://v2.tauri.app/develop/calling-rust/#commands
 export async function loadSessionStatus(): Promise<DesktopSessionStatus> {
@@ -182,6 +212,18 @@ export async function discardStarterOrganization(
   );
 }
 
+export async function loadProjects(): Promise<ProjectSummary[]> {
+  return invokeAndValidate("projects", undefined, isProjectSummaries, "Project list");
+}
+
+export async function loadProject(projectId: string): Promise<ProjectView> {
+  return invokeAndValidate("project", { projectId }, isProjectView, "Project");
+}
+
+export async function createProject(draft: ProjectDraft): Promise<ProjectView> {
+  return invokeAndValidate("create_project", { draft }, isProjectView, "Project");
+}
+
 export function describeLocalAccountError(error: unknown): string {
   if (typeof error !== "object" || error === null || Array.isArray(error)) {
     return "Beacon could not complete that local account action.";
@@ -215,6 +257,12 @@ export function describeLocalAccountError(error: unknown): string {
       return "This Starter Organization was already decided.";
     case "starter_organization_unavailable":
       return "Beacon could not verify the Starter Organization state.";
+    case "invalid_project":
+      return "Review the Project name and every Charter field.";
+    case "project_not_found":
+      return "That Project is no longer available in this Workspace.";
+    case "project_unavailable":
+      return "Beacon could not verify the Project state.";
     default:
       return "Beacon could not complete that local account action.";
   }
@@ -342,6 +390,105 @@ function isStarterOrganizationView(value: unknown): value is StarterOrganization
   return value.decision === "accepted"
     ? value.residents.length >= 1 && value.residents.length <= 4
     : value.residents.length === 0;
+}
+
+function isProjectSummaries(value: unknown): value is ProjectSummary[] {
+  return Array.isArray(value) && value.every(isProjectSummary);
+}
+
+function isProjectSummary(value: unknown): value is ProjectSummary {
+  return (
+    hasExactKeys(value, [
+      "autonomyProfile",
+      "charterRevision",
+      "createdAtMs",
+      "id",
+      "name",
+    ]) &&
+    isUuid(value.id) &&
+    isProjectName(value.name) &&
+    isPositiveInteger(value.charterRevision) &&
+    isAutonomyProfile(value.autonomyProfile) &&
+    isNonnegativeInteger(value.createdAtMs)
+  );
+}
+
+function isProjectView(value: unknown): value is ProjectView {
+  return (
+    hasExactKeys(value, ["charter", "createdAtMs", "id", "name", "workspaceId"]) &&
+    isUuid(value.id) &&
+    isUuid(value.workspaceId) &&
+    isProjectName(value.name) &&
+    isProjectCharter(value.charter) &&
+    isNonnegativeInteger(value.createdAtMs)
+  );
+}
+
+function isProjectCharter(value: unknown): value is ProjectCharter {
+  return (
+    hasExactKeys(value, [
+      "authoredAtMs",
+      "autonomyProfile",
+      "budgetBoundary",
+      "constraints",
+      "desiredOutcomes",
+      "externalEffects",
+      "prohibitions",
+      "purpose",
+      "revision",
+    ]) &&
+    isPositiveInteger(value.revision) &&
+    isPurpose(value.purpose) &&
+    isCharterItems(value.desiredOutcomes, true) &&
+    isCharterItems(value.constraints, false) &&
+    isCharterItems(value.prohibitions, false) &&
+    isAutonomyProfile(value.autonomyProfile) &&
+    value.budgetBoundary === "no_spend" &&
+    value.externalEffects === "prohibited" &&
+    isNonnegativeInteger(value.authoredAtMs)
+  );
+}
+
+function isProjectName(value: unknown): value is string {
+  return isTrimmedText(value, 120) && !/\p{Cc}/u.test(value);
+}
+
+function isPurpose(value: unknown): value is string {
+  return (
+    isTrimmedText(value, 2_000) &&
+    !/\p{Cc}/u.test(value.replaceAll("\n", ""))
+  );
+}
+
+function isCharterItems(value: unknown, required: boolean): value is string[] {
+  if (!Array.isArray(value) || value.length > 20 || (required && value.length === 0)) return false;
+  const distinct = new Set<string>();
+  for (const item of value) {
+    if (!isTrimmedText(item, 300) || /\p{Cc}/u.test(item) || distinct.has(item)) return false;
+    distinct.add(item);
+  }
+  return true;
+}
+
+function isTrimmedText(value: unknown, maxCharacters: number): value is string {
+  return (
+    typeof value === "string" &&
+    value.trim() === value &&
+    value.length > 0 &&
+    Array.from(value).length <= maxCharacters
+  );
+}
+
+function isAutonomyProfile(value: unknown): value is AutonomyProfile {
+  return value === "observe" || value === "supervised";
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
+}
+
+function isNonnegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function isUuid(value: unknown): value is string {
