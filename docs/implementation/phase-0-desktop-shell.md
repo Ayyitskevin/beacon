@@ -58,6 +58,8 @@ a claim that the later interactive product has completed manual Orca testing.
   jsdom as documented at <https://vitest.dev/guide/environment>.
 - axe-core 4.13.0 checks the rendered signed-out structure. jsdom cannot render color contrast, so
   deterministic WCAG luminance tests cover the fixed palette separately.
+- Node 22.23.2 and npm 10.9.8 are exact development inputs. `.node-version`, `packageManager`, and
+  strict package-engine checks fail the clean install when that runtime contract is not met.
 
 ## Development and verification
 
@@ -74,8 +76,9 @@ cd apps/desktop
 npm run tauri dev
 ```
 
-The repository-wide `scripts/gate` performs a clean lifecycle-script-disabled npm install, desktop
-tests, a production web build, a Tauri no-bundle native build, the preserved Python checks, and all
-Rust checks. `bundle.active` remains false: this checkpoint builds a local executable but creates no
-public installer, package identity, or release artifact. The visible Beacon title is temporary;
-internal npm, Cargo, and Tauri identifiers continue to use the approved `mosaic` placeholder.
+The desktop stage performs a clean lifecycle-script-disabled npm install, frontend tests, the native
+pre-authentication contract test, a production web build, and a Tauri no-bundle native build. The
+repository-wide gate adds the preserved Python checks and all Rust checks. `bundle.active` remains
+false: this checkpoint builds a local executable but creates no public installer, package identity,
+or release artifact. The visible Beacon title is temporary; internal npm, Cargo, and Tauri
+identifiers continue to use the approved `mosaic` placeholder.

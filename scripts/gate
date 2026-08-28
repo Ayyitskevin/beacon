@@ -75,6 +75,7 @@ case "$stage" in
     desktop)
         run "npm clean install" run_in_desktop npm ci --ignore-scripts
         run "desktop tests"    run_in_desktop npm test
+        run "desktop Rust test" cargo test -p mosaic-desktop --all-targets
         run "desktop build"    run_in_desktop npm run build
         run "Tauri build"      run_in_desktop npm run tauri build -- --no-bundle
         ;;
@@ -90,6 +91,7 @@ case "$stage" in
         run "pytest"      "$PY" -m pytest -q
         run "npm clean install" run_in_desktop npm ci --ignore-scripts
         run "desktop tests"    run_in_desktop npm test
+        run "desktop Rust test" cargo test -p mosaic-desktop --all-targets
         run "desktop build"    run_in_desktop npm run build
         run "Tauri build"      run_in_desktop npm run tauri build -- --no-bundle
         run "cargo fmt"    cargo fmt --all --check
