@@ -1,4 +1,12 @@
-const COMMANDS: &[&str] = &["session_status"];
+const COMMANDS: &[&str] = &[
+    "authentication_capabilities",
+    "session_status",
+    "begin_password_setup",
+    "complete_operator_setup",
+    "authenticate_password",
+    "recover_operator_account",
+    "lock_session",
+];
 
 fn main() {
     tauri_build::try_build(

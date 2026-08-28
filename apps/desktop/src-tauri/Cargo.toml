@@ -15,8 +15,11 @@ crate-type = ["lib", "cdylib", "staticlib"]
 tauri-build = { version = "=2.6.3", features = [] }
 
 [dependencies]
+libc.workspace = true
+mosaicd = { path = "../../../crates/mosaicd" }
 serde.workspace = true
 tauri = { version = "=2.11.5", features = [] }
 
 [dev-dependencies]
 serde_json.workspace = true
+uuid.workspace = true

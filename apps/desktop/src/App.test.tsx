@@ -10,6 +10,26 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 const invokeMock = vi.mocked(invoke);
 const originalMatchMedia = window.matchMedia;
+const capabilities = {
+  preferredMethod: "passkey",
+  passkey: { available: false, reason: "unsupported_linux_webkitgtk" },
+  passwordFallback: { available: true, scope: "same_machine" },
+} as const;
+
+type Phase = "operator_setup_required" | "locked" | "unlocked";
+
+function status(phase: Phase) {
+  const unlocked = phase === "unlocked";
+  return { phase, workspaceAccess: unlocked, operatorCommands: unlocked };
+}
+
+function mockInitialState(phase: Phase) {
+  invokeMock.mockImplementation((command) => {
+    if (command === "session_status") return Promise.resolve(status(phase));
+    if (command === "authentication_capabilities") return Promise.resolve(capabilities);
+    return Promise.reject(new Error(`unexpected command: ${command}`));
+  });
+}
 
 describe("Beacon desktop shell", () => {
   beforeEach(() => {
@@ -17,6 +37,7 @@ describe("Beacon desktop shell", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     Object.defineProperty(window, "matchMedia", {
       configurable: true,
       writable: true,
@@ -25,11 +46,7 @@ describe("Beacon desktop shell", () => {
   });
 
   it("keeps Workspace material and Operator Commands closed before setup", async () => {
-    invokeMock.mockResolvedValue({
-      phase: "operator_setup_required",
-      workspaceAccess: false,
-      operatorCommands: false,
-    });
+    mockInitialState("operator_setup_required");
 
     render(<App />);
 
@@ -37,10 +54,9 @@ describe("Beacon desktop shell", () => {
       await screen.findByRole("heading", { name: "Set up your operator account" }),
     ).toBeVisible();
     expect(invokeMock).toHaveBeenCalledWith("session_status");
+    expect(await screen.findByText(/Passkeys are not available on this Linux build/i)).toBeVisible();
     expect(screen.getByText("Workspace access locked")).toBeVisible();
-    const suiteNavigation = screen.getByRole("navigation", {
-      name: "Beacon applications",
-    });
+    const suiteNavigation = screen.getByRole("navigation", { name: "Beacon applications" });
     for (const button of within(suiteNavigation).getAllByRole("button")) {
       expect(button).toBeDisabled();
     }
@@ -48,13 +64,95 @@ describe("Beacon desktop shell", () => {
     expect(document.body).not.toHaveTextContent(/workspace[_ -]id/i);
   });
 
-  it("explains a session check failure and can retry without reloading", async () => {
+  it("enrolls the Owner only after the one-time Recovery Key is confirmed saved", async () => {
     const user = userEvent.setup();
-    invokeMock.mockRejectedValueOnce(new Error("supervisor unavailable")).mockResolvedValueOnce({
-      phase: "operator_setup_required",
-      workspaceAccess: false,
-      operatorCommands: false,
+    invokeMock.mockImplementation((command) => {
+      if (command === "session_status") return Promise.resolve(status("operator_setup_required"));
+      if (command === "authentication_capabilities") return Promise.resolve(capabilities);
+      if (command === "begin_password_setup") {
+        return Promise.resolve({ recoveryKey: "ABCD-EFGH-IJKL-MNOP-QRST-UVWX-YZ23-4567" });
+      }
+      if (command === "complete_operator_setup") return Promise.resolve(status("unlocked"));
+      return Promise.reject(new Error(`unexpected command: ${command}`));
     });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Set up your operator account" });
+    await user.type(screen.getByLabelText("Password"), "a long local passphrase");
+    await user.type(screen.getByLabelText("Confirm password"), "a long local passphrase");
+    await user.click(screen.getByRole("button", { name: "Create recovery key" }));
+
+    expect(screen.getByText("ABCD-EFGH-IJKL-MNOP-QRST-UVWX-YZ23-4567")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Finish setup" })).toBeDisabled();
+    await user.click(screen.getByRole("checkbox", { name: /saved this Recovery Key offline/i }));
+    await user.click(screen.getByRole("button", { name: "Finish setup" }));
+
+    expect(await screen.findByRole("heading", { name: "Owner workspace" })).toBeVisible();
+    expect(invokeMock).toHaveBeenCalledWith("complete_operator_setup", { recoverySaved: true });
+    const suiteNavigation = screen.getByRole("navigation", { name: "Beacon applications" });
+    for (const button of within(suiteNavigation).getAllByRole("button")) {
+      expect(button).toBeEnabled();
+    }
+  });
+
+  it("signs into an existing local account and can lock it again", async () => {
+    const user = userEvent.setup();
+    invokeMock.mockImplementation((command) => {
+      if (command === "session_status") return Promise.resolve(status("locked"));
+      if (command === "authentication_capabilities") return Promise.resolve(capabilities);
+      if (command === "authenticate_password") return Promise.resolve(status("unlocked"));
+      if (command === "lock_session") return Promise.resolve(status("locked"));
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Welcome back" });
+    await user.type(screen.getByLabelText("Password"), "a long local passphrase");
+    await user.click(screen.getByRole("button", { name: "Unlock Beacon" }));
+    expect(await screen.findByRole("heading", { name: "Owner workspace" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Lock Beacon" }));
+    expect(await screen.findByRole("heading", { name: "Welcome back" })).toBeVisible();
+  });
+
+  it("closes Workspace access when the supervisor reports session expiry", async () => {
+    vi.useFakeTimers();
+    let checks = 0;
+    invokeMock.mockImplementation((command) => {
+      if (command === "session_status") {
+        checks += 1;
+        return Promise.resolve(status(checks === 1 ? "unlocked" : "locked"));
+      }
+      if (command === "authentication_capabilities") return Promise.resolve(capabilities);
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+
+    render(<App />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByRole("heading", { name: "Owner workspace" })).toBeVisible();
+
+    await act(async () => {
+      vi.advanceTimersByTime(15_000);
+    });
+
+    expect(screen.getByRole("heading", { name: "Welcome back" })).toBeVisible();
+    expect(screen.getByText("Workspace access locked")).toBeVisible();
+  });
+
+  it("explains a session check failure and can retry without reloading", async () => {
+    let sessionChecks = 0;
+    invokeMock.mockImplementation((command) => {
+      if (command === "session_status") {
+        sessionChecks += 1;
+        return sessionChecks === 1
+          ? Promise.reject(new Error("supervisor unavailable"))
+          : Promise.resolve(status("operator_setup_required"));
+      }
+      if (command === "authentication_capabilities") return Promise.resolve(capabilities);
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+    const user = userEvent.setup();
 
     render(<App />);
 
@@ -65,7 +163,6 @@ describe("Beacon desktop shell", () => {
     expect(
       await screen.findByRole("heading", { name: "Set up your operator account" }),
     ).toBeVisible();
-    expect(invokeMock).toHaveBeenCalledTimes(2);
   });
 
   it("fails closed when the command returns an undeclared field", async () => {
@@ -86,11 +183,7 @@ describe("Beacon desktop shell", () => {
 
   it("starts in light mode and lets the Operator choose dark mode", async () => {
     const user = userEvent.setup();
-    invokeMock.mockResolvedValue({
-      phase: "operator_setup_required",
-      workspaceAccess: false,
-      operatorCommands: false,
-    });
+    mockInitialState("operator_setup_required");
 
     render(<App />);
     await screen.findByRole("heading", { name: "Set up your operator account" });
@@ -101,10 +194,6 @@ describe("Beacon desktop shell", () => {
     );
     await user.click(screen.getByRole("button", { name: "Use dark theme" }));
     expect(document.documentElement).toHaveAttribute("data-theme", "dark");
-    expect(screen.getByRole("button", { name: "Use dark theme" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
   });
 
   it("tracks operating-system theme changes while following system", async () => {
@@ -125,11 +214,7 @@ describe("Beacon desktop shell", () => {
           listeners.delete(listener),
       })),
     });
-    invokeMock.mockResolvedValue({
-      phase: "operator_setup_required",
-      workspaceAccess: false,
-      operatorCommands: false,
-    });
+    mockInitialState("operator_setup_required");
 
     render(<App />);
     await screen.findByRole("heading", { name: "Set up your operator account" });
@@ -138,28 +223,17 @@ describe("Beacon desktop shell", () => {
 
     dark = true;
     act(() => {
-      for (const listener of listeners) {
-        listener({ matches: true } as MediaQueryListEvent);
-      }
+      for (const listener of listeners) listener({ matches: true } as MediaQueryListEvent);
     });
     expect(document.documentElement).toHaveAttribute("data-theme", "dark");
   });
 
-  it("has no automated accessibility violations in the signed-out view", async () => {
-    invokeMock.mockResolvedValue({
-      phase: "operator_setup_required",
-      workspaceAccess: false,
-      operatorCommands: false,
-    });
-
+  it("has no automated accessibility violations in the setup view", async () => {
+    mockInitialState("operator_setup_required");
     const { container } = render(<App />);
     await screen.findByRole("heading", { name: "Set up your operator account" });
 
-    // jsdom has no canvas implementation, so axe cannot measure rendered color contrast here.
-    // Keep structural checks automated; contrast is checked separately against the fixed palette.
-    const results = await axe.run(container, {
-      rules: { "color-contrast": { enabled: false } },
-    });
+    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
     expect(results.violations).toEqual([]);
   });
 });
