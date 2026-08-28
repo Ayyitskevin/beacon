@@ -868,7 +868,7 @@ export function App() {
           <p className={classes.status}>
             Workspace access {unlocked ? "open" : "locked"}
           </p>
-          <p className={classes.status}>Network activity off</p>
+          <p className={classes.status}>External network activity off</p>
           {unlocked && (
             <>
               <h3 className={classes.themeHeading}>Session</h3>
