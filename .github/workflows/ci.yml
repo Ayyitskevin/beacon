@@ -16,6 +16,43 @@ env:
   PYTHONDONTWRITEBYTECODE: "1"
 
 jobs:
+  product:
+    name: Beacon product
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      # Source: https://github.com/actions/setup-node/releases/tag/v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.23.2"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Select the pinned npm release
+        run: npm install --global npm@10.9.8
+      - name: Install Tauri Linux prerequisites
+        # Source: https://v2.tauri.app/start/prerequisites/#linux
+        run: >-
+          sudo apt-get update &&
+          sudo apt-get install --no-install-recommends --yes
+          libwebkit2gtk-4.1-dev
+          build-essential
+          curl
+          wget
+          file
+          libxdo-dev
+          libssl-dev
+          libayatana-appindicator3-dev
+          librsvg2-dev
+      - name: Report pinned toolchains
+        run: node --version && npm --version && rustc --version && cargo --version
+      - name: Desktop gate
+        run: scripts/gate desktop
+      - name: Rust workspace gate
+        run: scripts/gate rust
+
   quality:
     name: Lint and format
     runs-on: ubuntu-latest
