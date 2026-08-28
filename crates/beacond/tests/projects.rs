@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 use beacond::{
     AutonomyProfile, BudgetBoundary, ExternalEffects, OperatorAccountService, OperatorSessionPhase,
@@ -130,12 +131,302 @@ fn owner_creates_and_reads_an_immutable_first_charter() {
 #[test]
 fn project_commands_require_an_active_owner_session() {
     let (_store, accounts, projects) = enrolled_service("locked");
+    let created = projects
+        .create(draft("Protected", AutonomyProfile::Supervised))
+        .unwrap();
     accounts.lock().unwrap();
 
     assert!(matches!(projects.list(), Err(ProjectError::Account(_))));
     assert!(matches!(
+        projects.charter_history(created.id),
+        Err(ProjectError::Account(_))
+    ));
+    assert!(matches!(
         projects.create(draft("Refused", AutonomyProfile::Observe)),
         Err(ProjectError::Account(_))
+    ));
+    assert!(matches!(
+        projects.revise_charter(
+            created.id,
+            1,
+            draft("ignored", AutonomyProfile::Observe).charter
+        ),
+        Err(ProjectError::Account(_))
+    ));
+}
+
+#[test]
+fn owner_appends_an_immutable_charter_revision_and_advances_current_intent_atomically() {
+    let (store, accounts, projects) = enrolled_service("revise");
+    let created = projects
+        .create(draft("Beacon Alpha", AutonomyProfile::Supervised))
+        .unwrap();
+    let original = created.charter.clone();
+    let replacement = ProjectCharterDraft {
+        purpose: "Build the trustworthy agent office, starting with software production."
+            .to_owned(),
+        desired_outcomes: vec![
+            "Publish an evaluated software change".to_owned(),
+            "Preserve exact authority history".to_owned(),
+        ],
+        constraints: vec!["Keep Workspace data local".to_owned()],
+        prohibitions: vec!["Do not deploy publicly".to_owned()],
+        autonomy_profile: AutonomyProfile::Observe,
+    };
+
+    let revised = projects
+        .revise_charter(created.id, created.charter.revision, replacement.clone())
+        .unwrap();
+
+    assert_eq!(revised.id, created.id);
+    assert_eq!(revised.name, created.name);
+    assert_eq!(revised.created_at_ms, created.created_at_ms);
+    assert_eq!(revised.charter.revision, 2);
+    assert_eq!(revised.charter.purpose, replacement.purpose);
+    assert_eq!(
+        revised.charter.desired_outcomes,
+        replacement.desired_outcomes
+    );
+    assert_eq!(revised.charter.autonomy_profile, AutonomyProfile::Observe);
+    assert_eq!(revised.charter.budget_boundary, BudgetBoundary::NoSpend);
+    assert_eq!(
+        revised.charter.external_effects,
+        ExternalEffects::Prohibited
+    );
+    assert_eq!(projects.get(created.id).unwrap(), revised);
+    assert_eq!(
+        projects.charter_history(created.id).unwrap(),
+        [original, revised.charter.clone()]
+    );
+    assert_eq!(projects.list().unwrap()[0].charter_revision, 2);
+
+    drop(projects);
+    drop(accounts);
+    let report = Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .unwrap();
+    assert_eq!(report.diagnostics.persisted_event_count, 3);
+}
+
+#[test]
+fn stale_or_unchanged_charter_revisions_are_refused_without_partial_state() {
+    let (store, _accounts, projects) = enrolled_service("revision-refusal");
+    let created = projects
+        .create(draft("Beacon Alpha", AutonomyProfile::Supervised))
+        .unwrap();
+    let revision_two_draft = ProjectCharterDraft {
+        purpose: "A revised purpose.".to_owned(),
+        desired_outcomes: vec!["A revised outcome".to_owned()],
+        constraints: vec![],
+        prohibitions: vec![],
+        autonomy_profile: AutonomyProfile::Observe,
+    };
+    let revised = projects
+        .revise_charter(created.id, 1, revision_two_draft.clone())
+        .unwrap();
+
+    assert!(matches!(
+        projects.revise_charter(
+            created.id,
+            1,
+            ProjectCharterDraft {
+                purpose: "A conflicting purpose.".to_owned(),
+                ..revision_two_draft.clone()
+            }
+        ),
+        Err(ProjectError::StaleCharterRevision {
+            expected: 1,
+            current: 2
+        })
+    ));
+    assert!(matches!(
+        projects.revise_charter(created.id, 2, revision_two_draft),
+        Err(ProjectError::UnchangedCharter)
+    ));
+    assert!(matches!(
+        projects.revise_charter(
+            Uuid::new_v4(),
+            1,
+            draft("ignored", AutonomyProfile::Observe).charter
+        ),
+        Err(ProjectError::NotFound)
+    ));
+
+    assert_eq!(projects.get(created.id).unwrap(), revised);
+    assert_eq!(projects.charter_history(created.id).unwrap().len(), 2);
+    let connection = Connection::open(&store.path).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM events WHERE kind = 'project.charter_revised'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn concurrent_revisions_from_the_same_base_commit_exactly_once() {
+    let (_store, accounts, first_service) = enrolled_service("concurrent-revision");
+    let created = first_service
+        .create(draft("Beacon Alpha", AutonomyProfile::Supervised))
+        .unwrap();
+    let second_service = ProjectService::new(Arc::clone(&accounts), created.workspace_id);
+    let barrier = Arc::new(Barrier::new(3));
+
+    let first_barrier = Arc::clone(&barrier);
+    let project_id = created.id;
+    let first = thread::spawn(move || {
+        first_barrier.wait();
+        first_service.revise_charter(
+            project_id,
+            1,
+            ProjectCharterDraft {
+                purpose: "First concurrent intent.".to_owned(),
+                desired_outcomes: vec!["First outcome".to_owned()],
+                constraints: vec![],
+                prohibitions: vec![],
+                autonomy_profile: AutonomyProfile::Observe,
+            },
+        )
+    });
+    let second_barrier = Arc::clone(&barrier);
+    let second = thread::spawn(move || {
+        second_barrier.wait();
+        second_service.revise_charter(
+            project_id,
+            1,
+            ProjectCharterDraft {
+                purpose: "Second concurrent intent.".to_owned(),
+                desired_outcomes: vec!["Second outcome".to_owned()],
+                constraints: vec![],
+                prohibitions: vec![],
+                autonomy_profile: AutonomyProfile::Observe,
+            },
+        )
+    });
+
+    barrier.wait();
+    let results = [first.join().unwrap(), second.join().unwrap()];
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(
+                result,
+                Err(ProjectError::StaleCharterRevision {
+                    expected: 1,
+                    current: 2
+                })
+            ))
+            .count(),
+        1
+    );
+
+    let projects = ProjectService::new(Arc::clone(&accounts), created.workspace_id);
+    assert_eq!(projects.get(created.id).unwrap().charter.revision, 2);
+    assert_eq!(projects.charter_history(created.id).unwrap().len(), 2);
+}
+
+#[test]
+fn restart_refuses_a_charter_revision_without_its_exact_event() {
+    let (store, accounts, projects) = enrolled_service("missing-revision-event");
+    let created = projects
+        .create(draft("Audited", AutonomyProfile::Supervised))
+        .unwrap();
+    projects
+        .revise_charter(
+            created.id,
+            1,
+            draft("ignored", AutonomyProfile::Observe).charter,
+        )
+        .unwrap();
+    drop(projects);
+    drop(accounts);
+    let connection = Connection::open(&store.path).unwrap();
+    connection
+        .execute(
+            "DELETE FROM events WHERE kind = 'project.charter_revised'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    assert!(matches!(
+        Supervisor::bootstrap(StartupConfig {
+            store_path: store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        }),
+        Err(beacond::SupervisorError::ProjectStateMismatch)
+    ));
+}
+
+#[test]
+fn restart_refuses_a_charter_revision_event_bound_to_the_wrong_predecessor() {
+    let (store, accounts, projects) = enrolled_service("revision-event-predecessor");
+    let created = projects
+        .create(draft("Audited", AutonomyProfile::Supervised))
+        .unwrap();
+    projects
+        .revise_charter(
+            created.id,
+            1,
+            draft("ignored", AutonomyProfile::Observe).charter,
+        )
+        .unwrap();
+    drop(projects);
+    drop(accounts);
+    let connection = Connection::open(&store.path).unwrap();
+    connection
+        .execute(
+            "UPDATE events
+             SET payload_json = json_set(payload_json, '$.previous_revision', 0)
+             WHERE kind = 'project.charter_revised'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    assert!(matches!(
+        Supervisor::bootstrap(StartupConfig {
+            store_path: store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        }),
+        Err(beacond::SupervisorError::ProjectEventMismatch(_))
+    ));
+}
+
+#[test]
+fn restart_refuses_project_update_time_that_does_not_match_current_intent() {
+    let (store, accounts, projects) = enrolled_service("revision-update-time");
+    let created = projects
+        .create(draft("Audited", AutonomyProfile::Supervised))
+        .unwrap();
+    projects
+        .revise_charter(
+            created.id,
+            1,
+            draft("ignored", AutonomyProfile::Observe).charter,
+        )
+        .unwrap();
+    drop(projects);
+    drop(accounts);
+    let connection = Connection::open(&store.path).unwrap();
+    connection
+        .execute("UPDATE projects SET updated_at_ms = updated_at_ms + 1", [])
+        .unwrap();
+    drop(connection);
+
+    assert!(matches!(
+        Supervisor::bootstrap(StartupConfig {
+            store_path: store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        }),
+        Err(beacond::SupervisorError::ProjectStateMismatch)
     ));
 }
 

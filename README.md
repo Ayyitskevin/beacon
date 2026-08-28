@@ -186,7 +186,9 @@ The Projects application is the first working suite surface after Briefing. The 
 a Project from a structured Charter containing its purpose, desired outcomes, constraints,
 prohibitions, and an Observe or Supervised autonomy profile. Beacon preserves Charter revision 1
 immutably, assigns no spending boundary, prohibits external effects, and starts no work as a side
-effect of creation.
+effect of creation. The Owner may later publish a new immutable Charter revision from the exact
+current revision, inspect the preserved history, and safely recover from a stale edit without
+overwriting either version.
 
 From `apps/desktop`, use `npm run tauri dev` to launch the development shell. The implementation
 checkpoints and verified dependency sources are recorded in
@@ -195,7 +197,8 @@ checkpoints and verified dependency sources are recorded in
 admission boundary is recorded in
 [the Starter Organization checkpoint](docs/implementation/phase-0-starter-organization.md).
 The Project and immutable Charter boundary is recorded in
-[the Projects checkpoint](docs/implementation/phase-0-projects.md).
+[the Projects checkpoint](docs/implementation/phase-0-projects.md), with revision publishing in
+[the Charter revisions checkpoint](docs/implementation/phase-0-charter-revisions.md).
 Run `scripts/gate` to verify the
 preserved Beacon Legacy Desk, the Rust workspace, the web bundle, and the native desktop build.
 The exact pre-Beacon compatibility boundary is recorded in the

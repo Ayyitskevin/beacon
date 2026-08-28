@@ -11,7 +11,7 @@ attributable `project.created` Event through beacond's authenticated command bou
 
 ## Consequences
 
-Future Charter changes append a new Operator-authored revision and move the Project's current
+Charter changes append a new Operator-authored revision and move the Project's current
 revision pointer in the same accepted Command; Residents may never perform that change. Every
 Agent-created Mission, alignment decision, Proposal, Ruling, and Receipt names the exact Charter
 Revision under which it was evaluated, so a later edit cannot silently broaden earlier authority.

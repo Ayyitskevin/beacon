@@ -220,8 +220,30 @@ export async function loadProject(projectId: string): Promise<ProjectView> {
   return invokeAndValidate("project", { projectId }, isProjectView, "Project");
 }
 
+export async function loadProjectCharterHistory(projectId: string): Promise<ProjectCharter[]> {
+  return invokeAndValidate(
+    "project_charter_history",
+    { projectId },
+    isProjectCharterHistory,
+    "Project Charter history",
+  );
+}
+
 export async function createProject(draft: ProjectDraft): Promise<ProjectView> {
   return invokeAndValidate("create_project", { draft }, isProjectView, "Project");
+}
+
+export async function reviseProjectCharter(
+  projectId: string,
+  expectedCurrentRevision: number,
+  draft: ProjectCharterDraft,
+): Promise<ProjectView> {
+  return invokeAndValidate(
+    "revise_project_charter",
+    { projectId, expectedCurrentRevision, draft },
+    isProjectView,
+    "Project",
+  );
 }
 
 export function describeLocalAccountError(error: unknown): string {
@@ -261,6 +283,10 @@ export function describeLocalAccountError(error: unknown): string {
       return "Review the Project name and every Charter field.";
     case "project_not_found":
       return "That Project is no longer available in this Workspace.";
+    case "stale_charter_revision":
+      return "This Charter changed. Reload the current revision before publishing.";
+    case "unchanged_charter":
+      return "Change at least one Charter field before publishing a revision.";
     case "project_unavailable":
       return "Beacon could not verify the Project state.";
     default:
@@ -447,6 +473,14 @@ function isProjectCharter(value: unknown): value is ProjectCharter {
     value.externalEffects === "prohibited" &&
     isNonnegativeInteger(value.authoredAtMs)
   );
+}
+
+function isProjectCharterHistory(value: unknown): value is ProjectCharter[] {
+  if (!Array.isArray(value) || value.length === 0 || !value.every(isProjectCharter)) return false;
+  return value.every((charter, index) => {
+    if (charter.revision !== index + 1) return false;
+    return index === 0 || value[index - 1].authoredAtMs <= charter.authoredAtMs;
+  });
 }
 
 function isProjectName(value: unknown): value is string {

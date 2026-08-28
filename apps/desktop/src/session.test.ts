@@ -11,6 +11,7 @@ import {
   loadAuthenticationCapabilities,
   loadPlatformSessionMonitorStatus,
   loadProject,
+  loadProjectCharterHistory,
   loadProjects,
   loadSessionPolicy,
   loadSessionStatus,
@@ -18,6 +19,7 @@ import {
   lockLocalSession,
   recordLocalOperatorActivity,
   recoverLocalOperatorAccount,
+  reviseProjectCharter,
   setLocalSessionTimeout,
   signInWithLocalPassword,
 } from "./session";
@@ -213,16 +215,42 @@ describe("desktop session transport", () => {
       .mockResolvedValueOnce([summary])
       .mockResolvedValueOnce(project)
       .mockResolvedValueOnce(project)
+      .mockResolvedValueOnce([project.charter])
+      .mockResolvedValueOnce({
+        ...project,
+        charter: { ...project.charter, revision: 2, purpose: "Revised purpose" },
+      })
+      .mockResolvedValueOnce([{ ...project.charter, revision: 2 }])
       .mockResolvedValueOnce({ ...project, executionAuthority: "ambient" });
 
     await expect(loadProjects()).resolves.toEqual([summary]);
     await expect(loadProject(project.id)).resolves.toEqual(project);
     await expect(createProject(draft)).resolves.toEqual(project);
+    await expect(loadProjectCharterHistory(project.id)).resolves.toEqual([project.charter]);
+    await expect(
+      reviseProjectCharter(project.id, 1, {
+        ...draft.charter,
+        purpose: "Revised purpose",
+      }),
+    ).resolves.toMatchObject({ charter: { revision: 2, purpose: "Revised purpose" } });
+    await expect(loadProjectCharterHistory(project.id)).rejects.toThrow(
+      "invalid Project Charter history",
+    );
     await expect(loadProject(project.id)).rejects.toThrow("invalid Project");
     expect(invokeMock.mock.calls).toEqual([
       ["projects"],
       ["project", { projectId: project.id }],
       ["create_project", { draft }],
+      ["project_charter_history", { projectId: project.id }],
+      [
+        "revise_project_charter",
+        {
+          projectId: project.id,
+          expectedCurrentRevision: 1,
+          draft: { ...draft.charter, purpose: "Revised purpose" },
+        },
+      ],
+      ["project_charter_history", { projectId: project.id }],
       ["project", { projectId: project.id }],
     ]);
   });
@@ -321,6 +349,12 @@ describe("desktop session transport", () => {
     ).toBe("Wait 2 seconds before trying again.");
     expect(describeLocalAccountError({ code: "starter_organization_unavailable" })).toBe(
       "Beacon could not verify the Starter Organization state.",
+    );
+    expect(describeLocalAccountError({ code: "stale_charter_revision" })).toBe(
+      "This Charter changed. Reload the current revision before publishing.",
+    );
+    expect(describeLocalAccountError({ code: "unchanged_charter" })).toBe(
+      "Change at least one Charter field before publishing a revision.",
     );
     expect(describeLocalAccountError({ code: "invented", message: "render me" })).not.toContain(
       "render me",

@@ -237,6 +237,7 @@ Organization decision. Accepting its editable Lead, Builder, Reviewer, and Resea
 creates inactive Resident identities only; it grants no model, capability, budget, activation, or
 execution authority. Authenticated Owners can create and inspect Projects with immutable, contiguous
 Charter revisions; the current Charter pointer must identify the terminal revision, and creation
-remains limited to Observe or Supervised autonomy with no spending or external effects. Charter
-revision commands, Missions, Cloud Link, passkeys, active agent work, and a downloadable installer
-do not exist yet. Do not describe this checkpoint as a usable Alpha.
+and revision remain limited to Observe or Supervised autonomy with no spending or external effects.
+The Owner can publish a new immutable revision from the exact current revision and inspect the full
+history. Missions, Cloud Link, passkeys, active agent work, and a downloadable installer do not
+exist yet. Do not describe this checkpoint as a usable Alpha.

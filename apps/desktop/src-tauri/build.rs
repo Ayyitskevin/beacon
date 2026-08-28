@@ -15,7 +15,9 @@ const COMMANDS: &[&str] = &[
     "discard_starter_organization",
     "projects",
     "project",
+    "project_charter_history",
     "create_project",
+    "revise_project_charter",
 ];
 
 fn main() {

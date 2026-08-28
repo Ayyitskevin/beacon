@@ -19,6 +19,8 @@
     "allow-discard-starter-organization",
     "allow-projects",
     "allow-project",
-    "allow-create-project"
+    "allow-project-charter-history",
+    "allow-create-project",
+    "allow-revise-project-charter"
   ]
 }
