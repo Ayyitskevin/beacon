@@ -42,6 +42,17 @@ const acceptedOrganization = {
     },
   ],
 } as const;
+const inactiveResident = {
+  id: acceptedOrganization.residents[0].id,
+  workspaceId: acceptedOrganization.workspaceId,
+  role: acceptedOrganization.residents[0].role,
+  displayName: acceptedOrganization.residents[0].displayName,
+  lifecycle: "inactive",
+  latestDecisionId: null,
+  createdAtMs: 100,
+  updatedAtMs: 100,
+} as const;
+const residentRoster = [inactiveResident] as const;
 const localModelReport = {
   status: "available",
   endpoint: "http://127.0.0.1:11434",
@@ -99,6 +110,7 @@ function mockInitialState(phase: Phase) {
     if (command === "session_policy") return Promise.resolve(sessionPolicy);
     if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
     if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
+    if (command === "residents") return Promise.resolve(residentRoster);
     if (command === "record_operator_activity") return Promise.resolve(null);
     if (command === "set_session_timeout") {
       return Promise.resolve({
@@ -155,6 +167,7 @@ describe("Beacon desktop shell", () => {
       if (command === "session_policy") return Promise.resolve(sessionPolicy);
       if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
       if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
+      if (command === "residents") return Promise.resolve(residentRoster);
       if (command === "record_operator_activity") return Promise.resolve(null);
       return Promise.reject(new Error(`unexpected command: ${command}`));
     });
@@ -191,6 +204,7 @@ describe("Beacon desktop shell", () => {
       if (command === "session_policy") return Promise.resolve(sessionPolicy);
       if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
       if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
+      if (command === "residents") return Promise.resolve(residentRoster);
       if (command === "record_operator_activity") return Promise.resolve(null);
       if (command === "set_session_timeout") {
         return Promise.resolve({
@@ -231,6 +245,7 @@ describe("Beacon desktop shell", () => {
       if (command === "session_policy") return Promise.resolve(sessionPolicy);
       if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
       if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
+      if (command === "residents") return Promise.resolve(residentRoster);
       if (command === "record_operator_activity") return Promise.resolve(null);
       if (command === "discover_local_models") return Promise.resolve(localModelReport);
       if (command === "local_model_activations") return Promise.resolve([]);
@@ -289,6 +304,7 @@ describe("Beacon desktop shell", () => {
       if (command === "session_policy") return Promise.resolve(sessionPolicy);
       if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
       if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
+      if (command === "residents") return Promise.resolve(residentRoster);
       if (command === "record_operator_activity") return Promise.resolve(null);
       if (command === "discover_local_models") return Promise.resolve(unavailable);
       if (command === "local_model_activations") return Promise.resolve([activeLocalModel]);
@@ -347,6 +363,7 @@ describe("Beacon desktop shell", () => {
       if (command === "session_policy") return Promise.resolve(sessionPolicy);
       if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
       if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
+      if (command === "residents") return Promise.resolve(residentRoster);
       if (command === "projects") return Promise.resolve([]);
       if (command === "create_project") return Promise.resolve(created);
       if (command === "revise_project_charter") return Promise.resolve(revised);
@@ -460,6 +477,7 @@ describe("Beacon desktop shell", () => {
       if (command === "session_policy") return Promise.resolve(sessionPolicy);
       if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
       if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
+      if (command === "residents") return Promise.resolve(residentRoster);
       if (command === "projects") return Promise.resolve([summary]);
       if (command === "project") return Promise.resolve(project);
       if (command === "project_charter_history") {
@@ -505,6 +523,14 @@ describe("Beacon desktop shell", () => {
         },
       ],
     } as const;
+    const admittedResidents = accepted.residents.map((resident, index) => ({
+      ...resident,
+      workspaceId: accepted.workspaceId,
+      latestDecisionId: null,
+      createdAtMs: 100 + index,
+      updatedAtMs: 100 + index,
+    }));
+    let admitted = false;
     mockInitialState("unlocked");
     invokeMock.mockImplementation((command, args) => {
       if (command === "session_status") return Promise.resolve(status("unlocked"));
@@ -513,7 +539,11 @@ describe("Beacon desktop shell", () => {
       if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
       if (command === "record_operator_activity") return Promise.resolve(null);
       if (command === "starter_organization") return Promise.resolve(proposedOrganization);
-      if (command === "accept_starter_organization") return Promise.resolve(accepted);
+      if (command === "residents") return Promise.resolve(admitted ? admittedResidents : []);
+      if (command === "accept_starter_organization") {
+        admitted = true;
+        return Promise.resolve(accepted);
+      }
       return Promise.reject(new Error(`unexpected command: ${command} ${JSON.stringify(args)}`));
     });
 
@@ -538,8 +568,110 @@ describe("Beacon desktop shell", () => {
       ],
     });
     expect(await screen.findByRole("heading", { name: "Briefing" })).toBeVisible();
-    expect(screen.getByText("2 inactive Residents")).toBeVisible();
-    expect(screen.getByText("No Resident has execution authority yet.")).toBeVisible();
+    expect(screen.getByText("2 Residents in this Workspace")).toBeVisible();
+    expect(screen.getByText(/No Resident has execution authority yet/)).toBeVisible();
+  });
+
+  it("controls Resident availability and confirms terminal retirement", async () => {
+    const user = userEvent.setup();
+    const active = {
+      ...inactiveResident,
+      lifecycle: "active",
+      latestDecisionId: "33333333-3333-4333-8333-333333333333",
+      updatedAtMs: 110,
+    } as const;
+    const suspended = {
+      ...active,
+      lifecycle: "suspended",
+      latestDecisionId: "44444444-4444-4444-8444-444444444444",
+      updatedAtMs: 120,
+    } as const;
+    const reactivated = {
+      ...active,
+      latestDecisionId: "55555555-5555-4555-8555-555555555555",
+      updatedAtMs: 130,
+    } as const;
+    const retired = {
+      ...reactivated,
+      lifecycle: "retired",
+      latestDecisionId: "66666666-6666-4666-8666-666666666666",
+      updatedAtMs: 140,
+    } as const;
+    let current:
+      | typeof inactiveResident
+      | typeof active
+      | typeof suspended
+      | typeof reactivated
+      | typeof retired = inactiveResident;
+    invokeMock.mockImplementation((command) => {
+      if (command === "session_status") return Promise.resolve(status("unlocked"));
+      if (command === "authentication_capabilities") return Promise.resolve(capabilities);
+      if (command === "session_policy") return Promise.resolve(sessionPolicy);
+      if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+      if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
+      if (command === "residents") return Promise.resolve([current]);
+      if (command === "record_operator_activity") return Promise.resolve(null);
+      if (command === "activate_resident") {
+        current = active;
+        return Promise.resolve(active);
+      }
+      if (command === "suspend_resident") {
+        current = suspended;
+        return Promise.resolve(suspended);
+      }
+      if (command === "reactivate_resident") {
+        current = reactivated;
+        return Promise.resolve(reactivated);
+      }
+      if (command === "retire_resident") {
+        current = retired;
+        return Promise.resolve(retired);
+      }
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    const roster = screen.getByRole("list", { name: "Resident roster" });
+    await user.click(within(roster).getByRole("button", { name: "Activate" }));
+    expect(invokeMock).toHaveBeenCalledWith("activate_resident", {
+      residentId: inactiveResident.id,
+      expectedDecisionId: null,
+    });
+    expect(await within(roster).findByText("active")).toBeVisible();
+
+    await user.click(within(roster).getByRole("button", { name: "Suspend" }));
+    expect(invokeMock).toHaveBeenCalledWith("suspend_resident", {
+      residentId: active.id,
+      expectedDecisionId: active.latestDecisionId,
+    });
+    await user.click(within(roster).getByRole("button", { name: "Reactivate" }));
+    expect(invokeMock).toHaveBeenCalledWith("reactivate_resident", {
+      residentId: suspended.id,
+      expectedDecisionId: suspended.latestDecisionId,
+    });
+
+    await user.click(within(roster).getByRole("button", { name: "Retire" }));
+    const confirmation = screen.getByRole("alertdialog", {
+      name: "Permanently retire this Resident?",
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith("retire_resident", expect.anything());
+    await user.click(within(confirmation).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+
+    await user.click(within(roster).getByRole("button", { name: "Retire" }));
+    await user.click(
+      within(screen.getByRole("alertdialog")).getByRole("button", {
+        name: "Permanently retire",
+      }),
+    );
+    expect(invokeMock).toHaveBeenCalledWith("retire_resident", {
+      residentId: reactivated.id,
+      expectedDecisionId: reactivated.latestDecisionId,
+    });
+    expect(await within(roster).findByText("retired")).toBeVisible();
+    expect(within(roster).queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.getByText(/Lifecycle controls availability only/)).toBeVisible();
   });
 
   it("requires confirmation before discarding the one-time Starter Organization", async () => {
@@ -552,6 +684,7 @@ describe("Beacon desktop shell", () => {
       if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
       if (command === "record_operator_activity") return Promise.resolve(null);
       if (command === "starter_organization") return Promise.resolve(proposedOrganization);
+      if (command === "residents") return Promise.resolve([]);
       if (command === "discard_starter_organization") return Promise.resolve(discarded);
       return Promise.reject(new Error(`unexpected command: ${command}`));
     });
@@ -586,6 +719,7 @@ describe("Beacon desktop shell", () => {
       if (command === "session_policy") return Promise.resolve(sessionPolicy);
       if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
       if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
+      if (command === "residents") return Promise.resolve(residentRoster);
       if (command === "record_operator_activity") return Promise.resolve(null);
       return Promise.reject(new Error(`unexpected command: ${command}`));
     });
@@ -611,6 +745,7 @@ describe("Beacon desktop shell", () => {
       if (command === "session_policy") return Promise.resolve(sessionPolicy);
       if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
       if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
+      if (command === "residents") return Promise.resolve(residentRoster);
       if (command === "record_operator_activity") return Promise.resolve(null);
       return Promise.reject(new Error(`unexpected command: ${command}`));
     });
@@ -640,6 +775,7 @@ describe("Beacon desktop shell", () => {
       if (command === "session_policy") return Promise.resolve(sessionPolicy);
       if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
       if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
+      if (command === "residents") return Promise.resolve(residentRoster);
       if (command === "record_operator_activity") return Promise.resolve(null);
       return Promise.reject(new Error(`unexpected command: ${command}`));
     });
@@ -671,6 +807,7 @@ describe("Beacon desktop shell", () => {
       if (command === "session_policy") return Promise.resolve(sessionPolicy);
       if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
       if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
+      if (command === "residents") return Promise.resolve(residentRoster);
       if (command === "record_operator_activity") return Promise.resolve(null);
       return Promise.reject(new Error(`unexpected command: ${command}`));
     });
@@ -748,6 +885,7 @@ describe("Beacon desktop shell", () => {
         return Promise.resolve({ screenLock: "unavailable", suspend: "active" });
       }
       if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
+      if (command === "residents") return Promise.resolve(residentRoster);
       if (command === "record_operator_activity") return Promise.resolve(null);
       return Promise.reject(new Error(`unexpected command: ${command}`));
     });
@@ -840,6 +978,7 @@ describe("Beacon desktop shell", () => {
       if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
       if (command === "record_operator_activity") return Promise.resolve(null);
       if (command === "starter_organization") return Promise.resolve(proposedOrganization);
+      if (command === "residents") return Promise.resolve([]);
       return Promise.reject(new Error(`unexpected command: ${command}`));
     });
     const { container } = render(<App />);
@@ -858,6 +997,7 @@ describe("Beacon desktop shell", () => {
       if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
       if (command === "record_operator_activity") return Promise.resolve(null);
       if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
+      if (command === "residents") return Promise.resolve(residentRoster);
       if (command === "projects") return Promise.resolve([]);
       return Promise.reject(new Error(`unexpected command: ${command}`));
     });
@@ -898,6 +1038,7 @@ describe("Beacon desktop shell", () => {
       if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
       if (command === "record_operator_activity") return Promise.resolve(null);
       if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
+      if (command === "residents") return Promise.resolve(residentRoster);
       if (command === "projects") {
         return Promise.resolve([
           {

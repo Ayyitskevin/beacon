@@ -49,6 +49,17 @@ export type ResidentAgentSummary = {
   displayName: string | null;
   lifecycle: "inactive";
 };
+export type ResidentLifecycle = "inactive" | "active" | "suspended" | "retired";
+export type ResidentAgentView = {
+  id: string;
+  workspaceId: string;
+  role: StarterRole;
+  displayName: string | null;
+  lifecycle: ResidentLifecycle;
+  latestDecisionId: string | null;
+  createdAtMs: number;
+  updatedAtMs: number;
+};
 export type StarterOrganizationView = {
   workspaceId: string;
   proposalVersion: 1;
@@ -257,6 +268,51 @@ export async function discardStarterOrganization(
   );
 }
 
+export async function loadResidents(): Promise<ResidentAgentView[]> {
+  return invokeAndValidate("residents", undefined, isResidentList, "Resident roster");
+}
+
+export async function activateResident(
+  residentId: string,
+  expectedDecisionId: string | null,
+): Promise<ResidentAgentView> {
+  return invokeResidentLifecycle("activate_resident", residentId, expectedDecisionId);
+}
+
+export async function suspendResident(
+  residentId: string,
+  expectedDecisionId: string | null,
+): Promise<ResidentAgentView> {
+  return invokeResidentLifecycle("suspend_resident", residentId, expectedDecisionId);
+}
+
+export async function reactivateResident(
+  residentId: string,
+  expectedDecisionId: string | null,
+): Promise<ResidentAgentView> {
+  return invokeResidentLifecycle("reactivate_resident", residentId, expectedDecisionId);
+}
+
+export async function retireResident(
+  residentId: string,
+  expectedDecisionId: string | null,
+): Promise<ResidentAgentView> {
+  return invokeResidentLifecycle("retire_resident", residentId, expectedDecisionId);
+}
+
+function invokeResidentLifecycle(
+  command: string,
+  residentId: string,
+  expectedDecisionId: string | null,
+): Promise<ResidentAgentView> {
+  return invokeAndValidate(
+    command,
+    { residentId, expectedDecisionId },
+    isResidentAgentView,
+    "Resident lifecycle response",
+  );
+}
+
 export async function loadProjects(): Promise<ProjectSummary[]> {
   return invokeAndValidate("projects", undefined, isProjectSummaries, "Project list");
 }
@@ -377,6 +433,14 @@ export function describeLocalAccountError(error: unknown): string {
       return "This Starter Organization was already decided.";
     case "starter_organization_unavailable":
       return "Beacon could not verify the Starter Organization state.";
+    case "resident_not_found":
+      return "That Resident is no longer available in this Workspace.";
+    case "invalid_resident_transition":
+      return "That lifecycle action is not available from the Resident's current state.";
+    case "stale_resident_decision":
+      return "The Resident changed. Reload the roster before trying again.";
+    case "resident_lifecycle_unavailable":
+      return "Beacon could not verify Resident lifecycle state.";
     case "invalid_project":
       return "Review the Project name and every Charter field.";
     case "project_not_found":
@@ -528,6 +592,54 @@ function isStarterOrganizationView(value: unknown): value is StarterOrganization
   return value.decision === "accepted"
     ? value.residents.length >= 1 && value.residents.length <= 4
     : value.residents.length === 0;
+}
+
+function isResidentAgentView(value: unknown): value is ResidentAgentView {
+  if (
+    !hasExactKeys(value, [
+      "createdAtMs",
+      "displayName",
+      "id",
+      "latestDecisionId",
+      "lifecycle",
+      "role",
+      "updatedAtMs",
+      "workspaceId",
+    ]) ||
+    !isUuid(value.id) ||
+    !isUuid(value.workspaceId) ||
+    !starterRoles.includes(value.role as StarterRole) ||
+    !["inactive", "active", "suspended", "retired"].includes(String(value.lifecycle)) ||
+    !(value.latestDecisionId === null || isUuid(value.latestDecisionId)) ||
+    !isNonnegativeInteger(value.createdAtMs) ||
+    !isNonnegativeInteger(value.updatedAtMs) ||
+    value.updatedAtMs < value.createdAtMs ||
+    !(
+      value.displayName === null ||
+      (typeof value.displayName === "string" &&
+        value.displayName.trim() === value.displayName &&
+        value.displayName.length >= 1 &&
+        Array.from(value.displayName).length <= 80 &&
+        !/\p{Cc}/u.test(value.displayName))
+    )
+  ) {
+    return false;
+  }
+  return value.lifecycle === "inactive"
+    ? value.latestDecisionId === null && value.updatedAtMs === value.createdAtMs
+    : value.latestDecisionId !== null;
+}
+
+function isResidentList(value: unknown): value is ResidentAgentView[] {
+  if (!Array.isArray(value) || value.length > 512 || !value.every(isResidentAgentView)) {
+    return false;
+  }
+  const ids = new Set<string>();
+  return value.every((resident) => {
+    if (ids.has(resident.id)) return false;
+    ids.add(resident.id);
+    return true;
+  });
 }
 
 function isProjectSummaries(value: unknown): value is ProjectSummary[] {

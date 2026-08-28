@@ -15,6 +15,7 @@ mod local_model_activation;
 mod operator_account;
 mod platform_session;
 mod project;
+mod resident_lifecycle;
 mod resource_discovery;
 mod starter_organization;
 
@@ -42,18 +43,22 @@ pub use project::{
     AutonomyProfile, BudgetBoundary, ExternalEffects, ProjectCharter, ProjectCharterDraft,
     ProjectDraft, ProjectError, ProjectService, ProjectSummary, ProjectView,
 };
+pub use resident_lifecycle::{
+    ResidentAgentView, ResidentLifecycle, ResidentLifecycleActor, ResidentLifecycleDecision,
+    ResidentLifecycleError, ResidentLifecycleService,
+};
 pub use resource_discovery::{
     DiscoveredLocalModel, DiscoveryStatus, LocalModelDetails, LocalModelDiscoveryReport,
     LocalModelEndpoint, ModelActivation, ModelProvider, ResourceDiscoveryError,
     ResourceDiscoveryService,
 };
 pub use starter_organization::{
-    ResidentAgentSummary, ResidentLifecycle, StarterOrganizationDecision, StarterOrganizationError,
+    ResidentAgentSummary, StarterOrganizationDecision, StarterOrganizationError,
     StarterOrganizationService, StarterOrganizationView, StarterResidentDraft, StarterRole,
     StarterRoleTemplate,
 };
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 const MAX_WORKSPACE_NAME_CHARS: usize = 120;
 
 const SCHEMA_V1: &str = include_str!("../migrations/0001_initial.sql");
@@ -63,6 +68,7 @@ const MIGRATION_V4: &str = include_str!("../migrations/0004_starter_organization
 const MIGRATION_V5: &str = include_str!("../migrations/0005_projects.sql");
 const MIGRATION_V6: &str = include_str!("../migrations/0006_project_charter_revisions.sql");
 const MIGRATION_V7: &str = include_str!("../migrations/0007_local_model_activations.sql");
+const MIGRATION_V8: &str = include_str!("../migrations/0008_resident_lifecycle.sql");
 
 #[derive(Debug, Clone)]
 pub struct StartupConfig {
@@ -127,6 +133,8 @@ pub enum SupervisorError {
     ProjectStateMismatch,
     LocalModelActivationEventMismatch(i64),
     LocalModelActivationStateMismatch,
+    ResidentLifecycleEventMismatch(i64),
+    ResidentLifecycleStateMismatch,
     SchemaMismatch,
     UnsupportedSchemaVersion(i64),
     IntegrityCheckFailed(String),
@@ -187,6 +195,14 @@ impl fmt::Display for SupervisorError {
             Self::LocalModelActivationStateMismatch => write!(
                 formatter,
                 "local-model activation state has no exact audit Event"
+            ),
+            Self::ResidentLifecycleEventMismatch(sequence) => write!(
+                formatter,
+                "Event sequence {sequence} does not match Resident lifecycle state"
+            ),
+            Self::ResidentLifecycleStateMismatch => write!(
+                formatter,
+                "Resident lifecycle state has no exact audit Event"
             ),
             Self::SchemaMismatch => {
                 write!(
@@ -255,6 +271,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V5)?;
                     transaction.execute_batch(MIGRATION_V6)?;
                     transaction.execute_batch(MIGRATION_V7)?;
+                    transaction.execute_batch(MIGRATION_V8)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 2 => {
@@ -264,6 +281,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V5)?;
                     transaction.execute_batch(MIGRATION_V6)?;
                     transaction.execute_batch(MIGRATION_V7)?;
+                    transaction.execute_batch(MIGRATION_V8)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 3 => {
@@ -272,6 +290,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V5)?;
                     transaction.execute_batch(MIGRATION_V6)?;
                     transaction.execute_batch(MIGRATION_V7)?;
+                    transaction.execute_batch(MIGRATION_V8)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 4 => {
@@ -279,17 +298,25 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V5)?;
                     transaction.execute_batch(MIGRATION_V6)?;
                     transaction.execute_batch(MIGRATION_V7)?;
+                    transaction.execute_batch(MIGRATION_V8)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 5 => {
                     verify_schema(&transaction, 5)?;
                     transaction.execute_batch(MIGRATION_V6)?;
                     transaction.execute_batch(MIGRATION_V7)?;
+                    transaction.execute_batch(MIGRATION_V8)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 6 => {
                     verify_schema(&transaction, 6)?;
                     transaction.execute_batch(MIGRATION_V7)?;
+                    transaction.execute_batch(MIGRATION_V8)?;
+                    verify_schema(&transaction, SCHEMA_VERSION)?;
+                }
+                7 => {
+                    verify_schema(&transaction, 7)?;
+                    transaction.execute_batch(MIGRATION_V8)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 SCHEMA_VERSION => verify_schema(&transaction, SCHEMA_VERSION)?,
@@ -303,6 +330,7 @@ impl Supervisor {
             transaction.execute_batch(MIGRATION_V5)?;
             transaction.execute_batch(MIGRATION_V6)?;
             transaction.execute_batch(MIGRATION_V7)?;
+            transaction.execute_batch(MIGRATION_V8)?;
             verify_schema(&transaction, SCHEMA_VERSION)?;
         }
 
@@ -497,6 +525,9 @@ fn verify_schema(connection: &Connection, version: i64) -> Result<(), Supervisor
     if version >= 7 {
         expected_connection.execute_batch(MIGRATION_V7)?;
     }
+    if version >= 8 {
+        expected_connection.execute_batch(MIGRATION_V8)?;
+    }
     if !(1..=SCHEMA_VERSION).contains(&version) {
         return Err(SupervisorError::UnsupportedSchemaVersion(version));
     }
@@ -549,6 +580,7 @@ struct WorkspaceCreatedPayload {
     name: String,
 }
 
+#[derive(Clone, Copy)]
 enum PersistedEventKind {
     WorkspaceCreated,
     StarterOrganizationAccepted,
@@ -557,6 +589,10 @@ enum PersistedEventKind {
     ProjectCharterRevised,
     LocalModelActivated,
     LocalModelDeactivated,
+    ResidentActivated,
+    ResidentSuspended,
+    ResidentReactivated,
+    ResidentRetired,
 }
 
 impl PersistedEventKind {
@@ -569,6 +605,10 @@ impl PersistedEventKind {
             Self::ProjectCharterRevised => "project.charter_revised",
             Self::LocalModelActivated => "local_model.activated",
             Self::LocalModelDeactivated => "local_model.deactivated",
+            Self::ResidentActivated => "resident.activated",
+            Self::ResidentSuspended => "resident.suspended",
+            Self::ResidentReactivated => "resident.reactivated",
+            Self::ResidentRetired => "resident.retired",
         }
     }
 
@@ -581,6 +621,10 @@ impl PersistedEventKind {
             "project.charter_revised" => Ok(Self::ProjectCharterRevised),
             "local_model.activated" => Ok(Self::LocalModelActivated),
             "local_model.deactivated" => Ok(Self::LocalModelDeactivated),
+            "resident.activated" => Ok(Self::ResidentActivated),
+            "resident.suspended" => Ok(Self::ResidentSuspended),
+            "resident.reactivated" => Ok(Self::ResidentReactivated),
+            "resident.retired" => Ok(Self::ResidentRetired),
             _ => Err(SupervisorError::InvalidEventKind(value)),
         }
     }
@@ -620,6 +664,8 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     project::verify_project_state(connection).map_err(|_| SupervisorError::ProjectStateMismatch)?;
     local_model_activation::verify_activation_state(connection)
         .map_err(|_| SupervisorError::LocalModelActivationStateMismatch)?;
+    resident_lifecycle::verify_lifecycle_state(connection)
+        .map_err(|_| SupervisorError::ResidentLifecycleStateMismatch)?;
 
     Ok(StoreDiagnostics {
         status: DiagnosticStatus::Ready,
@@ -713,6 +759,19 @@ fn verify_persisted_events(connection: &Connection) -> Result<u64, SupervisorErr
                 )
                 .map_err(|_| SupervisorError::LocalModelActivationEventMismatch(sequence))?;
             }
+            PersistedEventKind::ResidentActivated
+            | PersistedEventKind::ResidentSuspended
+            | PersistedEventKind::ResidentReactivated
+            | PersistedEventKind::ResidentRetired => {
+                resident_lifecycle::verify_lifecycle_event(
+                    connection,
+                    workspace_id,
+                    occurred_at_ms,
+                    kind.as_str(),
+                    &payload_json,
+                )
+                .map_err(|_| SupervisorError::ResidentLifecycleEventMismatch(sequence))?;
+            }
         }
         count += 1;
     }
@@ -744,7 +803,7 @@ mod tests {
 
     use super::{
         DiagnosticStatus, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6,
-        SCHEMA_V1, StartupConfig, Supervisor, SupervisorError,
+        MIGRATION_V7, SCHEMA_V1, StartupConfig, Supervisor, SupervisorError,
     };
 
     struct TestStore {
@@ -784,7 +843,7 @@ mod tests {
         assert!(report.workspace.created);
         assert_eq!(report.workspace.name, "Personal");
         assert_eq!(report.diagnostics.status, DiagnosticStatus::Ready);
-        assert_eq!(report.diagnostics.schema_version, 7);
+        assert_eq!(report.diagnostics.schema_version, 8);
         assert_eq!(report.diagnostics.integrity_check, "ok");
         assert_eq!(report.diagnostics.foreign_key_violations, 0);
         assert_eq!(report.diagnostics.workspace_count, 1);
@@ -867,7 +926,7 @@ mod tests {
         assert_eq!(report.workspace.id, workspace_id);
         assert_eq!(report.workspace.name, "Existing");
         assert!(!report.workspace.created);
-        assert_eq!(report.diagnostics.schema_version, 7);
+        assert_eq!(report.diagnostics.schema_version, 8);
         assert_eq!(report.diagnostics.workspace_count, 1);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         assert_eq!(report.diagnostics.security_event_count, 0);
@@ -906,7 +965,7 @@ mod tests {
 
         let report = Supervisor::bootstrap(config(&store.path, "Personal")).unwrap();
 
-        assert_eq!(report.diagnostics.schema_version, 7);
+        assert_eq!(report.diagnostics.schema_version, 8);
         assert_eq!(report.diagnostics.security_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(
@@ -965,7 +1024,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 7);
+        assert_eq!(report.diagnostics.schema_version, 8);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(
             connection
@@ -1068,7 +1127,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 7);
+        assert_eq!(report.diagnostics.schema_version, 8);
         assert_eq!(report.diagnostics.persisted_event_count, 2);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(
@@ -1130,7 +1189,7 @@ mod tests {
 
         assert_eq!(report.workspace.id, workspace_id);
         assert_eq!(report.workspace.name, "Existing");
-        assert_eq!(report.diagnostics.schema_version, 7);
+        assert_eq!(report.diagnostics.schema_version, 8);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(
@@ -1139,6 +1198,115 @@ mod tests {
                     "SELECT count(*) FROM local_model_activation_decisions",
                     [],
                     |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn version_seven_store_adds_resident_lifecycle_without_replacing_admission() {
+        let store = TestStore::new("version-seven-migration");
+        let workspace_id = Uuid::new_v4();
+        let resident_id = Uuid::new_v4();
+        let connection = Connection::open(&store.path).unwrap();
+        connection.execute_batch(SCHEMA_V1).unwrap();
+        connection.execute_batch(MIGRATION_V2).unwrap();
+        connection.execute_batch(MIGRATION_V3).unwrap();
+        connection.execute_batch(MIGRATION_V4).unwrap();
+        connection.execute_batch(MIGRATION_V5).unwrap();
+        connection.execute_batch(MIGRATION_V6).unwrap();
+        connection.execute_batch(MIGRATION_V7).unwrap();
+        connection
+            .execute(
+                "INSERT INTO workspaces (id, name, created_at_ms) VALUES (?1, 'Existing', 7)",
+                [workspace_id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+                 VALUES (?1, 'workspace.created', ?2, 7)",
+                rusqlite::params![
+                    workspace_id.to_string(),
+                    serde_json::json!({
+                        "workspace_id": workspace_id,
+                        "name": "Existing"
+                    })
+                    .to_string()
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO starter_organization_decisions (
+                    workspace_id, proposal_version, decision, decided_at_ms
+                 ) VALUES (?1, 1, 'accepted', 9)",
+                [workspace_id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO agents (
+                    id, workspace_id, kind, admission_source, role, display_name_state,
+                    display_name, lifecycle, created_at_ms, updated_at_ms
+                 ) VALUES (?1, ?2, 'resident', 'starter_organization', 'lead',
+                           'absent', '', 'inactive', 9, 9)",
+                rusqlite::params![resident_id.to_string(), workspace_id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO starter_organization_admissions (
+                    workspace_id, agent_id, role, display_name_state, display_name, admitted_at_ms
+                 ) VALUES (?1, ?2, 'lead', 'absent', '', 9)",
+                rusqlite::params![workspace_id.to_string(), resident_id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+                 VALUES (?1, 'starter_organization.accepted', ?2, 9)",
+                rusqlite::params![
+                    workspace_id.to_string(),
+                    serde_json::json!({
+                        "workspace_id": workspace_id,
+                        "proposal_version": 1,
+                        "residents": [{
+                            "id": resident_id,
+                            "role": "lead",
+                            "displayName": null,
+                            "lifecycle": "inactive"
+                        }]
+                    })
+                    .to_string()
+                ],
+            )
+            .unwrap();
+        drop(connection);
+
+        let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
+
+        assert_eq!(report.workspace.id, workspace_id);
+        assert_eq!(report.diagnostics.schema_version, 8);
+        assert_eq!(report.diagnostics.persisted_event_count, 2);
+        let connection = Connection::open(&store.path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT lifecycle FROM agents WHERE id = ?1",
+                    [resident_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "inactive"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM resident_lifecycle_decisions",
+                    [],
+                    |row| { row.get::<_, i64>(0) }
                 )
                 .unwrap(),
             0

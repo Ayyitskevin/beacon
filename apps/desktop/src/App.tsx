@@ -13,6 +13,7 @@ import { type FormEvent, useEffect, useRef, useState } from "react";
 import {
   acceptStarterOrganization,
   activateLocalModel,
+  activateResident,
   type AuthenticationCapabilities,
   type DesktopSessionStatus,
   beginLocalPasswordSetup,
@@ -29,6 +30,7 @@ import {
   loadProject,
   loadProjectCharterHistory,
   loadProjects,
+  loadResidents,
   loadSessionPolicy,
   loadSessionStatus,
   loadStarterOrganization,
@@ -44,11 +46,15 @@ import {
   type ProjectSummary,
   type ProjectView,
   recordLocalOperatorActivity,
+  reactivateResident,
   recoverLocalOperatorAccount,
   reviseProjectCharter,
+  retireResident,
   setLocalSessionTimeout,
   signInWithLocalPassword,
+  suspendResident,
   type StarterOrganizationView,
+  type ResidentAgentView,
   type StarterResidentDraft,
   type StarterRole,
 } from "./session";
@@ -198,6 +204,22 @@ const useStyles = makeStyles({
     marginBottom: tokens.spacingVerticalL,
     paddingLeft: tokens.spacingHorizontalXXL,
   },
+  residentRow: {
+    display: "grid",
+    gridTemplateColumns: "minmax(0, 1fr) auto",
+    columnGap: tokens.spacingHorizontalM,
+    rowGap: tokens.spacingVerticalXS,
+    alignItems: "center",
+  },
+  residentSummary: { display: "grid", rowGap: tokens.spacingVerticalXXS },
+  residentActions: { display: "flex", columnGap: tokens.spacingHorizontalXS },
+  lifecycleStatus: { color: tokens.colorNeutralForeground2 },
+  retirementConfirm: {
+    marginTop: tokens.spacingVerticalL,
+    ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalM),
+    ...shorthands.border(tokens.strokeWidthThin, "solid", tokens.colorPaletteRedBorder1),
+    ...shorthands.borderRadius(tokens.borderRadiusMedium),
+  },
 });
 
 export function App() {
@@ -222,6 +244,7 @@ export function App() {
     useState<PlatformSessionMonitorStatus | null>(null);
   const [starterOrganization, setStarterOrganization] =
     useState<StarterOrganizationView | null>(null);
+  const [residents, setResidents] = useState<ResidentAgentView[] | null>(null);
   const [activeApplication, setActiveApplication] = useState<Application>("Briefing");
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [selectedProject, setSelectedProject] = useState<ProjectView | null>(null);
@@ -250,6 +273,7 @@ export function App() {
     setSession(nextSession);
     if (nextSession.phase !== "unlocked") {
       setStarterOrganization(null);
+      setResidents(null);
       setProjects(null);
       setSelectedProject(null);
       setCharterHistory(null);
@@ -289,6 +313,7 @@ export function App() {
     if (!unlocked) return;
     let active = true;
     setStarterOrganization(null);
+    setResidents(null);
     setProjects(null);
     setSelectedProject(null);
     setCharterHistory(null);
@@ -299,18 +324,21 @@ export function App() {
       loadSessionPolicy(),
       loadPlatformSessionMonitorStatus(),
       loadStarterOrganization(),
+      loadResidents(),
     ]).then(
-      ([policy, monitor, organization]) => {
+      ([policy, monitor, organization, loadedResidents]) => {
         if (!active) return;
         setTimeoutMinutes(String(policy.inactivityTimeoutMinutes));
         setPlatformMonitor(monitor);
         setStarterOrganization(organization);
+        setResidents(loadedResidents);
       },
       () => {
         if (!active) return;
         setSession(null);
         setForegroundVerified(false);
         setStarterOrganization(null);
+        setResidents(null);
         setProjects(null);
         setSelectedProject(null);
         setCharterHistory(null);
@@ -371,6 +399,7 @@ export function App() {
           if (nextSession.phase !== "unlocked") {
             setForegroundVerified(false);
             setStarterOrganization(null);
+            setResidents(null);
             setProjects(null);
             setSelectedProject(null);
             setCharterHistory(null);
@@ -385,6 +414,7 @@ export function App() {
           setSession(null);
           setForegroundVerified(false);
           setStarterOrganization(null);
+          setResidents(null);
           setProjects(null);
           setSelectedProject(null);
           setCharterHistory(null);
@@ -420,6 +450,7 @@ export function App() {
           setSession(null);
           setForegroundVerified(false);
           setStarterOrganization(null);
+          setResidents(null);
           setProjects(null);
           setSelectedProject(null);
           setCharterHistory(null);
@@ -553,6 +584,7 @@ export function App() {
       setSession(await lockLocalSession());
       setForegroundVerified(false);
       setStarterOrganization(null);
+      setResidents(null);
       setProjects(null);
       setSelectedProject(null);
       setCharterHistory(null);
@@ -636,9 +668,13 @@ export function App() {
   async function acceptStarterRoster(residents: StarterResidentDraft[]) {
     if (!starterOrganization) return;
     await runAction(async () => {
-      setStarterOrganization(
-        await acceptStarterOrganization(starterOrganization.proposalVersion, residents),
+      const organization = await acceptStarterOrganization(
+        starterOrganization.proposalVersion,
+        residents,
       );
+      const admitted = await loadResidents();
+      setStarterOrganization(organization);
+      setResidents(admitted);
     });
   }
 
@@ -648,7 +684,27 @@ export function App() {
       setStarterOrganization(
         await discardStarterOrganization(starterOrganization.proposalVersion),
       );
+      setResidents([]);
     });
+  }
+
+  async function changeResident(
+    action: (
+      residentId: string,
+      expectedDecisionId: string | null,
+    ) => Promise<ResidentAgentView>,
+    resident: ResidentAgentView,
+  ) {
+    await runAction(async () => {
+      const changed = await action(resident.id, resident.latestDecisionId);
+      setResidents((current) =>
+        current?.map((item) => (item.id === changed.id ? changed : item)) ?? null,
+      );
+    });
+  }
+
+  async function refreshResidents() {
+    await runAction(async () => setResidents(await loadResidents()));
   }
 
   async function openProject(projectId: string) {
@@ -902,6 +958,7 @@ export function App() {
             <Briefing
               classes={classes}
               organization={starterOrganization}
+              residents={residents}
               replacementKey={replacementKey}
               busy={busy}
               error={actionError}
@@ -914,6 +971,11 @@ export function App() {
               onCancelLocalModelReview={() => setLocalModelReview(null)}
               onActivateLocalModel={activateReviewedLocalModel}
               onDeactivateLocalModel={deactivateActiveLocalModel}
+              onActivateResident={(resident) => changeResident(activateResident, resident)}
+              onSuspendResident={(resident) => changeResident(suspendResident, resident)}
+              onReactivateResident={(resident) => changeResident(reactivateResident, resident)}
+              onRetireResident={(resident) => changeResident(retireResident, resident)}
+              onRefreshResidents={refreshResidents}
               onLock={lockSession}
             />
           )}
@@ -1145,6 +1207,7 @@ function replaceLocalModelActivation(
 function Briefing({
   classes,
   organization,
+  residents,
   replacementKey,
   busy,
   error,
@@ -1157,10 +1220,16 @@ function Briefing({
   onCancelLocalModelReview,
   onActivateLocalModel,
   onDeactivateLocalModel,
+  onActivateResident,
+  onSuspendResident,
+  onReactivateResident,
+  onRetireResident,
+  onRefreshResidents,
   onLock,
 }: {
   classes: StyleClasses;
   organization: StarterOrganizationView;
+  residents: ResidentAgentView[] | null;
   replacementKey: string;
   busy: boolean;
   error: string;
@@ -1176,9 +1245,17 @@ function Briefing({
     approvedFeatures: readonly ProviderFeature[],
   ) => void;
   onDeactivateLocalModel: (expectedActivationId: string) => void;
+  onActivateResident: (resident: ResidentAgentView) => void;
+  onSuspendResident: (resident: ResidentAgentView) => void;
+  onReactivateResident: (resident: ResidentAgentView) => void;
+  onRetireResident: (resident: ResidentAgentView) => void;
+  onRefreshResidents: () => void;
   onLock: () => void;
 }) {
-  const count = organization.residents.length;
+  const [retirementCandidateId, setRetirementCandidateId] = useState<string | null>(null);
+  const retirementCandidate =
+    residents?.find((resident) => resident.id === retirementCandidateId) ?? null;
+  const count = residents?.length ?? 0;
   return (
     <section className={classes.attention} aria-labelledby="briefing-heading">
       <h1 id="briefing-heading" className={classes.heading}>
@@ -1186,20 +1263,100 @@ function Briefing({
       </h1>
       <p className={classes.body}>
         {organization.decision === "accepted"
-          ? `${count} inactive ${count === 1 ? "Resident" : "Residents"}`
+          ? `${count} ${count === 1 ? "Resident" : "Residents"} in this Workspace`
           : "Starter organization skipped"}
       </p>
-      {count > 0 && (
+      {residents === null ? (
+        <p role="status">Loading Residents</p>
+      ) : count > 0 ? (
         <ul className={classes.briefingList} aria-label="Resident roster">
-          {organization.residents.map((resident) => (
-            <li key={resident.id}>
-              {starterRoleLabels[resident.role]}
-              {resident.displayName ? `: ${resident.displayName}` : ""}
+          {residents.map((resident) => (
+            <li key={resident.id} className={classes.residentRow}>
+              <span className={classes.residentSummary}>
+                <span>
+                  {starterRoleLabels[resident.role]}
+                  {resident.displayName ? `: ${resident.displayName}` : ""}
+                </span>
+                <span className={classes.lifecycleStatus}>{resident.lifecycle}</span>
+              </span>
+              <span className={classes.residentActions}>
+                {resident.lifecycle === "inactive" && (
+                  <Button
+                    size="small"
+                    disabled={busy}
+                    onClick={() => onActivateResident(resident)}
+                  >
+                    Activate
+                  </Button>
+                )}
+                {resident.lifecycle === "active" && (
+                  <Button
+                    size="small"
+                    disabled={busy}
+                    onClick={() => onSuspendResident(resident)}
+                  >
+                    Suspend
+                  </Button>
+                )}
+                {resident.lifecycle === "suspended" && (
+                  <Button
+                    size="small"
+                    disabled={busy}
+                    onClick={() => onReactivateResident(resident)}
+                  >
+                    Reactivate
+                  </Button>
+                )}
+                {resident.lifecycle !== "retired" && (
+                  <Button
+                    size="small"
+                    appearance="subtle"
+                    disabled={busy}
+                    onClick={() => setRetirementCandidateId(resident.id)}
+                  >
+                    Retire
+                  </Button>
+                )}
+              </span>
             </li>
           ))}
         </ul>
+      ) : null}
+      <p className={classes.body}>
+        Lifecycle controls availability only. No Resident has execution authority yet.
+      </p>
+      <Button size="small" disabled={busy || residents === null} onClick={onRefreshResidents}>
+        Refresh Residents
+      </Button>
+      {retirementCandidate && (
+        <section
+          className={classes.retirementConfirm}
+          role="alertdialog"
+          aria-labelledby="retire-resident-heading"
+          aria-describedby="retire-resident-description"
+        >
+          <h2 id="retire-resident-heading">Permanently retire this Resident?</h2>
+          <p id="retire-resident-description">
+            {retirementCandidate.displayName ?? starterRoleLabels[retirementCandidate.role]} cannot
+            be reactivated after retirement. Its identity and history remain auditable.
+          </p>
+          <div className={classes.actions}>
+            <Button
+              appearance="primary"
+              disabled={busy}
+              onClick={() => {
+                onRetireResident(retirementCandidate);
+                setRetirementCandidateId(null);
+              }}
+            >
+              Permanently retire
+            </Button>
+            <Button disabled={busy} onClick={() => setRetirementCandidateId(null)}>
+              Cancel
+            </Button>
+          </div>
+        </section>
       )}
-      <p className={classes.body}>No Resident has execution authority yet.</p>
       <LocalModels
         report={localModelDiscovery}
         activations={localModelActivations}

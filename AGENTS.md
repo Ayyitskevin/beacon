@@ -235,12 +235,16 @@ Owner account and Recovery Key boundary, authenticated local transport, configur
 lock, Linux screen-lock/suspend monitor, Tauri/React shell, and the authenticated Starter
 Organization decision. Accepting its editable Lead, Builder, Reviewer, and Researcher proposal
 creates inactive Resident identities only; it grants no model, capability, budget, activation, or
-execution authority. Authenticated Owners can create and inspect Projects with immutable, contiguous
+execution authority. The Owner can activate, suspend, reactivate, and permanently retire those
+identities through an append-only, stale-safe lifecycle; availability still grants no execution
+authority. Authenticated Owners can create and inspect Projects with immutable, contiguous
 Charter revisions; the current Charter pointer must identify the terminal revision, and creation
 and revision remain limited to Observe or Supervised autonomy with no spending or external effects.
 The Owner can publish a new immutable revision from the exact current revision and inspect the full
 history. Briefing can discover installed Ollama models through a bounded loopback read, but every
 result remains ephemeral and inactive: discovery persists nothing, invokes nothing, and grants no
-capability or authority. Model capability inspection, resource activation, Teams, Missions, Cloud
-Link, passkeys, active agent work, and a downloadable installer do not exist yet. Do not describe
-this checkpoint as a usable Alpha.
+capability or authority. The Owner can separately inspect an exact local model, approve a known
+Provider Feature subset, activate it as revocable Workspace eligibility, and deactivate it without
+running the model or granting Agent authority. Teams, Missions, Cloud Link, passkeys, active agent
+work, and a downloadable installer do not exist yet. Do not describe this checkpoint as a usable
+Alpha.
