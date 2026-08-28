@@ -2,5 +2,13 @@
   "identifier": "main-window",
   "description": "Minimum capability for Beacon's bundled main window.",
   "windows": ["main"],
-  "permissions": ["allow-session-status"]
+  "permissions": [
+    "allow-authentication-capabilities",
+    "allow-session-status",
+    "allow-begin-password-setup",
+    "allow-complete-operator-setup",
+    "allow-authenticate-password",
+    "allow-recover-operator-account",
+    "allow-lock-session"
+  ]
 }

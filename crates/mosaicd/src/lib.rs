@@ -1,5 +1,9 @@
 use std::fmt;
 use std::fs;
+#[cfg(unix)]
+use std::fs::OpenOptions;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -7,10 +11,27 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 1;
+mod operator_account;
+
+#[cfg(unix)]
+mod local_transport;
+
+#[cfg(unix)]
+pub use local_transport::{
+    LocalErrorCode, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
+    LocalTransportError, initialize_local_auth_token,
+};
+
+pub use operator_account::{
+    AccessOrigin, OperatorAccountError, OperatorAccountService, OperatorSessionPhase,
+    OperatorSessionStatus, RecoveryKey, SecretString,
+};
+
+const SCHEMA_VERSION: i64 = 2;
 const MAX_WORKSPACE_NAME_CHARS: usize = 120;
 
-const SCHEMA: &str = include_str!("../migrations/0001_initial.sql");
+const SCHEMA_V1: &str = include_str!("../migrations/0001_initial.sql");
+const MIGRATION_V2: &str = include_str!("../migrations/0002_operator_account.sql");
 
 #[derive(Debug, Clone)]
 pub struct StartupConfig {
@@ -40,6 +61,7 @@ pub struct StoreDiagnostics {
     pub foreign_key_violations: u64,
     pub workspace_count: u64,
     pub persisted_event_count: u64,
+    pub security_event_count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -105,7 +127,10 @@ impl fmt::Display for SupervisorError {
                 "Event sequence {sequence} payload does not match its Workspace scope"
             ),
             Self::SchemaMismatch => {
-                write!(formatter, "store schema does not match schema version 1")
+                write!(
+                    formatter,
+                    "store schema does not match its declared version"
+                )
             }
             Self::UnsupportedSchemaVersion(version) => {
                 write!(formatter, "store schema version {version} is unsupported")
@@ -148,6 +173,7 @@ impl Supervisor {
         let workspace_name = validate_workspace_name(&config.initial_workspace_name)?;
 
         prepare_parent(&config.store_path)?;
+        prepare_store_file(&config.store_path)?;
 
         let mut connection = Connection::open(&config.store_path)?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
@@ -158,19 +184,19 @@ impl Supervisor {
         // https://docs.rs/rusqlite/0.40.2/rusqlite/struct.Connection.html#method.transaction_with_behavior
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if has_user_schema(&transaction)? {
-            verify_schema(&transaction)?;
+            match declared_schema_version(&transaction)? {
+                1 => {
+                    verify_schema(&transaction, 1)?;
+                    transaction.execute_batch(MIGRATION_V2)?;
+                    verify_schema(&transaction, SCHEMA_VERSION)?;
+                }
+                SCHEMA_VERSION => verify_schema(&transaction, SCHEMA_VERSION)?,
+                version => return Err(SupervisorError::UnsupportedSchemaVersion(version)),
+            }
         } else {
-            transaction.execute_batch(SCHEMA)?;
-            verify_schema(&transaction)?;
-        }
-
-        let schema_version: i64 = transaction.query_row(
-            "SELECT version FROM schema_meta WHERE singleton = 1",
-            [],
-            |row| row.get(0),
-        )?;
-        if schema_version != SCHEMA_VERSION {
-            return Err(SupervisorError::UnsupportedSchemaVersion(schema_version));
+            transaction.execute_batch(SCHEMA_V1)?;
+            transaction.execute_batch(MIGRATION_V2)?;
+            verify_schema(&transaction, SCHEMA_VERSION)?;
         }
 
         let existing = transaction
@@ -284,6 +310,28 @@ fn prepare_parent(store_path: &Path) -> Result<(), std::io::Error> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn prepare_store_file(store_path: &Path) -> Result<(), std::io::Error> {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW);
+    let file = options.open(store_path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other("store path is not a regular file"));
+    }
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn prepare_store_file(_store_path: &Path) -> Result<(), std::io::Error> {
+    Ok(())
+}
+
 fn parse_workspace_id(value: String) -> Result<Uuid, SupervisorError> {
     Uuid::parse_str(&value).map_err(|_| SupervisorError::InvalidWorkspaceId(value))
 }
@@ -311,9 +359,24 @@ fn has_user_schema(connection: &Connection) -> Result<bool, SupervisorError> {
     Ok(exists)
 }
 
-fn verify_schema(connection: &Connection) -> Result<(), SupervisorError> {
+fn declared_schema_version(connection: &Connection) -> Result<i64, SupervisorError> {
+    connection
+        .query_row(
+            "SELECT version FROM schema_meta WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(SupervisorError::Store)
+}
+
+fn verify_schema(connection: &Connection, version: i64) -> Result<(), SupervisorError> {
     let expected_connection = Connection::open_in_memory()?;
-    expected_connection.execute_batch(SCHEMA)?;
+    expected_connection.execute_batch(SCHEMA_V1)?;
+    if version == SCHEMA_VERSION {
+        expected_connection.execute_batch(MIGRATION_V2)?;
+    } else if version != 1 {
+        return Err(SupervisorError::UnsupportedSchemaVersion(version));
+    }
     let expected = schema_signature(&expected_connection)?;
     let actual = schema_signature(connection)?;
     if actual != expected {
@@ -419,6 +482,7 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
         foreign_key_violations,
         workspace_count: count_rows(connection, "workspaces")?,
         persisted_event_count,
+        security_event_count: count_rows(connection, "security_events")?,
     })
 }
 
@@ -456,6 +520,7 @@ fn verify_persisted_events(connection: &Connection) -> Result<u64, SupervisorErr
 fn count_rows(connection: &Connection, table: &str) -> Result<u64, SupervisorError> {
     let sql = match table {
         "workspaces" => "SELECT count(*) FROM workspaces",
+        "security_events" => "SELECT count(*) FROM security_events",
         _ => unreachable!("count_rows is restricted to known tables"),
     };
     let count: i64 = connection.query_row(sql, [], |row| row.get(0))?;
@@ -466,6 +531,8 @@ fn count_rows(connection: &Connection, table: &str) -> Result<u64, SupervisorErr
 #[cfg(test)]
 mod tests {
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Barrier};
     use std::thread;
@@ -473,7 +540,7 @@ mod tests {
     use rusqlite::Connection;
     use uuid::Uuid;
 
-    use super::{DiagnosticStatus, StartupConfig, Supervisor, SupervisorError};
+    use super::{DiagnosticStatus, SCHEMA_V1, StartupConfig, Supervisor, SupervisorError};
 
     struct TestStore {
         path: PathBuf,
@@ -512,11 +579,12 @@ mod tests {
         assert!(report.workspace.created);
         assert_eq!(report.workspace.name, "Personal");
         assert_eq!(report.diagnostics.status, DiagnosticStatus::Ready);
-        assert_eq!(report.diagnostics.schema_version, 1);
+        assert_eq!(report.diagnostics.schema_version, 2);
         assert_eq!(report.diagnostics.integrity_check, "ok");
         assert_eq!(report.diagnostics.foreign_key_violations, 0);
         assert_eq!(report.diagnostics.workspace_count, 1);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
+        assert_eq!(report.diagnostics.security_event_count, 0);
         assert_eq!(
             report
                 .events
@@ -525,6 +593,25 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["store.opened", "workspace.created", "diagnostic.completed"]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bootstrap_makes_the_store_owner_only() {
+        let root = std::env::temp_dir().join(format!("mosaic-store-{}", Uuid::new_v4()));
+        let store_path = root.join("beacon.sqlite3");
+
+        Supervisor::bootstrap(StartupConfig {
+            store_path: store_path.clone(),
+            initial_workspace_name: "Personal".to_owned(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            fs::metadata(&store_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -540,6 +627,53 @@ mod tests {
         assert_eq!(second.diagnostics.workspace_count, 1);
         assert_eq!(second.diagnostics.persisted_event_count, 1);
         assert_eq!(second.events[1].kind, "workspace.reused");
+    }
+
+    #[test]
+    fn version_one_store_migrates_transactionally_without_replacing_workspace_state() {
+        let store = TestStore::new("version-one-migration");
+        let connection = Connection::open(&store.path).unwrap();
+        connection.execute_batch(SCHEMA_V1).unwrap();
+        let workspace_id = Uuid::new_v4();
+        connection
+            .execute(
+                "INSERT INTO workspaces (id, name, created_at_ms) VALUES (?1, 'Existing', 7)",
+                [workspace_id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+                 VALUES (?1, 'workspace.created', ?2, 7)",
+                rusqlite::params![
+                    workspace_id.to_string(),
+                    serde_json::json!({
+                        "workspace_id": workspace_id,
+                        "name": "Existing"
+                    })
+                    .to_string()
+                ],
+            )
+            .unwrap();
+        drop(connection);
+
+        let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
+
+        assert_eq!(report.workspace.id, workspace_id);
+        assert_eq!(report.workspace.name, "Existing");
+        assert!(!report.workspace.created);
+        assert_eq!(report.diagnostics.schema_version, 2);
+        assert_eq!(report.diagnostics.workspace_count, 1);
+        assert_eq!(report.diagnostics.persisted_event_count, 1);
+        assert_eq!(report.diagnostics.security_event_count, 0);
+        let connection = Connection::open(&store.path).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM operator_accounts", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
