@@ -348,7 +348,7 @@ impl OperatorAccountService {
 
         let verified = verify_password(&password, &account.password_hash)?;
         if !verified {
-            register_failure(&mut state.connection, CredentialKind::Password, now)?;
+            register_failure(&mut state.connection, CredentialKind::Password)?;
             return Err(OperatorAccountError::AuthenticationFailed);
         }
 
@@ -394,7 +394,7 @@ impl OperatorAccountService {
             Err(()) => false,
         };
         if !verified {
-            register_failure(&mut state.connection, CredentialKind::Recovery, now)?;
+            register_failure(&mut state.connection, CredentialKind::Recovery)?;
             return Err(OperatorAccountError::AuthenticationFailed);
         }
 
@@ -751,7 +751,6 @@ fn enforce_rate_limit(
 fn register_failure(
     connection: &mut Connection,
     kind: CredentialKind,
-    now: i64,
 ) -> Result<(), OperatorAccountError> {
     let (attempt_column, retry_column, event_kind) = match kind {
         CredentialKind::Password => (
@@ -768,6 +767,7 @@ fn register_failure(
     let select = format!("SELECT {attempt_column} FROM operator_accounts WHERE singleton = 1");
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let previous: i64 = transaction.query_row(&select, [], |row| row.get(0))?;
+    let now = current_time_ms()?;
     let attempts = (previous + 1).min(MAX_FAILED_ATTEMPTS);
     let retry_after = if attempts < FIRST_DELAYED_ATTEMPT {
         0
