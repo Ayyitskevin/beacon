@@ -109,6 +109,7 @@ fn parse_serve(mut arguments: impl Iterator<Item = String>) -> Result<LocalServe
         socket_path: socket_path.ok_or_else(|| "serve requires --socket".to_owned())?,
         auth_token_path: auth_token_path.ok_or_else(|| "serve requires --auth-token".to_owned())?,
         lock_path: lock_path.ok_or_else(|| "serve requires --lock".to_owned())?,
+        local_model_endpoint: beacond::LocalModelEndpoint::ollama_default(),
     })
 }
 

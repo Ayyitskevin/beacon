@@ -511,6 +511,12 @@ impl OperatorAccountService {
         Ok(())
     }
 
+    pub(crate) fn require_authenticated(&self) -> Result<(), OperatorAccountError> {
+        let now = current_time_ms()?;
+        let mut state = self.lock_state()?;
+        require_active_session(&mut state, now)
+    }
+
     pub(crate) fn with_authenticated_store<T, E>(
         &self,
         operation: impl FnOnce(&mut Connection, i64) -> Result<T, E>,

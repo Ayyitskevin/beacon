@@ -18,6 +18,7 @@ const COMMANDS: &[&str] = &[
     "project_charter_history",
     "create_project",
     "revise_project_charter",
+    "discover_local_models",
 ];
 
 fn main() {

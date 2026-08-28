@@ -19,15 +19,18 @@ use crate::{
     AccessOrigin, OperatorAccountError, OperatorAccountService, OperatorSessionPolicy,
     OperatorSessionStatus, PlatformSessionMonitor, PlatformSessionMonitorStatus, ProjectCharter,
     ProjectCharterDraft, ProjectDraft, ProjectError, ProjectService, ProjectSummary, ProjectView,
-    RecoveryKey, SecretString, StarterOrganizationError, StarterOrganizationService,
-    StarterOrganizationView, StarterResidentDraft, StartupConfig, Supervisor,
+    RecoveryKey, ResourceDiscoveryError, ResourceDiscoveryService, SecretString,
+    StarterOrganizationError, StarterOrganizationService, StarterOrganizationView,
+    StarterResidentDraft, StartupConfig, Supervisor,
 };
 
 const PROTOCOL_VERSION: u16 = 1;
 const AUTH_TOKEN_BYTES: usize = 32;
 const MAX_MESSAGE_BYTES: u64 = 64 * 1024;
 const SERVER_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
-const CLIENT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
+// Resource discovery may use its complete two-second HTTP budget. Keep transport overhead
+// outside that budget so a clean "unavailable" report is not mistaken for a socket failure.
+const CLIENT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone)]
 pub struct LocalServerConfig {
@@ -36,6 +39,7 @@ pub struct LocalServerConfig {
     pub socket_path: PathBuf,
     pub auth_token_path: PathBuf,
     pub lock_path: PathBuf,
+    pub local_model_endpoint: crate::LocalModelEndpoint,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -83,6 +87,7 @@ pub enum LocalTransportError {
     Account(OperatorAccountError),
     StarterOrganization(StarterOrganizationError),
     Project(ProjectError),
+    ResourceDiscovery(ResourceDiscoveryError),
 }
 
 impl fmt::Display for LocalTransportError {
@@ -105,6 +110,9 @@ impl fmt::Display for LocalTransportError {
                 write!(formatter, "starter organization failed: {error}")
             }
             Self::Project(error) => write!(formatter, "Project operation failed: {error}"),
+            Self::ResourceDiscovery(error) => {
+                write!(formatter, "resource discovery failed: {error}")
+            }
         }
     }
 }
@@ -144,6 +152,12 @@ impl From<StarterOrganizationError> for LocalTransportError {
 impl From<ProjectError> for LocalTransportError {
     fn from(error: ProjectError) -> Self {
         Self::Project(error)
+    }
+}
+
+impl From<ResourceDiscoveryError> for LocalTransportError {
+    fn from(error: ResourceDiscoveryError) -> Self {
+        Self::ResourceDiscovery(error)
     }
 }
 
@@ -342,6 +356,7 @@ enum LocalCommand {
         expected_current_revision: u32,
         draft: ProjectCharterDraft,
     },
+    DiscoverLocalModels,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -379,6 +394,9 @@ enum LocalResult {
     ProjectCharterHistory {
         charters: Vec<ProjectCharter>,
     },
+    LocalModelDiscovery {
+        report: crate::LocalModelDiscoveryReport,
+    },
     Empty,
 }
 
@@ -397,6 +415,7 @@ pub struct LocalSupervisorServer {
     accounts: Arc<OperatorAccountService>,
     starter_organization: StarterOrganizationService,
     projects: ProjectService,
+    resource_discovery: ResourceDiscoveryService,
     platform_monitor: PlatformSessionMonitor,
 }
 
@@ -420,6 +439,8 @@ impl LocalSupervisorServer {
         let starter_organization =
             StarterOrganizationService::new(Arc::clone(&accounts), report.workspace.id);
         let projects = ProjectService::new(Arc::clone(&accounts), report.workspace.id);
+        let resource_discovery =
+            ResourceDiscoveryService::new(Arc::clone(&accounts), config.local_model_endpoint);
         let token = load_local_auth_token(&config.auth_token_path)?;
         let listener = UnixListener::bind(&config.socket_path)?;
         fs::set_permissions(&config.socket_path, fs::Permissions::from_mode(0o600))?;
@@ -435,6 +456,7 @@ impl LocalSupervisorServer {
             accounts,
             starter_organization,
             projects,
+            resource_discovery,
             platform_monitor: PlatformSessionMonitor::new(),
         })
     }
@@ -588,6 +610,9 @@ impl LocalSupervisorServer {
                     expected_current_revision,
                     draft,
                 )?,
+            },
+            LocalCommand::DiscoverLocalModels => LocalResult::LocalModelDiscovery {
+                report: self.resource_discovery.discover_local_models()?,
             },
         };
         Ok(ResponseEnvelope {
@@ -782,6 +807,12 @@ impl LocalSupervisorClient {
         })?)
     }
 
+    pub fn discover_local_models(
+        &self,
+    ) -> Result<crate::LocalModelDiscoveryReport, LocalTransportError> {
+        expect_local_model_discovery(self.send(LocalCommand::DiscoverLocalModels)?)
+    }
+
     fn send(&self, command: LocalCommand) -> Result<LocalResult, LocalTransportError> {
         let token = load_local_auth_token(&self.token_path)?;
         let request = RequestEnvelope {
@@ -876,11 +907,29 @@ fn expect_project_charter_history(
     }
 }
 
+fn expect_local_model_discovery(
+    result: LocalResult,
+) -> Result<crate::LocalModelDiscoveryReport, LocalTransportError> {
+    match result {
+        LocalResult::LocalModelDiscovery { report } => Ok(report),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
 fn response_from_transport_error(error: LocalTransportError) -> ResponseEnvelope {
     let wire_error = match error {
         LocalTransportError::Account(error) => wire_error_from_account(error),
         LocalTransportError::StarterOrganization(error) => wire_error_from_starter(error),
         LocalTransportError::Project(error) => wire_error_from_project(error),
+        LocalTransportError::ResourceDiscovery(ResourceDiscoveryError::Account(error)) => {
+            wire_error_from_account(error)
+        }
+        LocalTransportError::ResourceDiscovery(ResourceDiscoveryError::EndpointNotLoopback) => {
+            WireError {
+                code: LocalErrorCode::ProtocolError,
+                retry_after_ms: None,
+            }
+        }
         LocalTransportError::Remote {
             code,
             retry_after_ms,

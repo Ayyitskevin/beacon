@@ -14,6 +14,7 @@ use uuid::Uuid;
 mod operator_account;
 mod platform_session;
 mod project;
+mod resource_discovery;
 mod starter_organization;
 
 #[cfg(unix)]
@@ -35,6 +36,11 @@ pub use platform_session::{
 pub use project::{
     AutonomyProfile, BudgetBoundary, ExternalEffects, ProjectCharter, ProjectCharterDraft,
     ProjectDraft, ProjectError, ProjectService, ProjectSummary, ProjectView,
+};
+pub use resource_discovery::{
+    DiscoveredLocalModel, DiscoveryStatus, LocalModelDetails, LocalModelDiscoveryReport,
+    LocalModelEndpoint, ModelActivation, ModelProvider, ResourceDiscoveryError,
+    ResourceDiscoveryService,
 };
 pub use starter_organization::{
     ResidentAgentSummary, ResidentLifecycle, StarterOrganizationDecision, StarterOrganizationError,

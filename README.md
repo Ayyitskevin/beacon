@@ -190,6 +190,12 @@ effect of creation. The Owner may later publish a new immutable Charter revision
 current revision, inspect the preserved history, and safely recover from a stale edit without
 overwriting either version.
 
+Briefing can also check the same computer for installed Ollama models. Discovery is an explicit,
+bounded loopback read: every result remains inactive, nothing is persisted, no model is invoked,
+and unavailable Ollama never blocks the Workspace. The Owner can expand a result for its endpoint,
+digest, format, family, and modified time. Capability inspection and activation remain later,
+separate decisions.
+
 From `apps/desktop`, use `npm run tauri dev` to launch the development shell. The implementation
 checkpoints and verified dependency sources are recorded in
 [the Rust foundation](docs/implementation/phase-0-rust-foundation.md) and
@@ -199,6 +205,8 @@ admission boundary is recorded in
 The Project and immutable Charter boundary is recorded in
 [the Projects checkpoint](docs/implementation/phase-0-projects.md), with revision publishing in
 [the Charter revisions checkpoint](docs/implementation/phase-0-charter-revisions.md).
+The inactive resource boundary is recorded in
+[the local-model discovery checkpoint](docs/implementation/phase-0-local-model-discovery.md).
 Run `scripts/gate` to verify the
 preserved Beacon Legacy Desk, the Rust workspace, the web bundle, and the native desktop build.
 The exact pre-Beacon compatibility boundary is recorded in the

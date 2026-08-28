@@ -5,6 +5,7 @@ import {
   beginLocalPasswordSetup,
   acceptStarterOrganization,
   createProject,
+  discoverLocalModels,
   completeLocalOperatorSetup,
   describeLocalAccountError,
   discardStarterOrganization,
@@ -253,6 +254,76 @@ describe("desktop session transport", () => {
       ["project_charter_history", { projectId: project.id }],
       ["project", { projectId: project.id }],
     ]);
+  });
+
+  it("maps local-model discovery and accepts only inactive loopback resources", async () => {
+    const report = {
+      status: "available",
+      endpoint: "http://127.0.0.1:11434",
+      observedAtMs: 123,
+      models: [
+        {
+          provider: "ollama",
+          activation: "inactive",
+          name: "qwen3.8:27b",
+          digest: "22130167c4c20e20c7b71454612966ca8e8171e9b3cc8ab6ce8aa6cbfec79643",
+          sizeBytes: 17_741_872_154,
+          modifiedAt: "2026-08-14T14:38:20.13373148-04:00",
+          details: {
+            format: "gguf",
+            family: "qwen35",
+            parameterSize: "27.3B",
+            quantizationLevel: "Q4_K_M",
+          },
+        },
+      ],
+    } as const;
+    invokeMock
+      .mockResolvedValueOnce(report)
+      .mockResolvedValueOnce({ ...report, endpoint: "http://192.0.2.1:11434" })
+      .mockResolvedValueOnce({
+        ...report,
+        models: [{ ...report.models[0], activation: "active" }],
+      })
+      .mockResolvedValueOnce({ ...report, executionAuthority: "ambient" });
+
+    await expect(discoverLocalModels()).resolves.toEqual(report);
+    await expect(discoverLocalModels()).rejects.toThrow("invalid local-model discovery report");
+    await expect(discoverLocalModels()).rejects.toThrow("invalid local-model discovery report");
+    await expect(discoverLocalModels()).rejects.toThrow("invalid local-model discovery report");
+    expect(invokeMock.mock.calls).toEqual([
+      ["discover_local_models"],
+      ["discover_local_models"],
+      ["discover_local_models"],
+      ["discover_local_models"],
+    ]);
+  });
+
+  it.each([
+    ["unsorted models", ["zeta:latest", "alpha:latest"]],
+    ["duplicate model names", ["alpha:latest", "alpha:latest"]],
+  ])("rejects local-model discovery with %s", async (_label, names) => {
+    const template = {
+      provider: "ollama",
+      activation: "inactive",
+      digest: "22130167c4c20e20c7b71454612966ca8e8171e9b3cc8ab6ce8aa6cbfec79643",
+      sizeBytes: 1,
+      modifiedAt: "2026-08-14T14:38:20Z",
+      details: {
+        format: "gguf",
+        family: "qwen35",
+        parameterSize: "27.3B",
+        quantizationLevel: "Q4_K_M",
+      },
+    };
+    invokeMock.mockResolvedValue({
+      status: "available",
+      endpoint: "http://127.0.0.1:11434",
+      observedAtMs: 123,
+      models: names.map((name) => ({ ...template, name })),
+    });
+
+    await expect(discoverLocalModels()).rejects.toThrow("invalid local-model discovery report");
   });
 
   it.each([
