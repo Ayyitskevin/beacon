@@ -28,6 +28,7 @@ scripts/gate all
 | Exact-id deactivation | Appends inactive successor | Pass |
 | Repeated/stale deactivation | Refused without another decision | Pass |
 | Provider offline during deactivation | Deactivation still succeeds | Pass |
+| Desktop with provider offline | Stored active decision remains visible and revocable | Pass |
 | Real authenticated Unix lifecycle | Inspect, activate, list, deactivate all pass | Pass |
 | Strict TypeScript adapter | Widened, remote, unsorted, and invalid-history data refused | Pass |
 | Desktop review interaction | Explicit selection and revocation; no Route/run claim | Pass |
