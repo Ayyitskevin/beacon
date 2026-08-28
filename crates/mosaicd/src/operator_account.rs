@@ -20,7 +20,8 @@ use super::{SCHEMA_VERSION, SupervisorError, unix_time_ms, verify_schema};
 const MIN_PASSWORD_CHARS: usize = 15;
 const MAX_PASSWORD_CHARS: usize = 1_024;
 const RECOVERY_KEY_BYTES: usize = 20;
-const SESSION_TIMEOUT_MS: i64 = 30 * 60 * 1_000;
+const MIN_SESSION_TIMEOUT_MINUTES: u16 = 1;
+const MAX_SESSION_TIMEOUT_MINUTES: u16 = 24 * 60;
 const MAX_FAILED_ATTEMPTS: i64 = 100;
 const FIRST_DELAYED_ATTEMPT: i64 = 5;
 const MAX_RETRY_DELAY_MS: i64 = 5 * 60 * 1_000;
@@ -94,12 +95,33 @@ pub enum OperatorSessionPhase {
     Unlocked,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlatformSessionEvent {
+    ScreenLocked,
+    PreparingForSleep,
+}
+
+impl PlatformSessionEvent {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::ScreenLocked => "screen_locked",
+            Self::PreparingForSleep => "preparing_for_sleep",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OperatorSessionStatus {
     pub phase: OperatorSessionPhase,
     pub workspace_access: bool,
     pub operator_commands: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorSessionPolicy {
+    pub inactivity_timeout_minutes: u16,
 }
 
 #[derive(Debug)]
@@ -116,6 +138,7 @@ pub enum OperatorAccountError {
     CredentialDisabled,
     RemotePasswordNotAllowed,
     NotAuthenticated,
+    InvalidSessionTimeout,
     CredentialProcessing,
     InvalidStore,
     ClockBeforeUnixEpoch,
@@ -159,6 +182,10 @@ impl fmt::Display for OperatorAccountError {
                 write!(formatter, "password fallback is restricted to this machine")
             }
             Self::NotAuthenticated => write!(formatter, "the Operator session is locked"),
+            Self::InvalidSessionTimeout => write!(
+                formatter,
+                "session timeout must be between {MIN_SESSION_TIMEOUT_MINUTES} and {MAX_SESSION_TIMEOUT_MINUTES} minutes"
+            ),
             Self::CredentialProcessing => write!(formatter, "credential processing failed"),
             Self::InvalidStore => write!(formatter, "the account store failed validation"),
             Self::ClockBeforeUnixEpoch => write!(formatter, "the system clock is invalid"),
@@ -223,8 +250,9 @@ impl OperatorAccountService {
         }
 
         if let Some(session) = state.session {
-            let active = now >= session.last_activity_ms
-                && now - session.last_activity_ms < SESSION_TIMEOUT_MS;
+            let timeout_ms = load_session_timeout_ms(&state.connection)?;
+            let active =
+                now >= session.last_activity_ms && now - session.last_activity_ms < timeout_ms;
             if active {
                 return Ok(status_for(OperatorSessionPhase::Unlocked));
             }
@@ -397,11 +425,30 @@ impl OperatorAccountService {
     }
 
     pub fn lock(&self) -> Result<OperatorSessionStatus, OperatorAccountError> {
+        self.lock_with_reason("operator_requested")
+    }
+
+    pub fn lock_for_platform_event(
+        &self,
+        event: PlatformSessionEvent,
+    ) -> Result<OperatorSessionStatus, OperatorAccountError> {
+        self.lock_with_reason(event.reason())
+    }
+
+    fn lock_with_reason(
+        &self,
+        reason: &'static str,
+    ) -> Result<OperatorSessionStatus, OperatorAccountError> {
         let now = current_time_ms()?;
         let mut state = self.lock_state()?;
         let phase = if account_exists(&state.connection)? {
             if state.session.take().is_some() {
-                insert_security_event(&state.connection, "session.locked", now)?;
+                insert_security_event_with_detail(
+                    &state.connection,
+                    "session.locked",
+                    &serde_json::json!({ "reason": reason }).to_string(),
+                    now,
+                )?;
             }
             OperatorSessionPhase::Locked
         } else {
@@ -411,18 +458,55 @@ impl OperatorAccountService {
         Ok(status_for(phase))
     }
 
+    pub fn session_policy(&self) -> Result<OperatorSessionPolicy, OperatorAccountError> {
+        let mut state = self.lock_state()?;
+        require_active_session(&mut state, current_time_ms()?)?;
+        load_session_policy(&state.connection)
+    }
+
+    pub fn set_session_timeout_minutes(
+        &self,
+        inactivity_timeout_minutes: u16,
+    ) -> Result<OperatorSessionPolicy, OperatorAccountError> {
+        if !(MIN_SESSION_TIMEOUT_MINUTES..=MAX_SESSION_TIMEOUT_MINUTES)
+            .contains(&inactivity_timeout_minutes)
+        {
+            return Err(OperatorAccountError::InvalidSessionTimeout);
+        }
+        let now = current_time_ms()?;
+        let mut state = self.lock_state()?;
+        require_active_session(&mut state, now)?;
+        let transaction = state
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "UPDATE operator_accounts
+             SET session_timeout_minutes = ?1, updated_at_ms = ?2
+             WHERE singleton = 1",
+            params![inactivity_timeout_minutes, now],
+        )?;
+        insert_security_event_with_detail(
+            &transaction,
+            "session.policy_changed",
+            &serde_json::json!({
+                "inactivity_timeout_minutes": inactivity_timeout_minutes
+            })
+            .to_string(),
+            now,
+        )?;
+        transaction.commit()?;
+
+        require_active_session(&mut state, now)?;
+        Ok(OperatorSessionPolicy {
+            inactivity_timeout_minutes,
+        })
+    }
+
     pub fn record_operator_activity(&self) -> Result<(), OperatorAccountError> {
         let now = current_time_ms()?;
         let mut state = self.lock_state()?;
-        let session = state
-            .session
-            .as_mut()
-            .ok_or(OperatorAccountError::NotAuthenticated)?;
-        if now < session.last_activity_ms || now - session.last_activity_ms >= SESSION_TIMEOUT_MS {
-            state.session = None;
-            insert_security_event(&state.connection, "session.locked", now)?;
-            return Err(OperatorAccountError::NotAuthenticated);
-        }
+        require_active_session(&mut state, now)?;
+        let session = state.session.as_mut().expect("active session exists");
         session.last_activity_ms = now;
         Ok(())
     }
@@ -432,6 +516,19 @@ impl OperatorAccountService {
             .lock()
             .map_err(|_| OperatorAccountError::StateUnavailable)
     }
+}
+
+fn require_active_session(state: &mut AccountState, now: i64) -> Result<(), OperatorAccountError> {
+    let session = state
+        .session
+        .ok_or(OperatorAccountError::NotAuthenticated)?;
+    let timeout_ms = load_session_timeout_ms(&state.connection)?;
+    if now < session.last_activity_ms || now - session.last_activity_ms >= timeout_ms {
+        state.session = None;
+        insert_security_event(&state.connection, "session.locked", now)?;
+        return Err(OperatorAccountError::NotAuthenticated);
+    }
+    Ok(())
 }
 
 fn status_for(phase: OperatorSessionPhase) -> OperatorSessionStatus {
@@ -589,6 +686,27 @@ fn load_account(connection: &Connection) -> Result<Option<StoredAccount>, Operat
         .map_err(OperatorAccountError::Store)
 }
 
+fn load_session_policy(
+    connection: &Connection,
+) -> Result<OperatorSessionPolicy, OperatorAccountError> {
+    let value: i64 = connection.query_row(
+        "SELECT session_timeout_minutes FROM operator_accounts WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    let inactivity_timeout_minutes = u16::try_from(value)
+        .ok()
+        .filter(|value| (MIN_SESSION_TIMEOUT_MINUTES..=MAX_SESSION_TIMEOUT_MINUTES).contains(value))
+        .ok_or(OperatorAccountError::InvalidStore)?;
+    Ok(OperatorSessionPolicy {
+        inactivity_timeout_minutes,
+    })
+}
+
+fn load_session_timeout_ms(connection: &Connection) -> Result<i64, OperatorAccountError> {
+    Ok(i64::from(load_session_policy(connection)?.inactivity_timeout_minutes) * 60 * 1_000)
+}
+
 #[derive(Clone, Copy)]
 enum CredentialKind {
     Password,
@@ -654,10 +772,19 @@ fn insert_security_event(
     kind: &str,
     occurred_at_ms: i64,
 ) -> Result<(), OperatorAccountError> {
+    insert_security_event_with_detail(connection, kind, "{}", occurred_at_ms)
+}
+
+fn insert_security_event_with_detail(
+    connection: &Connection,
+    kind: &str,
+    detail_json: &str,
+    occurred_at_ms: i64,
+) -> Result<(), OperatorAccountError> {
     connection.execute(
         "INSERT INTO security_events (kind, detail_json, occurred_at_ms)
-         VALUES (?1, '{}', ?2)",
-        params![kind, occurred_at_ms],
+         VALUES (?1, ?2, ?3)",
+        params![kind, detail_json, occurred_at_ms],
     )?;
     Ok(())
 }
@@ -737,6 +864,54 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, OperatorAccountError::CredentialProcessing));
+        drop(service);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
+    #[test]
+    fn shortening_the_policy_below_elapsed_activity_locks_the_current_session() {
+        let path =
+            std::env::temp_dir().join(format!("mosaicd-short-policy-{}.sqlite3", Uuid::new_v4()));
+        Supervisor::bootstrap(StartupConfig {
+            store_path: path.clone(),
+            initial_workspace_name: "Personal".to_owned(),
+        })
+        .unwrap();
+        let service = OperatorAccountService::open(&path).unwrap();
+        service
+            .begin_password_setup(
+                SecretString::new("a long local passphrase".to_owned()),
+                SecretString::new("a long local passphrase".to_owned()),
+            )
+            .unwrap();
+        service.complete_operator_setup(true).unwrap();
+        service.state.lock().unwrap().session = Some(LiveSession {
+            last_activity_ms: current_time_ms().unwrap() - 61_000,
+        });
+
+        let error = service.set_session_timeout_minutes(1).unwrap_err();
+
+        assert!(matches!(error, OperatorAccountError::NotAuthenticated));
+        assert_eq!(
+            service.status().unwrap().phase,
+            OperatorSessionPhase::Locked
+        );
+        assert_eq!(
+            service
+                .state
+                .lock()
+                .unwrap()
+                .connection
+                .query_row(
+                    "SELECT session_timeout_minutes FROM operator_accounts WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
         drop(service);
         for suffix in ["", "-wal", "-shm"] {
             let _ = fs::remove_file(format!("{}{suffix}", path.display()));

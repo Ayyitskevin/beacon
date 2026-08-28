@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use mosaicd::{
     AccessOrigin, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
-    OperatorSessionPhase, SecretString, initialize_local_auth_token,
+    OperatorSessionPhase, PlatformMonitorState, SecretString, initialize_local_auth_token,
 };
 use uuid::Uuid;
 
@@ -102,6 +102,20 @@ fn authenticated_client_completes_account_flow_without_owning_the_store() {
         client.status().unwrap().phase,
         OperatorSessionPhase::Unlocked
     );
+    assert_eq!(
+        client
+            .set_session_timeout_minutes(90)
+            .unwrap()
+            .inactivity_timeout_minutes,
+        90
+    );
+    assert_eq!(
+        client.session_policy().unwrap().inactivity_timeout_minutes,
+        90
+    );
+    let monitor = client.platform_session_monitor_status().unwrap();
+    assert_eq!(monitor.screen_lock, PlatformMonitorState::Starting);
+    assert_eq!(monitor.suspend, PlatformMonitorState::Starting);
     client.lock().unwrap();
     client
         .authenticate_password(

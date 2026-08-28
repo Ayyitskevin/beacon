@@ -5,6 +5,10 @@
   "permissions": [
     "allow-authentication-capabilities",
     "allow-session-status",
+    "allow-session-policy",
+    "allow-set-session-timeout",
+    "allow-record-operator-activity",
+    "allow-platform-session-monitor-status",
     "allow-begin-password-setup",
     "allow-complete-operator-setup",
     "allow-authenticate-password",

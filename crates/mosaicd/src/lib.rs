@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 mod operator_account;
+mod platform_session;
 
 #[cfg(unix)]
 mod local_transport;
@@ -24,14 +25,18 @@ pub use local_transport::{
 
 pub use operator_account::{
     AccessOrigin, OperatorAccountError, OperatorAccountService, OperatorSessionPhase,
-    OperatorSessionStatus, RecoveryKey, SecretString,
+    OperatorSessionPolicy, OperatorSessionStatus, PlatformSessionEvent, RecoveryKey, SecretString,
+};
+pub use platform_session::{
+    PlatformMonitorState, PlatformSessionMonitor, PlatformSessionMonitorStatus,
 };
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const MAX_WORKSPACE_NAME_CHARS: usize = 120;
 
 const SCHEMA_V1: &str = include_str!("../migrations/0001_initial.sql");
 const MIGRATION_V2: &str = include_str!("../migrations/0002_operator_account.sql");
+const MIGRATION_V3: &str = include_str!("../migrations/0003_session_policy.sql");
 
 #[derive(Debug, Clone)]
 pub struct StartupConfig {
@@ -188,6 +193,12 @@ impl Supervisor {
                 1 => {
                     verify_schema(&transaction, 1)?;
                     transaction.execute_batch(MIGRATION_V2)?;
+                    transaction.execute_batch(MIGRATION_V3)?;
+                    verify_schema(&transaction, SCHEMA_VERSION)?;
+                }
+                2 => {
+                    verify_schema(&transaction, 2)?;
+                    transaction.execute_batch(MIGRATION_V3)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 SCHEMA_VERSION => verify_schema(&transaction, SCHEMA_VERSION)?,
@@ -196,6 +207,7 @@ impl Supervisor {
         } else {
             transaction.execute_batch(SCHEMA_V1)?;
             transaction.execute_batch(MIGRATION_V2)?;
+            transaction.execute_batch(MIGRATION_V3)?;
             verify_schema(&transaction, SCHEMA_VERSION)?;
         }
 
@@ -372,9 +384,13 @@ fn declared_schema_version(connection: &Connection) -> Result<i64, SupervisorErr
 fn verify_schema(connection: &Connection, version: i64) -> Result<(), SupervisorError> {
     let expected_connection = Connection::open_in_memory()?;
     expected_connection.execute_batch(SCHEMA_V1)?;
-    if version == SCHEMA_VERSION {
+    if version >= 2 {
         expected_connection.execute_batch(MIGRATION_V2)?;
-    } else if version != 1 {
+    }
+    if version >= 3 {
+        expected_connection.execute_batch(MIGRATION_V3)?;
+    }
+    if !(1..=SCHEMA_VERSION).contains(&version) {
         return Err(SupervisorError::UnsupportedSchemaVersion(version));
     }
     let expected = schema_signature(&expected_connection)?;
@@ -540,7 +556,9 @@ mod tests {
     use rusqlite::Connection;
     use uuid::Uuid;
 
-    use super::{DiagnosticStatus, SCHEMA_V1, StartupConfig, Supervisor, SupervisorError};
+    use super::{
+        DiagnosticStatus, MIGRATION_V2, SCHEMA_V1, StartupConfig, Supervisor, SupervisorError,
+    };
 
     struct TestStore {
         path: PathBuf,
@@ -579,7 +597,7 @@ mod tests {
         assert!(report.workspace.created);
         assert_eq!(report.workspace.name, "Personal");
         assert_eq!(report.diagnostics.status, DiagnosticStatus::Ready);
-        assert_eq!(report.diagnostics.schema_version, 2);
+        assert_eq!(report.diagnostics.schema_version, 3);
         assert_eq!(report.diagnostics.integrity_check, "ok");
         assert_eq!(report.diagnostics.foreign_key_violations, 0);
         assert_eq!(report.diagnostics.workspace_count, 1);
@@ -662,7 +680,7 @@ mod tests {
         assert_eq!(report.workspace.id, workspace_id);
         assert_eq!(report.workspace.name, "Existing");
         assert!(!report.workspace.created);
-        assert_eq!(report.diagnostics.schema_version, 2);
+        assert_eq!(report.diagnostics.schema_version, 3);
         assert_eq!(report.diagnostics.workspace_count, 1);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         assert_eq!(report.diagnostics.security_event_count, 0);
@@ -673,6 +691,56 @@ mod tests {
                     .get::<_, i64>(0))
                 .unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn version_two_store_migrates_account_and_security_history_with_default_policy() {
+        let store = TestStore::new("version-two-migration");
+        let connection = Connection::open(&store.path).unwrap();
+        connection.execute_batch(SCHEMA_V1).unwrap();
+        connection.execute_batch(MIGRATION_V2).unwrap();
+        connection
+            .execute(
+                "INSERT INTO operator_accounts (
+                    singleton, role, password_hash, recovery_key_hash, created_at_ms, updated_at_ms
+                 ) VALUES (1, 'owner', ?1, ?2, 7, 7)",
+                rusqlite::params!["x".repeat(32), vec![1_u8; 32]],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO security_events (kind, detail_json, occurred_at_ms)
+                 VALUES ('operator.enrolled', '{}', 7)",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let report = Supervisor::bootstrap(config(&store.path, "Personal")).unwrap();
+
+        assert_eq!(report.diagnostics.schema_version, 3);
+        assert_eq!(report.diagnostics.security_event_count, 1);
+        let connection = Connection::open(&store.path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT session_timeout_minutes FROM operator_accounts WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            30
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT kind FROM security_events WHERE sequence = 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "operator.enrolled"
         );
     }
 

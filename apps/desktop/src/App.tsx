@@ -17,9 +17,14 @@ import {
   completeLocalOperatorSetup,
   describeLocalAccountError,
   loadAuthenticationCapabilities,
+  loadPlatformSessionMonitorStatus,
+  loadSessionPolicy,
   loadSessionStatus,
   lockLocalSession,
+  type PlatformSessionMonitorStatus,
+  recordLocalOperatorActivity,
   recoverLocalOperatorAccount,
+  setLocalSessionTimeout,
   signInWithLocalPassword,
 } from "./session";
 import { darkTheme, lightTheme } from "./theme";
@@ -133,6 +138,12 @@ const useStyles = makeStyles({
     gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
     columnGap: tokens.spacingHorizontalXS,
   },
+  settingsForm: {
+    display: "grid",
+    rowGap: tokens.spacingVerticalS,
+    marginTop: tokens.spacingVerticalS,
+  },
+  monitorWarning: { color: tokens.colorPaletteDarkOrangeForeground1 },
 });
 
 export function App() {
@@ -149,6 +160,9 @@ export function App() {
   const [replacementKey, setReplacementKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState("");
+  const [timeoutMinutes, setTimeoutMinutes] = useState("30");
+  const [platformMonitor, setPlatformMonitor] =
+    useState<PlatformSessionMonitorStatus | null>(null);
   const [themeChoice, setThemeChoice] = useState<ThemeChoice>("light");
   const [systemPrefersDark, setSystemPrefersDark] = useState(
     () =>
@@ -180,13 +194,35 @@ export function App() {
   useEffect(() => {
     if (session?.phase !== "unlocked") return;
     let active = true;
+    Promise.all([loadSessionPolicy(), loadPlatformSessionMonitorStatus()]).then(
+      ([policy, monitor]) => {
+        if (!active) return;
+        setTimeoutMinutes(String(policy.inactivityTimeoutMinutes));
+        setPlatformMonitor(monitor);
+      },
+      () => {
+        if (!active) return;
+        setSession(null);
+        setViewState("error");
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [session?.phase]);
+
+  useEffect(() => {
+    if (session?.phase !== "unlocked") return;
+    let active = true;
     let checking = false;
     const timer = window.setInterval(() => {
       if (checking) return;
       checking = true;
-      void loadSessionStatus().then(
-        (nextSession) => {
-          if (active) setSession(nextSession);
+      void Promise.all([loadSessionStatus(), loadPlatformSessionMonitorStatus()]).then(
+        ([nextSession, monitor]) => {
+          if (!active) return;
+          setSession(nextSession);
+          setPlatformMonitor(monitor);
         },
         () => {
           if (!active) return;
@@ -200,6 +236,39 @@ export function App() {
     return () => {
       active = false;
       window.clearInterval(timer);
+    };
+  }, [session?.phase]);
+
+  useEffect(() => {
+    if (session?.phase !== "unlocked") return;
+    let active = true;
+    let renewing = false;
+    let lastRenewal = 0;
+    const renew = () => {
+      const now = Date.now();
+      if (renewing || now - lastRenewal < 30_000) return;
+      renewing = true;
+      void recordLocalOperatorActivity().then(
+        () => {
+          lastRenewal = Date.now();
+        },
+        () => {
+          if (!active) return;
+          setSession(null);
+          setViewState("error");
+        },
+      ).finally(() => {
+        renewing = false;
+      });
+    };
+    document.addEventListener("pointerdown", renew);
+    document.addEventListener("keydown", renew);
+    window.addEventListener("focus", renew);
+    return () => {
+      active = false;
+      document.removeEventListener("pointerdown", renew);
+      document.removeEventListener("keydown", renew);
+      window.removeEventListener("focus", renew);
     };
   }, [session?.phase]);
 
@@ -269,6 +338,15 @@ export function App() {
       setSession(await lockLocalSession());
       setRecoveryMode(false);
       setReplacementKey("");
+    });
+  }
+
+  async function saveSessionPolicy(event: FormEvent) {
+    event.preventDefault();
+    const value = Number(timeoutMinutes);
+    await runAction(async () => {
+      const policy = await setLocalSessionTimeout(value);
+      setTimeoutMinutes(String(policy.inactivityTimeoutMinutes));
     });
   }
 
@@ -441,6 +519,45 @@ export function App() {
             Workspace access {unlocked ? "open" : "locked"}
           </p>
           <p className={classes.status}>Network activity off</p>
+          {unlocked && (
+            <>
+              <h3 className={classes.themeHeading}>Session</h3>
+              <form className={classes.settingsForm} onSubmit={saveSessionPolicy}>
+                <Field label="Lock after inactivity" hint="Minutes, from 1 to 1,440">
+                  <Input
+                    aria-label="Lock after inactivity in minutes"
+                    type="number"
+                    min={1}
+                    max={1440}
+                    value={timeoutMinutes}
+                    onChange={(_, data) => setTimeoutMinutes(data.value)}
+                    required
+                  />
+                </Field>
+                <Button type="submit" size="small" disabled={busy}>
+                  Save timeout
+                </Button>
+              </form>
+              {platformMonitor &&
+                (platformMonitor.screenLock === "unavailable" ||
+                  platformMonitor.suspend === "unavailable") && (
+                  <p className={classes.monitorWarning} role="status">
+                    Automatic OS lock monitoring is unavailable. Manual and inactivity locking
+                    remain active.
+                  </p>
+                )}
+              {platformMonitor &&
+                platformMonitor.screenLock !== "unavailable" &&
+                platformMonitor.suspend !== "unavailable" && (
+                  <p className={classes.status}>
+                    OS lock monitoring {platformMonitor.screenLock === "active" &&
+                    platformMonitor.suspend === "active"
+                      ? "active"
+                      : "starting"}
+                  </p>
+                )}
+            </>
+          )}
           <h3 className={classes.themeHeading}>Appearance</h3>
           <div className={classes.themeControls} role="group" aria-label="Appearance">
             {themeChoices.map((choice) => (

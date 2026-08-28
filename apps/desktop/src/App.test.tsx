@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import axe from "axe-core";
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -15,6 +15,8 @@ const capabilities = {
   passkey: { available: false, reason: "unsupported_linux_webkitgtk" },
   passwordFallback: { available: true, scope: "same_machine" },
 } as const;
+const sessionPolicy = { inactivityTimeoutMinutes: 30 } as const;
+const monitorStatus = { screenLock: "active", suspend: "active" } as const;
 
 type Phase = "operator_setup_required" | "locked" | "unlocked";
 
@@ -24,9 +26,18 @@ function status(phase: Phase) {
 }
 
 function mockInitialState(phase: Phase) {
-  invokeMock.mockImplementation((command) => {
+  invokeMock.mockImplementation((command, args) => {
     if (command === "session_status") return Promise.resolve(status(phase));
     if (command === "authentication_capabilities") return Promise.resolve(capabilities);
+    if (command === "session_policy") return Promise.resolve(sessionPolicy);
+    if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+    if (command === "record_operator_activity") return Promise.resolve(null);
+    if (command === "set_session_timeout") {
+      return Promise.resolve({
+        inactivityTimeoutMinutes: (args as { inactivityTimeoutMinutes: number })
+          .inactivityTimeoutMinutes,
+      });
+    }
     return Promise.reject(new Error(`unexpected command: ${command}`));
   });
 }
@@ -73,6 +84,9 @@ describe("Beacon desktop shell", () => {
         return Promise.resolve({ recoveryKey: "ABCD-EFGH-IJKL-MNOP-QRST-UVWX-YZ23-4567" });
       }
       if (command === "complete_operator_setup") return Promise.resolve(status("unlocked"));
+      if (command === "session_policy") return Promise.resolve(sessionPolicy);
+      if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+      if (command === "record_operator_activity") return Promise.resolve(null);
       return Promise.reject(new Error(`unexpected command: ${command}`));
     });
 
@@ -102,6 +116,9 @@ describe("Beacon desktop shell", () => {
       if (command === "authentication_capabilities") return Promise.resolve(capabilities);
       if (command === "authenticate_password") return Promise.resolve(status("unlocked"));
       if (command === "lock_session") return Promise.resolve(status("locked"));
+      if (command === "session_policy") return Promise.resolve(sessionPolicy);
+      if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+      if (command === "record_operator_activity") return Promise.resolve(null);
       return Promise.reject(new Error(`unexpected command: ${command}`));
     });
 
@@ -123,6 +140,9 @@ describe("Beacon desktop shell", () => {
         return Promise.resolve(status(checks === 1 ? "unlocked" : "locked"));
       }
       if (command === "authentication_capabilities") return Promise.resolve(capabilities);
+      if (command === "session_policy") return Promise.resolve(sessionPolicy);
+      if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+      if (command === "record_operator_activity") return Promise.resolve(null);
       return Promise.reject(new Error(`unexpected command: ${command}`));
     });
 
@@ -163,6 +183,50 @@ describe("Beacon desktop shell", () => {
     expect(
       await screen.findByRole("heading", { name: "Set up your operator account" }),
     ).toBeVisible();
+  });
+
+  it("persists the session timeout and renews only on explicit operator activity", async () => {
+    const user = userEvent.setup();
+    mockInitialState("unlocked");
+
+    render(<App />);
+
+    const timeout = await screen.findByRole("spinbutton", {
+      name: "Lock after inactivity in minutes",
+    });
+    expect(timeout).toHaveValue(30);
+    expect(screen.getByText("OS lock monitoring active")).toBeVisible();
+    expect(invokeMock).not.toHaveBeenCalledWith("record_operator_activity");
+
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(invokeMock).toHaveBeenCalledWith("record_operator_activity");
+    await user.clear(timeout);
+    await user.type(timeout, "60");
+    await user.click(screen.getByRole("button", { name: "Save timeout" }));
+
+    expect(invokeMock).toHaveBeenCalledWith("set_session_timeout", {
+      inactivityTimeoutMinutes: 60,
+    });
+  });
+
+  it("warns without claiming protection when an OS lock monitor is unavailable", async () => {
+    invokeMock.mockImplementation((command) => {
+      if (command === "session_status") return Promise.resolve(status("unlocked"));
+      if (command === "authentication_capabilities") return Promise.resolve(capabilities);
+      if (command === "session_policy") return Promise.resolve(sessionPolicy);
+      if (command === "platform_session_monitor_status") {
+        return Promise.resolve({ screenLock: "unavailable", suspend: "active" });
+      }
+      if (command === "record_operator_activity") return Promise.resolve(null);
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+
+    render(<App />);
+
+    expect(
+      await screen.findByText(/Automatic OS lock monitoring is unavailable/i),
+    ).toBeVisible();
+    expect(screen.queryByText("OS lock monitoring active")).not.toBeInTheDocument();
   });
 
   it("fails closed when the command returns an undeclared field", async () => {

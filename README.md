@@ -177,8 +177,10 @@ inspectable SQLite diagnostic report:
 cargo run -p mosaicd -- bootstrap
 ```
 
-The desktop intentionally opens in a locked setup-required state. Until the separately reviewed
-Operator Account work exists, its only command returns a closed three-field session status; the UI
+The desktop intentionally opens in a locked setup-required state. A same-machine Owner can enroll
+with a password and one-time Recovery Key, configure a 1–1,440 minute inactivity lock, and see
+whether Linux screen-lock and suspend monitoring are active. The independently running supervisor
+owns credentials, the authoritative session, OS monitoring, and the managed store; locked UI
 receives no Workspace material and exposes no Operator Command.
 
 From `apps/desktop`, use `npm run tauri dev` to launch the development shell. The implementation

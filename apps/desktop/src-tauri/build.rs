@@ -1,6 +1,10 @@
 const COMMANDS: &[&str] = &[
     "authentication_capabilities",
     "session_status",
+    "session_policy",
+    "set_session_timeout",
+    "record_operator_activity",
+    "platform_session_monitor_status",
     "begin_password_setup",
     "complete_operator_setup",
     "authenticate_password",
@@ -13,5 +17,5 @@ fn main() {
         tauri_build::Attributes::new()
             .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS)),
     )
-    .expect("failed to build the Mosaic Phase 0 Tauri shell");
+    .expect("failed to build the Beacon Phase 0 Tauri shell");
 }

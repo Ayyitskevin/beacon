@@ -1,13 +1,14 @@
-# Phase 0 signed-out desktop shell
+# Phase 0 local Owner session
 
-This checkpoint proves the native desktop toolchain and the pre-authentication security boundary.
-It does not implement an Operator Account, sign-in, recovery, Cloud Link, or a usable Workspace.
-Those security-sensitive changes require their own design, independent review, and human approval.
+This checkpoint proves the native desktop toolchain, local Owner enrollment and recovery, and the
+authoritative inactivity and Linux platform-lock boundary. It does not implement passkeys, Cloud
+Link, remote authentication, or a usable Workspace. Those security-sensitive changes retain their
+own design and review boundaries.
 
 ## Boundary
 
-The bundled main window has one custom Tauri permission and one command:
-`session_status`. Rust always returns this exact shape:
+The bundled main window receives only explicit account and session commands. Before enrollment or
+while locked, `session_status` returns this exact closed shape:
 
 ```json
 {
@@ -19,12 +20,12 @@ The bundled main window has one custom Tauri permission and one command:
 
 The TypeScript adapter validates the exact key set and literal values. Missing fields, added fields,
 unexpected phases, enabled access, enabled commands, and non-object responses all fail closed into
-the local-session error view. The Tauri crate deliberately has no dependency on `mosaicd`; a window
-that has not authenticated an Operator cannot open the managed store through this slice.
+the local-session error view. The Tauri crate reaches the independently running supervisor only
+through an authenticated, owner-only Unix socket. It cannot open the managed store directly.
 
-The build manifest generates the command permission, and the capability manifest grants only
-`allow-session-status` to the `main` window. Generated permission and schema files remain ignored
-build products. The content security policy admits bundled content, Tauri IPC, inline styles
+The build manifest generates one permission per registered command, and the capability manifest
+grants that exact closed set to the `main` window. Generated permission and schema files remain
+ignored build products. The content security policy admits bundled content, Tauri IPC, inline styles
 required by Fluent UI's runtime styling, and local image data. It does not grant arbitrary network
 access. There is no browser development bypass and no JavaScript SQLite access.
 
@@ -37,7 +38,8 @@ available without changing semantic meaning. Appearance persistence belongs to t
 preference boundary and is not implied here.
 
 Automated tests cover the locked session shape, malformed-response rejection, failure and retry,
-disabled navigation, Light/Dark/Follow System behavior, structural accessibility, and WCAG AA
+enrollment, recovery, configurable timeout, explicit-activity renewal, unavailable-monitor
+warnings, disabled navigation, Light/Dark/Follow System behavior, structural accessibility, and WCAG AA
 contrast for the fixed text and brand-control color pairs. The layout includes a keyboard skip link,
 semantic landmarks, labeled controls, and reduced-motion handling. This is automated evidence, not
 a claim that the later interactive product has completed manual Orca testing.
@@ -80,5 +82,5 @@ The desktop stage performs a clean lifecycle-script-disabled npm install, fronte
 pre-authentication contract test, a production web build, and a Tauri no-bundle native build. The
 repository-wide gate adds the preserved Python checks and all Rust checks. `bundle.active` remains
 false: this checkpoint builds a local executable but creates no public installer, package identity,
-or release artifact. The visible Beacon title is temporary; internal npm, Cargo, and Tauri
-identifiers continue to use the approved `mosaic` placeholder.
+or release artifact. Product and executable identifiers migrate from the old `mosaic` placeholder
+to Beacon in the next isolated change so existing local state can be handled safely.

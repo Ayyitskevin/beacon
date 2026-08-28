@@ -11,6 +11,7 @@ license = "Apache-2.0"
 [workspace.dependencies]
 argon2 = { version = "=0.6.0", features = ["zeroize"] }
 data-encoding = "=2.11.1"
+dbus = "=0.9.12"
 getrandom = "=0.4.3"
 libc = "=0.2.189"
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
