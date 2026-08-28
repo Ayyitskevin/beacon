@@ -17,6 +17,7 @@ import {
   beginLocalPasswordSetup,
   completeLocalOperatorSetup,
   createProject,
+  discoverLocalModels,
   describeLocalAccountError,
   discardStarterOrganization,
   loadAuthenticationCapabilities,
@@ -29,6 +30,7 @@ import {
   loadStarterOrganization,
   lockLocalSession,
   type PlatformSessionMonitorStatus,
+  type LocalModelDiscoveryReport,
   type ProjectCharter,
   type ProjectCharterDraft,
   type ProjectDraft,
@@ -43,6 +45,7 @@ import {
   type StarterResidentDraft,
   type StarterRole,
 } from "./session";
+import { LocalModels } from "./LocalModels";
 import { ProjectsWorkspace } from "./Projects";
 import { darkTheme, lightTheme } from "./theme";
 
@@ -218,6 +221,10 @@ export function App() {
   const [charterHistory, setCharterHistory] = useState<ProjectCharter[] | null>(null);
   const [projectComposerOpen, setProjectComposerOpen] = useState(false);
   const [charterComposerOpen, setCharterComposerOpen] = useState(false);
+  const [localModelDiscovery, setLocalModelDiscovery] =
+    useState<LocalModelDiscoveryReport | null>(null);
+  const [discoveringLocalModels, setDiscoveringLocalModels] = useState(false);
+  const localModelDiscoveryEpoch = useRef(0);
   const [themeChoice, setThemeChoice] = useState<ThemeChoice>("light");
   const [systemPrefersDark, setSystemPrefersDark] = useState(
     () =>
@@ -304,6 +311,13 @@ export function App() {
     return () => {
       active = false;
     };
+  }, [unlocked]);
+
+  useEffect(() => {
+    if (unlocked) return;
+    localModelDiscoveryEpoch.current += 1;
+    setLocalModelDiscovery(null);
+    setDiscoveringLocalModels(false);
   }, [unlocked]);
 
   useEffect(() => {
@@ -531,10 +545,32 @@ export function App() {
       setCharterHistory(null);
       setProjectComposerOpen(false);
       setCharterComposerOpen(false);
+      setLocalModelDiscovery(null);
+      setDiscoveringLocalModels(false);
       setActiveApplication("Briefing");
       setRecoveryMode(false);
       setReplacementKey("");
     });
+  }
+
+  async function checkLocalModels() {
+    const requestEpoch = ++localModelDiscoveryEpoch.current;
+    setDiscoveringLocalModels(true);
+    setActionError("");
+    try {
+      const report = await discoverLocalModels();
+      if (requestEpoch === localModelDiscoveryEpoch.current) {
+        setLocalModelDiscovery(report);
+      }
+    } catch (error) {
+      if (requestEpoch === localModelDiscoveryEpoch.current) {
+        setActionError(describeLocalAccountError(error));
+      }
+    } finally {
+      if (requestEpoch === localModelDiscoveryEpoch.current) {
+        setDiscoveringLocalModels(false);
+      }
+    }
   }
 
   async function saveSessionPolicy(event: FormEvent) {
@@ -818,6 +854,9 @@ export function App() {
               replacementKey={replacementKey}
               busy={busy}
               error={actionError}
+              localModelDiscovery={localModelDiscovery}
+              discoveringLocalModels={discoveringLocalModels}
+              onCheckLocalModels={checkLocalModels}
               onLock={lockSession}
             />
           )}
@@ -1034,6 +1073,9 @@ function Briefing({
   replacementKey,
   busy,
   error,
+  localModelDiscovery,
+  discoveringLocalModels,
+  onCheckLocalModels,
   onLock,
 }: {
   classes: StyleClasses;
@@ -1041,6 +1083,9 @@ function Briefing({
   replacementKey: string;
   busy: boolean;
   error: string;
+  localModelDiscovery: LocalModelDiscoveryReport | null;
+  discoveringLocalModels: boolean;
+  onCheckLocalModels: () => void;
   onLock: () => void;
 }) {
   const count = organization.residents.length;
@@ -1065,6 +1110,11 @@ function Briefing({
         </ul>
       )}
       <p className={classes.body}>No Resident has execution authority yet.</p>
+      <LocalModels
+        report={localModelDiscovery}
+        busy={discoveringLocalModels}
+        onRefresh={onCheckLocalModels}
+      />
       {replacementKey && (
         <>
           <p>A new one-time Recovery Key replaced the old key. Save it offline now.</p>

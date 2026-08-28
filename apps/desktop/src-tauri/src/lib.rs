@@ -8,10 +8,11 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use beacond::{
-    AccessOrigin, LocalErrorCode, LocalSupervisorClient, LocalTransportError,
-    OperatorSessionPolicy, OperatorSessionStatus, PlatformSessionMonitorStatus, ProjectCharter,
-    ProjectCharterDraft, ProjectDraft, ProjectSummary, ProjectView, SecretString,
-    StarterOrganizationView, StarterResidentDraft, initialize_local_auth_token,
+    AccessOrigin, LocalErrorCode, LocalModelDiscoveryReport, LocalSupervisorClient,
+    LocalTransportError, OperatorSessionPolicy, OperatorSessionStatus,
+    PlatformSessionMonitorStatus, ProjectCharter, ProjectCharterDraft, ProjectDraft,
+    ProjectSummary, ProjectView, SecretString, StarterOrganizationView, StarterResidentDraft,
+    initialize_local_auth_token,
 };
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -361,6 +362,12 @@ fn revise_project_charter_value(
         .map_err(Into::into)
 }
 
+fn discover_local_models_value(
+    state: &DesktopState,
+) -> Result<LocalModelDiscoveryReport, CommandError> {
+    state.supervisor.discover_local_models().map_err(Into::into)
+}
+
 // Tauri command registration and typed Result/value transport:
 // https://v2.tauri.app/develop/calling-rust/#commands
 #[tauri::command]
@@ -520,6 +527,13 @@ fn revise_project_charter(
     draft: ProjectCharterDraft,
 ) -> Result<ProjectView, CommandError> {
     revise_project_charter_value(&state, project_id, expected_current_revision, draft)
+}
+
+#[tauri::command]
+fn discover_local_models(
+    state: State<'_, DesktopState>,
+) -> Result<LocalModelDiscoveryReport, CommandError> {
+    discover_local_models_value(&state)
 }
 
 fn prepare_runtime_directory(path: &Path) -> Result<(), std::io::Error> {
@@ -747,7 +761,8 @@ pub fn run() {
             project,
             project_charter_history,
             create_project,
-            revise_project_charter
+            revise_project_charter,
+            discover_local_models
         ])
         .run(tauri::generate_context!())
         .expect("failed to run the Beacon Phase 0 desktop shell");
@@ -923,6 +938,7 @@ mod tests {
                 "allow-project-charter-history",
                 "allow-create-project",
                 "allow-revise-project-charter",
+                "allow-discover-local-models",
             ]
         );
     }
@@ -947,6 +963,7 @@ mod tests {
                 socket_path: socket.clone(),
                 auth_token_path: token.clone(),
                 lock_path: root.join("supervisor.lock"),
+                local_model_endpoint: beacond::LocalModelEndpoint::ollama_default(),
             })
             .unwrap();
             let running = Arc::new(AtomicBool::new(true));

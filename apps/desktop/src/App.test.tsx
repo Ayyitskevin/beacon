@@ -42,6 +42,27 @@ const acceptedOrganization = {
     },
   ],
 } as const;
+const localModelReport = {
+  status: "available",
+  endpoint: "http://127.0.0.1:11434",
+  observedAtMs: 123,
+  models: [
+    {
+      provider: "ollama",
+      activation: "inactive",
+      name: "qwen3.8:27b",
+      digest: "22130167c4c20e20c7b71454612966ca8e8171e9b3cc8ab6ce8aa6cbfec79643",
+      sizeBytes: 17_741_872_154,
+      modifiedAt: "2026-08-14T14:38:20.13373148-04:00",
+      details: {
+        format: "gguf",
+        family: "qwen35",
+        parameterSize: "27.3B",
+        quantizationLevel: "Q4_K_M",
+      },
+    },
+  ],
+} as const;
 
 type Phase = "operator_setup_required" | "locked" | "unlocked";
 
@@ -136,6 +157,40 @@ describe("Beacon desktop shell", () => {
     expect(within(suiteNavigation).getByRole("button", { name: "Conversations" })).toBeDisabled();
     expect(within(suiteNavigation).getByRole("button", { name: "Knowledge" })).toBeDisabled();
     expect(within(suiteNavigation).getByRole("button", { name: "Software" })).toBeDisabled();
+  });
+
+  it("discovers installed local models as inactive resources from Briefing", async () => {
+    const user = userEvent.setup();
+    mockInitialState("unlocked");
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "discover_local_models") return Promise.resolve(localModelReport);
+      if (command === "session_status") return Promise.resolve(status("unlocked"));
+      if (command === "authentication_capabilities") return Promise.resolve(capabilities);
+      if (command === "session_policy") return Promise.resolve(sessionPolicy);
+      if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+      if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
+      if (command === "record_operator_activity") return Promise.resolve(null);
+      if (command === "set_session_timeout") {
+        return Promise.resolve({
+          inactivityTimeoutMinutes: (args as { inactivityTimeoutMinutes: number })
+            .inactivityTimeoutMinutes,
+        });
+      }
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    expect(screen.getByText("Not checked yet")).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Check local models" }));
+
+    expect(await screen.findByText("qwen3.8:27b")).toBeVisible();
+    expect(screen.getByText("Inactive")).toBeVisible();
+    expect(screen.getByText(/does not activate or run them/i)).toBeVisible();
+    expect(invokeMock).toHaveBeenCalledWith("discover_local_models");
+    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
+    expect(results.violations).toEqual([]);
   });
 
   it("creates a Project from an explicit Charter without granting effects or spend", async () => {

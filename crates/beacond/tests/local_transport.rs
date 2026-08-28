@@ -1,6 +1,8 @@
 #![cfg(unix)]
 
 use std::fs;
+use std::io::{Read, Write};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -11,10 +13,11 @@ use std::thread;
 use std::time::Duration;
 
 use beacond::{
-    AccessOrigin, AutonomyProfile, LocalErrorCode, LocalServerConfig, LocalSupervisorClient,
-    LocalSupervisorServer, LocalTransportError, OperatorSessionPhase, PlatformMonitorState,
-    ProjectCharterDraft, ProjectDraft, SecretString, StarterOrganizationDecision,
-    StarterResidentDraft, StarterRole, initialize_local_auth_token,
+    AccessOrigin, AutonomyProfile, DiscoveryStatus, LocalErrorCode, LocalModelEndpoint,
+    LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer, LocalTransportError,
+    ModelActivation, OperatorSessionPhase, PlatformMonitorState, ProjectCharterDraft, ProjectDraft,
+    SecretString, StarterOrganizationDecision, StarterResidentDraft, StarterRole,
+    initialize_local_auth_token,
 };
 use uuid::Uuid;
 
@@ -42,6 +45,13 @@ impl TestRuntime {
     }
 
     fn server(&self) -> LocalSupervisorServer {
+        self.server_with_model_endpoint(LocalModelEndpoint::ollama_default())
+    }
+
+    fn server_with_model_endpoint(
+        &self,
+        local_model_endpoint: LocalModelEndpoint,
+    ) -> LocalSupervisorServer {
         initialize_local_auth_token(&self.token).unwrap();
         LocalSupervisorServer::bind(LocalServerConfig {
             store_path: self.store.clone(),
@@ -49,9 +59,80 @@ impl TestRuntime {
             socket_path: self.socket.clone(),
             auth_token_path: self.token.clone(),
             lock_path: self.lock.clone(),
+            local_model_endpoint,
         })
         .unwrap()
     }
+}
+
+fn serve_ollama_json(body: &'static str) -> SocketAddr {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 1024];
+        let size = stream.read(&mut request).unwrap();
+        assert!(
+            std::str::from_utf8(&request[..size])
+                .unwrap()
+                .starts_with("GET /api/tags HTTP/1.1\r\n")
+        );
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+    });
+    address
+}
+
+#[test]
+fn authenticated_client_discovers_inactive_local_models_over_both_real_transports() {
+    let runtime = TestRuntime::new("model-discovery");
+    let address = serve_ollama_json(
+        r#"{"models":[{"name":"qwen3.8:27b","model":"qwen3.8:27b","modified_at":"2026-08-14T14:38:20-04:00","size":17741872154,"digest":"22130167c4c20e20c7b71454612966ca8e8171e9b3cc8ab6ce8aa6cbfec79643","details":{"format":"gguf","family":"qwen35","families":["qwen35"],"parameter_size":"27.3B","quantization_level":"Q4_K_M"}}]}"#,
+    );
+    let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+
+    assert!(matches!(
+        client.discover_local_models(),
+        Err(LocalTransportError::Remote {
+            code: LocalErrorCode::NotAuthenticated,
+            ..
+        })
+    ));
+    let recovery = client
+        .begin_password_setup(
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+    assert!(!recovery.expose().is_empty());
+    client.complete_operator_setup(true).unwrap();
+
+    let report = client.discover_local_models().unwrap();
+    assert_eq!(report.status, DiscoveryStatus::Available);
+    assert_eq!(report.models.len(), 1);
+    assert_eq!(report.models[0].name, "qwen3.8:27b");
+    assert_eq!(report.models[0].activation, ModelActivation::Inactive);
+
+    client.lock().unwrap();
+    assert!(matches!(
+        client.discover_local_models(),
+        Err(LocalTransportError::Remote {
+            code: LocalErrorCode::NotAuthenticated,
+            ..
+        })
+    ));
+
+    running.store(false, Ordering::Release);
+    thread.join().unwrap().unwrap();
 }
 
 impl Drop for TestRuntime {
@@ -449,6 +530,7 @@ fn a_second_supervisor_cannot_replace_the_live_servers_socket() {
         socket_path: runtime.socket.clone(),
         auth_token_path: runtime.token.clone(),
         lock_path: runtime.lock.clone(),
+        local_model_endpoint: LocalModelEndpoint::ollama_default(),
     });
 
     assert!(second.is_err());

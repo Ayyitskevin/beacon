@@ -87,6 +87,29 @@ export type ProjectSummary = {
   createdAtMs: number;
 };
 
+export type DiscoveryStatus = "available" | "unavailable" | "invalid_response";
+export type LocalModelDetails = {
+  format: string;
+  family: string;
+  parameterSize: string;
+  quantizationLevel: string;
+};
+export type DiscoveredLocalModel = {
+  provider: "ollama";
+  activation: "inactive";
+  name: string;
+  digest: string;
+  sizeBytes: number;
+  modifiedAt: string;
+  details: LocalModelDetails;
+};
+export type LocalModelDiscoveryReport = {
+  status: DiscoveryStatus;
+  endpoint: string;
+  models: DiscoveredLocalModel[];
+  observedAtMs: number;
+};
+
 // Tauri's current frontend command adapter returns a Promise for the Rust value.
 // Source: https://v2.tauri.app/develop/calling-rust/#commands
 export async function loadSessionStatus(): Promise<DesktopSessionStatus> {
@@ -243,6 +266,15 @@ export async function reviseProjectCharter(
     { projectId, expectedCurrentRevision, draft },
     isProjectView,
     "Project",
+  );
+}
+
+export async function discoverLocalModels(): Promise<LocalModelDiscoveryReport> {
+  return invokeAndValidate(
+    "discover_local_models",
+    undefined,
+    isLocalModelDiscoveryReport,
+    "local-model discovery report",
   );
 }
 
@@ -483,6 +515,69 @@ function isProjectCharterHistory(value: unknown): value is ProjectCharter[] {
   });
 }
 
+function isLocalModelDiscoveryReport(value: unknown): value is LocalModelDiscoveryReport {
+  if (!hasExactKeys(value, ["endpoint", "models", "observedAtMs", "status"])) return false;
+  const models = value.models;
+  if (
+    !isLoopbackHttpEndpoint(value.endpoint) ||
+    !isNonnegativeInteger(value.observedAtMs) ||
+    !["available", "unavailable", "invalid_response"].includes(String(value.status)) ||
+    !Array.isArray(models) ||
+    models.length > 512 ||
+    !models.every(isDiscoveredLocalModel)
+  ) {
+    return false;
+  }
+  if (value.status !== "available" && models.length !== 0) return false;
+  return models.every(
+    (model, index) => index === 0 || models[index - 1].name < model.name,
+  );
+}
+
+function isDiscoveredLocalModel(value: unknown): value is DiscoveredLocalModel {
+  return (
+    hasExactKeys(value, [
+      "activation",
+      "details",
+      "digest",
+      "modifiedAt",
+      "name",
+      "provider",
+      "sizeBytes",
+    ]) &&
+    value.provider === "ollama" &&
+    value.activation === "inactive" &&
+    isTrimmedTextWithoutControls(value.name, 256) &&
+    typeof value.digest === "string" &&
+    /^[0-9a-f]{64}$/.test(value.digest) &&
+    isPositiveInteger(value.sizeBytes) &&
+    isTrimmedTextWithoutControls(value.modifiedAt, 80) &&
+    isLocalModelDetails(value.details)
+  );
+}
+
+function isLocalModelDetails(value: unknown): value is LocalModelDetails {
+  return (
+    hasExactKeys(value, ["family", "format", "parameterSize", "quantizationLevel"]) &&
+    isTrimmedTextWithoutControls(value.format, 80) &&
+    isTrimmedTextWithoutControls(value.family, 80) &&
+    isTrimmedTextWithoutControls(value.parameterSize, 80) &&
+    isTrimmedTextWithoutControls(value.quantizationLevel, 80)
+  );
+}
+
+function isLoopbackHttpEndpoint(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const ipv6 = /^http:\/\/\[::1\]:([1-9][0-9]{0,4})$/.exec(value);
+  if (ipv6) return Number(ipv6[1]) <= 65_535;
+  const ipv4 = /^http:\/\/127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):([1-9][0-9]{0,4})$/.exec(value);
+  return (
+    ipv4 !== null &&
+    ipv4.slice(1, 4).every((octet) => Number(octet) <= 255) &&
+    Number(ipv4[4]) <= 65_535
+  );
+}
+
 function isProjectName(value: unknown): value is string {
   return isTrimmedText(value, 120) && !/\p{Cc}/u.test(value);
 }
@@ -511,6 +606,10 @@ function isTrimmedText(value: unknown, maxCharacters: number): value is string {
     value.length > 0 &&
     Array.from(value).length <= maxCharacters
   );
+}
+
+function isTrimmedTextWithoutControls(value: unknown, maxCharacters: number): value is string {
+  return isTrimmedText(value, maxCharacters) && !/\p{Cc}/u.test(value);
 }
 
 function isAutonomyProfile(value: unknown): value is AutonomyProfile {

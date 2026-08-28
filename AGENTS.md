@@ -239,5 +239,8 @@ execution authority. Authenticated Owners can create and inspect Projects with i
 Charter revisions; the current Charter pointer must identify the terminal revision, and creation
 and revision remain limited to Observe or Supervised autonomy with no spending or external effects.
 The Owner can publish a new immutable revision from the exact current revision and inspect the full
-history. Missions, Cloud Link, passkeys, active agent work, and a downloadable installer do not
-exist yet. Do not describe this checkpoint as a usable Alpha.
+history. Briefing can discover installed Ollama models through a bounded loopback read, but every
+result remains ephemeral and inactive: discovery persists nothing, invokes nothing, and grants no
+capability or authority. Model capability inspection, resource activation, Teams, Missions, Cloud
+Link, passkeys, active agent work, and a downloadable installer do not exist yet. Do not describe
+this checkpoint as a usable Alpha.
