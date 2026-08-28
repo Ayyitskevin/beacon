@@ -65,17 +65,18 @@ requirements and OWASP's Argon2id minimum:
 | An unauthenticated client opens a partial request and stops writing | Per-connection read and write deadlines bound the stall before the single-threaded supervisor accepts the next request. |
 | A second supervisor starts while one is live | A non-blocking kernel file lock rejects it before stale-socket cleanup, preserving the live socket and single-writer invariant. |
 | A remote adapter tries password fallback | The domain interface requires an access origin and refuses anything except `same_machine`. |
-| The system sleeps or the OS screen locks | This slice keeps the manual and inactivity locks authoritative; native suspend/screen-lock hooks are a required follow-up before remote access. |
+| The system sleeps or the OS screen locks | The Linux supervisor accepts only sender-bound signals from an owned supported screen-lock provider or systemd-logind and locks the session. Other platforms remain release-blocking follow-up work. |
 | A compromised renderer reads a secret while the Owner enters or views it | Renderer hardening and a native secret-entry surface remain defense-in-depth follow-ups; no secret survives in browser storage or command output after the step completes. |
 
 ## Session semantics
 
 The default inactivity window is 30 minutes. The live unlock timestamp exists only in the Rust
 process. Status checks do not renew it. While the Workspace is visible, the desktop refreshes the
-authoritative status every 15 seconds and closes access when the supervisor reports expiry or
-cannot be reached. Explicit authenticated Owner activity may renew the server timestamp; manual
-lock invalidates it immediately. Agent work is outside this human-session state and continues when
-the session locks.
+authoritative status every second and closes access when the supervisor reports expiry or cannot be
+reached. It also conceals Workspace material immediately on window focus loss and re-verifies the
+supervisor before revealing it again. Explicit authenticated Owner activity may renew the server
+timestamp; manual lock invalidates it immediately. Agent work is outside this human-session state
+and continues when the session locks.
 
 The Owner may configure the inactivity window from 1 minute through 24 hours. The default remains
 30 minutes and Beacon never offers a no-timeout value. A shorter policy applies to the existing
@@ -91,7 +92,9 @@ monitoring. It subscribes to `PrepareForSleep(true)` on systemd-logind's system 
 `ActiveChanged(true)` on the GNOME and freedesktop-compatible screen-saver interfaces on the user
 bus. A `false` signal never unlocks Beacon. Each monitor reports `starting`, `active`, or
 `unavailable`; an unavailable monitor leaves manual and inactivity locking active and creates a
-visible warning rather than a false claim. Losing the desktop window cannot disable the monitor.
+visible warning rather than a false claim. `active` requires a live supported D-Bus owner and owner
+loss changes the status to `unavailable`; signal matches are bound to that owner. Losing the desktop
+window cannot disable the monitor.
 
 Platform and library sources:
 

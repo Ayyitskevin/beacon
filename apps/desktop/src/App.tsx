@@ -151,6 +151,7 @@ export function App() {
   const [viewState, setViewState] = useState<SessionViewState>("loading");
   const [sessionAttempt, setSessionAttempt] = useState(0);
   const [session, setSession] = useState<DesktopSessionStatus | null>(null);
+  const [foregroundVerified, setForegroundVerified] = useState(false);
   const [capabilities, setCapabilities] = useState<AuthenticationCapabilities | null>(null);
   const [password, setPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
@@ -171,6 +172,7 @@ export function App() {
   );
   const resolvedTheme =
     themeChoice === "system" ? (systemPrefersDark ? "dark" : "light") : themeChoice;
+  const unlocked = session?.phase === "unlocked" && foregroundVerified;
 
   useEffect(() => {
     let active = true;
@@ -179,6 +181,7 @@ export function App() {
       ([nextSession, nextCapabilities]) => {
         if (!active) return;
         setSession(nextSession);
+        setForegroundVerified(nextSession.phase === "unlocked");
         setCapabilities(nextCapabilities);
         setViewState("ready");
       },
@@ -192,7 +195,7 @@ export function App() {
   }, [sessionAttempt]);
 
   useEffect(() => {
-    if (session?.phase !== "unlocked") return;
+    if (!unlocked) return;
     let active = true;
     Promise.all([loadSessionPolicy(), loadPlatformSessionMonitorStatus()]).then(
       ([policy, monitor]) => {
@@ -203,16 +206,17 @@ export function App() {
       () => {
         if (!active) return;
         setSession(null);
+        setForegroundVerified(false);
         setViewState("error");
       },
     );
     return () => {
       active = false;
     };
-  }, [session?.phase]);
+  }, [unlocked]);
 
   useEffect(() => {
-    if (session?.phase !== "unlocked") return;
+    if (!unlocked) return;
     let active = true;
     let checking = false;
     const timer = window.setInterval(() => {
@@ -222,25 +226,27 @@ export function App() {
         ([nextSession, monitor]) => {
           if (!active) return;
           setSession(nextSession);
+          if (nextSession.phase !== "unlocked") setForegroundVerified(false);
           setPlatformMonitor(monitor);
         },
         () => {
           if (!active) return;
           setSession(null);
+          setForegroundVerified(false);
           setViewState("error");
         },
       ).finally(() => {
         checking = false;
       });
-    }, 15_000);
+    }, 1_000);
     return () => {
       active = false;
       window.clearInterval(timer);
     };
-  }, [session?.phase]);
+  }, [unlocked]);
 
   useEffect(() => {
-    if (session?.phase !== "unlocked") return;
+    if (!unlocked) return;
     let active = true;
     let renewing = false;
     let lastRenewal = 0;
@@ -255,6 +261,7 @@ export function App() {
         () => {
           if (!active) return;
           setSession(null);
+          setForegroundVerified(false);
           setViewState("error");
         },
       ).finally(() => {
@@ -263,14 +270,51 @@ export function App() {
     };
     document.addEventListener("pointerdown", renew);
     document.addEventListener("keydown", renew);
-    window.addEventListener("focus", renew);
     return () => {
       active = false;
       document.removeEventListener("pointerdown", renew);
       document.removeEventListener("keydown", renew);
-      window.removeEventListener("focus", renew);
     };
-  }, [session?.phase]);
+  }, [unlocked]);
+
+  useEffect(() => {
+    let active = true;
+    let checking = false;
+    const conceal = () => setForegroundVerified(false);
+    const verifyBeforeReveal = () => {
+      if (checking || document.visibilityState === "hidden") return;
+      checking = true;
+      setForegroundVerified(false);
+      void loadSessionStatus().then(
+        (nextSession) => {
+          if (!active) return;
+          setSession(nextSession);
+          setForegroundVerified(nextSession.phase === "unlocked");
+        },
+        () => {
+          if (!active) return;
+          setSession(null);
+          setForegroundVerified(false);
+          setViewState("error");
+        },
+      ).finally(() => {
+        checking = false;
+      });
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") conceal();
+      else verifyBeforeReveal();
+    };
+    window.addEventListener("blur", conceal);
+    window.addEventListener("focus", verifyBeforeReveal);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      active = false;
+      window.removeEventListener("blur", conceal);
+      window.removeEventListener("focus", verifyBeforeReveal);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
 
   useEffect(() => {
     document.documentElement.dataset.theme = resolvedTheme;
@@ -304,6 +348,7 @@ export function App() {
       setRecoveryKey("");
       setRecoverySaved(false);
       setSession(nextSession);
+      setForegroundVerified(nextSession.phase === "unlocked");
     });
   }
 
@@ -311,7 +356,11 @@ export function App() {
     event.preventDefault();
     const submittedPassword = password;
     setPassword("");
-    await runAction(async () => setSession(await signInWithLocalPassword(submittedPassword)));
+    await runAction(async () => {
+      const nextSession = await signInWithLocalPassword(submittedPassword);
+      setSession(nextSession);
+      setForegroundVerified(nextSession.phase === "unlocked");
+    });
   }
 
   async function submitRecovery(event: FormEvent) {
@@ -329,13 +378,16 @@ export function App() {
         submittedConfirmation,
       );
       setReplacementKey(output.recoveryKey);
-      setSession(await loadSessionStatus());
+      const nextSession = await loadSessionStatus();
+      setSession(nextSession);
+      setForegroundVerified(nextSession.phase === "unlocked");
     });
   }
 
   async function lockSession() {
     await runAction(async () => {
       setSession(await lockLocalSession());
+      setForegroundVerified(false);
       setRecoveryMode(false);
       setReplacementKey("");
     });
@@ -361,8 +413,6 @@ export function App() {
       setBusy(false);
     }
   }
-
-  const unlocked = session?.phase === "unlocked";
 
   return (
     <FluentProvider
@@ -394,6 +444,13 @@ export function App() {
             </div>
           ) : viewState === "loading" || !session || !capabilities ? (
             <p role="status">Checking local session</p>
+          ) : session.phase === "unlocked" && !foregroundVerified ? (
+            <section className={classes.attention} aria-labelledby="concealed-heading">
+              <h1 id="concealed-heading" className={classes.heading}>
+                Beacon is concealed
+              </h1>
+              <p className={classes.body}>Rechecking the local session before showing Workspace data.</p>
+            </section>
           ) : session.phase === "operator_setup_required" ? (
             <section className={classes.attention} aria-labelledby="setup-heading">
               <h1 id="setup-heading" className={classes.heading}>
