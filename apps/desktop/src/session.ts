@@ -36,6 +36,27 @@ export type PlatformSessionMonitorStatus = {
   suspend: PlatformMonitorState;
 };
 
+export type StarterRole = "lead" | "builder" | "reviewer" | "researcher";
+export type StarterResidentDraft = { role: StarterRole; displayName: string | null };
+export type StarterRoleTemplate = {
+  role: StarterRole;
+  description: string;
+  recommended: boolean;
+};
+export type ResidentAgentSummary = {
+  id: string;
+  role: StarterRole;
+  displayName: string | null;
+  lifecycle: "inactive";
+};
+export type StarterOrganizationView = {
+  workspaceId: string;
+  proposalVersion: 1;
+  decision: "proposed" | "accepted" | "discarded";
+  templates: StarterRoleTemplate[];
+  residents: ResidentAgentSummary[];
+};
+
 // Tauri's current frontend command adapter returns a Promise for the Rust value.
 // Source: https://v2.tauri.app/develop/calling-rust/#commands
 export async function loadSessionStatus(): Promise<DesktopSessionStatus> {
@@ -129,6 +150,38 @@ export async function lockLocalSession(): Promise<DesktopSessionStatus> {
   return invokeAndValidate("lock_session", undefined, isDesktopSessionStatus, "session status");
 }
 
+export async function loadStarterOrganization(): Promise<StarterOrganizationView> {
+  return invokeAndValidate(
+    "starter_organization",
+    undefined,
+    isStarterOrganizationView,
+    "Starter Organization",
+  );
+}
+
+export async function acceptStarterOrganization(
+  proposalVersion: number,
+  residents: StarterResidentDraft[],
+): Promise<StarterOrganizationView> {
+  return invokeAndValidate(
+    "accept_starter_organization",
+    { proposalVersion, residents },
+    isStarterOrganizationView,
+    "Starter Organization",
+  );
+}
+
+export async function discardStarterOrganization(
+  proposalVersion: number,
+): Promise<StarterOrganizationView> {
+  return invokeAndValidate(
+    "discard_starter_organization",
+    { proposalVersion },
+    isStarterOrganizationView,
+    "Starter Organization",
+  );
+}
+
 export function describeLocalAccountError(error: unknown): string {
   if (typeof error !== "object" || error === null || Array.isArray(error)) {
     return "Beacon could not complete that local account action.";
@@ -154,6 +207,14 @@ export function describeLocalAccountError(error: unknown): string {
       return "Use the other local credential to recover this account.";
     case "invalid_session_timeout":
       return "Choose a timeout from 1 to 1,440 minutes.";
+    case "unsupported_starter_proposal":
+      return "The proposal changed. Reload it before continuing.";
+    case "invalid_starter_roster":
+      return "Select each role once and use Display Names from 1 to 80 characters.";
+    case "starter_decision_recorded":
+      return "This Starter Organization was already decided.";
+    case "starter_organization_unavailable":
+      return "Beacon could not verify the Starter Organization state.";
     default:
       return "Beacon could not complete that local account action.";
   }
@@ -225,6 +286,69 @@ function isPlatformSessionMonitorStatus(
   if (!hasExactKeys(value, ["screenLock", "suspend"])) return false;
   const states = ["starting", "active", "unavailable"];
   return states.includes(String(value.screenLock)) && states.includes(String(value.suspend));
+}
+
+const starterRoles: StarterRole[] = ["lead", "builder", "reviewer", "researcher"];
+
+function isStarterOrganizationView(value: unknown): value is StarterOrganizationView {
+  if (
+    !hasExactKeys(value, [
+      "decision",
+      "proposalVersion",
+      "residents",
+      "templates",
+      "workspaceId",
+    ]) ||
+    !isUuid(value.workspaceId) ||
+    value.proposalVersion !== 1 ||
+    !["proposed", "accepted", "discarded"].includes(String(value.decision)) ||
+    !Array.isArray(value.templates) ||
+    !Array.isArray(value.residents)
+  ) {
+    return false;
+  }
+  if (
+    value.templates.length !== starterRoles.length ||
+    !value.templates.every((template, index) => {
+      if (!hasExactKeys(template, ["description", "recommended", "role"])) return false;
+      return (
+        template.role === starterRoles[index] &&
+        typeof template.description === "string" &&
+        template.description.length > 0 &&
+        template.description.length <= 240 &&
+        template.recommended === (index < 3)
+      );
+    })
+  ) {
+    return false;
+  }
+  const roles = new Set<string>();
+  const residentsValid = value.residents.every((resident) => {
+    if (!hasExactKeys(resident, ["displayName", "id", "lifecycle", "role"])) return false;
+    if (!isUuid(resident.id) || !starterRoles.includes(resident.role as StarterRole)) return false;
+    if (roles.has(String(resident.role))) return false;
+    roles.add(String(resident.role));
+    return (
+      resident.lifecycle === "inactive" &&
+      (resident.displayName === null ||
+        (typeof resident.displayName === "string" &&
+          resident.displayName.trim() === resident.displayName &&
+          resident.displayName.length >= 1 &&
+          Array.from(resident.displayName).length <= 80 &&
+          !/\p{Cc}/u.test(resident.displayName)))
+    );
+  });
+  if (!residentsValid) return false;
+  return value.decision === "accepted"
+    ? value.residents.length >= 1 && value.residents.length <= 4
+    : value.residents.length === 0;
+}
+
+function isUuid(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+  );
 }
 
 function hasExactKeys<K extends string>(

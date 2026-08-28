@@ -10,7 +10,7 @@ use std::time::Duration;
 use beacond::{
     AccessOrigin, LocalErrorCode, LocalSupervisorClient, LocalTransportError,
     OperatorSessionPolicy, OperatorSessionStatus, PlatformSessionMonitorStatus, SecretString,
-    initialize_local_auth_token,
+    StarterOrganizationView, StarterResidentDraft, initialize_local_auth_token,
 };
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -138,6 +138,38 @@ impl From<LocalTransportError> for CommandError {
                 "Choose a timeout from 1 to 1,440 minutes.",
                 None,
             ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::UnsupportedStarterProposal,
+                ..
+            } => (
+                "unsupported_starter_proposal",
+                "Reload the current Starter Organization proposal.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::InvalidStarterRoster,
+                ..
+            } => (
+                "invalid_starter_roster",
+                "Select each role once and use Display Names from 1 to 80 characters.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::StarterDecisionRecorded,
+                ..
+            } => (
+                "starter_decision_recorded",
+                "The Starter Organization was already decided.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::StarterOrganizationUnavailable,
+                ..
+            } => (
+                "starter_organization_unavailable",
+                "The Starter Organization state could not be verified.",
+                None,
+            ),
             _ => (
                 "account_service_unavailable",
                 "The local account service is unavailable.",
@@ -218,6 +250,33 @@ fn complete_operator_setup_value(
     state
         .supervisor
         .complete_operator_setup(recovery_saved)
+        .map_err(Into::into)
+}
+
+fn starter_organization_value(
+    state: &DesktopState,
+) -> Result<StarterOrganizationView, CommandError> {
+    state.supervisor.starter_organization().map_err(Into::into)
+}
+
+fn accept_starter_organization_value(
+    state: &DesktopState,
+    proposal_version: u16,
+    residents: Vec<StarterResidentDraft>,
+) -> Result<StarterOrganizationView, CommandError> {
+    state
+        .supervisor
+        .accept_starter_organization(proposal_version, residents)
+        .map_err(Into::into)
+}
+
+fn discard_starter_organization_value(
+    state: &DesktopState,
+    proposal_version: u16,
+) -> Result<StarterOrganizationView, CommandError> {
+    state
+        .supervisor
+        .discard_starter_organization(proposal_version)
         .map_err(Into::into)
 }
 
@@ -317,6 +376,30 @@ fn recover_operator_account(
 #[tauri::command]
 fn lock_session(state: State<'_, DesktopState>) -> Result<OperatorSessionStatus, CommandError> {
     state.supervisor.lock().map_err(Into::into)
+}
+
+#[tauri::command]
+fn starter_organization(
+    state: State<'_, DesktopState>,
+) -> Result<StarterOrganizationView, CommandError> {
+    starter_organization_value(&state)
+}
+
+#[tauri::command]
+fn accept_starter_organization(
+    state: State<'_, DesktopState>,
+    proposal_version: u16,
+    residents: Vec<StarterResidentDraft>,
+) -> Result<StarterOrganizationView, CommandError> {
+    accept_starter_organization_value(&state, proposal_version, residents)
+}
+
+#[tauri::command]
+fn discard_starter_organization(
+    state: State<'_, DesktopState>,
+    proposal_version: u16,
+) -> Result<StarterOrganizationView, CommandError> {
+    discard_starter_organization_value(&state, proposal_version)
 }
 
 fn prepare_runtime_directory(path: &Path) -> Result<(), std::io::Error> {
@@ -536,7 +619,10 @@ pub fn run() {
             complete_operator_setup,
             authenticate_password,
             recover_operator_account,
-            lock_session
+            lock_session,
+            starter_organization,
+            accept_starter_organization,
+            discard_starter_organization
         ])
         .run(tauri::generate_context!())
         .expect("failed to run the Beacon Phase 0 desktop shell");
@@ -553,16 +639,16 @@ mod tests {
 
     use beacond::{
         LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer, SecretString,
-        initialize_local_auth_token,
+        StarterResidentDraft, StarterRole, initialize_local_auth_token,
     };
     use serde_json::Value;
     use uuid::Uuid;
 
     use super::{
-        DesktopState, authentication_capabilities_value, begin_password_setup_value,
-        complete_operator_setup_value, migrate_legacy_app_data,
+        DesktopState, accept_starter_organization_value, authentication_capabilities_value,
+        begin_password_setup_value, complete_operator_setup_value, migrate_legacy_app_data,
         platform_session_monitor_status_value, prepare_runtime_directory, session_policy_value,
-        session_status_value, set_session_timeout_value,
+        session_status_value, set_session_timeout_value, starter_organization_value,
     };
 
     #[test]
@@ -701,6 +787,9 @@ mod tests {
                 "allow-authenticate-password",
                 "allow-recover-operator-account",
                 "allow-lock-session",
+                "allow-starter-organization",
+                "allow-accept-starter-organization",
+                "allow-discard-starter-organization",
             ]
         );
     }
@@ -833,6 +922,45 @@ mod tests {
                 .unwrap();
         assert_eq!(monitor["screenLock"], "starting");
         assert_eq!(monitor["suspend"], "starting");
+    }
+
+    #[test]
+    fn command_adapter_returns_and_accepts_the_closed_starter_roster() {
+        let state = TestState::new();
+        begin_password_setup_value(
+            &state.state,
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+        complete_operator_setup_value(&state.state, true).unwrap();
+
+        let proposed = starter_organization_value(&state.state).unwrap();
+        assert_eq!(proposed.templates.len(), 4);
+        assert!(proposed.residents.is_empty());
+        let accepted = accept_starter_organization_value(
+            &state.state,
+            proposed.proposal_version,
+            vec![
+                StarterResidentDraft {
+                    role: StarterRole::Lead,
+                    display_name: Some("Northstar".to_owned()),
+                },
+                StarterResidentDraft {
+                    role: StarterRole::Builder,
+                    display_name: None,
+                },
+                StarterResidentDraft {
+                    role: StarterRole::Reviewer,
+                    display_name: None,
+                },
+            ],
+        )
+        .unwrap();
+        let value = serde_json::to_value(accepted).unwrap();
+        assert_eq!(value["decision"], "accepted");
+        assert_eq!(value["residents"].as_array().unwrap().len(), 3);
+        assert_eq!(value["residents"][0]["lifecycle"], "inactive");
     }
 
     fn contains_workspace_material(value: &Value) -> bool {

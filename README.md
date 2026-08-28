@@ -46,8 +46,10 @@ same Project and Mission rather than a separate silo.
 Every agent has a desk: its assignments, context, allowed tools, budget, messages, and blockers.
 A fresh install proposes a professional Starter Organization instead of leaving the operator with
 a blank page or silently activating a canned team. The operator reviews every Resident, role,
-model binding, permission, and budget before admitting it. The operator has a fleet desk: active
-work, health, spend, exceptions, and the small set of items that genuinely require human attention.
+and optional Display Name before admitting it. Admission creates inactive identities only; model
+bindings, permissions, budgets, activation, and execution authority remain separate later
+decisions. The operator has a fleet desk: active work, health, spend, exceptions, and the small set
+of items that genuinely require human attention.
 
 Teams combine persistent named agents with durable history and temporary specialists created for
 one Mission. Agents keep private working memory and deliberately promote useful knowledge into
@@ -175,12 +177,18 @@ The desktop intentionally opens in a locked setup-required state. A same-machine
 with a password and one-time Recovery Key, configure a 1–1,440 minute inactivity lock, and see
 whether Linux screen-lock and suspend monitoring are active. The independently running supervisor
 owns credentials, the authoritative session, OS monitoring, and the managed store; locked UI
-receives no Workspace material and exposes no Operator Command.
+receives no Workspace material and exposes no Operator Command. After sign-in, a fresh Workspace
+offers the editable Starter Organization. The Owner may admit any non-empty selection of Lead,
+Builder, Reviewer, and Researcher identities or explicitly discard the proposal. Every admitted
+Resident remains inactive and receives no authority.
 
 From `apps/desktop`, use `npm run tauri dev` to launch the development shell. The implementation
 checkpoints and verified dependency sources are recorded in
 [the Rust foundation](docs/implementation/phase-0-rust-foundation.md) and
-[the desktop shell](docs/implementation/phase-0-desktop-shell.md). Run `scripts/gate` to verify the
+[the desktop shell](docs/implementation/phase-0-desktop-shell.md). The closed proposal and
+admission boundary is recorded in
+[the Starter Organization checkpoint](docs/implementation/phase-0-starter-organization.md).
+Run `scripts/gate` to verify the
 preserved Beacon Legacy Desk, the Rust workspace, the web bundle, and the native desktop build.
 The exact pre-Beacon compatibility boundary is recorded in the
 [name migration note](docs/implementation/beacon-name-migration.md).

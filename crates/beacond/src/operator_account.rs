@@ -511,6 +511,19 @@ impl OperatorAccountService {
         Ok(())
     }
 
+    pub(crate) fn with_authenticated_store<T, E>(
+        &self,
+        operation: impl FnOnce(&mut Connection, i64) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<OperatorAccountError>,
+    {
+        let now = current_time_ms().map_err(E::from)?;
+        let mut state = self.lock_state().map_err(E::from)?;
+        require_active_session(&mut state, now).map_err(E::from)?;
+        operation(&mut state.connection, now)
+    }
+
     fn lock_state(&self) -> Result<std::sync::MutexGuard<'_, AccountState>, OperatorAccountError> {
         self.state
             .lock()

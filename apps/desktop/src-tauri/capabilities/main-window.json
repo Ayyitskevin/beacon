@@ -13,6 +13,9 @@
     "allow-complete-operator-setup",
     "allow-authenticate-password",
     "allow-recover-operator-account",
-    "allow-lock-session"
+    "allow-lock-session",
+    "allow-starter-organization",
+    "allow-accept-starter-organization",
+    "allow-discard-starter-organization"
   ]
 }

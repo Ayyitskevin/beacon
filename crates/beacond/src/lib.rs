@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 mod operator_account;
 mod platform_session;
+mod starter_organization;
 
 #[cfg(unix)]
 mod local_transport;
@@ -30,13 +31,19 @@ pub use operator_account::{
 pub use platform_session::{
     PlatformMonitorState, PlatformSessionMonitor, PlatformSessionMonitorStatus,
 };
+pub use starter_organization::{
+    ResidentAgentSummary, ResidentLifecycle, StarterOrganizationDecision, StarterOrganizationError,
+    StarterOrganizationService, StarterOrganizationView, StarterResidentDraft, StarterRole,
+    StarterRoleTemplate,
+};
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 const MAX_WORKSPACE_NAME_CHARS: usize = 120;
 
 const SCHEMA_V1: &str = include_str!("../migrations/0001_initial.sql");
 const MIGRATION_V2: &str = include_str!("../migrations/0002_operator_account.sql");
 const MIGRATION_V3: &str = include_str!("../migrations/0003_session_policy.sql");
+const MIGRATION_V4: &str = include_str!("../migrations/0004_starter_organization.sql");
 
 #[derive(Debug, Clone)]
 pub struct StartupConfig {
@@ -95,6 +102,8 @@ pub enum SupervisorError {
     InvalidWorkspaceId(String),
     InvalidEventKind(String),
     EventPayloadScopeMismatch(i64),
+    StarterOrganizationEventMismatch(i64),
+    StarterOrganizationStateMismatch,
     SchemaMismatch,
     UnsupportedSchemaVersion(i64),
     IntegrityCheckFailed(String),
@@ -131,6 +140,16 @@ impl fmt::Display for SupervisorError {
                 formatter,
                 "Event sequence {sequence} payload does not match its Workspace scope"
             ),
+            Self::StarterOrganizationEventMismatch(sequence) => write!(
+                formatter,
+                "Event sequence {sequence} does not match Starter Organization state"
+            ),
+            Self::StarterOrganizationStateMismatch => {
+                write!(
+                    formatter,
+                    "Starter Organization state has no exact audit Event"
+                )
+            }
             Self::SchemaMismatch => {
                 write!(
                     formatter,
@@ -194,11 +213,18 @@ impl Supervisor {
                     verify_schema(&transaction, 1)?;
                     transaction.execute_batch(MIGRATION_V2)?;
                     transaction.execute_batch(MIGRATION_V3)?;
+                    transaction.execute_batch(MIGRATION_V4)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 2 => {
                     verify_schema(&transaction, 2)?;
                     transaction.execute_batch(MIGRATION_V3)?;
+                    transaction.execute_batch(MIGRATION_V4)?;
+                    verify_schema(&transaction, SCHEMA_VERSION)?;
+                }
+                3 => {
+                    verify_schema(&transaction, 3)?;
+                    transaction.execute_batch(MIGRATION_V4)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 SCHEMA_VERSION => verify_schema(&transaction, SCHEMA_VERSION)?,
@@ -208,6 +234,7 @@ impl Supervisor {
             transaction.execute_batch(SCHEMA_V1)?;
             transaction.execute_batch(MIGRATION_V2)?;
             transaction.execute_batch(MIGRATION_V3)?;
+            transaction.execute_batch(MIGRATION_V4)?;
             verify_schema(&transaction, SCHEMA_VERSION)?;
         }
 
@@ -390,6 +417,9 @@ fn verify_schema(connection: &Connection, version: i64) -> Result<(), Supervisor
     if version >= 3 {
         expected_connection.execute_batch(MIGRATION_V3)?;
     }
+    if version >= 4 {
+        expected_connection.execute_batch(MIGRATION_V4)?;
+    }
     if !(1..=SCHEMA_VERSION).contains(&version) {
         return Err(SupervisorError::UnsupportedSchemaVersion(version));
     }
@@ -444,18 +474,24 @@ struct WorkspaceCreatedPayload {
 
 enum PersistedEventKind {
     WorkspaceCreated,
+    StarterOrganizationAccepted,
+    StarterOrganizationDiscarded,
 }
 
 impl PersistedEventKind {
     fn as_str(&self) -> &'static str {
         match self {
             Self::WorkspaceCreated => "workspace.created",
+            Self::StarterOrganizationAccepted => "starter_organization.accepted",
+            Self::StarterOrganizationDiscarded => "starter_organization.discarded",
         }
     }
 
     fn parse(value: String) -> Result<Self, SupervisorError> {
         match value.as_str() {
             "workspace.created" => Ok(Self::WorkspaceCreated),
+            "starter_organization.accepted" => Ok(Self::StarterOrganizationAccepted),
+            "starter_organization.discarded" => Ok(Self::StarterOrganizationDiscarded),
             _ => Err(SupervisorError::InvalidEventKind(value)),
         }
     }
@@ -490,6 +526,8 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     }
 
     let persisted_event_count = verify_persisted_events(connection)?;
+    starter_organization::verify_starter_state(connection)
+        .map_err(|_| SupervisorError::StarterOrganizationStateMismatch)?;
 
     Ok(StoreDiagnostics {
         status: DiagnosticStatus::Ready,
@@ -526,6 +564,24 @@ fn verify_persisted_events(connection: &Connection) -> Result<u64, SupervisorErr
                     return Err(SupervisorError::EventPayloadScopeMismatch(sequence));
                 }
                 validate_workspace_name(&payload.name)?;
+            }
+            PersistedEventKind::StarterOrganizationAccepted => {
+                starter_organization::verify_starter_event(
+                    connection,
+                    workspace_id,
+                    true,
+                    &payload_json,
+                )
+                .map_err(|_| SupervisorError::StarterOrganizationEventMismatch(sequence))?;
+            }
+            PersistedEventKind::StarterOrganizationDiscarded => {
+                starter_organization::verify_starter_event(
+                    connection,
+                    workspace_id,
+                    false,
+                    &payload_json,
+                )
+                .map_err(|_| SupervisorError::StarterOrganizationEventMismatch(sequence))?;
             }
         }
         count += 1;
@@ -597,7 +653,7 @@ mod tests {
         assert!(report.workspace.created);
         assert_eq!(report.workspace.name, "Personal");
         assert_eq!(report.diagnostics.status, DiagnosticStatus::Ready);
-        assert_eq!(report.diagnostics.schema_version, 3);
+        assert_eq!(report.diagnostics.schema_version, 4);
         assert_eq!(report.diagnostics.integrity_check, "ok");
         assert_eq!(report.diagnostics.foreign_key_violations, 0);
         assert_eq!(report.diagnostics.workspace_count, 1);
@@ -680,7 +736,7 @@ mod tests {
         assert_eq!(report.workspace.id, workspace_id);
         assert_eq!(report.workspace.name, "Existing");
         assert!(!report.workspace.created);
-        assert_eq!(report.diagnostics.schema_version, 3);
+        assert_eq!(report.diagnostics.schema_version, 4);
         assert_eq!(report.diagnostics.workspace_count, 1);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         assert_eq!(report.diagnostics.security_event_count, 0);
@@ -719,7 +775,7 @@ mod tests {
 
         let report = Supervisor::bootstrap(config(&store.path, "Personal")).unwrap();
 
-        assert_eq!(report.diagnostics.schema_version, 3);
+        assert_eq!(report.diagnostics.schema_version, 4);
         assert_eq!(report.diagnostics.security_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(
