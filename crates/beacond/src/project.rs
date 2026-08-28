@@ -551,7 +551,10 @@ pub(crate) fn verify_project_state(connection: &rusqlite::Connection) -> Result<
         {
             return Err(ProjectError::InvalidStore);
         }
-        verify_all_charter_revisions(connection, workspace_id, project_id)?;
+        let terminal_revision = verify_all_charter_revisions(connection, workspace_id, project_id)?;
+        if current.charter.revision != terminal_revision {
+            return Err(ProjectError::InvalidStore);
+        }
         let event_count: i64 = connection.query_row(
             "SELECT count(*) FROM events
              WHERE workspace_id = ?1 AND kind = 'project.created'
@@ -586,7 +589,7 @@ fn verify_all_charter_revisions(
     connection: &rusqlite::Connection,
     workspace_id: Uuid,
     project_id: Uuid,
-) -> Result<(), ProjectError> {
+) -> Result<u32, ProjectError> {
     let mut statement = connection.prepare(
         "SELECT revision FROM project_charter_revisions
          WHERE workspace_id = ?1 AND project_id = ?2 ORDER BY revision",
@@ -600,18 +603,15 @@ fn verify_all_charter_revisions(
     if revisions.is_empty() {
         return Err(ProjectError::InvalidStore);
     }
+    let mut terminal_revision = FIRST_CHARTER_REVISION;
     for (index, revision) in revisions.into_iter().enumerate() {
         if revision != i64::try_from(index + 1).map_err(|_| ProjectError::InvalidStore)? {
             return Err(ProjectError::InvalidStore);
         }
-        let _charter = load_charter(
-            connection,
-            workspace_id,
-            project_id,
-            positive_u32(revision)?,
-        )?;
+        terminal_revision = positive_u32(revision)?;
+        let _charter = load_charter(connection, workspace_id, project_id, terminal_revision)?;
     }
-    Ok(())
+    Ok(terminal_revision)
 }
 
 fn validate_stored_single_line(value: String, max_chars: usize) -> Result<String, ProjectError> {

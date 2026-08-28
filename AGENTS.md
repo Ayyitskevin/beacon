@@ -235,5 +235,8 @@ Owner account and Recovery Key boundary, authenticated local transport, configur
 lock, Linux screen-lock/suspend monitor, Tauri/React shell, and the authenticated Starter
 Organization decision. Accepting its editable Lead, Builder, Reviewer, and Researcher proposal
 creates inactive Resident identities only; it grants no model, capability, budget, activation, or
-execution authority. Cloud Link, passkeys, active agent work, Projects, and a downloadable installer
+execution authority. Authenticated Owners can create and inspect Projects with immutable, contiguous
+Charter revisions; the current Charter pointer must identify the terminal revision, and creation
+remains limited to Observe or Supervised autonomy with no spending or external effects. Charter
+revision commands, Missions, Cloud Link, passkeys, active agent work, and a downloadable installer
 do not exist yet. Do not describe this checkpoint as a usable Alpha.
