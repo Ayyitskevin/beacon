@@ -6,9 +6,13 @@ import {
   completeLocalOperatorSetup,
   describeLocalAccountError,
   loadAuthenticationCapabilities,
+  loadPlatformSessionMonitorStatus,
+  loadSessionPolicy,
   loadSessionStatus,
   lockLocalSession,
+  recordLocalOperatorActivity,
   recoverLocalOperatorAccount,
+  setLocalSessionTimeout,
   signInWithLocalPassword,
 } from "./session";
 
@@ -91,6 +95,38 @@ describe("desktop session transport", () => {
       ],
       ["lock_session"],
     ]);
+  });
+
+  it("validates session policy and platform monitor responses exactly", async () => {
+    invokeMock
+      .mockResolvedValueOnce({ inactivityTimeoutMinutes: 30 })
+      .mockResolvedValueOnce({ inactivityTimeoutMinutes: 90 })
+      .mockResolvedValueOnce({ screenLock: "active", suspend: "unavailable" })
+      .mockResolvedValueOnce(null);
+
+    await expect(loadSessionPolicy()).resolves.toEqual({ inactivityTimeoutMinutes: 30 });
+    await expect(setLocalSessionTimeout(90)).resolves.toEqual({ inactivityTimeoutMinutes: 90 });
+    await expect(loadPlatformSessionMonitorStatus()).resolves.toEqual({
+      screenLock: "active",
+      suspend: "unavailable",
+    });
+    await expect(recordLocalOperatorActivity()).resolves.toBeUndefined();
+    expect(invokeMock.mock.calls).toEqual([
+      ["session_policy"],
+      ["set_session_timeout", { inactivityTimeoutMinutes: 90 }],
+      ["platform_session_monitor_status"],
+      ["record_operator_activity"],
+    ]);
+  });
+
+  it.each([
+    { inactivityTimeoutMinutes: 0 },
+    { inactivityTimeoutMinutes: 1_441 },
+    { inactivityTimeoutMinutes: 30, extra: true },
+  ])("rejects an invalid session policy response", async (response) => {
+    invokeMock.mockResolvedValue(response);
+
+    await expect(loadSessionPolicy()).rejects.toThrow("invalid session policy");
   });
 
   it("maps only known local error codes to Operator-facing guidance", () => {

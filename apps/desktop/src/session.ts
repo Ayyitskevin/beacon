@@ -28,10 +28,47 @@ export type AuthenticationCapabilities = {
 
 export type RecoveryKeyOutput = { recoveryKey: string };
 
+export type SessionPolicy = { inactivityTimeoutMinutes: number };
+
+type PlatformMonitorState = "starting" | "active" | "unavailable";
+export type PlatformSessionMonitorStatus = {
+  screenLock: PlatformMonitorState;
+  suspend: PlatformMonitorState;
+};
+
 // Tauri's current frontend command adapter returns a Promise for the Rust value.
 // Source: https://v2.tauri.app/develop/calling-rust/#commands
 export async function loadSessionStatus(): Promise<DesktopSessionStatus> {
   return invokeAndValidate("session_status", undefined, isDesktopSessionStatus, "session status");
+}
+
+export async function loadSessionPolicy(): Promise<SessionPolicy> {
+  return invokeAndValidate("session_policy", undefined, isSessionPolicy, "session policy");
+}
+
+export async function setLocalSessionTimeout(
+  inactivityTimeoutMinutes: number,
+): Promise<SessionPolicy> {
+  return invokeAndValidate(
+    "set_session_timeout",
+    { inactivityTimeoutMinutes },
+    isSessionPolicy,
+    "session policy",
+  );
+}
+
+export async function recordLocalOperatorActivity(): Promise<void> {
+  const value: unknown = await invoke("record_operator_activity");
+  if (value !== null) throw new Error("Beacon received an invalid activity response.");
+}
+
+export async function loadPlatformSessionMonitorStatus(): Promise<PlatformSessionMonitorStatus> {
+  return invokeAndValidate(
+    "platform_session_monitor_status",
+    undefined,
+    isPlatformSessionMonitorStatus,
+    "platform session monitor status",
+  );
 }
 
 export async function loadAuthenticationCapabilities(): Promise<AuthenticationCapabilities> {
@@ -115,6 +152,8 @@ export function describeLocalAccountError(error: unknown): string {
         : "Wait before trying again.";
     case "credential_disabled":
       return "Use the other local credential to recover this account.";
+    case "invalid_session_timeout":
+      return "Choose a timeout from 1 to 1,440 minutes.";
     default:
       return "Beacon could not complete that local account action.";
   }
@@ -168,6 +207,24 @@ function isRecoveryKeyOutput(value: unknown): value is RecoveryKeyOutput {
     typeof value.recoveryKey === "string" &&
     value.recoveryKey.length > 0
   );
+}
+
+function isSessionPolicy(value: unknown): value is SessionPolicy {
+  return (
+    hasExactKeys(value, ["inactivityTimeoutMinutes"]) &&
+    Number.isInteger(value.inactivityTimeoutMinutes) &&
+    typeof value.inactivityTimeoutMinutes === "number" &&
+    value.inactivityTimeoutMinutes >= 1 &&
+    value.inactivityTimeoutMinutes <= 1_440
+  );
+}
+
+function isPlatformSessionMonitorStatus(
+  value: unknown,
+): value is PlatformSessionMonitorStatus {
+  if (!hasExactKeys(value, ["screenLock", "suspend"])) return false;
+  const states = ["starting", "active", "unavailable"];
+  return states.includes(String(value.screenLock)) && states.includes(String(value.suspend));
 }
 
 function hasExactKeys<K extends string>(

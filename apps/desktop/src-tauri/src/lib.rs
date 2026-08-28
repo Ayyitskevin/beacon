@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use mosaicd::{
     AccessOrigin, LocalErrorCode, LocalSupervisorClient, LocalTransportError,
-    OperatorSessionStatus, SecretString, initialize_local_auth_token,
+    OperatorSessionPolicy, OperatorSessionStatus, PlatformSessionMonitorStatus, SecretString,
+    initialize_local_auth_token,
 };
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -128,6 +129,14 @@ impl From<LocalTransportError> for CommandError {
                 "Use the other local credential to recover this account.",
                 None,
             ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::InvalidSessionTimeout,
+                ..
+            } => (
+                "invalid_session_timeout",
+                "Choose a timeout from 1 to 1,440 minutes.",
+                None,
+            ),
             _ => (
                 "account_service_unavailable",
                 "The local account service is unavailable.",
@@ -164,6 +173,29 @@ fn session_status_value(state: &DesktopState) -> Result<OperatorSessionStatus, C
     state.supervisor.status().map_err(Into::into)
 }
 
+fn session_policy_value(state: &DesktopState) -> Result<OperatorSessionPolicy, CommandError> {
+    state.supervisor.session_policy().map_err(Into::into)
+}
+
+fn set_session_timeout_value(
+    state: &DesktopState,
+    inactivity_timeout_minutes: u16,
+) -> Result<OperatorSessionPolicy, CommandError> {
+    state
+        .supervisor
+        .set_session_timeout_minutes(inactivity_timeout_minutes)
+        .map_err(Into::into)
+}
+
+fn platform_session_monitor_status_value(
+    state: &DesktopState,
+) -> Result<PlatformSessionMonitorStatus, CommandError> {
+    state
+        .supervisor
+        .platform_session_monitor_status()
+        .map_err(Into::into)
+}
+
 fn begin_password_setup_value(
     state: &DesktopState,
     password: SecretString,
@@ -198,6 +230,34 @@ fn authentication_capabilities() -> AuthenticationCapabilities {
 #[tauri::command]
 fn session_status(state: State<'_, DesktopState>) -> Result<OperatorSessionStatus, CommandError> {
     session_status_value(&state)
+}
+
+#[tauri::command]
+fn session_policy(state: State<'_, DesktopState>) -> Result<OperatorSessionPolicy, CommandError> {
+    session_policy_value(&state)
+}
+
+#[tauri::command]
+fn set_session_timeout(
+    state: State<'_, DesktopState>,
+    inactivity_timeout_minutes: u16,
+) -> Result<OperatorSessionPolicy, CommandError> {
+    set_session_timeout_value(&state, inactivity_timeout_minutes)
+}
+
+#[tauri::command]
+fn record_operator_activity(state: State<'_, DesktopState>) -> Result<(), CommandError> {
+    state
+        .supervisor
+        .record_operator_activity()
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+fn platform_session_monitor_status(
+    state: State<'_, DesktopState>,
+) -> Result<PlatformSessionMonitorStatus, CommandError> {
+    platform_session_monitor_status_value(&state)
 }
 
 #[tauri::command]
@@ -352,6 +412,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             authentication_capabilities,
             session_status,
+            session_policy,
+            set_session_timeout,
+            record_operator_activity,
+            platform_session_monitor_status,
             begin_password_setup,
             complete_operator_setup,
             authenticate_password,
@@ -380,7 +444,9 @@ mod tests {
 
     use super::{
         DesktopState, authentication_capabilities_value, begin_password_setup_value,
-        complete_operator_setup_value, prepare_runtime_directory, session_status_value,
+        complete_operator_setup_value, platform_session_monitor_status_value,
+        prepare_runtime_directory, session_policy_value, session_status_value,
+        set_session_timeout_value,
     };
 
     #[test]
@@ -413,6 +479,10 @@ mod tests {
             [
                 "allow-authentication-capabilities",
                 "allow-session-status",
+                "allow-session-policy",
+                "allow-set-session-timeout",
+                "allow-record-operator-activity",
+                "allow-platform-session-monitor-status",
                 "allow-begin-password-setup",
                 "allow-complete-operator-setup",
                 "allow-authenticate-password",
@@ -534,6 +604,22 @@ mod tests {
         assert_eq!(status["workspaceAccess"], true);
         assert_eq!(status["operatorCommands"], true);
         assert_eq!(status.as_object().unwrap().len(), 3);
+
+        let policy =
+            serde_json::to_value(set_session_timeout_value(&state.state, 75).unwrap()).unwrap();
+        assert_eq!(policy["inactivityTimeoutMinutes"], 75);
+        assert_eq!(policy.as_object().unwrap().len(), 1);
+        assert_eq!(
+            session_policy_value(&state.state)
+                .unwrap()
+                .inactivity_timeout_minutes,
+            75
+        );
+        let monitor =
+            serde_json::to_value(platform_session_monitor_status_value(&state.state).unwrap())
+                .unwrap();
+        assert_eq!(monitor["screenLock"], "starting");
+        assert_eq!(monitor["suspend"], "starting");
     }
 
     fn contains_workspace_material(value: &Value) -> bool {

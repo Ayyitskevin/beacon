@@ -2,8 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use mosaicd::{
-    AccessOrigin, OperatorAccountError, OperatorAccountService, OperatorSessionPhase, SecretString,
-    StartupConfig, Supervisor,
+    AccessOrigin, OperatorAccountError, OperatorAccountService, OperatorSessionPhase,
+    PlatformSessionEvent, SecretString, StartupConfig, Supervisor,
 };
 use rusqlite::Connection;
 use uuid::Uuid;
@@ -157,6 +157,100 @@ fn enrollment_stores_verifiers_only_and_a_restart_returns_locked() {
     assert_eq!(
         reopened.status().unwrap().phase,
         OperatorSessionPhase::Unlocked
+    );
+}
+
+#[test]
+fn session_timeout_defaults_to_thirty_minutes_and_persists_owner_changes() {
+    let store = TestStore::new("session-policy");
+    let service = store.service();
+    enroll(&service, PASSWORD);
+
+    assert_eq!(
+        service.session_policy().unwrap().inactivity_timeout_minutes,
+        30
+    );
+    assert_eq!(
+        service
+            .set_session_timeout_minutes(45)
+            .unwrap()
+            .inactivity_timeout_minutes,
+        45
+    );
+    drop(service);
+
+    let reopened = OperatorAccountService::open(&store.path).unwrap();
+    reopened
+        .authenticate_password(
+            SecretString::new(PASSWORD.to_owned()),
+            AccessOrigin::SameMachine,
+        )
+        .unwrap();
+    assert_eq!(
+        reopened
+            .session_policy()
+            .unwrap()
+            .inactivity_timeout_minutes,
+        45
+    );
+}
+
+#[test]
+fn session_timeout_change_requires_an_unlocked_owner_and_enforces_closed_bounds() {
+    let store = TestStore::new("session-policy-validation");
+    let service = store.service();
+
+    assert!(matches!(
+        service.set_session_timeout_minutes(30),
+        Err(OperatorAccountError::NotAuthenticated)
+    ));
+    enroll(&service, PASSWORD);
+    for invalid in [0, 1_441] {
+        assert!(matches!(
+            service.set_session_timeout_minutes(invalid),
+            Err(OperatorAccountError::InvalidSessionTimeout)
+        ));
+    }
+    assert_eq!(
+        service
+            .set_session_timeout_minutes(1)
+            .unwrap()
+            .inactivity_timeout_minutes,
+        1
+    );
+    assert_eq!(
+        service
+            .set_session_timeout_minutes(1_440)
+            .unwrap()
+            .inactivity_timeout_minutes,
+        1_440
+    );
+    service.lock().unwrap();
+    assert!(matches!(
+        service.session_policy(),
+        Err(OperatorAccountError::NotAuthenticated)
+    ));
+}
+
+#[test]
+fn platform_lock_and_suspend_events_lock_without_ever_unlocking_the_owner() {
+    let store = TestStore::new("platform-lock");
+    let service = store.service();
+    enroll(&service, PASSWORD);
+
+    assert_eq!(
+        service
+            .lock_for_platform_event(PlatformSessionEvent::ScreenLocked)
+            .unwrap()
+            .phase,
+        OperatorSessionPhase::Locked
+    );
+    assert_eq!(
+        service
+            .lock_for_platform_event(PlatformSessionEvent::PreparingForSleep)
+            .unwrap()
+            .phase,
+        OperatorSessionPhase::Locked
     );
 }
 

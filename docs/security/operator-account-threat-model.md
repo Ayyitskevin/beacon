@@ -77,11 +77,41 @@ cannot be reached. Explicit authenticated Owner activity may renew the server ti
 lock invalidates it immediately. Agent work is outside this human-session state and continues when
 the session locks.
 
+The Owner may configure the inactivity window from 1 minute through 24 hours. The default remains
+30 minutes and Beacon never offers a no-timeout value. A shorter policy applies to the existing
+session immediately; changing the policy requires an unlocked Owner session and is not a Cloud Link
+preference. NIST requires documented, context-sensitive session limits and termination when the
+inactivity limit expires; it also requires subscriber activity, rather than unrelated machine
+activity, to renew the session:
+
+- https://pages.nist.gov/800-63-4/sp800-63b/session/
+
+On Linux, the independently running supervisor—not the desktop renderer—owns operating-system lock
+monitoring. It subscribes to `PrepareForSleep(true)` on systemd-logind's system bus and to
+`ActiveChanged(true)` on the GNOME and freedesktop-compatible screen-saver interfaces on the user
+bus. A `false` signal never unlocks Beacon. Each monitor reports `starting`, `active`, or
+`unavailable`; an unavailable monitor leaves manual and inactivity locking active and creates a
+visible warning rather than a false claim. Losing the desktop window cannot disable the monitor.
+
+Platform and library sources:
+
+- systemd-logind sends `PrepareForSleep(true)` before suspend or hibernate:
+  https://www.freedesktop.org/wiki/Software/systemd/logind/
+- `dbus` 0.9.12 blocking connections register typed signal callbacks with `add_match` and dispatch
+  them with bounded `process` calls:
+  https://docs.rs/dbus/0.9.12/dbus/blocking/struct.Connection.html
+- The supported Ubuntu GNOME host was also verified directly with `busctl` to expose
+  `org.gnome.ScreenSaver.ActiveChanged(bool)` and logind `PrepareForSleep(bool)`.
+
 ## Deferred, release-blocking work
 
 - Native passkey adapters: Windows WebAuthn, Apple AuthenticationServices, and a trustworthy Linux
   FIDO2/credentials portal path.
-- Native OS screen-lock and suspend listeners.
+- Native OS screen-lock and suspend listeners on platforms other than Linux.
+- The current Tauri Linux stack transitively uses the legacy GTK3 bindings. The 2026-08-27
+  `cargo-audit` run found no vulnerability advisories but did report the GTK3 family as unmaintained
+  and `glib` 0.18.5 under RUSTSEC-2024-0429. Packaging remains disabled; a release review must
+  document the reachable surface or move to a maintained upstream path before public distribution.
 - A renderer-hardening review before exposing Workspace content, including CSP and secret-entry
   handling.
 - Compromised-password blocklist strategy that works offline without leaking the candidate.

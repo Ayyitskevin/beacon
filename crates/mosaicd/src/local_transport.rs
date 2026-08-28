@@ -16,7 +16,8 @@ use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use crate::{
-    AccessOrigin, OperatorAccountError, OperatorAccountService, OperatorSessionStatus, RecoveryKey,
+    AccessOrigin, OperatorAccountError, OperatorAccountService, OperatorSessionPolicy,
+    OperatorSessionStatus, PlatformSessionMonitor, PlatformSessionMonitorStatus, RecoveryKey,
     SecretString, StartupConfig, Supervisor,
 };
 
@@ -50,6 +51,7 @@ pub enum LocalErrorCode {
     CredentialDisabled,
     RemotePasswordNotAllowed,
     NotAuthenticated,
+    InvalidSessionTimeout,
     AccountServiceUnavailable,
     UnauthorizedClient,
     ProtocolError,
@@ -264,6 +266,11 @@ struct RequestEnvelope {
 #[serde(tag = "name", rename_all = "snake_case", deny_unknown_fields)]
 enum LocalCommand {
     Status,
+    SessionPolicy,
+    SetSessionTimeout {
+        inactivity_timeout_minutes: u16,
+    },
+    PlatformSessionMonitorStatus,
     BeginPasswordSetup {
         password: WireSecret,
         confirmation: WireSecret,
@@ -296,8 +303,18 @@ struct ResponseEnvelope {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum LocalResult {
-    SessionStatus { status: OperatorSessionStatus },
-    RecoveryKey { recovery_key: WireSecret },
+    SessionStatus {
+        status: OperatorSessionStatus,
+    },
+    SessionPolicy {
+        policy: OperatorSessionPolicy,
+    },
+    PlatformSessionMonitorStatus {
+        status: PlatformSessionMonitorStatus,
+    },
+    RecoveryKey {
+        recovery_key: WireSecret,
+    },
     Empty,
 }
 
@@ -313,7 +330,8 @@ pub struct LocalSupervisorServer {
     socket_path: PathBuf,
     _lock_file: File,
     token: LocalAuthToken,
-    accounts: OperatorAccountService,
+    accounts: Arc<OperatorAccountService>,
+    platform_monitor: PlatformSessionMonitor,
 }
 
 impl LocalSupervisorServer {
@@ -332,7 +350,7 @@ impl LocalSupervisorServer {
             store_path: config.store_path.clone(),
             initial_workspace_name: config.initial_workspace_name,
         })?;
-        let accounts = OperatorAccountService::open(&config.store_path)?;
+        let accounts = Arc::new(OperatorAccountService::open(&config.store_path)?);
         let token = load_local_auth_token(&config.auth_token_path)?;
         let listener = UnixListener::bind(&config.socket_path)?;
         fs::set_permissions(&config.socket_path, fs::Permissions::from_mode(0o600))?;
@@ -346,10 +364,12 @@ impl LocalSupervisorServer {
             _lock_file: lock_file,
             token,
             accounts,
+            platform_monitor: PlatformSessionMonitor::new(),
         })
     }
 
     pub fn serve(self) -> Result<(), LocalTransportError> {
+        self.platform_monitor.start(Arc::clone(&self.accounts));
         loop {
             let (stream, _) = self.listener.accept()?;
             self.handle_connection(stream);
@@ -405,6 +425,21 @@ impl LocalSupervisorServer {
             LocalCommand::Status => LocalResult::SessionStatus {
                 status: self.accounts.status()?,
             },
+            LocalCommand::SessionPolicy => LocalResult::SessionPolicy {
+                policy: self.accounts.session_policy()?,
+            },
+            LocalCommand::SetSessionTimeout {
+                inactivity_timeout_minutes,
+            } => LocalResult::SessionPolicy {
+                policy: self
+                    .accounts
+                    .set_session_timeout_minutes(inactivity_timeout_minutes)?,
+            },
+            LocalCommand::PlatformSessionMonitorStatus => {
+                LocalResult::PlatformSessionMonitorStatus {
+                    status: self.platform_monitor.status(),
+                }
+            }
             LocalCommand::BeginPasswordSetup {
                 password,
                 confirmation,
@@ -498,6 +533,28 @@ impl LocalSupervisorClient {
 
     pub fn status(&self) -> Result<OperatorSessionStatus, LocalTransportError> {
         expect_status(self.send(LocalCommand::Status)?)
+    }
+
+    pub fn session_policy(&self) -> Result<OperatorSessionPolicy, LocalTransportError> {
+        expect_policy(self.send(LocalCommand::SessionPolicy)?)
+    }
+
+    pub fn set_session_timeout_minutes(
+        &self,
+        inactivity_timeout_minutes: u16,
+    ) -> Result<OperatorSessionPolicy, LocalTransportError> {
+        expect_policy(self.send(LocalCommand::SetSessionTimeout {
+            inactivity_timeout_minutes,
+        })?)
+    }
+
+    pub fn platform_session_monitor_status(
+        &self,
+    ) -> Result<PlatformSessionMonitorStatus, LocalTransportError> {
+        match self.send(LocalCommand::PlatformSessionMonitorStatus)? {
+            LocalResult::PlatformSessionMonitorStatus { status } => Ok(status),
+            _ => Err(LocalTransportError::Protocol),
+        }
     }
 
     pub fn begin_password_setup(
@@ -603,6 +660,13 @@ fn expect_status(result: LocalResult) -> Result<OperatorSessionStatus, LocalTran
     }
 }
 
+fn expect_policy(result: LocalResult) -> Result<OperatorSessionPolicy, LocalTransportError> {
+    match result {
+        LocalResult::SessionPolicy { policy } => Ok(policy),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
 fn expect_recovery(result: LocalResult) -> Result<RecoveryKey, LocalTransportError> {
     match result {
         LocalResult::RecoveryKey { recovery_key } => Ok(recovery_key.into_recovery()),
@@ -653,6 +717,9 @@ fn wire_error_from_account(error: OperatorAccountError) -> WireError {
             (LocalErrorCode::RemotePasswordNotAllowed, None)
         }
         OperatorAccountError::NotAuthenticated => (LocalErrorCode::NotAuthenticated, None),
+        OperatorAccountError::InvalidSessionTimeout => {
+            (LocalErrorCode::InvalidSessionTimeout, None)
+        }
         _ => (LocalErrorCode::AccountServiceUnavailable, None),
     };
     WireError {

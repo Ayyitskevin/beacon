@@ -1972,6 +1972,7 @@ version = "0.1.0"
 dependencies = [
  "argon2",
  "data-encoding",
+ "dbus",
  "getrandom 0.4.3",
  "libc",
  "rusqlite",
