@@ -71,7 +71,7 @@ pub struct LocalModelEndpoint(SocketAddr);
 
 impl LocalModelEndpoint {
     pub fn new(address: SocketAddr) -> Result<Self, ResourceDiscoveryError> {
-        if !address.ip().is_loopback() {
+        if !address.ip().is_loopback() || address.port() == 0 {
             return Err(ResourceDiscoveryError::EndpointNotLoopback);
         }
         Ok(Self(address))
@@ -81,7 +81,7 @@ impl LocalModelEndpoint {
         Self(SocketAddr::from(([127, 0, 0, 1], DEFAULT_OLLAMA_PORT)))
     }
 
-    fn base_url(self) -> String {
+    pub(crate) fn base_url(self) -> String {
         format!("http://{}", self.0)
     }
 }
@@ -172,13 +172,7 @@ fn discover_ollama(endpoint: LocalModelEndpoint, observed_at_ms: u64) -> LocalMo
     // discovery request cannot leave the machine. The global timeout covers the complete call.
     // Sources: https://docs.rs/ureq/3.4.0/ureq/config/struct.ConfigBuilder.html
     // and https://docs.rs/ureq/3.4.0/ureq/struct.BodyWithConfig.html
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .proxy(None)
-        .max_redirects(0)
-        .timeout_global(Some(REQUEST_TIMEOUT))
-        .user_agent(concat!("Beacon/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .into();
+    let agent = ollama_agent();
     // Ollama documents installed-model discovery as GET /api/tags.
     // Source: https://docs.ollama.com/api/tags
     let mut response = match agent.get(format!("{base_url}/api/tags")).call() {
@@ -208,6 +202,16 @@ fn discover_ollama(endpoint: LocalModelEndpoint, observed_at_ms: u64) -> LocalMo
         models,
         observed_at_ms,
     }
+}
+
+pub(crate) fn ollama_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .proxy(None)
+        .max_redirects(0)
+        .timeout_global(Some(REQUEST_TIMEOUT))
+        .user_agent(concat!("Beacon/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .into()
 }
 
 fn normalize_models(models: Vec<OllamaModel>) -> Option<Vec<DiscoveredLocalModel>> {
