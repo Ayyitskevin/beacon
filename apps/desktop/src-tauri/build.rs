@@ -19,6 +19,10 @@ const COMMANDS: &[&str] = &[
     "create_project",
     "revise_project_charter",
     "discover_local_models",
+    "inspect_local_model",
+    "activate_local_model",
+    "local_model_activations",
+    "deactivate_local_model",
 ];
 
 fn main() {

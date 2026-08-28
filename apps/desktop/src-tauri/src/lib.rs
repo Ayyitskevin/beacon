@@ -8,11 +8,11 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use beacond::{
-    AccessOrigin, LocalErrorCode, LocalModelDiscoveryReport, LocalSupervisorClient,
-    LocalTransportError, OperatorSessionPolicy, OperatorSessionStatus,
-    PlatformSessionMonitorStatus, ProjectCharter, ProjectCharterDraft, ProjectDraft,
-    ProjectSummary, ProjectView, SecretString, StarterOrganizationView, StarterResidentDraft,
-    initialize_local_auth_token,
+    AccessOrigin, LocalErrorCode, LocalModelActivation, LocalModelActivationReview,
+    LocalModelDiscoveryReport, LocalSupervisorClient, LocalTransportError, OperatorSessionPolicy,
+    OperatorSessionStatus, PlatformSessionMonitorStatus, ProjectCharter, ProjectCharterDraft,
+    ProjectDraft, ProjectSummary, ProjectView, ProviderFeature, SecretString,
+    StarterOrganizationView, StarterResidentDraft, initialize_local_auth_token,
 };
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -212,6 +212,62 @@ impl From<LocalTransportError> for CommandError {
                 "Beacon could not verify the Project state.",
                 None,
             ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::LocalModelUnavailable,
+                ..
+            } => (
+                "local_model_unavailable",
+                "The local model provider could not be verified.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::LocalModelNotFound,
+                ..
+            } => (
+                "local_model_not_found",
+                "That exact local model is no longer installed.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::LocalModelChanged,
+                ..
+            } => (
+                "local_model_changed",
+                "The local model changed. Review it again before activation.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::InvalidLocalModelApproval,
+                ..
+            } => (
+                "invalid_local_model_approval",
+                "Select at least one advertised feature and review the model again.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::LocalModelAlreadyActive,
+                ..
+            } => (
+                "local_model_already_active",
+                "This local model is already active in the Workspace.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::StaleLocalModelDecision,
+                ..
+            } => (
+                "stale_local_model_decision",
+                "The activation changed. Reload it before deactivating.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::LocalModelActivationUnavailable,
+                ..
+            } => (
+                "local_model_activation_unavailable",
+                "Beacon could not verify local-model activation state.",
+                None,
+            ),
             _ => (
                 "account_service_unavailable",
                 "The local account service is unavailable.",
@@ -366,6 +422,47 @@ fn discover_local_models_value(
     state: &DesktopState,
 ) -> Result<LocalModelDiscoveryReport, CommandError> {
     state.supervisor.discover_local_models().map_err(Into::into)
+}
+
+fn inspect_local_model_value(
+    state: &DesktopState,
+    model_name: String,
+    expected_digest: String,
+) -> Result<LocalModelActivationReview, CommandError> {
+    state
+        .supervisor
+        .inspect_local_model(model_name, expected_digest)
+        .map_err(Into::into)
+}
+
+fn activate_local_model_value(
+    state: &DesktopState,
+    review: LocalModelActivationReview,
+    approved_features: Vec<ProviderFeature>,
+) -> Result<LocalModelActivation, CommandError> {
+    state
+        .supervisor
+        .activate_local_model(review, approved_features)
+        .map_err(Into::into)
+}
+
+fn local_model_activations_value(
+    state: &DesktopState,
+) -> Result<Vec<LocalModelActivation>, CommandError> {
+    state
+        .supervisor
+        .local_model_activations()
+        .map_err(Into::into)
+}
+
+fn deactivate_local_model_value(
+    state: &DesktopState,
+    expected_activation_id: uuid::Uuid,
+) -> Result<LocalModelActivation, CommandError> {
+    state
+        .supervisor
+        .deactivate_local_model(expected_activation_id)
+        .map_err(Into::into)
 }
 
 // Tauri command registration and typed Result/value transport:
@@ -534,6 +631,39 @@ fn discover_local_models(
     state: State<'_, DesktopState>,
 ) -> Result<LocalModelDiscoveryReport, CommandError> {
     discover_local_models_value(&state)
+}
+
+#[tauri::command]
+fn inspect_local_model(
+    state: State<'_, DesktopState>,
+    model_name: String,
+    expected_digest: String,
+) -> Result<LocalModelActivationReview, CommandError> {
+    inspect_local_model_value(&state, model_name, expected_digest)
+}
+
+#[tauri::command]
+fn activate_local_model(
+    state: State<'_, DesktopState>,
+    review: LocalModelActivationReview,
+    approved_features: Vec<ProviderFeature>,
+) -> Result<LocalModelActivation, CommandError> {
+    activate_local_model_value(&state, review, approved_features)
+}
+
+#[tauri::command]
+fn local_model_activations(
+    state: State<'_, DesktopState>,
+) -> Result<Vec<LocalModelActivation>, CommandError> {
+    local_model_activations_value(&state)
+}
+
+#[tauri::command]
+fn deactivate_local_model(
+    state: State<'_, DesktopState>,
+    expected_activation_id: uuid::Uuid,
+) -> Result<LocalModelActivation, CommandError> {
+    deactivate_local_model_value(&state, expected_activation_id)
 }
 
 fn prepare_runtime_directory(path: &Path) -> Result<(), std::io::Error> {
@@ -762,7 +892,11 @@ pub fn run() {
             project_charter_history,
             create_project,
             revise_project_charter,
-            discover_local_models
+            discover_local_models,
+            inspect_local_model,
+            activate_local_model,
+            local_model_activations,
+            deactivate_local_model
         ])
         .run(tauri::generate_context!())
         .expect("failed to run the Beacon Phase 0 desktop shell");
@@ -939,6 +1073,10 @@ mod tests {
                 "allow-create-project",
                 "allow-revise-project-charter",
                 "allow-discover-local-models",
+                "allow-inspect-local-model",
+                "allow-activate-local-model",
+                "allow-local-model-activations",
+                "allow-deactivate-local-model",
             ]
         );
     }
