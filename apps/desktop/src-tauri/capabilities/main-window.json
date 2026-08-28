@@ -22,6 +22,10 @@
     "allow-project-charter-history",
     "allow-create-project",
     "allow-revise-project-charter",
-    "allow-discover-local-models"
+    "allow-discover-local-models",
+    "allow-inspect-local-model",
+    "allow-activate-local-model",
+    "allow-local-model-activations",
+    "allow-deactivate-local-model"
   ]
 }

@@ -218,6 +218,16 @@ _Avoid_: Sync, publish, copy
 
 ## Models and evaluation
 
+**Provider Feature**:
+A model provider's advertised operation, such as completion, embedding, vision, tools, or thinking,
+used as evidence during resource review but never as a Beacon Capability or grant of authority.
+_Avoid_: Capability, permission, model power
+
+**Resource Activation**:
+An Operator's revocable Workspace-scoped decision that an exact Discovered Resource and approved
+Provider Feature subset may be considered for later Route binding.
+_Avoid_: Enable model, Capability grant, Route
+
 **Invocation**:
 One recorded request to a model and its response, provider, model identity, inputs, usage, cost,
 and timing.

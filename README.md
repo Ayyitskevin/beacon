@@ -192,9 +192,12 @@ overwriting either version.
 
 Briefing can also check the same computer for installed Ollama models. Discovery is an explicit,
 bounded loopback read: every result remains inactive, nothing is persisted, no model is invoked,
-and unavailable Ollama never blocks the Workspace. The Owner can expand a result for its endpoint,
-digest, format, family, and modified time. Capability inspection and activation remain later,
-separate decisions.
+and unavailable Ollama never blocks the Workspace. The Owner can inspect one exact model, review
+the provider features Ollama advertises, and activate only a chosen subset for this Workspace.
+Activation is a revocable eligibility decision: it creates no Route, Agent binding, invocation,
+credential, budget, data scope, network expansion, or execution authority. Unknown provider
+features remain visible but cannot be approved. Beacon rechecks the model and its digest before
+persisting the append-only decision; deactivation remains available when Ollama is offline.
 
 From `apps/desktop`, use `npm run tauri dev` to launch the development shell. The implementation
 checkpoints and verified dependency sources are recorded in
@@ -207,6 +210,8 @@ The Project and immutable Charter boundary is recorded in
 [the Charter revisions checkpoint](docs/implementation/phase-0-charter-revisions.md).
 The inactive resource boundary is recorded in
 [the local-model discovery checkpoint](docs/implementation/phase-0-local-model-discovery.md).
+[The local-model activation checkpoint](docs/implementation/phase-0-local-model-activation.md)
+records the separate inspection, approval, and revocation boundary.
 Run `scripts/gate` to verify the
 preserved Beacon Legacy Desk, the Rust workspace, the web bundle, and the native desktop build.
 The exact pre-Beacon compatibility boundary is recorded in the

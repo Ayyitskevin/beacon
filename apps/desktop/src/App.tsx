@@ -12,15 +12,19 @@ import { type FormEvent, useEffect, useRef, useState } from "react";
 
 import {
   acceptStarterOrganization,
+  activateLocalModel,
   type AuthenticationCapabilities,
   type DesktopSessionStatus,
   beginLocalPasswordSetup,
   completeLocalOperatorSetup,
   createProject,
+  deactivateLocalModel,
   discoverLocalModels,
   describeLocalAccountError,
   discardStarterOrganization,
   loadAuthenticationCapabilities,
+  inspectLocalModel,
+  loadLocalModelActivations,
   loadPlatformSessionMonitorStatus,
   loadProject,
   loadProjectCharterHistory,
@@ -31,6 +35,9 @@ import {
   lockLocalSession,
   type PlatformSessionMonitorStatus,
   type LocalModelDiscoveryReport,
+  type LocalModelActivation,
+  type LocalModelActivationReview,
+  type ProviderFeature,
   type ProjectCharter,
   type ProjectCharterDraft,
   type ProjectDraft,
@@ -223,6 +230,10 @@ export function App() {
   const [charterComposerOpen, setCharterComposerOpen] = useState(false);
   const [localModelDiscovery, setLocalModelDiscovery] =
     useState<LocalModelDiscoveryReport | null>(null);
+  const [localModelActivations, setLocalModelActivations] =
+    useState<LocalModelActivation[] | null>(null);
+  const [localModelReview, setLocalModelReview] =
+    useState<LocalModelActivationReview | null>(null);
   const [discoveringLocalModels, setDiscoveringLocalModels] = useState(false);
   const localModelDiscoveryEpoch = useRef(0);
   const [themeChoice, setThemeChoice] = useState<ThemeChoice>("light");
@@ -317,6 +328,8 @@ export function App() {
     if (unlocked) return;
     localModelDiscoveryEpoch.current += 1;
     setLocalModelDiscovery(null);
+    setLocalModelActivations(null);
+    setLocalModelReview(null);
     setDiscoveringLocalModels(false);
   }, [unlocked]);
 
@@ -546,6 +559,8 @@ export function App() {
       setProjectComposerOpen(false);
       setCharterComposerOpen(false);
       setLocalModelDiscovery(null);
+      setLocalModelActivations(null);
+      setLocalModelReview(null);
       setDiscoveringLocalModels(false);
       setActiveApplication("Briefing");
       setRecoveryMode(false);
@@ -558,9 +573,14 @@ export function App() {
     setDiscoveringLocalModels(true);
     setActionError("");
     try {
-      const report = await discoverLocalModels();
+      const [report, activations] = await Promise.all([
+        discoverLocalModels(),
+        loadLocalModelActivations(),
+      ]);
       if (requestEpoch === localModelDiscoveryEpoch.current) {
         setLocalModelDiscovery(report);
+        setLocalModelActivations(activations);
+        setLocalModelReview(null);
       }
     } catch (error) {
       if (requestEpoch === localModelDiscoveryEpoch.current) {
@@ -571,6 +591,37 @@ export function App() {
         setDiscoveringLocalModels(false);
       }
     }
+  }
+
+  async function reviewLocalModel(modelName: string, expectedDigest: string) {
+    const requestEpoch = localModelDiscoveryEpoch.current;
+    await runAction(async () => {
+      const review = await inspectLocalModel(modelName, expectedDigest);
+      if (requestEpoch === localModelDiscoveryEpoch.current) setLocalModelReview(review);
+    });
+  }
+
+  async function activateReviewedLocalModel(
+    review: LocalModelActivationReview,
+    approvedFeatures: readonly ProviderFeature[],
+  ) {
+    const requestEpoch = localModelDiscoveryEpoch.current;
+    await runAction(async () => {
+      const activation = await activateLocalModel(review, approvedFeatures);
+      if (requestEpoch !== localModelDiscoveryEpoch.current) return;
+      setLocalModelActivations((current) => replaceLocalModelActivation(current, activation));
+      setLocalModelReview(null);
+    });
+  }
+
+  async function deactivateActiveLocalModel(expectedActivationId: string) {
+    const requestEpoch = localModelDiscoveryEpoch.current;
+    await runAction(async () => {
+      const activation = await deactivateLocalModel(expectedActivationId);
+      if (requestEpoch !== localModelDiscoveryEpoch.current) return;
+      setLocalModelActivations((current) => replaceLocalModelActivation(current, activation));
+      setLocalModelReview(null);
+    });
   }
 
   async function saveSessionPolicy(event: FormEvent) {
@@ -855,8 +906,14 @@ export function App() {
               busy={busy}
               error={actionError}
               localModelDiscovery={localModelDiscovery}
+              localModelActivations={localModelActivations}
+              localModelReview={localModelReview}
               discoveringLocalModels={discoveringLocalModels}
               onCheckLocalModels={checkLocalModels}
+              onReviewLocalModel={reviewLocalModel}
+              onCancelLocalModelReview={() => setLocalModelReview(null)}
+              onActivateLocalModel={activateReviewedLocalModel}
+              onDeactivateLocalModel={deactivateActiveLocalModel}
               onLock={lockSession}
             />
           )}
@@ -1067,6 +1124,24 @@ function StarterOrganizationStep({
   );
 }
 
+function replaceLocalModelActivation(
+  current: LocalModelActivation[] | null,
+  replacement: LocalModelActivation,
+): LocalModelActivation[] {
+  return [
+    ...(current ?? []).filter(
+      (activation) =>
+        activation.binding.endpoint !== replacement.binding.endpoint ||
+        activation.binding.modelName !== replacement.binding.modelName,
+    ),
+    replacement,
+  ].sort(
+    (left, right) =>
+      left.binding.modelName.localeCompare(right.binding.modelName) ||
+      left.binding.endpoint.localeCompare(right.binding.endpoint),
+  );
+}
+
 function Briefing({
   classes,
   organization,
@@ -1074,8 +1149,14 @@ function Briefing({
   busy,
   error,
   localModelDiscovery,
+  localModelActivations,
+  localModelReview,
   discoveringLocalModels,
   onCheckLocalModels,
+  onReviewLocalModel,
+  onCancelLocalModelReview,
+  onActivateLocalModel,
+  onDeactivateLocalModel,
   onLock,
 }: {
   classes: StyleClasses;
@@ -1084,8 +1165,17 @@ function Briefing({
   busy: boolean;
   error: string;
   localModelDiscovery: LocalModelDiscoveryReport | null;
+  localModelActivations: LocalModelActivation[] | null;
+  localModelReview: LocalModelActivationReview | null;
   discoveringLocalModels: boolean;
   onCheckLocalModels: () => void;
+  onReviewLocalModel: (modelName: string, expectedDigest: string) => void;
+  onCancelLocalModelReview: () => void;
+  onActivateLocalModel: (
+    review: LocalModelActivationReview,
+    approvedFeatures: readonly ProviderFeature[],
+  ) => void;
+  onDeactivateLocalModel: (expectedActivationId: string) => void;
   onLock: () => void;
 }) {
   const count = organization.residents.length;
@@ -1112,8 +1202,15 @@ function Briefing({
       <p className={classes.body}>No Resident has execution authority yet.</p>
       <LocalModels
         report={localModelDiscovery}
-        busy={discoveringLocalModels}
+        activations={localModelActivations}
+        review={localModelReview}
+        busy={busy || discoveringLocalModels}
+        discovering={discoveringLocalModels}
         onRefresh={onCheckLocalModels}
+        onReview={onReviewLocalModel}
+        onCancelReview={onCancelLocalModelReview}
+        onActivate={onActivateLocalModel}
+        onDeactivate={onDeactivateLocalModel}
       />
       {replacementKey && (
         <>
