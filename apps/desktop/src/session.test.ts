@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   activateLocalModel,
+  activateResident,
   beginLocalPasswordSetup,
   acceptStarterOrganization,
   createProject,
@@ -18,15 +19,19 @@ import {
   loadProject,
   loadProjectCharterHistory,
   loadProjects,
+  loadResidents,
   loadSessionPolicy,
   loadSessionStatus,
   loadStarterOrganization,
   lockLocalSession,
   recordLocalOperatorActivity,
   recoverLocalOperatorAccount,
+  reactivateResident,
+  retireResident,
   reviseProjectCharter,
   setLocalSessionTimeout,
   signInWithLocalPassword,
+  suspendResident,
 } from "./session";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -178,6 +183,82 @@ describe("desktop session transport", () => {
       ],
       ["discard_starter_organization", { proposalVersion: 1 }],
       ["starter_organization"],
+    ]);
+  });
+
+  it("maps the closed Resident lifecycle without accepting authority fields", async () => {
+    const inactive = {
+      id: "22222222-2222-4222-8222-222222222222",
+      workspaceId: "11111111-1111-4111-8111-111111111111",
+      role: "lead",
+      displayName: "Northstar",
+      lifecycle: "inactive",
+      latestDecisionId: null,
+      createdAtMs: 100,
+      updatedAtMs: 100,
+    } as const;
+    const active = {
+      ...inactive,
+      lifecycle: "active",
+      latestDecisionId: "33333333-3333-4333-8333-333333333333",
+      updatedAtMs: 110,
+    } as const;
+    const suspended = {
+      ...active,
+      lifecycle: "suspended",
+      latestDecisionId: "44444444-4444-4444-8444-444444444444",
+      updatedAtMs: 120,
+    } as const;
+    const reactivated = {
+      ...active,
+      latestDecisionId: "55555555-5555-4555-8555-555555555555",
+      updatedAtMs: 130,
+    } as const;
+    const retired = {
+      ...reactivated,
+      lifecycle: "retired",
+      latestDecisionId: "66666666-6666-4666-8666-666666666666",
+      updatedAtMs: 140,
+    } as const;
+    invokeMock
+      .mockResolvedValueOnce([inactive])
+      .mockResolvedValueOnce(active)
+      .mockResolvedValueOnce(suspended)
+      .mockResolvedValueOnce(reactivated)
+      .mockResolvedValueOnce(retired)
+      .mockResolvedValueOnce([{ ...retired, authority: "ambient" }])
+      .mockResolvedValueOnce({ ...inactive, latestDecisionId: active.latestDecisionId });
+
+    await expect(loadResidents()).resolves.toEqual([inactive]);
+    await expect(activateResident(inactive.id, null)).resolves.toEqual(active);
+    await expect(suspendResident(active.id, active.latestDecisionId)).resolves.toEqual(suspended);
+    await expect(
+      reactivateResident(suspended.id, suspended.latestDecisionId),
+    ).resolves.toEqual(reactivated);
+    await expect(retireResident(reactivated.id, reactivated.latestDecisionId)).resolves.toEqual(
+      retired,
+    );
+    await expect(loadResidents()).rejects.toThrow("invalid Resident roster");
+    await expect(activateResident(inactive.id, null)).rejects.toThrow(
+      "invalid Resident lifecycle response",
+    );
+    expect(invokeMock.mock.calls).toEqual([
+      ["residents"],
+      ["activate_resident", { residentId: inactive.id, expectedDecisionId: null }],
+      [
+        "suspend_resident",
+        { residentId: active.id, expectedDecisionId: active.latestDecisionId },
+      ],
+      [
+        "reactivate_resident",
+        { residentId: suspended.id, expectedDecisionId: suspended.latestDecisionId },
+      ],
+      [
+        "retire_resident",
+        { residentId: reactivated.id, expectedDecisionId: reactivated.latestDecisionId },
+      ],
+      ["residents"],
+      ["activate_resident", { residentId: inactive.id, expectedDecisionId: null }],
     ]);
   });
 
@@ -518,6 +599,9 @@ describe("desktop session transport", () => {
     ).toBe("Wait 2 seconds before trying again.");
     expect(describeLocalAccountError({ code: "starter_organization_unavailable" })).toBe(
       "Beacon could not verify the Starter Organization state.",
+    );
+    expect(describeLocalAccountError({ code: "stale_resident_decision" })).toBe(
+      "The Resident changed. Reload the roster before trying again.",
     );
     expect(describeLocalAccountError({ code: "stale_charter_revision" })).toBe(
       "This Charter changed. Reload the current revision before publishing.",

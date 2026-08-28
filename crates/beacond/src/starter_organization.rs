@@ -6,7 +6,7 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::OperatorAccountError;
+use crate::{OperatorAccountError, ResidentLifecycle};
 
 const PROPOSAL_VERSION: u16 = 1;
 
@@ -20,7 +20,7 @@ pub enum StarterRole {
 }
 
 impl StarterRole {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Lead => "lead",
             Self::Builder => "builder",
@@ -29,7 +29,7 @@ impl StarterRole {
         }
     }
 
-    fn parse(value: &str) -> Result<Self, StarterOrganizationError> {
+    pub(crate) fn parse(value: &str) -> Result<Self, StarterOrganizationError> {
         match value {
             "lead" => Ok(Self::Lead),
             "builder" => Ok(Self::Builder),
@@ -39,7 +39,7 @@ impl StarterRole {
         }
     }
 
-    fn ordinal(self) -> u8 {
+    pub(crate) fn ordinal(self) -> u8 {
         match self {
             Self::Lead => 0,
             Self::Builder => 1,
@@ -55,12 +55,6 @@ pub enum StarterOrganizationDecision {
     Proposed,
     Accepted,
     Discarded,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ResidentLifecycle {
-    Inactive,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -330,7 +324,7 @@ impl StarterOrganizationService {
     }
 }
 
-fn normalize_display_name(
+pub(crate) fn normalize_display_name(
     display_name: Option<String>,
 ) -> Result<Option<String>, StarterOrganizationError> {
     let Some(value) = display_name else {

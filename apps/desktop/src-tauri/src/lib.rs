@@ -11,7 +11,7 @@ use beacond::{
     AccessOrigin, LocalErrorCode, LocalModelActivation, LocalModelActivationReview,
     LocalModelDiscoveryReport, LocalSupervisorClient, LocalTransportError, OperatorSessionPolicy,
     OperatorSessionStatus, PlatformSessionMonitorStatus, ProjectCharter, ProjectCharterDraft,
-    ProjectDraft, ProjectSummary, ProjectView, ProviderFeature, SecretString,
+    ProjectDraft, ProjectSummary, ProjectView, ProviderFeature, ResidentAgentView, SecretString,
     StarterOrganizationView, StarterResidentDraft, initialize_local_auth_token,
 };
 use serde::Serialize;
@@ -170,6 +170,38 @@ impl From<LocalTransportError> for CommandError {
             } => (
                 "starter_organization_unavailable",
                 "The Starter Organization state could not be verified.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::ResidentNotFound,
+                ..
+            } => (
+                "resident_not_found",
+                "That Resident is no longer available in this Workspace.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::InvalidResidentTransition,
+                ..
+            } => (
+                "invalid_resident_transition",
+                "That Resident lifecycle action is not available from the current state.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::StaleResidentDecision,
+                ..
+            } => (
+                "stale_resident_decision",
+                "The Resident changed. Reload the roster before trying again.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::ResidentLifecycleUnavailable,
+                ..
+            } => (
+                "resident_lifecycle_unavailable",
+                "Beacon could not verify Resident lifecycle state.",
                 None,
             ),
             LocalTransportError::Remote {
@@ -375,6 +407,54 @@ fn discard_starter_organization_value(
     state
         .supervisor
         .discard_starter_organization(proposal_version)
+        .map_err(Into::into)
+}
+
+fn residents_value(state: &DesktopState) -> Result<Vec<ResidentAgentView>, CommandError> {
+    state.supervisor.residents().map_err(Into::into)
+}
+
+fn activate_resident_value(
+    state: &DesktopState,
+    resident_id: uuid::Uuid,
+    expected_decision_id: Option<uuid::Uuid>,
+) -> Result<ResidentAgentView, CommandError> {
+    state
+        .supervisor
+        .activate_resident(resident_id, expected_decision_id)
+        .map_err(Into::into)
+}
+
+fn suspend_resident_value(
+    state: &DesktopState,
+    resident_id: uuid::Uuid,
+    expected_decision_id: Option<uuid::Uuid>,
+) -> Result<ResidentAgentView, CommandError> {
+    state
+        .supervisor
+        .suspend_resident(resident_id, expected_decision_id)
+        .map_err(Into::into)
+}
+
+fn reactivate_resident_value(
+    state: &DesktopState,
+    resident_id: uuid::Uuid,
+    expected_decision_id: Option<uuid::Uuid>,
+) -> Result<ResidentAgentView, CommandError> {
+    state
+        .supervisor
+        .reactivate_resident(resident_id, expected_decision_id)
+        .map_err(Into::into)
+}
+
+fn retire_resident_value(
+    state: &DesktopState,
+    resident_id: uuid::Uuid,
+    expected_decision_id: Option<uuid::Uuid>,
+) -> Result<ResidentAgentView, CommandError> {
+    state
+        .supervisor
+        .retire_resident(resident_id, expected_decision_id)
         .map_err(Into::into)
 }
 
@@ -585,6 +665,47 @@ fn discard_starter_organization(
     proposal_version: u16,
 ) -> Result<StarterOrganizationView, CommandError> {
     discard_starter_organization_value(&state, proposal_version)
+}
+
+#[tauri::command]
+fn residents(state: State<'_, DesktopState>) -> Result<Vec<ResidentAgentView>, CommandError> {
+    residents_value(&state)
+}
+
+#[tauri::command]
+fn activate_resident(
+    state: State<'_, DesktopState>,
+    resident_id: uuid::Uuid,
+    expected_decision_id: Option<uuid::Uuid>,
+) -> Result<ResidentAgentView, CommandError> {
+    activate_resident_value(&state, resident_id, expected_decision_id)
+}
+
+#[tauri::command]
+fn suspend_resident(
+    state: State<'_, DesktopState>,
+    resident_id: uuid::Uuid,
+    expected_decision_id: Option<uuid::Uuid>,
+) -> Result<ResidentAgentView, CommandError> {
+    suspend_resident_value(&state, resident_id, expected_decision_id)
+}
+
+#[tauri::command]
+fn reactivate_resident(
+    state: State<'_, DesktopState>,
+    resident_id: uuid::Uuid,
+    expected_decision_id: Option<uuid::Uuid>,
+) -> Result<ResidentAgentView, CommandError> {
+    reactivate_resident_value(&state, resident_id, expected_decision_id)
+}
+
+#[tauri::command]
+fn retire_resident(
+    state: State<'_, DesktopState>,
+    resident_id: uuid::Uuid,
+    expected_decision_id: Option<uuid::Uuid>,
+) -> Result<ResidentAgentView, CommandError> {
+    retire_resident_value(&state, resident_id, expected_decision_id)
 }
 
 #[tauri::command]
@@ -887,6 +1008,11 @@ pub fn run() {
             starter_organization,
             accept_starter_organization,
             discard_starter_organization,
+            residents,
+            activate_resident,
+            suspend_resident,
+            reactivate_resident,
+            retire_resident,
             projects,
             project,
             project_charter_history,
@@ -913,19 +1039,21 @@ mod tests {
 
     use beacond::{
         AutonomyProfile, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
-        ProjectCharterDraft, ProjectDraft, SecretString, StarterResidentDraft, StarterRole,
-        initialize_local_auth_token,
+        ProjectCharterDraft, ProjectDraft, ResidentLifecycle, SecretString, StarterResidentDraft,
+        StarterRole, initialize_local_auth_token,
     };
     use serde_json::Value;
     use uuid::Uuid;
 
     use super::{
-        DesktopState, accept_starter_organization_value, authentication_capabilities_value,
-        begin_password_setup_value, complete_operator_setup_value, create_project_value,
-        migrate_legacy_app_data, platform_session_monitor_status_value, prepare_runtime_directory,
-        project_charter_history_value, project_value, projects_value, revise_project_charter_value,
-        session_policy_value, session_status_value, set_session_timeout_value,
-        starter_organization_value,
+        DesktopState, accept_starter_organization_value, activate_resident_value,
+        authentication_capabilities_value, begin_password_setup_value,
+        complete_operator_setup_value, create_project_value, migrate_legacy_app_data,
+        platform_session_monitor_status_value, prepare_runtime_directory,
+        project_charter_history_value, project_value, projects_value, reactivate_resident_value,
+        residents_value, retire_resident_value, revise_project_charter_value, session_policy_value,
+        session_status_value, set_session_timeout_value, starter_organization_value,
+        suspend_resident_value,
     };
 
     #[test]
@@ -1067,6 +1195,11 @@ mod tests {
                 "allow-starter-organization",
                 "allow-accept-starter-organization",
                 "allow-discard-starter-organization",
+                "allow-residents",
+                "allow-activate-resident",
+                "allow-suspend-resident",
+                "allow-reactivate-resident",
+                "allow-retire-resident",
                 "allow-projects",
                 "allow-project",
                 "allow-project-charter-history",
@@ -1249,6 +1382,26 @@ mod tests {
         assert_eq!(value["decision"], "accepted");
         assert_eq!(value["residents"].as_array().unwrap().len(), 3);
         assert_eq!(value["residents"][0]["lifecycle"], "inactive");
+
+        let residents = residents_value(&state.state).unwrap();
+        assert_eq!(residents.len(), 3);
+        let resident_id = residents[0].id;
+        let active = activate_resident_value(&state.state, resident_id, None).unwrap();
+        assert_eq!(active.lifecycle, ResidentLifecycle::Active);
+        let suspended =
+            suspend_resident_value(&state.state, resident_id, active.latest_decision_id).unwrap();
+        assert_eq!(suspended.lifecycle, ResidentLifecycle::Suspended);
+        let reactivated =
+            reactivate_resident_value(&state.state, resident_id, suspended.latest_decision_id)
+                .unwrap();
+        assert_eq!(reactivated.lifecycle, ResidentLifecycle::Active);
+        let retired =
+            retire_resident_value(&state.state, resident_id, reactivated.latest_decision_id)
+                .unwrap();
+        let resident_value = serde_json::to_value(&retired).unwrap();
+        assert_eq!(resident_value["lifecycle"], "retired");
+        assert_eq!(resident_value.as_object().unwrap().len(), 8);
+        assert!(resident_value.get("authority").is_none());
     }
 
     #[test]

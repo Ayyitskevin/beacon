@@ -180,7 +180,10 @@ owns credentials, the authoritative session, OS monitoring, and the managed stor
 receives no Workspace material and exposes no Operator Command. After sign-in, a fresh Workspace
 offers the editable Starter Organization. The Owner may admit any non-empty selection of Lead,
 Builder, Reviewer, and Researcher identities or explicitly discard the proposal. Every admitted
-Resident remains inactive and receives no authority.
+Resident begins inactive and receives no authority. The Owner may later activate, suspend,
+reactivate, or permanently retire the identity. Those lifecycle decisions control availability
+only: even an active Resident has no model, Capability, Route, budget, Mission, Run, or execution
+authority in Phase 0.
 
 The Projects application is the first working suite surface after Briefing. The Owner can create
 a Project from a structured Charter containing its purpose, desired outcomes, constraints,
@@ -212,6 +215,9 @@ The inactive resource boundary is recorded in
 [the local-model discovery checkpoint](docs/implementation/phase-0-local-model-discovery.md).
 [The local-model activation checkpoint](docs/implementation/phase-0-local-model-activation.md)
 records the separate inspection, approval, and revocation boundary.
+[The Resident lifecycle checkpoint](docs/implementation/phase-0-resident-lifecycle.md) records the
+separate Operator-only availability states, append-only audit chain, and terminal retirement
+boundary.
 Run `scripts/gate` to verify the
 preserved Beacon Legacy Desk, the Rust workspace, the web bundle, and the native desktop build.
 The exact pre-Beacon compatibility boundary is recorded in the

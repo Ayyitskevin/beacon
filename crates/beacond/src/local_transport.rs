@@ -19,9 +19,10 @@ use crate::{
     AccessOrigin, OperatorAccountError, OperatorAccountService, OperatorSessionPolicy,
     OperatorSessionStatus, PlatformSessionMonitor, PlatformSessionMonitorStatus, ProjectCharter,
     ProjectCharterDraft, ProjectDraft, ProjectError, ProjectService, ProjectSummary, ProjectView,
-    RecoveryKey, ResourceDiscoveryError, ResourceDiscoveryService, SecretString,
-    StarterOrganizationError, StarterOrganizationService, StarterOrganizationView,
-    StarterResidentDraft, StartupConfig, Supervisor,
+    RecoveryKey, ResidentAgentView, ResidentLifecycleError, ResidentLifecycleService,
+    ResourceDiscoveryError, ResourceDiscoveryService, SecretString, StarterOrganizationError,
+    StarterOrganizationService, StarterOrganizationView, StarterResidentDraft, StartupConfig,
+    Supervisor,
 };
 
 const PROTOCOL_VERSION: u16 = 1;
@@ -63,6 +64,10 @@ pub enum LocalErrorCode {
     InvalidStarterRoster,
     StarterDecisionRecorded,
     StarterOrganizationUnavailable,
+    ResidentNotFound,
+    InvalidResidentTransition,
+    StaleResidentDecision,
+    ResidentLifecycleUnavailable,
     InvalidProject,
     ProjectNotFound,
     StaleCharterRevision,
@@ -94,6 +99,7 @@ pub enum LocalTransportError {
     Supervisor(crate::SupervisorError),
     Account(OperatorAccountError),
     StarterOrganization(StarterOrganizationError),
+    ResidentLifecycle(ResidentLifecycleError),
     Project(ProjectError),
     ResourceDiscovery(ResourceDiscoveryError),
     LocalModelActivation(crate::LocalModelActivationError),
@@ -117,6 +123,9 @@ impl fmt::Display for LocalTransportError {
             Self::Account(error) => write!(formatter, "account service failed: {error}"),
             Self::StarterOrganization(error) => {
                 write!(formatter, "starter organization failed: {error}")
+            }
+            Self::ResidentLifecycle(error) => {
+                write!(formatter, "Resident lifecycle failed: {error}")
             }
             Self::Project(error) => write!(formatter, "Project operation failed: {error}"),
             Self::ResourceDiscovery(error) => {
@@ -158,6 +167,12 @@ impl From<OperatorAccountError> for LocalTransportError {
 impl From<StarterOrganizationError> for LocalTransportError {
     fn from(error: StarterOrganizationError) -> Self {
         Self::StarterOrganization(error)
+    }
+}
+
+impl From<ResidentLifecycleError> for LocalTransportError {
+    fn from(error: ResidentLifecycleError) -> Self {
+        Self::ResidentLifecycle(error)
     }
 }
 
@@ -359,6 +374,23 @@ enum LocalCommand {
     DiscardStarterOrganization {
         proposal_version: u16,
     },
+    Residents,
+    ActivateResident {
+        resident_id: uuid::Uuid,
+        expected_decision_id: Option<uuid::Uuid>,
+    },
+    SuspendResident {
+        resident_id: uuid::Uuid,
+        expected_decision_id: Option<uuid::Uuid>,
+    },
+    ReactivateResident {
+        resident_id: uuid::Uuid,
+        expected_decision_id: Option<uuid::Uuid>,
+    },
+    RetireResident {
+        resident_id: uuid::Uuid,
+        expected_decision_id: Option<uuid::Uuid>,
+    },
     Projects,
     Project {
         project_id: uuid::Uuid,
@@ -415,6 +447,12 @@ enum LocalResult {
     StarterOrganization {
         organization: StarterOrganizationView,
     },
+    Residents {
+        residents: Vec<ResidentAgentView>,
+    },
+    Resident {
+        resident: ResidentAgentView,
+    },
     Projects {
         projects: Vec<ProjectSummary>,
     },
@@ -453,6 +491,7 @@ pub struct LocalSupervisorServer {
     token: LocalAuthToken,
     accounts: Arc<OperatorAccountService>,
     starter_organization: StarterOrganizationService,
+    resident_lifecycle: ResidentLifecycleService,
     projects: ProjectService,
     resource_discovery: ResourceDiscoveryService,
     local_model_activation: crate::LocalModelActivationService,
@@ -478,6 +517,8 @@ impl LocalSupervisorServer {
         let accounts = Arc::new(OperatorAccountService::open(&config.store_path)?);
         let starter_organization =
             StarterOrganizationService::new(Arc::clone(&accounts), report.workspace.id);
+        let resident_lifecycle =
+            ResidentLifecycleService::new(Arc::clone(&accounts), report.workspace.id);
         let projects = ProjectService::new(Arc::clone(&accounts), report.workspace.id);
         let resource_discovery =
             ResourceDiscoveryService::new(Arc::clone(&accounts), config.local_model_endpoint);
@@ -500,6 +541,7 @@ impl LocalSupervisorServer {
             token,
             accounts,
             starter_organization,
+            resident_lifecycle,
             projects,
             resource_discovery,
             local_model_activation,
@@ -632,6 +674,41 @@ impl LocalSupervisorServer {
                     organization: self.starter_organization.discard(proposal_version)?,
                 }
             }
+            LocalCommand::Residents => LocalResult::Residents {
+                residents: self.resident_lifecycle.list()?,
+            },
+            LocalCommand::ActivateResident {
+                resident_id,
+                expected_decision_id,
+            } => LocalResult::Resident {
+                resident: self
+                    .resident_lifecycle
+                    .activate(resident_id, expected_decision_id)?,
+            },
+            LocalCommand::SuspendResident {
+                resident_id,
+                expected_decision_id,
+            } => LocalResult::Resident {
+                resident: self
+                    .resident_lifecycle
+                    .suspend(resident_id, expected_decision_id)?,
+            },
+            LocalCommand::ReactivateResident {
+                resident_id,
+                expected_decision_id,
+            } => LocalResult::Resident {
+                resident: self
+                    .resident_lifecycle
+                    .reactivate(resident_id, expected_decision_id)?,
+            },
+            LocalCommand::RetireResident {
+                resident_id,
+                expected_decision_id,
+            } => LocalResult::Resident {
+                resident: self
+                    .resident_lifecycle
+                    .retire(resident_id, expected_decision_id)?,
+            },
             LocalCommand::Projects => LocalResult::Projects {
                 projects: self.projects.list()?,
             },
@@ -845,6 +922,54 @@ impl LocalSupervisorClient {
         )
     }
 
+    pub fn residents(&self) -> Result<Vec<ResidentAgentView>, LocalTransportError> {
+        expect_residents(self.send(LocalCommand::Residents)?)
+    }
+
+    pub fn activate_resident(
+        &self,
+        resident_id: uuid::Uuid,
+        expected_decision_id: Option<uuid::Uuid>,
+    ) -> Result<ResidentAgentView, LocalTransportError> {
+        expect_resident(self.send(LocalCommand::ActivateResident {
+            resident_id,
+            expected_decision_id,
+        })?)
+    }
+
+    pub fn suspend_resident(
+        &self,
+        resident_id: uuid::Uuid,
+        expected_decision_id: Option<uuid::Uuid>,
+    ) -> Result<ResidentAgentView, LocalTransportError> {
+        expect_resident(self.send(LocalCommand::SuspendResident {
+            resident_id,
+            expected_decision_id,
+        })?)
+    }
+
+    pub fn reactivate_resident(
+        &self,
+        resident_id: uuid::Uuid,
+        expected_decision_id: Option<uuid::Uuid>,
+    ) -> Result<ResidentAgentView, LocalTransportError> {
+        expect_resident(self.send(LocalCommand::ReactivateResident {
+            resident_id,
+            expected_decision_id,
+        })?)
+    }
+
+    pub fn retire_resident(
+        &self,
+        resident_id: uuid::Uuid,
+        expected_decision_id: Option<uuid::Uuid>,
+    ) -> Result<ResidentAgentView, LocalTransportError> {
+        expect_resident(self.send(LocalCommand::RetireResident {
+            resident_id,
+            expected_decision_id,
+        })?)
+    }
+
     pub fn projects(&self) -> Result<Vec<ProjectSummary>, LocalTransportError> {
         expect_projects(self.send(LocalCommand::Projects)?)
     }
@@ -993,6 +1118,20 @@ fn expect_starter_organization(
     }
 }
 
+fn expect_residents(result: LocalResult) -> Result<Vec<ResidentAgentView>, LocalTransportError> {
+    match result {
+        LocalResult::Residents { residents } => Ok(residents),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
+fn expect_resident(result: LocalResult) -> Result<ResidentAgentView, LocalTransportError> {
+    match result {
+        LocalResult::Resident { resident } => Ok(resident),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
 fn expect_projects(result: LocalResult) -> Result<Vec<ProjectSummary>, LocalTransportError> {
     match result {
         LocalResult::Projects { projects } => Ok(projects),
@@ -1056,6 +1195,7 @@ fn response_from_transport_error(error: LocalTransportError) -> ResponseEnvelope
     let wire_error = match error {
         LocalTransportError::Account(error) => wire_error_from_account(error),
         LocalTransportError::StarterOrganization(error) => wire_error_from_starter(error),
+        LocalTransportError::ResidentLifecycle(error) => wire_error_from_resident(error),
         LocalTransportError::Project(error) => wire_error_from_project(error),
         LocalTransportError::ResourceDiscovery(ResourceDiscoveryError::Account(error)) => {
             wire_error_from_account(error)
@@ -1085,6 +1225,22 @@ fn response_from_transport_error(error: LocalTransportError) -> ResponseEnvelope
         protocol: PROTOCOL_VERSION,
         result: None,
         error: Some(wire_error),
+    }
+}
+
+fn wire_error_from_resident(error: ResidentLifecycleError) -> WireError {
+    let code = match error {
+        ResidentLifecycleError::Account(error) => return wire_error_from_account(error),
+        ResidentLifecycleError::NotFound => LocalErrorCode::ResidentNotFound,
+        ResidentLifecycleError::InvalidTransition => LocalErrorCode::InvalidResidentTransition,
+        ResidentLifecycleError::StaleDecision => LocalErrorCode::StaleResidentDecision,
+        ResidentLifecycleError::InvalidStore
+        | ResidentLifecycleError::Store(_)
+        | ResidentLifecycleError::Json(_) => LocalErrorCode::ResidentLifecycleUnavailable,
+    };
+    WireError {
+        code,
+        retry_after_ms: None,
     }
 }
 

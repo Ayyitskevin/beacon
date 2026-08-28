@@ -16,8 +16,8 @@ use beacond::{
     AccessOrigin, AutonomyProfile, DiscoveryStatus, LocalErrorCode, LocalModelActivationState,
     LocalModelEndpoint, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
     LocalTransportError, ModelActivation, OperatorSessionPhase, PlatformMonitorState,
-    ProjectCharterDraft, ProjectDraft, ProviderFeature, SecretString, StarterOrganizationDecision,
-    StarterResidentDraft, StarterRole, initialize_local_auth_token,
+    ProjectCharterDraft, ProjectDraft, ProviderFeature, ResidentLifecycle, SecretString,
+    StarterOrganizationDecision, StarterResidentDraft, StarterRole, initialize_local_auth_token,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -418,6 +418,83 @@ fn authenticated_client_decides_the_starter_organization_over_the_real_socket() 
         client.starter_organization(),
         LocalErrorCode::NotAuthenticated,
     );
+    running.store(false, Ordering::Release);
+    thread.join().unwrap().unwrap();
+}
+
+#[test]
+fn authenticated_client_controls_resident_lifecycle_over_the_real_socket() {
+    let runtime = TestRuntime::new("resident-lifecycle");
+    let server = runtime.server();
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+
+    assert_remote_code(client.residents(), LocalErrorCode::NotAuthenticated);
+    client
+        .begin_password_setup(
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+    client.complete_operator_setup(true).unwrap();
+    let accepted = client
+        .accept_starter_organization(1, vec![draft(StarterRole::Lead, Some("Northstar"))])
+        .unwrap();
+    let resident_id = accepted.residents[0].id;
+
+    let initial = client.residents().unwrap();
+    assert_eq!(initial.len(), 1);
+    assert_eq!(initial[0].lifecycle, ResidentLifecycle::Inactive);
+    assert_eq!(initial[0].latest_decision_id, None);
+    assert_remote_code(
+        client.suspend_resident(resident_id, None),
+        LocalErrorCode::InvalidResidentTransition,
+    );
+
+    let active = client.activate_resident(resident_id, None).unwrap();
+    assert_eq!(active.lifecycle, ResidentLifecycle::Active);
+    let active_id = active.latest_decision_id.unwrap();
+    assert_remote_code(
+        client.activate_resident(resident_id, None),
+        LocalErrorCode::StaleResidentDecision,
+    );
+    assert_eq!(client.residents().unwrap(), std::slice::from_ref(&active));
+
+    let suspended = client
+        .suspend_resident(resident_id, Some(active_id))
+        .unwrap();
+    assert_eq!(suspended.lifecycle, ResidentLifecycle::Suspended);
+    assert_remote_code(
+        client.suspend_resident(resident_id, Some(active_id)),
+        LocalErrorCode::StaleResidentDecision,
+    );
+
+    let reactivated = client
+        .reactivate_resident(resident_id, suspended.latest_decision_id)
+        .unwrap();
+    assert_eq!(reactivated.lifecycle, ResidentLifecycle::Active);
+    let retired = client
+        .retire_resident(resident_id, reactivated.latest_decision_id)
+        .unwrap();
+    assert_eq!(retired.lifecycle, ResidentLifecycle::Retired);
+    assert_remote_code(
+        client.reactivate_resident(resident_id, retired.latest_decision_id),
+        LocalErrorCode::InvalidResidentTransition,
+    );
+    assert_remote_code(
+        client.retire_resident(Uuid::new_v4(), None),
+        LocalErrorCode::ResidentNotFound,
+    );
+    assert_eq!(client.residents().unwrap(), [retired]);
+    assert_eq!(
+        client.starter_organization().unwrap().residents[0].lifecycle,
+        ResidentLifecycle::Inactive
+    );
+
+    client.lock().unwrap();
+    assert_remote_code(client.residents(), LocalErrorCode::NotAuthenticated);
     running.store(false, Ordering::Release);
     thread.join().unwrap().unwrap();
 }

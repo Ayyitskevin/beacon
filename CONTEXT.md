@@ -61,7 +61,9 @@ _Avoid_: Agent ID, role, persona
 
 **Resident Agent**:
 An Operator-admitted persistent Agent whose identity, role, history, and Track Record continue
-across Missions.
+across Missions. Its lifecycle is inactive, active, suspended, or retired. Lifecycle controls
+availability for later assignment and never grants a model, Capability, budget, or execution
+authority; retirement is terminal while identity and history remain auditable.
 _Avoid_: Permanent agent, primary agent
 
 **Specialist Agent**:
