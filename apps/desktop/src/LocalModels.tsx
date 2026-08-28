@@ -188,23 +188,46 @@ function DiscoveryResult({
   if (!report) return <p className={classes.status}>Not checked yet</p>;
   if (report.status === "unavailable") {
     return (
-      <p className={classes.status} role="status">
-        Ollama is not available at {report.endpoint}. Beacon continues without it.
-      </p>
+      <>
+        <p className={classes.status} role="status">
+          Ollama is not available at {report.endpoint}. Stored Workspace decisions remain
+          revocable.
+        </p>
+        <StoredActivationList
+          activations={activations}
+          busy={busy}
+          onDeactivate={onDeactivate}
+        />
+      </>
     );
   }
   if (report.status === "invalid_response") {
     return (
-      <p className={classes.status} role="status">
-        Ollama responded, but Beacon could not verify its installed-model list.
-      </p>
+      <>
+        <p className={classes.status} role="status">
+          Ollama responded, but Beacon could not verify its installed-model list. Stored Workspace
+          decisions remain revocable.
+        </p>
+        <StoredActivationList
+          activations={activations}
+          busy={busy}
+          onDeactivate={onDeactivate}
+        />
+      </>
     );
   }
   if (report.models.length === 0) {
     return (
-      <p className={classes.status} role="status">
-        Ollama is available. No installed models were found.
-      </p>
+      <>
+        <p className={classes.status} role="status">
+          Ollama is available. No installed models were found.
+        </p>
+        <StoredActivationList
+          activations={activations}
+          busy={busy}
+          onDeactivate={onDeactivate}
+        />
+      </>
     );
   }
   return (
@@ -241,7 +264,73 @@ function DiscoveryResult({
           );
         })}
       </ul>
+      <StoredActivationList
+        activations={activations?.filter(
+          (activation) =>
+            !report.models.some(
+              (model) =>
+                activation.binding.endpoint === report.endpoint &&
+                activation.binding.modelName === model.name,
+            ),
+        )}
+        busy={busy}
+        onDeactivate={onDeactivate}
+      />
     </>
+  );
+}
+
+function StoredActivationList({
+  activations,
+  busy,
+  onDeactivate,
+}: {
+  activations: readonly LocalModelActivation[] | null | undefined;
+  busy: boolean;
+  onDeactivate: (expectedActivationId: string) => void;
+}) {
+  const classes = useStyles();
+  if (!activations || activations.length === 0) return null;
+  return (
+    <ul className={classes.list} aria-label="Stored local-model activation decisions">
+      {activations.map((activation) => (
+        <li className={classes.model} key={activation.id}>
+          <div>
+            <h3 className={classes.modelName}>{activation.binding.modelName}</h3>
+            <p className={classes.modelSummary}>
+              Stored decision for {activation.binding.provider}. Provider inspection is not needed
+              to revoke it.
+            </p>
+          </div>
+          <span className={classes.badge}>
+            {activation.state === "active" ? "Active" : "Inactive"}
+          </span>
+          {activation.state === "active" && (
+            <div className={classes.modelActions}>
+              <Button
+                size="small"
+                disabled={busy}
+                onClick={() => onDeactivate(activation.id)}
+                aria-label={`Deactivate ${activation.binding.modelName}`}
+              >
+                Deactivate
+              </Button>
+              <span className={classes.status}>
+                Deactivation is local and does not contact or run the provider.
+              </span>
+            </div>
+          )}
+          <details className={classes.technical}>
+            <summary>Decision evidence</summary>
+            <p>Endpoint: {activation.binding.endpoint}</p>
+            <p className={classes.digest}>Model digest: {activation.binding.modelDigest}</p>
+            <p className={classes.digest}>
+              Inspection digest: {activation.binding.inspectionDigest}
+            </p>
+          </details>
+        </li>
+      ))}
+    </ul>
   );
 }
 
