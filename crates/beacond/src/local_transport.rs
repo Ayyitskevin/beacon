@@ -18,7 +18,8 @@ use zeroize::Zeroizing;
 use crate::{
     AccessOrigin, OperatorAccountError, OperatorAccountService, OperatorSessionPolicy,
     OperatorSessionStatus, PlatformSessionMonitor, PlatformSessionMonitorStatus, RecoveryKey,
-    SecretString, StartupConfig, Supervisor,
+    SecretString, StarterOrganizationError, StarterOrganizationService, StarterOrganizationView,
+    StarterResidentDraft, StartupConfig, Supervisor,
 };
 
 const PROTOCOL_VERSION: u16 = 1;
@@ -52,6 +53,10 @@ pub enum LocalErrorCode {
     RemotePasswordNotAllowed,
     NotAuthenticated,
     InvalidSessionTimeout,
+    UnsupportedStarterProposal,
+    InvalidStarterRoster,
+    StarterDecisionRecorded,
+    StarterOrganizationUnavailable,
     AccountServiceUnavailable,
     UnauthorizedClient,
     ProtocolError,
@@ -70,6 +75,7 @@ pub enum LocalTransportError {
     },
     Supervisor(crate::SupervisorError),
     Account(OperatorAccountError),
+    StarterOrganization(StarterOrganizationError),
 }
 
 impl fmt::Display for LocalTransportError {
@@ -88,6 +94,9 @@ impl fmt::Display for LocalTransportError {
             Self::Remote { code, .. } => write!(formatter, "local supervisor refused: {code:?}"),
             Self::Supervisor(error) => write!(formatter, "supervisor startup failed: {error}"),
             Self::Account(error) => write!(formatter, "account service failed: {error}"),
+            Self::StarterOrganization(error) => {
+                write!(formatter, "starter organization failed: {error}")
+            }
         }
     }
 }
@@ -115,6 +124,12 @@ impl From<crate::SupervisorError> for LocalTransportError {
 impl From<OperatorAccountError> for LocalTransportError {
     fn from(error: OperatorAccountError) -> Self {
         Self::Account(error)
+    }
+}
+
+impl From<StarterOrganizationError> for LocalTransportError {
+    fn from(error: StarterOrganizationError) -> Self {
+        Self::StarterOrganization(error)
     }
 }
 
@@ -290,6 +305,14 @@ enum LocalCommand {
     },
     Lock,
     RecordOperatorActivity,
+    StarterOrganization,
+    AcceptStarterOrganization {
+        proposal_version: u16,
+        residents: Vec<StarterResidentDraft>,
+    },
+    DiscardStarterOrganization {
+        proposal_version: u16,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -315,6 +338,9 @@ enum LocalResult {
     RecoveryKey {
         recovery_key: WireSecret,
     },
+    StarterOrganization {
+        organization: StarterOrganizationView,
+    },
     Empty,
 }
 
@@ -331,6 +357,7 @@ pub struct LocalSupervisorServer {
     _lock_file: File,
     token: LocalAuthToken,
     accounts: Arc<OperatorAccountService>,
+    starter_organization: StarterOrganizationService,
     platform_monitor: PlatformSessionMonitor,
 }
 
@@ -346,11 +373,13 @@ impl LocalSupervisorServer {
             }
             fs::remove_file(&config.socket_path)?;
         }
-        Supervisor::bootstrap(StartupConfig {
+        let report = Supervisor::bootstrap(StartupConfig {
             store_path: config.store_path.clone(),
             initial_workspace_name: config.initial_workspace_name,
         })?;
         let accounts = Arc::new(OperatorAccountService::open(&config.store_path)?);
+        let starter_organization =
+            StarterOrganizationService::new(Arc::clone(&accounts), report.workspace.id);
         let token = load_local_auth_token(&config.auth_token_path)?;
         let listener = UnixListener::bind(&config.socket_path)?;
         fs::set_permissions(&config.socket_path, fs::Permissions::from_mode(0o600))?;
@@ -364,6 +393,7 @@ impl LocalSupervisorServer {
             _lock_file: lock_file,
             token,
             accounts,
+            starter_organization,
             platform_monitor: PlatformSessionMonitor::new(),
         })
     }
@@ -476,6 +506,22 @@ impl LocalSupervisorServer {
             LocalCommand::RecordOperatorActivity => {
                 self.accounts.record_operator_activity()?;
                 LocalResult::Empty
+            }
+            LocalCommand::StarterOrganization => LocalResult::StarterOrganization {
+                organization: self.starter_organization.view()?,
+            },
+            LocalCommand::AcceptStarterOrganization {
+                proposal_version,
+                residents,
+            } => LocalResult::StarterOrganization {
+                organization: self
+                    .starter_organization
+                    .accept(proposal_version, residents)?,
+            },
+            LocalCommand::DiscardStarterOrganization { proposal_version } => {
+                LocalResult::StarterOrganization {
+                    organization: self.starter_organization.discard(proposal_version)?,
+                }
             }
         };
         Ok(ResponseEnvelope {
@@ -612,6 +658,30 @@ impl LocalSupervisorClient {
         }
     }
 
+    pub fn starter_organization(&self) -> Result<StarterOrganizationView, LocalTransportError> {
+        expect_starter_organization(self.send(LocalCommand::StarterOrganization)?)
+    }
+
+    pub fn accept_starter_organization(
+        &self,
+        proposal_version: u16,
+        residents: Vec<StarterResidentDraft>,
+    ) -> Result<StarterOrganizationView, LocalTransportError> {
+        expect_starter_organization(self.send(LocalCommand::AcceptStarterOrganization {
+            proposal_version,
+            residents,
+        })?)
+    }
+
+    pub fn discard_starter_organization(
+        &self,
+        proposal_version: u16,
+    ) -> Result<StarterOrganizationView, LocalTransportError> {
+        expect_starter_organization(
+            self.send(LocalCommand::DiscardStarterOrganization { proposal_version })?,
+        )
+    }
+
     fn send(&self, command: LocalCommand) -> Result<LocalResult, LocalTransportError> {
         let token = load_local_auth_token(&self.token_path)?;
         let request = RequestEnvelope {
@@ -674,9 +744,19 @@ fn expect_recovery(result: LocalResult) -> Result<RecoveryKey, LocalTransportErr
     }
 }
 
+fn expect_starter_organization(
+    result: LocalResult,
+) -> Result<StarterOrganizationView, LocalTransportError> {
+    match result {
+        LocalResult::StarterOrganization { organization } => Ok(organization),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
 fn response_from_transport_error(error: LocalTransportError) -> ResponseEnvelope {
     let wire_error = match error {
         LocalTransportError::Account(error) => wire_error_from_account(error),
+        LocalTransportError::StarterOrganization(error) => wire_error_from_starter(error),
         LocalTransportError::Remote {
             code,
             retry_after_ms,
@@ -693,6 +773,28 @@ fn response_from_transport_error(error: LocalTransportError) -> ResponseEnvelope
         protocol: PROTOCOL_VERSION,
         result: None,
         error: Some(wire_error),
+    }
+}
+
+fn wire_error_from_starter(error: StarterOrganizationError) -> WireError {
+    let code = match error {
+        StarterOrganizationError::Account(error) => return wire_error_from_account(error),
+        StarterOrganizationError::UnsupportedProposalVersion => {
+            LocalErrorCode::UnsupportedStarterProposal
+        }
+        StarterOrganizationError::EmptyRoster
+        | StarterOrganizationError::DuplicateRole
+        | StarterOrganizationError::InvalidDisplayName => LocalErrorCode::InvalidStarterRoster,
+        StarterOrganizationError::DecisionAlreadyRecorded => {
+            LocalErrorCode::StarterDecisionRecorded
+        }
+        StarterOrganizationError::InvalidStore
+        | StarterOrganizationError::Store(_)
+        | StarterOrganizationError::Json(_) => LocalErrorCode::StarterOrganizationUnavailable,
+    };
+    WireError {
+        code,
+        retry_after_ms: None,
     }
 }
 

@@ -1,9 +1,10 @@
 # Phase 0 local Owner session
 
-This checkpoint proves the native desktop toolchain, local Owner enrollment and recovery, and the
-authoritative inactivity and Linux platform-lock boundary. It does not implement passkeys, Cloud
-Link, remote authentication, or a usable Workspace. Those security-sensitive changes retain their
-own design and review boundaries.
+This checkpoint proves the native desktop toolchain, local Owner enrollment and recovery, the
+authoritative inactivity and Linux platform-lock boundary, and the authenticated Starter
+Organization screen. It does not implement passkeys, Cloud Link, remote authentication, Projects,
+or active agent work. Those security-sensitive changes retain their own design and review
+boundaries.
 
 ## Boundary
 
@@ -29,6 +30,11 @@ ignored build products. The content security policy admits bundled content, Taur
 required by Fluent UI's runtime styling, and local image data. It does not grant arbitrary network
 access. There is no browser development bypass and no JavaScript SQLite access.
 
+After authentication, the renderer may invoke only the typed Starter Organization query, accept,
+and discard commands. The supervisor rechecks the live Owner session while holding the account
+service lock and performs each accepted decision and Event in one immediate store transaction. The
+renderer cannot create an active Resident or submit model, capability, budget, or authority fields.
+
 ## Interface
 
 The React shell uses Fluent UI v9 and a restrained institutional palette. It contains the accepted
@@ -40,7 +46,9 @@ preference boundary and is not implied here.
 Automated tests cover the locked session shape, malformed-response rejection, failure and retry,
 enrollment, recovery, configurable timeout, explicit-activity renewal, unavailable-monitor
 warnings, disabled navigation, Light/Dark/Follow System behavior, structural accessibility, and WCAG AA
-contrast for the fixed text and brand-control color pairs. The layout includes a keyboard skip link,
+contrast for the fixed text and brand-control color pairs. They also cover Starter Organization
+editing, explicit acceptance, two-step discard, closed response validation, and accessibility. The
+layout includes a keyboard skip link,
 semantic landmarks, labeled controls, and reduced-motion handling. This is automated evidence, not
 a claim that the later interactive product has completed manual Orca testing.
 

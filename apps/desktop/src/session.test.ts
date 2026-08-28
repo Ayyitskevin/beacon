@@ -3,12 +3,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   beginLocalPasswordSetup,
+  acceptStarterOrganization,
   completeLocalOperatorSetup,
   describeLocalAccountError,
+  discardStarterOrganization,
   loadAuthenticationCapabilities,
   loadPlatformSessionMonitorStatus,
   loadSessionPolicy,
   loadSessionStatus,
+  loadStarterOrganization,
   lockLocalSession,
   recordLocalOperatorActivity,
   recoverLocalOperatorAccount,
@@ -119,6 +122,99 @@ describe("desktop session transport", () => {
     ]);
   });
 
+  it("maps the Starter Organization commands and rejects widened roster results", async () => {
+    const proposed = {
+      workspaceId: "11111111-1111-4111-8111-111111111111",
+      proposalVersion: 1,
+      decision: "proposed",
+      templates: [
+        { role: "lead", description: "Coordinates Missions.", recommended: true },
+        { role: "builder", description: "Produces Artifacts.", recommended: true },
+        { role: "reviewer", description: "Evaluates work.", recommended: true },
+        { role: "researcher", description: "Develops Evidence.", recommended: false },
+      ],
+      residents: [],
+    } as const;
+    const accepted = {
+      ...proposed,
+      decision: "accepted",
+      residents: [
+        {
+          id: "22222222-2222-4222-8222-222222222222",
+          role: "lead",
+          displayName: "Northstar",
+          lifecycle: "inactive",
+        },
+      ],
+    } as const;
+    const discarded = { ...proposed, decision: "discarded" } as const;
+    invokeMock
+      .mockResolvedValueOnce(proposed)
+      .mockResolvedValueOnce(accepted)
+      .mockResolvedValueOnce(discarded)
+      .mockResolvedValueOnce({ ...proposed, authority: "ambient" });
+
+    await expect(loadStarterOrganization()).resolves.toEqual(proposed);
+    await expect(
+      acceptStarterOrganization(1, [{ role: "lead", displayName: "Northstar" }]),
+    ).resolves.toEqual(accepted);
+    await expect(discardStarterOrganization(1)).resolves.toEqual(discarded);
+    await expect(loadStarterOrganization()).rejects.toThrow("invalid Starter Organization");
+    expect(invokeMock.mock.calls).toEqual([
+      ["starter_organization"],
+      [
+        "accept_starter_organization",
+        { proposalVersion: 1, residents: [{ role: "lead", displayName: "Northstar" }] },
+      ],
+      ["discard_starter_organization", { proposalVersion: 1 }],
+      ["starter_organization"],
+    ]);
+  });
+
+  it.each([
+    [
+      "changed recommendation defaults",
+      {
+        workspaceId: "11111111-1111-4111-8111-111111111111",
+        proposalVersion: 1,
+        decision: "proposed",
+        templates: [
+          { role: "lead", description: "Coordinates Missions.", recommended: false },
+          { role: "builder", description: "Produces Artifacts.", recommended: true },
+          { role: "reviewer", description: "Evaluates work.", recommended: true },
+          { role: "researcher", description: "Develops Evidence.", recommended: false },
+        ],
+        residents: [],
+      },
+    ],
+    [
+      "a control character in a Display Name",
+      {
+        workspaceId: "11111111-1111-4111-8111-111111111111",
+        proposalVersion: 1,
+        decision: "accepted",
+        templates: [
+          { role: "lead", description: "Coordinates Missions.", recommended: true },
+          { role: "builder", description: "Produces Artifacts.", recommended: true },
+          { role: "reviewer", description: "Evaluates work.", recommended: true },
+          { role: "researcher", description: "Develops Evidence.", recommended: false },
+        ],
+        residents: [
+          {
+            id: "22222222-2222-4222-8222-222222222222",
+            role: "lead",
+            displayName: "North\nstar",
+            lifecycle: "inactive",
+          },
+        ],
+      },
+    ],
+  ])("rejects %s in a Starter Organization result", async (_case, response) => {
+    invokeMock.mockResolvedValue(response);
+
+    await expect(loadStarterOrganization()).rejects.toThrow("invalid Starter Organization");
+  });
+
   it.each([
     { inactivityTimeoutMinutes: 0 },
     { inactivityTimeoutMinutes: 1_441 },
@@ -136,6 +232,9 @@ describe("desktop session transport", () => {
     expect(
       describeLocalAccountError({ code: "authentication_throttled", retryAfterMs: 1_001 }),
     ).toBe("Wait 2 seconds before trying again.");
+    expect(describeLocalAccountError({ code: "starter_organization_unavailable" })).toBe(
+      "Beacon could not verify the Starter Organization state.",
+    );
     expect(describeLocalAccountError({ code: "invented", message: "render me" })).not.toContain(
       "render me",
     );

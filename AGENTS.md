@@ -232,6 +232,8 @@ on a tagged legacy branch before removal or relocation.
 The expanded Alpha blueprint is accepted design. Phase 0 has begun beside the preserved Beacon
 Legacy Desk. The Rust workspace contains the `beacond` supervisor, managed SQLite store, local
 Owner account and Recovery Key boundary, authenticated local transport, configurable human-session
-lock, Linux screen-lock/suspend monitor, and a signed-out Tauri/React shell. Cloud Link, passkeys,
-Starter Organization, agent work, and a downloadable installer do not exist yet. Do not describe
-this checkpoint as a usable Alpha.
+lock, Linux screen-lock/suspend monitor, Tauri/React shell, and the authenticated Starter
+Organization decision. Accepting its editable Lead, Builder, Reviewer, and Researcher proposal
+creates inactive Resident identities only; it grants no model, capability, budget, activation, or
+execution authority. Cloud Link, passkeys, active agent work, Projects, and a downloadable installer
+do not exist yet. Do not describe this checkpoint as a usable Alpha.

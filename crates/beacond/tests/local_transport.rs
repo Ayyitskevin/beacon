@@ -11,8 +11,9 @@ use std::thread;
 use std::time::Duration;
 
 use beacond::{
-    AccessOrigin, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
-    OperatorSessionPhase, PlatformMonitorState, SecretString, initialize_local_auth_token,
+    AccessOrigin, LocalErrorCode, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
+    LocalTransportError, OperatorSessionPhase, PlatformMonitorState, SecretString,
+    StarterOrganizationDecision, StarterResidentDraft, StarterRole, initialize_local_auth_token,
 };
 use uuid::Uuid;
 
@@ -127,6 +128,130 @@ fn authenticated_client_completes_account_flow_without_owning_the_store() {
 
     running.store(false, Ordering::Release);
     thread.join().unwrap().unwrap();
+}
+
+#[test]
+fn authenticated_client_decides_the_starter_organization_over_the_real_socket() {
+    let runtime = TestRuntime::new("starter-organization");
+    let server = runtime.server();
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+
+    assert_remote_code(
+        client.starter_organization(),
+        LocalErrorCode::NotAuthenticated,
+    );
+    client
+        .begin_password_setup(
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+    client.complete_operator_setup(true).unwrap();
+    let proposed = client.starter_organization().unwrap();
+    assert_eq!(proposed.decision, StarterOrganizationDecision::Proposed);
+
+    assert_remote_code(
+        client.accept_starter_organization(2, vec![draft(StarterRole::Lead, None)]),
+        LocalErrorCode::UnsupportedStarterProposal,
+    );
+    assert_remote_code(
+        client.accept_starter_organization(1, vec![]),
+        LocalErrorCode::InvalidStarterRoster,
+    );
+    assert_remote_code(
+        client.accept_starter_organization(
+            1,
+            vec![
+                draft(StarterRole::Builder, None),
+                draft(StarterRole::Builder, None),
+            ],
+        ),
+        LocalErrorCode::InvalidStarterRoster,
+    );
+    for invalid_name in ["   ".to_owned(), "line\nbreak".to_owned(), "x".repeat(81)] {
+        assert_remote_code(
+            client.accept_starter_organization(
+                1,
+                vec![draft(StarterRole::Lead, Some(&invalid_name))],
+            ),
+            LocalErrorCode::InvalidStarterRoster,
+        );
+    }
+    assert_eq!(
+        client.starter_organization().unwrap().decision,
+        StarterOrganizationDecision::Proposed
+    );
+
+    let accepted = client
+        .accept_starter_organization(
+            proposed.proposal_version,
+            vec![
+                draft(StarterRole::Lead, Some("Northstar")),
+                draft(StarterRole::Builder, None),
+                draft(StarterRole::Reviewer, None),
+            ],
+        )
+        .unwrap();
+    assert_eq!(accepted.decision, StarterOrganizationDecision::Accepted);
+    assert_eq!(accepted.residents.len(), 3);
+    assert_remote_code(
+        client.accept_starter_organization(1, vec![draft(StarterRole::Researcher, None)]),
+        LocalErrorCode::StarterDecisionRecorded,
+    );
+
+    client.lock().unwrap();
+    assert_remote_code(
+        client.starter_organization(),
+        LocalErrorCode::NotAuthenticated,
+    );
+    running.store(false, Ordering::Release);
+    thread.join().unwrap().unwrap();
+}
+
+#[test]
+fn authenticated_client_discards_the_starter_organization_over_the_real_socket() {
+    let runtime = TestRuntime::new("discard-starter-organization");
+    let server = runtime.server();
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+
+    client
+        .begin_password_setup(
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+    client.complete_operator_setup(true).unwrap();
+    let discarded = client.discard_starter_organization(1).unwrap();
+    assert_eq!(discarded.decision, StarterOrganizationDecision::Discarded);
+    assert!(discarded.residents.is_empty());
+    assert_remote_code(
+        client.accept_starter_organization(1, vec![draft(StarterRole::Lead, None)]),
+        LocalErrorCode::StarterDecisionRecorded,
+    );
+
+    running.store(false, Ordering::Release);
+    thread.join().unwrap().unwrap();
+}
+
+fn draft(role: StarterRole, display_name: Option<&str>) -> StarterResidentDraft {
+    StarterResidentDraft {
+        role,
+        display_name: display_name.map(str::to_owned),
+    }
+}
+
+fn assert_remote_code<T>(result: Result<T, LocalTransportError>, expected: LocalErrorCode) {
+    match result {
+        Err(LocalTransportError::Remote { code, .. }) => assert_eq!(code, expected),
+        Ok(_) => panic!("command unexpectedly succeeded"),
+        Err(error) => panic!("unexpected transport error: {error}"),
+    }
 }
 
 #[test]

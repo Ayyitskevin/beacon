@@ -10,6 +10,9 @@ const COMMANDS: &[&str] = &[
     "authenticate_password",
     "recover_operator_account",
     "lock_session",
+    "starter_organization",
+    "accept_starter_organization",
+    "discard_starter_organization",
 ];
 
 fn main() {

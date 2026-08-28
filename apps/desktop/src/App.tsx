@@ -11,21 +11,27 @@ import {
 import { type FormEvent, useEffect, useRef, useState } from "react";
 
 import {
+  acceptStarterOrganization,
   type AuthenticationCapabilities,
   type DesktopSessionStatus,
   beginLocalPasswordSetup,
   completeLocalOperatorSetup,
   describeLocalAccountError,
+  discardStarterOrganization,
   loadAuthenticationCapabilities,
   loadPlatformSessionMonitorStatus,
   loadSessionPolicy,
   loadSessionStatus,
+  loadStarterOrganization,
   lockLocalSession,
   type PlatformSessionMonitorStatus,
   recordLocalOperatorActivity,
   recoverLocalOperatorAccount,
   setLocalSessionTimeout,
   signInWithLocalPassword,
+  type StarterOrganizationView,
+  type StarterResidentDraft,
+  type StarterRole,
 } from "./session";
 import { darkTheme, lightTheme } from "./theme";
 
@@ -144,6 +150,31 @@ const useStyles = makeStyles({
     marginTop: tokens.spacingVerticalS,
   },
   monitorWarning: { color: tokens.colorPaletteDarkOrangeForeground1 },
+  starterSection: { width: "min(100%, 760px)" },
+  roster: {
+    display: "grid",
+    marginTop: tokens.spacingVerticalXL,
+    ...shorthands.borderTop(tokens.strokeWidthThin, "solid", tokens.colorNeutralStroke2),
+  },
+  rosterRow: {
+    display: "grid",
+    gridTemplateColumns: "minmax(220px, 1fr) minmax(220px, 0.8fr)",
+    columnGap: tokens.spacingHorizontalXXL,
+    rowGap: tokens.spacingVerticalS,
+    alignItems: "center",
+    ...shorthands.padding(tokens.spacingVerticalL, 0),
+    ...shorthands.borderBottom(tokens.strokeWidthThin, "solid", tokens.colorNeutralStroke2),
+  },
+  roleSummary: { display: "grid", rowGap: tokens.spacingVerticalXS },
+  roleDescription: { color: tokens.colorNeutralForeground2, margin: 0 },
+  rosterField: { minWidth: 0 },
+  briefingList: {
+    display: "grid",
+    rowGap: tokens.spacingVerticalS,
+    marginTop: tokens.spacingVerticalL,
+    marginBottom: tokens.spacingVerticalL,
+    paddingLeft: tokens.spacingHorizontalXXL,
+  },
 });
 
 export function App() {
@@ -166,6 +197,8 @@ export function App() {
   const [timeoutMinutes, setTimeoutMinutes] = useState("30");
   const [platformMonitor, setPlatformMonitor] =
     useState<PlatformSessionMonitorStatus | null>(null);
+  const [starterOrganization, setStarterOrganization] =
+    useState<StarterOrganizationView | null>(null);
   const [themeChoice, setThemeChoice] = useState<ThemeChoice>("light");
   const [systemPrefersDark, setSystemPrefersDark] = useState(
     () =>
@@ -178,6 +211,7 @@ export function App() {
 
   function applyVerifiedSession(nextSession: DesktopSessionStatus, expectedEpoch: number) {
     setSession(nextSession);
+    if (nextSession.phase !== "unlocked") setStarterOrganization(null);
     setForegroundVerified(
       nextSession.phase === "unlocked" &&
         foregroundEligible.current &&
@@ -209,16 +243,23 @@ export function App() {
   useEffect(() => {
     if (!unlocked) return;
     let active = true;
-    Promise.all([loadSessionPolicy(), loadPlatformSessionMonitorStatus()]).then(
-      ([policy, monitor]) => {
+    setStarterOrganization(null);
+    Promise.all([
+      loadSessionPolicy(),
+      loadPlatformSessionMonitorStatus(),
+      loadStarterOrganization(),
+    ]).then(
+      ([policy, monitor, organization]) => {
         if (!active) return;
         setTimeoutMinutes(String(policy.inactivityTimeoutMinutes));
         setPlatformMonitor(monitor);
+        setStarterOrganization(organization);
       },
       () => {
         if (!active) return;
         setSession(null);
         setForegroundVerified(false);
+        setStarterOrganization(null);
         setViewState("error");
       },
     );
@@ -238,13 +279,17 @@ export function App() {
         ([nextSession, monitor]) => {
           if (!active) return;
           setSession(nextSession);
-          if (nextSession.phase !== "unlocked") setForegroundVerified(false);
+          if (nextSession.phase !== "unlocked") {
+            setForegroundVerified(false);
+            setStarterOrganization(null);
+          }
           setPlatformMonitor(monitor);
         },
         () => {
           if (!active) return;
           setSession(null);
           setForegroundVerified(false);
+          setStarterOrganization(null);
           setViewState("error");
         },
       ).finally(() => {
@@ -274,6 +319,7 @@ export function App() {
           if (!active) return;
           setSession(null);
           setForegroundVerified(false);
+          setStarterOrganization(null);
           setViewState("error");
         },
       ).finally(() => {
@@ -401,6 +447,7 @@ export function App() {
     await runAction(async () => {
       setSession(await lockLocalSession());
       setForegroundVerified(false);
+      setStarterOrganization(null);
       setRecoveryMode(false);
       setReplacementKey("");
     });
@@ -412,6 +459,24 @@ export function App() {
     await runAction(async () => {
       const policy = await setLocalSessionTimeout(value);
       setTimeoutMinutes(String(policy.inactivityTimeoutMinutes));
+    });
+  }
+
+  async function acceptStarterRoster(residents: StarterResidentDraft[]) {
+    if (!starterOrganization) return;
+    await runAction(async () => {
+      setStarterOrganization(
+        await acceptStarterOrganization(starterOrganization.proposalVersion, residents),
+      );
+    });
+  }
+
+  async function discardStarterRoster() {
+    if (!starterOrganization) return;
+    await runAction(async () => {
+      setStarterOrganization(
+        await discardStarterOrganization(starterOrganization.proposalVersion),
+      );
     });
   }
 
@@ -557,28 +622,27 @@ export function App() {
                 </form>
               )}
             </section>
+          ) : !starterOrganization ? (
+            <p role="status">Loading Briefing</p>
+          ) : starterOrganization.decision === "proposed" ? (
+            <StarterOrganizationStep
+              key={starterOrganization.proposalVersion}
+              classes={classes}
+              organization={starterOrganization}
+              busy={busy}
+              error={actionError}
+              onAccept={acceptStarterRoster}
+              onDiscard={discardStarterRoster}
+            />
           ) : (
-            <section className={classes.attention} aria-labelledby="workspace-heading">
-              <h1 id="workspace-heading" className={classes.heading}>
-                Owner workspace
-              </h1>
-              <p className={classes.body}>
-                Your local Operator session is active. Authentication opens Beacon; Policy and
-                Gates still control every agent effect.
-              </p>
-              {replacementKey && (
-                <>
-                  <p>A new one-time Recovery Key replaced the old key. Save it offline now.</p>
-                  <code className={classes.recoveryKey}>{replacementKey}</code>
-                </>
-              )}
-              {actionError && <p className={classes.actionError}>{actionError}</p>}
-              <div className={classes.actions}>
-                <Button onClick={lockSession} disabled={busy}>
-                  Lock Beacon
-                </Button>
-              </div>
-            </section>
+            <Briefing
+              classes={classes}
+              organization={starterOrganization}
+              replacementKey={replacementKey}
+              busy={busy}
+              error={actionError}
+              onLock={lockSession}
+            />
           )}
         </main>
         <aside className={`${classes.inspector} desktop-inspector`} aria-labelledby="installation-heading">
@@ -650,6 +714,195 @@ export function App() {
 }
 
 type StyleClasses = ReturnType<typeof useStyles>;
+
+const starterRoleLabels: Record<StarterRole, string> = {
+  lead: "Lead",
+  builder: "Builder",
+  reviewer: "Reviewer",
+  researcher: "Researcher",
+};
+
+function StarterOrganizationStep({
+  classes,
+  organization,
+  busy,
+  error,
+  onAccept,
+  onDiscard,
+}: {
+  classes: StyleClasses;
+  organization: StarterOrganizationView;
+  busy: boolean;
+  error: string;
+  onAccept: (residents: StarterResidentDraft[]) => void;
+  onDiscard: () => void;
+}) {
+  const [included, setIncluded] = useState<Record<StarterRole, boolean>>(() =>
+    Object.fromEntries(
+      organization.templates.map((template) => [template.role, template.recommended]),
+    ) as Record<StarterRole, boolean>,
+  );
+  const [displayNames, setDisplayNames] = useState<Record<StarterRole, string>>({
+    lead: "",
+    builder: "",
+    reviewer: "",
+    researcher: "",
+  });
+  const [confirmingDiscard, setConfirmingDiscard] = useState(false);
+  const selectedCount = Object.values(included).filter(Boolean).length;
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    if (confirmingDiscard) return;
+    onAccept(
+      organization.templates
+        .filter((template) => included[template.role])
+        .map((template) => ({
+          role: template.role,
+          displayName: displayNames[template.role].trim() || null,
+        })),
+    );
+  }
+
+  return (
+    <section className={classes.starterSection} aria-labelledby="starter-heading">
+      <h1 id="starter-heading" className={classes.heading}>
+        Build your starter organization
+      </h1>
+      <p className={classes.body}>
+        Review the proposed Residents. Admission creates inactive identities only. No model,
+        capability, budget, or execution authority is assigned here.
+      </p>
+      <form aria-label="Starter Organization proposal" onSubmit={submit}>
+        <div className={classes.roster}>
+          {organization.templates.map((template) => {
+            const label = starterRoleLabels[template.role];
+            return (
+              <div className={`${classes.rosterRow} starter-roster-row`} key={template.role}>
+                <div className={classes.roleSummary}>
+                  <Checkbox
+                    checked={included[template.role]}
+                    disabled={busy || confirmingDiscard}
+                    label={`Include ${label}`}
+                    onChange={(_, data) =>
+                      setIncluded((current) => ({
+                        ...current,
+                        [template.role]: data.checked === true,
+                      }))
+                    }
+                  />
+                  <p className={classes.roleDescription}>{template.description}</p>
+                </div>
+                <Field
+                  className={classes.rosterField}
+                  label={`${label} Display Name`}
+                  hint="Optional. Identity and authority never depend on this name."
+                >
+                  <Input
+                    aria-label={`${label} Display Name`}
+                    value={displayNames[template.role]}
+                    maxLength={80}
+                    disabled={!included[template.role] || busy || confirmingDiscard}
+                    onChange={(_, data) =>
+                      setDisplayNames((current) => ({
+                        ...current,
+                        [template.role]: data.value,
+                      }))
+                    }
+                  />
+                </Field>
+              </div>
+            );
+          })}
+        </div>
+        {error && (
+          <p className={classes.actionError} role="alert">
+            {error}
+          </p>
+        )}
+        <div className={classes.actions}>
+          {confirmingDiscard ? (
+            <>
+              <Button type="button" appearance="primary" disabled={busy} onClick={onDiscard}>
+                Confirm start without Residents
+              </Button>
+              <Button type="button" disabled={busy} onClick={() => setConfirmingDiscard(false)}>
+                Keep proposal
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button appearance="primary" type="submit" disabled={busy || selectedCount === 0}>
+                Admit selected Residents
+              </Button>
+              <Button type="button" disabled={busy} onClick={() => setConfirmingDiscard(true)}>
+                Start without Residents
+              </Button>
+            </>
+          )}
+        </div>
+        {confirmingDiscard && (
+          <p className={classes.body} role="status">
+            This closes the one-time proposal without creating any Residents.
+          </p>
+        )}
+      </form>
+    </section>
+  );
+}
+
+function Briefing({
+  classes,
+  organization,
+  replacementKey,
+  busy,
+  error,
+  onLock,
+}: {
+  classes: StyleClasses;
+  organization: StarterOrganizationView;
+  replacementKey: string;
+  busy: boolean;
+  error: string;
+  onLock: () => void;
+}) {
+  const count = organization.residents.length;
+  return (
+    <section className={classes.attention} aria-labelledby="briefing-heading">
+      <h1 id="briefing-heading" className={classes.heading}>
+        Briefing
+      </h1>
+      <p className={classes.body}>
+        {organization.decision === "accepted"
+          ? `${count} inactive ${count === 1 ? "Resident" : "Residents"}`
+          : "Starter organization skipped"}
+      </p>
+      {count > 0 && (
+        <ul className={classes.briefingList} aria-label="Resident roster">
+          {organization.residents.map((resident) => (
+            <li key={resident.id}>
+              {starterRoleLabels[resident.role]}
+              {resident.displayName ? `: ${resident.displayName}` : ""}
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className={classes.body}>No Resident has execution authority yet.</p>
+      {replacementKey && (
+        <>
+          <p>A new one-time Recovery Key replaced the old key. Save it offline now.</p>
+          <code className={classes.recoveryKey}>{replacementKey}</code>
+        </>
+      )}
+      {error && <p className={classes.actionError}>{error}</p>}
+      <div className={classes.actions}>
+        <Button onClick={onLock} disabled={busy}>
+          Lock Beacon
+        </Button>
+      </div>
+    </section>
+  );
+}
 
 function PasskeyNotice({
   capabilities,

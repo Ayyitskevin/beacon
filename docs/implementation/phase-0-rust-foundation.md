@@ -32,13 +32,17 @@ packages. They are now present on the development host, and the follow-on signed
 documented in [phase-0-desktop-shell.md](phase-0-desktop-shell.md). The supervisor remains
 independently buildable and does not gain a UI dependency.
 
-The initial schema is plain SQL in `crates/beacond/migrations/0001_initial.sql`. Rust includes and
-applies that versioned file inside the same immediate transaction that creates the first Workspace.
+The initial schema and forward migrations are plain SQL in `crates/beacond/migrations/`. Rust
+includes and applies the versioned files inside an immediate transaction before opening the domain
+interfaces. Schema version 4 adds the one-time Starter Organization decision, its inactive Resident
+identities, and typed accepted/discarded Events.
 Workspace names are parameterized, capped at 120 characters, and reject control characters before
 the store file is created. The SQL schema independently enforces the length bound.
-The schema contains only the Workspace and its typed creation Event; Project persistence waits for
-the Phase 1 Project interface. Startup reconciles the exact schema before mutating a non-empty store
-and reads every persisted Event back into its closed kind and typed payload before reporting ready.
+Project persistence still waits for its dedicated interface. Startup reconciles the exact schema
+before mutating a non-empty store and reads every persisted Event back into its closed kind and
+typed payload before reporting ready. Starter admission Events reconcile only Residents whose
+admission source is `starter_organization` and their immutable admission snapshots, so later
+Resident admission or lifecycle changes cannot rewrite or invalidate the original decision.
 
 ## Development command
 

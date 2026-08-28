@@ -17,6 +17,31 @@ const capabilities = {
 } as const;
 const sessionPolicy = { inactivityTimeoutMinutes: 30 } as const;
 const monitorStatus = { screenLock: "active", suspend: "active" } as const;
+const starterTemplates = [
+  { role: "lead", description: "Coordinates Missions.", recommended: true },
+  { role: "builder", description: "Produces Artifacts.", recommended: true },
+  { role: "reviewer", description: "Evaluates work.", recommended: true },
+  { role: "researcher", description: "Develops Evidence.", recommended: false },
+] as const;
+const proposedOrganization = {
+  workspaceId: "11111111-1111-4111-8111-111111111111",
+  proposalVersion: 1,
+  decision: "proposed",
+  templates: starterTemplates,
+  residents: [],
+} as const;
+const acceptedOrganization = {
+  ...proposedOrganization,
+  decision: "accepted",
+  residents: [
+    {
+      id: "22222222-2222-4222-8222-222222222222",
+      role: "lead",
+      displayName: null,
+      lifecycle: "inactive",
+    },
+  ],
+} as const;
 
 type Phase = "operator_setup_required" | "locked" | "unlocked";
 
@@ -31,6 +56,7 @@ function mockInitialState(phase: Phase) {
     if (command === "authentication_capabilities") return Promise.resolve(capabilities);
     if (command === "session_policy") return Promise.resolve(sessionPolicy);
     if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+    if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
     if (command === "record_operator_activity") return Promise.resolve(null);
     if (command === "set_session_timeout") {
       return Promise.resolve({
@@ -86,6 +112,7 @@ describe("Beacon desktop shell", () => {
       if (command === "complete_operator_setup") return Promise.resolve(status("unlocked"));
       if (command === "session_policy") return Promise.resolve(sessionPolicy);
       if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+      if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
       if (command === "record_operator_activity") return Promise.resolve(null);
       return Promise.reject(new Error(`unexpected command: ${command}`));
     });
@@ -101,12 +128,103 @@ describe("Beacon desktop shell", () => {
     await user.click(screen.getByRole("checkbox", { name: /saved this Recovery Key offline/i }));
     await user.click(screen.getByRole("button", { name: "Finish setup" }));
 
-    expect(await screen.findByRole("heading", { name: "Owner workspace" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Briefing" })).toBeVisible();
     expect(invokeMock).toHaveBeenCalledWith("complete_operator_setup", { recoverySaved: true });
     const suiteNavigation = screen.getByRole("navigation", { name: "Beacon applications" });
     for (const button of within(suiteNavigation).getAllByRole("button")) {
       expect(button).toBeEnabled();
     }
+  });
+
+  it("edits and explicitly admits the recommended Starter Organization", async () => {
+    const user = userEvent.setup();
+    const accepted = {
+      ...proposedOrganization,
+      decision: "accepted",
+      residents: [
+        {
+          id: "22222222-2222-4222-8222-222222222222",
+          role: "lead",
+          displayName: "Northstar",
+          lifecycle: "inactive",
+        },
+        {
+          id: "33333333-3333-4333-8333-333333333333",
+          role: "builder",
+          displayName: null,
+          lifecycle: "inactive",
+        },
+      ],
+    } as const;
+    mockInitialState("unlocked");
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "session_status") return Promise.resolve(status("unlocked"));
+      if (command === "authentication_capabilities") return Promise.resolve(capabilities);
+      if (command === "session_policy") return Promise.resolve(sessionPolicy);
+      if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+      if (command === "record_operator_activity") return Promise.resolve(null);
+      if (command === "starter_organization") return Promise.resolve(proposedOrganization);
+      if (command === "accept_starter_organization") return Promise.resolve(accepted);
+      return Promise.reject(new Error(`unexpected command: ${command} ${JSON.stringify(args)}`));
+    });
+
+    render(<App />);
+
+    expect(
+      await screen.findByRole("heading", { name: "Build your starter organization" }),
+    ).toBeVisible();
+    expect(screen.getByRole("checkbox", { name: "Include Lead" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Include Builder" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Include Reviewer" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Include Researcher" })).not.toBeChecked();
+    await user.type(screen.getByLabelText("Lead Display Name"), "Northstar");
+    await user.click(screen.getByRole("checkbox", { name: "Include Reviewer" }));
+    await user.click(screen.getByRole("button", { name: "Admit selected Residents" }));
+
+    expect(invokeMock).toHaveBeenCalledWith("accept_starter_organization", {
+      proposalVersion: 1,
+      residents: [
+        { role: "lead", displayName: "Northstar" },
+        { role: "builder", displayName: null },
+      ],
+    });
+    expect(await screen.findByRole("heading", { name: "Briefing" })).toBeVisible();
+    expect(screen.getByText("2 inactive Residents")).toBeVisible();
+    expect(screen.getByText("No Resident has execution authority yet.")).toBeVisible();
+  });
+
+  it("requires confirmation before discarding the one-time Starter Organization", async () => {
+    const user = userEvent.setup();
+    const discarded = { ...proposedOrganization, decision: "discarded" } as const;
+    invokeMock.mockImplementation((command) => {
+      if (command === "session_status") return Promise.resolve(status("unlocked"));
+      if (command === "authentication_capabilities") return Promise.resolve(capabilities);
+      if (command === "session_policy") return Promise.resolve(sessionPolicy);
+      if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+      if (command === "record_operator_activity") return Promise.resolve(null);
+      if (command === "starter_organization") return Promise.resolve(proposedOrganization);
+      if (command === "discard_starter_organization") return Promise.resolve(discarded);
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Build your starter organization" });
+    await user.click(screen.getByRole("button", { name: "Start without Residents" }));
+
+    expect(invokeMock).not.toHaveBeenCalledWith("discard_starter_organization", expect.anything());
+    expect(screen.getByRole("status")).toHaveTextContent("closes the one-time proposal");
+    fireEvent.submit(screen.getByRole("form", { name: "Starter Organization proposal" }));
+    expect(invokeMock).not.toHaveBeenCalledWith("accept_starter_organization", expect.anything());
+    await user.click(screen.getByRole("button", { name: "Keep proposal" }));
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Start without Residents" }));
+    await user.click(screen.getByRole("button", { name: "Confirm start without Residents" }));
+    expect(invokeMock).toHaveBeenCalledWith("discard_starter_organization", {
+      proposalVersion: 1,
+    });
+    expect(await screen.findByRole("heading", { name: "Briefing" })).toBeVisible();
+    expect(screen.getByText("Starter organization skipped")).toBeVisible();
   });
 
   it("signs into an existing local account and can lock it again", async () => {
@@ -118,6 +236,7 @@ describe("Beacon desktop shell", () => {
       if (command === "lock_session") return Promise.resolve(status("locked"));
       if (command === "session_policy") return Promise.resolve(sessionPolicy);
       if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+      if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
       if (command === "record_operator_activity") return Promise.resolve(null);
       return Promise.reject(new Error(`unexpected command: ${command}`));
     });
@@ -126,7 +245,7 @@ describe("Beacon desktop shell", () => {
     await screen.findByRole("heading", { name: "Welcome back" });
     await user.type(screen.getByLabelText("Password"), "a long local passphrase");
     await user.click(screen.getByRole("button", { name: "Unlock Beacon" }));
-    expect(await screen.findByRole("heading", { name: "Owner workspace" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Briefing" })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Lock Beacon" }));
     expect(await screen.findByRole("heading", { name: "Welcome back" })).toBeVisible();
   });
@@ -142,6 +261,7 @@ describe("Beacon desktop shell", () => {
       if (command === "authentication_capabilities") return Promise.resolve(capabilities);
       if (command === "session_policy") return Promise.resolve(sessionPolicy);
       if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+      if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
       if (command === "record_operator_activity") return Promise.resolve(null);
       return Promise.reject(new Error(`unexpected command: ${command}`));
     });
@@ -150,7 +270,7 @@ describe("Beacon desktop shell", () => {
     await act(async () => {
       await Promise.resolve();
     });
-    expect(screen.getByRole("heading", { name: "Owner workspace" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Briefing" })).toBeVisible();
 
     await act(async () => {
       vi.advanceTimersByTime(1_000);
@@ -170,20 +290,21 @@ describe("Beacon desktop shell", () => {
       if (command === "authentication_capabilities") return Promise.resolve(capabilities);
       if (command === "session_policy") return Promise.resolve(sessionPolicy);
       if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+      if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
       if (command === "record_operator_activity") return Promise.resolve(null);
       return Promise.reject(new Error(`unexpected command: ${command}`));
     });
 
     render(<App />);
-    expect(await screen.findByRole("heading", { name: "Owner workspace" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Briefing" })).toBeVisible();
 
     fireEvent.blur(window);
     expect(screen.getByRole("heading", { name: "Beacon is concealed" })).toBeVisible();
-    expect(screen.queryByRole("heading", { name: "Owner workspace" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Briefing" })).not.toBeInTheDocument();
     fireEvent.focus(window);
 
     expect(await screen.findByRole("heading", { name: "Welcome back" })).toBeVisible();
-    expect(screen.queryByRole("heading", { name: "Owner workspace" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Briefing" })).not.toBeInTheDocument();
   });
 
   it("stays concealed when focus is lost during an in-flight session verification", async () => {
@@ -200,12 +321,13 @@ describe("Beacon desktop shell", () => {
       if (command === "authentication_capabilities") return Promise.resolve(capabilities);
       if (command === "session_policy") return Promise.resolve(sessionPolicy);
       if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+      if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
       if (command === "record_operator_activity") return Promise.resolve(null);
       return Promise.reject(new Error(`unexpected command: ${command}`));
     });
 
     render(<App />);
-    expect(await screen.findByRole("heading", { name: "Owner workspace" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Briefing" })).toBeVisible();
 
     fireEvent.focus(window);
     expect(screen.getByRole("heading", { name: "Beacon is concealed" })).toBeVisible();
@@ -216,7 +338,7 @@ describe("Beacon desktop shell", () => {
     });
 
     expect(screen.getByRole("heading", { name: "Beacon is concealed" })).toBeVisible();
-    expect(screen.queryByRole("heading", { name: "Owner workspace" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Briefing" })).not.toBeInTheDocument();
   });
 
   it("explains a session check failure and can retry without reloading", async () => {
@@ -276,6 +398,7 @@ describe("Beacon desktop shell", () => {
       if (command === "platform_session_monitor_status") {
         return Promise.resolve({ screenLock: "unavailable", suspend: "active" });
       }
+      if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
       if (command === "record_operator_activity") return Promise.resolve(null);
       return Promise.reject(new Error(`unexpected command: ${command}`));
     });
@@ -355,6 +478,23 @@ describe("Beacon desktop shell", () => {
     mockInitialState("operator_setup_required");
     const { container } = render(<App />);
     await screen.findByRole("heading", { name: "Set up your operator account" });
+
+    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
+    expect(results.violations).toEqual([]);
+  });
+
+  it("has no automated accessibility violations in the Starter Organization view", async () => {
+    invokeMock.mockImplementation((command) => {
+      if (command === "session_status") return Promise.resolve(status("unlocked"));
+      if (command === "authentication_capabilities") return Promise.resolve(capabilities);
+      if (command === "session_policy") return Promise.resolve(sessionPolicy);
+      if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+      if (command === "record_operator_activity") return Promise.resolve(null);
+      if (command === "starter_organization") return Promise.resolve(proposedOrganization);
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Build your starter organization" });
 
     const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
     expect(results.violations).toEqual([]);
