@@ -13,6 +13,8 @@ import { type FormEvent, useState } from "react";
 
 import type {
   AutonomyProfile,
+  ProjectCharter,
+  ProjectCharterDraft,
   ProjectDraft,
   ProjectSummary,
   ProjectView,
@@ -25,6 +27,8 @@ const useStyles = makeStyles({
     justifyContent: "space-between",
     alignItems: "start",
     columnGap: tokens.spacingHorizontalL,
+    rowGap: tokens.spacingVerticalM,
+    flexWrap: "wrap",
     marginBottom: tokens.spacingVerticalXL,
   },
   heading: {
@@ -95,28 +99,66 @@ const useStyles = makeStyles({
     alignItems: "center",
     marginTop: tokens.spacingVerticalS,
   },
+  recordHeader: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "start",
+    columnGap: tokens.spacingHorizontalL,
+    rowGap: tokens.spacingVerticalM,
+    flexWrap: "wrap",
+  },
+  history: {
+    marginTop: tokens.spacingVerticalXXL,
+    ...shorthands.borderTop(tokens.strokeWidthThin, "solid", tokens.colorNeutralStroke2),
+    paddingTop: tokens.spacingVerticalL,
+  },
+  historySummary: {
+    cursor: "pointer",
+    fontWeight: tokens.fontWeightSemibold,
+    minHeight: "44px",
+    display: "flex",
+    alignItems: "center",
+  },
+  historyList: {
+    display: "grid",
+    rowGap: tokens.spacingVerticalL,
+    paddingLeft: tokens.spacingHorizontalXL,
+  },
+  historyEntry: {
+    paddingLeft: tokens.spacingHorizontalS,
+  },
 });
 
 export function ProjectsWorkspace({
   projects,
   selectedProject,
+  charterHistory,
   composerOpen,
+  charterComposerOpen,
   busy,
   error,
   onCreate,
   onCancelCreate,
   onOpenProject,
   onSubmitProject,
+  onReviseCharter,
+  onCancelCharterRevision,
+  onSubmitCharterRevision,
 }: {
   projects: ProjectSummary[] | null;
   selectedProject: ProjectView | null;
+  charterHistory: ProjectCharter[] | null;
   composerOpen: boolean;
+  charterComposerOpen: boolean;
   busy: boolean;
   error: string;
   onCreate: () => void;
   onCancelCreate: () => void;
   onOpenProject: (projectId: string) => void;
   onSubmitProject: (draft: ProjectDraft) => void;
+  onReviseCharter: () => void;
+  onCancelCharterRevision: () => void;
+  onSubmitCharterRevision: (draft: ProjectCharterDraft) => void;
 }) {
   const classes = useStyles();
   return (
@@ -130,7 +172,7 @@ export function ProjectsWorkspace({
             Durable bodies of work governed by an Operator-authored Charter.
           </p>
         </div>
-        {!composerOpen && (
+        {!composerOpen && !charterComposerOpen && (
           <Button appearance="primary" onClick={onCreate} disabled={busy}>
             Create Project
           </Button>
@@ -143,8 +185,21 @@ export function ProjectsWorkspace({
       )}
       {composerOpen ? (
         <ProjectComposer busy={busy} onCancel={onCancelCreate} onSubmit={onSubmitProject} />
+      ) : charterComposerOpen && selectedProject ? (
+        <CharterRevisionComposer
+          key={selectedProject.charter.revision}
+          project={selectedProject}
+          busy={busy}
+          onCancel={onCancelCharterRevision}
+          onSubmit={onSubmitCharterRevision}
+        />
       ) : selectedProject ? (
-        <ProjectRecord project={selectedProject} />
+        <ProjectRecord
+          project={selectedProject}
+          history={charterHistory}
+          busy={busy}
+          onRevise={onReviseCharter}
+        />
       ) : projects === null ? (
         <p role="status">Loading Projects</p>
       ) : projects.length === 0 ? (
@@ -187,24 +242,13 @@ function ProjectComposer({
 }) {
   const classes = useStyles();
   const [name, setName] = useState("");
-  const [purpose, setPurpose] = useState("");
-  const [desiredOutcomes, setDesiredOutcomes] = useState("");
-  const [constraints, setConstraints] = useState("");
-  const [prohibitions, setProhibitions] = useState("");
-  const [autonomyProfile, setAutonomyProfile] =
-    useState<AutonomyProfile>("supervised");
+  const [charter, setCharter] = useState<CharterFormState>(emptyCharterForm);
 
   function submit(event: FormEvent) {
     event.preventDefault();
     onSubmit({
       name: name.trim(),
-      charter: {
-        purpose: purpose.trim(),
-        desiredOutcomes: lines(desiredOutcomes),
-        constraints: lines(constraints),
-        prohibitions: lines(prohibitions),
-        autonomyProfile,
-      },
+      charter: draftFromForm(charter),
     });
   }
 
@@ -219,56 +263,7 @@ function ProjectComposer({
           required
         />
       </Field>
-      <Field label="Purpose" hint="Why this Project exists." required>
-        <Textarea
-          aria-label="Purpose"
-          value={purpose}
-          maxLength={2_000}
-          resize="vertical"
-          onChange={(_, data) => setPurpose(data.value)}
-          required
-        />
-      </Field>
-      <Field label="Desired outcomes" hint="One concrete outcome per line, up to 20." required>
-        <Textarea
-          aria-label="Desired outcomes"
-          value={desiredOutcomes}
-          resize="vertical"
-          onChange={(_, data) => setDesiredOutcomes(data.value)}
-          required
-        />
-      </Field>
-      <Field label="Constraints" hint="Optional. One boundary per line, up to 20.">
-        <Textarea
-          aria-label="Constraints"
-          value={constraints}
-          resize="vertical"
-          onChange={(_, data) => setConstraints(data.value)}
-        />
-      </Field>
-      <Field label="Prohibitions" hint="Optional. One forbidden action per line, up to 20.">
-        <Textarea
-          aria-label="Prohibitions"
-          value={prohibitions}
-          resize="vertical"
-          onChange={(_, data) => setProhibitions(data.value)}
-        />
-      </Field>
-      <Field label="Autonomy profile">
-        <RadioGroup
-          value={autonomyProfile}
-          onChange={(_, data) => setAutonomyProfile(data.value as AutonomyProfile)}
-        >
-          <Radio
-            value="supervised"
-            label="Supervised — Agents may prepare work; every external effect requires a Ruling."
-          />
-          <Radio
-            value="observe"
-            label="Observe — research and evaluation only; no external mutation."
-          />
-        </RadioGroup>
-      </Field>
+      <CharterFields value={charter} onChange={setCharter} />
       <CharterGuard />
       <p className={classes.body}>
         Revision 1 is preserved immutably. Creating it starts no Mission, Run, model, or network
@@ -286,15 +281,181 @@ function ProjectComposer({
   );
 }
 
-function ProjectRecord({ project }: { project: ProjectView }) {
+function CharterRevisionComposer({
+  project,
+  busy,
+  onCancel,
+  onSubmit,
+}: {
+  project: ProjectView;
+  busy: boolean;
+  onCancel: () => void;
+  onSubmit: (draft: ProjectCharterDraft) => void;
+}) {
+  const classes = useStyles();
+  const [charter, setCharter] = useState<CharterFormState>(formFromCharter(project.charter));
+  const nextRevision = project.charter.revision + 1;
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    onSubmit(draftFromForm(charter));
+  }
+
+  return (
+    <form className={classes.form} aria-label="Revise Project Charter" onSubmit={submit}>
+      <div>
+        <p className={classes.meta}>Preparing Charter revision {nextRevision}</p>
+        <h2 className={classes.sectionHeading}>{project.name}</h2>
+        <p className={classes.body}>
+          Publishing preserves the current Charter and advances the Project to a new immutable
+          revision.
+        </p>
+      </div>
+      <CharterFields value={charter} onChange={setCharter} />
+      <CharterGuard />
+      <p className={classes.body}>
+        This changes Project intent only. It starts no Mission or Run and grants no spending or
+        external effects.
+      </p>
+      <div className={classes.actions}>
+        <Button appearance="primary" type="submit" disabled={busy}>
+          Publish revision {nextRevision}
+        </Button>
+        <Button type="button" onClick={onCancel} disabled={busy}>
+          Cancel
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+type CharterFormState = {
+  purpose: string;
+  desiredOutcomes: string;
+  constraints: string;
+  prohibitions: string;
+  autonomyProfile: AutonomyProfile;
+};
+
+const emptyCharterForm: CharterFormState = {
+  purpose: "",
+  desiredOutcomes: "",
+  constraints: "",
+  prohibitions: "",
+  autonomyProfile: "supervised",
+};
+
+function CharterFields({
+  value,
+  onChange,
+}: {
+  value: CharterFormState;
+  onChange: (value: CharterFormState) => void;
+}) {
+  return (
+    <>
+      <Field label="Purpose" hint="Why this Project exists." required>
+        <Textarea
+          aria-label="Purpose"
+          value={value.purpose}
+          maxLength={2_000}
+          resize="vertical"
+          onChange={(_, data) => onChange({ ...value, purpose: data.value })}
+          required
+        />
+      </Field>
+      <Field label="Desired outcomes" hint="One concrete outcome per line, up to 20." required>
+        <Textarea
+          aria-label="Desired outcomes"
+          value={value.desiredOutcomes}
+          resize="vertical"
+          onChange={(_, data) => onChange({ ...value, desiredOutcomes: data.value })}
+          required
+        />
+      </Field>
+      <Field label="Constraints" hint="Optional. One boundary per line, up to 20.">
+        <Textarea
+          aria-label="Constraints"
+          value={value.constraints}
+          resize="vertical"
+          onChange={(_, data) => onChange({ ...value, constraints: data.value })}
+        />
+      </Field>
+      <Field label="Prohibitions" hint="Optional. One forbidden action per line, up to 20.">
+        <Textarea
+          aria-label="Prohibitions"
+          value={value.prohibitions}
+          resize="vertical"
+          onChange={(_, data) => onChange({ ...value, prohibitions: data.value })}
+        />
+      </Field>
+      <Field label="Autonomy profile">
+        <RadioGroup
+          value={value.autonomyProfile}
+          onChange={(_, data) =>
+            onChange({ ...value, autonomyProfile: data.value as AutonomyProfile })
+          }
+        >
+          <Radio
+            value="supervised"
+            label="Supervised — Agents may prepare work; every external effect requires a Ruling."
+          />
+          <Radio
+            value="observe"
+            label="Observe — research and evaluation only; no external mutation."
+          />
+        </RadioGroup>
+      </Field>
+    </>
+  );
+}
+
+function formFromCharter(charter: ProjectCharter): CharterFormState {
+  return {
+    purpose: charter.purpose,
+    desiredOutcomes: charter.desiredOutcomes.join("\n"),
+    constraints: charter.constraints.join("\n"),
+    prohibitions: charter.prohibitions.join("\n"),
+    autonomyProfile: charter.autonomyProfile,
+  };
+}
+
+function draftFromForm(value: CharterFormState): ProjectCharterDraft {
+  return {
+    purpose: value.purpose.trim(),
+    desiredOutcomes: lines(value.desiredOutcomes),
+    constraints: lines(value.constraints),
+    prohibitions: lines(value.prohibitions),
+    autonomyProfile: value.autonomyProfile,
+  };
+}
+
+function ProjectRecord({
+  project,
+  history,
+  busy,
+  onRevise,
+}: {
+  project: ProjectView;
+  history: ProjectCharter[] | null;
+  busy: boolean;
+  onRevise: () => void;
+}) {
   const classes = useStyles();
   const charter = project.charter;
   return (
     <article aria-labelledby="project-name">
-      <p className={classes.meta}>Charter revision {charter.revision}</p>
-      <h2 id="project-name" className={classes.heading}>
-        {project.name}
-      </h2>
+      <div className={classes.recordHeader}>
+        <div>
+          <p className={classes.meta}>Charter revision {charter.revision}</p>
+          <h2 id="project-name" className={classes.heading}>
+            {project.name}
+          </h2>
+        </div>
+        <Button onClick={onRevise} disabled={busy}>
+          Revise Charter
+        </Button>
+      </div>
       <p className={classes.body}>{charter.purpose}</p>
       <section className={classes.charterSection} aria-labelledby="outcomes-heading">
         <h3 id="outcomes-heading" className={classes.sectionHeading}>
@@ -327,6 +488,29 @@ function ProjectRecord({ project }: { project: ProjectView }) {
         </p>
         <CharterGuard />
         <p className={classes.body}>No work has started.</p>
+      </section>
+      <section className={classes.history} aria-label="Charter revision history">
+        <details>
+          <summary className={classes.historySummary}>
+            {history === null
+              ? "Loading revision history"
+              : `${history.length} preserved ${history.length === 1 ? "revision" : "revisions"}`}
+          </summary>
+          {history && (
+            <ol className={classes.historyList}>
+              {[...history].reverse().map((revision) => (
+                <li className={classes.historyEntry} key={revision.revision}>
+                  <p className={classes.guardLabel}>
+                    Revision {revision.revision}
+                    {revision.revision === charter.revision ? " (current)" : ""}
+                  </p>
+                  <p className={classes.guardDetail}>{revision.purpose}</p>
+                  <p className={classes.meta}>{formatAuthoredAt(revision.authoredAtMs)}</p>
+                </li>
+              ))}
+            </ol>
+          )}
+        </details>
       </section>
     </article>
   );
@@ -363,4 +547,16 @@ function lines(value: string): string[] {
     .split(/\r?\n/u)
     .map((line) => line.trim())
     .filter(Boolean);
+}
+
+function formatAuthoredAt(timestampMs: number): string {
+  const authoredAt = new Date(timestampMs);
+  if (Number.isNaN(authoredAt.getTime())) {
+    return "Recorded time unavailable";
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(authoredAt);
 }

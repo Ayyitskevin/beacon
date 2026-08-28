@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use beacond::{
     AccessOrigin, LocalErrorCode, LocalSupervisorClient, LocalTransportError,
-    OperatorSessionPolicy, OperatorSessionStatus, PlatformSessionMonitorStatus, ProjectDraft,
-    ProjectSummary, ProjectView, SecretString, StarterOrganizationView, StarterResidentDraft,
-    initialize_local_auth_token,
+    OperatorSessionPolicy, OperatorSessionStatus, PlatformSessionMonitorStatus, ProjectCharter,
+    ProjectCharterDraft, ProjectDraft, ProjectSummary, ProjectView, SecretString,
+    StarterOrganizationView, StarterResidentDraft, initialize_local_auth_token,
 };
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -188,6 +188,22 @@ impl From<LocalTransportError> for CommandError {
                 None,
             ),
             LocalTransportError::Remote {
+                code: LocalErrorCode::StaleCharterRevision,
+                ..
+            } => (
+                "stale_charter_revision",
+                "Reload the current Charter before publishing a new revision.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::UnchangedCharter,
+                ..
+            } => (
+                "unchanged_charter",
+                "Change at least one Charter field before publishing a revision.",
+                None,
+            ),
+            LocalTransportError::Remote {
                 code: LocalErrorCode::ProjectUnavailable,
                 ..
             } => (
@@ -316,11 +332,33 @@ fn project_value(
     state.supervisor.project(project_id).map_err(Into::into)
 }
 
+fn project_charter_history_value(
+    state: &DesktopState,
+    project_id: uuid::Uuid,
+) -> Result<Vec<ProjectCharter>, CommandError> {
+    state
+        .supervisor
+        .project_charter_history(project_id)
+        .map_err(Into::into)
+}
+
 fn create_project_value(
     state: &DesktopState,
     draft: ProjectDraft,
 ) -> Result<ProjectView, CommandError> {
     state.supervisor.create_project(draft).map_err(Into::into)
+}
+
+fn revise_project_charter_value(
+    state: &DesktopState,
+    project_id: uuid::Uuid,
+    expected_current_revision: u32,
+    draft: ProjectCharterDraft,
+) -> Result<ProjectView, CommandError> {
+    state
+        .supervisor
+        .revise_project_charter(project_id, expected_current_revision, draft)
+        .map_err(Into::into)
 }
 
 // Tauri command registration and typed Result/value transport:
@@ -459,11 +497,29 @@ fn project(
 }
 
 #[tauri::command]
+fn project_charter_history(
+    state: State<'_, DesktopState>,
+    project_id: uuid::Uuid,
+) -> Result<Vec<ProjectCharter>, CommandError> {
+    project_charter_history_value(&state, project_id)
+}
+
+#[tauri::command]
 fn create_project(
     state: State<'_, DesktopState>,
     draft: ProjectDraft,
 ) -> Result<ProjectView, CommandError> {
     create_project_value(&state, draft)
+}
+
+#[tauri::command]
+fn revise_project_charter(
+    state: State<'_, DesktopState>,
+    project_id: uuid::Uuid,
+    expected_current_revision: u32,
+    draft: ProjectCharterDraft,
+) -> Result<ProjectView, CommandError> {
+    revise_project_charter_value(&state, project_id, expected_current_revision, draft)
 }
 
 fn prepare_runtime_directory(path: &Path) -> Result<(), std::io::Error> {
@@ -689,7 +745,9 @@ pub fn run() {
             discard_starter_organization,
             projects,
             project,
-            create_project
+            project_charter_history,
+            create_project,
+            revise_project_charter
         ])
         .run(tauri::generate_context!())
         .expect("failed to run the Beacon Phase 0 desktop shell");
@@ -716,8 +774,9 @@ mod tests {
         DesktopState, accept_starter_organization_value, authentication_capabilities_value,
         begin_password_setup_value, complete_operator_setup_value, create_project_value,
         migrate_legacy_app_data, platform_session_monitor_status_value, prepare_runtime_directory,
-        project_value, projects_value, session_policy_value, session_status_value,
-        set_session_timeout_value, starter_organization_value,
+        project_charter_history_value, project_value, projects_value, revise_project_charter_value,
+        session_policy_value, session_status_value, set_session_timeout_value,
+        starter_organization_value,
     };
 
     #[test]
@@ -861,7 +920,9 @@ mod tests {
                 "allow-discard-starter-organization",
                 "allow-projects",
                 "allow-project",
+                "allow-project-charter-history",
                 "allow-create-project",
+                "allow-revise-project-charter",
             ]
         );
     }
@@ -1067,6 +1128,31 @@ mod tests {
         assert_eq!(value["charter"]["budgetBoundary"], "no_spend");
         assert_eq!(value["charter"]["externalEffects"], "prohibited");
         assert_eq!(project_value(&state.state, created.id).unwrap(), created);
+        assert_eq!(
+            project_charter_history_value(&state.state, created.id).unwrap(),
+            std::slice::from_ref(&created.charter)
+        );
+        let revised = revise_project_charter_value(
+            &state.state,
+            created.id,
+            1,
+            ProjectCharterDraft {
+                purpose: "Build the agent office, beginning with software.".to_owned(),
+                desired_outcomes: vec!["Ship a governed revision".to_owned()],
+                constraints: vec!["Keep Workspace data local".to_owned()],
+                prohibitions: vec!["Do not deploy publicly".to_owned()],
+                autonomy_profile: AutonomyProfile::Observe,
+            },
+        )
+        .unwrap();
+        assert_eq!(revised.charter.revision, 2);
+        assert_eq!(revised.charter.autonomy_profile, AutonomyProfile::Observe);
+        assert_eq!(
+            project_charter_history_value(&state.state, created.id)
+                .unwrap()
+                .len(),
+            2
+        );
         assert_eq!(projects_value(&state.state).unwrap().len(), 1);
     }
 

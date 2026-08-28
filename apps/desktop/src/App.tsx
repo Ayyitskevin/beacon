@@ -22,17 +22,21 @@ import {
   loadAuthenticationCapabilities,
   loadPlatformSessionMonitorStatus,
   loadProject,
+  loadProjectCharterHistory,
   loadProjects,
   loadSessionPolicy,
   loadSessionStatus,
   loadStarterOrganization,
   lockLocalSession,
   type PlatformSessionMonitorStatus,
+  type ProjectCharter,
+  type ProjectCharterDraft,
   type ProjectDraft,
   type ProjectSummary,
   type ProjectView,
   recordLocalOperatorActivity,
   recoverLocalOperatorAccount,
+  reviseProjectCharter,
   setLocalSessionTimeout,
   signInWithLocalPassword,
   type StarterOrganizationView,
@@ -211,7 +215,9 @@ export function App() {
   const [activeApplication, setActiveApplication] = useState<Application>("Briefing");
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [selectedProject, setSelectedProject] = useState<ProjectView | null>(null);
+  const [charterHistory, setCharterHistory] = useState<ProjectCharter[] | null>(null);
   const [projectComposerOpen, setProjectComposerOpen] = useState(false);
+  const [charterComposerOpen, setCharterComposerOpen] = useState(false);
   const [themeChoice, setThemeChoice] = useState<ThemeChoice>("light");
   const [systemPrefersDark, setSystemPrefersDark] = useState(
     () =>
@@ -228,7 +234,9 @@ export function App() {
       setStarterOrganization(null);
       setProjects(null);
       setSelectedProject(null);
+      setCharterHistory(null);
       setProjectComposerOpen(false);
+      setCharterComposerOpen(false);
       setActiveApplication("Briefing");
     }
     setForegroundVerified(
@@ -265,7 +273,9 @@ export function App() {
     setStarterOrganization(null);
     setProjects(null);
     setSelectedProject(null);
+    setCharterHistory(null);
     setProjectComposerOpen(false);
+    setCharterComposerOpen(false);
     setActiveApplication("Briefing");
     Promise.all([
       loadSessionPolicy(),
@@ -285,6 +295,9 @@ export function App() {
         setStarterOrganization(null);
         setProjects(null);
         setSelectedProject(null);
+        setCharterHistory(null);
+        setProjectComposerOpen(false);
+        setCharterComposerOpen(false);
         setViewState("error");
       },
     );
@@ -333,7 +346,9 @@ export function App() {
             setStarterOrganization(null);
             setProjects(null);
             setSelectedProject(null);
+            setCharterHistory(null);
             setProjectComposerOpen(false);
+            setCharterComposerOpen(false);
             setActiveApplication("Briefing");
           }
           setPlatformMonitor(monitor);
@@ -345,6 +360,9 @@ export function App() {
           setStarterOrganization(null);
           setProjects(null);
           setSelectedProject(null);
+          setCharterHistory(null);
+          setProjectComposerOpen(false);
+          setCharterComposerOpen(false);
           setViewState("error");
         },
       ).finally(() => {
@@ -377,6 +395,9 @@ export function App() {
           setStarterOrganization(null);
           setProjects(null);
           setSelectedProject(null);
+          setCharterHistory(null);
+          setProjectComposerOpen(false);
+          setCharterComposerOpen(false);
           setViewState("error");
         },
       ).finally(() => {
@@ -507,7 +528,9 @@ export function App() {
       setStarterOrganization(null);
       setProjects(null);
       setSelectedProject(null);
+      setCharterHistory(null);
       setProjectComposerOpen(false);
+      setCharterComposerOpen(false);
       setActiveApplication("Briefing");
       setRecoveryMode(false);
       setReplacementKey("");
@@ -543,8 +566,17 @@ export function App() {
 
   async function openProject(projectId: string) {
     await runAction(async () => {
-      setSelectedProject(await loadProject(projectId));
+      const [project, history] = await Promise.all([
+        loadProject(projectId),
+        loadProjectCharterHistory(projectId),
+      ]);
+      if (history.at(-1)?.revision !== project.charter.revision) {
+        throw new Error("Beacon received inconsistent Project Charter history.");
+      }
+      setSelectedProject(project);
+      setCharterHistory(history);
       setProjectComposerOpen(false);
+      setCharterComposerOpen(false);
     });
   }
 
@@ -562,7 +594,34 @@ export function App() {
         ...(current ?? []),
       ]);
       setSelectedProject(created);
+      setCharterHistory([created.charter]);
       setProjectComposerOpen(false);
+      setCharterComposerOpen(false);
+    });
+  }
+
+  async function publishCharterRevision(draft: ProjectCharterDraft) {
+    if (!selectedProject) return;
+    await runAction(async () => {
+      const revised = await reviseProjectCharter(
+        selectedProject.id,
+        selectedProject.charter.revision,
+        draft,
+      );
+      setSelectedProject(revised);
+      setCharterHistory((current) => [...(current ?? []), revised.charter]);
+      setProjects((current) =>
+        current?.map((project) =>
+          project.id === revised.id
+            ? {
+                ...project,
+                charterRevision: revised.charter.revision,
+                autonomyProfile: revised.charter.autonomyProfile,
+              }
+            : project,
+        ) ?? null,
+      );
+      setCharterComposerOpen(false);
     });
   }
 
@@ -734,16 +793,23 @@ export function App() {
             <ProjectsWorkspace
               projects={projects}
               selectedProject={selectedProject}
+              charterHistory={charterHistory}
               composerOpen={projectComposerOpen}
+              charterComposerOpen={charterComposerOpen}
               busy={busy}
               error={actionError}
               onCreate={() => {
                 setSelectedProject(null);
+                setCharterHistory(null);
                 setProjectComposerOpen(true);
+                setCharterComposerOpen(false);
               }}
               onCancelCreate={() => setProjectComposerOpen(false)}
               onOpenProject={openProject}
               onSubmitProject={createProjectFromCharter}
+              onReviseCharter={() => setCharterComposerOpen(true)}
+              onCancelCharterRevision={() => setCharterComposerOpen(false)}
+              onSubmitCharterRevision={publishCharterRevision}
             />
           ) : (
             <Briefing

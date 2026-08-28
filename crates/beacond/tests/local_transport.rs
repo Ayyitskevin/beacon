@@ -251,6 +251,10 @@ fn authenticated_client_creates_and_reads_projects_over_the_real_socket() {
 
     assert_remote_code(client.projects(), LocalErrorCode::NotAuthenticated);
     assert_remote_code(
+        client.project_charter_history(Uuid::new_v4()),
+        LocalErrorCode::NotAuthenticated,
+    );
+    assert_remote_code(
         client.create_project(project_draft("Refused", AutonomyProfile::Supervised)),
         LocalErrorCode::NotAuthenticated,
     );
@@ -299,7 +303,49 @@ fn authenticated_client_creates_and_reads_projects_over_the_real_socket() {
     assert_eq!(created.name, "Beacon Alpha");
     assert_eq!(created.charter.revision, 1);
     assert_eq!(client.project(created.id).unwrap(), created);
-    assert_eq!(client.projects().unwrap()[0].id, created.id);
+    assert_eq!(
+        client.project_charter_history(created.id).unwrap(),
+        std::slice::from_ref(&created.charter)
+    );
+    let revision_two = project_draft("ignored", AutonomyProfile::Observe).charter;
+    let revised = client
+        .revise_project_charter(created.id, 1, revision_two.clone())
+        .unwrap();
+    assert_eq!(revised.charter.revision, 2);
+    assert_eq!(revised.charter.autonomy_profile, AutonomyProfile::Observe);
+    assert_eq!(
+        client.project_charter_history(created.id).unwrap(),
+        [created.charter.clone(), revised.charter.clone()]
+    );
+    assert_remote_code(
+        client.revise_project_charter(
+            created.id,
+            1,
+            ProjectCharterDraft {
+                purpose: "Conflicting intent".to_owned(),
+                ..revision_two.clone()
+            },
+        ),
+        LocalErrorCode::StaleCharterRevision,
+    );
+    assert_remote_code(
+        client.revise_project_charter(created.id, 2, revision_two.clone()),
+        LocalErrorCode::UnchangedCharter,
+    );
+    let mut invalid_revision = revision_two.clone();
+    invalid_revision.purpose = "   ".to_owned();
+    assert_remote_code(
+        client.revise_project_charter(created.id, 2, invalid_revision),
+        LocalErrorCode::InvalidProject,
+    );
+    assert_remote_code(
+        client.revise_project_charter(Uuid::new_v4(), 1, revision_two.clone()),
+        LocalErrorCode::ProjectNotFound,
+    );
+    let revised_summary = client.projects().unwrap().remove(0);
+    assert_eq!(revised_summary.id, created.id);
+    assert_eq!(revised_summary.charter_revision, 2);
+    assert_eq!(revised_summary.autonomy_profile, AutonomyProfile::Observe);
     let observed = client
         .create_project(project_draft("Research only", AutonomyProfile::Observe))
         .unwrap();
@@ -312,6 +358,14 @@ fn authenticated_client_creates_and_reads_projects_over_the_real_socket() {
 
     client.lock().unwrap();
     assert_remote_code(client.projects(), LocalErrorCode::NotAuthenticated);
+    assert_remote_code(
+        client.project_charter_history(created.id),
+        LocalErrorCode::NotAuthenticated,
+    );
+    assert_remote_code(
+        client.revise_project_charter(created.id, 2, revision_two),
+        LocalErrorCode::NotAuthenticated,
+    );
     running.store(false, Ordering::Release);
     thread.join().unwrap().unwrap();
 
@@ -328,7 +382,8 @@ fn authenticated_client_creates_and_reads_projects_over_the_real_socket() {
         )
         .unwrap();
     assert_eq!(client.projects().unwrap().len(), 2);
-    assert_eq!(client.project(created.id).unwrap(), created);
+    assert_eq!(client.project(created.id).unwrap(), revised);
+    assert_eq!(client.project_charter_history(created.id).unwrap().len(), 2);
     running.store(false, Ordering::Release);
     thread.join().unwrap().unwrap();
 }

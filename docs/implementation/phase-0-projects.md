@@ -18,28 +18,31 @@ Project creation starts no work and makes Bounded autonomy unavailable.
 
 ## Ownership and state
 
-`ProjectService` owns Project queries and creation behind the active Operator Account session.
-`beacond` remains the sole store writer. Schema version 5 adds scoped Project rows, immutable
-Charter revisions, immutable creation snapshots, and the `project.created` Event kind. One
-immediate transaction writes revision 1, its snapshot, and its Event.
+`ProjectService` owns Project queries, creation, and Charter revision publishing behind the active
+Operator Account session. `beacond` remains the sole store writer. Schema version 5 adds scoped
+Project rows, immutable Charter revisions, immutable creation snapshots, and the `project.created`
+Event kind. Schema version 6 admits the `project.charter_revised` Event. One immediate transaction
+writes revision 1, its snapshot, and its Event.
 
 The mutable Project row points to an exact current Charter revision. Revision history must begin at
 1 and remain contiguous. Startup independently reconstructs the creation record, validates every
 stored Charter revision, and requires exactly one matching creation Event per Project. Event scope,
-timestamp, payload, snapshot, and Charter must agree before the store can report ready. Future
-Charter changes will append a revision rather than rewriting history.
+timestamp, payload, snapshot, and Charter must agree before the store can report ready. Charter
+changes append a revision rather than rewriting history and are detailed in
+[`phase-0-charter-revisions.md`](phase-0-charter-revisions.md).
 
 ## Interfaces and presentation
 
 The Rust service, Unix-domain socket, Tauri commands, and TypeScript adapter transport the same
 closed Project shapes. Unknown fields and widened authority values are rejected. Locked sessions
-cannot list, read, or create Projects.
+cannot list, read, create, inspect Charter history, or publish a Charter revision.
 
 Briefing remains the ordinary launch surface. Projects is the only other enabled application in
 the rail; Conversations, Knowledge, and Software remain visibly unavailable until they have real
 implementations. The Projects workspace provides a keyboard-complete Fluent UI Charter composer,
-portfolio list, and durable Charter record. Light, dark, and system themes share the same semantic
-boundaries. Automated accessibility checks cover the composer.
+portfolio list, durable Charter record, revision composer, and collapsed preserved history. Light,
+dark, and system themes share the same semantic boundaries. Automated accessibility checks cover
+both composers.
 
 ## Verification
 

@@ -157,6 +157,17 @@ describe("Beacon desktop shell", () => {
       },
       createdAtMs: 123,
     } as const;
+    const revised = {
+      ...created,
+      charter: {
+        ...created.charter,
+        revision: 2,
+        purpose: "Build a trustworthy local software factory.",
+        desiredOutcomes: ["Publish an evaluated change"],
+        autonomyProfile: "observe",
+        authoredAtMs: 124,
+      },
+    } as const;
     mockInitialState("unlocked");
     invokeMock.mockImplementation((command, args) => {
       if (command === "session_status") return Promise.resolve(status("unlocked"));
@@ -166,6 +177,7 @@ describe("Beacon desktop shell", () => {
       if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
       if (command === "projects") return Promise.resolve([]);
       if (command === "create_project") return Promise.resolve(created);
+      if (command === "revise_project_charter") return Promise.resolve(revised);
       if (command === "record_operator_activity") return Promise.resolve(null);
       return Promise.reject(new Error(`unexpected command: ${command} ${JSON.stringify(args)}`));
     });
@@ -208,6 +220,97 @@ describe("Beacon desktop shell", () => {
     expect(await screen.findByRole("heading", { name: "Beacon Alpha" })).toBeVisible();
     expect(screen.getByText("Charter revision 1")).toBeVisible();
     expect(screen.getByText("No work has started.")).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Revise Charter" }));
+    const purpose = screen.getByLabelText("Purpose");
+    await user.clear(purpose);
+    await user.type(purpose, "Build a trustworthy local software factory.");
+    const outcomes = screen.getByLabelText("Desired outcomes");
+    await user.clear(outcomes);
+    await user.type(outcomes, "Publish an evaluated change");
+    await user.click(screen.getByRole("radio", { name: /Observe/i }));
+    await user.click(screen.getByRole("button", { name: "Publish revision 2" }));
+
+    expect(invokeMock).toHaveBeenCalledWith("revise_project_charter", {
+      projectId: created.id,
+      expectedCurrentRevision: 1,
+      draft: {
+        purpose: "Build a trustworthy local software factory.",
+        desiredOutcomes: ["Publish an evaluated change"],
+        constraints: ["Keep Workspace data local"],
+        prohibitions: ["Do not deploy publicly"],
+        autonomyProfile: "observe",
+      },
+    });
+    expect(await screen.findByText("Charter revision 2")).toBeVisible();
+    expect(screen.getByText("2 preserved revisions")).toBeVisible();
+    expect(screen.getAllByText("Build a trustworthy local software factory.")).toHaveLength(2);
+  });
+
+  it("opens an existing Project with its complete preserved Charter history", async () => {
+    const user = userEvent.setup();
+    const revisionOne = {
+      revision: 1,
+      purpose: "Build a trustworthy local software product.",
+      desiredOutcomes: ["Ship a verified vertical slice"],
+      constraints: ["Keep Workspace data local"],
+      prohibitions: ["Do not deploy publicly"],
+      autonomyProfile: "supervised",
+      budgetBoundary: "no_spend",
+      externalEffects: "prohibited",
+      authoredAtMs: 9_000_000_000_000_000,
+    } as const;
+    const revisionTwo = {
+      ...revisionOne,
+      revision: 2,
+      purpose: "Build a trustworthy local software factory.",
+      autonomyProfile: "observe",
+      authoredAtMs: 9_000_000_000_000_000,
+    } as const;
+    const project = {
+      id: "33333333-3333-4333-8333-333333333333",
+      workspaceId: proposedOrganization.workspaceId,
+      name: "Beacon Alpha",
+      charter: revisionTwo,
+      createdAtMs: 123,
+    } as const;
+    const summary = {
+      id: project.id,
+      name: project.name,
+      charterRevision: 2,
+      autonomyProfile: "observe",
+      createdAtMs: project.createdAtMs,
+    } as const;
+    mockInitialState("unlocked");
+    invokeMock.mockImplementation((command) => {
+      if (command === "session_status") return Promise.resolve(status("unlocked"));
+      if (command === "authentication_capabilities") return Promise.resolve(capabilities);
+      if (command === "session_policy") return Promise.resolve(sessionPolicy);
+      if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+      if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
+      if (command === "projects") return Promise.resolve([summary]);
+      if (command === "project") return Promise.resolve(project);
+      if (command === "project_charter_history") {
+        return Promise.resolve([revisionOne, revisionTwo]);
+      }
+      if (command === "record_operator_activity") return Promise.resolve(null);
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    await user.click(await screen.findByRole("button", { name: /Beacon Alpha/i }));
+
+    expect(await screen.findByText("Charter revision 2")).toBeVisible();
+    await user.click(screen.getByText("2 preserved revisions"));
+    expect(screen.getByText("Revision 2 (current)")).toBeVisible();
+    expect(screen.getByText("Revision 1")).toBeVisible();
+    expect(screen.getByText("Build a trustworthy local software product.")).toBeVisible();
+    expect(screen.getAllByText("Recorded time unavailable")).toHaveLength(2);
+    expect(invokeMock).toHaveBeenCalledWith("project_charter_history", {
+      projectId: project.id,
+    });
   });
 
   it("edits and explicitly admits the recommended Starter Organization", async () => {
@@ -591,6 +694,58 @@ describe("Beacon desktop shell", () => {
     await user.click(screen.getByRole("button", { name: "Projects" }));
     await screen.findByText("No Projects yet");
     await user.click(screen.getByRole("button", { name: "Create Project" }));
+
+    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
+    expect(results.violations).toEqual([]);
+  });
+
+  it("has no automated accessibility violations in the Charter revision composer", async () => {
+    const user = userEvent.setup();
+    const charter = {
+      revision: 1,
+      purpose: "Build a trustworthy local software product.",
+      desiredOutcomes: ["Ship a verified vertical slice"],
+      constraints: [],
+      prohibitions: [],
+      autonomyProfile: "supervised",
+      budgetBoundary: "no_spend",
+      externalEffects: "prohibited",
+      authoredAtMs: 123,
+    } as const;
+    const project = {
+      id: "33333333-3333-4333-8333-333333333333",
+      workspaceId: proposedOrganization.workspaceId,
+      name: "Beacon Alpha",
+      charter,
+      createdAtMs: 123,
+    } as const;
+    invokeMock.mockImplementation((command) => {
+      if (command === "session_status") return Promise.resolve(status("unlocked"));
+      if (command === "authentication_capabilities") return Promise.resolve(capabilities);
+      if (command === "session_policy") return Promise.resolve(sessionPolicy);
+      if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+      if (command === "record_operator_activity") return Promise.resolve(null);
+      if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
+      if (command === "projects") {
+        return Promise.resolve([
+          {
+            id: project.id,
+            name: project.name,
+            charterRevision: 1,
+            autonomyProfile: "supervised",
+            createdAtMs: 123,
+          },
+        ]);
+      }
+      if (command === "project") return Promise.resolve(project);
+      if (command === "project_charter_history") return Promise.resolve([charter]);
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    await user.click(await screen.findByRole("button", { name: /Beacon Alpha/i }));
+    await user.click(await screen.findByRole("button", { name: "Revise Charter" }));
 
     const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
     expect(results.violations).toEqual([]);

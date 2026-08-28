@@ -17,10 +17,10 @@ use zeroize::Zeroizing;
 
 use crate::{
     AccessOrigin, OperatorAccountError, OperatorAccountService, OperatorSessionPolicy,
-    OperatorSessionStatus, PlatformSessionMonitor, PlatformSessionMonitorStatus, ProjectDraft,
-    ProjectError, ProjectService, ProjectSummary, ProjectView, RecoveryKey, SecretString,
-    StarterOrganizationError, StarterOrganizationService, StarterOrganizationView,
-    StarterResidentDraft, StartupConfig, Supervisor,
+    OperatorSessionStatus, PlatformSessionMonitor, PlatformSessionMonitorStatus, ProjectCharter,
+    ProjectCharterDraft, ProjectDraft, ProjectError, ProjectService, ProjectSummary, ProjectView,
+    RecoveryKey, SecretString, StarterOrganizationError, StarterOrganizationService,
+    StarterOrganizationView, StarterResidentDraft, StartupConfig, Supervisor,
 };
 
 const PROTOCOL_VERSION: u16 = 1;
@@ -60,6 +60,8 @@ pub enum LocalErrorCode {
     StarterOrganizationUnavailable,
     InvalidProject,
     ProjectNotFound,
+    StaleCharterRevision,
+    UnchangedCharter,
     ProjectUnavailable,
     AccountServiceUnavailable,
     UnauthorizedClient,
@@ -329,8 +331,16 @@ enum LocalCommand {
     Project {
         project_id: uuid::Uuid,
     },
+    ProjectCharterHistory {
+        project_id: uuid::Uuid,
+    },
     CreateProject {
         draft: ProjectDraft,
+    },
+    ReviseProjectCharter {
+        project_id: uuid::Uuid,
+        expected_current_revision: u32,
+        draft: ProjectCharterDraft,
     },
 }
 
@@ -365,6 +375,9 @@ enum LocalResult {
     },
     Project {
         project: ProjectView,
+    },
+    ProjectCharterHistory {
+        charters: Vec<ProjectCharter>,
     },
     Empty,
 }
@@ -557,8 +570,24 @@ impl LocalSupervisorServer {
             LocalCommand::Project { project_id } => LocalResult::Project {
                 project: self.projects.get(project_id)?,
             },
+            LocalCommand::ProjectCharterHistory { project_id } => {
+                LocalResult::ProjectCharterHistory {
+                    charters: self.projects.charter_history(project_id)?,
+                }
+            }
             LocalCommand::CreateProject { draft } => LocalResult::Project {
                 project: self.projects.create(draft)?,
+            },
+            LocalCommand::ReviseProjectCharter {
+                project_id,
+                expected_current_revision,
+                draft,
+            } => LocalResult::Project {
+                project: self.projects.revise_charter(
+                    project_id,
+                    expected_current_revision,
+                    draft,
+                )?,
             },
         };
         Ok(ResponseEnvelope {
@@ -727,8 +756,30 @@ impl LocalSupervisorClient {
         expect_project(self.send(LocalCommand::Project { project_id })?)
     }
 
+    pub fn project_charter_history(
+        &self,
+        project_id: uuid::Uuid,
+    ) -> Result<Vec<ProjectCharter>, LocalTransportError> {
+        expect_project_charter_history(
+            self.send(LocalCommand::ProjectCharterHistory { project_id })?,
+        )
+    }
+
     pub fn create_project(&self, draft: ProjectDraft) -> Result<ProjectView, LocalTransportError> {
         expect_project(self.send(LocalCommand::CreateProject { draft })?)
+    }
+
+    pub fn revise_project_charter(
+        &self,
+        project_id: uuid::Uuid,
+        expected_current_revision: u32,
+        draft: ProjectCharterDraft,
+    ) -> Result<ProjectView, LocalTransportError> {
+        expect_project(self.send(LocalCommand::ReviseProjectCharter {
+            project_id,
+            expected_current_revision,
+            draft,
+        })?)
     }
 
     fn send(&self, command: LocalCommand) -> Result<LocalResult, LocalTransportError> {
@@ -816,6 +867,15 @@ fn expect_project(result: LocalResult) -> Result<ProjectView, LocalTransportErro
     }
 }
 
+fn expect_project_charter_history(
+    result: LocalResult,
+) -> Result<Vec<ProjectCharter>, LocalTransportError> {
+    match result {
+        LocalResult::ProjectCharterHistory { charters } => Ok(charters),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
 fn response_from_transport_error(error: LocalTransportError) -> ResponseEnvelope {
     let wire_error = match error {
         LocalTransportError::Account(error) => wire_error_from_account(error),
@@ -850,6 +910,8 @@ fn wire_error_from_project(error: ProjectError) -> WireError {
         | ProjectError::InvalidProhibition
         | ProjectError::DuplicateCharterEntry => LocalErrorCode::InvalidProject,
         ProjectError::NotFound => LocalErrorCode::ProjectNotFound,
+        ProjectError::StaleCharterRevision { .. } => LocalErrorCode::StaleCharterRevision,
+        ProjectError::UnchangedCharter => LocalErrorCode::UnchangedCharter,
         ProjectError::InvalidStore | ProjectError::Store(_) | ProjectError::Json(_) => {
             LocalErrorCode::ProjectUnavailable
         }
