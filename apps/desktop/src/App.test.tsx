@@ -153,11 +153,37 @@ describe("Beacon desktop shell", () => {
     expect(screen.getByRole("heading", { name: "Owner workspace" })).toBeVisible();
 
     await act(async () => {
-      vi.advanceTimersByTime(15_000);
+      vi.advanceTimersByTime(1_000);
     });
 
     expect(screen.getByRole("heading", { name: "Welcome back" })).toBeVisible();
     expect(screen.getByText("Workspace access locked")).toBeVisible();
+  });
+
+  it("conceals Workspace material on focus loss until the supervisor is reverified", async () => {
+    let sessionChecks = 0;
+    invokeMock.mockImplementation((command) => {
+      if (command === "session_status") {
+        sessionChecks += 1;
+        return Promise.resolve(status(sessionChecks === 1 ? "unlocked" : "locked"));
+      }
+      if (command === "authentication_capabilities") return Promise.resolve(capabilities);
+      if (command === "session_policy") return Promise.resolve(sessionPolicy);
+      if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+      if (command === "record_operator_activity") return Promise.resolve(null);
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Owner workspace" })).toBeVisible();
+
+    fireEvent.blur(window);
+    expect(screen.getByRole("heading", { name: "Beacon is concealed" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "Owner workspace" })).not.toBeInTheDocument();
+    fireEvent.focus(window);
+
+    expect(await screen.findByRole("heading", { name: "Welcome back" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "Owner workspace" })).not.toBeInTheDocument();
   });
 
   it("explains a session check failure and can retry without reloading", async () => {
