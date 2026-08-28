@@ -13,12 +13,13 @@ use std::thread;
 use std::time::Duration;
 
 use beacond::{
-    AccessOrigin, AutonomyProfile, DiscoveryStatus, LocalErrorCode, LocalModelEndpoint,
-    LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer, LocalTransportError,
-    ModelActivation, OperatorSessionPhase, PlatformMonitorState, ProjectCharterDraft, ProjectDraft,
-    SecretString, StarterOrganizationDecision, StarterResidentDraft, StarterRole,
-    initialize_local_auth_token,
+    AccessOrigin, AutonomyProfile, DiscoveryStatus, LocalErrorCode, LocalModelActivationState,
+    LocalModelEndpoint, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
+    LocalTransportError, ModelActivation, OperatorSessionPhase, PlatformMonitorState,
+    ProjectCharterDraft, ProjectDraft, ProviderFeature, SecretString, StarterOrganizationDecision,
+    StarterResidentDraft, StarterRole, initialize_local_auth_token,
 };
+use serde_json::json;
 use uuid::Uuid;
 
 struct TestRuntime {
@@ -86,6 +87,134 @@ fn serve_ollama_json(body: &'static str) -> SocketAddr {
         .unwrap();
     });
     address
+}
+
+const MODEL_NAME: &str = "qwen3.8:27b";
+const MODEL_DIGEST: &str = "22130167c4c20e20c7b71454612966ca8e8171e9b3cc8ab6ce8aa6cbfec79643";
+
+fn tags_response() -> String {
+    json!({
+        "models": [{
+            "name": MODEL_NAME,
+            "model": MODEL_NAME,
+            "modified_at": "2026-08-14T14:38:20.13373148-04:00",
+            "size": 17_741_872_154_u64,
+            "digest": MODEL_DIGEST,
+            "details": {
+                "format": "gguf",
+                "family": "qwen35",
+                "families": ["qwen35"],
+                "parameter_size": "27.3B",
+                "quantization_level": "Q4_K_M"
+            }
+        }]
+    })
+    .to_string()
+}
+
+fn serve_ollama_inspections(count: usize) -> SocketAddr {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        let responses = [
+            ("GET /api/tags HTTP/1.1\r\n", tags_response()),
+            (
+                "POST /api/show HTTP/1.1\r\n",
+                json!({ "capabilities": ["completion", "tools", "future_audio"] }).to_string(),
+            ),
+            ("GET /api/tags HTTP/1.1\r\n", tags_response()),
+        ];
+        for _ in 0..count {
+            for (expected, body) in &responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_http_request(&mut stream);
+                assert!(
+                    request.starts_with(expected),
+                    "unexpected request: {request}"
+                );
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            }
+        }
+    });
+    address
+}
+
+fn read_http_request(stream: &mut impl Read) -> String {
+    let mut request = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    loop {
+        let size = stream.read(&mut chunk).unwrap();
+        assert!(size > 0, "request closed before its declared body arrived");
+        request.extend_from_slice(&chunk[..size]);
+        let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+            continue;
+        };
+        let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap_or(0);
+        if request.len() >= header_end + 4 + content_length {
+            return String::from_utf8(request).unwrap();
+        }
+    }
+}
+
+#[test]
+fn authenticated_client_reviews_activates_and_deactivates_an_exact_local_model() {
+    let runtime = TestRuntime::new("model-activation");
+    let address = serve_ollama_inspections(2);
+    let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+
+    assert_remote_code(
+        client.inspect_local_model(MODEL_NAME.to_owned(), MODEL_DIGEST.to_owned()),
+        LocalErrorCode::NotAuthenticated,
+    );
+    client
+        .begin_password_setup(
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+    client.complete_operator_setup(true).unwrap();
+
+    let review = client
+        .inspect_local_model(MODEL_NAME.to_owned(), MODEL_DIGEST.to_owned())
+        .unwrap();
+    assert_eq!(
+        review.provider_features,
+        [ProviderFeature::Completion, ProviderFeature::Tools]
+    );
+    assert_eq!(review.unrecognized_features, ["future_audio"]);
+
+    let active = client
+        .activate_local_model(review, vec![ProviderFeature::Completion])
+        .unwrap();
+    assert_eq!(active.state, LocalModelActivationState::Active);
+    let listed = client.local_model_activations().unwrap();
+    assert_eq!(listed.as_slice(), std::slice::from_ref(&active));
+
+    let inactive = client.deactivate_local_model(active.id).unwrap();
+    assert_eq!(inactive.state, LocalModelActivationState::Inactive);
+    assert_eq!(inactive.predecessor_id, Some(active.id));
+    assert_eq!(client.local_model_activations().unwrap(), [inactive]);
+
+    running.store(false, Ordering::Release);
+    thread.join().unwrap().unwrap();
 }
 
 #[test]

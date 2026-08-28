@@ -28,9 +28,10 @@ const PROTOCOL_VERSION: u16 = 1;
 const AUTH_TOKEN_BYTES: usize = 32;
 const MAX_MESSAGE_BYTES: u64 = 64 * 1024;
 const SERVER_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
-// Resource discovery may use its complete two-second HTTP budget. Keep transport overhead
-// outside that budget so a clean "unavailable" report is not mistaken for a socket failure.
-const CLIENT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
+// Exact activation review makes three independently bounded provider reads (tags, show, tags).
+// Keep transport overhead outside that six-second worst case so a provider error is returned as
+// a domain result rather than being mistaken for a broken supervisor socket.
+const CLIENT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(7);
 
 #[derive(Debug, Clone)]
 pub struct LocalServerConfig {
@@ -67,6 +68,13 @@ pub enum LocalErrorCode {
     StaleCharterRevision,
     UnchangedCharter,
     ProjectUnavailable,
+    LocalModelUnavailable,
+    LocalModelNotFound,
+    LocalModelChanged,
+    InvalidLocalModelApproval,
+    LocalModelAlreadyActive,
+    StaleLocalModelDecision,
+    LocalModelActivationUnavailable,
     AccountServiceUnavailable,
     UnauthorizedClient,
     ProtocolError,
@@ -88,6 +96,7 @@ pub enum LocalTransportError {
     StarterOrganization(StarterOrganizationError),
     Project(ProjectError),
     ResourceDiscovery(ResourceDiscoveryError),
+    LocalModelActivation(crate::LocalModelActivationError),
 }
 
 impl fmt::Display for LocalTransportError {
@@ -112,6 +121,9 @@ impl fmt::Display for LocalTransportError {
             Self::Project(error) => write!(formatter, "Project operation failed: {error}"),
             Self::ResourceDiscovery(error) => {
                 write!(formatter, "resource discovery failed: {error}")
+            }
+            Self::LocalModelActivation(error) => {
+                write!(formatter, "local model activation failed: {error}")
             }
         }
     }
@@ -158,6 +170,12 @@ impl From<ProjectError> for LocalTransportError {
 impl From<ResourceDiscoveryError> for LocalTransportError {
     fn from(error: ResourceDiscoveryError) -> Self {
         Self::ResourceDiscovery(error)
+    }
+}
+
+impl From<crate::LocalModelActivationError> for LocalTransportError {
+    fn from(error: crate::LocalModelActivationError) -> Self {
+        Self::LocalModelActivation(error)
     }
 }
 
@@ -357,6 +375,18 @@ enum LocalCommand {
         draft: ProjectCharterDraft,
     },
     DiscoverLocalModels,
+    InspectLocalModel {
+        model_name: String,
+        expected_digest: String,
+    },
+    ActivateLocalModel {
+        review: crate::LocalModelActivationReview,
+        approved_features: Vec<crate::ProviderFeature>,
+    },
+    LocalModelActivations,
+    DeactivateLocalModel {
+        expected_activation_id: uuid::Uuid,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -397,6 +427,15 @@ enum LocalResult {
     LocalModelDiscovery {
         report: crate::LocalModelDiscoveryReport,
     },
+    LocalModelActivationReview {
+        review: crate::LocalModelActivationReview,
+    },
+    LocalModelActivation {
+        activation: crate::LocalModelActivation,
+    },
+    LocalModelActivations {
+        activations: Vec<crate::LocalModelActivation>,
+    },
     Empty,
 }
 
@@ -416,6 +455,7 @@ pub struct LocalSupervisorServer {
     starter_organization: StarterOrganizationService,
     projects: ProjectService,
     resource_discovery: ResourceDiscoveryService,
+    local_model_activation: crate::LocalModelActivationService,
     platform_monitor: PlatformSessionMonitor,
 }
 
@@ -441,6 +481,11 @@ impl LocalSupervisorServer {
         let projects = ProjectService::new(Arc::clone(&accounts), report.workspace.id);
         let resource_discovery =
             ResourceDiscoveryService::new(Arc::clone(&accounts), config.local_model_endpoint);
+        let local_model_activation = crate::LocalModelActivationService::new(
+            Arc::clone(&accounts),
+            report.workspace.id,
+            config.local_model_endpoint,
+        );
         let token = load_local_auth_token(&config.auth_token_path)?;
         let listener = UnixListener::bind(&config.socket_path)?;
         fs::set_permissions(&config.socket_path, fs::Permissions::from_mode(0o600))?;
@@ -457,6 +502,7 @@ impl LocalSupervisorServer {
             starter_organization,
             projects,
             resource_discovery,
+            local_model_activation,
             platform_monitor: PlatformSessionMonitor::new(),
         })
     }
@@ -613,6 +659,32 @@ impl LocalSupervisorServer {
             },
             LocalCommand::DiscoverLocalModels => LocalResult::LocalModelDiscovery {
                 report: self.resource_discovery.discover_local_models()?,
+            },
+            LocalCommand::InspectLocalModel {
+                model_name,
+                expected_digest,
+            } => LocalResult::LocalModelActivationReview {
+                review: self
+                    .local_model_activation
+                    .inspect(&model_name, &expected_digest)?,
+            },
+            LocalCommand::ActivateLocalModel {
+                review,
+                approved_features,
+            } => LocalResult::LocalModelActivation {
+                activation: self
+                    .local_model_activation
+                    .activate(review, approved_features)?,
+            },
+            LocalCommand::LocalModelActivations => LocalResult::LocalModelActivations {
+                activations: self.local_model_activation.list()?,
+            },
+            LocalCommand::DeactivateLocalModel {
+                expected_activation_id,
+            } => LocalResult::LocalModelActivation {
+                activation: self
+                    .local_model_activation
+                    .deactivate(expected_activation_id)?,
             },
         };
         Ok(ResponseEnvelope {
@@ -813,6 +885,43 @@ impl LocalSupervisorClient {
         expect_local_model_discovery(self.send(LocalCommand::DiscoverLocalModels)?)
     }
 
+    pub fn inspect_local_model(
+        &self,
+        model_name: String,
+        expected_digest: String,
+    ) -> Result<crate::LocalModelActivationReview, LocalTransportError> {
+        expect_local_model_activation_review(self.send(LocalCommand::InspectLocalModel {
+            model_name,
+            expected_digest,
+        })?)
+    }
+
+    pub fn activate_local_model(
+        &self,
+        review: crate::LocalModelActivationReview,
+        approved_features: Vec<crate::ProviderFeature>,
+    ) -> Result<crate::LocalModelActivation, LocalTransportError> {
+        expect_local_model_activation(self.send(LocalCommand::ActivateLocalModel {
+            review,
+            approved_features,
+        })?)
+    }
+
+    pub fn local_model_activations(
+        &self,
+    ) -> Result<Vec<crate::LocalModelActivation>, LocalTransportError> {
+        expect_local_model_activations(self.send(LocalCommand::LocalModelActivations)?)
+    }
+
+    pub fn deactivate_local_model(
+        &self,
+        expected_activation_id: uuid::Uuid,
+    ) -> Result<crate::LocalModelActivation, LocalTransportError> {
+        expect_local_model_activation(self.send(LocalCommand::DeactivateLocalModel {
+            expected_activation_id,
+        })?)
+    }
+
     fn send(&self, command: LocalCommand) -> Result<LocalResult, LocalTransportError> {
         let token = load_local_auth_token(&self.token_path)?;
         let request = RequestEnvelope {
@@ -916,6 +1025,33 @@ fn expect_local_model_discovery(
     }
 }
 
+fn expect_local_model_activation_review(
+    result: LocalResult,
+) -> Result<crate::LocalModelActivationReview, LocalTransportError> {
+    match result {
+        LocalResult::LocalModelActivationReview { review } => Ok(review),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
+fn expect_local_model_activation(
+    result: LocalResult,
+) -> Result<crate::LocalModelActivation, LocalTransportError> {
+    match result {
+        LocalResult::LocalModelActivation { activation } => Ok(activation),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
+fn expect_local_model_activations(
+    result: LocalResult,
+) -> Result<Vec<crate::LocalModelActivation>, LocalTransportError> {
+    match result {
+        LocalResult::LocalModelActivations { activations } => Ok(activations),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
 fn response_from_transport_error(error: LocalTransportError) -> ResponseEnvelope {
     let wire_error = match error {
         LocalTransportError::Account(error) => wire_error_from_account(error),
@@ -929,6 +1065,9 @@ fn response_from_transport_error(error: LocalTransportError) -> ResponseEnvelope
                 code: LocalErrorCode::ProtocolError,
                 retry_after_ms: None,
             }
+        }
+        LocalTransportError::LocalModelActivation(error) => {
+            wire_error_from_local_model_activation(error)
         }
         LocalTransportError::Remote {
             code,
@@ -946,6 +1085,30 @@ fn response_from_transport_error(error: LocalTransportError) -> ResponseEnvelope
         protocol: PROTOCOL_VERSION,
         result: None,
         error: Some(wire_error),
+    }
+}
+
+fn wire_error_from_local_model_activation(error: crate::LocalModelActivationError) -> WireError {
+    use crate::LocalModelActivationError;
+
+    let code = match error {
+        LocalModelActivationError::Account(error) => return wire_error_from_account(error),
+        LocalModelActivationError::ResourceUnavailable
+        | LocalModelActivationError::InvalidProviderResponse => {
+            LocalErrorCode::LocalModelUnavailable
+        }
+        LocalModelActivationError::ModelNotFound => LocalErrorCode::LocalModelNotFound,
+        LocalModelActivationError::ModelDrift => LocalErrorCode::LocalModelChanged,
+        LocalModelActivationError::InvalidApproval => LocalErrorCode::InvalidLocalModelApproval,
+        LocalModelActivationError::AlreadyActive => LocalErrorCode::LocalModelAlreadyActive,
+        LocalModelActivationError::StaleDecision => LocalErrorCode::StaleLocalModelDecision,
+        LocalModelActivationError::InvalidStore
+        | LocalModelActivationError::Store(_)
+        | LocalModelActivationError::Json(_) => LocalErrorCode::LocalModelActivationUnavailable,
+    };
+    WireError {
+        code,
+        retry_after_ms: None,
     }
 }
 

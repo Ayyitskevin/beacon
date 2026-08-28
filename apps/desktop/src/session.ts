@@ -110,6 +110,28 @@ export type LocalModelDiscoveryReport = {
   observedAtMs: number;
 };
 
+export type ProviderFeature = "completion" | "embedding" | "thinking" | "tools" | "vision";
+export type LocalModelBinding = {
+  provider: "ollama";
+  endpoint: string;
+  modelName: string;
+  modelDigest: string;
+  inspectionDigest: string;
+};
+export type LocalModelActivationReview = {
+  binding: LocalModelBinding;
+  providerFeatures: readonly ProviderFeature[];
+  unrecognizedFeatures: readonly string[];
+};
+export type LocalModelActivation = LocalModelActivationReview & {
+  id: string;
+  workspaceId: string;
+  approvedFeatures: readonly ProviderFeature[];
+  state: "active" | "inactive";
+  predecessorId: string | null;
+  decidedAtMs: number;
+};
+
 // Tauri's current frontend command adapter returns a Promise for the Rust value.
 // Source: https://v2.tauri.app/develop/calling-rust/#commands
 export async function loadSessionStatus(): Promise<DesktopSessionStatus> {
@@ -278,6 +300,50 @@ export async function discoverLocalModels(): Promise<LocalModelDiscoveryReport> 
   );
 }
 
+export async function inspectLocalModel(
+  modelName: string,
+  expectedDigest: string,
+): Promise<LocalModelActivationReview> {
+  return invokeAndValidate(
+    "inspect_local_model",
+    { modelName, expectedDigest },
+    isLocalModelActivationReview,
+    "local-model activation review",
+  );
+}
+
+export async function activateLocalModel(
+  review: LocalModelActivationReview,
+  approvedFeatures: readonly ProviderFeature[],
+): Promise<LocalModelActivation> {
+  return invokeAndValidate(
+    "activate_local_model",
+    { review, approvedFeatures: [...approvedFeatures] },
+    isLocalModelActivation,
+    "local-model activation",
+  );
+}
+
+export async function loadLocalModelActivations(): Promise<LocalModelActivation[]> {
+  return invokeAndValidate(
+    "local_model_activations",
+    undefined,
+    isLocalModelActivationList,
+    "local-model activation list",
+  );
+}
+
+export async function deactivateLocalModel(
+  expectedActivationId: string,
+): Promise<LocalModelActivation> {
+  return invokeAndValidate(
+    "deactivate_local_model",
+    { expectedActivationId },
+    isLocalModelActivation,
+    "local-model activation",
+  );
+}
+
 export function describeLocalAccountError(error: unknown): string {
   if (typeof error !== "object" || error === null || Array.isArray(error)) {
     return "Beacon could not complete that local account action.";
@@ -321,6 +387,20 @@ export function describeLocalAccountError(error: unknown): string {
       return "Change at least one Charter field before publishing a revision.";
     case "project_unavailable":
       return "Beacon could not verify the Project state.";
+    case "local_model_unavailable":
+      return "The local model provider could not be verified.";
+    case "local_model_not_found":
+      return "That exact local model is no longer installed.";
+    case "local_model_changed":
+      return "The local model changed. Review it again before activation.";
+    case "invalid_local_model_approval":
+      return "Select at least one advertised feature and review the model again.";
+    case "local_model_already_active":
+      return "This local model is already active in the Workspace.";
+    case "stale_local_model_decision":
+      return "The activation changed. Reload it before deactivating.";
+    case "local_model_activation_unavailable":
+      return "Beacon could not verify local-model activation state.";
     default:
       return "Beacon could not complete that local account action.";
   }
@@ -563,6 +643,115 @@ function isLocalModelDetails(value: unknown): value is LocalModelDetails {
     isTrimmedTextWithoutControls(value.family, 80) &&
     isTrimmedTextWithoutControls(value.parameterSize, 80) &&
     isTrimmedTextWithoutControls(value.quantizationLevel, 80)
+  );
+}
+
+const providerFeatures: readonly ProviderFeature[] = [
+  "completion",
+  "embedding",
+  "thinking",
+  "tools",
+  "vision",
+];
+
+function isLocalModelBinding(value: unknown): value is LocalModelBinding {
+  return (
+    hasExactKeys(value, [
+      "endpoint",
+      "inspectionDigest",
+      "modelDigest",
+      "modelName",
+      "provider",
+    ]) &&
+    value.provider === "ollama" &&
+    isLoopbackHttpEndpoint(value.endpoint) &&
+    isTrimmedTextWithoutControls(value.modelName, 256) &&
+    typeof value.modelDigest === "string" &&
+    /^[0-9a-f]{64}$/.test(value.modelDigest) &&
+    typeof value.inspectionDigest === "string" &&
+    /^[0-9a-f]{64}$/.test(value.inspectionDigest)
+  );
+}
+
+function isLocalModelActivationReview(value: unknown): value is LocalModelActivationReview {
+  return (
+    hasExactKeys(value, ["binding", "providerFeatures", "unrecognizedFeatures"]) &&
+    isLocalModelBinding(value.binding) &&
+    isSortedUniqueProviderFeatures(value.providerFeatures, true) &&
+    isSortedUniqueUnknownFeatures(value.unrecognizedFeatures)
+  );
+}
+
+function isLocalModelActivation(value: unknown): value is LocalModelActivation {
+  if (!hasExactKeys(value, [
+    "approvedFeatures",
+    "binding",
+    "decidedAtMs",
+    "id",
+    "predecessorId",
+    "providerFeatures",
+    "state",
+    "unrecognizedFeatures",
+    "workspaceId",
+  ])) {
+    return false;
+  }
+  const providerFeaturesValue = value.providerFeatures;
+  const approvedFeaturesValue = value.approvedFeatures;
+  if (
+    !isUuid(value.id) ||
+    !isUuid(value.workspaceId) ||
+    !isLocalModelBinding(value.binding) ||
+    !isSortedUniqueProviderFeatures(providerFeaturesValue, false) ||
+    !isSortedUniqueUnknownFeatures(value.unrecognizedFeatures) ||
+    !isSortedUniqueProviderFeatures(approvedFeaturesValue, false) ||
+    !approvedFeaturesValue.every((feature) => providerFeaturesValue.includes(feature)) ||
+    !["active", "inactive"].includes(String(value.state)) ||
+    !(value.predecessorId === null || isUuid(value.predecessorId)) ||
+    !isNonnegativeInteger(value.decidedAtMs)
+  ) return false;
+  return value.state === "active" || value.predecessorId !== null;
+}
+
+function isLocalModelActivationList(value: unknown): value is LocalModelActivation[] {
+  if (!Array.isArray(value) || value.length > 512 || !value.every(isLocalModelActivation)) {
+    return false;
+  }
+  const resources = new Set<string>();
+  return value.every((activation, index) => {
+    const key = `${activation.binding.modelName}\n${activation.binding.endpoint}`;
+    if (resources.has(key)) return false;
+    resources.add(key);
+    if (index === 0) return true;
+    const prior = value[index - 1];
+    return (
+      prior.binding.modelName < activation.binding.modelName ||
+      (prior.binding.modelName === activation.binding.modelName &&
+        prior.binding.endpoint < activation.binding.endpoint)
+    );
+  });
+}
+
+function isSortedUniqueProviderFeatures(
+  value: unknown,
+  allowEmpty: boolean,
+): value is ProviderFeature[] {
+  if (!Array.isArray(value) || value.length > providerFeatures.length) return false;
+  if (!allowEmpty && value.length === 0) return false;
+  return value.every(
+    (feature, index) =>
+      providerFeatures.includes(feature) &&
+      (index === 0 || String(value[index - 1]) < String(feature)),
+  );
+}
+
+function isSortedUniqueUnknownFeatures(value: unknown): value is string[] {
+  if (!Array.isArray(value) || value.length > 64) return false;
+  return value.every(
+    (feature, index) =>
+      isTrimmedTextWithoutControls(feature, 64) &&
+      !providerFeatures.includes(feature as ProviderFeature) &&
+      (index === 0 || String(value[index - 1]) < feature),
   );
 }
 

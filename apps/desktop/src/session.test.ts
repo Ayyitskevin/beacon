@@ -2,14 +2,18 @@ import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  activateLocalModel,
   beginLocalPasswordSetup,
   acceptStarterOrganization,
   createProject,
+  deactivateLocalModel,
   discoverLocalModels,
   completeLocalOperatorSetup,
   describeLocalAccountError,
   discardStarterOrganization,
   loadAuthenticationCapabilities,
+  inspectLocalModel,
+  loadLocalModelActivations,
   loadPlatformSessionMonitorStatus,
   loadProject,
   loadProjectCharterHistory,
@@ -324,6 +328,100 @@ describe("desktop session transport", () => {
     });
 
     await expect(discoverLocalModels()).rejects.toThrow("invalid local-model discovery report");
+  });
+
+  it("maps local-model review and activation through closed, authority-free shapes", async () => {
+    const review = {
+      binding: {
+        provider: "ollama",
+        endpoint: "http://127.0.0.1:11434",
+        modelName: "qwen3.8:27b",
+        modelDigest: "22130167c4c20e20c7b71454612966ca8e8171e9b3cc8ab6ce8aa6cbfec79643",
+        inspectionDigest:
+          "12340167c4c20e20c7b71454612966ca8e8171e9b3cc8ab6ce8aa6cbfec79643",
+      },
+      providerFeatures: ["completion", "tools"],
+      unrecognizedFeatures: ["future_audio"],
+    } as const;
+    const active = {
+      id: "44444444-4444-4444-8444-444444444444",
+      workspaceId: "11111111-1111-4111-8111-111111111111",
+      ...review,
+      approvedFeatures: ["completion"],
+      state: "active",
+      predecessorId: null,
+      decidedAtMs: 123,
+    } as const;
+    const inactive = {
+      ...active,
+      id: "55555555-5555-4555-8555-555555555555",
+      state: "inactive",
+      predecessorId: active.id,
+      decidedAtMs: 124,
+    } as const;
+    invokeMock
+      .mockResolvedValueOnce(review)
+      .mockResolvedValueOnce(active)
+      .mockResolvedValueOnce([active])
+      .mockResolvedValueOnce(inactive)
+      .mockResolvedValueOnce({ ...active, routeId: "ambient" });
+
+    await expect(
+      inspectLocalModel(review.binding.modelName, review.binding.modelDigest),
+    ).resolves.toEqual(review);
+    await expect(activateLocalModel(review, ["completion"])).resolves.toEqual(active);
+    await expect(loadLocalModelActivations()).resolves.toEqual([active]);
+    await expect(deactivateLocalModel(active.id)).resolves.toEqual(inactive);
+    await expect(loadLocalModelActivations()).rejects.toThrow(
+      "invalid local-model activation list",
+    );
+    expect(invokeMock.mock.calls).toEqual([
+      [
+        "inspect_local_model",
+        { modelName: review.binding.modelName, expectedDigest: review.binding.modelDigest },
+      ],
+      ["activate_local_model", { review, approvedFeatures: ["completion"] }],
+      ["local_model_activations"],
+      ["deactivate_local_model", { expectedActivationId: active.id }],
+      ["local_model_activations"],
+    ]);
+  });
+
+  it.each([
+    ["unknown approved feature", { approvedFeatures: ["future_audio"] }],
+    ["unsorted provider features", { providerFeatures: ["tools", "completion"] }],
+    ["non-loopback binding", { binding: { endpoint: "http://192.0.2.1:11434" } }],
+    ["inactive decision without a predecessor", { state: "inactive" }],
+  ])("rejects local-model activation with %s", async (_label, change) => {
+    const review = {
+      binding: {
+        provider: "ollama",
+        endpoint: "http://127.0.0.1:11434",
+        modelName: "qwen3.8:27b",
+        modelDigest: "22130167c4c20e20c7b71454612966ca8e8171e9b3cc8ab6ce8aa6cbfec79643",
+        inspectionDigest:
+          "12340167c4c20e20c7b71454612966ca8e8171e9b3cc8ab6ce8aa6cbfec79643",
+      },
+      providerFeatures: ["completion", "tools"],
+      unrecognizedFeatures: ["future_audio"],
+    };
+    const activation = {
+      id: "44444444-4444-4444-8444-444444444444",
+      workspaceId: "11111111-1111-4111-8111-111111111111",
+      ...review,
+      approvedFeatures: ["completion"],
+      state: "active",
+      predecessorId: null,
+      decidedAtMs: 123,
+    };
+    const response = "binding" in change
+      ? { ...activation, binding: { ...activation.binding, ...change.binding } }
+      : { ...activation, ...change };
+    invokeMock.mockResolvedValue([response]);
+
+    await expect(loadLocalModelActivations()).rejects.toThrow(
+      "invalid local-model activation list",
+    );
   });
 
   it.each([
