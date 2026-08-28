@@ -277,3 +277,38 @@ fn restart_refuses_a_discontinuous_charter_history() {
         Err(beacond::SupervisorError::ProjectStateMismatch)
     ));
 }
+
+#[test]
+fn restart_refuses_a_current_charter_pointer_behind_the_terminal_revision() {
+    let (store, accounts, projects) = enrolled_service("stale-charter-pointer");
+    let created = projects
+        .create(draft("Audited", AutonomyProfile::Supervised))
+        .unwrap();
+    drop(projects);
+    drop(accounts);
+    let connection = Connection::open(&store.path).unwrap();
+    connection
+        .execute(
+            "INSERT INTO project_charter_revisions (
+                workspace_id, project_id, revision, purpose, desired_outcomes_json,
+                constraints_json, prohibitions_json, autonomy_profile, budget_boundary,
+                external_effects, author_kind, authored_at_ms
+             ) VALUES (?1, ?2, 2, 'Changed purpose', '[\"Changed outcome\"]', '[]', '[]',
+                       'observe', 'no_spend', 'prohibited', 'owner', ?3)",
+            rusqlite::params![
+                created.workspace_id.to_string(),
+                created.id.to_string(),
+                i64::try_from(created.created_at_ms + 1).unwrap()
+            ],
+        )
+        .unwrap();
+    drop(connection);
+
+    assert!(matches!(
+        Supervisor::bootstrap(StartupConfig {
+            store_path: store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        }),
+        Err(beacond::SupervisorError::ProjectStateMismatch)
+    ));
+}
