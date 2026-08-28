@@ -160,15 +160,15 @@ fn screen_provider_bit(name: &str) -> Option<u8> {
 }
 
 #[cfg(target_os = "linux")]
-fn apply_screen_provider_probe(
+fn apply_screen_provider_probe<E>(
     providers: &AtomicU8,
     status: &RwLock<PlatformSessionMonitorStatus>,
     name: &str,
     active: Option<bool>,
-    lock: impl FnOnce(),
-) {
+    lock: impl FnOnce() -> Result<(), E>,
+) -> Result<(), E> {
     let Some(bit) = screen_provider_bit(name) else {
-        return;
+        return Ok(());
     };
     let providers = if active.is_some() {
         providers.fetch_or(bit, Ordering::AcqRel) | bit
@@ -180,10 +180,18 @@ fn apply_screen_provider_probe(
     } else {
         PlatformMonitorState::Active
     };
-    update_status(status, MonitorKind::ScreenLock, state);
-    if active == Some(true) {
-        lock();
+    if active == Some(true)
+        && let Err(error) = lock()
+    {
+        update_status(
+            status,
+            MonitorKind::ScreenLock,
+            PlatformMonitorState::Unavailable,
+        );
+        return Err(error);
     }
+    update_status(status, MonitorKind::ScreenLock, state);
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -273,15 +281,29 @@ fn monitor_screen_lock(
         )?;
     }
     loop {
+        let mut lock_failed = false;
         for provider in SCREEN_PROVIDERS {
-            apply_screen_provider_probe(
+            if apply_screen_provider_probe(
                 &providers,
                 &status,
                 provider.bus_name,
                 probe_screen_provider(&connection, provider),
                 || {
-                    let _ = accounts.lock_for_platform_event(PlatformSessionEvent::ScreenLocked);
+                    accounts
+                        .lock_for_platform_event(PlatformSessionEvent::ScreenLocked)
+                        .map(|_| ())
                 },
+            )
+            .is_err()
+            {
+                lock_failed = true;
+            }
+        }
+        if lock_failed {
+            update_status(
+                &status,
+                MonitorKind::ScreenLock,
+                PlatformMonitorState::Unavailable,
             );
         }
         connection.process(Duration::from_millis(500))?;
@@ -405,8 +427,10 @@ mod tests {
             Some(true),
             || {
                 calls.fetch_add(1, Ordering::Relaxed);
+                Ok::<(), ()>(())
             },
-        );
+        )
+        .unwrap();
         assert_eq!(
             status.read().unwrap().screen_lock,
             PlatformMonitorState::Starting
@@ -418,8 +442,10 @@ mod tests {
             Some(true),
             || {
                 calls.fetch_add(1, Ordering::Relaxed);
+                Ok::<(), ()>(())
             },
-        );
+        )
+        .unwrap();
         assert_eq!(
             status.read().unwrap().screen_lock,
             PlatformMonitorState::Active
@@ -432,11 +458,15 @@ mod tests {
             Some(false),
             || {
                 calls.fetch_add(1, Ordering::Relaxed);
+                Ok::<(), ()>(())
             },
-        );
+        )
+        .unwrap();
         apply_screen_provider_probe(&providers, &status, "org.gnome.ScreenSaver", None, || {
             calls.fetch_add(1, Ordering::Relaxed);
-        });
+            Ok::<(), ()>(())
+        })
+        .unwrap();
         assert_eq!(
             status.read().unwrap().screen_lock,
             PlatformMonitorState::Active
@@ -448,8 +478,33 @@ mod tests {
             None,
             || {
                 calls.fetch_add(1, Ordering::Relaxed);
+                Ok::<(), ()>(())
             },
+        )
+        .unwrap();
+        assert_eq!(
+            status.read().unwrap().screen_lock,
+            PlatformMonitorState::Unavailable
         );
+    }
+
+    #[test]
+    fn active_screen_probe_is_unavailable_when_session_lock_fails() {
+        let providers = AtomicU8::new(0);
+        let status = RwLock::new(PlatformSessionMonitorStatus {
+            screen_lock: PlatformMonitorState::Starting,
+            suspend: PlatformMonitorState::Starting,
+        });
+
+        let result = apply_screen_provider_probe(
+            &providers,
+            &status,
+            "org.gnome.ScreenSaver",
+            Some(true),
+            || Err("store unavailable"),
+        );
+
+        assert_eq!(result, Err("store unavailable"));
         assert_eq!(
             status.read().unwrap().screen_lock,
             PlatformMonitorState::Unavailable
