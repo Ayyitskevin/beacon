@@ -1,5 +1,5 @@
 [workspace]
-members = ["apps/desktop/src-tauri", "crates/mosaicd"]
+members = ["apps/desktop/src-tauri", "crates/beacond"]
 resolver = "3"
 
 [workspace.package]

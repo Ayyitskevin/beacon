@@ -19,7 +19,7 @@
 
 ---
 
-# Authority in Mosaic
+# Authority findings inherited by Beacon
 
 **Status:** adopted for v0 · **Owner:** Lane A (contracts & doctrine) · **Last verified:** 2026-08-24
 
@@ -244,7 +244,7 @@ of them to be silent, and the first version of this table found out which one.
 | `reported` + `bytes-drifted` | **Nothing is stopping anyone.** The ruling is void and the system does not know it | **Contain it.** Raise a new gate | `act` |
 | any + `unbound` | **Attached to nothing.** No artifact was ever pinned, so no check can ever be run | **Decide.** Accept it as resting on the raiser's word, or re-raise with a checkable binding | `decide` |
 | `reported` + `bytes-unverifiable` | Binds bytes nobody can re-derive, though it does show them | Same decision, with more to go on than `unbound` gives you | `decide` |
-| any + `bytes-unchecked` | Mosaic could not look **this run** | Restore reachability and re-run. `mosaic doctor` owns this surface | `none` |
+| any + `bytes-unchecked` | Mosaic could not look **this run** | Restore reachability and re-run. `beacon-legacy-desk doctor` owns this surface | `none` |
 | `none` + `intent` / `handle` / `step` | Nothing binds content, by design | Read the module's own `meaning`. Safety lives in expiry, single-use, approver checks — not in a digest | `none` |
 
 Two rows carry the weight. **`reported` + `bytes-drifted` is the only state

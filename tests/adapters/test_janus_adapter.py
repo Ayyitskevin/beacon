@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from mosaic.adapters.janus import JanusAdapter
-from mosaic.adapters.transport import READ_VERBS
-from mosaic.contracts import Attachment, Decider, Enforcement, Lifecycle
+from beacon_legacy.adapters.janus import JanusAdapter
+from beacon_legacy.adapters.transport import READ_VERBS
+from beacon_legacy.contracts import Attachment, Decider, Enforcement, Lifecycle
 
 #: Shapes taken from `janus list --state all --json` on node-a, 2026-08-24.
 #: The live ledger's 13 gates are distributed kind=git 8, kind=none 4, kind=file 1.
@@ -103,7 +103,7 @@ def test_read_never_raises_for_an_unreachable_module() -> None:
     so a desk can say "Janus did not answer" instead of "Janus had nothing".
     """
 
-    from mosaic.adapters.transport import Unreachable as TransportUnreachable
+    from beacon_legacy.adapters.transport import Unreachable as TransportUnreachable
 
     adapter = JanusAdapter()
 

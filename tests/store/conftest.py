@@ -1,6 +1,6 @@
 """Make THIS worktree's `src/` win over any editable install on sys.path.
 
-Not a convenience. The venv in the sibling checkout has `mosaic` installed
+Not a convenience. The venv in the sibling checkout has `beacon_legacy` installed
 editable pointing at *that* tree, so without this the suite silently tests the
 other worktree's code — a mutation applied here would be invisible and the
 tests would report green on code they never loaded. That exact trap cost a

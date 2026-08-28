@@ -11,13 +11,13 @@ import sqlite3
 
 import pytest
 
-from mosaic.store.ownership import REGISTRY
-from mosaic.store.reconcile import (
+from beacon_legacy.store.ownership import REGISTRY
+from beacon_legacy.store.reconcile import (
     Resolution,
     reconcile_columns,
     reconcile_vocabularies,
 )
-from mosaic.store.schema import apply_schema
+from beacon_legacy.store.schema import apply_schema
 
 
 @pytest.fixture
@@ -58,10 +58,10 @@ class TestEveryVocabularyIsOwned:
         good reason that the world had moved. A test whose premise is another
         lane's progress measures their schedule, not this mechanism.
         """
-        from mosaic.store import ownership
+        from beacon_legacy.store import ownership
 
         ghost = ownership.Vocabulary(
-            "enum_resolution", "nobody", "mosaic.store.module_that_will_never_exist", "X"
+            "enum_resolution", "nobody", "beacon_legacy.store.module_that_will_never_exist", "X"
         )
         assert ownership.canonical_values(ghost) is None
 
@@ -124,7 +124,7 @@ class TestColumnReconciliation:
         assert unbacked == frozenset({"invented_field"})
 
     def test_a_fully_claimed_table_is_absent_from_the_report(self, db):
-        from mosaic.store.schema import schema_columns
+        from beacon_legacy.store.schema import schema_columns
 
         exact = {t: set(c) for t, c in schema_columns(db).items()}
         assert reconcile_columns(db, exact) == {}
@@ -140,13 +140,13 @@ class TestTheColumnReconcilerIsActuallyWired:
     """
 
     def test_the_canonical_map_is_importable_and_non_empty(self):
-        from mosaic.store.models import CANONICAL_MODELS
+        from beacon_legacy.store.models import CANONICAL_MODELS
 
         assert CANONICAL_MODELS, "an empty map would make every check below vacuous"
 
     def test_every_mapped_table_exists_in_the_schema(self, db):
-        from mosaic.store.models import CANONICAL_MODELS
-        from mosaic.store.schema import schema_columns
+        from beacon_legacy.store.models import CANONICAL_MODELS
+        from beacon_legacy.store.schema import schema_columns
 
         present = set(schema_columns(db))
         missing = {t for t in CANONICAL_MODELS if t not in present}
@@ -157,7 +157,7 @@ class TestTheColumnReconcilerIsActuallyWired:
 
     def test_no_mapped_table_has_an_unclaimed_column_or_unbacked_field(self, db):
         """Check 2, live. A column no model reads is a silent data sink."""
-        from mosaic.store.models import CANONICAL_MODELS, expected_columns
+        from beacon_legacy.store.models import CANONICAL_MODELS, expected_columns
 
         models = {table: expected_columns(table) for table in CANONICAL_MODELS}
         divergences = reconcile_columns(db, models)

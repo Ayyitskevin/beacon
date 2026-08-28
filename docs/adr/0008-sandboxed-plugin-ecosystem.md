@@ -8,7 +8,7 @@ Beacon supports Agent Packs, Connectors, Views, Evaluators, and Worker Capabilit
 versioned manifests. Declarative Agent Packs are the first public extension type because they
 exercise identity, instructions, tools, Evaluations, and Policy without adding a new transport.
 All Plugin types use the public Command, Query, Event, and Worker lease interfaces. Plugins do
-not receive raw database access, load arbitrary native Rust into mosaicd, replace authority, or
+not receive raw database access, load arbitrary native Rust into beacond, replace authority, or
 create a second execution path.
 
 ## Consequences

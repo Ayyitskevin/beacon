@@ -11,7 +11,7 @@ import dataclasses
 
 import pytest
 
-from mosaic.contracts import (
+from beacon_legacy.contracts import (
     NOT_ASSURING,
     Attachment,
     Authority,
@@ -149,7 +149,7 @@ class TestOperatorAction:
 
     def test_unchecked_is_deliberately_quiet(self):
         """A stated choice, not an oversight. BYTES_UNCHECKED is a fact about
-        this run rather than about the decision, and `mosaic doctor` owns that
+        this run rather than about the decision, and `beacon-legacy-desk doctor` owns that
         surface. Most product-trace hops are legitimately unreachable today
         (2 of 7 joinable), so flagging every unchecked entry would drown ACT
         and DECIDE. `assures()` is still False, so it keeps its warning."""
@@ -245,7 +245,7 @@ class TestAgentNeverApproves:
 class TestMeaning:
     def test_meaning_is_required(self):
         """Every approval states what it means in the OWNING module's words.
-        Mosaic is not entitled to paraphrase another module's semantics more
+        Beacon legacy desk is not entitled to paraphrase another module's semantics more
         briefly than the module does."""
         with pytest.raises(TypeError):
             Authority(

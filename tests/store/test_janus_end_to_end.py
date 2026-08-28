@@ -14,17 +14,17 @@ from pathlib import Path
 
 import pytest
 
-from mosaic.store.integrity import orphaned_claims
-from mosaic.store.readers import MigrationReader, UnknownSourceValue
-from mosaic.store.readers_impl.janus_load import STATE_POLARITY, load
-from mosaic.store.readers_impl.janus_reader import JanusReader
-from mosaic.store.reconcile import Resolution, reconcile_vocabularies
-from mosaic.store.schema import apply_schema
+from beacon_legacy.store.integrity import orphaned_claims
+from beacon_legacy.store.readers import MigrationReader, UnknownSourceValue
+from beacon_legacy.store.readers_impl.janus_load import STATE_POLARITY, load
+from beacon_legacy.store.readers_impl.janus_reader import JanusReader
+from beacon_legacy.store.reconcile import Resolution, reconcile_vocabularies
+from beacon_legacy.store.schema import apply_schema
 
 CORPUS = (
     Path(__file__).resolve().parents[2]
     / "src"
-    / "mosaic"
+    / "beacon_legacy"
     / "store"
     / "fixtures"
     / "corpus"
@@ -161,7 +161,7 @@ class TestTheReadersCopyOfTheSourceVocabularyIsVerified:
         import shutil
         import subprocess
 
-        from mosaic.store.readers_impl.janus_reader import JANUS_STATES
+        from beacon_legacy.store.readers_impl.janus_reader import JANUS_STATES
 
         if not shutil.which("janus"):
             pytest.skip("janus is not on PATH; cannot verify against the source")

@@ -16,7 +16,7 @@
     {
       "source": "athena",
       "owner": "codex",
-      "title": "Wire the Mosaic desk adapters",
+      "title": "Wire the Beacon legacy desk desk adapters",
       "status": "in_review",
       "timestamp": "2026-08-24T20:15:00Z",
       "schema_version": "athena.issue.v1",

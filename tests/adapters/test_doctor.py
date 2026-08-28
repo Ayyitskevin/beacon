@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from mosaic import doctor
-from mosaic.adapters import REGISTRY
+from beacon_legacy import doctor
+from beacon_legacy.adapters import REGISTRY
 
 
 def test_all_seven_capabilities_are_listed() -> None:

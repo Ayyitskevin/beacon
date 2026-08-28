@@ -2,7 +2,8 @@
 
 Beacon is an office suite where AI agent teams perform project work under one human operator.
 This glossary defines the product language shared by every capability and interface.
-Beacon is a temporary working title; the domain language does not depend on the final brand.
+Beacon is the canonical project and local-alpha name. Public distribution still requires its
+separate naming and release gates.
 
 ## Organization
 

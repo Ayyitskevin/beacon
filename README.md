@@ -1,7 +1,7 @@
 # Beacon
 
 Beacon is an office suite for AI agent teams.
-Beacon is the current internal working title, not a cleared public brand or software namespace.
+Beacon is the canonical project and local-alpha name. It is not yet a cleared public brand.
 
 One human operator oversees a fleet of agents that can discuss work, plan it, research it,
 build it, evaluate it, request authority, execute within bounds, and leave a complete receipt.
@@ -142,22 +142,16 @@ or cannot be detected. The warning opens a one-click, operating-system-specific 
 status recheck; Beacon does not change system settings on its own.
 Portable Safety Snapshots receive Beacon-managed encryption before leaving the Installation.
 
-Beacon is the temporary working title while Alpha architecture begins. Earlier screening rejected
-it as a permanent candidate because current AI-agent products already use the name. It does not
-authorize a Beacon application ID, CLI command, package namespace, domain, or public release.
+Beacon is the canonical project and local-alpha product name. Active application IDs, commands,
+packages, source modules, and development paths use Beacon consistently. The earlier naming
+research remains part of the decision record, but it no longer controls local identifiers. A
+domain, public distribution, or claim of exclusive brand rights still requires a separate naming
+and release review.
 
-The permanent name should be an uncommon real word that evokes a durable knowledge institution
-rather than an operations center, Agent, model, assistant persona, temporary workshop, or animal.
-It must also be easy to pronounce and spell after hearing it once. Its tone should be professional
-with a quiet academic character: thoughtful and enduring, not governmental or corporate. A clean
-application, CLI, and package namespace is a hard gate before selection.
-
-Current preliminary collision research is recorded in the
-[ten-candidate name screen](docs/research/name-collision-screen-2026-08-27.md) and the follow-up
-[Beacon, Recall, and Hivemind screen][three-name-screen]. Orca was proposed, then rejected after
-the [Orca collision screen][orca-name-screen] found direct AI-workstation and accessibility-name
-conflicts.
-No permanent candidate is selected or legally cleared.
+Preliminary collision research is preserved in the
+[ten-candidate name screen](docs/research/name-collision-screen-2026-08-27.md), the follow-up
+[Beacon, Recall, and Hivemind screen][three-name-screen], and the [Orca collision
+screen][orca-name-screen]. These are historical research artifacts, not the current product name.
 
 [three-name-screen]: docs/research/name-screen-beacon-recall-hivemind-2026-08-27.md
 [orca-name-screen]: docs/research/name-screen-orca-2026-08-27.md
@@ -170,11 +164,11 @@ The shared vocabulary is in [CONTEXT.md](CONTEXT.md). Architectural decisions li
 ## Development foundation
 
 Phase 0 now includes the first Rust supervisor and a native Tauri desktop shell beside the
-preserved Python prototype. The supervisor creates one empty local Workspace and returns an
+preserved Beacon Legacy Desk. The supervisor creates one empty local Workspace and returns an
 inspectable SQLite diagnostic report:
 
 ```sh
-cargo run -p mosaicd -- bootstrap
+cargo run -p beacond -- bootstrap
 ```
 
 The desktop intentionally opens in a locked setup-required state. A same-machine Owner can enroll
@@ -187,7 +181,9 @@ From `apps/desktop`, use `npm run tauri dev` to launch the development shell. Th
 checkpoints and verified dependency sources are recorded in
 [the Rust foundation](docs/implementation/phase-0-rust-foundation.md) and
 [the desktop shell](docs/implementation/phase-0-desktop-shell.md). Run `scripts/gate` to verify the
-preserved Python prototype, the Rust workspace, the web bundle, and the native desktop build.
+preserved Beacon Legacy Desk, the Rust workspace, the web bundle, and the native desktop build.
+The exact pre-Beacon compatibility boundary is recorded in the
+[name migration note](docs/implementation/beacon-name-migration.md).
 
 ## License
 

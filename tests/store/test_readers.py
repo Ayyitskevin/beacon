@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from mosaic.store.readers import (
+from beacon_legacy.store.readers import (
     MigrationReader,
     SourceRecord,
     SourceSurface,
@@ -32,7 +32,7 @@ class TestTheInterfaceCannotWrite:
         surface = {n for n in dir(MigrationReader) if not n.startswith("_")}
         assert surface == {"read"}, (
             f"the reader protocol grew a member: {sorted(surface)}. Every "
-            f"addition is a new thing Mosaic can ask of a retiring system."
+            f"addition is a new thing Beacon legacy desk can ask of a retiring system."
         )
 
     def test_a_conforming_reader_satisfies_the_protocol(self):
@@ -86,15 +86,22 @@ class TestTheOriginWordSurvives:
 class TestAddedMembersAreNotDataLoss:
     """Measured: only Janus has terminal-negative as a status *value*."""
 
-    def test_a_mosaic_added_member_absent_from_the_source_is_not_loss(self):
-        assert absent_is_not_loss(member_added_by_mosaic=True, source_had_value=False) is False
+    def test_a_beacon_legacy_added_member_absent_from_the_source_is_not_loss(self):
+        assert (
+            absent_is_not_loss(member_added_by_beacon_legacy=True, source_had_value=False) is False
+        )
 
     def test_a_real_member_missing_from_the_source_IS_loss(self):
-        assert absent_is_not_loss(member_added_by_mosaic=False, source_had_value=False) is True
+        assert (
+            absent_is_not_loss(member_added_by_beacon_legacy=False, source_had_value=False) is True
+        )
 
     def test_presence_is_never_loss(self):
         for added in (True, False):
-            assert absent_is_not_loss(member_added_by_mosaic=added, source_had_value=True) is False
+            assert (
+                absent_is_not_loss(member_added_by_beacon_legacy=added, source_had_value=True)
+                is False
+            )
 
     def test_the_marker_is_read_never_inferred_from_absence(self):
         """Both calls see source_had_value=False; only the marker separates them."""
@@ -111,7 +118,7 @@ class TestLocalDbRequiresVerifiedQuiescence:
     """
 
     def _db(self, quiescence=None):
-        from mosaic.store.readers import SourceSurface
+        from beacon_legacy.store.readers import SourceSurface
 
         return SourceSurface(
             kind=SurfaceKind.LOCAL_DB,
@@ -122,7 +129,7 @@ class TestLocalDbRequiresVerifiedQuiescence:
         )
 
     def test_a_live_database_is_refused(self):
-        from mosaic.store.readers import SourceNotQuiescent, require_quiescent
+        from beacon_legacy.store.readers import SourceNotQuiescent, require_quiescent
 
         with pytest.raises(SourceNotQuiescent, match="quiescence was not verified"):
             require_quiescent(self._db())
@@ -130,7 +137,7 @@ class TestLocalDbRequiresVerifiedQuiescence:
     def test_claimed_but_unverified_quiescence_is_refused(self):
         """`verified=False` is the default precisely so the precondition cannot
         be satisfied by asserting it."""
-        from mosaic.store.readers import (
+        from beacon_legacy.store.readers import (
             Quiescence,
             SourceNotQuiescent,
             require_quiescent,
@@ -141,7 +148,7 @@ class TestLocalDbRequiresVerifiedQuiescence:
             require_quiescent(self._db(claimed))
 
     def test_verified_quiescence_is_allowed(self):
-        from mosaic.store.readers import Quiescence, require_quiescent
+        from beacon_legacy.store.readers import Quiescence, require_quiescent
 
         checked = Quiescence(
             method="frozen_snapshot",
@@ -151,7 +158,7 @@ class TestLocalDbRequiresVerifiedQuiescence:
         require_quiescent(self._db(checked))
 
     def test_non_database_surfaces_are_untouched(self):
-        from mosaic.store.readers import SourceSurface, require_quiescent
+        from beacon_legacy.store.readers import SourceSurface, require_quiescent
 
         for kind in ("http", "file", "subprocess"):
             require_quiescent(SourceSurface(kind=SurfaceKind(kind), boundary="n/a"))
@@ -159,7 +166,7 @@ class TestLocalDbRequiresVerifiedQuiescence:
     def test_the_evidence_field_is_a_command_not_an_assertion(self):
         """A precondition recorded as 'it was stopped' cannot be re-checked by
         the next person; one recorded as the command they can re-run can."""
-        from mosaic.store.readers import Quiescence
+        from beacon_legacy.store.readers import Quiescence
 
         q = Quiescence("frozen_snapshot", "systemctl is-active janus -> inactive", True)
         assert "->" in q.evidence
@@ -176,20 +183,20 @@ class TestSurfaceKindIsClosed:
 
     @pytest.mark.parametrize("typo", ["localdb", "local-db", "LOCAL_DB", "sqlite", ""])
     def test_an_unrecognised_kind_cannot_be_constructed(self, typo):
-        from mosaic.store.readers import SourceSurface
+        from beacon_legacy.store.readers import SourceSurface
 
         with pytest.raises(ValueError, match="closed vocabulary"):
             SourceSurface(kind=typo, boundary="x")
 
     def test_it_refuses_rather_than_coercing(self):
         """A coerced typo becomes a plausible value the guard cannot question."""
-        from mosaic.store.readers import SourceSurface
+        from beacon_legacy.store.readers import SourceSurface
 
         with pytest.raises(ValueError):
             SourceSurface(kind="local_db_", boundary="x")
 
     def test_the_guard_now_keys_on_a_member_not_a_string(self):
-        from mosaic.store.readers import SourceNotQuiescent, SourceSurface, require_quiescent
+        from beacon_legacy.store.readers import SourceNotQuiescent, SourceSurface, require_quiescent
 
         with pytest.raises(SourceNotQuiescent):
             require_quiescent(SourceSurface(kind=SurfaceKind.LOCAL_DB, boundary="x"))

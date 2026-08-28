@@ -6,7 +6,7 @@ desktop session lock
 
 ## Security boundary
 
-`mosaicd` is the separate authority process for the account record, credential verifiers,
+`beacond` is the separate authority process for the account record, credential verifiers,
 authentication throttling, and the live session. Tauri connects through a versioned Unix-domain
 socket protocol protected by a 256-bit capability token; the runtime directory is owner-only and
 the socket, token, and process lock are private files. A held kernel lock prevents a second
@@ -93,8 +93,10 @@ monitoring. It subscribes to `PrepareForSleep(true)` on systemd-logind's system 
 bus. A `false` signal never unlocks Beacon. Each monitor reports `starting`, `active`, or
 `unavailable`; an unavailable monitor leaves manual and inactivity locking active and creates a
 visible warning rather than a false claim. `active` requires a live supported D-Bus owner and owner
-loss changes the status to `unavailable`; signal matches are bound to that owner. Losing the desktop
-window cannot disable the monitor.
+loss changes the status to `unavailable`; signal matches are bound to that owner. The supervisor
+also rechecks provider ownership and `GetActive` state every monitor cycle, so acquiring or
+restarting a provider while the screen is already locked locks Beacon before that provider is
+reported active. Losing the desktop window cannot disable the monitor.
 
 Platform and library sources:
 

@@ -12,12 +12,12 @@ import sqlite3
 
 import pytest
 
-from mosaic.store.integrity import (
+from beacon_legacy.store.integrity import (
     MUST_BE_CONTAINED,
     contained_types_present,
     orphaned_claims,
 )
-from mosaic.store.schema import apply_schema
+from beacon_legacy.store.schema import apply_schema
 
 RECORD_COLS = (
     "id, capability, kind, title, status, occurred_at, recorded_at, "

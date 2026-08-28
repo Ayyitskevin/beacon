@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 
-from mosaic.compose import compose, to_document
-from mosaic.contracts import (
+from beacon_legacy.compose import compose, to_document
+from beacon_legacy.contracts import (
     Attachment,
     Authority,
     Decider,
@@ -114,7 +114,7 @@ class TestMissingJoinsAreResults:
 
 
 class TestStatusIsTheModulesOwnWord:
-    """`Entry.status` must never be Mosaic's vocabulary."""
+    """`Entry.status` must never be Beacon legacy desk's vocabulary."""
 
     def test_module_status_survives_verbatim(self):
         """Janus has three terminal-negative states with no home in an

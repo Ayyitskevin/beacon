@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from mosaic.adapters.athena import AthenaAdapter
-from mosaic.adapters.transport import Unreachable
+from beacon_legacy.adapters.athena import AthenaAdapter
+from beacon_legacy.adapters.transport import Unreachable
 
 VERSION = {
     "version": "0.1.0a1",

@@ -82,5 +82,8 @@ The desktop stage performs a clean lifecycle-script-disabled npm install, fronte
 pre-authentication contract test, a production web build, and a Tauri no-bundle native build. The
 repository-wide gate adds the preserved Python checks and all Rust checks. `bundle.active` remains
 false: this checkpoint builds a local executable but creates no public installer, package identity,
-or release artifact. Product and executable identifiers migrate from the old `mosaic` placeholder
-to Beacon in the next isolated change so existing local state can be handled safely.
+or release artifact. Product and executable identifiers use Beacon; explicit legacy migration paths
+preserve local state created under the pre-Beacon placeholder. On first launch, Beacon atomically
+adopts a private, same-owner legacy application directory and renames its SQLite/WAL family. It
+refuses symlink sources, non-private ownership, a running legacy supervisor, or simultaneous old and
+new directories instead of choosing or copying credential-bearing state.

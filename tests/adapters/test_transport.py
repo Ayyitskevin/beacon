@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from mosaic.adapters.transport import ReadOnlyCommand, ReadOnlyHTTP, Unreachable
+from beacon_legacy.adapters.transport import ReadOnlyCommand, ReadOnlyHTTP, Unreachable
 
 
 def test_command_refuses_a_verb_it_was_not_given() -> None:
@@ -38,7 +38,7 @@ def test_unreachable_always_carries_the_address_tried() -> None:
 
 
 def test_missing_executable_is_unreachable_not_a_crash() -> None:
-    cli = ReadOnlyCommand(module="janus", executable="mosaic-no-such-binary")
+    cli = ReadOnlyCommand(module="janus", executable="beacon_legacy-no-such-binary")
     with pytest.raises(Unreachable) as caught:
         cli.run_json(["list"])
     assert "not on PATH" in str(caught.value)
