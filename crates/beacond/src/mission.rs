@@ -311,11 +311,7 @@ impl MissionService {
 }
 
 fn normalize_draft(draft: &mut MissionDraft) -> Result<(), MissionError> {
-    draft.desired_outcome = normalize_text(
-        std::mem::take(&mut draft.desired_outcome),
-        MAX_DESIRED_OUTCOME_CHARS,
-        MissionError::InvalidDesiredOutcome,
-    )?;
+    draft.desired_outcome = normalize_desired_outcome(std::mem::take(&mut draft.desired_outcome))?;
     draft.success_conditions = normalize_items(
         std::mem::take(&mut draft.success_conditions),
         false,
@@ -332,6 +328,20 @@ fn normalize_draft(draft: &mut MissionDraft) -> Result<(), MissionError> {
         MissionError::InvalidProhibition,
     )?;
     Ok(())
+}
+
+fn normalize_desired_outcome(value: String) -> Result<String, MissionError> {
+    if value
+        .chars()
+        .any(|character| character.is_control() && character != '\n')
+    {
+        return Err(MissionError::InvalidDesiredOutcome);
+    }
+    let normalized = value.trim();
+    if normalized.is_empty() || normalized.chars().count() > MAX_DESIRED_OUTCOME_CHARS {
+        return Err(MissionError::InvalidDesiredOutcome);
+    }
+    Ok(normalized.to_owned())
 }
 
 fn normalize_text(

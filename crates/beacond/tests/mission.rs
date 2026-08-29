@@ -237,7 +237,7 @@ fn mission_draft(prepared: &PreparedTeam) -> MissionDraft {
         project_id: prepared.project.id,
         expected_charter_revision: prepared.project.charter.revision,
         team_id: prepared.team.id,
-        desired_outcome: "  Ship one reviewed Beacon feature.  ".to_owned(),
+        desired_outcome: "  Ship one reviewed Beacon feature.\nPreserve its evidence.  ".to_owned(),
         success_conditions: vec!["Relevant gates pass".to_owned()],
         constraints: vec!["Keep the change reversible".to_owned()],
         prohibitions: vec!["Do not deploy".to_owned()],
@@ -267,7 +267,7 @@ fn operator_admits_a_finite_mission_from_exact_current_team_evidence() {
     assert_eq!(admitted.team_id, prepared.team.id);
     assert_eq!(
         admitted.desired_outcome,
-        "Ship one reviewed Beacon feature."
+        "Ship one reviewed Beacon feature.\nPreserve its evidence."
     );
     assert_eq!(admitted.success_conditions, ["Relevant gates pass"]);
     assert_eq!(admitted.constraints, ["Keep the change reversible"]);
@@ -377,6 +377,12 @@ fn mission_admission_refuses_invalid_stale_or_ineligible_inputs_without_writes()
     invalid_outcome.desired_outcome = "   ".to_owned();
     assert!(matches!(
         missions.admit(invalid_outcome),
+        Err(MissionError::InvalidDesiredOutcome)
+    ));
+    let mut control_outcome = mission_draft(&prepared);
+    control_outcome.desired_outcome = "unsafe\0outcome".to_owned();
+    assert!(matches!(
+        missions.admit(control_outcome),
         Err(MissionError::InvalidDesiredOutcome)
     ));
     let mut invalid_success = mission_draft(&prepared);
