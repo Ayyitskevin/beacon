@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Verify a Project's declared checks before an execution path exists, and refuse in a typed Receipt
