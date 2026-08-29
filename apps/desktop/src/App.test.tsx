@@ -95,6 +95,43 @@ const activeLocalModel = {
   predecessorId: null,
   decidedAtMs: 123,
 } as const;
+const residentCapabilityCatalog = [
+  {
+    capability: "work.create_mission",
+    label: "Create Missions",
+    description: "Request Mission creation through Work Policy.",
+  },
+  {
+    capability: "work.form_team",
+    label: "Form Teams",
+    description: "Request Team formation through Work Policy.",
+  },
+  {
+    capability: "work.coordinate_mission",
+    label: "Coordinate Missions",
+    description: "Coordinate accepted Mission work through Work Policy.",
+  },
+  {
+    capability: "work.assign_work",
+    label: "Assign Work",
+    description: "Assign bounded work through Work Policy.",
+  },
+  {
+    capability: "artifact.produce",
+    label: "Produce Artifacts",
+    description: "Produce reviewable Mission artifacts.",
+  },
+  {
+    capability: "artifact.evaluate",
+    label: "Evaluate Artifacts",
+    description: "Evaluate artifacts without approving effects.",
+  },
+  {
+    capability: "evidence.develop",
+    label: "Develop Evidence",
+    description: "Develop evidence for operator review.",
+  },
+] as const;
 
 type Phase = "operator_setup_required" | "locked" | "unlocked";
 
@@ -672,6 +709,101 @@ describe("Beacon desktop shell", () => {
     expect(await within(roster).findByText("retired")).toBeVisible();
     expect(within(roster).queryByRole("button")).not.toBeInTheDocument();
     expect(screen.getByText(/Lifecycle controls availability only/)).toBeVisible();
+  });
+
+  it("configures and clears a Resident without granting execution authority", async () => {
+    const user = userEvent.setup();
+    const activeResident = {
+      ...inactiveResident,
+      lifecycle: "active",
+      latestDecisionId: "33333333-3333-4333-8333-333333333333",
+      updatedAtMs: 110,
+    } as const;
+    const configured = {
+      id: "77777777-7777-4777-8777-777777777777",
+      workspaceId: activeResident.workspaceId,
+      residentId: activeResident.id,
+      state: "configured",
+      binding: {
+        activationId: activeLocalModel.id,
+        capabilities: [
+          "work.create_mission",
+          "work.form_team",
+          "work.coordinate_mission",
+        ],
+        budgetBoundary: "no_spend",
+      },
+      predecessorId: null,
+      decidedAtMs: 200,
+      eligibleForTeam: true,
+      ineligibilityReasons: [],
+    } as const;
+    const cleared = {
+      ...configured,
+      id: "88888888-8888-4888-8888-888888888888",
+      state: "cleared",
+      binding: null,
+      predecessorId: configured.id,
+      decidedAtMs: 210,
+      eligibleForTeam: false,
+      ineligibilityReasons: ["configuration_cleared"],
+    } as const;
+    invokeMock.mockImplementation((command) => {
+      if (command === "session_status") return Promise.resolve(status("unlocked"));
+      if (command === "authentication_capabilities") return Promise.resolve(capabilities);
+      if (command === "session_policy") return Promise.resolve(sessionPolicy);
+      if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+      if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
+      if (command === "residents") return Promise.resolve([activeResident]);
+      if (command === "record_operator_activity") return Promise.resolve(null);
+      if (command === "resident_capability_catalog") {
+        return Promise.resolve(residentCapabilityCatalog);
+      }
+      if (command === "resident_configurations") return Promise.resolve([]);
+      if (command === "local_model_activations") return Promise.resolve([activeLocalModel]);
+      if (command === "configure_resident") return Promise.resolve(configured);
+      if (command === "clear_resident_configuration") return Promise.resolve(cleared);
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.click(screen.getByRole("button", { name: "Review Resident configurations" }));
+    await user.click(await screen.findByRole("button", { name: "Configure Lead" }));
+    expect(screen.getByRole("combobox", { name: "Local model for Lead" })).toHaveValue(
+      activeLocalModel.id,
+    );
+    await user.click(screen.getByRole("checkbox", { name: "Assign Work" }));
+    await user.click(screen.getByRole("button", { name: "Save Resident configuration" }));
+
+    expect(invokeMock).toHaveBeenCalledWith("configure_resident", {
+      residentId: activeResident.id,
+      expectedDecisionId: null,
+      activationId: activeLocalModel.id,
+      capabilities: [
+        "work.create_mission",
+        "work.form_team",
+        "work.coordinate_mission",
+      ],
+    });
+    expect(await screen.findByText("Eligible for Team formation")).toBeVisible();
+    expect(screen.getByText(/does not grant execution authority/i)).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Clear configuration for Lead" }));
+    const confirmation = screen.getByRole("alertdialog", {
+      name: "Clear this Resident configuration?",
+    });
+    await user.click(
+      within(confirmation).getByRole("button", { name: "Clear Resident configuration" }),
+    );
+    expect(invokeMock).toHaveBeenCalledWith("clear_resident_configuration", {
+      residentId: activeResident.id,
+      expectedDecisionId: configured.id,
+    });
+    expect(await screen.findByText("Cleared; not eligible for Team formation")).toBeVisible();
+
+    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
+    expect(results.violations).toEqual([]);
   });
 
   it("requires confirmation before discarding the one-time Starter Organization", async () => {

@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   activateLocalModel,
   activateResident,
+  clearResidentConfiguration,
+  configureResident,
   beginLocalPasswordSetup,
   acceptStarterOrganization,
   createProject,
@@ -20,6 +22,8 @@ import {
   loadProjectCharterHistory,
   loadProjects,
   loadResidents,
+  loadResidentCapabilityCatalog,
+  loadResidentConfigurations,
   loadSessionPolicy,
   loadSessionStatus,
   loadStarterOrganization,
@@ -609,8 +613,116 @@ describe("desktop session transport", () => {
     expect(describeLocalAccountError({ code: "unchanged_charter" })).toBe(
       "Change at least one Charter field before publishing a revision.",
     );
+    expect(describeLocalAccountError({ code: "stale_resident_configuration" })).toBe(
+      "The Resident configuration changed. Reload it before trying again.",
+    );
     expect(describeLocalAccountError({ code: "invented", message: "render me" })).not.toContain(
       "render me",
     );
+  });
+
+  it("maps only the closed Resident Configuration contract without widening authority", async () => {
+    const catalog = [
+      {
+        capability: "work.create_mission",
+        label: "Create Missions",
+        description: "Request creation through Work Policy.",
+      },
+      {
+        capability: "work.form_team",
+        label: "Form Teams",
+        description: "Request a named Team through Work Policy.",
+      },
+      {
+        capability: "work.coordinate_mission",
+        label: "Coordinate Missions",
+        description: "Coordinate accepted Mission work through Work Policy.",
+      },
+      {
+        capability: "work.assign_work",
+        label: "Assign Work",
+        description: "Assign bounded work through Work Policy.",
+      },
+      {
+        capability: "artifact.produce",
+        label: "Produce Artifacts",
+        description: "Produce reviewable Mission artifacts.",
+      },
+      {
+        capability: "artifact.evaluate",
+        label: "Evaluate Artifacts",
+        description: "Evaluate artifacts without approving effects.",
+      },
+      {
+        capability: "evidence.develop",
+        label: "Develop Evidence",
+        description: "Develop evidence for operator review.",
+      },
+    ] as const;
+    const configured = {
+      id: "77777777-7777-4777-8777-777777777777",
+      workspaceId: "11111111-1111-4111-8111-111111111111",
+      residentId: "22222222-2222-4222-8222-222222222222",
+      state: "configured",
+      binding: {
+        activationId: "44444444-4444-4444-8444-444444444444",
+        capabilities: ["work.create_mission", "work.form_team"],
+        budgetBoundary: "no_spend",
+      },
+      predecessorId: null,
+      decidedAtMs: 123,
+      eligibleForTeam: true,
+      ineligibilityReasons: [],
+    } as const;
+    const cleared = {
+      ...configured,
+      id: "88888888-8888-4888-8888-888888888888",
+      state: "cleared",
+      binding: null,
+      predecessorId: configured.id,
+      eligibleForTeam: false,
+      ineligibilityReasons: ["configuration_cleared"],
+    } as const;
+    invokeMock
+      .mockResolvedValueOnce(catalog)
+      .mockResolvedValueOnce([configured])
+      .mockResolvedValueOnce(configured)
+      .mockResolvedValueOnce(cleared)
+      .mockResolvedValueOnce({ ...configured, executionAuthority: true });
+
+    await expect(loadResidentCapabilityCatalog()).resolves.toEqual(catalog);
+    await expect(loadResidentConfigurations()).resolves.toEqual([configured]);
+    await expect(
+      configureResident(
+        configured.residentId,
+        null,
+        configured.binding.activationId,
+        configured.binding.capabilities,
+      ),
+    ).resolves.toEqual(configured);
+    await expect(
+      clearResidentConfiguration(configured.residentId, configured.id),
+    ).resolves.toEqual(cleared);
+    await expect(loadResidentConfigurations()).rejects.toThrow(
+      "invalid Resident configuration list",
+    );
+    expect(invokeMock.mock.calls).toEqual([
+      ["resident_capability_catalog"],
+      ["resident_configurations"],
+      [
+        "configure_resident",
+        {
+          residentId: configured.residentId,
+          expectedDecisionId: null,
+          activationId: configured.binding.activationId,
+          capabilities: configured.binding.capabilities,
+        },
+      ],
+      [
+        "clear_resident_configuration",
+        { residentId: configured.residentId, expectedDecisionId: configured.id },
+      ],
+      ["resident_configurations"],
+    ]);
   });
 });
