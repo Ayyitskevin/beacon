@@ -405,6 +405,7 @@ describe("Beacon desktop shell", () => {
       if (command === "create_project") return Promise.resolve(created);
       if (command === "revise_project_charter") return Promise.resolve(revised);
       if (command === "teams") return Promise.resolve([]);
+      if (command === "missions") return Promise.resolve([]);
       if (command === "record_operator_activity") return Promise.resolve(null);
       return Promise.reject(new Error(`unexpected command: ${command} ${JSON.stringify(args)}`));
     });
@@ -522,6 +523,7 @@ describe("Beacon desktop shell", () => {
         return Promise.resolve([revisionOne, revisionTwo]);
       }
       if (command === "teams") return Promise.resolve([]);
+      if (command === "missions") return Promise.resolve([]);
       if (command === "record_operator_activity") return Promise.resolve(null);
       return Promise.reject(new Error(`unexpected command: ${command}`));
     });
@@ -619,6 +621,7 @@ describe("Beacon desktop shell", () => {
       if (command === "project") return Promise.resolve(project);
       if (command === "project_charter_history") return Promise.resolve([project.charter]);
       if (command === "teams") return Promise.resolve([]);
+      if (command === "missions") return Promise.resolve([]);
       if (command === "resident_configurations") return Promise.resolve([configuration]);
       if (command === "form_team") return Promise.resolve(formed);
       return Promise.reject(new Error(`unexpected command: ${command}`));
@@ -654,6 +657,146 @@ describe("Beacon desktop shell", () => {
     });
     expect(await screen.findByText("Alpha Team")).toBeVisible();
     expect(screen.getByText(/Operator formed · 1 member/i)).toBeVisible();
+  });
+
+  it("admits a finite Mission from the exact current Team without inventing a lead", async () => {
+    const user = userEvent.setup();
+    const resident = {
+      ...inactiveResident,
+      displayName: "Northstar",
+      lifecycle: "active",
+      latestDecisionId: "66666666-6666-4666-8666-666666666666",
+      updatedAtMs: 110,
+    } as const;
+    const previousCharter = {
+      revision: 1,
+      purpose: "Build a trustworthy local software product.",
+      desiredOutcomes: ["Form an attributable Team"],
+      constraints: [],
+      prohibitions: [],
+      autonomyProfile: "supervised",
+      budgetBoundary: "no_spend",
+      externalEffects: "prohibited",
+      authoredAtMs: 122,
+    } as const;
+    const project = {
+      id: "33333333-3333-4333-8333-333333333333",
+      workspaceId: acceptedOrganization.workspaceId,
+      name: "Beacon Alpha",
+      charter: {
+        revision: 2,
+        purpose: "Build a trustworthy local software product.",
+        desiredOutcomes: ["Ship an attributable Mission"],
+        constraints: [],
+        prohibitions: [],
+        autonomyProfile: "supervised",
+        budgetBoundary: "no_spend",
+        externalEffects: "prohibited",
+        authoredAtMs: 123,
+      },
+      createdAtMs: 120,
+    } as const;
+    const summary = {
+      id: project.id,
+      name: project.name,
+      charterRevision: 2,
+      autonomyProfile: "supervised",
+      createdAtMs: 120,
+    } as const;
+    const configurationId = "77777777-7777-4777-8777-777777777777";
+    const team = {
+      id: "55555555-5555-4555-8555-555555555555",
+      workspaceId: acceptedOrganization.workspaceId,
+      projectId: project.id,
+      name: "Alpha Team",
+      formedBy: "operator",
+      formedAtMs: 125,
+      members: [
+        {
+          residentId: resident.id,
+          formationConfigurationId: configurationId,
+          currentConfigurationId: configurationId,
+          eligibleNow: true,
+          ineligibilityReasons: [],
+        },
+      ],
+    } as const;
+    const admitted = {
+      id: "88888888-8888-4888-8888-888888888888",
+      workspaceId: acceptedOrganization.workspaceId,
+      projectId: project.id,
+      charterRevision: project.charter.revision,
+      teamId: team.id,
+      desiredOutcome: "Ship one reviewed Beacon feature",
+      successConditions: ["Relevant gates pass"],
+      constraints: ["Keep the change reversible"],
+      prohibitions: ["Do not deploy"],
+      lifecycle: "admitted",
+      admittedBy: "operator",
+      admittedAtMs: 126,
+      members: [
+        {
+          residentId: resident.id,
+          admissionConfigurationId: configurationId,
+        },
+      ],
+    } as const;
+    invokeMock.mockImplementation((command) => {
+      if (command === "session_status") return Promise.resolve(status("unlocked"));
+      if (command === "authentication_capabilities") return Promise.resolve(capabilities);
+      if (command === "session_policy") return Promise.resolve(sessionPolicy);
+      if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+      if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
+      if (command === "residents") return Promise.resolve([resident]);
+      if (command === "record_operator_activity") return Promise.resolve(null);
+      if (command === "projects") return Promise.resolve([summary]);
+      if (command === "project") return Promise.resolve(project);
+      if (command === "project_charter_history") {
+        return Promise.resolve([previousCharter, project.charter]);
+      }
+      if (command === "teams") return Promise.resolve([team]);
+      if (command === "missions") return Promise.resolve([]);
+      if (command === "admit_mission") return Promise.resolve(admitted);
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    await user.click(await screen.findByRole("button", { name: /Beacon Alpha/i }));
+    expect(await screen.findByText("No Missions have been admitted for this Project.")).toBeVisible();
+    expect(screen.getByText(/Team Lead selection waits for Policy/i)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Admit Mission" }));
+
+    expect(await screen.findByRole("form", { name: "Admit Mission" })).toBeVisible();
+    await user.selectOptions(screen.getByLabelText("Mission Team"), team.id);
+    await user.type(screen.getByLabelText("Desired outcome"), admitted.desiredOutcome);
+    await user.type(screen.getByLabelText("Success conditions"), admitted.successConditions[0]);
+    await user.type(screen.getByLabelText("Mission constraints"), admitted.constraints[0]);
+    await user.type(screen.getByLabelText("Mission prohibitions"), admitted.prohibitions[0]);
+    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
+    expect(results.violations).toEqual([]);
+    await user.click(screen.getByRole("button", { name: "Admit Mission" }));
+
+    expect(invokeMock).toHaveBeenCalledWith("admit_mission", {
+      draft: {
+        projectId: project.id,
+        expectedCharterRevision: project.charter.revision,
+        teamId: team.id,
+        desiredOutcome: admitted.desiredOutcome,
+        successConditions: [...admitted.successConditions],
+        constraints: [...admitted.constraints],
+        prohibitions: [...admitted.prohibitions],
+        members: [
+          {
+            residentId: resident.id,
+            expectedConfigurationId: configurationId,
+          },
+        ],
+      },
+    });
+    expect(await screen.findByText(admitted.desiredOutcome)).toBeVisible();
+    expect(screen.getByText(/Operator admitted · Charter revision 2/i)).toBeVisible();
   });
 
   it("edits and explicitly admits the recommended Starter Organization", async () => {
@@ -1301,6 +1444,7 @@ describe("Beacon desktop shell", () => {
       if (command === "project") return Promise.resolve(project);
       if (command === "project_charter_history") return Promise.resolve([charter]);
       if (command === "teams") return Promise.resolve([]);
+      if (command === "missions") return Promise.resolve([]);
       return Promise.reject(new Error(`unexpected command: ${command}`));
     });
     const { container } = render(<App />);
