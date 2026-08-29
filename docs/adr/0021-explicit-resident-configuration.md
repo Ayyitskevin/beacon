@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Make Resident Configuration explicit without granting execution authority
@@ -34,4 +34,4 @@ Startup fails closed unless every configuration chain, exact binding, Capability
 Event reconcile. The desktop and authenticated transport expose eligibility as derived status and
 keep the fixed no-spend/no-execution boundary visible.
 
-This proposal becomes accepted only with Product Steward sign-off on the reviewed branch.
+Accepted 2026-08-29 by the Product Steward. The reviewed branch merged to `main` as `3513ec3` on 2026-08-28; the Steward ruled on 2026-08-29 that every ADR merged under this convention is accepted.

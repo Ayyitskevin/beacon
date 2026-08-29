@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Prove Alpha 1 against the Operator's own fleet
@@ -70,7 +70,7 @@ what the round table already demands of every change — so Beacon's Evaluations
 critical path earlier than the vertical order in §10 implies. That ordering question is open
 for the Product Steward; this record does not move it.
 
-This proposal becomes accepted only with Product Steward sign-off on the reviewed branch.
+Accepted 2026-08-29 by the Product Steward. The reviewed branch merged to `main` as `30d3448` on 2026-08-29; the Steward ruled on 2026-08-29 that every ADR merged under this convention is accepted.
 
 
 > Privacy rewrite: machine names, paths and endpoint examples in this document are illustrative, not a live infrastructure map. Historical measurements and prior byte-hash/review claims refer to retained original evidence, not these edited public bytes; no authority transfers through this rewrite.
