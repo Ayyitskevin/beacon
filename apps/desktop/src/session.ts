@@ -98,6 +98,34 @@ export type ProjectSummary = {
   createdAtMs: number;
 };
 
+export type TrackRecordEvidenceKind =
+  | "mission_outcome"
+  | "evaluation"
+  | "policy_compliance"
+  | "spend"
+  | "receipt";
+export type TrackRecordRequirement = {
+  evidenceKind: TrackRecordEvidenceKind;
+  minimumCount: number;
+};
+export type TeamLeadSelectionPolicy = {
+  requiredCapabilities: BeaconCapability[];
+  availabilityRule: "current_team_eligibility";
+  trackRecordRequirements: TrackRecordRequirement[];
+  conflictRule: "require_no_declared_conflict";
+  ambiguityRule: "require_operator_decision";
+};
+export type ProjectPolicyDraft = { teamLeadSelection: TeamLeadSelectionPolicy };
+export type ProjectPolicy = ProjectPolicyDraft & {
+  workspaceId: string;
+  projectId: string;
+  revision: number;
+  charterRevision: number;
+  authoredBy: "operator";
+  authoredAtMs: number;
+  appliesToCurrentCharter: boolean;
+};
+
 export type DiscoveryStatus = "available" | "unavailable" | "invalid_response";
 export type LocalModelDetails = {
   format: string;
@@ -488,6 +516,38 @@ export async function reviseProjectCharter(
   );
 }
 
+export async function loadProjectPolicy(projectId: string): Promise<ProjectPolicy | null> {
+  return invokeAndValidate(
+    "project_policy",
+    { projectId },
+    isProjectPolicyOrNull,
+    "Project Policy",
+  );
+}
+
+export async function loadProjectPolicyHistory(projectId: string): Promise<ProjectPolicy[]> {
+  return invokeAndValidate(
+    "project_policy_history",
+    { projectId },
+    isProjectPolicyHistory,
+    "Project Policy history",
+  );
+}
+
+export async function publishProjectPolicy(
+  projectId: string,
+  expectedCharterRevision: number,
+  expectedPolicyRevision: number | null,
+  draft: ProjectPolicyDraft,
+): Promise<ProjectPolicy> {
+  return invokeAndValidate(
+    "publish_project_policy",
+    { projectId, expectedCharterRevision, expectedPolicyRevision, draft },
+    isProjectPolicy,
+    "Project Policy",
+  );
+}
+
 export async function loadTeams(projectId: string): Promise<TeamView[]> {
   return invokeAndValidate("teams", { projectId }, isTeamList, "Team list");
 }
@@ -622,6 +682,14 @@ export function describeLocalAccountError(error: unknown): string {
       return "Change at least one Charter field before publishing a revision.";
     case "project_unavailable":
       return "Beacon could not verify the Project state.";
+    case "invalid_project_policy":
+      return "Review the Lead capabilities and every Track Record evidence threshold.";
+    case "stale_project_policy":
+      return "This Policy changed. Reload the current revision before publishing.";
+    case "unchanged_project_policy":
+      return "Change at least one Team Lead selection criterion before publishing.";
+    case "project_policy_unavailable":
+      return "Beacon could not verify the Project Policy state.";
     case "invalid_team":
       return "Choose a Project, a Team name, and distinct eligible Residents.";
     case "team_not_found":
@@ -843,6 +911,14 @@ const beaconCapabilities: readonly BeaconCapability[] = [
   "evidence.develop",
 ];
 
+const trackRecordEvidenceKinds: readonly TrackRecordEvidenceKind[] = [
+  "mission_outcome",
+  "evaluation",
+  "policy_compliance",
+  "spend",
+  "receipt",
+];
+
 const teamIneligibilityReasons: readonly TeamIneligibilityReason[] = [
   "configuration_cleared",
   "resident_inactive",
@@ -1006,6 +1082,85 @@ function isProjectCharterHistory(value: unknown): value is ProjectCharter[] {
   return value.every((charter, index) => {
     if (charter.revision !== index + 1) return false;
     return index === 0 || value[index - 1].authoredAtMs <= charter.authoredAtMs;
+  });
+}
+
+function isTrackRecordRequirement(value: unknown): value is TrackRecordRequirement {
+  return (
+    hasExactKeys(value, ["evidenceKind", "minimumCount"]) &&
+    trackRecordEvidenceKinds.includes(value.evidenceKind as TrackRecordEvidenceKind) &&
+    isPositiveInteger(value.minimumCount)
+  );
+}
+
+function isTeamLeadSelectionPolicy(value: unknown): value is TeamLeadSelectionPolicy {
+  if (
+    !hasExactKeys(value, [
+      "ambiguityRule",
+      "availabilityRule",
+      "conflictRule",
+      "requiredCapabilities",
+      "trackRecordRequirements",
+    ]) ||
+    !isOrderedUniqueClosedValues(value.requiredCapabilities, beaconCapabilities, false) ||
+    !value.requiredCapabilities.includes("work.coordinate_mission") ||
+    value.availabilityRule !== "current_team_eligibility" ||
+    value.conflictRule !== "require_no_declared_conflict" ||
+    value.ambiguityRule !== "require_operator_decision" ||
+    !Array.isArray(value.trackRecordRequirements) ||
+    value.trackRecordRequirements.length === 0 ||
+    value.trackRecordRequirements.length > trackRecordEvidenceKinds.length ||
+    !value.trackRecordRequirements.every(isTrackRecordRequirement)
+  ) {
+    return false;
+  }
+  let prior = -1;
+  return value.trackRecordRequirements.every((requirement) => {
+    const index = trackRecordEvidenceKinds.indexOf(requirement.evidenceKind);
+    if (index <= prior) return false;
+    prior = index;
+    return true;
+  });
+}
+
+function isProjectPolicy(value: unknown): value is ProjectPolicy {
+  return (
+    hasExactKeys(value, [
+      "appliesToCurrentCharter",
+      "authoredAtMs",
+      "authoredBy",
+      "charterRevision",
+      "projectId",
+      "revision",
+      "teamLeadSelection",
+      "workspaceId",
+    ]) &&
+    isUuid(value.workspaceId) &&
+    isUuid(value.projectId) &&
+    isPositiveInteger(value.revision) &&
+    isPositiveInteger(value.charterRevision) &&
+    isTeamLeadSelectionPolicy(value.teamLeadSelection) &&
+    value.authoredBy === "operator" &&
+    isNonnegativeInteger(value.authoredAtMs) &&
+    typeof value.appliesToCurrentCharter === "boolean"
+  );
+}
+
+function isProjectPolicyOrNull(value: unknown): value is ProjectPolicy | null {
+  return value === null || isProjectPolicy(value);
+}
+
+function isProjectPolicyHistory(value: unknown): value is ProjectPolicy[] {
+  if (!Array.isArray(value) || value.length > 512 || !value.every(isProjectPolicy)) return false;
+  return value.every((policy, index) => {
+    if (policy.revision !== index + 1) return false;
+    if (index === 0) return true;
+    const prior = value[index - 1];
+    return (
+      prior.workspaceId === policy.workspaceId &&
+      prior.projectId === policy.projectId &&
+      prior.authoredAtMs <= policy.authoredAtMs
+    );
   });
 }
 
