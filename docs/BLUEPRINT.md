@@ -994,7 +994,10 @@ and the desktop can recover from a supervisor restart.
   checks plus manual keyboard and Orca screen-reader testing on supported Linux.
 - Package the verified Linux Alpha as an AppImage.
 
-Exit: every Alpha acceptance criterion in section 9 passes against a disposable repository.
+Exit: every Alpha acceptance criterion in section 9 passes against the Operator's own fleet —
+the frozen pillar repositories held as Projects in one proving Workspace, with Janus as the first
+Mission's repository (ADR 0025). The bundled Sample Project must still pass the same criteria for a
+fresh public install; it is the onboarding path, not the proof.
 
 Distribute initial builds as invite-only technical alphas. Expand access only after invited
 evaluators complete the core loop and the resulting safety, usability, and installation findings
