@@ -271,6 +271,16 @@ An immutable Operator-authored version of Project rules, bound to one exact Char
 used to evaluate future decisions without granting authority itself.
 _Avoid_: Live settings, appointment, permission grant
 
+**Repository Binding**:
+An immutable Project revision naming the Git repository a Project works on, its pinned base
+revision, and its Declared Checks. It declares; it never fetches, clones, or runs.
+_Avoid_: Clone, worktree, checkout, target
+
+**Declared Check**:
+A deterministic command a Repository Binding names as evidence a later Evaluation or Run must
+produce, identified by name, argument vector, and working directory. It is not an Evaluation.
+_Avoid_: Test, gate, CI
+
 **Autonomy Profile**:
 The Project-level posture that determines which classes of actions may proceed automatically.
 _Avoid_: Mode, trust level

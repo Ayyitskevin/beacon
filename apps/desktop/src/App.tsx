@@ -38,6 +38,8 @@ import {
   loadProjectCharterHistory,
   loadProjectPolicy,
   loadProjectPolicyHistory,
+  loadProjectRepository,
+  loadProjectRepositoryHistory,
   loadProjects,
   loadResidentCapabilityCatalog,
   loadResidentConfigurations,
@@ -57,6 +59,8 @@ import {
   type ProjectDraft,
   type ProjectPolicy,
   type ProjectPolicyDraft,
+  type ProjectRepository,
+  type RepositoryDraft,
   type ProjectSummary,
   type ProjectView,
   type MissionDraft,
@@ -68,6 +72,7 @@ import {
   recoverLocalOperatorAccount,
   reviseProjectCharter,
   publishProjectPolicy,
+  bindProjectRepository,
   retireResident,
   setLocalSessionTimeout,
   signInWithLocalPassword,
@@ -272,6 +277,10 @@ export function App() {
   const [charterHistory, setCharterHistory] = useState<ProjectCharter[] | null>(null);
   const [projectPolicy, setProjectPolicy] = useState<ProjectPolicy | null>(null);
   const [projectPolicyHistory, setProjectPolicyHistory] = useState<ProjectPolicy[] | null>(null);
+  const [projectRepository, setProjectRepository] = useState<ProjectRepository | null>(null);
+  const [projectRepositoryHistory, setProjectRepositoryHistory] = useState<
+    ProjectRepository[] | null
+  >(null);
   const [teams, setTeams] = useState<TeamView[] | null>(null);
   const [missions, setMissions] = useState<MissionView[] | null>(null);
   const [teamConfigurations, setTeamConfigurations] =
@@ -279,6 +288,7 @@ export function App() {
   const [projectComposerOpen, setProjectComposerOpen] = useState(false);
   const [charterComposerOpen, setCharterComposerOpen] = useState(false);
   const [policyComposerOpen, setPolicyComposerOpen] = useState(false);
+  const [repositoryComposerOpen, setRepositoryComposerOpen] = useState(false);
   const [teamComposerOpen, setTeamComposerOpen] = useState(false);
   const [missionComposerOpen, setMissionComposerOpen] = useState(false);
   const [localModelDiscovery, setLocalModelDiscovery] =
@@ -314,12 +324,15 @@ export function App() {
       setCharterHistory(null);
       setProjectPolicy(null);
       setProjectPolicyHistory(null);
+      setProjectRepository(null);
+      setProjectRepositoryHistory(null);
       setTeams(null);
       setMissions(null);
       setTeamConfigurations(null);
       setProjectComposerOpen(false);
       setCharterComposerOpen(false);
       setPolicyComposerOpen(false);
+      setRepositoryComposerOpen(false);
       setTeamComposerOpen(false);
       setMissionComposerOpen(false);
       setActiveApplication("Briefing");
@@ -362,12 +375,15 @@ export function App() {
     setCharterHistory(null);
     setProjectPolicy(null);
     setProjectPolicyHistory(null);
+    setProjectRepository(null);
+    setProjectRepositoryHistory(null);
     setTeams(null);
     setMissions(null);
     setTeamConfigurations(null);
     setProjectComposerOpen(false);
     setCharterComposerOpen(false);
     setPolicyComposerOpen(false);
+    setRepositoryComposerOpen(false);
     setTeamComposerOpen(false);
     setMissionComposerOpen(false);
     setActiveApplication("Briefing");
@@ -395,12 +411,15 @@ export function App() {
         setCharterHistory(null);
         setProjectPolicy(null);
         setProjectPolicyHistory(null);
+        setProjectRepository(null);
+        setProjectRepositoryHistory(null);
         setTeams(null);
         setMissions(null);
         setTeamConfigurations(null);
         setProjectComposerOpen(false);
         setCharterComposerOpen(false);
         setPolicyComposerOpen(false);
+        setRepositoryComposerOpen(false);
         setTeamComposerOpen(false);
         setMissionComposerOpen(false);
         setViewState("error");
@@ -454,6 +473,7 @@ export function App() {
     setMissions(null);
     setTeamConfigurations(null);
     setPolicyComposerOpen(false);
+    setRepositoryComposerOpen(false);
     setTeamComposerOpen(false);
     setMissionComposerOpen(false);
     void Promise.all([loadTeams(selectedProject.id), loadMissions(selectedProject.id)]).then(
@@ -491,12 +511,15 @@ export function App() {
             setCharterHistory(null);
             setProjectPolicy(null);
             setProjectPolicyHistory(null);
+            setProjectRepository(null);
+            setProjectRepositoryHistory(null);
             setTeams(null);
             setMissions(null);
             setTeamConfigurations(null);
             setProjectComposerOpen(false);
             setCharterComposerOpen(false);
             setPolicyComposerOpen(false);
+            setRepositoryComposerOpen(false);
             setTeamComposerOpen(false);
             setMissionComposerOpen(false);
             setActiveApplication("Briefing");
@@ -514,12 +537,15 @@ export function App() {
           setCharterHistory(null);
           setProjectPolicy(null);
           setProjectPolicyHistory(null);
+          setProjectRepository(null);
+          setProjectRepositoryHistory(null);
           setTeams(null);
           setMissions(null);
           setTeamConfigurations(null);
           setProjectComposerOpen(false);
           setCharterComposerOpen(false);
           setPolicyComposerOpen(false);
+          setRepositoryComposerOpen(false);
           setTeamComposerOpen(false);
           setMissionComposerOpen(false);
           setViewState("error");
@@ -558,12 +584,15 @@ export function App() {
           setCharterHistory(null);
           setProjectPolicy(null);
           setProjectPolicyHistory(null);
+          setProjectRepository(null);
+          setProjectRepositoryHistory(null);
           setTeams(null);
           setMissions(null);
           setTeamConfigurations(null);
           setProjectComposerOpen(false);
           setCharterComposerOpen(false);
           setPolicyComposerOpen(false);
+          setRepositoryComposerOpen(false);
           setTeamComposerOpen(false);
           setMissionComposerOpen(false);
           setViewState("error");
@@ -700,12 +729,15 @@ export function App() {
       setCharterHistory(null);
       setProjectPolicy(null);
       setProjectPolicyHistory(null);
+      setProjectRepository(null);
+      setProjectRepositoryHistory(null);
       setTeams(null);
       setMissions(null);
       setTeamConfigurations(null);
       setProjectComposerOpen(false);
       setCharterComposerOpen(false);
       setPolicyComposerOpen(false);
+      setRepositoryComposerOpen(false);
       setTeamComposerOpen(false);
       setMissionComposerOpen(false);
       setLocalModelDiscovery(null);
@@ -894,28 +926,37 @@ export function App() {
 
   async function openProject(projectId: string) {
     await runAction(async () => {
-      const [project, history, policy, policyHistory] = await Promise.all([
-        loadProject(projectId),
-        loadProjectCharterHistory(projectId),
-        loadProjectPolicy(projectId),
-        loadProjectPolicyHistory(projectId),
-      ]);
+      const [project, history, policy, policyHistory, repository, repositoryHistory] =
+        await Promise.all([
+          loadProject(projectId),
+          loadProjectCharterHistory(projectId),
+          loadProjectPolicy(projectId),
+          loadProjectPolicyHistory(projectId),
+          loadProjectRepository(projectId),
+          loadProjectRepositoryHistory(projectId),
+        ]);
       if (history.at(-1)?.revision !== project.charter.revision) {
         throw new Error("Beacon received inconsistent Project Charter history.");
       }
       if ((policyHistory.at(-1)?.revision ?? null) !== (policy?.revision ?? null)) {
         throw new Error("Beacon received inconsistent Project Policy history.");
       }
+      if ((repositoryHistory.at(-1)?.revision ?? null) !== (repository?.revision ?? null)) {
+        throw new Error("Beacon received inconsistent Project Repository history.");
+      }
       setSelectedProject(project);
       setCharterHistory(history);
       setProjectPolicy(policy);
       setProjectPolicyHistory(policyHistory);
+      setProjectRepository(repository);
+      setProjectRepositoryHistory(repositoryHistory);
       setTeams(null);
       setMissions(null);
       setTeamConfigurations(null);
       setProjectComposerOpen(false);
       setCharterComposerOpen(false);
       setPolicyComposerOpen(false);
+      setRepositoryComposerOpen(false);
       setTeamComposerOpen(false);
       setMissionComposerOpen(false);
     });
@@ -938,12 +979,15 @@ export function App() {
       setCharterHistory([created.charter]);
       setProjectPolicy(null);
       setProjectPolicyHistory([]);
+      setProjectRepository(null);
+      setProjectRepositoryHistory([]);
       setTeams([]);
       setMissions([]);
       setTeamConfigurations(null);
       setProjectComposerOpen(false);
       setCharterComposerOpen(false);
       setPolicyComposerOpen(false);
+      setRepositoryComposerOpen(false);
       setTeamComposerOpen(false);
       setMissionComposerOpen(false);
     });
@@ -964,6 +1008,12 @@ export function App() {
       );
       setProjectPolicyHistory((current) =>
         current?.map((policy) => ({ ...policy, appliesToCurrentCharter: false })) ?? null,
+      );
+      setProjectRepository((current) =>
+        current ? { ...current, appliesToCurrentCharter: false } : null,
+      );
+      setProjectRepositoryHistory((current) =>
+        current?.map((repository) => ({ ...repository, appliesToCurrentCharter: false })) ?? null,
       );
       setProjects((current) =>
         current?.map((project) =>
@@ -992,6 +1042,22 @@ export function App() {
       setProjectPolicy(published);
       setProjectPolicyHistory((current) => [...(current ?? []), published]);
       setPolicyComposerOpen(false);
+      setRepositoryComposerOpen(false);
+    });
+  }
+
+  async function bindRepository(draft: RepositoryDraft) {
+    if (!selectedProject) return;
+    await runAction(async () => {
+      const bound = await bindProjectRepository(
+        selectedProject.id,
+        selectedProject.charter.revision,
+        projectRepository?.revision ?? null,
+        draft,
+      );
+      setProjectRepository(bound);
+      setProjectRepositoryHistory((current) => [...(current ?? []), bound]);
+      setRepositoryComposerOpen(false);
     });
   }
 
@@ -1000,6 +1066,7 @@ export function App() {
       setTeamConfigurations(await loadResidentConfigurations());
       setCharterComposerOpen(false);
       setPolicyComposerOpen(false);
+      setRepositoryComposerOpen(false);
       setMissionComposerOpen(false);
       setTeamComposerOpen(true);
     });
@@ -1021,6 +1088,7 @@ export function App() {
   function openMissionComposer() {
     setCharterComposerOpen(false);
     setPolicyComposerOpen(false);
+    setRepositoryComposerOpen(false);
     setTeamComposerOpen(false);
     setTeamConfigurations(null);
     setMissionComposerOpen(true);
@@ -1210,6 +1278,8 @@ export function App() {
               charterHistory={charterHistory}
               projectPolicy={projectPolicy}
               projectPolicyHistory={projectPolicyHistory}
+              projectRepository={projectRepository}
+              projectRepositoryHistory={projectRepositoryHistory}
               teams={teams}
               missions={missions}
               residents={residents}
@@ -1217,6 +1287,7 @@ export function App() {
               composerOpen={projectComposerOpen}
               charterComposerOpen={charterComposerOpen}
               policyComposerOpen={policyComposerOpen}
+              repositoryComposerOpen={repositoryComposerOpen}
               teamComposerOpen={teamComposerOpen}
               missionComposerOpen={missionComposerOpen}
               busy={busy}
@@ -1226,12 +1297,15 @@ export function App() {
                 setCharterHistory(null);
                 setProjectPolicy(null);
                 setProjectPolicyHistory(null);
+                setProjectRepository(null);
+                setProjectRepositoryHistory(null);
                 setTeams(null);
                 setMissions(null);
                 setTeamConfigurations(null);
                 setProjectComposerOpen(true);
                 setCharterComposerOpen(false);
                 setPolicyComposerOpen(false);
+                setRepositoryComposerOpen(false);
                 setTeamComposerOpen(false);
                 setMissionComposerOpen(false);
               }}
@@ -1240,6 +1314,7 @@ export function App() {
               onSubmitProject={createProjectFromCharter}
               onReviseCharter={() => {
                 setPolicyComposerOpen(false);
+                setRepositoryComposerOpen(false);
                 setTeamComposerOpen(false);
                 setTeamConfigurations(null);
                 setMissionComposerOpen(false);
@@ -1249,6 +1324,7 @@ export function App() {
               onSubmitCharterRevision={publishCharterRevision}
               onOpenPolicyComposer={() => {
                 setCharterComposerOpen(false);
+                setRepositoryComposerOpen(false);
                 setTeamComposerOpen(false);
                 setTeamConfigurations(null);
                 setMissionComposerOpen(false);
@@ -1256,6 +1332,16 @@ export function App() {
               }}
               onCancelPolicyComposer={() => setPolicyComposerOpen(false)}
               onSubmitProjectPolicy={(draft) => void publishTeamLeadPolicy(draft)}
+              onOpenRepositoryComposer={() => {
+                setCharterComposerOpen(false);
+                setPolicyComposerOpen(false);
+                setTeamComposerOpen(false);
+                setTeamConfigurations(null);
+                setMissionComposerOpen(false);
+                setRepositoryComposerOpen(true);
+              }}
+              onCancelRepositoryComposer={() => setRepositoryComposerOpen(false)}
+              onSubmitProjectRepository={(draft) => void bindRepository(draft)}
               onOpenTeamComposer={() => void prepareTeamFormation()}
               onCancelTeamComposer={() => {
                 setTeamComposerOpen(false);

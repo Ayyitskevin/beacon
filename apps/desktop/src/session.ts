@@ -126,6 +126,28 @@ export type ProjectPolicy = ProjectPolicyDraft & {
   appliesToCurrentCharter: boolean;
 };
 
+export type RepositorySourceKind = "local_path" | "git_url";
+export type DeclaredCheck = {
+  name: string;
+  argv: string[];
+  workingDirectory: string;
+};
+export type RepositoryDraft = {
+  sourceKind: RepositorySourceKind;
+  source: string;
+  baseRevision: string;
+  declaredChecks: DeclaredCheck[];
+};
+export type ProjectRepository = RepositoryDraft & {
+  workspaceId: string;
+  projectId: string;
+  revision: number;
+  charterRevision: number;
+  authorKind: "operator";
+  authoredAtMs: number;
+  appliesToCurrentCharter: boolean;
+};
+
 export type DiscoveryStatus = "available" | "unavailable" | "invalid_response";
 export type LocalModelDetails = {
   format: string;
@@ -548,6 +570,40 @@ export async function publishProjectPolicy(
   );
 }
 
+export async function loadProjectRepository(projectId: string): Promise<ProjectRepository | null> {
+  return invokeAndValidate(
+    "current_project_repository",
+    { projectId },
+    isProjectRepositoryOrNull,
+    "Project Repository",
+  );
+}
+
+export async function loadProjectRepositoryHistory(
+  projectId: string,
+): Promise<ProjectRepository[]> {
+  return invokeAndValidate(
+    "project_repository_history",
+    { projectId },
+    isProjectRepositoryHistory,
+    "Project Repository history",
+  );
+}
+
+export async function bindProjectRepository(
+  projectId: string,
+  expectedCharterRevision: number,
+  expectedPriorRepositoryRevision: number | null,
+  draft: RepositoryDraft,
+): Promise<ProjectRepository> {
+  return invokeAndValidate(
+    "bind_project_repository",
+    { projectId, expectedCharterRevision, expectedPriorRepositoryRevision, draft },
+    isProjectRepository,
+    "Project Repository",
+  );
+}
+
 export async function loadTeams(projectId: string): Promise<TeamView[]> {
   return invokeAndValidate("teams", { projectId }, isTeamList, "Team list");
 }
@@ -690,6 +746,14 @@ export function describeLocalAccountError(error: unknown): string {
       return "Change at least one Team Lead selection criterion before publishing.";
     case "project_policy_unavailable":
       return "Beacon could not verify the Project Policy state.";
+    case "invalid_project_repository":
+      return "Review the repository source, the base revision, and every declared check.";
+    case "stale_project_repository":
+      return "This binding changed. Reload the current revision before binding.";
+    case "unchanged_project_repository":
+      return "Change the source, the base revision, or a declared check before binding.";
+    case "project_repository_unavailable":
+      return "Beacon could not verify the Project Repository state.";
     case "invalid_team":
       return "Choose a Project, a Team name, and distinct eligible Residents.";
     case "team_not_found":
@@ -918,6 +982,8 @@ const trackRecordEvidenceKinds: readonly TrackRecordEvidenceKind[] = [
   "spend",
   "receipt",
 ];
+
+const repositorySourceKinds: readonly RepositorySourceKind[] = ["local_path", "git_url"];
 
 const teamIneligibilityReasons: readonly TeamIneligibilityReason[] = [
   "configuration_cleared",
@@ -1160,6 +1226,103 @@ function isProjectPolicyHistory(value: unknown): value is ProjectPolicy[] {
       prior.workspaceId === policy.workspaceId &&
       prior.projectId === policy.projectId &&
       prior.authoredAtMs <= policy.authoredAtMs
+    );
+  });
+}
+
+function isCheckArgument(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && !value.includes("\u0000");
+}
+
+function isRepositoryRelativeDirectory(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0) return false;
+  if (value === ".") return true;
+  if (value.startsWith("/") || value.includes("\\") || value.includes("\u0000")) return false;
+  return value
+    .split("/")
+    .every((component) => component.length > 0 && component !== "." && component !== "..");
+}
+
+function isDeclaredCheck(value: unknown): value is DeclaredCheck {
+  return (
+    hasExactKeys(value, ["argv", "name", "workingDirectory"]) &&
+    typeof value.name === "string" &&
+    value.name.length <= 64 &&
+    /^[a-z0-9][a-z0-9._-]*$/.test(value.name) &&
+    Array.isArray(value.argv) &&
+    value.argv.length > 0 &&
+    value.argv.every(isCheckArgument) &&
+    isRepositoryRelativeDirectory(value.workingDirectory)
+  );
+}
+
+function isDeclaredCheckList(value: unknown): value is DeclaredCheck[] {
+  if (!Array.isArray(value) || value.length === 0 || !value.every(isDeclaredCheck)) return false;
+  return value.every((check, index) => index === 0 || value[index - 1].name < check.name);
+}
+
+function isRepositorySource(kind: RepositorySourceKind, value: unknown): value is string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > 2000 ||
+    value.trim() !== value
+  ) {
+    return false;
+  }
+  if (kind === "local_path") return value.startsWith("/") && !value.endsWith("/");
+  return /^(?:https|ssh):\/\/\S+$/.test(value) || /^\S+@[^\s/:]+:\S+$/.test(value);
+}
+
+function isBaseRevision(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{40}$/.test(value);
+}
+
+function isProjectRepository(value: unknown): value is ProjectRepository {
+  return (
+    hasExactKeys(value, [
+      "appliesToCurrentCharter",
+      "authorKind",
+      "authoredAtMs",
+      "baseRevision",
+      "charterRevision",
+      "declaredChecks",
+      "projectId",
+      "revision",
+      "source",
+      "sourceKind",
+      "workspaceId",
+    ]) &&
+    isUuid(value.workspaceId) &&
+    isUuid(value.projectId) &&
+    isPositiveInteger(value.revision) &&
+    isPositiveInteger(value.charterRevision) &&
+    repositorySourceKinds.includes(value.sourceKind as RepositorySourceKind) &&
+    isRepositorySource(value.sourceKind as RepositorySourceKind, value.source) &&
+    isBaseRevision(value.baseRevision) &&
+    isDeclaredCheckList(value.declaredChecks) &&
+    value.authorKind === "operator" &&
+    isNonnegativeInteger(value.authoredAtMs) &&
+    typeof value.appliesToCurrentCharter === "boolean"
+  );
+}
+
+function isProjectRepositoryOrNull(value: unknown): value is ProjectRepository | null {
+  return value === null || isProjectRepository(value);
+}
+
+function isProjectRepositoryHistory(value: unknown): value is ProjectRepository[] {
+  if (!Array.isArray(value) || value.length > 512 || !value.every(isProjectRepository)) {
+    return false;
+  }
+  return value.every((repository, index) => {
+    if (repository.revision !== index + 1) return false;
+    if (index === 0) return true;
+    const prior = value[index - 1];
+    return (
+      prior.workspaceId === repository.workspaceId &&
+      prior.projectId === repository.projectId &&
+      prior.authoredAtMs <= repository.authoredAtMs
     );
   });
 }

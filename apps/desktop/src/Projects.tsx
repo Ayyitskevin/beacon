@@ -18,17 +18,20 @@ import type {
   ProjectDraft,
   ProjectPolicy,
   ProjectPolicyDraft,
+  ProjectRepository,
   ProjectSummary,
   ProjectView,
   MissionDraft,
   MissionView,
   ResidentAgentView,
   ResidentConfiguration,
+  RepositoryDraft,
   TeamDraft,
   TeamView,
 } from "./session";
 import { ProjectMissions } from "./ProjectMissions";
 import { ProjectPolicySection } from "./ProjectPolicy";
+import { ProjectRepositorySection } from "./ProjectRepository";
 import { ProjectTeams } from "./ProjectTeams";
 
 const useStyles = makeStyles({
@@ -146,6 +149,8 @@ export function ProjectsWorkspace({
   charterHistory,
   projectPolicy,
   projectPolicyHistory,
+  projectRepository,
+  projectRepositoryHistory,
   teams,
   missions,
   residents,
@@ -153,6 +158,7 @@ export function ProjectsWorkspace({
   composerOpen,
   charterComposerOpen,
   policyComposerOpen,
+  repositoryComposerOpen,
   teamComposerOpen,
   missionComposerOpen,
   busy,
@@ -167,6 +173,9 @@ export function ProjectsWorkspace({
   onOpenPolicyComposer,
   onCancelPolicyComposer,
   onSubmitProjectPolicy,
+  onOpenRepositoryComposer,
+  onCancelRepositoryComposer,
+  onSubmitProjectRepository,
   onOpenTeamComposer,
   onCancelTeamComposer,
   onSubmitTeam,
@@ -179,6 +188,8 @@ export function ProjectsWorkspace({
   charterHistory: ProjectCharter[] | null;
   projectPolicy: ProjectPolicy | null;
   projectPolicyHistory: ProjectPolicy[] | null;
+  projectRepository: ProjectRepository | null;
+  projectRepositoryHistory: ProjectRepository[] | null;
   teams: TeamView[] | null;
   missions: MissionView[] | null;
   residents: ResidentAgentView[] | null;
@@ -186,6 +197,7 @@ export function ProjectsWorkspace({
   composerOpen: boolean;
   charterComposerOpen: boolean;
   policyComposerOpen: boolean;
+  repositoryComposerOpen: boolean;
   teamComposerOpen: boolean;
   missionComposerOpen: boolean;
   busy: boolean;
@@ -200,6 +212,9 @@ export function ProjectsWorkspace({
   onOpenPolicyComposer: () => void;
   onCancelPolicyComposer: () => void;
   onSubmitProjectPolicy: (draft: ProjectPolicyDraft) => void;
+  onOpenRepositoryComposer: () => void;
+  onCancelRepositoryComposer: () => void;
+  onSubmitProjectRepository: (draft: RepositoryDraft) => void;
   onOpenTeamComposer: () => void;
   onCancelTeamComposer: () => void;
   onSubmitTeam: (draft: TeamDraft) => void;
@@ -222,6 +237,7 @@ export function ProjectsWorkspace({
         {!composerOpen &&
           !charterComposerOpen &&
           !policyComposerOpen &&
+          !repositoryComposerOpen &&
           !teamComposerOpen &&
           !missionComposerOpen && (
           <Button appearance="primary" onClick={onCreate} disabled={busy}>
@@ -250,18 +266,24 @@ export function ProjectsWorkspace({
           history={charterHistory}
           policy={projectPolicy}
           policyHistory={projectPolicyHistory}
+          repository={projectRepository}
+          repositoryHistory={projectRepositoryHistory}
           teams={teams}
           missions={missions}
           residents={residents}
           teamConfigurations={teamConfigurations}
           teamComposerOpen={teamComposerOpen}
           policyComposerOpen={policyComposerOpen}
+          repositoryComposerOpen={repositoryComposerOpen}
           missionComposerOpen={missionComposerOpen}
           busy={busy}
           onRevise={onReviseCharter}
           onOpenPolicyComposer={onOpenPolicyComposer}
           onCancelPolicyComposer={onCancelPolicyComposer}
           onSubmitProjectPolicy={onSubmitProjectPolicy}
+          onOpenRepositoryComposer={onOpenRepositoryComposer}
+          onCancelRepositoryComposer={onCancelRepositoryComposer}
+          onSubmitProjectRepository={onSubmitProjectRepository}
           onOpenTeamComposer={onOpenTeamComposer}
           onCancelTeamComposer={onCancelTeamComposer}
           onSubmitTeam={onSubmitTeam}
@@ -504,18 +526,24 @@ function ProjectRecord({
   history,
   policy,
   policyHistory,
+  repository,
+  repositoryHistory,
   teams,
   missions,
   residents,
   teamConfigurations,
   teamComposerOpen,
   policyComposerOpen,
+  repositoryComposerOpen,
   missionComposerOpen,
   busy,
   onRevise,
   onOpenPolicyComposer,
   onCancelPolicyComposer,
   onSubmitProjectPolicy,
+  onOpenRepositoryComposer,
+  onCancelRepositoryComposer,
+  onSubmitProjectRepository,
   onOpenTeamComposer,
   onCancelTeamComposer,
   onSubmitTeam,
@@ -527,18 +555,24 @@ function ProjectRecord({
   history: ProjectCharter[] | null;
   policy: ProjectPolicy | null;
   policyHistory: ProjectPolicy[] | null;
+  repository: ProjectRepository | null;
+  repositoryHistory: ProjectRepository[] | null;
   teams: TeamView[] | null;
   missions: MissionView[] | null;
   residents: ResidentAgentView[] | null;
   teamConfigurations: ResidentConfiguration[] | null;
   teamComposerOpen: boolean;
   policyComposerOpen: boolean;
+  repositoryComposerOpen: boolean;
   missionComposerOpen: boolean;
   busy: boolean;
   onRevise: () => void;
   onOpenPolicyComposer: () => void;
   onCancelPolicyComposer: () => void;
   onSubmitProjectPolicy: (draft: ProjectPolicyDraft) => void;
+  onOpenRepositoryComposer: () => void;
+  onCancelRepositoryComposer: () => void;
+  onSubmitProjectRepository: (draft: RepositoryDraft) => void;
   onOpenTeamComposer: () => void;
   onCancelTeamComposer: () => void;
   onSubmitTeam: (draft: TeamDraft) => void;
@@ -627,6 +661,17 @@ function ProjectRecord({
         onOpenComposer={onOpenPolicyComposer}
         onCancel={onCancelPolicyComposer}
         onSubmit={onSubmitProjectPolicy}
+      />
+      <ProjectRepositorySection
+        projectId={project.id}
+        charterRevision={charter.revision}
+        repository={repository}
+        history={repositoryHistory}
+        composerOpen={repositoryComposerOpen}
+        busy={busy}
+        onOpenComposer={onOpenRepositoryComposer}
+        onCancel={onCancelRepositoryComposer}
+        onSubmit={onSubmitProjectRepository}
       />
       <ProjectTeams
         projectId={project.id}
