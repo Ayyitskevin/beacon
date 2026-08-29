@@ -210,7 +210,13 @@ fn a_session_that_locks_during_http_withholds_the_discovery_result() {
     let accounts_for_lock = Arc::clone(&accounts);
     let (locked_tx, locked_rx) = mpsc::channel();
     let locking = thread::spawn(move || locked_tx.send(accounts_for_lock.lock()).unwrap());
-    let lock_result = locked_rx.recv_timeout(Duration::from_millis(250));
+    // The property is ordering, not speed: the fixture holds the HTTP response until
+    // `release_tx` fires below, so a lock that completes at all before that point cannot
+    // have waited on discovery. The budget only has to outlast a durable `lock()` —
+    // it takes the state mutex and writes a security event to SQLite — on a loaded CI
+    // runner. 250 ms did not (run 33274424854, 2026-08-29): the same commit passed in
+    // the parallel run, and the panic read as "held the mutex" when nothing was held.
+    let lock_result = locked_rx.recv_timeout(Duration::from_secs(5));
     release_tx.send(()).unwrap();
     server.join().unwrap();
     locking.join().unwrap();
