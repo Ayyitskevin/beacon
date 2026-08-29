@@ -19,6 +19,7 @@ mod resident_configuration;
 mod resident_lifecycle;
 mod resource_discovery;
 mod starter_organization;
+mod team;
 
 #[cfg(unix)]
 mod local_transport;
@@ -63,8 +64,12 @@ pub use starter_organization::{
     StarterOrganizationService, StarterOrganizationView, StarterResidentDraft, StarterRole,
     StarterRoleTemplate,
 };
+pub use team::{
+    TeamDraft, TeamError, TeamFormationActor, TeamMemberDraft, TeamMemberView, TeamService,
+    TeamView,
+};
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 const MAX_WORKSPACE_NAME_CHARS: usize = 120;
 
 const SCHEMA_V1: &str = include_str!("../migrations/0001_initial.sql");
@@ -76,6 +81,7 @@ const MIGRATION_V6: &str = include_str!("../migrations/0006_project_charter_revi
 const MIGRATION_V7: &str = include_str!("../migrations/0007_local_model_activations.sql");
 const MIGRATION_V8: &str = include_str!("../migrations/0008_resident_lifecycle.sql");
 const MIGRATION_V9: &str = include_str!("../migrations/0009_resident_configurations.sql");
+const MIGRATION_V10: &str = include_str!("../migrations/0010_teams.sql");
 
 #[derive(Debug, Clone)]
 pub struct StartupConfig {
@@ -144,6 +150,8 @@ pub enum SupervisorError {
     ResidentLifecycleStateMismatch,
     ResidentConfigurationEventMismatch(i64),
     ResidentConfigurationStateMismatch,
+    TeamEventMismatch(i64),
+    TeamStateMismatch,
     SchemaMismatch,
     UnsupportedSchemaVersion(i64),
     IntegrityCheckFailed(String),
@@ -221,6 +229,15 @@ impl fmt::Display for SupervisorError {
                 formatter,
                 "Resident configuration state has no exact audit Event"
             ),
+            Self::TeamEventMismatch(sequence) => {
+                write!(
+                    formatter,
+                    "Event sequence {sequence} does not match Team state"
+                )
+            }
+            Self::TeamStateMismatch => {
+                write!(formatter, "Team state has no exact formation audit Event")
+            }
             Self::SchemaMismatch => {
                 write!(
                     formatter,
@@ -290,6 +307,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V7)?;
                     transaction.execute_batch(MIGRATION_V8)?;
                     transaction.execute_batch(MIGRATION_V9)?;
+                    transaction.execute_batch(MIGRATION_V10)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 2 => {
@@ -301,6 +319,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V7)?;
                     transaction.execute_batch(MIGRATION_V8)?;
                     transaction.execute_batch(MIGRATION_V9)?;
+                    transaction.execute_batch(MIGRATION_V10)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 3 => {
@@ -311,6 +330,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V7)?;
                     transaction.execute_batch(MIGRATION_V8)?;
                     transaction.execute_batch(MIGRATION_V9)?;
+                    transaction.execute_batch(MIGRATION_V10)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 4 => {
@@ -320,6 +340,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V7)?;
                     transaction.execute_batch(MIGRATION_V8)?;
                     transaction.execute_batch(MIGRATION_V9)?;
+                    transaction.execute_batch(MIGRATION_V10)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 5 => {
@@ -328,6 +349,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V7)?;
                     transaction.execute_batch(MIGRATION_V8)?;
                     transaction.execute_batch(MIGRATION_V9)?;
+                    transaction.execute_batch(MIGRATION_V10)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 6 => {
@@ -335,17 +357,25 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V7)?;
                     transaction.execute_batch(MIGRATION_V8)?;
                     transaction.execute_batch(MIGRATION_V9)?;
+                    transaction.execute_batch(MIGRATION_V10)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 7 => {
                     verify_schema(&transaction, 7)?;
                     transaction.execute_batch(MIGRATION_V8)?;
                     transaction.execute_batch(MIGRATION_V9)?;
+                    transaction.execute_batch(MIGRATION_V10)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 8 => {
                     verify_schema(&transaction, 8)?;
                     transaction.execute_batch(MIGRATION_V9)?;
+                    transaction.execute_batch(MIGRATION_V10)?;
+                    verify_schema(&transaction, SCHEMA_VERSION)?;
+                }
+                9 => {
+                    verify_schema(&transaction, 9)?;
+                    transaction.execute_batch(MIGRATION_V10)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 SCHEMA_VERSION => verify_schema(&transaction, SCHEMA_VERSION)?,
@@ -361,6 +391,7 @@ impl Supervisor {
             transaction.execute_batch(MIGRATION_V7)?;
             transaction.execute_batch(MIGRATION_V8)?;
             transaction.execute_batch(MIGRATION_V9)?;
+            transaction.execute_batch(MIGRATION_V10)?;
             verify_schema(&transaction, SCHEMA_VERSION)?;
         }
 
@@ -561,6 +592,9 @@ fn verify_schema(connection: &Connection, version: i64) -> Result<(), Supervisor
     if version >= 9 {
         expected_connection.execute_batch(MIGRATION_V9)?;
     }
+    if version >= 10 {
+        expected_connection.execute_batch(MIGRATION_V10)?;
+    }
     if !(1..=SCHEMA_VERSION).contains(&version) {
         return Err(SupervisorError::UnsupportedSchemaVersion(version));
     }
@@ -628,6 +662,7 @@ enum PersistedEventKind {
     ResidentRetired,
     ResidentConfigurationSet,
     ResidentConfigurationCleared,
+    TeamFormed,
 }
 
 impl PersistedEventKind {
@@ -646,6 +681,7 @@ impl PersistedEventKind {
             Self::ResidentRetired => "resident.retired",
             Self::ResidentConfigurationSet => "resident.configuration_set",
             Self::ResidentConfigurationCleared => "resident.configuration_cleared",
+            Self::TeamFormed => "team.formed",
         }
     }
 
@@ -664,6 +700,7 @@ impl PersistedEventKind {
             "resident.retired" => Ok(Self::ResidentRetired),
             "resident.configuration_set" => Ok(Self::ResidentConfigurationSet),
             "resident.configuration_cleared" => Ok(Self::ResidentConfigurationCleared),
+            "team.formed" => Ok(Self::TeamFormed),
             _ => Err(SupervisorError::InvalidEventKind(value)),
         }
     }
@@ -707,6 +744,7 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
         .map_err(|_| SupervisorError::ResidentLifecycleStateMismatch)?;
     resident_configuration::verify_configuration_state(connection)
         .map_err(|_| SupervisorError::ResidentConfigurationStateMismatch)?;
+    team::verify_team_state(connection).map_err(|_| SupervisorError::TeamStateMismatch)?;
 
     Ok(StoreDiagnostics {
         status: DiagnosticStatus::Ready,
@@ -833,6 +871,10 @@ fn verify_persisted_events(connection: &Connection) -> Result<u64, SupervisorErr
                 )
                 .map_err(|_| SupervisorError::ResidentConfigurationEventMismatch(sequence))?;
             }
+            PersistedEventKind::TeamFormed => {
+                team::verify_team_event(connection, workspace_id, occurred_at_ms, &payload_json)
+                    .map_err(|_| SupervisorError::TeamEventMismatch(sequence))?;
+            }
         }
         count += 1;
     }
@@ -864,7 +906,8 @@ mod tests {
 
     use super::{
         DiagnosticStatus, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6,
-        MIGRATION_V7, MIGRATION_V8, SCHEMA_V1, StartupConfig, Supervisor, SupervisorError,
+        MIGRATION_V7, MIGRATION_V8, MIGRATION_V9, SCHEMA_V1, StartupConfig, Supervisor,
+        SupervisorError,
     };
 
     struct TestStore {
@@ -904,7 +947,7 @@ mod tests {
         assert!(report.workspace.created);
         assert_eq!(report.workspace.name, "Personal");
         assert_eq!(report.diagnostics.status, DiagnosticStatus::Ready);
-        assert_eq!(report.diagnostics.schema_version, 9);
+        assert_eq!(report.diagnostics.schema_version, 10);
         assert_eq!(report.diagnostics.integrity_check, "ok");
         assert_eq!(report.diagnostics.foreign_key_violations, 0);
         assert_eq!(report.diagnostics.workspace_count, 1);
@@ -987,7 +1030,7 @@ mod tests {
         assert_eq!(report.workspace.id, workspace_id);
         assert_eq!(report.workspace.name, "Existing");
         assert!(!report.workspace.created);
-        assert_eq!(report.diagnostics.schema_version, 9);
+        assert_eq!(report.diagnostics.schema_version, 10);
         assert_eq!(report.diagnostics.workspace_count, 1);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         assert_eq!(report.diagnostics.security_event_count, 0);
@@ -1026,7 +1069,7 @@ mod tests {
 
         let report = Supervisor::bootstrap(config(&store.path, "Personal")).unwrap();
 
-        assert_eq!(report.diagnostics.schema_version, 9);
+        assert_eq!(report.diagnostics.schema_version, 10);
         assert_eq!(report.diagnostics.security_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(
@@ -1085,7 +1128,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 9);
+        assert_eq!(report.diagnostics.schema_version, 10);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(
             connection
@@ -1188,7 +1231,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 9);
+        assert_eq!(report.diagnostics.schema_version, 10);
         assert_eq!(report.diagnostics.persisted_event_count, 2);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(
@@ -1250,7 +1293,7 @@ mod tests {
 
         assert_eq!(report.workspace.id, workspace_id);
         assert_eq!(report.workspace.name, "Existing");
-        assert_eq!(report.diagnostics.schema_version, 9);
+        assert_eq!(report.diagnostics.schema_version, 10);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(
@@ -1349,7 +1392,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 9);
+        assert_eq!(report.diagnostics.schema_version, 10);
         assert_eq!(report.diagnostics.persisted_event_count, 2);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(
@@ -1410,7 +1453,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 9);
+        assert_eq!(report.diagnostics.schema_version, 10);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         let event = connection
@@ -1445,6 +1488,77 @@ mod tests {
                 .optional()
                 .unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn version_nine_store_preserves_event_bytes_when_adding_empty_team_state() {
+        let store = TestStore::new("version-nine-migration");
+        let workspace_id = Uuid::new_v4();
+        let payload = serde_json::json!({
+            "workspace_id": workspace_id,
+            "name": "Existing"
+        })
+        .to_string();
+        let connection = Connection::open(&store.path).unwrap();
+        connection.execute_batch(SCHEMA_V1).unwrap();
+        connection.execute_batch(MIGRATION_V2).unwrap();
+        connection.execute_batch(MIGRATION_V3).unwrap();
+        connection.execute_batch(MIGRATION_V4).unwrap();
+        connection.execute_batch(MIGRATION_V5).unwrap();
+        connection.execute_batch(MIGRATION_V6).unwrap();
+        connection.execute_batch(MIGRATION_V7).unwrap();
+        connection.execute_batch(MIGRATION_V8).unwrap();
+        connection.execute_batch(MIGRATION_V9).unwrap();
+        connection
+            .execute(
+                "INSERT INTO workspaces (id, name, created_at_ms) VALUES (?1, 'Existing', 7)",
+                [workspace_id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+                 VALUES (?1, 'workspace.created', ?2, 7)",
+                rusqlite::params![workspace_id.to_string(), payload],
+            )
+            .unwrap();
+        drop(connection);
+
+        let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
+
+        assert_eq!(report.workspace.id, workspace_id);
+        assert_eq!(report.diagnostics.schema_version, 10);
+        assert_eq!(report.diagnostics.persisted_event_count, 1);
+        let connection = Connection::open(&store.path).unwrap();
+        let event = connection
+            .query_row(
+                "SELECT sequence, kind, payload_json, occurred_at_ms FROM events",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(event, (1, "workspace.created".to_owned(), payload, 7));
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM teams", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM team_formation_members", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
         );
     }
 

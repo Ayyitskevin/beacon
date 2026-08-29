@@ -93,7 +93,10 @@ or authority into a Workspace.
 _Avoid_: Shared grant, credential bundle, active configuration
 
 **Team**:
-A named group of Agents assembled to pursue Missions together.
+A durable named group of one or more distinct Agent identities assembled inside one Project. Its
+formation preserves the exact Resident Configuration used for each member, while current
+eligibility is derived without rewriting that evidence. Membership aggregates no Capability or
+authority, and a Team has no permanent lead.
 _Avoid_: Swarm, pool
 
 **Team Lead**:

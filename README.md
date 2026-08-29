@@ -187,6 +187,11 @@ activation, an explicit closed Capability set, and the fixed Alpha no-spend boun
 makes an active Resident eligible for later Team formation but creates no Route, Mission, Run,
 external effect, or execution authority. Clearing the configuration, suspending or retiring the
 Resident, or revoking that exact model activation removes eligibility without erasing history.
+Inside a Project, the authenticated Owner can now form a durable named Team from the exact current
+configurations of one or more eligible Residents. Formation preserves that evidence and reports
+later eligibility changes without rewriting history. It assigns no permanent lead and creates no
+Mission, Run, aggregated capability, spending, model invocation, or external effect. Autonomous
+Resident-issued formation still waits for the Agent command and Policy paths.
 
 The Projects application is the first working suite surface after Briefing. The Owner can create
 a Project from a structured Charter containing its purpose, desired outcomes, constraints,
@@ -224,6 +229,9 @@ boundary.
 [The Resident Configuration checkpoint](docs/implementation/phase-0-resident-configuration.md)
 records exact model binding, explicit Capability selection, fixed no-spend scope, and derived Team
 eligibility without execution authority.
+[The Project Teams checkpoint](docs/implementation/phase-0-project-teams.md) records truthful
+Operator attribution, exact formation evidence, current eligibility, and the no-Mission/no-authority
+boundary.
 Run `scripts/gate` to verify the
 preserved Beacon Legacy Desk, the Rust workspace, the web bundle, and the native desktop build.
 The exact pre-Beacon compatibility boundary is recorded in the
