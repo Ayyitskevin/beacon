@@ -272,6 +272,38 @@ impl From<LocalTransportError> for CommandError {
                 None,
             ),
             LocalTransportError::Remote {
+                code: LocalErrorCode::InvalidProjectPolicy,
+                ..
+            } => (
+                "invalid_project_policy",
+                "Review the Lead capabilities and every Track Record evidence threshold.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::StaleProjectPolicy,
+                ..
+            } => (
+                "stale_project_policy",
+                "Reload the current Policy revision before publishing a new one.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::UnchangedProjectPolicy,
+                ..
+            } => (
+                "unchanged_project_policy",
+                "Change at least one Team Lead selection criterion before publishing.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::ProjectPolicyUnavailable,
+                ..
+            } => (
+                "project_policy_unavailable",
+                "Beacon could not verify the Project Policy state.",
+                None,
+            ),
+            LocalTransportError::Remote {
                 code: LocalErrorCode::InvalidProjectRepository,
                 ..
             } => (
@@ -1975,6 +2007,87 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn policy_refusals_reach_the_interface_under_their_own_code() {
+        let state = TestState::new();
+        begin_password_setup_value(
+            &state.state,
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+        complete_operator_setup_value(&state.state, true).unwrap();
+        let project = create_project_value(
+            &state.state,
+            ProjectDraft {
+                name: "Policy Project".to_owned(),
+                charter: ProjectCharterDraft {
+                    purpose: "Build the agent office.".to_owned(),
+                    desired_outcomes: vec!["Ship a governed vertical slice".to_owned()],
+                    constraints: vec!["Keep Workspace data local".to_owned()],
+                    prohibitions: vec!["Do not deploy publicly".to_owned()],
+                    autonomy_profile: AutonomyProfile::Supervised,
+                },
+            },
+        )
+        .unwrap();
+        let valid = || ProjectPolicyDraft {
+            team_lead_selection: TeamLeadSelectionPolicy {
+                required_capabilities: vec![BeaconCapability::WorkCoordinateMission],
+                availability_rule: TeamLeadAvailabilityRule::CurrentTeamEligibility,
+                track_record_requirements: vec![TrackRecordRequirement {
+                    evidence_kind: TrackRecordEvidenceKind::MissionOutcome,
+                    minimum_count: 1,
+                }],
+                conflict_rule: TeamLeadConflictRule::RequireNoDeclaredConflict,
+                ambiguity_rule: TeamLeadAmbiguityRule::RequireOperatorDecision,
+            },
+        };
+
+        // Before this change every one of these fell through to
+        // "account_service_unavailable", so the matching `case` strings in
+        // session.ts were unreachable. Each refusal must now carry its own code.
+        let mut invalid = valid();
+        invalid.team_lead_selection.required_capabilities.clear();
+        let refusal = publish_project_policy_value(
+            &state.state,
+            project.id,
+            project.charter.revision,
+            None,
+            invalid,
+        )
+        .unwrap_err();
+        assert_eq!(refusal.code, "invalid_project_policy");
+
+        publish_project_policy_value(
+            &state.state,
+            project.id,
+            project.charter.revision,
+            None,
+            valid(),
+        )
+        .unwrap();
+        let unchanged = publish_project_policy_value(
+            &state.state,
+            project.id,
+            project.charter.revision,
+            Some(1),
+            valid(),
+        )
+        .unwrap_err();
+        assert_eq!(unchanged.code, "unchanged_project_policy");
+
+        let stale = publish_project_policy_value(
+            &state.state,
+            project.id,
+            project.charter.revision,
+            None,
+            valid(),
+        )
+        .unwrap_err();
+        assert_eq!(stale.code, "stale_project_policy");
     }
 
     fn repository_project_draft() -> ProjectDraft {
