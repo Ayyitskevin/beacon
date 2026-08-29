@@ -207,6 +207,15 @@ remain ambiguous. Publication records criteria only: it does not evaluate a cand
 replace a Lead, create an Assignment, or grant authority. Track Record evidence, Policy evaluation,
 and Resident-issued command paths remain subsequent slices.
 
+The authenticated Owner can now also bind a Project to the repository it works on. A binding is an
+immutable revision naming one source (an absolute local path or a Git URL), one pinned
+40-character base revision, and one or more Declared Checks, each with a distinct name, an argument
+vector, and a repository-relative working directory. Like a Policy revision, it binds the exact
+current Charter revision and preserves earlier revisions. Binding is a declaration and nothing
+more: Beacon does not open, clone, or fetch the repository, does not confirm that the pinned commit
+exists, and does not run a declared check. Check execution, its evidence, and any Proposal that
+consumes a binding remain subsequent slices.
+
 The Projects application is the first working suite surface after Briefing. The Owner can create
 a Project from a structured Charter containing its purpose, desired outcomes, constraints,
 prohibitions, and an Observe or Supervised autonomy profile. Beacon preserves Charter revision 1
@@ -252,6 +261,9 @@ execution authority out of scope.
 [The Project Policy checkpoint](docs/implementation/phase-0-project-policy.md) records immutable
 Operator-authored Team Lead selection criteria, exact Charter binding, and the no-selection and
 no-authority boundary.
+[The Project Repository checkpoint](docs/implementation/phase-1-project-repository.md) records the
+immutable repository, pinned base revision, and Declared Checks a Project names, and the
+declared-not-verified boundary that keeps clones, fetches, and check execution out of scope.
 Run `scripts/gate` to verify the
 preserved Beacon Legacy Desk, the Rust workspace, the web bundle, and the native desktop build.
 The exact pre-Beacon compatibility boundary is recorded in the

@@ -524,6 +524,8 @@ describe("Beacon desktop shell", () => {
       }
       if (command === "project_policy") return Promise.resolve(null);
       if (command === "project_policy_history") return Promise.resolve([]);
+      if (command === "current_project_repository") return Promise.resolve(null);
+      if (command === "project_repository_history") return Promise.resolve([]);
       if (command === "teams") return Promise.resolve([]);
       if (command === "missions") return Promise.resolve([]);
       if (command === "record_operator_activity") return Promise.resolve(null);
@@ -610,6 +612,8 @@ describe("Beacon desktop shell", () => {
       if (command === "project_charter_history") return Promise.resolve([priorCharter, charter]);
       if (command === "project_policy") return Promise.resolve(null);
       if (command === "project_policy_history") return Promise.resolve([]);
+      if (command === "current_project_repository") return Promise.resolve(null);
+      if (command === "project_repository_history") return Promise.resolve([]);
       if (command === "publish_project_policy") return Promise.resolve(published);
       if (command === "teams") return Promise.resolve([]);
       if (command === "missions") return Promise.resolve([]);
@@ -656,6 +660,205 @@ describe("Beacon desktop shell", () => {
     expect(await screen.findByText(/^Policy revision 1/)).toBeVisible();
     expect(screen.getByText("No Lead selected")).toBeVisible();
     expect(screen.getByText(/Operator decides whenever eligible candidates remain ambiguous/i)).toBeVisible();
+  });
+
+  it("binds a Project repository and its declared checks without opening the repository", async () => {
+    const user = userEvent.setup();
+    const charter = {
+      revision: 2,
+      purpose: "Build a trustworthy local software factory.",
+      desiredOutcomes: ["Ship an attributable Mission"],
+      constraints: ["Keep Workspace data local"],
+      prohibitions: ["Do not deploy publicly"],
+      autonomyProfile: "supervised",
+      budgetBoundary: "no_spend",
+      externalEffects: "prohibited",
+      authoredAtMs: 123,
+    } as const;
+    const project = {
+      id: "33333333-3333-4333-8333-333333333333",
+      workspaceId: acceptedOrganization.workspaceId,
+      name: "Beacon Alpha",
+      charter,
+      createdAtMs: 120,
+    } as const;
+    const summary = {
+      id: project.id,
+      name: project.name,
+      charterRevision: charter.revision,
+      autonomyProfile: charter.autonomyProfile,
+      createdAtMs: project.createdAtMs,
+    } as const;
+    const bound = {
+      workspaceId: project.workspaceId,
+      projectId: project.id,
+      revision: 1,
+      charterRevision: charter.revision,
+      sourceKind: "local_path",
+      source: "/home/kevin-lee/ai-workspace/janus",
+      baseRevision: "6b62110e9c918c67219ab0b45dbf4dd9937d6620",
+      declaredChecks: [
+        {
+          name: "pytest",
+          argv: ["pytest", "tests/test_invariants.py", "-q"],
+          workingDirectory: ".",
+        },
+      ],
+      authorKind: "operator",
+      authoredAtMs: 124,
+      appliesToCurrentCharter: true,
+    } as const;
+    invokeMock.mockImplementation((command) => {
+      if (command === "session_status") return Promise.resolve(status("unlocked"));
+      if (command === "authentication_capabilities") return Promise.resolve(capabilities);
+      if (command === "session_policy") return Promise.resolve(sessionPolicy);
+      if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+      if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
+      if (command === "residents") return Promise.resolve(residentRoster);
+      if (command === "record_operator_activity") return Promise.resolve(null);
+      if (command === "projects") return Promise.resolve([summary]);
+      if (command === "project") return Promise.resolve(project);
+      if (command === "project_charter_history")
+        return Promise.resolve([{ ...charter, revision: 1, authoredAtMs: 122 }, charter]);
+      if (command === "project_policy") return Promise.resolve(null);
+      if (command === "project_policy_history") return Promise.resolve([]);
+      if (command === "current_project_repository") return Promise.resolve(null);
+      if (command === "project_repository_history") return Promise.resolve([]);
+      if (command === "bind_project_repository") return Promise.resolve(bound);
+      if (command === "teams") return Promise.resolve([]);
+      if (command === "missions") return Promise.resolve([]);
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    await user.click(await screen.findByRole("button", { name: /Beacon Alpha/i }));
+
+    expect(await screen.findByText("No repository has been bound to this Project.")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Bind Repository" }));
+    expect(await screen.findByRole("form", { name: "Bind Repository" })).toBeVisible();
+    expect(screen.getByRole("radio", { name: "Local path" })).toBeChecked();
+    await user.type(screen.getByLabelText("Repository source"), bound.source);
+    await user.type(screen.getByLabelText("Pinned base revision"), bound.baseRevision);
+    await user.type(screen.getByLabelText("Check 1 name"), "pytest");
+    await user.type(
+      screen.getByLabelText("Check 1 arguments"),
+      "pytest{enter}tests/test_invariants.py{enter}-q",
+    );
+    expect(
+      screen.getAllByText("Declared, not verified — Beacon has not opened this repository.").length,
+    ).toBeGreaterThan(0);
+    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
+    expect(results.violations).toEqual([]);
+    await user.click(screen.getByRole("button", { name: "Bind Repository revision 1" }));
+
+    expect(invokeMock).toHaveBeenCalledWith("bind_project_repository", {
+      projectId: project.id,
+      expectedCharterRevision: charter.revision,
+      expectedPriorRepositoryRevision: null,
+      draft: {
+        sourceKind: "local_path",
+        source: bound.source,
+        baseRevision: bound.baseRevision,
+        declaredChecks: [
+          {
+            name: "pytest",
+            argv: ["pytest", "tests/test_invariants.py", "-q"],
+            workingDirectory: ".",
+          },
+        ],
+      },
+    });
+    expect(await screen.findByText(/^Repository revision 1/)).toBeVisible();
+    expect(screen.getByText(bound.baseRevision)).toBeVisible();
+    expect(
+      screen.getByText("Declared, not verified — Beacon has not opened this repository."),
+    ).toBeVisible();
+  });
+
+  it("warns that a bound repository no longer applies to the current Charter", async () => {
+    const user = userEvent.setup();
+    const charter = {
+      revision: 2,
+      purpose: "Build a trustworthy local software factory.",
+      desiredOutcomes: ["Ship an attributable Mission"],
+      constraints: ["Keep Workspace data local"],
+      prohibitions: ["Do not deploy publicly"],
+      autonomyProfile: "supervised",
+      budgetBoundary: "no_spend",
+      externalEffects: "prohibited",
+      authoredAtMs: 123,
+    } as const;
+    const project = {
+      id: "33333333-3333-4333-8333-333333333333",
+      workspaceId: acceptedOrganization.workspaceId,
+      name: "Beacon Alpha",
+      charter,
+      createdAtMs: 120,
+    } as const;
+    const summary = {
+      id: project.id,
+      name: project.name,
+      charterRevision: charter.revision,
+      autonomyProfile: charter.autonomyProfile,
+      createdAtMs: project.createdAtMs,
+    } as const;
+    const stale = {
+      workspaceId: project.workspaceId,
+      projectId: project.id,
+      revision: 1,
+      charterRevision: 1,
+      sourceKind: "local_path",
+      source: "/home/kevin-lee/ai-workspace/janus",
+      baseRevision: "6b62110e9c918c67219ab0b45dbf4dd9937d6620",
+      declaredChecks: [
+        {
+          name: "pytest",
+          argv: ["pytest", "tests/test_invariants.py", "-q"],
+          workingDirectory: ".",
+        },
+      ],
+      authorKind: "operator",
+      authoredAtMs: 124,
+      appliesToCurrentCharter: false,
+    } as const;
+    invokeMock.mockImplementation((command) => {
+      if (command === "session_status") return Promise.resolve(status("unlocked"));
+      if (command === "authentication_capabilities") return Promise.resolve(capabilities);
+      if (command === "session_policy") return Promise.resolve(sessionPolicy);
+      if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+      if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
+      if (command === "residents") return Promise.resolve(residentRoster);
+      if (command === "record_operator_activity") return Promise.resolve(null);
+      if (command === "projects") return Promise.resolve([summary]);
+      if (command === "project") return Promise.resolve(project);
+      if (command === "project_charter_history")
+        return Promise.resolve([{ ...charter, revision: 1, authoredAtMs: 122 }, charter]);
+      if (command === "project_policy") return Promise.resolve(null);
+      if (command === "project_policy_history") return Promise.resolve([]);
+      if (command === "current_project_repository") return Promise.resolve(stale);
+      if (command === "project_repository_history") return Promise.resolve([stale]);
+      if (command === "teams") return Promise.resolve([]);
+      if (command === "missions") return Promise.resolve([]);
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    await user.click(await screen.findByRole("button", { name: /Beacon Alpha/i }));
+
+    expect(await screen.findByText(/^Repository revision 1/)).toBeVisible();
+    expect(
+      screen.getByText(
+        "The Charter is now revision 2. Bind a new Repository revision before planning work against it.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText("Declared, not verified — Beacon has not opened this repository."),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Revise Repository Binding" })).toBeVisible();
   });
 
   it("forms a Project Team from exact eligible Resident configurations without implying authority", async () => {
@@ -736,6 +939,8 @@ describe("Beacon desktop shell", () => {
       if (command === "project_charter_history") return Promise.resolve([project.charter]);
       if (command === "project_policy") return Promise.resolve(null);
       if (command === "project_policy_history") return Promise.resolve([]);
+      if (command === "current_project_repository") return Promise.resolve(null);
+      if (command === "project_repository_history") return Promise.resolve([]);
       if (command === "teams") return Promise.resolve([]);
       if (command === "missions") return Promise.resolve([]);
       if (command === "resident_configurations") return Promise.resolve([configuration]);
@@ -872,6 +1077,8 @@ describe("Beacon desktop shell", () => {
       }
       if (command === "project_policy") return Promise.resolve(null);
       if (command === "project_policy_history") return Promise.resolve([]);
+      if (command === "current_project_repository") return Promise.resolve(null);
+      if (command === "project_repository_history") return Promise.resolve([]);
       if (command === "teams") return Promise.resolve([team]);
       if (command === "missions") return Promise.resolve([]);
       if (command === "admit_mission") return Promise.resolve(admitted);
@@ -1563,6 +1770,8 @@ describe("Beacon desktop shell", () => {
       if (command === "project_charter_history") return Promise.resolve([charter]);
       if (command === "project_policy") return Promise.resolve(null);
       if (command === "project_policy_history") return Promise.resolve([]);
+      if (command === "current_project_repository") return Promise.resolve(null);
+      if (command === "project_repository_history") return Promise.resolve([]);
       if (command === "teams") return Promise.resolve([]);
       if (command === "missions") return Promise.resolve([]);
       return Promise.reject(new Error(`unexpected command: ${command}`));
