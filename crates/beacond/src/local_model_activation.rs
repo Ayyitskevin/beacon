@@ -430,7 +430,7 @@ fn insert_decision(
     Ok(())
 }
 
-fn latest_activation_for_resource(
+pub(crate) fn latest_activation_for_resource(
     connection: &Connection,
     workspace_id: Uuid,
     binding: &LocalModelBinding,
@@ -452,7 +452,7 @@ fn latest_activation_for_resource(
     rows.next()?.map(read_activation_row).transpose()
 }
 
-fn activation_by_id(
+pub(crate) fn activation_by_id(
     connection: &Connection,
     workspace_id: Uuid,
     activation_id: Uuid,

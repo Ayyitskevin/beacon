@@ -16,13 +16,14 @@ use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use crate::{
-    AccessOrigin, OperatorAccountError, OperatorAccountService, OperatorSessionPolicy,
-    OperatorSessionStatus, PlatformSessionMonitor, PlatformSessionMonitorStatus, ProjectCharter,
-    ProjectCharterDraft, ProjectDraft, ProjectError, ProjectService, ProjectSummary, ProjectView,
-    RecoveryKey, ResidentAgentView, ResidentLifecycleError, ResidentLifecycleService,
-    ResourceDiscoveryError, ResourceDiscoveryService, SecretString, StarterOrganizationError,
-    StarterOrganizationService, StarterOrganizationView, StarterResidentDraft, StartupConfig,
-    Supervisor,
+    AccessOrigin, BeaconCapability, BeaconCapabilityDescriptor, OperatorAccountError,
+    OperatorAccountService, OperatorSessionPolicy, OperatorSessionStatus, PlatformSessionMonitor,
+    PlatformSessionMonitorStatus, ProjectCharter, ProjectCharterDraft, ProjectDraft, ProjectError,
+    ProjectService, ProjectSummary, ProjectView, RecoveryKey, ResidentAgentView,
+    ResidentConfiguration, ResidentConfigurationError, ResidentConfigurationService,
+    ResidentLifecycleError, ResidentLifecycleService, ResourceDiscoveryError,
+    ResourceDiscoveryService, SecretString, StarterOrganizationError, StarterOrganizationService,
+    StarterOrganizationView, StarterResidentDraft, StartupConfig, Supervisor,
 };
 
 const PROTOCOL_VERSION: u16 = 1;
@@ -68,6 +69,9 @@ pub enum LocalErrorCode {
     InvalidResidentTransition,
     StaleResidentDecision,
     ResidentLifecycleUnavailable,
+    InvalidResidentConfiguration,
+    StaleResidentConfiguration,
+    ResidentConfigurationUnavailable,
     InvalidProject,
     ProjectNotFound,
     StaleCharterRevision,
@@ -100,6 +104,7 @@ pub enum LocalTransportError {
     Account(OperatorAccountError),
     StarterOrganization(StarterOrganizationError),
     ResidentLifecycle(ResidentLifecycleError),
+    ResidentConfiguration(ResidentConfigurationError),
     Project(ProjectError),
     ResourceDiscovery(ResourceDiscoveryError),
     LocalModelActivation(crate::LocalModelActivationError),
@@ -126,6 +131,9 @@ impl fmt::Display for LocalTransportError {
             }
             Self::ResidentLifecycle(error) => {
                 write!(formatter, "Resident lifecycle failed: {error}")
+            }
+            Self::ResidentConfiguration(error) => {
+                write!(formatter, "Resident configuration failed: {error}")
             }
             Self::Project(error) => write!(formatter, "Project operation failed: {error}"),
             Self::ResourceDiscovery(error) => {
@@ -173,6 +181,12 @@ impl From<StarterOrganizationError> for LocalTransportError {
 impl From<ResidentLifecycleError> for LocalTransportError {
     fn from(error: ResidentLifecycleError) -> Self {
         Self::ResidentLifecycle(error)
+    }
+}
+
+impl From<ResidentConfigurationError> for LocalTransportError {
+    fn from(error: ResidentConfigurationError) -> Self {
+        Self::ResidentConfiguration(error)
     }
 }
 
@@ -391,6 +405,18 @@ enum LocalCommand {
         resident_id: uuid::Uuid,
         expected_decision_id: Option<uuid::Uuid>,
     },
+    ResidentCapabilityCatalog,
+    ResidentConfigurations,
+    ConfigureResident {
+        resident_id: uuid::Uuid,
+        expected_decision_id: Option<uuid::Uuid>,
+        activation_id: uuid::Uuid,
+        capabilities: Vec<BeaconCapability>,
+    },
+    ClearResidentConfiguration {
+        resident_id: uuid::Uuid,
+        expected_decision_id: uuid::Uuid,
+    },
     Projects,
     Project {
         project_id: uuid::Uuid,
@@ -453,6 +479,15 @@ enum LocalResult {
     Resident {
         resident: ResidentAgentView,
     },
+    ResidentCapabilityCatalog {
+        capabilities: Vec<BeaconCapabilityDescriptor>,
+    },
+    ResidentConfigurations {
+        configurations: Vec<ResidentConfiguration>,
+    },
+    ResidentConfiguration {
+        configuration: ResidentConfiguration,
+    },
     Projects {
         projects: Vec<ProjectSummary>,
     },
@@ -492,6 +527,7 @@ pub struct LocalSupervisorServer {
     accounts: Arc<OperatorAccountService>,
     starter_organization: StarterOrganizationService,
     resident_lifecycle: ResidentLifecycleService,
+    resident_configuration: ResidentConfigurationService,
     projects: ProjectService,
     resource_discovery: ResourceDiscoveryService,
     local_model_activation: crate::LocalModelActivationService,
@@ -519,6 +555,8 @@ impl LocalSupervisorServer {
             StarterOrganizationService::new(Arc::clone(&accounts), report.workspace.id);
         let resident_lifecycle =
             ResidentLifecycleService::new(Arc::clone(&accounts), report.workspace.id);
+        let resident_configuration =
+            ResidentConfigurationService::new(Arc::clone(&accounts), report.workspace.id);
         let projects = ProjectService::new(Arc::clone(&accounts), report.workspace.id);
         let resource_discovery =
             ResourceDiscoveryService::new(Arc::clone(&accounts), config.local_model_endpoint);
@@ -542,6 +580,7 @@ impl LocalSupervisorServer {
             accounts,
             starter_organization,
             resident_lifecycle,
+            resident_configuration,
             projects,
             resource_discovery,
             local_model_activation,
@@ -708,6 +747,33 @@ impl LocalSupervisorServer {
                 resident: self
                     .resident_lifecycle
                     .retire(resident_id, expected_decision_id)?,
+            },
+            LocalCommand::ResidentCapabilityCatalog => LocalResult::ResidentCapabilityCatalog {
+                capabilities: self.resident_configuration.catalog()?,
+            },
+            LocalCommand::ResidentConfigurations => LocalResult::ResidentConfigurations {
+                configurations: self.resident_configuration.list()?,
+            },
+            LocalCommand::ConfigureResident {
+                resident_id,
+                expected_decision_id,
+                activation_id,
+                capabilities,
+            } => LocalResult::ResidentConfiguration {
+                configuration: self.resident_configuration.configure(
+                    resident_id,
+                    expected_decision_id,
+                    activation_id,
+                    capabilities,
+                )?,
+            },
+            LocalCommand::ClearResidentConfiguration {
+                resident_id,
+                expected_decision_id,
+            } => LocalResult::ResidentConfiguration {
+                configuration: self
+                    .resident_configuration
+                    .clear(resident_id, expected_decision_id)?,
             },
             LocalCommand::Projects => LocalResult::Projects {
                 projects: self.projects.list()?,
@@ -970,6 +1036,44 @@ impl LocalSupervisorClient {
         })?)
     }
 
+    pub fn resident_capability_catalog(
+        &self,
+    ) -> Result<Vec<BeaconCapabilityDescriptor>, LocalTransportError> {
+        expect_resident_capability_catalog(self.send(LocalCommand::ResidentCapabilityCatalog)?)
+    }
+
+    pub fn resident_configurations(
+        &self,
+    ) -> Result<Vec<ResidentConfiguration>, LocalTransportError> {
+        expect_resident_configurations(self.send(LocalCommand::ResidentConfigurations)?)
+    }
+
+    pub fn configure_resident(
+        &self,
+        resident_id: uuid::Uuid,
+        expected_decision_id: Option<uuid::Uuid>,
+        activation_id: uuid::Uuid,
+        capabilities: Vec<BeaconCapability>,
+    ) -> Result<ResidentConfiguration, LocalTransportError> {
+        expect_resident_configuration(self.send(LocalCommand::ConfigureResident {
+            resident_id,
+            expected_decision_id,
+            activation_id,
+            capabilities,
+        })?)
+    }
+
+    pub fn clear_resident_configuration(
+        &self,
+        resident_id: uuid::Uuid,
+        expected_decision_id: uuid::Uuid,
+    ) -> Result<ResidentConfiguration, LocalTransportError> {
+        expect_resident_configuration(self.send(LocalCommand::ClearResidentConfiguration {
+            resident_id,
+            expected_decision_id,
+        })?)
+    }
+
     pub fn projects(&self) -> Result<Vec<ProjectSummary>, LocalTransportError> {
         expect_projects(self.send(LocalCommand::Projects)?)
     }
@@ -1132,6 +1236,33 @@ fn expect_resident(result: LocalResult) -> Result<ResidentAgentView, LocalTransp
     }
 }
 
+fn expect_resident_capability_catalog(
+    result: LocalResult,
+) -> Result<Vec<BeaconCapabilityDescriptor>, LocalTransportError> {
+    match result {
+        LocalResult::ResidentCapabilityCatalog { capabilities } => Ok(capabilities),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
+fn expect_resident_configurations(
+    result: LocalResult,
+) -> Result<Vec<ResidentConfiguration>, LocalTransportError> {
+    match result {
+        LocalResult::ResidentConfigurations { configurations } => Ok(configurations),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
+fn expect_resident_configuration(
+    result: LocalResult,
+) -> Result<ResidentConfiguration, LocalTransportError> {
+    match result {
+        LocalResult::ResidentConfiguration { configuration } => Ok(configuration),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
 fn expect_projects(result: LocalResult) -> Result<Vec<ProjectSummary>, LocalTransportError> {
     match result {
         LocalResult::Projects { projects } => Ok(projects),
@@ -1196,6 +1327,9 @@ fn response_from_transport_error(error: LocalTransportError) -> ResponseEnvelope
         LocalTransportError::Account(error) => wire_error_from_account(error),
         LocalTransportError::StarterOrganization(error) => wire_error_from_starter(error),
         LocalTransportError::ResidentLifecycle(error) => wire_error_from_resident(error),
+        LocalTransportError::ResidentConfiguration(error) => {
+            wire_error_from_resident_configuration(error)
+        }
         LocalTransportError::Project(error) => wire_error_from_project(error),
         LocalTransportError::ResourceDiscovery(ResourceDiscoveryError::Account(error)) => {
             wire_error_from_account(error)
@@ -1237,6 +1371,28 @@ fn wire_error_from_resident(error: ResidentLifecycleError) -> WireError {
         ResidentLifecycleError::InvalidStore
         | ResidentLifecycleError::Store(_)
         | ResidentLifecycleError::Json(_) => LocalErrorCode::ResidentLifecycleUnavailable,
+    };
+    WireError {
+        code,
+        retry_after_ms: None,
+    }
+}
+
+fn wire_error_from_resident_configuration(error: ResidentConfigurationError) -> WireError {
+    let code = match error {
+        ResidentConfigurationError::Account(error) => return wire_error_from_account(error),
+        ResidentConfigurationError::ResidentNotFound => LocalErrorCode::ResidentNotFound,
+        ResidentConfigurationError::ResidentRetired
+        | ResidentConfigurationError::ModelActivationUnavailable
+        | ResidentConfigurationError::ModelMissingCompletion
+        | ResidentConfigurationError::InvalidCapabilities
+        | ResidentConfigurationError::AlreadyCleared => {
+            LocalErrorCode::InvalidResidentConfiguration
+        }
+        ResidentConfigurationError::StaleDecision => LocalErrorCode::StaleResidentConfiguration,
+        ResidentConfigurationError::InvalidStore
+        | ResidentConfigurationError::Store(_)
+        | ResidentConfigurationError::Json(_) => LocalErrorCode::ResidentConfigurationUnavailable,
     };
     WireError {
         code,

@@ -13,11 +13,12 @@ use std::thread;
 use std::time::Duration;
 
 use beacond::{
-    AccessOrigin, AutonomyProfile, DiscoveryStatus, LocalErrorCode, LocalModelActivationState,
-    LocalModelEndpoint, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
-    LocalTransportError, ModelActivation, OperatorSessionPhase, PlatformMonitorState,
-    ProjectCharterDraft, ProjectDraft, ProviderFeature, ResidentLifecycle, SecretString,
-    StarterOrganizationDecision, StarterResidentDraft, StarterRole, initialize_local_auth_token,
+    AccessOrigin, AutonomyProfile, BeaconCapability, BudgetBoundary, DiscoveryStatus,
+    LocalErrorCode, LocalModelActivationState, LocalModelEndpoint, LocalServerConfig,
+    LocalSupervisorClient, LocalSupervisorServer, LocalTransportError, ModelActivation,
+    OperatorSessionPhase, PlatformMonitorState, ProjectCharterDraft, ProjectDraft, ProviderFeature,
+    ResidentConfigurationState, ResidentLifecycle, SecretString, StarterOrganizationDecision,
+    StarterResidentDraft, StarterRole, TeamIneligibilityReason, initialize_local_auth_token,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -495,6 +496,131 @@ fn authenticated_client_controls_resident_lifecycle_over_the_real_socket() {
 
     client.lock().unwrap();
     assert_remote_code(client.residents(), LocalErrorCode::NotAuthenticated);
+    running.store(false, Ordering::Release);
+    thread.join().unwrap().unwrap();
+}
+
+#[test]
+fn authenticated_client_configures_and_clears_a_resident_over_the_real_socket() {
+    let runtime = TestRuntime::new("resident-configuration");
+    let address = serve_ollama_inspections(2);
+    let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+
+    assert_remote_code(
+        client.resident_capability_catalog(),
+        LocalErrorCode::NotAuthenticated,
+    );
+    assert_remote_code(
+        client.resident_configurations(),
+        LocalErrorCode::NotAuthenticated,
+    );
+    assert_remote_code(
+        client.configure_resident(Uuid::new_v4(), None, Uuid::new_v4(), vec![]),
+        LocalErrorCode::NotAuthenticated,
+    );
+    client
+        .begin_password_setup(
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+    client.complete_operator_setup(true).unwrap();
+    let accepted = client
+        .accept_starter_organization(1, vec![draft(StarterRole::Lead, Some("Northstar"))])
+        .unwrap();
+    let resident_id = accepted.residents[0].id;
+    client.activate_resident(resident_id, None).unwrap();
+    let review = client
+        .inspect_local_model(MODEL_NAME.to_owned(), MODEL_DIGEST.to_owned())
+        .unwrap();
+    let activation = client
+        .activate_local_model(review, vec![ProviderFeature::Completion])
+        .unwrap();
+
+    let catalog = client.resident_capability_catalog().unwrap();
+    assert_eq!(catalog.len(), 7);
+    assert_eq!(catalog[0].capability, BeaconCapability::WorkCreateMission);
+    assert!(client.resident_configurations().unwrap().is_empty());
+    assert_remote_code(
+        client.configure_resident(resident_id, None, activation.id, vec![]),
+        LocalErrorCode::InvalidResidentConfiguration,
+    );
+    assert_remote_code(
+        client.configure_resident(
+            Uuid::new_v4(),
+            None,
+            activation.id,
+            vec![BeaconCapability::WorkCreateMission],
+        ),
+        LocalErrorCode::ResidentNotFound,
+    );
+    let configured = client
+        .configure_resident(
+            resident_id,
+            None,
+            activation.id,
+            vec![
+                BeaconCapability::WorkCreateMission,
+                BeaconCapability::WorkFormTeam,
+            ],
+        )
+        .unwrap();
+    assert_eq!(configured.state, ResidentConfigurationState::Configured);
+    assert_eq!(
+        configured.binding.as_ref().unwrap().budget_boundary,
+        BudgetBoundary::NoSpend
+    );
+    assert!(configured.eligible_for_team);
+    assert_eq!(
+        client.resident_configurations().unwrap(),
+        std::slice::from_ref(&configured)
+    );
+
+    assert_remote_code(
+        client.configure_resident(
+            resident_id,
+            None,
+            activation.id,
+            vec![BeaconCapability::WorkCreateMission],
+        ),
+        LocalErrorCode::StaleResidentConfiguration,
+    );
+    let cleared = client
+        .clear_resident_configuration(resident_id, configured.id)
+        .unwrap();
+    assert_eq!(cleared.state, ResidentConfigurationState::Cleared);
+    assert!(!cleared.eligible_for_team);
+    assert_remote_code(
+        client.clear_resident_configuration(resident_id, configured.id),
+        LocalErrorCode::StaleResidentConfiguration,
+    );
+    let reconfigured = client
+        .configure_resident(
+            resident_id,
+            Some(cleared.id),
+            activation.id,
+            vec![BeaconCapability::ArtifactEvaluate],
+        )
+        .unwrap();
+    assert!(reconfigured.eligible_for_team);
+
+    client.deactivate_local_model(activation.id).unwrap();
+    let revoked = client.resident_configurations().unwrap().remove(0);
+    assert_eq!(revoked.id, reconfigured.id);
+    assert_eq!(
+        revoked.ineligibility_reasons,
+        [TeamIneligibilityReason::ModelActivationUnavailable]
+    );
+
+    client.lock().unwrap();
+    assert_remote_code(
+        client.resident_configurations(),
+        LocalErrorCode::NotAuthenticated,
+    );
     running.store(false, Ordering::Release);
     thread.join().unwrap().unwrap();
 }

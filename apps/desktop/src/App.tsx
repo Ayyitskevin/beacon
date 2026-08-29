@@ -15,9 +15,13 @@ import {
   activateLocalModel,
   activateResident,
   type AuthenticationCapabilities,
+  type BeaconCapability,
+  type BeaconCapabilityDescriptor,
   type DesktopSessionStatus,
   beginLocalPasswordSetup,
+  clearResidentConfiguration,
   completeLocalOperatorSetup,
+  configureResident,
   createProject,
   deactivateLocalModel,
   discoverLocalModels,
@@ -30,6 +34,8 @@ import {
   loadProject,
   loadProjectCharterHistory,
   loadProjects,
+  loadResidentCapabilityCatalog,
+  loadResidentConfigurations,
   loadResidents,
   loadSessionPolicy,
   loadSessionStatus,
@@ -55,11 +61,13 @@ import {
   suspendResident,
   type StarterOrganizationView,
   type ResidentAgentView,
+  type ResidentConfiguration,
   type StarterResidentDraft,
   type StarterRole,
 } from "./session";
 import { LocalModels } from "./LocalModels";
 import { ProjectsWorkspace } from "./Projects";
+import { ResidentConfigurations } from "./ResidentConfigurations";
 import { darkTheme, lightTheme } from "./theme";
 
 const applications = ["Briefing", "Projects", "Conversations", "Knowledge", "Software"] as const;
@@ -259,6 +267,11 @@ export function App() {
     useState<LocalModelActivationReview | null>(null);
   const [discoveringLocalModels, setDiscoveringLocalModels] = useState(false);
   const localModelDiscoveryEpoch = useRef(0);
+  const [residentCapabilityCatalog, setResidentCapabilityCatalog] =
+    useState<BeaconCapabilityDescriptor[] | null>(null);
+  const [residentConfigurations, setResidentConfigurations] =
+    useState<ResidentConfiguration[] | null>(null);
+  const [loadingResidentConfigurations, setLoadingResidentConfigurations] = useState(false);
   const [themeChoice, setThemeChoice] = useState<ThemeChoice>("light");
   const [systemPrefersDark, setSystemPrefersDark] = useState(
     () =>
@@ -359,6 +372,9 @@ export function App() {
     setLocalModelActivations(null);
     setLocalModelReview(null);
     setDiscoveringLocalModels(false);
+    setResidentCapabilityCatalog(null);
+    setResidentConfigurations(null);
+    setLoadingResidentConfigurations(false);
   }, [unlocked]);
 
   useEffect(() => {
@@ -642,6 +658,9 @@ export function App() {
       const activation = await activateLocalModel(review, approvedFeatures);
       if (requestEpoch !== localModelDiscoveryEpoch.current) return;
       setLocalModelActivations((current) => replaceLocalModelActivation(current, activation));
+      if (residentConfigurations !== null) {
+        setResidentConfigurations(await loadResidentConfigurations());
+      }
       setLocalModelReview(null);
     });
   }
@@ -652,6 +671,9 @@ export function App() {
       const activation = await deactivateLocalModel(expectedActivationId);
       if (requestEpoch !== localModelDiscoveryEpoch.current) return;
       setLocalModelActivations((current) => replaceLocalModelActivation(current, activation));
+      if (residentConfigurations !== null) {
+        setResidentConfigurations(await loadResidentConfigurations());
+      }
       setLocalModelReview(null);
     });
   }
@@ -700,11 +722,72 @@ export function App() {
       setResidents((current) =>
         current?.map((item) => (item.id === changed.id ? changed : item)) ?? null,
       );
+      if (residentConfigurations !== null) {
+        setResidentConfigurations(await loadResidentConfigurations());
+      }
     });
   }
 
   async function refreshResidents() {
-    await runAction(async () => setResidents(await loadResidents()));
+    await runAction(async () => {
+      const [loadedResidents, configurations] = await Promise.all([
+        loadResidents(),
+        residentConfigurations === null
+          ? Promise.resolve(null)
+          : loadResidentConfigurations(),
+      ]);
+      setResidents(loadedResidents);
+      if (configurations !== null) setResidentConfigurations(configurations);
+    });
+  }
+
+  async function reviewResidentConfigurations() {
+    setLoadingResidentConfigurations(true);
+    await runAction(async () => {
+      const [catalog, configurations, activations] = await Promise.all([
+        loadResidentCapabilityCatalog(),
+        loadResidentConfigurations(),
+        loadLocalModelActivations(),
+      ]);
+      setResidentCapabilityCatalog(catalog);
+      setResidentConfigurations(configurations);
+      setLocalModelActivations(activations);
+    });
+    setLoadingResidentConfigurations(false);
+  }
+
+  async function saveResidentConfiguration(
+    residentId: string,
+    expectedDecisionId: string | null,
+    activationId: string,
+    selectedCapabilities: readonly BeaconCapability[],
+  ) {
+    await runAction(async () => {
+      const configuration = await configureResident(
+        residentId,
+        expectedDecisionId,
+        activationId,
+        selectedCapabilities,
+      );
+      setResidentConfigurations((current) =>
+        replaceResidentConfiguration(current, configuration),
+      );
+    });
+  }
+
+  async function removeResidentConfiguration(
+    residentId: string,
+    expectedDecisionId: string,
+  ) {
+    await runAction(async () => {
+      const configuration = await clearResidentConfiguration(
+        residentId,
+        expectedDecisionId,
+      );
+      setResidentConfigurations((current) =>
+        replaceResidentConfiguration(current, configuration),
+      );
+    });
   }
 
   async function openProject(projectId: string) {
@@ -966,11 +1049,17 @@ export function App() {
               localModelActivations={localModelActivations}
               localModelReview={localModelReview}
               discoveringLocalModels={discoveringLocalModels}
+              residentCapabilityCatalog={residentCapabilityCatalog}
+              residentConfigurations={residentConfigurations}
+              loadingResidentConfigurations={loadingResidentConfigurations}
               onCheckLocalModels={checkLocalModels}
               onReviewLocalModel={reviewLocalModel}
               onCancelLocalModelReview={() => setLocalModelReview(null)}
               onActivateLocalModel={activateReviewedLocalModel}
               onDeactivateLocalModel={deactivateActiveLocalModel}
+              onReviewResidentConfigurations={reviewResidentConfigurations}
+              onConfigureResident={saveResidentConfiguration}
+              onClearResidentConfiguration={removeResidentConfiguration}
               onActivateResident={(resident) => changeResident(activateResident, resident)}
               onSuspendResident={(resident) => changeResident(suspendResident, resident)}
               onReactivateResident={(resident) => changeResident(reactivateResident, resident)}
@@ -1204,6 +1293,18 @@ function replaceLocalModelActivation(
   );
 }
 
+function replaceResidentConfiguration(
+  current: ResidentConfiguration[] | null,
+  replacement: ResidentConfiguration,
+): ResidentConfiguration[] {
+  return [
+    ...(current ?? []).filter(
+      (configuration) => configuration.residentId !== replacement.residentId,
+    ),
+    replacement,
+  ].sort((left, right) => left.residentId.localeCompare(right.residentId));
+}
+
 function Briefing({
   classes,
   organization,
@@ -1215,11 +1316,17 @@ function Briefing({
   localModelActivations,
   localModelReview,
   discoveringLocalModels,
+  residentCapabilityCatalog,
+  residentConfigurations,
+  loadingResidentConfigurations,
   onCheckLocalModels,
   onReviewLocalModel,
   onCancelLocalModelReview,
   onActivateLocalModel,
   onDeactivateLocalModel,
+  onReviewResidentConfigurations,
+  onConfigureResident,
+  onClearResidentConfiguration,
   onActivateResident,
   onSuspendResident,
   onReactivateResident,
@@ -1237,6 +1344,9 @@ function Briefing({
   localModelActivations: LocalModelActivation[] | null;
   localModelReview: LocalModelActivationReview | null;
   discoveringLocalModels: boolean;
+  residentCapabilityCatalog: BeaconCapabilityDescriptor[] | null;
+  residentConfigurations: ResidentConfiguration[] | null;
+  loadingResidentConfigurations: boolean;
   onCheckLocalModels: () => void;
   onReviewLocalModel: (modelName: string, expectedDigest: string) => void;
   onCancelLocalModelReview: () => void;
@@ -1245,6 +1355,17 @@ function Briefing({
     approvedFeatures: readonly ProviderFeature[],
   ) => void;
   onDeactivateLocalModel: (expectedActivationId: string) => void;
+  onReviewResidentConfigurations: () => void;
+  onConfigureResident: (
+    residentId: string,
+    expectedDecisionId: string | null,
+    activationId: string,
+    capabilities: readonly BeaconCapability[],
+  ) => void;
+  onClearResidentConfiguration: (
+    residentId: string,
+    expectedDecisionId: string,
+  ) => void;
   onActivateResident: (resident: ResidentAgentView) => void;
   onSuspendResident: (resident: ResidentAgentView) => void;
   onReactivateResident: (resident: ResidentAgentView) => void;
@@ -1357,6 +1478,17 @@ function Briefing({
           </div>
         </section>
       )}
+      <ResidentConfigurations
+        residents={residents ?? []}
+        catalog={residentCapabilityCatalog}
+        configurations={residentConfigurations}
+        activations={localModelActivations}
+        busy={busy}
+        loading={loadingResidentConfigurations}
+        onLoad={onReviewResidentConfigurations}
+        onConfigure={onConfigureResident}
+        onClear={onClearResidentConfiguration}
+      />
       <LocalModels
         report={localModelDiscovery}
         activations={localModelActivations}

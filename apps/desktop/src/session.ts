@@ -143,6 +143,42 @@ export type LocalModelActivation = LocalModelActivationReview & {
   decidedAtMs: number;
 };
 
+export type BeaconCapability =
+  | "work.create_mission"
+  | "work.form_team"
+  | "work.coordinate_mission"
+  | "work.assign_work"
+  | "artifact.produce"
+  | "artifact.evaluate"
+  | "evidence.develop";
+export type BeaconCapabilityDescriptor = {
+  capability: BeaconCapability;
+  label: string;
+  description: string;
+};
+export type TeamIneligibilityReason =
+  | "configuration_cleared"
+  | "resident_inactive"
+  | "resident_suspended"
+  | "resident_retired"
+  | "model_activation_unavailable";
+export type ResidentConfigurationBinding = {
+  activationId: string;
+  capabilities: readonly BeaconCapability[];
+  budgetBoundary: "no_spend";
+};
+export type ResidentConfiguration = {
+  id: string;
+  workspaceId: string;
+  residentId: string;
+  state: "configured" | "cleared";
+  binding: ResidentConfigurationBinding | null;
+  predecessorId: string | null;
+  decidedAtMs: number;
+  eligibleForTeam: boolean;
+  ineligibilityReasons: readonly TeamIneligibilityReason[];
+};
+
 // Tauri's current frontend command adapter returns a Promise for the Rust value.
 // Source: https://v2.tauri.app/develop/calling-rust/#commands
 export async function loadSessionStatus(): Promise<DesktopSessionStatus> {
@@ -313,6 +349,50 @@ function invokeResidentLifecycle(
   );
 }
 
+export async function loadResidentCapabilityCatalog(): Promise<BeaconCapabilityDescriptor[]> {
+  return invokeAndValidate(
+    "resident_capability_catalog",
+    undefined,
+    isResidentCapabilityCatalog,
+    "Resident Capability catalog",
+  );
+}
+
+export async function loadResidentConfigurations(): Promise<ResidentConfiguration[]> {
+  return invokeAndValidate(
+    "resident_configurations",
+    undefined,
+    isResidentConfigurationList,
+    "Resident configuration list",
+  );
+}
+
+export async function configureResident(
+  residentId: string,
+  expectedDecisionId: string | null,
+  activationId: string,
+  capabilities: readonly BeaconCapability[],
+): Promise<ResidentConfiguration> {
+  return invokeAndValidate(
+    "configure_resident",
+    { residentId, expectedDecisionId, activationId, capabilities: [...capabilities] },
+    isResidentConfiguration,
+    "Resident configuration",
+  );
+}
+
+export async function clearResidentConfiguration(
+  residentId: string,
+  expectedDecisionId: string,
+): Promise<ResidentConfiguration> {
+  return invokeAndValidate(
+    "clear_resident_configuration",
+    { residentId, expectedDecisionId },
+    isResidentConfiguration,
+    "Resident configuration",
+  );
+}
+
 export async function loadProjects(): Promise<ProjectSummary[]> {
   return invokeAndValidate("projects", undefined, isProjectSummaries, "Project list");
 }
@@ -441,6 +521,12 @@ export function describeLocalAccountError(error: unknown): string {
       return "The Resident changed. Reload the roster before trying again.";
     case "resident_lifecycle_unavailable":
       return "Beacon could not verify Resident lifecycle state.";
+    case "invalid_resident_configuration":
+      return "Review the Resident, active model, completion approval, and Capability selection.";
+    case "stale_resident_configuration":
+      return "The Resident configuration changed. Reload it before trying again.";
+    case "resident_configuration_unavailable":
+      return "Beacon could not verify Resident configuration state.";
     case "invalid_project":
       return "Review the Project name and every Charter field.";
     case "project_not_found":
@@ -638,6 +724,117 @@ function isResidentList(value: unknown): value is ResidentAgentView[] {
   return value.every((resident) => {
     if (ids.has(resident.id)) return false;
     ids.add(resident.id);
+    return true;
+  });
+}
+
+const beaconCapabilities: readonly BeaconCapability[] = [
+  "work.create_mission",
+  "work.form_team",
+  "work.coordinate_mission",
+  "work.assign_work",
+  "artifact.produce",
+  "artifact.evaluate",
+  "evidence.develop",
+];
+
+const teamIneligibilityReasons: readonly TeamIneligibilityReason[] = [
+  "configuration_cleared",
+  "resident_inactive",
+  "resident_suspended",
+  "resident_retired",
+  "model_activation_unavailable",
+];
+
+function isResidentCapabilityCatalog(value: unknown): value is BeaconCapabilityDescriptor[] {
+  return (
+    Array.isArray(value) &&
+    value.length === beaconCapabilities.length &&
+    value.every(
+      (descriptor, index) =>
+        hasExactKeys(descriptor, ["capability", "description", "label"]) &&
+        descriptor.capability === beaconCapabilities[index] &&
+        isTrimmedTextWithoutControls(descriptor.label, 80) &&
+        isTrimmedTextWithoutControls(descriptor.description, 300),
+    )
+  );
+}
+
+function isResidentConfigurationBinding(value: unknown): value is ResidentConfigurationBinding {
+  return (
+    hasExactKeys(value, ["activationId", "budgetBoundary", "capabilities"]) &&
+    isUuid(value.activationId) &&
+    value.budgetBoundary === "no_spend" &&
+    isOrderedUniqueClosedValues(value.capabilities, beaconCapabilities, false)
+  );
+}
+
+function isResidentConfiguration(value: unknown): value is ResidentConfiguration {
+  if (
+    !hasExactKeys(value, [
+      "binding",
+      "decidedAtMs",
+      "eligibleForTeam",
+      "id",
+      "ineligibilityReasons",
+      "predecessorId",
+      "residentId",
+      "state",
+      "workspaceId",
+    ]) ||
+    !isUuid(value.id) ||
+    !isUuid(value.workspaceId) ||
+    !isUuid(value.residentId) ||
+    !(value.predecessorId === null || isUuid(value.predecessorId)) ||
+    !isNonnegativeInteger(value.decidedAtMs) ||
+    typeof value.eligibleForTeam !== "boolean" ||
+    !isOrderedUniqueClosedValues(
+      value.ineligibilityReasons,
+      teamIneligibilityReasons,
+      true,
+    )
+  ) {
+    return false;
+  }
+  if (value.state === "configured") {
+    if (!isResidentConfigurationBinding(value.binding)) return false;
+  } else if (value.state === "cleared") {
+    if (value.binding !== null || !value.ineligibilityReasons.includes("configuration_cleared")) {
+      return false;
+    }
+  } else {
+    return false;
+  }
+  return value.eligibleForTeam
+    ? value.state === "configured" && value.ineligibilityReasons.length === 0
+    : value.ineligibilityReasons.length > 0;
+}
+
+function isResidentConfigurationList(value: unknown): value is ResidentConfiguration[] {
+  if (!Array.isArray(value) || value.length > 512 || !value.every(isResidentConfiguration)) {
+    return false;
+  }
+  const residents = new Set<string>();
+  return value.every((configuration, index) => {
+    if (residents.has(configuration.residentId)) return false;
+    residents.add(configuration.residentId);
+    return index === 0 || value[index - 1].residentId < configuration.residentId;
+  });
+}
+
+function isOrderedUniqueClosedValues<T extends string>(
+  value: unknown,
+  order: readonly T[],
+  allowEmpty: boolean,
+): value is T[] {
+  if (!Array.isArray(value) || (!allowEmpty && value.length === 0) || value.length > order.length) {
+    return false;
+  }
+  let prior = -1;
+  return value.every((item) => {
+    const index = order.indexOf(item as T);
+    if (index <= prior) return false;
+    prior = index;
     return true;
   });
 }
