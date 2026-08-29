@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Admit Missions before selecting leadership or granting execution authority
@@ -25,4 +25,4 @@ Every accepted admission command creates a distinct Mission identity, even when 
 match an existing Mission. Admission creates no Team Lead, Assignment, Route, Invocation, Run,
 credential, budget, network scope, external effect, or execution authority.
 
-This proposal becomes accepted only with Product Steward sign-off on the reviewed branch.
+Accepted 2026-08-29 by the Product Steward. The reviewed branch merged to `main` as `0678ba6` on 2026-08-29; the Steward ruled on 2026-08-29 that every ADR merged under this convention is accepted.

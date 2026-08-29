@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Separate Resident availability from execution authority
@@ -33,4 +33,4 @@ irreversible. Startup reconciles every decision, predecessor, Event, and current
 before reporting the store ready. Starter Organization acceptance remains an immutable snapshot of
 the identities as admitted—always inactive—even after their current lifecycle changes.
 
-This proposal becomes accepted only with Product Steward sign-off on the reviewed branch.
+Accepted 2026-08-29 by the Product Steward. The reviewed branch merged to `main` as `dba5e01` on 2026-08-28; the Steward ruled on 2026-08-29 that every ADR merged under this convention is accepted.
