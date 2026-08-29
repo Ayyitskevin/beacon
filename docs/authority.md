@@ -18,6 +18,29 @@
 > 2. `shared/handoffs/2026-08-25_mosaic-datamodel-synthesis.md` — the current design
 
 ---
+> ## Revision check — 2026-08-29
+>
+> The table under "How this page was produced" pins the trees as read on 2026-08-24. Five days
+> later the findings still hold, but three of the pins moved and one line number with them:
+>
+> | Module | Was | Now | What moved |
+> |---|---|---|---|
+> | Icarus | `af41796` | `origin/main` @ `c919cd2` | `change-handoff-reader.ts:2740` → **`:2779`** (`if (expected !== planSha256) sourceInvalid();`, unchanged); `scripts/security-check.mjs:1829` → **`:2006`**. `authorizeLiveEvidenceRun` now has production callers (`live-evidence-executor.ts:186`, `:327`). Gate 1 closed 2026-08-23 (ADR 0055); Gate 2 open. |
+> | Janus | `6b62110` | `6b62110` — **FROZEN 2026-08-29** (Janus PR #4) | No code change on `main`. PR #3 (pending) is a correctness fix: `doctor`, `decide` and `show` all flattened `verify_binding`'s `None` into silence, and `digest_of_live` lets a ruling be written with `bound_sha256 = NULL`. That is the `unbound` case this page measured, produced by a live path. |
+> | Athena | deploy `eeb8ae3` | `origin/main` @ `8ddefc8`; **deploy still `eeb8ae3`** | Mechanism 3 unchanged. `main` is 30 commits ahead of production (migration 0080 in the gap); PR #402 (MWS-29) changed the desk's lease lanes, not approvals. |
+> | Buzz | `78cbffe` | `78cbffe` (upstream +221) | Kind numbers unchanged (`kind.rs` diff empty). Upstream PR #6977 closed unmerged 2026-08-28. |
+>
+> Open question 5 below is **corrected**: ReplayDeck is not "the existing `fleet-eval` repo" —
+> no such repo or tree exists anywhere, and `docs/BLUEPRINT.md` already says so. See
+> [`docs/evaluations.md`](evaluations.md).
+>
+> This page now has six siblings, one per BLUEPRINT §3 surface, produced the same way:
+> [`briefing.md`](briefing.md) · [`conversations.md`](conversations.md) ·
+> [`knowledge.md`](knowledge.md) · [`models.md`](models.md) · [`evaluations.md`](evaluations.md) ·
+> [`decisions.md`](decisions.md) · [`execution.md`](execution.md). `decisions.md` owns the Janus
+> gate *model*; this page keeps the binding *mechanics*.
+
+---
 
 # Authority findings inherited by Beacon
 
@@ -375,8 +398,11 @@ number.
    the recommendation is deliberately not self-executing.
 5. **AI Town is seven capabilities, not six.** The roadmap names Buzz, Athena,
    Minerva, Vulcan, **ReplayDeck**, Janus, and Icarus, and puts ReplayDeck in
-   the product trace at the evaluation step. ReplayDeck is the existing
-   `fleet-eval` repo (roadmap line 202; owner Kimi, reviewer Codex). Both the
+   the product trace at the evaluation step. ~~ReplayDeck is the existing
+   `fleet-eval` repo (roadmap line 202; owner Kimi, reviewer Codex).~~
+   **Corrected 2026-08-29:** there is no `fleet-eval` repo or tree; ReplayDeck
+   names an intent, and the evaluation practice that exists lives in Icarus —
+   see [`docs/evaluations.md`](evaluations.md). Both the
    Mosaic lane plan and every handoff in this thread describe six modules and
    omit it. Not blocking for v0 — the first slice needs two adapters, not seven
    — but the composition engine must not hardcode a six-module world, and the

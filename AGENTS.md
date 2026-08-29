@@ -16,7 +16,13 @@ Read these before changing the product:
 4. [docs/adr/](docs/adr/) — accepted architectural decisions.
 5. [GOVERNANCE.md](GOVERNANCE.md) — project stewardship and maintainer authority.
 6. [docs/authority.md](docs/authority.md) — inherited authority findings that the unified
-   mechanism must preserve.
+   mechanism must preserve — and its six siblings, one per BLUEPRINT §3 surface, produced the
+   same way (re-derived from the legacy trees at pinned revisions, cited, measured; findings, not
+   decisions): [briefing](docs/briefing.md) (Athena), [conversations](docs/conversations.md)
+   (Buzz), [knowledge](docs/knowledge.md) (Minerva), [models](docs/models.md) (Vulcan),
+   [evaluations](docs/evaluations.md) (ReplayDeck — which has no code — plus Icarus's harness),
+   [decisions](docs/decisions.md) (Janus's gate model), [execution](docs/execution.md) (Icarus).
+   Each ends with open questions that are the Product Steward's, not the page's.
 
 If an older handoff, roadmap section, Python module, or comment describes the project, then called
 Mosaic, as a read-only federating desk, it is historical. Do not reconcile the two designs. The
