@@ -16,6 +16,8 @@ import type {
   ProjectCharter,
   ProjectCharterDraft,
   ProjectDraft,
+  ProjectPolicy,
+  ProjectPolicyDraft,
   ProjectSummary,
   ProjectView,
   MissionDraft,
@@ -26,6 +28,7 @@ import type {
   TeamView,
 } from "./session";
 import { ProjectMissions } from "./ProjectMissions";
+import { ProjectPolicySection } from "./ProjectPolicy";
 import { ProjectTeams } from "./ProjectTeams";
 
 const useStyles = makeStyles({
@@ -141,12 +144,15 @@ export function ProjectsWorkspace({
   projects,
   selectedProject,
   charterHistory,
+  projectPolicy,
+  projectPolicyHistory,
   teams,
   missions,
   residents,
   teamConfigurations,
   composerOpen,
   charterComposerOpen,
+  policyComposerOpen,
   teamComposerOpen,
   missionComposerOpen,
   busy,
@@ -158,6 +164,9 @@ export function ProjectsWorkspace({
   onReviseCharter,
   onCancelCharterRevision,
   onSubmitCharterRevision,
+  onOpenPolicyComposer,
+  onCancelPolicyComposer,
+  onSubmitProjectPolicy,
   onOpenTeamComposer,
   onCancelTeamComposer,
   onSubmitTeam,
@@ -168,12 +177,15 @@ export function ProjectsWorkspace({
   projects: ProjectSummary[] | null;
   selectedProject: ProjectView | null;
   charterHistory: ProjectCharter[] | null;
+  projectPolicy: ProjectPolicy | null;
+  projectPolicyHistory: ProjectPolicy[] | null;
   teams: TeamView[] | null;
   missions: MissionView[] | null;
   residents: ResidentAgentView[] | null;
   teamConfigurations: ResidentConfiguration[] | null;
   composerOpen: boolean;
   charterComposerOpen: boolean;
+  policyComposerOpen: boolean;
   teamComposerOpen: boolean;
   missionComposerOpen: boolean;
   busy: boolean;
@@ -185,6 +197,9 @@ export function ProjectsWorkspace({
   onReviseCharter: () => void;
   onCancelCharterRevision: () => void;
   onSubmitCharterRevision: (draft: ProjectCharterDraft) => void;
+  onOpenPolicyComposer: () => void;
+  onCancelPolicyComposer: () => void;
+  onSubmitProjectPolicy: (draft: ProjectPolicyDraft) => void;
   onOpenTeamComposer: () => void;
   onCancelTeamComposer: () => void;
   onSubmitTeam: (draft: TeamDraft) => void;
@@ -204,7 +219,11 @@ export function ProjectsWorkspace({
             Durable bodies of work governed by an Operator-authored Charter.
           </p>
         </div>
-        {!composerOpen && !charterComposerOpen && !teamComposerOpen && !missionComposerOpen && (
+        {!composerOpen &&
+          !charterComposerOpen &&
+          !policyComposerOpen &&
+          !teamComposerOpen &&
+          !missionComposerOpen && (
           <Button appearance="primary" onClick={onCreate} disabled={busy}>
             Create Project
           </Button>
@@ -229,14 +248,20 @@ export function ProjectsWorkspace({
         <ProjectRecord
           project={selectedProject}
           history={charterHistory}
+          policy={projectPolicy}
+          policyHistory={projectPolicyHistory}
           teams={teams}
           missions={missions}
           residents={residents}
           teamConfigurations={teamConfigurations}
           teamComposerOpen={teamComposerOpen}
+          policyComposerOpen={policyComposerOpen}
           missionComposerOpen={missionComposerOpen}
           busy={busy}
           onRevise={onReviseCharter}
+          onOpenPolicyComposer={onOpenPolicyComposer}
+          onCancelPolicyComposer={onCancelPolicyComposer}
+          onSubmitProjectPolicy={onSubmitProjectPolicy}
           onOpenTeamComposer={onOpenTeamComposer}
           onCancelTeamComposer={onCancelTeamComposer}
           onSubmitTeam={onSubmitTeam}
@@ -477,14 +502,20 @@ function draftFromForm(value: CharterFormState): ProjectCharterDraft {
 function ProjectRecord({
   project,
   history,
+  policy,
+  policyHistory,
   teams,
   missions,
   residents,
   teamConfigurations,
   teamComposerOpen,
+  policyComposerOpen,
   missionComposerOpen,
   busy,
   onRevise,
+  onOpenPolicyComposer,
+  onCancelPolicyComposer,
+  onSubmitProjectPolicy,
   onOpenTeamComposer,
   onCancelTeamComposer,
   onSubmitTeam,
@@ -494,14 +525,20 @@ function ProjectRecord({
 }: {
   project: ProjectView;
   history: ProjectCharter[] | null;
+  policy: ProjectPolicy | null;
+  policyHistory: ProjectPolicy[] | null;
   teams: TeamView[] | null;
   missions: MissionView[] | null;
   residents: ResidentAgentView[] | null;
   teamConfigurations: ResidentConfiguration[] | null;
   teamComposerOpen: boolean;
+  policyComposerOpen: boolean;
   missionComposerOpen: boolean;
   busy: boolean;
   onRevise: () => void;
+  onOpenPolicyComposer: () => void;
+  onCancelPolicyComposer: () => void;
+  onSubmitProjectPolicy: (draft: ProjectPolicyDraft) => void;
   onOpenTeamComposer: () => void;
   onCancelTeamComposer: () => void;
   onSubmitTeam: (draft: TeamDraft) => void;
@@ -580,6 +617,17 @@ function ProjectRecord({
           )}
         </details>
       </section>
+      <ProjectPolicySection
+        projectId={project.id}
+        charterRevision={charter.revision}
+        policy={policy}
+        history={policyHistory}
+        composerOpen={policyComposerOpen}
+        busy={busy}
+        onOpenComposer={onOpenPolicyComposer}
+        onCancel={onCancelPolicyComposer}
+        onSubmit={onSubmitProjectPolicy}
+      />
       <ProjectTeams
         projectId={project.id}
         teams={teams}

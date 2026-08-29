@@ -522,6 +522,8 @@ describe("Beacon desktop shell", () => {
       if (command === "project_charter_history") {
         return Promise.resolve([revisionOne, revisionTwo]);
       }
+      if (command === "project_policy") return Promise.resolve(null);
+      if (command === "project_policy_history") return Promise.resolve([]);
       if (command === "teams") return Promise.resolve([]);
       if (command === "missions") return Promise.resolve([]);
       if (command === "record_operator_activity") return Promise.resolve(null);
@@ -542,6 +544,118 @@ describe("Beacon desktop shell", () => {
     expect(invokeMock).toHaveBeenCalledWith("project_charter_history", {
       projectId: project.id,
     });
+  });
+
+  it("publishes Team Lead selection criteria without selecting a Lead or granting authority", async () => {
+    const user = userEvent.setup();
+    const charter = {
+      revision: 2,
+      purpose: "Build a trustworthy local software factory.",
+      desiredOutcomes: ["Ship an attributable Mission"],
+      constraints: ["Keep Workspace data local"],
+      prohibitions: ["Do not deploy publicly"],
+      autonomyProfile: "supervised",
+      budgetBoundary: "no_spend",
+      externalEffects: "prohibited",
+      authoredAtMs: 123,
+    } as const;
+    const priorCharter = {
+      ...charter,
+      revision: 1,
+      authoredAtMs: 122,
+    } as const;
+    const project = {
+      id: "33333333-3333-4333-8333-333333333333",
+      workspaceId: acceptedOrganization.workspaceId,
+      name: "Beacon Alpha",
+      charter,
+      createdAtMs: 120,
+    } as const;
+    const summary = {
+      id: project.id,
+      name: project.name,
+      charterRevision: charter.revision,
+      autonomyProfile: charter.autonomyProfile,
+      createdAtMs: project.createdAtMs,
+    } as const;
+    const published = {
+      workspaceId: project.workspaceId,
+      projectId: project.id,
+      revision: 1,
+      charterRevision: charter.revision,
+      authoredBy: "operator",
+      authoredAtMs: 124,
+      appliesToCurrentCharter: true,
+      teamLeadSelection: {
+        requiredCapabilities: ["work.coordinate_mission"],
+        availabilityRule: "current_team_eligibility",
+        trackRecordRequirements: [
+          { evidenceKind: "mission_outcome", minimumCount: 1 },
+          { evidenceKind: "evaluation", minimumCount: 2 },
+        ],
+        conflictRule: "require_no_declared_conflict",
+        ambiguityRule: "require_operator_decision",
+      },
+    } as const;
+    invokeMock.mockImplementation((command) => {
+      if (command === "session_status") return Promise.resolve(status("unlocked"));
+      if (command === "authentication_capabilities") return Promise.resolve(capabilities);
+      if (command === "session_policy") return Promise.resolve(sessionPolicy);
+      if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+      if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
+      if (command === "residents") return Promise.resolve(residentRoster);
+      if (command === "record_operator_activity") return Promise.resolve(null);
+      if (command === "projects") return Promise.resolve([summary]);
+      if (command === "project") return Promise.resolve(project);
+      if (command === "project_charter_history") return Promise.resolve([priorCharter, charter]);
+      if (command === "project_policy") return Promise.resolve(null);
+      if (command === "project_policy_history") return Promise.resolve([]);
+      if (command === "publish_project_policy") return Promise.resolve(published);
+      if (command === "teams") return Promise.resolve([]);
+      if (command === "missions") return Promise.resolve([]);
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    await user.click(await screen.findByRole("button", { name: /Beacon Alpha/i }));
+
+    expect(await screen.findByText("No Team Lead Policy has been published.")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Publish Team Lead Policy" }));
+    expect(await screen.findByRole("form", { name: "Publish Team Lead Policy" })).toBeVisible();
+    expect(screen.getByRole("checkbox", { name: /Coordinate Missions.*required/i })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /Coordinate Missions.*required/i })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "Mission outcomes" })).toBeChecked();
+    await user.click(screen.getByRole("checkbox", { name: "Evaluations" }));
+    const evaluationCount = screen.getByLabelText("Evaluation minimum count");
+    await user.clear(evaluationCount);
+    await user.type(evaluationCount, "2");
+    expect(screen.getByText("This does not select a Lead or grant authority.")).toBeVisible();
+    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
+    expect(results.violations).toEqual([]);
+    await user.click(screen.getByRole("button", { name: "Publish Policy revision 1" }));
+
+    expect(invokeMock).toHaveBeenCalledWith("publish_project_policy", {
+      projectId: project.id,
+      expectedCharterRevision: charter.revision,
+      expectedPolicyRevision: null,
+      draft: {
+        teamLeadSelection: {
+          requiredCapabilities: ["work.coordinate_mission"],
+          availabilityRule: "current_team_eligibility",
+          trackRecordRequirements: [
+            { evidenceKind: "mission_outcome", minimumCount: 1 },
+            { evidenceKind: "evaluation", minimumCount: 2 },
+          ],
+          conflictRule: "require_no_declared_conflict",
+          ambiguityRule: "require_operator_decision",
+        },
+      },
+    });
+    expect(await screen.findByText(/^Policy revision 1/)).toBeVisible();
+    expect(screen.getByText("No Lead selected")).toBeVisible();
+    expect(screen.getByText(/Operator decides whenever eligible candidates remain ambiguous/i)).toBeVisible();
   });
 
   it("forms a Project Team from exact eligible Resident configurations without implying authority", async () => {
@@ -620,6 +734,8 @@ describe("Beacon desktop shell", () => {
       if (command === "projects") return Promise.resolve([summary]);
       if (command === "project") return Promise.resolve(project);
       if (command === "project_charter_history") return Promise.resolve([project.charter]);
+      if (command === "project_policy") return Promise.resolve(null);
+      if (command === "project_policy_history") return Promise.resolve([]);
       if (command === "teams") return Promise.resolve([]);
       if (command === "missions") return Promise.resolve([]);
       if (command === "resident_configurations") return Promise.resolve([configuration]);
@@ -754,6 +870,8 @@ describe("Beacon desktop shell", () => {
       if (command === "project_charter_history") {
         return Promise.resolve([previousCharter, project.charter]);
       }
+      if (command === "project_policy") return Promise.resolve(null);
+      if (command === "project_policy_history") return Promise.resolve([]);
       if (command === "teams") return Promise.resolve([team]);
       if (command === "missions") return Promise.resolve([]);
       if (command === "admit_mission") return Promise.resolve(admitted);
@@ -1443,6 +1561,8 @@ describe("Beacon desktop shell", () => {
       }
       if (command === "project") return Promise.resolve(project);
       if (command === "project_charter_history") return Promise.resolve([charter]);
+      if (command === "project_policy") return Promise.resolve(null);
+      if (command === "project_policy_history") return Promise.resolve([]);
       if (command === "teams") return Promise.resolve([]);
       if (command === "missions") return Promise.resolve([]);
       return Promise.reject(new Error(`unexpected command: ${command}`));

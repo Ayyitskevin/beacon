@@ -20,12 +20,12 @@ use crate::{
     MissionService, MissionView, OperatorAccountError, OperatorAccountService,
     OperatorSessionPolicy, OperatorSessionStatus, PlatformSessionMonitor,
     PlatformSessionMonitorStatus, ProjectCharter, ProjectCharterDraft, ProjectDraft, ProjectError,
-    ProjectService, ProjectSummary, ProjectView, RecoveryKey, ResidentAgentView,
-    ResidentConfiguration, ResidentConfigurationError, ResidentConfigurationService,
-    ResidentLifecycleError, ResidentLifecycleService, ResourceDiscoveryError,
-    ResourceDiscoveryService, SecretString, StarterOrganizationError, StarterOrganizationService,
-    StarterOrganizationView, StarterResidentDraft, StartupConfig, Supervisor, TeamDraft, TeamError,
-    TeamService, TeamView,
+    ProjectPolicy, ProjectPolicyDraft, ProjectPolicyError, ProjectPolicyService, ProjectService,
+    ProjectSummary, ProjectView, RecoveryKey, ResidentAgentView, ResidentConfiguration,
+    ResidentConfigurationError, ResidentConfigurationService, ResidentLifecycleError,
+    ResidentLifecycleService, ResourceDiscoveryError, ResourceDiscoveryService, SecretString,
+    StarterOrganizationError, StarterOrganizationService, StarterOrganizationView,
+    StarterResidentDraft, StartupConfig, Supervisor, TeamDraft, TeamError, TeamService, TeamView,
 };
 
 const PROTOCOL_VERSION: u16 = 1;
@@ -79,6 +79,10 @@ pub enum LocalErrorCode {
     StaleCharterRevision,
     UnchangedCharter,
     ProjectUnavailable,
+    InvalidProjectPolicy,
+    StaleProjectPolicy,
+    UnchangedProjectPolicy,
+    ProjectPolicyUnavailable,
     InvalidTeam,
     TeamNotFound,
     StaleTeamMemberConfiguration,
@@ -118,6 +122,7 @@ pub enum LocalTransportError {
     ResidentLifecycle(ResidentLifecycleError),
     ResidentConfiguration(ResidentConfigurationError),
     Project(ProjectError),
+    ProjectPolicy(ProjectPolicyError),
     Team(TeamError),
     Mission(MissionError),
     ResourceDiscovery(ResourceDiscoveryError),
@@ -150,6 +155,7 @@ impl fmt::Display for LocalTransportError {
                 write!(formatter, "Resident configuration failed: {error}")
             }
             Self::Project(error) => write!(formatter, "Project operation failed: {error}"),
+            Self::ProjectPolicy(error) => write!(formatter, "Project Policy failed: {error}"),
             Self::Team(error) => write!(formatter, "Team operation failed: {error}"),
             Self::Mission(error) => write!(formatter, "Mission operation failed: {error}"),
             Self::ResourceDiscovery(error) => {
@@ -209,6 +215,12 @@ impl From<ResidentConfigurationError> for LocalTransportError {
 impl From<ProjectError> for LocalTransportError {
     fn from(error: ProjectError) -> Self {
         Self::Project(error)
+    }
+}
+
+impl From<ProjectPolicyError> for LocalTransportError {
+    fn from(error: ProjectPolicyError) -> Self {
+        Self::ProjectPolicy(error)
     }
 }
 
@@ -460,6 +472,18 @@ enum LocalCommand {
         expected_current_revision: u32,
         draft: ProjectCharterDraft,
     },
+    ProjectPolicy {
+        project_id: uuid::Uuid,
+    },
+    ProjectPolicyHistory {
+        project_id: uuid::Uuid,
+    },
+    PublishProjectPolicy {
+        project_id: uuid::Uuid,
+        expected_charter_revision: u32,
+        expected_policy_revision: Option<u32>,
+        draft: ProjectPolicyDraft,
+    },
     Teams {
         project_id: uuid::Uuid,
     },
@@ -543,6 +567,12 @@ enum LocalResult {
     ProjectCharterHistory {
         charters: Vec<ProjectCharter>,
     },
+    ProjectPolicy {
+        policy: Option<ProjectPolicy>,
+    },
+    ProjectPolicyHistory {
+        policies: Vec<ProjectPolicy>,
+    },
     Teams {
         teams: Vec<TeamView>,
     },
@@ -587,6 +617,7 @@ pub struct LocalSupervisorServer {
     resident_lifecycle: ResidentLifecycleService,
     resident_configuration: ResidentConfigurationService,
     projects: ProjectService,
+    project_policies: ProjectPolicyService,
     teams: TeamService,
     missions: MissionService,
     resource_discovery: ResourceDiscoveryService,
@@ -618,6 +649,8 @@ impl LocalSupervisorServer {
         let resident_configuration =
             ResidentConfigurationService::new(Arc::clone(&accounts), report.workspace.id);
         let projects = ProjectService::new(Arc::clone(&accounts), report.workspace.id);
+        let project_policies =
+            ProjectPolicyService::new(Arc::clone(&accounts), report.workspace.id);
         let teams = TeamService::new(Arc::clone(&accounts), report.workspace.id);
         let missions = MissionService::new(Arc::clone(&accounts), report.workspace.id);
         let resource_discovery =
@@ -644,6 +677,7 @@ impl LocalSupervisorServer {
             resident_lifecycle,
             resident_configuration,
             projects,
+            project_policies,
             teams,
             missions,
             resource_discovery,
@@ -863,6 +897,27 @@ impl LocalSupervisorServer {
                     expected_current_revision,
                     draft,
                 )?,
+            },
+            LocalCommand::ProjectPolicy { project_id } => LocalResult::ProjectPolicy {
+                policy: self.project_policies.current(project_id)?,
+            },
+            LocalCommand::ProjectPolicyHistory { project_id } => {
+                LocalResult::ProjectPolicyHistory {
+                    policies: self.project_policies.history(project_id)?,
+                }
+            }
+            LocalCommand::PublishProjectPolicy {
+                project_id,
+                expected_charter_revision,
+                expected_policy_revision,
+                draft,
+            } => LocalResult::ProjectPolicy {
+                policy: Some(self.project_policies.publish(
+                    project_id,
+                    expected_charter_revision,
+                    expected_policy_revision,
+                    draft,
+                )?),
             },
             LocalCommand::Teams { project_id } => LocalResult::Teams {
                 teams: self.teams.list(project_id)?,
@@ -1190,6 +1245,36 @@ impl LocalSupervisorClient {
         })?)
     }
 
+    pub fn project_policy(
+        &self,
+        project_id: uuid::Uuid,
+    ) -> Result<Option<ProjectPolicy>, LocalTransportError> {
+        expect_project_policy(self.send(LocalCommand::ProjectPolicy { project_id })?)
+    }
+
+    pub fn project_policy_history(
+        &self,
+        project_id: uuid::Uuid,
+    ) -> Result<Vec<ProjectPolicy>, LocalTransportError> {
+        expect_project_policy_history(self.send(LocalCommand::ProjectPolicyHistory { project_id })?)
+    }
+
+    pub fn publish_project_policy(
+        &self,
+        project_id: uuid::Uuid,
+        expected_charter_revision: u32,
+        expected_policy_revision: Option<u32>,
+        draft: ProjectPolicyDraft,
+    ) -> Result<ProjectPolicy, LocalTransportError> {
+        expect_project_policy(self.send(LocalCommand::PublishProjectPolicy {
+            project_id,
+            expected_charter_revision,
+            expected_policy_revision,
+            draft,
+        })?)?
+        .ok_or(LocalTransportError::Protocol)
+    }
+
     pub fn teams(&self, project_id: uuid::Uuid) -> Result<Vec<TeamView>, LocalTransportError> {
         expect_teams(self.send(LocalCommand::Teams { project_id })?)
     }
@@ -1395,6 +1480,24 @@ fn expect_project_charter_history(
     }
 }
 
+fn expect_project_policy(
+    result: LocalResult,
+) -> Result<Option<ProjectPolicy>, LocalTransportError> {
+    match result {
+        LocalResult::ProjectPolicy { policy } => Ok(policy),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
+fn expect_project_policy_history(
+    result: LocalResult,
+) -> Result<Vec<ProjectPolicy>, LocalTransportError> {
+    match result {
+        LocalResult::ProjectPolicyHistory { policies } => Ok(policies),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
 fn expect_teams(result: LocalResult) -> Result<Vec<TeamView>, LocalTransportError> {
     match result {
         LocalResult::Teams { teams } => Ok(teams),
@@ -1468,6 +1571,7 @@ fn response_from_transport_error(error: LocalTransportError) -> ResponseEnvelope
             wire_error_from_resident_configuration(error)
         }
         LocalTransportError::Project(error) => wire_error_from_project(error),
+        LocalTransportError::ProjectPolicy(error) => wire_error_from_project_policy(error),
         LocalTransportError::Team(error) => wire_error_from_team(error),
         LocalTransportError::Mission(error) => wire_error_from_mission(error),
         LocalTransportError::ResourceDiscovery(ResourceDiscoveryError::Account(error)) => {
@@ -1578,6 +1682,27 @@ fn wire_error_from_project(error: ProjectError) -> WireError {
         ProjectError::InvalidStore | ProjectError::Store(_) | ProjectError::Json(_) => {
             LocalErrorCode::ProjectUnavailable
         }
+    };
+    WireError {
+        code,
+        retry_after_ms: None,
+    }
+}
+
+fn wire_error_from_project_policy(error: ProjectPolicyError) -> WireError {
+    let code = match error {
+        ProjectPolicyError::Account(error) => return wire_error_from_account(error),
+        ProjectPolicyError::ProjectNotFound => LocalErrorCode::ProjectNotFound,
+        ProjectPolicyError::StaleCharterRevision { .. } => LocalErrorCode::StaleCharterRevision,
+        ProjectPolicyError::StalePolicyRevision => LocalErrorCode::StaleProjectPolicy,
+        ProjectPolicyError::InvalidRequiredCapabilities
+        | ProjectPolicyError::InvalidTrackRecordRequirements => {
+            LocalErrorCode::InvalidProjectPolicy
+        }
+        ProjectPolicyError::UnchangedPolicy => LocalErrorCode::UnchangedProjectPolicy,
+        ProjectPolicyError::InvalidStore
+        | ProjectPolicyError::Store(_)
+        | ProjectPolicyError::Json(_) => LocalErrorCode::ProjectPolicyUnavailable,
     };
     WireError {
         code,
