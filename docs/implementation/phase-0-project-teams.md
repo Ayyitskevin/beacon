@@ -26,8 +26,9 @@ credential, network scope, external effect, or aggregated capability.
 
 Schema version 10 adds `teams` and `team_formation_members`. Composite foreign keys keep Project,
 Resident, and configuration evidence inside one Workspace. Update and delete triggers preserve
-the Team and roster as formation history. The accepted Command writes the Team, every member, and
-one `team.formed` Event atomically.
+the Team and roster as formation history; another trigger rejects member inserts after the
+formation Event closes the roster. The accepted Command writes the Team, every member, and one
+`team.formed` Event atomically.
 
 Startup compares every formation Event to its exact stored Team and ordered roster, requires one
 Event per Team, and refuses missing, malformed, widened, or mismatched state. The v9→v10 migration
