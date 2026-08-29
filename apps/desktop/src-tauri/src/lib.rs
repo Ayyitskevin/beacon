@@ -12,9 +12,9 @@ use beacond::{
     LocalModelActivation, LocalModelActivationReview, LocalModelDiscoveryReport,
     LocalSupervisorClient, LocalTransportError, MissionDraft, MissionView, OperatorSessionPolicy,
     OperatorSessionStatus, PlatformSessionMonitorStatus, ProjectCharter, ProjectCharterDraft,
-    ProjectDraft, ProjectSummary, ProjectView, ProviderFeature, ResidentAgentView,
-    ResidentConfiguration, SecretString, StarterOrganizationView, StarterResidentDraft, TeamDraft,
-    TeamView, initialize_local_auth_token,
+    ProjectDraft, ProjectPolicy, ProjectPolicyDraft, ProjectSummary, ProjectView, ProviderFeature,
+    ResidentAgentView, ResidentConfiguration, SecretString, StarterOrganizationView,
+    StarterResidentDraft, TeamDraft, TeamView, initialize_local_auth_token,
 };
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -611,6 +611,44 @@ fn revise_project_charter_value(
         .map_err(Into::into)
 }
 
+fn project_policy_value(
+    state: &DesktopState,
+    project_id: uuid::Uuid,
+) -> Result<Option<ProjectPolicy>, CommandError> {
+    state
+        .supervisor
+        .project_policy(project_id)
+        .map_err(Into::into)
+}
+
+fn project_policy_history_value(
+    state: &DesktopState,
+    project_id: uuid::Uuid,
+) -> Result<Vec<ProjectPolicy>, CommandError> {
+    state
+        .supervisor
+        .project_policy_history(project_id)
+        .map_err(Into::into)
+}
+
+fn publish_project_policy_value(
+    state: &DesktopState,
+    project_id: uuid::Uuid,
+    expected_charter_revision: u32,
+    expected_policy_revision: Option<u32>,
+    draft: ProjectPolicyDraft,
+) -> Result<ProjectPolicy, CommandError> {
+    state
+        .supervisor
+        .publish_project_policy(
+            project_id,
+            expected_charter_revision,
+            expected_policy_revision,
+            draft,
+        )
+        .map_err(Into::into)
+}
+
 fn teams_value(
     state: &DesktopState,
     project_id: uuid::Uuid,
@@ -937,6 +975,39 @@ fn revise_project_charter(
 }
 
 #[tauri::command]
+fn project_policy(
+    state: State<'_, DesktopState>,
+    project_id: uuid::Uuid,
+) -> Result<Option<ProjectPolicy>, CommandError> {
+    project_policy_value(&state, project_id)
+}
+
+#[tauri::command]
+fn project_policy_history(
+    state: State<'_, DesktopState>,
+    project_id: uuid::Uuid,
+) -> Result<Vec<ProjectPolicy>, CommandError> {
+    project_policy_history_value(&state, project_id)
+}
+
+#[tauri::command]
+fn publish_project_policy(
+    state: State<'_, DesktopState>,
+    project_id: uuid::Uuid,
+    expected_charter_revision: u32,
+    expected_policy_revision: Option<u32>,
+    draft: ProjectPolicyDraft,
+) -> Result<ProjectPolicy, CommandError> {
+    publish_project_policy_value(
+        &state,
+        project_id,
+        expected_charter_revision,
+        expected_policy_revision,
+        draft,
+    )
+}
+
+#[tauri::command]
 fn teams(
     state: State<'_, DesktopState>,
     project_id: uuid::Uuid,
@@ -1253,6 +1324,9 @@ pub fn run() {
             project_charter_history,
             create_project,
             revise_project_charter,
+            project_policy,
+            project_policy_history,
+            publish_project_policy,
             teams,
             team,
             form_team,
@@ -1279,9 +1353,11 @@ mod tests {
     use std::thread::JoinHandle;
 
     use beacond::{
-        AutonomyProfile, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
-        ProjectCharterDraft, ProjectDraft, ResidentLifecycle, SecretString, StarterResidentDraft,
-        StarterRole, initialize_local_auth_token,
+        AutonomyProfile, BeaconCapability, LocalServerConfig, LocalSupervisorClient,
+        LocalSupervisorServer, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft,
+        ResidentLifecycle, SecretString, StarterResidentDraft, StarterRole, TeamLeadAmbiguityRule,
+        TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy,
+        TrackRecordEvidenceKind, TrackRecordRequirement, initialize_local_auth_token,
     };
     use serde_json::Value;
     use uuid::Uuid;
@@ -1291,7 +1367,8 @@ mod tests {
         authentication_capabilities_value, begin_password_setup_value,
         complete_operator_setup_value, create_project_value, migrate_legacy_app_data,
         platform_session_monitor_status_value, prepare_runtime_directory,
-        project_charter_history_value, project_value, projects_value, reactivate_resident_value,
+        project_charter_history_value, project_policy_history_value, project_policy_value,
+        project_value, projects_value, publish_project_policy_value, reactivate_resident_value,
         residents_value, retire_resident_value, revise_project_charter_value, session_policy_value,
         session_status_value, set_session_timeout_value, starter_organization_value,
         suspend_resident_value,
@@ -1450,6 +1527,9 @@ mod tests {
                 "allow-project-charter-history",
                 "allow-create-project",
                 "allow-revise-project-charter",
+                "allow-project-policy",
+                "allow-project-policy-history",
+                "allow-publish-project-policy",
                 "allow-teams",
                 "allow-team",
                 "allow-form-team",
@@ -1713,6 +1793,75 @@ mod tests {
             2
         );
         assert_eq!(projects_value(&state.state).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn command_adapter_publishes_and_reads_project_policy_without_selecting_a_lead() {
+        let state = TestState::new();
+        begin_password_setup_value(
+            &state.state,
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+        complete_operator_setup_value(&state.state, true).unwrap();
+        let project = create_project_value(
+            &state.state,
+            ProjectDraft {
+                name: "Policy Project".to_owned(),
+                charter: ProjectCharterDraft {
+                    purpose: "Build the agent office.".to_owned(),
+                    desired_outcomes: vec!["Ship a governed vertical slice".to_owned()],
+                    constraints: vec!["Keep Workspace data local".to_owned()],
+                    prohibitions: vec!["Do not deploy publicly".to_owned()],
+                    autonomy_profile: AutonomyProfile::Supervised,
+                },
+            },
+        )
+        .unwrap();
+        assert!(
+            project_policy_value(&state.state, project.id)
+                .unwrap()
+                .is_none()
+        );
+
+        let policy = publish_project_policy_value(
+            &state.state,
+            project.id,
+            project.charter.revision,
+            None,
+            ProjectPolicyDraft {
+                team_lead_selection: TeamLeadSelectionPolicy {
+                    required_capabilities: vec![BeaconCapability::WorkCoordinateMission],
+                    availability_rule: TeamLeadAvailabilityRule::CurrentTeamEligibility,
+                    track_record_requirements: vec![TrackRecordRequirement {
+                        evidence_kind: TrackRecordEvidenceKind::MissionOutcome,
+                        minimum_count: 1,
+                    }],
+                    conflict_rule: TeamLeadConflictRule::RequireNoDeclaredConflict,
+                    ambiguity_rule: TeamLeadAmbiguityRule::RequireOperatorDecision,
+                },
+            },
+        )
+        .unwrap();
+        let value = serde_json::to_value(&policy).unwrap();
+        assert_eq!(value["revision"], 1);
+        assert_eq!(value["authoredBy"], "operator");
+        assert_eq!(
+            value["teamLeadSelection"]["availabilityRule"],
+            "current_team_eligibility"
+        );
+        assert!(value.get("leadResidentId").is_none());
+        assert_eq!(
+            project_policy_value(&state.state, project.id).unwrap(),
+            Some(policy)
+        );
+        assert_eq!(
+            project_policy_history_value(&state.state, project.id)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     fn contains_workspace_material(value: &Value) -> bool {

@@ -266,6 +266,11 @@ _Avoid_: Retry, rerun
 Operator-authored rules that classify and bound actions before execution.
 _Avoid_: Settings, guardrail, prompt
 
+**Project Policy Revision**:
+An immutable Operator-authored version of Project rules, bound to one exact Charter Revision and
+used to evaluate future decisions without granting authority itself.
+_Avoid_: Live settings, appointment, permission grant
+
 **Autonomy Profile**:
 The Project-level posture that determines which classes of actions may proceed automatically.
 _Avoid_: Mode, trust level

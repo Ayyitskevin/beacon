@@ -24,6 +24,8 @@ import {
   loadPlatformSessionMonitorStatus,
   loadProject,
   loadProjectCharterHistory,
+  loadProjectPolicy,
+  loadProjectPolicyHistory,
   loadProjects,
   loadResidents,
   loadResidentCapabilityCatalog,
@@ -36,6 +38,8 @@ import {
   lockLocalSession,
   recordLocalOperatorActivity,
   recoverLocalOperatorAccount,
+  publishProjectPolicy,
+  type ProjectPolicyDraft,
   reactivateResident,
   retireResident,
   reviseProjectCharter,
@@ -348,6 +352,87 @@ describe("desktop session transport", () => {
       ],
       ["project_charter_history", { projectId: project.id }],
       ["project", { projectId: project.id }],
+    ]);
+  });
+
+  it("maps Project Policy and rejects widened, unordered, or incomplete criteria", async () => {
+    const policy = {
+      workspaceId: "11111111-1111-4111-8111-111111111111",
+      projectId: "33333333-3333-4333-8333-333333333333",
+      revision: 1,
+      charterRevision: 2,
+      teamLeadSelection: {
+        requiredCapabilities: ["work.coordinate_mission", "evidence.develop"],
+        availabilityRule: "current_team_eligibility",
+        trackRecordRequirements: [
+          { evidenceKind: "mission_outcome", minimumCount: 1 },
+          { evidenceKind: "evaluation", minimumCount: 2 },
+        ],
+        conflictRule: "require_no_declared_conflict",
+        ambiguityRule: "require_operator_decision",
+      },
+      authoredBy: "operator",
+      authoredAtMs: 987,
+      appliesToCurrentCharter: true,
+    } as const;
+    const draft: ProjectPolicyDraft = {
+      teamLeadSelection: {
+        ...policy.teamLeadSelection,
+        requiredCapabilities: [...policy.teamLeadSelection.requiredCapabilities],
+        trackRecordRequirements: policy.teamLeadSelection.trackRecordRequirements.map(
+          (requirement) => ({ ...requirement }),
+        ),
+      },
+    };
+    invokeMock
+      .mockResolvedValueOnce(policy)
+      .mockResolvedValueOnce([policy])
+      .mockResolvedValueOnce(policy)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ ...policy, leadResidentId: "22222222-2222-4222-8222-222222222222" })
+      .mockResolvedValueOnce({
+        ...policy,
+        teamLeadSelection: {
+          ...policy.teamLeadSelection,
+          requiredCapabilities: ["evidence.develop"],
+        },
+      })
+      .mockResolvedValueOnce({
+        ...policy,
+        teamLeadSelection: {
+          ...policy.teamLeadSelection,
+          trackRecordRequirements: [
+            { evidenceKind: "mission_outcome", minimumCount: 1 },
+            { evidenceKind: "mission_outcome", minimumCount: 2 },
+          ],
+        },
+      });
+
+    await expect(loadProjectPolicy(policy.projectId)).resolves.toEqual(policy);
+    await expect(loadProjectPolicyHistory(policy.projectId)).resolves.toEqual([policy]);
+    await expect(
+      publishProjectPolicy(policy.projectId, policy.charterRevision, null, draft),
+    ).resolves.toEqual(policy);
+    await expect(loadProjectPolicy(policy.projectId)).resolves.toBeNull();
+    await expect(loadProjectPolicy(policy.projectId)).rejects.toThrow("invalid Project Policy");
+    await expect(loadProjectPolicy(policy.projectId)).rejects.toThrow("invalid Project Policy");
+    await expect(loadProjectPolicy(policy.projectId)).rejects.toThrow("invalid Project Policy");
+    expect(invokeMock.mock.calls).toEqual([
+      ["project_policy", { projectId: policy.projectId }],
+      ["project_policy_history", { projectId: policy.projectId }],
+      [
+        "publish_project_policy",
+        {
+          projectId: policy.projectId,
+          expectedCharterRevision: policy.charterRevision,
+          expectedPolicyRevision: null,
+          draft,
+        },
+      ],
+      ["project_policy", { projectId: policy.projectId }],
+      ["project_policy", { projectId: policy.projectId }],
+      ["project_policy", { projectId: policy.projectId }],
+      ["project_policy", { projectId: policy.projectId }],
     ]);
   });
 

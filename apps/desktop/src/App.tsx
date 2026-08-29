@@ -36,6 +36,8 @@ import {
   loadPlatformSessionMonitorStatus,
   loadProject,
   loadProjectCharterHistory,
+  loadProjectPolicy,
+  loadProjectPolicyHistory,
   loadProjects,
   loadResidentCapabilityCatalog,
   loadResidentConfigurations,
@@ -53,6 +55,8 @@ import {
   type ProjectCharter,
   type ProjectCharterDraft,
   type ProjectDraft,
+  type ProjectPolicy,
+  type ProjectPolicyDraft,
   type ProjectSummary,
   type ProjectView,
   type MissionDraft,
@@ -63,6 +67,7 @@ import {
   reactivateResident,
   recoverLocalOperatorAccount,
   reviseProjectCharter,
+  publishProjectPolicy,
   retireResident,
   setLocalSessionTimeout,
   signInWithLocalPassword,
@@ -265,12 +270,15 @@ export function App() {
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [selectedProject, setSelectedProject] = useState<ProjectView | null>(null);
   const [charterHistory, setCharterHistory] = useState<ProjectCharter[] | null>(null);
+  const [projectPolicy, setProjectPolicy] = useState<ProjectPolicy | null>(null);
+  const [projectPolicyHistory, setProjectPolicyHistory] = useState<ProjectPolicy[] | null>(null);
   const [teams, setTeams] = useState<TeamView[] | null>(null);
   const [missions, setMissions] = useState<MissionView[] | null>(null);
   const [teamConfigurations, setTeamConfigurations] =
     useState<ResidentConfiguration[] | null>(null);
   const [projectComposerOpen, setProjectComposerOpen] = useState(false);
   const [charterComposerOpen, setCharterComposerOpen] = useState(false);
+  const [policyComposerOpen, setPolicyComposerOpen] = useState(false);
   const [teamComposerOpen, setTeamComposerOpen] = useState(false);
   const [missionComposerOpen, setMissionComposerOpen] = useState(false);
   const [localModelDiscovery, setLocalModelDiscovery] =
@@ -304,11 +312,14 @@ export function App() {
       setProjects(null);
       setSelectedProject(null);
       setCharterHistory(null);
+      setProjectPolicy(null);
+      setProjectPolicyHistory(null);
       setTeams(null);
       setMissions(null);
       setTeamConfigurations(null);
       setProjectComposerOpen(false);
       setCharterComposerOpen(false);
+      setPolicyComposerOpen(false);
       setTeamComposerOpen(false);
       setMissionComposerOpen(false);
       setActiveApplication("Briefing");
@@ -349,11 +360,14 @@ export function App() {
     setProjects(null);
     setSelectedProject(null);
     setCharterHistory(null);
+    setProjectPolicy(null);
+    setProjectPolicyHistory(null);
     setTeams(null);
     setMissions(null);
     setTeamConfigurations(null);
     setProjectComposerOpen(false);
     setCharterComposerOpen(false);
+    setPolicyComposerOpen(false);
     setTeamComposerOpen(false);
     setMissionComposerOpen(false);
     setActiveApplication("Briefing");
@@ -379,11 +393,14 @@ export function App() {
         setProjects(null);
         setSelectedProject(null);
         setCharterHistory(null);
+        setProjectPolicy(null);
+        setProjectPolicyHistory(null);
         setTeams(null);
         setMissions(null);
         setTeamConfigurations(null);
         setProjectComposerOpen(false);
         setCharterComposerOpen(false);
+        setPolicyComposerOpen(false);
         setTeamComposerOpen(false);
         setMissionComposerOpen(false);
         setViewState("error");
@@ -436,6 +453,7 @@ export function App() {
     setTeams(null);
     setMissions(null);
     setTeamConfigurations(null);
+    setPolicyComposerOpen(false);
     setTeamComposerOpen(false);
     setMissionComposerOpen(false);
     void Promise.all([loadTeams(selectedProject.id), loadMissions(selectedProject.id)]).then(
@@ -471,11 +489,14 @@ export function App() {
             setProjects(null);
             setSelectedProject(null);
             setCharterHistory(null);
+            setProjectPolicy(null);
+            setProjectPolicyHistory(null);
             setTeams(null);
             setMissions(null);
             setTeamConfigurations(null);
             setProjectComposerOpen(false);
             setCharterComposerOpen(false);
+            setPolicyComposerOpen(false);
             setTeamComposerOpen(false);
             setMissionComposerOpen(false);
             setActiveApplication("Briefing");
@@ -491,11 +512,14 @@ export function App() {
           setProjects(null);
           setSelectedProject(null);
           setCharterHistory(null);
+          setProjectPolicy(null);
+          setProjectPolicyHistory(null);
           setTeams(null);
           setMissions(null);
           setTeamConfigurations(null);
           setProjectComposerOpen(false);
           setCharterComposerOpen(false);
+          setPolicyComposerOpen(false);
           setTeamComposerOpen(false);
           setMissionComposerOpen(false);
           setViewState("error");
@@ -532,11 +556,14 @@ export function App() {
           setProjects(null);
           setSelectedProject(null);
           setCharterHistory(null);
+          setProjectPolicy(null);
+          setProjectPolicyHistory(null);
           setTeams(null);
           setMissions(null);
           setTeamConfigurations(null);
           setProjectComposerOpen(false);
           setCharterComposerOpen(false);
+          setPolicyComposerOpen(false);
           setTeamComposerOpen(false);
           setMissionComposerOpen(false);
           setViewState("error");
@@ -671,11 +698,14 @@ export function App() {
       setProjects(null);
       setSelectedProject(null);
       setCharterHistory(null);
+      setProjectPolicy(null);
+      setProjectPolicyHistory(null);
       setTeams(null);
       setMissions(null);
       setTeamConfigurations(null);
       setProjectComposerOpen(false);
       setCharterComposerOpen(false);
+      setPolicyComposerOpen(false);
       setTeamComposerOpen(false);
       setMissionComposerOpen(false);
       setLocalModelDiscovery(null);
@@ -864,20 +894,28 @@ export function App() {
 
   async function openProject(projectId: string) {
     await runAction(async () => {
-      const [project, history] = await Promise.all([
+      const [project, history, policy, policyHistory] = await Promise.all([
         loadProject(projectId),
         loadProjectCharterHistory(projectId),
+        loadProjectPolicy(projectId),
+        loadProjectPolicyHistory(projectId),
       ]);
       if (history.at(-1)?.revision !== project.charter.revision) {
         throw new Error("Beacon received inconsistent Project Charter history.");
       }
+      if ((policyHistory.at(-1)?.revision ?? null) !== (policy?.revision ?? null)) {
+        throw new Error("Beacon received inconsistent Project Policy history.");
+      }
       setSelectedProject(project);
       setCharterHistory(history);
+      setProjectPolicy(policy);
+      setProjectPolicyHistory(policyHistory);
       setTeams(null);
       setMissions(null);
       setTeamConfigurations(null);
       setProjectComposerOpen(false);
       setCharterComposerOpen(false);
+      setPolicyComposerOpen(false);
       setTeamComposerOpen(false);
       setMissionComposerOpen(false);
     });
@@ -898,11 +936,14 @@ export function App() {
       ]);
       setSelectedProject(created);
       setCharterHistory([created.charter]);
+      setProjectPolicy(null);
+      setProjectPolicyHistory([]);
       setTeams([]);
       setMissions([]);
       setTeamConfigurations(null);
       setProjectComposerOpen(false);
       setCharterComposerOpen(false);
+      setPolicyComposerOpen(false);
       setTeamComposerOpen(false);
       setMissionComposerOpen(false);
     });
@@ -918,6 +959,12 @@ export function App() {
       );
       setSelectedProject(revised);
       setCharterHistory((current) => [...(current ?? []), revised.charter]);
+      setProjectPolicy((current) =>
+        current ? { ...current, appliesToCurrentCharter: false } : null,
+      );
+      setProjectPolicyHistory((current) =>
+        current?.map((policy) => ({ ...policy, appliesToCurrentCharter: false })) ?? null,
+      );
       setProjects((current) =>
         current?.map((project) =>
           project.id === revised.id
@@ -933,10 +980,26 @@ export function App() {
     });
   }
 
+  async function publishTeamLeadPolicy(draft: ProjectPolicyDraft) {
+    if (!selectedProject) return;
+    await runAction(async () => {
+      const published = await publishProjectPolicy(
+        selectedProject.id,
+        selectedProject.charter.revision,
+        projectPolicy?.revision ?? null,
+        draft,
+      );
+      setProjectPolicy(published);
+      setProjectPolicyHistory((current) => [...(current ?? []), published]);
+      setPolicyComposerOpen(false);
+    });
+  }
+
   async function prepareTeamFormation() {
     await runAction(async () => {
       setTeamConfigurations(await loadResidentConfigurations());
       setCharterComposerOpen(false);
+      setPolicyComposerOpen(false);
       setMissionComposerOpen(false);
       setTeamComposerOpen(true);
     });
@@ -957,6 +1020,7 @@ export function App() {
 
   function openMissionComposer() {
     setCharterComposerOpen(false);
+    setPolicyComposerOpen(false);
     setTeamComposerOpen(false);
     setTeamConfigurations(null);
     setMissionComposerOpen(true);
@@ -1144,12 +1208,15 @@ export function App() {
               projects={projects}
               selectedProject={selectedProject}
               charterHistory={charterHistory}
+              projectPolicy={projectPolicy}
+              projectPolicyHistory={projectPolicyHistory}
               teams={teams}
               missions={missions}
               residents={residents}
               teamConfigurations={teamConfigurations}
               composerOpen={projectComposerOpen}
               charterComposerOpen={charterComposerOpen}
+              policyComposerOpen={policyComposerOpen}
               teamComposerOpen={teamComposerOpen}
               missionComposerOpen={missionComposerOpen}
               busy={busy}
@@ -1157,11 +1224,14 @@ export function App() {
               onCreate={() => {
                 setSelectedProject(null);
                 setCharterHistory(null);
+                setProjectPolicy(null);
+                setProjectPolicyHistory(null);
                 setTeams(null);
                 setMissions(null);
                 setTeamConfigurations(null);
                 setProjectComposerOpen(true);
                 setCharterComposerOpen(false);
+                setPolicyComposerOpen(false);
                 setTeamComposerOpen(false);
                 setMissionComposerOpen(false);
               }}
@@ -1169,6 +1239,7 @@ export function App() {
               onOpenProject={openProject}
               onSubmitProject={createProjectFromCharter}
               onReviseCharter={() => {
+                setPolicyComposerOpen(false);
                 setTeamComposerOpen(false);
                 setTeamConfigurations(null);
                 setMissionComposerOpen(false);
@@ -1176,6 +1247,15 @@ export function App() {
               }}
               onCancelCharterRevision={() => setCharterComposerOpen(false)}
               onSubmitCharterRevision={publishCharterRevision}
+              onOpenPolicyComposer={() => {
+                setCharterComposerOpen(false);
+                setTeamComposerOpen(false);
+                setTeamConfigurations(null);
+                setMissionComposerOpen(false);
+                setPolicyComposerOpen(true);
+              }}
+              onCancelPolicyComposer={() => setPolicyComposerOpen(false)}
+              onSubmitProjectPolicy={(draft) => void publishTeamLeadPolicy(draft)}
               onOpenTeamComposer={() => void prepareTeamFormation()}
               onCancelTeamComposer={() => {
                 setTeamComposerOpen(false);

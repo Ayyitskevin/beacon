@@ -17,10 +17,12 @@ use beacond::{
     LocalErrorCode, LocalModelActivationState, LocalModelEndpoint, LocalServerConfig,
     LocalSupervisorClient, LocalSupervisorServer, LocalTransportError, MissionAdmissionActor,
     MissionDraft, MissionLifecycle, MissionMemberDraft, ModelActivation, OperatorSessionPhase,
-    PlatformMonitorState, ProjectCharterDraft, ProjectDraft, ProviderFeature,
-    ResidentConfigurationState, ResidentLifecycle, SecretString, StarterOrganizationDecision,
-    StarterResidentDraft, StarterRole, TeamDraft, TeamFormationActor, TeamIneligibilityReason,
-    TeamMemberDraft, initialize_local_auth_token,
+    PlatformMonitorState, PolicyAuthor, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft,
+    ProviderFeature, ResidentConfigurationState, ResidentLifecycle, SecretString,
+    StarterOrganizationDecision, StarterResidentDraft, StarterRole, TeamDraft, TeamFormationActor,
+    TeamIneligibilityReason, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule,
+    TeamLeadSelectionPolicy, TeamMemberDraft, TrackRecordEvidenceKind, TrackRecordRequirement,
+    initialize_local_auth_token,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -936,6 +938,70 @@ fn draft(role: StarterRole, display_name: Option<&str>) -> StarterResidentDraft 
         role,
         display_name: display_name.map(str::to_owned),
     }
+}
+
+#[test]
+fn authenticated_client_publishes_project_policy_over_the_real_socket() {
+    let runtime = TestRuntime::new("project-policy");
+    let server = runtime.server();
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+
+    assert_remote_code(
+        client.project_policy(Uuid::new_v4()),
+        LocalErrorCode::NotAuthenticated,
+    );
+    client
+        .begin_password_setup(
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+    client.complete_operator_setup(true).unwrap();
+    let project = client
+        .create_project(project_draft("Policy Project", AutonomyProfile::Supervised))
+        .unwrap();
+    assert!(client.project_policy(project.id).unwrap().is_none());
+
+    let draft = ProjectPolicyDraft {
+        team_lead_selection: TeamLeadSelectionPolicy {
+            required_capabilities: vec![BeaconCapability::WorkCoordinateMission],
+            availability_rule: TeamLeadAvailabilityRule::CurrentTeamEligibility,
+            track_record_requirements: vec![TrackRecordRequirement {
+                evidence_kind: TrackRecordEvidenceKind::MissionOutcome,
+                minimum_count: 1,
+            }],
+            conflict_rule: TeamLeadConflictRule::RequireNoDeclaredConflict,
+            ambiguity_rule: TeamLeadAmbiguityRule::RequireOperatorDecision,
+        },
+    };
+    let policy = client
+        .publish_project_policy(project.id, project.charter.revision, None, draft)
+        .unwrap();
+    assert_eq!(policy.authored_by, PolicyAuthor::Operator);
+    assert!(policy.applies_to_current_charter);
+    assert_eq!(
+        client.project_policy(project.id).unwrap(),
+        Some(policy.clone())
+    );
+    assert_eq!(
+        client.project_policy_history(project.id).unwrap(),
+        std::slice::from_ref(&policy)
+    );
+
+    client.lock().unwrap();
+    assert_remote_code(
+        client.project_policy(project.id),
+        LocalErrorCode::NotAuthenticated,
+    );
+    assert_remote_code(
+        client.project_policy_history(project.id),
+        LocalErrorCode::NotAuthenticated,
+    );
+    running.store(false, Ordering::Release);
+    thread.join().unwrap().unwrap();
 }
 
 fn project_draft(name: &str, autonomy_profile: AutonomyProfile) -> ProjectDraft {

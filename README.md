@@ -197,8 +197,15 @@ Admission binds the exact current Charter revision and every Team member's exact
 Configuration, then preserves that evidence with the Mission's desired outcome, success
 conditions, constraints, prohibitions, and `admitted` lifecycle. It selects no Team Lead and
 creates no Assignment, Route, Invocation, Run, budget, spending, credential, network scope,
-external effect, or execution authority. Those decisions wait for Policy, Track Record, and Agent
-command paths that do not yet exist.
+external effect, or execution authority.
+
+The authenticated Owner can now publish immutable Project Policy revisions for future Team Lead
+selection, each bound to the exact current Charter revision. Every revision requires
+`work.coordinate_mission`, current Team eligibility, one or more named Track Record evidence
+thresholds, no declared leadership conflict, and Operator adjudication when eligible candidates
+remain ambiguous. Publication records criteria only: it does not evaluate a candidate, select or
+replace a Lead, create an Assignment, or grant authority. Track Record evidence, Policy evaluation,
+and Resident-issued command paths remain subsequent slices.
 
 The Projects application is the first working suite surface after Briefing. The Owner can create
 a Project from a structured Charter containing its purpose, desired outcomes, constraints,
@@ -242,6 +249,9 @@ boundary.
 [The Project Missions checkpoint](docs/implementation/phase-0-project-missions.md) records exact
 Charter, Team, and Resident Configuration admission evidence while keeping Mission leadership and
 execution authority out of scope.
+[The Project Policy checkpoint](docs/implementation/phase-0-project-policy.md) records immutable
+Operator-authored Team Lead selection criteria, exact Charter binding, and the no-selection and
+no-authority boundary.
 Run `scripts/gate` to verify the
 preserved Beacon Legacy Desk, the Rust workspace, the web bundle, and the native desktop build.
 The exact pre-Beacon compatibility boundary is recorded in the
