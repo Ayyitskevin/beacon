@@ -79,6 +79,19 @@ BEGIN
     SELECT RAISE(ABORT, 'Team formation members are immutable');
 END;
 
+CREATE TRIGGER team_formation_members_no_insert_after_formation
+BEFORE INSERT ON team_formation_members
+WHEN EXISTS (
+    SELECT 1
+    FROM events
+    WHERE workspace_id = NEW.workspace_id
+      AND kind = 'team.formed'
+      AND json_extract(payload_json, '$.team.id') = NEW.team_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'Team formation roster is closed');
+END;
+
 CREATE TRIGGER team_formation_members_no_delete
 BEFORE DELETE ON team_formation_members
 BEGIN

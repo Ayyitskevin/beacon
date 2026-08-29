@@ -482,20 +482,31 @@ fn locked_sessions_and_tampered_formation_events_fail_closed() {
     let store = TestStore::new("tamper");
     let accounts = enrolled_accounts(&store);
     let project_id = create_project(&accounts, store.workspace_id);
-    let resident_id = admit_residents(&accounts, store.workspace_id)[0];
-    ResidentLifecycleService::new(Arc::clone(&accounts), store.workspace_id)
-        .activate(resident_id, None)
-        .unwrap();
+    let resident_ids = admit_residents(&accounts, store.workspace_id);
+    let resident_id = resident_ids[0];
+    let later_member_id = resident_ids[1];
+    let lifecycle = ResidentLifecycleService::new(Arc::clone(&accounts), store.workspace_id);
+    lifecycle.activate(resident_id, None).unwrap();
+    lifecycle.activate(later_member_id, None).unwrap();
     let (_models, activation_id) = activate_model(&store, &accounts);
-    let configuration =
-        ResidentConfigurationService::new(Arc::clone(&accounts), store.workspace_id)
-            .configure(
-                resident_id,
-                None,
-                activation_id,
-                vec![BeaconCapability::WorkCreateMission],
-            )
-            .unwrap();
+    let configurations =
+        ResidentConfigurationService::new(Arc::clone(&accounts), store.workspace_id);
+    let configuration = configurations
+        .configure(
+            resident_id,
+            None,
+            activation_id,
+            vec![BeaconCapability::WorkCreateMission],
+        )
+        .unwrap();
+    let later_member_configuration = configurations
+        .configure(
+            later_member_id,
+            None,
+            activation_id,
+            vec![BeaconCapability::ArtifactProduce],
+        )
+        .unwrap();
     let teams = TeamService::new(Arc::clone(&accounts), store.workspace_id);
     let formed = teams
         .form(TeamDraft {
@@ -519,6 +530,21 @@ fn locked_sessions_and_tampered_formation_events_fail_closed() {
             .execute(
                 "UPDATE teams SET name = 'tampered' WHERE id = ?1",
                 [formed.id.to_string()],
+            )
+            .is_err()
+    );
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO team_formation_members (
+                     workspace_id, team_id, position, resident_id, configuration_id
+                 ) VALUES (?1, ?2, 1, ?3, ?4)",
+                rusqlite::params![
+                    store.workspace_id.to_string(),
+                    formed.id.to_string(),
+                    later_member_id.to_string(),
+                    later_member_configuration.id.to_string(),
+                ],
             )
             .is_err()
     );

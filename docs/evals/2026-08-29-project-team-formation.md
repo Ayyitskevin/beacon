@@ -17,6 +17,7 @@ live migration is part of this evaluation.
 | Suspend, clear, and reconfigure after formation | Formation proof fixed; current eligibility derived | Pass |
 | Concurrent identical commands | Two distinct immutable Team IDs and two Events | Pass |
 | Team row update | Rejected by append-only trigger | Pass |
+| Member insert after formation Event | Rejected because the immutable roster is closed | Pass |
 | Malformed formation Event | Startup refusal | Pass |
 | Existing schema-v9 Event | Sequence, JSON bytes, and timestamp preserved at v10 | Pass |
 
