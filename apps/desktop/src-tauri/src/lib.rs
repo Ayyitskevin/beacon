@@ -10,11 +10,11 @@ use std::time::Duration;
 use beacond::{
     AccessOrigin, BeaconCapability, BeaconCapabilityDescriptor, LocalErrorCode,
     LocalModelActivation, LocalModelActivationReview, LocalModelDiscoveryReport,
-    LocalSupervisorClient, LocalTransportError, OperatorSessionPolicy, OperatorSessionStatus,
-    PlatformSessionMonitorStatus, ProjectCharter, ProjectCharterDraft, ProjectDraft,
-    ProjectSummary, ProjectView, ProviderFeature, ResidentAgentView, ResidentConfiguration,
-    SecretString, StarterOrganizationView, StarterResidentDraft, TeamDraft, TeamView,
-    initialize_local_auth_token,
+    LocalSupervisorClient, LocalTransportError, MissionDraft, MissionView, OperatorSessionPolicy,
+    OperatorSessionStatus, PlatformSessionMonitorStatus, ProjectCharter, ProjectCharterDraft,
+    ProjectDraft, ProjectSummary, ProjectView, ProviderFeature, ResidentAgentView,
+    ResidentConfiguration, SecretString, StarterOrganizationView, StarterResidentDraft, TeamDraft,
+    TeamView, initialize_local_auth_token,
 };
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -626,6 +626,27 @@ fn form_team_value(state: &DesktopState, draft: TeamDraft) -> Result<TeamView, C
     state.supervisor.form_team(draft).map_err(Into::into)
 }
 
+fn missions_value(
+    state: &DesktopState,
+    project_id: uuid::Uuid,
+) -> Result<Vec<MissionView>, CommandError> {
+    state.supervisor.missions(project_id).map_err(Into::into)
+}
+
+fn mission_value(
+    state: &DesktopState,
+    mission_id: uuid::Uuid,
+) -> Result<MissionView, CommandError> {
+    state.supervisor.mission(mission_id).map_err(Into::into)
+}
+
+fn admit_mission_value(
+    state: &DesktopState,
+    draft: MissionDraft,
+) -> Result<MissionView, CommandError> {
+    state.supervisor.admit_mission(draft).map_err(Into::into)
+}
+
 fn discover_local_models_value(
     state: &DesktopState,
 ) -> Result<LocalModelDiscoveryReport, CommandError> {
@@ -934,6 +955,30 @@ fn form_team(state: State<'_, DesktopState>, draft: TeamDraft) -> Result<TeamVie
 }
 
 #[tauri::command]
+fn missions(
+    state: State<'_, DesktopState>,
+    project_id: uuid::Uuid,
+) -> Result<Vec<MissionView>, CommandError> {
+    missions_value(&state, project_id)
+}
+
+#[tauri::command]
+fn mission(
+    state: State<'_, DesktopState>,
+    mission_id: uuid::Uuid,
+) -> Result<MissionView, CommandError> {
+    mission_value(&state, mission_id)
+}
+
+#[tauri::command]
+fn admit_mission(
+    state: State<'_, DesktopState>,
+    draft: MissionDraft,
+) -> Result<MissionView, CommandError> {
+    admit_mission_value(&state, draft)
+}
+
+#[tauri::command]
 fn discover_local_models(
     state: State<'_, DesktopState>,
 ) -> Result<LocalModelDiscoveryReport, CommandError> {
@@ -1211,6 +1256,9 @@ pub fn run() {
             teams,
             team,
             form_team,
+            missions,
+            mission,
+            admit_mission,
             discover_local_models,
             inspect_local_model,
             activate_local_model,
@@ -1405,6 +1453,9 @@ mod tests {
                 "allow-teams",
                 "allow-team",
                 "allow-form-team",
+                "allow-missions",
+                "allow-mission",
+                "allow-admit-mission",
                 "allow-discover-local-models",
                 "allow-inspect-local-model",
                 "allow-activate-local-model",

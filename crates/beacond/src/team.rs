@@ -456,6 +456,21 @@ fn render_team(
     })
 }
 
+pub(crate) fn load_team_for_mission(
+    connection: &Connection,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    team_id: Uuid,
+) -> Result<Option<TeamView>, TeamError> {
+    let Some(formation) = load_stored_team(connection, workspace_id, team_id)? else {
+        return Ok(None);
+    };
+    if formation.project_id != project_id {
+        return Ok(None);
+    }
+    render_team(connection, formation).map(Some)
+}
+
 fn parse_uuid(value: String) -> Result<Uuid, TeamError> {
     Uuid::parse_str(&value).map_err(|_| TeamError::InvalidStore)
 }

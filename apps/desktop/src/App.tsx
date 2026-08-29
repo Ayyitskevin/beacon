@@ -23,6 +23,7 @@ import {
   completeLocalOperatorSetup,
   configureResident,
   createProject,
+  admitMission,
   formTeam,
   deactivateLocalModel,
   discoverLocalModels,
@@ -31,6 +32,7 @@ import {
   loadAuthenticationCapabilities,
   inspectLocalModel,
   loadLocalModelActivations,
+  loadMissions,
   loadPlatformSessionMonitorStatus,
   loadProject,
   loadProjectCharterHistory,
@@ -53,6 +55,8 @@ import {
   type ProjectDraft,
   type ProjectSummary,
   type ProjectView,
+  type MissionDraft,
+  type MissionView,
   type TeamDraft,
   type TeamView,
   recordLocalOperatorActivity,
@@ -262,11 +266,13 @@ export function App() {
   const [selectedProject, setSelectedProject] = useState<ProjectView | null>(null);
   const [charterHistory, setCharterHistory] = useState<ProjectCharter[] | null>(null);
   const [teams, setTeams] = useState<TeamView[] | null>(null);
+  const [missions, setMissions] = useState<MissionView[] | null>(null);
   const [teamConfigurations, setTeamConfigurations] =
     useState<ResidentConfiguration[] | null>(null);
   const [projectComposerOpen, setProjectComposerOpen] = useState(false);
   const [charterComposerOpen, setCharterComposerOpen] = useState(false);
   const [teamComposerOpen, setTeamComposerOpen] = useState(false);
+  const [missionComposerOpen, setMissionComposerOpen] = useState(false);
   const [localModelDiscovery, setLocalModelDiscovery] =
     useState<LocalModelDiscoveryReport | null>(null);
   const [localModelActivations, setLocalModelActivations] =
@@ -299,10 +305,12 @@ export function App() {
       setSelectedProject(null);
       setCharterHistory(null);
       setTeams(null);
+      setMissions(null);
       setTeamConfigurations(null);
       setProjectComposerOpen(false);
       setCharterComposerOpen(false);
       setTeamComposerOpen(false);
+      setMissionComposerOpen(false);
       setActiveApplication("Briefing");
     }
     setForegroundVerified(
@@ -342,10 +350,12 @@ export function App() {
     setSelectedProject(null);
     setCharterHistory(null);
     setTeams(null);
+    setMissions(null);
     setTeamConfigurations(null);
     setProjectComposerOpen(false);
     setCharterComposerOpen(false);
     setTeamComposerOpen(false);
+    setMissionComposerOpen(false);
     setActiveApplication("Briefing");
     Promise.all([
       loadSessionPolicy(),
@@ -370,10 +380,12 @@ export function App() {
         setSelectedProject(null);
         setCharterHistory(null);
         setTeams(null);
+        setMissions(null);
         setTeamConfigurations(null);
         setProjectComposerOpen(false);
         setCharterComposerOpen(false);
         setTeamComposerOpen(false);
+        setMissionComposerOpen(false);
         setViewState("error");
       },
     );
@@ -422,11 +434,15 @@ export function App() {
     if (!unlocked || activeApplication !== "Projects" || !selectedProject) return;
     let active = true;
     setTeams(null);
+    setMissions(null);
     setTeamConfigurations(null);
     setTeamComposerOpen(false);
-    void loadTeams(selectedProject.id).then(
-      (loaded) => {
-        if (active) setTeams(loaded);
+    setMissionComposerOpen(false);
+    void Promise.all([loadTeams(selectedProject.id), loadMissions(selectedProject.id)]).then(
+      ([loadedTeams, loadedMissions]) => {
+        if (!active) return;
+        setTeams(loadedTeams);
+        setMissions(loadedMissions);
       },
       (error) => {
         if (active) setActionError(describeLocalAccountError(error));
@@ -456,10 +472,12 @@ export function App() {
             setSelectedProject(null);
             setCharterHistory(null);
             setTeams(null);
+            setMissions(null);
             setTeamConfigurations(null);
             setProjectComposerOpen(false);
             setCharterComposerOpen(false);
             setTeamComposerOpen(false);
+            setMissionComposerOpen(false);
             setActiveApplication("Briefing");
           }
           setPlatformMonitor(monitor);
@@ -474,10 +492,12 @@ export function App() {
           setSelectedProject(null);
           setCharterHistory(null);
           setTeams(null);
+          setMissions(null);
           setTeamConfigurations(null);
           setProjectComposerOpen(false);
           setCharterComposerOpen(false);
           setTeamComposerOpen(false);
+          setMissionComposerOpen(false);
           setViewState("error");
         },
       ).finally(() => {
@@ -513,10 +533,12 @@ export function App() {
           setSelectedProject(null);
           setCharterHistory(null);
           setTeams(null);
+          setMissions(null);
           setTeamConfigurations(null);
           setProjectComposerOpen(false);
           setCharterComposerOpen(false);
           setTeamComposerOpen(false);
+          setMissionComposerOpen(false);
           setViewState("error");
         },
       ).finally(() => {
@@ -650,10 +672,12 @@ export function App() {
       setSelectedProject(null);
       setCharterHistory(null);
       setTeams(null);
+      setMissions(null);
       setTeamConfigurations(null);
       setProjectComposerOpen(false);
       setCharterComposerOpen(false);
       setTeamComposerOpen(false);
+      setMissionComposerOpen(false);
       setLocalModelDiscovery(null);
       setLocalModelActivations(null);
       setLocalModelReview(null);
@@ -850,10 +874,12 @@ export function App() {
       setSelectedProject(project);
       setCharterHistory(history);
       setTeams(null);
+      setMissions(null);
       setTeamConfigurations(null);
       setProjectComposerOpen(false);
       setCharterComposerOpen(false);
       setTeamComposerOpen(false);
+      setMissionComposerOpen(false);
     });
   }
 
@@ -873,10 +899,12 @@ export function App() {
       setSelectedProject(created);
       setCharterHistory([created.charter]);
       setTeams([]);
+      setMissions([]);
       setTeamConfigurations(null);
       setProjectComposerOpen(false);
       setCharterComposerOpen(false);
       setTeamComposerOpen(false);
+      setMissionComposerOpen(false);
     });
   }
 
@@ -909,6 +937,7 @@ export function App() {
     await runAction(async () => {
       setTeamConfigurations(await loadResidentConfigurations());
       setCharterComposerOpen(false);
+      setMissionComposerOpen(false);
       setTeamComposerOpen(true);
     });
   }
@@ -923,6 +952,26 @@ export function App() {
       );
       setTeamComposerOpen(false);
       setTeamConfigurations(null);
+    });
+  }
+
+  function openMissionComposer() {
+    setCharterComposerOpen(false);
+    setTeamComposerOpen(false);
+    setTeamConfigurations(null);
+    setMissionComposerOpen(true);
+  }
+
+  async function admitProjectMission(draft: MissionDraft) {
+    await runAction(async () => {
+      const admitted = await admitMission(draft);
+      setMissions((current) =>
+        [...(current ?? []), admitted].sort(
+          (left, right) =>
+            left.admittedAtMs - right.admittedAtMs || left.id.localeCompare(right.id),
+        ),
+      );
+      setMissionComposerOpen(false);
     });
   }
 
@@ -1096,26 +1145,35 @@ export function App() {
               selectedProject={selectedProject}
               charterHistory={charterHistory}
               teams={teams}
+              missions={missions}
               residents={residents}
               teamConfigurations={teamConfigurations}
               composerOpen={projectComposerOpen}
               charterComposerOpen={charterComposerOpen}
               teamComposerOpen={teamComposerOpen}
+              missionComposerOpen={missionComposerOpen}
               busy={busy}
               error={actionError}
               onCreate={() => {
                 setSelectedProject(null);
                 setCharterHistory(null);
                 setTeams(null);
+                setMissions(null);
                 setTeamConfigurations(null);
                 setProjectComposerOpen(true);
                 setCharterComposerOpen(false);
                 setTeamComposerOpen(false);
+                setMissionComposerOpen(false);
               }}
               onCancelCreate={() => setProjectComposerOpen(false)}
               onOpenProject={openProject}
               onSubmitProject={createProjectFromCharter}
-              onReviseCharter={() => setCharterComposerOpen(true)}
+              onReviseCharter={() => {
+                setTeamComposerOpen(false);
+                setTeamConfigurations(null);
+                setMissionComposerOpen(false);
+                setCharterComposerOpen(true);
+              }}
               onCancelCharterRevision={() => setCharterComposerOpen(false)}
               onSubmitCharterRevision={publishCharterRevision}
               onOpenTeamComposer={() => void prepareTeamFormation()}
@@ -1124,6 +1182,9 @@ export function App() {
                 setTeamConfigurations(null);
               }}
               onSubmitTeam={(draft) => void formProjectTeam(draft)}
+              onOpenMissionComposer={openMissionComposer}
+              onCancelMissionComposer={() => setMissionComposerOpen(false)}
+              onSubmitMission={(draft) => void admitProjectMission(draft)}
             />
           ) : (
             <Briefing
