@@ -12,9 +12,10 @@ use beacond::{
     LocalModelActivation, LocalModelActivationReview, LocalModelDiscoveryReport,
     LocalSupervisorClient, LocalTransportError, MissionDraft, MissionView, OperatorSessionPolicy,
     OperatorSessionStatus, PlatformSessionMonitorStatus, ProjectCharter, ProjectCharterDraft,
-    ProjectDraft, ProjectPolicy, ProjectPolicyDraft, ProjectSummary, ProjectView, ProviderFeature,
-    ResidentAgentView, ResidentConfiguration, SecretString, StarterOrganizationView,
-    StarterResidentDraft, TeamDraft, TeamView, initialize_local_auth_token,
+    ProjectDraft, ProjectPolicy, ProjectPolicyDraft, ProjectRepository, ProjectSummary,
+    ProjectView, ProviderFeature, RepositoryDraft, ResidentAgentView, ResidentConfiguration,
+    SecretString, StarterOrganizationView, StarterResidentDraft, TeamDraft, TeamView,
+    initialize_local_auth_token,
 };
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -268,6 +269,38 @@ impl From<LocalTransportError> for CommandError {
             } => (
                 "project_unavailable",
                 "Beacon could not verify the Project state.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::InvalidProjectRepository,
+                ..
+            } => (
+                "invalid_project_repository",
+                "Review the repository source, the 40-character base revision, and every declared check.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::StaleProjectRepository,
+                ..
+            } => (
+                "stale_project_repository",
+                "Reload the current Repository revision before binding a new one.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::UnchangedProjectRepository,
+                ..
+            } => (
+                "unchanged_project_repository",
+                "Change the source, the base revision, or a declared check before binding.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::ProjectRepositoryUnavailable,
+                ..
+            } => (
+                "project_repository_unavailable",
+                "Beacon could not verify the Project Repository state.",
                 None,
             ),
             LocalTransportError::Remote {
@@ -649,6 +682,44 @@ fn publish_project_policy_value(
         .map_err(Into::into)
 }
 
+fn current_project_repository_value(
+    state: &DesktopState,
+    project_id: uuid::Uuid,
+) -> Result<Option<ProjectRepository>, CommandError> {
+    state
+        .supervisor
+        .current_project_repository(project_id)
+        .map_err(Into::into)
+}
+
+fn project_repository_history_value(
+    state: &DesktopState,
+    project_id: uuid::Uuid,
+) -> Result<Vec<ProjectRepository>, CommandError> {
+    state
+        .supervisor
+        .project_repository_history(project_id)
+        .map_err(Into::into)
+}
+
+fn bind_project_repository_value(
+    state: &DesktopState,
+    project_id: uuid::Uuid,
+    expected_charter_revision: u32,
+    expected_prior_repository_revision: Option<u32>,
+    draft: RepositoryDraft,
+) -> Result<ProjectRepository, CommandError> {
+    state
+        .supervisor
+        .bind_project_repository(
+            project_id,
+            expected_charter_revision,
+            expected_prior_repository_revision,
+            draft,
+        )
+        .map_err(Into::into)
+}
+
 fn teams_value(
     state: &DesktopState,
     project_id: uuid::Uuid,
@@ -1008,6 +1079,39 @@ fn publish_project_policy(
 }
 
 #[tauri::command]
+fn current_project_repository(
+    state: State<'_, DesktopState>,
+    project_id: uuid::Uuid,
+) -> Result<Option<ProjectRepository>, CommandError> {
+    current_project_repository_value(&state, project_id)
+}
+
+#[tauri::command]
+fn project_repository_history(
+    state: State<'_, DesktopState>,
+    project_id: uuid::Uuid,
+) -> Result<Vec<ProjectRepository>, CommandError> {
+    project_repository_history_value(&state, project_id)
+}
+
+#[tauri::command]
+fn bind_project_repository(
+    state: State<'_, DesktopState>,
+    project_id: uuid::Uuid,
+    expected_charter_revision: u32,
+    expected_prior_repository_revision: Option<u32>,
+    draft: RepositoryDraft,
+) -> Result<ProjectRepository, CommandError> {
+    bind_project_repository_value(
+        &state,
+        project_id,
+        expected_charter_revision,
+        expected_prior_repository_revision,
+        draft,
+    )
+}
+
+#[tauri::command]
 fn teams(
     state: State<'_, DesktopState>,
     project_id: uuid::Uuid,
@@ -1327,6 +1431,9 @@ pub fn run() {
             project_policy,
             project_policy_history,
             publish_project_policy,
+            current_project_repository,
+            project_repository_history,
+            bind_project_repository,
             teams,
             team,
             form_team,
@@ -1353,11 +1460,12 @@ mod tests {
     use std::thread::JoinHandle;
 
     use beacond::{
-        AutonomyProfile, BeaconCapability, LocalServerConfig, LocalSupervisorClient,
+        AutonomyProfile, BeaconCapability, DeclaredCheck, LocalServerConfig, LocalSupervisorClient,
         LocalSupervisorServer, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft,
-        ResidentLifecycle, SecretString, StarterResidentDraft, StarterRole, TeamLeadAmbiguityRule,
-        TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy,
-        TrackRecordEvidenceKind, TrackRecordRequirement, initialize_local_auth_token,
+        RepositoryDraft, RepositorySourceKind, ResidentLifecycle, SecretString,
+        StarterResidentDraft, StarterRole, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
+        TeamLeadConflictRule, TeamLeadSelectionPolicy, TrackRecordEvidenceKind,
+        TrackRecordRequirement, initialize_local_auth_token,
     };
     use serde_json::Value;
     use uuid::Uuid;
@@ -1365,11 +1473,13 @@ mod tests {
     use super::{
         DesktopState, accept_starter_organization_value, activate_resident_value,
         authentication_capabilities_value, begin_password_setup_value,
-        complete_operator_setup_value, create_project_value, migrate_legacy_app_data,
+        bind_project_repository_value, complete_operator_setup_value, create_project_value,
+        current_project_repository_value, migrate_legacy_app_data,
         platform_session_monitor_status_value, prepare_runtime_directory,
         project_charter_history_value, project_policy_history_value, project_policy_value,
-        project_value, projects_value, publish_project_policy_value, reactivate_resident_value,
-        residents_value, retire_resident_value, revise_project_charter_value, session_policy_value,
+        project_repository_history_value, project_value, projects_value,
+        publish_project_policy_value, reactivate_resident_value, residents_value,
+        retire_resident_value, revise_project_charter_value, session_policy_value,
         session_status_value, set_session_timeout_value, starter_organization_value,
         suspend_resident_value,
     };
@@ -1530,6 +1640,9 @@ mod tests {
                 "allow-project-policy",
                 "allow-project-policy-history",
                 "allow-publish-project-policy",
+                "allow-current-project-repository",
+                "allow-project-repository-history",
+                "allow-bind-project-repository",
                 "allow-teams",
                 "allow-team",
                 "allow-form-team",
@@ -1862,6 +1975,143 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    fn repository_project_draft() -> ProjectDraft {
+        ProjectDraft {
+            name: "Repository Project".to_owned(),
+            charter: ProjectCharterDraft {
+                purpose: "Build the agent office.".to_owned(),
+                desired_outcomes: vec!["Ship a governed vertical slice".to_owned()],
+                constraints: vec!["Keep Workspace data local".to_owned()],
+                prohibitions: vec!["Do not deploy publicly".to_owned()],
+                autonomy_profile: AutonomyProfile::Supervised,
+            },
+        }
+    }
+
+    /// The declaration under test: Janus at `6b62110`, resolved by
+    /// `git -C /example/checkouts/janus rev-parse 6b62110` on 2026-08-29.
+    /// The adapter never opens that path — this is a record, not a checkout.
+    fn janus_repository_draft() -> RepositoryDraft {
+        RepositoryDraft {
+            source_kind: RepositorySourceKind::LocalPath,
+            source: "/example/checkouts/janus".to_owned(),
+            base_revision: "6b62110e9c918c67219ab0b45dbf4dd9937d6620".to_owned(),
+            declared_checks: vec![DeclaredCheck {
+                name: "pytest".to_owned(),
+                argv: vec![
+                    "pytest".to_owned(),
+                    "tests/test_invariants.py".to_owned(),
+                    "-q".to_owned(),
+                ],
+                working_directory: ".".to_owned(),
+            }],
+        }
+    }
+
+    #[test]
+    fn command_adapter_binds_and_reads_project_repository_without_opening_it() {
+        let state = TestState::new();
+        begin_password_setup_value(
+            &state.state,
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+        complete_operator_setup_value(&state.state, true).unwrap();
+        let project = create_project_value(&state.state, repository_project_draft()).unwrap();
+        assert!(
+            current_project_repository_value(&state.state, project.id)
+                .unwrap()
+                .is_none()
+        );
+
+        let repository = bind_project_repository_value(
+            &state.state,
+            project.id,
+            project.charter.revision,
+            None,
+            janus_repository_draft(),
+        )
+        .unwrap();
+
+        let value = serde_json::to_value(&repository).unwrap();
+        assert_eq!(value["revision"], 1);
+        assert_eq!(value["authorKind"], "operator");
+        assert_eq!(value["sourceKind"], "local_path");
+        assert_eq!(value["source"], "/example/checkouts/janus");
+        assert_eq!(
+            value["baseRevision"],
+            "6b62110e9c918c67219ab0b45dbf4dd9937d6620"
+        );
+        assert_eq!(value["declaredChecks"][0]["name"], "pytest");
+        assert_eq!(value["declaredChecks"][0]["workingDirectory"], ".");
+        assert_eq!(value["appliesToCurrentCharter"], true);
+        assert!(value.get("worktreePath").is_none());
+        assert!(value.get("checkResults").is_none());
+        assert_eq!(
+            current_project_repository_value(&state.state, project.id).unwrap(),
+            Some(repository)
+        );
+        assert_eq!(
+            project_repository_history_value(&state.state, project.id)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn repository_refusals_reach_the_interface_under_their_own_code() {
+        let state = TestState::new();
+        begin_password_setup_value(
+            &state.state,
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+        complete_operator_setup_value(&state.state, true).unwrap();
+        let project = create_project_value(&state.state, repository_project_draft()).unwrap();
+
+        let mut invalid = janus_repository_draft();
+        invalid.base_revision = "6b62110".to_owned();
+        let refusal = bind_project_repository_value(
+            &state.state,
+            project.id,
+            project.charter.revision,
+            None,
+            invalid,
+        )
+        .unwrap_err();
+        assert_eq!(refusal.code, "invalid_project_repository");
+
+        bind_project_repository_value(
+            &state.state,
+            project.id,
+            project.charter.revision,
+            None,
+            janus_repository_draft(),
+        )
+        .unwrap();
+        let unchanged = bind_project_repository_value(
+            &state.state,
+            project.id,
+            project.charter.revision,
+            Some(1),
+            janus_repository_draft(),
+        )
+        .unwrap_err();
+        assert_eq!(unchanged.code, "unchanged_project_repository");
+        let stale = bind_project_repository_value(
+            &state.state,
+            project.id,
+            project.charter.revision,
+            None,
+            janus_repository_draft(),
+        )
+        .unwrap_err();
+        assert_eq!(stale.code, "stale_project_repository");
     }
 
     fn contains_workspace_material(value: &Value) -> bool {

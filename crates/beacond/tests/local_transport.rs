@@ -13,16 +13,16 @@ use std::thread;
 use std::time::Duration;
 
 use beacond::{
-    AccessOrigin, AutonomyProfile, BeaconCapability, BudgetBoundary, DiscoveryStatus,
-    LocalErrorCode, LocalModelActivationState, LocalModelEndpoint, LocalServerConfig,
-    LocalSupervisorClient, LocalSupervisorServer, LocalTransportError, MissionAdmissionActor,
-    MissionDraft, MissionLifecycle, MissionMemberDraft, ModelActivation, OperatorSessionPhase,
-    PlatformMonitorState, PolicyAuthor, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft,
-    ProviderFeature, ResidentConfigurationState, ResidentLifecycle, SecretString,
-    StarterOrganizationDecision, StarterResidentDraft, StarterRole, TeamDraft, TeamFormationActor,
-    TeamIneligibilityReason, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule,
-    TeamLeadSelectionPolicy, TeamMemberDraft, TrackRecordEvidenceKind, TrackRecordRequirement,
-    initialize_local_auth_token,
+    AccessOrigin, AutonomyProfile, BeaconCapability, BudgetBoundary, DeclaredCheck,
+    DiscoveryStatus, LocalErrorCode, LocalModelActivationState, LocalModelEndpoint,
+    LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer, LocalTransportError,
+    MissionAdmissionActor, MissionDraft, MissionLifecycle, MissionMemberDraft, ModelActivation,
+    OperatorSessionPhase, PlatformMonitorState, PolicyAuthor, ProjectCharterDraft, ProjectDraft,
+    ProjectPolicyDraft, ProviderFeature, RepositoryAuthor, RepositoryDraft, RepositorySourceKind,
+    ResidentConfigurationState, ResidentLifecycle, SecretString, StarterOrganizationDecision,
+    StarterResidentDraft, StarterRole, TeamDraft, TeamFormationActor, TeamIneligibilityReason,
+    TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy,
+    TeamMemberDraft, TrackRecordEvidenceKind, TrackRecordRequirement, initialize_local_auth_token,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -998,6 +998,82 @@ fn authenticated_client_publishes_project_policy_over_the_real_socket() {
     );
     assert_remote_code(
         client.project_policy_history(project.id),
+        LocalErrorCode::NotAuthenticated,
+    );
+    running.store(false, Ordering::Release);
+    thread.join().unwrap().unwrap();
+}
+
+#[test]
+fn authenticated_client_binds_project_repository_over_the_real_socket() {
+    let runtime = TestRuntime::new("project-repository");
+    let server = runtime.server();
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+
+    assert_remote_code(
+        client.current_project_repository(Uuid::new_v4()),
+        LocalErrorCode::NotAuthenticated,
+    );
+    client
+        .begin_password_setup(
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+    client.complete_operator_setup(true).unwrap();
+    let project = client
+        .create_project(project_draft(
+            "Repository Project",
+            AutonomyProfile::Supervised,
+        ))
+        .unwrap();
+    assert!(
+        client
+            .current_project_repository(project.id)
+            .unwrap()
+            .is_none()
+    );
+
+    // Declaration only: the Janus repository at 6b62110 is never opened by this test.
+    let draft = RepositoryDraft {
+        source_kind: RepositorySourceKind::LocalPath,
+        source: "/example/checkouts/janus".to_owned(),
+        base_revision: "6b62110e9c918c67219ab0b45dbf4dd9937d6620".to_owned(),
+        declared_checks: vec![DeclaredCheck {
+            name: "pytest".to_owned(),
+            argv: vec![
+                "pytest".to_owned(),
+                "tests/test_invariants.py".to_owned(),
+                "-q".to_owned(),
+            ],
+            working_directory: ".".to_owned(),
+        }],
+    };
+    let repository = client
+        .bind_project_repository(project.id, project.charter.revision, None, draft)
+        .unwrap();
+    assert_eq!(repository.author_kind, RepositoryAuthor::Operator);
+    assert_eq!(repository.revision, 1);
+    assert!(repository.applies_to_current_charter);
+    assert_eq!(
+        client.current_project_repository(project.id).unwrap(),
+        Some(repository.clone())
+    );
+    assert_eq!(
+        client.project_repository_history(project.id).unwrap(),
+        std::slice::from_ref(&repository)
+    );
+
+    client.lock().unwrap();
+    assert_remote_code(
+        client.current_project_repository(project.id),
+        LocalErrorCode::NotAuthenticated,
+    );
+    assert_remote_code(
+        client.project_repository_history(project.id),
         LocalErrorCode::NotAuthenticated,
     );
     running.store(false, Ordering::Release);

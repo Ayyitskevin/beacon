@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   admitMission,
+  bindProjectRepository,
   activateLocalModel,
   activateResident,
   clearResidentConfiguration,
@@ -26,6 +27,8 @@ import {
   loadProjectCharterHistory,
   loadProjectPolicy,
   loadProjectPolicyHistory,
+  loadProjectRepository,
+  loadProjectRepositoryHistory,
   loadProjects,
   loadResidents,
   loadResidentCapabilityCatalog,
@@ -40,6 +43,7 @@ import {
   recoverLocalOperatorAccount,
   publishProjectPolicy,
   type ProjectPolicyDraft,
+  type RepositoryDraft,
   reactivateResident,
   retireResident,
   reviseProjectCharter,
@@ -433,6 +437,88 @@ describe("desktop session transport", () => {
       ["project_policy", { projectId: policy.projectId }],
       ["project_policy", { projectId: policy.projectId }],
       ["project_policy", { projectId: policy.projectId }],
+    ]);
+  });
+
+  it("maps Project Repository bindings and rejects widened or unordered declarations", async () => {
+    const repository = {
+      workspaceId: "11111111-1111-4111-8111-111111111111",
+      projectId: "33333333-3333-4333-8333-333333333333",
+      revision: 1,
+      charterRevision: 2,
+      sourceKind: "local_path",
+      source: "/example/checkouts/janus",
+      baseRevision: "6b62110e9c918c67219ab0b45dbf4dd9937d6620",
+      declaredChecks: [
+        { name: "pytest", argv: ["pytest", "tests/test_invariants.py", "-q"], workingDirectory: "." },
+        { name: "ruff", argv: ["ruff", "check", "."], workingDirectory: "." },
+      ],
+      authorKind: "operator",
+      authoredAtMs: 987,
+      appliesToCurrentCharter: true,
+    } as const;
+    const draft: RepositoryDraft = {
+      sourceKind: repository.sourceKind,
+      source: repository.source,
+      baseRevision: repository.baseRevision,
+      declaredChecks: repository.declaredChecks.map((check) => ({
+        ...check,
+        argv: [...check.argv],
+      })),
+    };
+    invokeMock
+      .mockResolvedValueOnce(repository)
+      .mockResolvedValueOnce([repository])
+      .mockResolvedValueOnce(repository)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ ...repository, worktreePath: "/tmp/beacon-worktree" })
+      .mockResolvedValueOnce({ ...repository, baseRevision: "6b62110" })
+      .mockResolvedValueOnce({
+        ...repository,
+        declaredChecks: [repository.declaredChecks[1], repository.declaredChecks[0]],
+      })
+      .mockResolvedValueOnce({
+        ...repository,
+        declaredChecks: [
+          { name: "pytest", argv: [], workingDirectory: "." },
+        ],
+      })
+      .mockResolvedValueOnce({
+        ...repository,
+        declaredChecks: [
+          { name: "pytest", argv: ["pytest"], workingDirectory: "../outside" },
+        ],
+      });
+
+    await expect(loadProjectRepository(repository.projectId)).resolves.toEqual(repository);
+    await expect(loadProjectRepositoryHistory(repository.projectId)).resolves.toEqual([repository]);
+    await expect(
+      bindProjectRepository(repository.projectId, repository.charterRevision, null, draft),
+    ).resolves.toEqual(repository);
+    await expect(loadProjectRepository(repository.projectId)).resolves.toBeNull();
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await expect(loadProjectRepository(repository.projectId)).rejects.toThrow(
+        "invalid Project Repository",
+      );
+    }
+    expect(invokeMock.mock.calls).toEqual([
+      ["current_project_repository", { projectId: repository.projectId }],
+      ["project_repository_history", { projectId: repository.projectId }],
+      [
+        "bind_project_repository",
+        {
+          projectId: repository.projectId,
+          expectedCharterRevision: repository.charterRevision,
+          expectedPriorRepositoryRevision: null,
+          draft,
+        },
+      ],
+      ["current_project_repository", { projectId: repository.projectId }],
+      ["current_project_repository", { projectId: repository.projectId }],
+      ["current_project_repository", { projectId: repository.projectId }],
+      ["current_project_repository", { projectId: repository.projectId }],
+      ["current_project_repository", { projectId: repository.projectId }],
+      ["current_project_repository", { projectId: repository.projectId }],
     ]);
   });
 
