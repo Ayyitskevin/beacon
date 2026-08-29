@@ -353,7 +353,7 @@ fn list_residents(
     Ok(residents)
 }
 
-fn load_resident(
+pub(crate) fn load_resident(
     connection: &Connection,
     workspace_id: Uuid,
     resident_id: Uuid,
