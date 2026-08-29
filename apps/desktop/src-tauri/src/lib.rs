@@ -8,11 +8,12 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use beacond::{
-    AccessOrigin, LocalErrorCode, LocalModelActivation, LocalModelActivationReview,
-    LocalModelDiscoveryReport, LocalSupervisorClient, LocalTransportError, OperatorSessionPolicy,
-    OperatorSessionStatus, PlatformSessionMonitorStatus, ProjectCharter, ProjectCharterDraft,
-    ProjectDraft, ProjectSummary, ProjectView, ProviderFeature, ResidentAgentView, SecretString,
-    StarterOrganizationView, StarterResidentDraft, initialize_local_auth_token,
+    AccessOrigin, BeaconCapability, BeaconCapabilityDescriptor, LocalErrorCode,
+    LocalModelActivation, LocalModelActivationReview, LocalModelDiscoveryReport,
+    LocalSupervisorClient, LocalTransportError, OperatorSessionPolicy, OperatorSessionStatus,
+    PlatformSessionMonitorStatus, ProjectCharter, ProjectCharterDraft, ProjectDraft,
+    ProjectSummary, ProjectView, ProviderFeature, ResidentAgentView, ResidentConfiguration,
+    SecretString, StarterOrganizationView, StarterResidentDraft, initialize_local_auth_token,
 };
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -202,6 +203,30 @@ impl From<LocalTransportError> for CommandError {
             } => (
                 "resident_lifecycle_unavailable",
                 "Beacon could not verify Resident lifecycle state.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::InvalidResidentConfiguration,
+                ..
+            } => (
+                "invalid_resident_configuration",
+                "Review the Resident, active model, completion approval, and Capability selection.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::StaleResidentConfiguration,
+                ..
+            } => (
+                "stale_resident_configuration",
+                "The Resident configuration changed. Reload it before trying again.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::ResidentConfigurationUnavailable,
+                ..
+            } => (
+                "resident_configuration_unavailable",
+                "Beacon could not verify Resident configuration state.",
                 None,
             ),
             LocalTransportError::Remote {
@@ -458,6 +483,53 @@ fn retire_resident_value(
         .map_err(Into::into)
 }
 
+fn resident_capability_catalog_value(
+    state: &DesktopState,
+) -> Result<Vec<BeaconCapabilityDescriptor>, CommandError> {
+    state
+        .supervisor
+        .resident_capability_catalog()
+        .map_err(Into::into)
+}
+
+fn resident_configurations_value(
+    state: &DesktopState,
+) -> Result<Vec<ResidentConfiguration>, CommandError> {
+    state
+        .supervisor
+        .resident_configurations()
+        .map_err(Into::into)
+}
+
+fn configure_resident_value(
+    state: &DesktopState,
+    resident_id: uuid::Uuid,
+    expected_decision_id: Option<uuid::Uuid>,
+    activation_id: uuid::Uuid,
+    capabilities: Vec<BeaconCapability>,
+) -> Result<ResidentConfiguration, CommandError> {
+    state
+        .supervisor
+        .configure_resident(
+            resident_id,
+            expected_decision_id,
+            activation_id,
+            capabilities,
+        )
+        .map_err(Into::into)
+}
+
+fn clear_resident_configuration_value(
+    state: &DesktopState,
+    resident_id: uuid::Uuid,
+    expected_decision_id: uuid::Uuid,
+) -> Result<ResidentConfiguration, CommandError> {
+    state
+        .supervisor
+        .clear_resident_configuration(resident_id, expected_decision_id)
+        .map_err(Into::into)
+}
+
 fn projects_value(state: &DesktopState) -> Result<Vec<ProjectSummary>, CommandError> {
     state.supervisor.projects().map_err(Into::into)
 }
@@ -706,6 +778,46 @@ fn retire_resident(
     expected_decision_id: Option<uuid::Uuid>,
 ) -> Result<ResidentAgentView, CommandError> {
     retire_resident_value(&state, resident_id, expected_decision_id)
+}
+
+#[tauri::command]
+fn resident_capability_catalog(
+    state: State<'_, DesktopState>,
+) -> Result<Vec<BeaconCapabilityDescriptor>, CommandError> {
+    resident_capability_catalog_value(&state)
+}
+
+#[tauri::command]
+fn resident_configurations(
+    state: State<'_, DesktopState>,
+) -> Result<Vec<ResidentConfiguration>, CommandError> {
+    resident_configurations_value(&state)
+}
+
+#[tauri::command]
+fn configure_resident(
+    state: State<'_, DesktopState>,
+    resident_id: uuid::Uuid,
+    expected_decision_id: Option<uuid::Uuid>,
+    activation_id: uuid::Uuid,
+    capabilities: Vec<BeaconCapability>,
+) -> Result<ResidentConfiguration, CommandError> {
+    configure_resident_value(
+        &state,
+        resident_id,
+        expected_decision_id,
+        activation_id,
+        capabilities,
+    )
+}
+
+#[tauri::command]
+fn clear_resident_configuration(
+    state: State<'_, DesktopState>,
+    resident_id: uuid::Uuid,
+    expected_decision_id: uuid::Uuid,
+) -> Result<ResidentConfiguration, CommandError> {
+    clear_resident_configuration_value(&state, resident_id, expected_decision_id)
 }
 
 #[tauri::command]
@@ -1013,6 +1125,10 @@ pub fn run() {
             suspend_resident,
             reactivate_resident,
             retire_resident,
+            resident_capability_catalog,
+            resident_configurations,
+            configure_resident,
+            clear_resident_configuration,
             projects,
             project,
             project_charter_history,
@@ -1200,6 +1316,10 @@ mod tests {
                 "allow-suspend-resident",
                 "allow-reactivate-resident",
                 "allow-retire-resident",
+                "allow-resident-capability-catalog",
+                "allow-resident-configurations",
+                "allow-configure-resident",
+                "allow-clear-resident-configuration",
                 "allow-projects",
                 "allow-project",
                 "allow-project-charter-history",

@@ -66,6 +66,14 @@ availability for later assignment and never grants a model, Capability, budget, 
 authority; retirement is terminal while identity and history remain auditable.
 _Avoid_: Permanent agent, primary agent
 
+**Resident Configuration**:
+An append-only Operator decision that binds one Resident to one exact active Resource Activation,
+an explicit Beacon Capability set, and the Alpha no-spend boundary for Team eligibility. It is
+separate from lifecycle and never creates a Route, Mission, Run, external effect, or execution
+authority. Clearing it or revoking its exact Resource Activation makes the Resident ineligible for
+new Team formation while preserving history.
+_Avoid_: Agent profile, role preset, Route, execution grant
+
 **Specialist Agent**:
 A temporary Agent created for one bounded purpose, with Mission-scoped capabilities and budget.
 _Avoid_: Subagent, disposable agent, helper

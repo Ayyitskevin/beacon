@@ -182,8 +182,11 @@ offers the editable Starter Organization. The Owner may admit any non-empty sele
 Builder, Reviewer, and Researcher identities or explicitly discard the proposal. Every admitted
 Resident begins inactive and receives no authority. The Owner may later activate, suspend,
 reactivate, or permanently retire the identity. Those lifecycle decisions control availability
-only: even an active Resident has no model, Capability, Route, budget, Mission, Run, or execution
-authority in Phase 0.
+only. Separately, the Owner may configure a non-retired Resident with one exact active local-model
+activation, an explicit closed Capability set, and the fixed Alpha no-spend boundary. Configuration
+makes an active Resident eligible for later Team formation but creates no Route, Mission, Run,
+external effect, or execution authority. Clearing the configuration, suspending or retiring the
+Resident, or revoking that exact model activation removes eligibility without erasing history.
 
 The Projects application is the first working suite surface after Briefing. The Owner can create
 a Project from a structured Charter containing its purpose, desired outcomes, constraints,
@@ -218,6 +221,9 @@ records the separate inspection, approval, and revocation boundary.
 [The Resident lifecycle checkpoint](docs/implementation/phase-0-resident-lifecycle.md) records the
 separate Operator-only availability states, append-only audit chain, and terminal retirement
 boundary.
+[The Resident Configuration checkpoint](docs/implementation/phase-0-resident-configuration.md)
+records exact model binding, explicit Capability selection, fixed no-spend scope, and derived Team
+eligibility without execution authority.
 Run `scripts/gate` to verify the
 preserved Beacon Legacy Desk, the Rust workspace, the web bundle, and the native desktop build.
 The exact pre-Beacon compatibility boundary is recorded in the
