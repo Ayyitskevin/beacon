@@ -16,8 +16,9 @@ use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use crate::{
-    AccessOrigin, BeaconCapability, BeaconCapabilityDescriptor, OperatorAccountError,
-    OperatorAccountService, OperatorSessionPolicy, OperatorSessionStatus, PlatformSessionMonitor,
+    AccessOrigin, BeaconCapability, BeaconCapabilityDescriptor, MissionDraft, MissionError,
+    MissionService, MissionView, OperatorAccountError, OperatorAccountService,
+    OperatorSessionPolicy, OperatorSessionStatus, PlatformSessionMonitor,
     PlatformSessionMonitorStatus, ProjectCharter, ProjectCharterDraft, ProjectDraft, ProjectError,
     ProjectService, ProjectSummary, ProjectView, RecoveryKey, ResidentAgentView,
     ResidentConfiguration, ResidentConfigurationError, ResidentConfigurationService,
@@ -83,6 +84,11 @@ pub enum LocalErrorCode {
     StaleTeamMemberConfiguration,
     TeamMemberIneligible,
     TeamUnavailable,
+    InvalidMission,
+    MissionNotFound,
+    StaleMissionTeam,
+    MissionMemberIneligible,
+    MissionUnavailable,
     LocalModelUnavailable,
     LocalModelNotFound,
     LocalModelChanged,
@@ -113,6 +119,7 @@ pub enum LocalTransportError {
     ResidentConfiguration(ResidentConfigurationError),
     Project(ProjectError),
     Team(TeamError),
+    Mission(MissionError),
     ResourceDiscovery(ResourceDiscoveryError),
     LocalModelActivation(crate::LocalModelActivationError),
 }
@@ -144,6 +151,7 @@ impl fmt::Display for LocalTransportError {
             }
             Self::Project(error) => write!(formatter, "Project operation failed: {error}"),
             Self::Team(error) => write!(formatter, "Team operation failed: {error}"),
+            Self::Mission(error) => write!(formatter, "Mission operation failed: {error}"),
             Self::ResourceDiscovery(error) => {
                 write!(formatter, "resource discovery failed: {error}")
             }
@@ -207,6 +215,12 @@ impl From<ProjectError> for LocalTransportError {
 impl From<TeamError> for LocalTransportError {
     fn from(error: TeamError) -> Self {
         Self::Team(error)
+    }
+}
+
+impl From<MissionError> for LocalTransportError {
+    fn from(error: MissionError) -> Self {
+        Self::Mission(error)
     }
 }
 
@@ -455,6 +469,15 @@ enum LocalCommand {
     FormTeam {
         draft: TeamDraft,
     },
+    Missions {
+        project_id: uuid::Uuid,
+    },
+    Mission {
+        mission_id: uuid::Uuid,
+    },
+    AdmitMission {
+        draft: MissionDraft,
+    },
     DiscoverLocalModels,
     InspectLocalModel {
         model_name: String,
@@ -526,6 +549,12 @@ enum LocalResult {
     Team {
         team: TeamView,
     },
+    Missions {
+        missions: Vec<MissionView>,
+    },
+    Mission {
+        mission: MissionView,
+    },
     LocalModelDiscovery {
         report: crate::LocalModelDiscoveryReport,
     },
@@ -559,6 +588,7 @@ pub struct LocalSupervisorServer {
     resident_configuration: ResidentConfigurationService,
     projects: ProjectService,
     teams: TeamService,
+    missions: MissionService,
     resource_discovery: ResourceDiscoveryService,
     local_model_activation: crate::LocalModelActivationService,
     platform_monitor: PlatformSessionMonitor,
@@ -589,6 +619,7 @@ impl LocalSupervisorServer {
             ResidentConfigurationService::new(Arc::clone(&accounts), report.workspace.id);
         let projects = ProjectService::new(Arc::clone(&accounts), report.workspace.id);
         let teams = TeamService::new(Arc::clone(&accounts), report.workspace.id);
+        let missions = MissionService::new(Arc::clone(&accounts), report.workspace.id);
         let resource_discovery =
             ResourceDiscoveryService::new(Arc::clone(&accounts), config.local_model_endpoint);
         let local_model_activation = crate::LocalModelActivationService::new(
@@ -614,6 +645,7 @@ impl LocalSupervisorServer {
             resident_configuration,
             projects,
             teams,
+            missions,
             resource_discovery,
             local_model_activation,
             platform_monitor: PlatformSessionMonitor::new(),
@@ -840,6 +872,15 @@ impl LocalSupervisorServer {
             },
             LocalCommand::FormTeam { draft } => LocalResult::Team {
                 team: self.teams.form(draft)?,
+            },
+            LocalCommand::Missions { project_id } => LocalResult::Missions {
+                missions: self.missions.list(project_id)?,
+            },
+            LocalCommand::Mission { mission_id } => LocalResult::Mission {
+                mission: self.missions.get(mission_id)?,
+            },
+            LocalCommand::AdmitMission { draft } => LocalResult::Mission {
+                mission: self.missions.admit(draft)?,
             },
             LocalCommand::DiscoverLocalModels => LocalResult::LocalModelDiscovery {
                 report: self.resource_discovery.discover_local_models()?,
@@ -1161,6 +1202,21 @@ impl LocalSupervisorClient {
         expect_team(self.send(LocalCommand::FormTeam { draft })?)
     }
 
+    pub fn missions(
+        &self,
+        project_id: uuid::Uuid,
+    ) -> Result<Vec<MissionView>, LocalTransportError> {
+        expect_missions(self.send(LocalCommand::Missions { project_id })?)
+    }
+
+    pub fn mission(&self, mission_id: uuid::Uuid) -> Result<MissionView, LocalTransportError> {
+        expect_mission(self.send(LocalCommand::Mission { mission_id })?)
+    }
+
+    pub fn admit_mission(&self, draft: MissionDraft) -> Result<MissionView, LocalTransportError> {
+        expect_mission(self.send(LocalCommand::AdmitMission { draft })?)
+    }
+
     pub fn discover_local_models(
         &self,
     ) -> Result<crate::LocalModelDiscoveryReport, LocalTransportError> {
@@ -1353,6 +1409,20 @@ fn expect_team(result: LocalResult) -> Result<TeamView, LocalTransportError> {
     }
 }
 
+fn expect_missions(result: LocalResult) -> Result<Vec<MissionView>, LocalTransportError> {
+    match result {
+        LocalResult::Missions { missions } => Ok(missions),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
+fn expect_mission(result: LocalResult) -> Result<MissionView, LocalTransportError> {
+    match result {
+        LocalResult::Mission { mission } => Ok(mission),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
 fn expect_local_model_discovery(
     result: LocalResult,
 ) -> Result<crate::LocalModelDiscoveryReport, LocalTransportError> {
@@ -1399,6 +1469,7 @@ fn response_from_transport_error(error: LocalTransportError) -> ResponseEnvelope
         }
         LocalTransportError::Project(error) => wire_error_from_project(error),
         LocalTransportError::Team(error) => wire_error_from_team(error),
+        LocalTransportError::Mission(error) => wire_error_from_mission(error),
         LocalTransportError::ResourceDiscovery(ResourceDiscoveryError::Account(error)) => {
             wire_error_from_account(error)
         }
@@ -1526,6 +1597,31 @@ fn wire_error_from_team(error: TeamError) -> WireError {
         TeamError::ResidentIneligible(_) => LocalErrorCode::TeamMemberIneligible,
         TeamError::InvalidStore | TeamError::Store(_) | TeamError::Json(_) => {
             LocalErrorCode::TeamUnavailable
+        }
+    };
+    WireError {
+        code,
+        retry_after_ms: None,
+    }
+}
+
+fn wire_error_from_mission(error: MissionError) -> WireError {
+    let code = match error {
+        MissionError::Account(error) => return wire_error_from_account(error),
+        MissionError::ProjectNotFound => LocalErrorCode::ProjectNotFound,
+        MissionError::TeamNotFound => LocalErrorCode::TeamNotFound,
+        MissionError::MissionNotFound => LocalErrorCode::MissionNotFound,
+        MissionError::StaleCharterRevision { .. } => LocalErrorCode::StaleCharterRevision,
+        MissionError::InvalidDesiredOutcome
+        | MissionError::InvalidSuccessConditions
+        | MissionError::InvalidConstraint
+        | MissionError::InvalidProhibition
+        | MissionError::DuplicateMissionEntry
+        | MissionError::InvalidMembers => LocalErrorCode::InvalidMission,
+        MissionError::StaleTeamEligibility => LocalErrorCode::StaleMissionTeam,
+        MissionError::ResidentIneligible(_) => LocalErrorCode::MissionMemberIneligible,
+        MissionError::InvalidStore | MissionError::Store(_) | MissionError::Json(_) => {
+            LocalErrorCode::MissionUnavailable
         }
     };
     WireError {

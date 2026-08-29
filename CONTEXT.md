@@ -139,7 +139,9 @@ decisions bind exactly.
 _Avoid_: Current prompt, live brief, mutable instructions
 
 **Mission**:
-A finite desired outcome owned by one Team, with explicit success conditions and lifecycle.
+A finite desired outcome owned by one Team, with explicit success conditions, constraints,
+prohibitions, and lifecycle. Admission binds one exact Charter Revision and Team-member
+configuration snapshot without selecting a Team Lead or granting execution authority.
 _Avoid_: Task, ticket, job
 
 **Assignment**:

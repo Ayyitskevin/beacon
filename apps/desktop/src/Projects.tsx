@@ -18,11 +18,14 @@ import type {
   ProjectDraft,
   ProjectSummary,
   ProjectView,
+  MissionDraft,
+  MissionView,
   ResidentAgentView,
   ResidentConfiguration,
   TeamDraft,
   TeamView,
 } from "./session";
+import { ProjectMissions } from "./ProjectMissions";
 import { ProjectTeams } from "./ProjectTeams";
 
 const useStyles = makeStyles({
@@ -139,11 +142,13 @@ export function ProjectsWorkspace({
   selectedProject,
   charterHistory,
   teams,
+  missions,
   residents,
   teamConfigurations,
   composerOpen,
   charterComposerOpen,
   teamComposerOpen,
+  missionComposerOpen,
   busy,
   error,
   onCreate,
@@ -156,16 +161,21 @@ export function ProjectsWorkspace({
   onOpenTeamComposer,
   onCancelTeamComposer,
   onSubmitTeam,
+  onOpenMissionComposer,
+  onCancelMissionComposer,
+  onSubmitMission,
 }: {
   projects: ProjectSummary[] | null;
   selectedProject: ProjectView | null;
   charterHistory: ProjectCharter[] | null;
   teams: TeamView[] | null;
+  missions: MissionView[] | null;
   residents: ResidentAgentView[] | null;
   teamConfigurations: ResidentConfiguration[] | null;
   composerOpen: boolean;
   charterComposerOpen: boolean;
   teamComposerOpen: boolean;
+  missionComposerOpen: boolean;
   busy: boolean;
   error: string;
   onCreate: () => void;
@@ -178,6 +188,9 @@ export function ProjectsWorkspace({
   onOpenTeamComposer: () => void;
   onCancelTeamComposer: () => void;
   onSubmitTeam: (draft: TeamDraft) => void;
+  onOpenMissionComposer: () => void;
+  onCancelMissionComposer: () => void;
+  onSubmitMission: (draft: MissionDraft) => void;
 }) {
   const classes = useStyles();
   return (
@@ -191,7 +204,7 @@ export function ProjectsWorkspace({
             Durable bodies of work governed by an Operator-authored Charter.
           </p>
         </div>
-        {!composerOpen && !charterComposerOpen && !teamComposerOpen && (
+        {!composerOpen && !charterComposerOpen && !teamComposerOpen && !missionComposerOpen && (
           <Button appearance="primary" onClick={onCreate} disabled={busy}>
             Create Project
           </Button>
@@ -217,14 +230,19 @@ export function ProjectsWorkspace({
           project={selectedProject}
           history={charterHistory}
           teams={teams}
+          missions={missions}
           residents={residents}
           teamConfigurations={teamConfigurations}
           teamComposerOpen={teamComposerOpen}
+          missionComposerOpen={missionComposerOpen}
           busy={busy}
           onRevise={onReviseCharter}
           onOpenTeamComposer={onOpenTeamComposer}
           onCancelTeamComposer={onCancelTeamComposer}
           onSubmitTeam={onSubmitTeam}
+          onOpenMissionComposer={onOpenMissionComposer}
+          onCancelMissionComposer={onCancelMissionComposer}
+          onSubmitMission={onSubmitMission}
         />
       ) : projects === null ? (
         <p role="status">Loading Projects</p>
@@ -460,26 +478,36 @@ function ProjectRecord({
   project,
   history,
   teams,
+  missions,
   residents,
   teamConfigurations,
   teamComposerOpen,
+  missionComposerOpen,
   busy,
   onRevise,
   onOpenTeamComposer,
   onCancelTeamComposer,
   onSubmitTeam,
+  onOpenMissionComposer,
+  onCancelMissionComposer,
+  onSubmitMission,
 }: {
   project: ProjectView;
   history: ProjectCharter[] | null;
   teams: TeamView[] | null;
+  missions: MissionView[] | null;
   residents: ResidentAgentView[] | null;
   teamConfigurations: ResidentConfiguration[] | null;
   teamComposerOpen: boolean;
+  missionComposerOpen: boolean;
   busy: boolean;
   onRevise: () => void;
   onOpenTeamComposer: () => void;
   onCancelTeamComposer: () => void;
   onSubmitTeam: (draft: TeamDraft) => void;
+  onOpenMissionComposer: () => void;
+  onCancelMissionComposer: () => void;
+  onSubmitMission: (draft: MissionDraft) => void;
 }) {
   const classes = useStyles();
   const charter = project.charter;
@@ -562,6 +590,16 @@ function ProjectRecord({
         onOpenComposer={onOpenTeamComposer}
         onCancel={onCancelTeamComposer}
         onSubmit={onSubmitTeam}
+      />
+      <ProjectMissions
+        project={project}
+        teams={teams}
+        missions={missions}
+        composerOpen={missionComposerOpen}
+        busy={busy}
+        onOpenComposer={onOpenMissionComposer}
+        onCancel={onCancelMissionComposer}
+        onSubmit={onSubmitMission}
       />
     </article>
   );

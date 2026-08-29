@@ -204,6 +204,41 @@ export type TeamView = {
   formedAtMs: number;
   members: TeamMemberView[];
 };
+export type MissionAdmissionActor = "operator";
+export type MissionLifecycle = "admitted";
+export type MissionMemberDraft = {
+  residentId: string;
+  expectedConfigurationId: string;
+};
+export type MissionDraft = {
+  projectId: string;
+  expectedCharterRevision: number;
+  teamId: string;
+  desiredOutcome: string;
+  successConditions: string[];
+  constraints: string[];
+  prohibitions: string[];
+  members: MissionMemberDraft[];
+};
+export type MissionMemberView = {
+  residentId: string;
+  admissionConfigurationId: string;
+};
+export type MissionView = {
+  id: string;
+  workspaceId: string;
+  projectId: string;
+  charterRevision: number;
+  teamId: string;
+  desiredOutcome: string;
+  successConditions: string[];
+  constraints: string[];
+  prohibitions: string[];
+  lifecycle: MissionLifecycle;
+  admittedBy: MissionAdmissionActor;
+  admittedAtMs: number;
+  members: MissionMemberView[];
+};
 
 // Tauri's current frontend command adapter returns a Promise for the Rust value.
 // Source: https://v2.tauri.app/develop/calling-rust/#commands
@@ -465,6 +500,18 @@ export async function formTeam(draft: TeamDraft): Promise<TeamView> {
   return invokeAndValidate("form_team", { draft }, isTeamView, "Team");
 }
 
+export async function loadMissions(projectId: string): Promise<MissionView[]> {
+  return invokeAndValidate("missions", { projectId }, isMissionList, "Mission list");
+}
+
+export async function loadMission(missionId: string): Promise<MissionView> {
+  return invokeAndValidate("mission", { missionId }, isMissionView, "Mission");
+}
+
+export async function admitMission(draft: MissionDraft): Promise<MissionView> {
+  return invokeAndValidate("admit_mission", { draft }, isMissionView, "Mission");
+}
+
 export async function discoverLocalModels(): Promise<LocalModelDiscoveryReport> {
   return invokeAndValidate(
     "discover_local_models",
@@ -585,6 +632,16 @@ export function describeLocalAccountError(error: unknown): string {
       return "A selected Resident is no longer eligible for Team membership.";
     case "team_unavailable":
       return "Beacon could not verify Team state.";
+    case "invalid_mission":
+      return "Review the Mission outcome, success conditions, Team, and exact member evidence.";
+    case "mission_not_found":
+      return "That Mission is no longer available in this Workspace.";
+    case "stale_mission_team":
+      return "The Team or a Resident configuration changed. Reload before admitting the Mission.";
+    case "mission_member_ineligible":
+      return "A Team member is no longer eligible for Mission admission.";
+    case "mission_unavailable":
+      return "Beacon could not verify Mission state.";
     case "local_model_unavailable":
       return "The local model provider could not be verified.";
     case "local_model_not_found":
@@ -1016,6 +1073,71 @@ function isTeamList(value: unknown): value is TeamView[] {
     const prior = value[index - 1];
     return prior.formedAtMs < team.formedAtMs ||
       (prior.formedAtMs === team.formedAtMs && prior.id < team.id);
+  });
+}
+
+function isMissionMemberView(value: unknown): value is MissionMemberView {
+  return (
+    hasExactKeys(value, ["admissionConfigurationId", "residentId"]) &&
+    isUuid(value.residentId) &&
+    isUuid(value.admissionConfigurationId)
+  );
+}
+
+function isMissionView(value: unknown): value is MissionView {
+  if (
+    !hasExactKeys(value, [
+      "admittedAtMs",
+      "admittedBy",
+      "charterRevision",
+      "constraints",
+      "desiredOutcome",
+      "id",
+      "lifecycle",
+      "members",
+      "prohibitions",
+      "projectId",
+      "successConditions",
+      "teamId",
+      "workspaceId",
+    ]) ||
+    !isUuid(value.id) ||
+    !isUuid(value.workspaceId) ||
+    !isUuid(value.projectId) ||
+    !isPositiveInteger(value.charterRevision) ||
+    !isUuid(value.teamId) ||
+    !isPurpose(value.desiredOutcome) ||
+    !isCharterItems(value.successConditions, true) ||
+    !isCharterItems(value.constraints, false) ||
+    !isCharterItems(value.prohibitions, false) ||
+    value.lifecycle !== "admitted" ||
+    value.admittedBy !== "operator" ||
+    !isNonnegativeInteger(value.admittedAtMs) ||
+    !Array.isArray(value.members) ||
+    value.members.length === 0 ||
+    value.members.length > 512 ||
+    !value.members.every(isMissionMemberView)
+  ) {
+    return false;
+  }
+  const residentIds = new Set<string>();
+  return value.members.every((member) => {
+    if (residentIds.has(member.residentId)) return false;
+    residentIds.add(member.residentId);
+    return true;
+  });
+}
+
+function isMissionList(value: unknown): value is MissionView[] {
+  if (!Array.isArray(value) || value.length > 512 || !value.every(isMissionView)) return false;
+  const ids = new Set<string>();
+  return value.every((mission, index) => {
+    if (ids.has(mission.id)) return false;
+    ids.add(mission.id);
+    if (index === 0) return true;
+    const prior = value[index - 1];
+    return prior.admittedAtMs < mission.admittedAtMs ||
+      (prior.admittedAtMs === mission.admittedAtMs && prior.id < mission.id);
   });
 }
 
