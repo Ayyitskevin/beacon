@@ -178,6 +178,32 @@ export type ResidentConfiguration = {
   eligibleForTeam: boolean;
   ineligibilityReasons: readonly TeamIneligibilityReason[];
 };
+export type TeamFormationActor = "operator";
+export type TeamMemberDraft = {
+  residentId: string;
+  expectedConfigurationId: string;
+};
+export type TeamDraft = {
+  projectId: string;
+  name: string;
+  members: TeamMemberDraft[];
+};
+export type TeamMemberView = {
+  residentId: string;
+  formationConfigurationId: string;
+  currentConfigurationId: string;
+  eligibleNow: boolean;
+  ineligibilityReasons: readonly TeamIneligibilityReason[];
+};
+export type TeamView = {
+  id: string;
+  workspaceId: string;
+  projectId: string;
+  name: string;
+  formedBy: TeamFormationActor;
+  formedAtMs: number;
+  members: TeamMemberView[];
+};
 
 // Tauri's current frontend command adapter returns a Promise for the Rust value.
 // Source: https://v2.tauri.app/develop/calling-rust/#commands
@@ -427,6 +453,18 @@ export async function reviseProjectCharter(
   );
 }
 
+export async function loadTeams(projectId: string): Promise<TeamView[]> {
+  return invokeAndValidate("teams", { projectId }, isTeamList, "Team list");
+}
+
+export async function loadTeam(teamId: string): Promise<TeamView> {
+  return invokeAndValidate("team", { teamId }, isTeamView, "Team");
+}
+
+export async function formTeam(draft: TeamDraft): Promise<TeamView> {
+  return invokeAndValidate("form_team", { draft }, isTeamView, "Team");
+}
+
 export async function discoverLocalModels(): Promise<LocalModelDiscoveryReport> {
   return invokeAndValidate(
     "discover_local_models",
@@ -537,6 +575,16 @@ export function describeLocalAccountError(error: unknown): string {
       return "Change at least one Charter field before publishing a revision.";
     case "project_unavailable":
       return "Beacon could not verify the Project state.";
+    case "invalid_team":
+      return "Choose a Project, a Team name, and distinct eligible Residents.";
+    case "team_not_found":
+      return "That Team is no longer available in this Workspace.";
+    case "stale_team_member_configuration":
+      return "A Resident configuration changed. Reload the Team form before trying again.";
+    case "team_member_ineligible":
+      return "A selected Resident is no longer eligible for Team membership.";
+    case "team_unavailable":
+      return "Beacon could not verify Team state.";
     case "local_model_unavailable":
       return "The local model provider could not be verified.";
     case "local_model_not_found":
@@ -901,6 +949,73 @@ function isProjectCharterHistory(value: unknown): value is ProjectCharter[] {
   return value.every((charter, index) => {
     if (charter.revision !== index + 1) return false;
     return index === 0 || value[index - 1].authoredAtMs <= charter.authoredAtMs;
+  });
+}
+
+function isTeamMemberView(value: unknown): value is TeamMemberView {
+  if (
+    !hasExactKeys(value, [
+      "currentConfigurationId",
+      "eligibleNow",
+      "formationConfigurationId",
+      "ineligibilityReasons",
+      "residentId",
+    ]) ||
+    !isUuid(value.residentId) ||
+    !isUuid(value.formationConfigurationId) ||
+    !isUuid(value.currentConfigurationId) ||
+    typeof value.eligibleNow !== "boolean" ||
+    !isOrderedUniqueClosedValues(value.ineligibilityReasons, teamIneligibilityReasons, true)
+  ) {
+    return false;
+  }
+  return value.eligibleNow
+    ? value.ineligibilityReasons.length === 0
+    : value.ineligibilityReasons.length > 0;
+}
+
+function isTeamView(value: unknown): value is TeamView {
+  if (
+    !hasExactKeys(value, [
+      "formedAtMs",
+      "formedBy",
+      "id",
+      "members",
+      "name",
+      "projectId",
+      "workspaceId",
+    ]) ||
+    !isUuid(value.id) ||
+    !isUuid(value.workspaceId) ||
+    !isUuid(value.projectId) ||
+    !isProjectName(value.name) ||
+    value.formedBy !== "operator" ||
+    !isNonnegativeInteger(value.formedAtMs) ||
+    !Array.isArray(value.members) ||
+    value.members.length === 0 ||
+    value.members.length > 512 ||
+    !value.members.every(isTeamMemberView)
+  ) {
+    return false;
+  }
+  const residentIds = new Set<string>();
+  return value.members.every((member) => {
+    if (residentIds.has(member.residentId)) return false;
+    residentIds.add(member.residentId);
+    return true;
+  });
+}
+
+function isTeamList(value: unknown): value is TeamView[] {
+  if (!Array.isArray(value) || value.length > 512 || !value.every(isTeamView)) return false;
+  const ids = new Set<string>();
+  return value.every((team, index) => {
+    if (ids.has(team.id)) return false;
+    ids.add(team.id);
+    if (index === 0) return true;
+    const prior = value[index - 1];
+    return prior.formedAtMs < team.formedAtMs ||
+      (prior.formedAtMs === team.formedAtMs && prior.id < team.id);
   });
 }
 

@@ -14,6 +14,7 @@ import {
   completeLocalOperatorSetup,
   describeLocalAccountError,
   discardStarterOrganization,
+  formTeam,
   loadAuthenticationCapabilities,
   inspectLocalModel,
   loadLocalModelActivations,
@@ -27,6 +28,8 @@ import {
   loadSessionPolicy,
   loadSessionStatus,
   loadStarterOrganization,
+  loadTeam,
+  loadTeams,
   lockLocalSession,
   recordLocalOperatorActivity,
   recoverLocalOperatorAccount,
@@ -345,6 +348,55 @@ describe("desktop session transport", () => {
     ]);
   });
 
+  it("maps Team commands and rejects authority beyond immutable formation evidence", async () => {
+    const team = {
+      id: "55555555-5555-4555-8555-555555555555",
+      workspaceId: "11111111-1111-4111-8111-111111111111",
+      projectId: "33333333-3333-4333-8333-333333333333",
+      name: "Alpha Team",
+      formedBy: "operator",
+      formedAtMs: 456,
+      members: [
+        {
+          residentId: "22222222-2222-4222-8222-222222222222",
+          formationConfigurationId: "77777777-7777-4777-8777-777777777777",
+          currentConfigurationId: "77777777-7777-4777-8777-777777777777",
+          eligibleNow: true,
+          ineligibilityReasons: [],
+        },
+      ],
+    } as const;
+    const draft = {
+      projectId: team.projectId,
+      name: team.name,
+      members: [
+        {
+          residentId: team.members[0].residentId,
+          expectedConfigurationId: team.members[0].formationConfigurationId,
+        },
+      ],
+    };
+    invokeMock
+      .mockResolvedValueOnce([team])
+      .mockResolvedValueOnce(team)
+      .mockResolvedValueOnce(team)
+      .mockResolvedValueOnce({ ...team, leadResidentId: team.members[0].residentId })
+      .mockResolvedValueOnce({ ...team, members: [] });
+
+    await expect(loadTeams(team.projectId)).resolves.toEqual([team]);
+    await expect(loadTeam(team.id)).resolves.toEqual(team);
+    await expect(formTeam(draft)).resolves.toEqual(team);
+    await expect(loadTeam(team.id)).rejects.toThrow("invalid Team");
+    await expect(loadTeams(team.projectId)).rejects.toThrow("invalid Team list");
+    expect(invokeMock.mock.calls).toEqual([
+      ["teams", { projectId: team.projectId }],
+      ["team", { teamId: team.id }],
+      ["form_team", { draft }],
+      ["team", { teamId: team.id }],
+      ["teams", { projectId: team.projectId }],
+    ]);
+  });
+
   it("maps local-model discovery and accepts only inactive loopback resources", async () => {
     const report = {
       status: "available",
@@ -615,6 +667,12 @@ describe("desktop session transport", () => {
     );
     expect(describeLocalAccountError({ code: "stale_resident_configuration" })).toBe(
       "The Resident configuration changed. Reload it before trying again.",
+    );
+    expect(describeLocalAccountError({ code: "stale_team_member_configuration" })).toBe(
+      "A Resident configuration changed. Reload the Team form before trying again.",
+    );
+    expect(describeLocalAccountError({ code: "stale_team_member_configuration" })).toBe(
+      "A Resident configuration changed. Reload the Team form before trying again.",
     );
     expect(describeLocalAccountError({ code: "invented", message: "render me" })).not.toContain(
       "render me",

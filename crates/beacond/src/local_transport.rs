@@ -23,7 +23,8 @@ use crate::{
     ResidentConfiguration, ResidentConfigurationError, ResidentConfigurationService,
     ResidentLifecycleError, ResidentLifecycleService, ResourceDiscoveryError,
     ResourceDiscoveryService, SecretString, StarterOrganizationError, StarterOrganizationService,
-    StarterOrganizationView, StarterResidentDraft, StartupConfig, Supervisor,
+    StarterOrganizationView, StarterResidentDraft, StartupConfig, Supervisor, TeamDraft, TeamError,
+    TeamService, TeamView,
 };
 
 const PROTOCOL_VERSION: u16 = 1;
@@ -77,6 +78,11 @@ pub enum LocalErrorCode {
     StaleCharterRevision,
     UnchangedCharter,
     ProjectUnavailable,
+    InvalidTeam,
+    TeamNotFound,
+    StaleTeamMemberConfiguration,
+    TeamMemberIneligible,
+    TeamUnavailable,
     LocalModelUnavailable,
     LocalModelNotFound,
     LocalModelChanged,
@@ -106,6 +112,7 @@ pub enum LocalTransportError {
     ResidentLifecycle(ResidentLifecycleError),
     ResidentConfiguration(ResidentConfigurationError),
     Project(ProjectError),
+    Team(TeamError),
     ResourceDiscovery(ResourceDiscoveryError),
     LocalModelActivation(crate::LocalModelActivationError),
 }
@@ -136,6 +143,7 @@ impl fmt::Display for LocalTransportError {
                 write!(formatter, "Resident configuration failed: {error}")
             }
             Self::Project(error) => write!(formatter, "Project operation failed: {error}"),
+            Self::Team(error) => write!(formatter, "Team operation failed: {error}"),
             Self::ResourceDiscovery(error) => {
                 write!(formatter, "resource discovery failed: {error}")
             }
@@ -193,6 +201,12 @@ impl From<ResidentConfigurationError> for LocalTransportError {
 impl From<ProjectError> for LocalTransportError {
     fn from(error: ProjectError) -> Self {
         Self::Project(error)
+    }
+}
+
+impl From<TeamError> for LocalTransportError {
+    fn from(error: TeamError) -> Self {
+        Self::Team(error)
     }
 }
 
@@ -432,6 +446,15 @@ enum LocalCommand {
         expected_current_revision: u32,
         draft: ProjectCharterDraft,
     },
+    Teams {
+        project_id: uuid::Uuid,
+    },
+    Team {
+        team_id: uuid::Uuid,
+    },
+    FormTeam {
+        draft: TeamDraft,
+    },
     DiscoverLocalModels,
     InspectLocalModel {
         model_name: String,
@@ -497,6 +520,12 @@ enum LocalResult {
     ProjectCharterHistory {
         charters: Vec<ProjectCharter>,
     },
+    Teams {
+        teams: Vec<TeamView>,
+    },
+    Team {
+        team: TeamView,
+    },
     LocalModelDiscovery {
         report: crate::LocalModelDiscoveryReport,
     },
@@ -529,6 +558,7 @@ pub struct LocalSupervisorServer {
     resident_lifecycle: ResidentLifecycleService,
     resident_configuration: ResidentConfigurationService,
     projects: ProjectService,
+    teams: TeamService,
     resource_discovery: ResourceDiscoveryService,
     local_model_activation: crate::LocalModelActivationService,
     platform_monitor: PlatformSessionMonitor,
@@ -558,6 +588,7 @@ impl LocalSupervisorServer {
         let resident_configuration =
             ResidentConfigurationService::new(Arc::clone(&accounts), report.workspace.id);
         let projects = ProjectService::new(Arc::clone(&accounts), report.workspace.id);
+        let teams = TeamService::new(Arc::clone(&accounts), report.workspace.id);
         let resource_discovery =
             ResourceDiscoveryService::new(Arc::clone(&accounts), config.local_model_endpoint);
         let local_model_activation = crate::LocalModelActivationService::new(
@@ -582,6 +613,7 @@ impl LocalSupervisorServer {
             resident_lifecycle,
             resident_configuration,
             projects,
+            teams,
             resource_discovery,
             local_model_activation,
             platform_monitor: PlatformSessionMonitor::new(),
@@ -799,6 +831,15 @@ impl LocalSupervisorServer {
                     expected_current_revision,
                     draft,
                 )?,
+            },
+            LocalCommand::Teams { project_id } => LocalResult::Teams {
+                teams: self.teams.list(project_id)?,
+            },
+            LocalCommand::Team { team_id } => LocalResult::Team {
+                team: self.teams.get(team_id)?,
+            },
+            LocalCommand::FormTeam { draft } => LocalResult::Team {
+                team: self.teams.form(draft)?,
             },
             LocalCommand::DiscoverLocalModels => LocalResult::LocalModelDiscovery {
                 report: self.resource_discovery.discover_local_models()?,
@@ -1108,6 +1149,18 @@ impl LocalSupervisorClient {
         })?)
     }
 
+    pub fn teams(&self, project_id: uuid::Uuid) -> Result<Vec<TeamView>, LocalTransportError> {
+        expect_teams(self.send(LocalCommand::Teams { project_id })?)
+    }
+
+    pub fn team(&self, team_id: uuid::Uuid) -> Result<TeamView, LocalTransportError> {
+        expect_team(self.send(LocalCommand::Team { team_id })?)
+    }
+
+    pub fn form_team(&self, draft: TeamDraft) -> Result<TeamView, LocalTransportError> {
+        expect_team(self.send(LocalCommand::FormTeam { draft })?)
+    }
+
     pub fn discover_local_models(
         &self,
     ) -> Result<crate::LocalModelDiscoveryReport, LocalTransportError> {
@@ -1286,6 +1339,20 @@ fn expect_project_charter_history(
     }
 }
 
+fn expect_teams(result: LocalResult) -> Result<Vec<TeamView>, LocalTransportError> {
+    match result {
+        LocalResult::Teams { teams } => Ok(teams),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
+fn expect_team(result: LocalResult) -> Result<TeamView, LocalTransportError> {
+    match result {
+        LocalResult::Team { team } => Ok(team),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
 fn expect_local_model_discovery(
     result: LocalResult,
 ) -> Result<crate::LocalModelDiscoveryReport, LocalTransportError> {
@@ -1331,6 +1398,7 @@ fn response_from_transport_error(error: LocalTransportError) -> ResponseEnvelope
             wire_error_from_resident_configuration(error)
         }
         LocalTransportError::Project(error) => wire_error_from_project(error),
+        LocalTransportError::Team(error) => wire_error_from_team(error),
         LocalTransportError::ResourceDiscovery(ResourceDiscoveryError::Account(error)) => {
             wire_error_from_account(error)
         }
@@ -1438,6 +1506,26 @@ fn wire_error_from_project(error: ProjectError) -> WireError {
         ProjectError::UnchangedCharter => LocalErrorCode::UnchangedCharter,
         ProjectError::InvalidStore | ProjectError::Store(_) | ProjectError::Json(_) => {
             LocalErrorCode::ProjectUnavailable
+        }
+    };
+    WireError {
+        code,
+        retry_after_ms: None,
+    }
+}
+
+fn wire_error_from_team(error: TeamError) -> WireError {
+    let code = match error {
+        TeamError::Account(error) => return wire_error_from_account(error),
+        TeamError::ProjectNotFound => LocalErrorCode::ProjectNotFound,
+        TeamError::TeamNotFound => LocalErrorCode::TeamNotFound,
+        TeamError::InvalidName
+        | TeamError::InvalidMembers
+        | TeamError::ResidentConfigurationUnavailable => LocalErrorCode::InvalidTeam,
+        TeamError::StaleResidentConfiguration => LocalErrorCode::StaleTeamMemberConfiguration,
+        TeamError::ResidentIneligible(_) => LocalErrorCode::TeamMemberIneligible,
+        TeamError::InvalidStore | TeamError::Store(_) | TeamError::Json(_) => {
+            LocalErrorCode::TeamUnavailable
         }
     };
     WireError {

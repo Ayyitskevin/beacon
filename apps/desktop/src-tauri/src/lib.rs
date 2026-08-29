@@ -13,7 +13,8 @@ use beacond::{
     LocalSupervisorClient, LocalTransportError, OperatorSessionPolicy, OperatorSessionStatus,
     PlatformSessionMonitorStatus, ProjectCharter, ProjectCharterDraft, ProjectDraft,
     ProjectSummary, ProjectView, ProviderFeature, ResidentAgentView, ResidentConfiguration,
-    SecretString, StarterOrganizationView, StarterResidentDraft, initialize_local_auth_token,
+    SecretString, StarterOrganizationView, StarterResidentDraft, TeamDraft, TeamView,
+    initialize_local_auth_token,
 };
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -267,6 +268,46 @@ impl From<LocalTransportError> for CommandError {
             } => (
                 "project_unavailable",
                 "Beacon could not verify the Project state.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::InvalidTeam,
+                ..
+            } => (
+                "invalid_team",
+                "Choose a Project, a Team name, and distinct eligible Residents.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::TeamNotFound,
+                ..
+            } => (
+                "team_not_found",
+                "That Team is no longer available in this Workspace.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::StaleTeamMemberConfiguration,
+                ..
+            } => (
+                "stale_team_member_configuration",
+                "A Resident configuration changed. Reload the Team form before trying again.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::TeamMemberIneligible,
+                ..
+            } => (
+                "team_member_ineligible",
+                "A selected Resident is no longer eligible for Team membership.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::TeamUnavailable,
+                ..
+            } => (
+                "team_unavailable",
+                "Beacon could not verify Team state.",
                 None,
             ),
             LocalTransportError::Remote {
@@ -570,6 +611,21 @@ fn revise_project_charter_value(
         .map_err(Into::into)
 }
 
+fn teams_value(
+    state: &DesktopState,
+    project_id: uuid::Uuid,
+) -> Result<Vec<TeamView>, CommandError> {
+    state.supervisor.teams(project_id).map_err(Into::into)
+}
+
+fn team_value(state: &DesktopState, team_id: uuid::Uuid) -> Result<TeamView, CommandError> {
+    state.supervisor.team(team_id).map_err(Into::into)
+}
+
+fn form_team_value(state: &DesktopState, draft: TeamDraft) -> Result<TeamView, CommandError> {
+    state.supervisor.form_team(draft).map_err(Into::into)
+}
+
 fn discover_local_models_value(
     state: &DesktopState,
 ) -> Result<LocalModelDiscoveryReport, CommandError> {
@@ -860,6 +916,24 @@ fn revise_project_charter(
 }
 
 #[tauri::command]
+fn teams(
+    state: State<'_, DesktopState>,
+    project_id: uuid::Uuid,
+) -> Result<Vec<TeamView>, CommandError> {
+    teams_value(&state, project_id)
+}
+
+#[tauri::command]
+fn team(state: State<'_, DesktopState>, team_id: uuid::Uuid) -> Result<TeamView, CommandError> {
+    team_value(&state, team_id)
+}
+
+#[tauri::command]
+fn form_team(state: State<'_, DesktopState>, draft: TeamDraft) -> Result<TeamView, CommandError> {
+    form_team_value(&state, draft)
+}
+
+#[tauri::command]
 fn discover_local_models(
     state: State<'_, DesktopState>,
 ) -> Result<LocalModelDiscoveryReport, CommandError> {
@@ -1134,6 +1208,9 @@ pub fn run() {
             project_charter_history,
             create_project,
             revise_project_charter,
+            teams,
+            team,
+            form_team,
             discover_local_models,
             inspect_local_model,
             activate_local_model,
@@ -1325,6 +1402,9 @@ mod tests {
                 "allow-project-charter-history",
                 "allow-create-project",
                 "allow-revise-project-charter",
+                "allow-teams",
+                "allow-team",
+                "allow-form-team",
                 "allow-discover-local-models",
                 "allow-inspect-local-model",
                 "allow-activate-local-model",

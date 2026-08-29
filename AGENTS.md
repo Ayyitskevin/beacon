@@ -245,6 +245,9 @@ history. Briefing can discover installed Ollama models through a bounded loopbac
 result remains ephemeral and inactive: discovery persists nothing, invokes nothing, and grants no
 capability or authority. The Owner can separately inspect an exact local model, approve a known
 Provider Feature subset, activate it as revocable Workspace eligibility, and deactivate it without
-running the model or granting Agent authority. Teams, Missions, Cloud Link, passkeys, active agent
-work, and a downloadable installer do not exist yet. Do not describe this checkpoint as a usable
-Alpha.
+running the model or granting Agent authority. Inside one Project, the authenticated Owner can form
+an immutable named Team from the exact current configurations of one or more eligible Residents.
+Formation is truthfully Operator-attributed, keeps later eligibility separate from formation
+evidence, assigns no permanent lead, and creates no Mission or authority. Resident-issued Team
+formation, Missions, Cloud Link, passkeys, active agent work, and a downloadable installer do not
+exist yet. Do not describe this checkpoint as a usable Alpha.
