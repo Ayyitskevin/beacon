@@ -515,6 +515,24 @@ fn load_project(
     })
 }
 
+pub(crate) fn current_charter_revision(
+    connection: &rusqlite::Connection,
+    workspace_id: Uuid,
+    project_id: Uuid,
+) -> Result<Option<u32>, ProjectError> {
+    connection
+        .query_row(
+            "SELECT current_charter_revision
+             FROM projects
+             WHERE workspace_id = ?1 AND id = ?2",
+            params![workspace_id.to_string(), project_id.to_string()],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .map(|revision| u32::try_from(revision).map_err(|_| ProjectError::InvalidStore))
+        .transpose()
+}
+
 fn load_charter_history(
     connection: &rusqlite::Connection,
     workspace_id: Uuid,

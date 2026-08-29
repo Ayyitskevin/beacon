@@ -192,6 +192,13 @@ configurations of one or more eligible Residents. Formation preserves that evide
 later eligibility changes without rewriting history. It assigns no permanent lead and creates no
 Mission, Run, aggregated capability, spending, model invocation, or external effect. Autonomous
 Resident-issued formation still waits for the Agent command and Policy paths.
+The authenticated Owner can also admit a finite Mission owned by one currently eligible Team.
+Admission binds the exact current Charter revision and every Team member's exact current Resident
+Configuration, then preserves that evidence with the Mission's desired outcome, success
+conditions, constraints, prohibitions, and `admitted` lifecycle. It selects no Team Lead and
+creates no Assignment, Route, Invocation, Run, budget, spending, credential, network scope,
+external effect, or execution authority. Those decisions wait for Policy, Track Record, and Agent
+command paths that do not yet exist.
 
 The Projects application is the first working suite surface after Briefing. The Owner can create
 a Project from a structured Charter containing its purpose, desired outcomes, constraints,
@@ -232,6 +239,9 @@ eligibility without execution authority.
 [The Project Teams checkpoint](docs/implementation/phase-0-project-teams.md) records truthful
 Operator attribution, exact formation evidence, current eligibility, and the no-Mission/no-authority
 boundary.
+[The Project Missions checkpoint](docs/implementation/phase-0-project-missions.md) records exact
+Charter, Team, and Resident Configuration admission evidence while keeping Mission leadership and
+execution authority out of scope.
 Run `scripts/gate` to verify the
 preserved Beacon Legacy Desk, the Rust workspace, the web bundle, and the native desktop build.
 The exact pre-Beacon compatibility boundary is recorded in the

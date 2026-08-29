@@ -15,8 +15,9 @@ use std::time::Duration;
 use beacond::{
     AccessOrigin, AutonomyProfile, BeaconCapability, BudgetBoundary, DiscoveryStatus,
     LocalErrorCode, LocalModelActivationState, LocalModelEndpoint, LocalServerConfig,
-    LocalSupervisorClient, LocalSupervisorServer, LocalTransportError, ModelActivation,
-    OperatorSessionPhase, PlatformMonitorState, ProjectCharterDraft, ProjectDraft, ProviderFeature,
+    LocalSupervisorClient, LocalSupervisorServer, LocalTransportError, MissionAdmissionActor,
+    MissionDraft, MissionLifecycle, MissionMemberDraft, ModelActivation, OperatorSessionPhase,
+    PlatformMonitorState, ProjectCharterDraft, ProjectDraft, ProviderFeature,
     ResidentConfigurationState, ResidentLifecycle, SecretString, StarterOrganizationDecision,
     StarterResidentDraft, StarterRole, TeamDraft, TeamFormationActor, TeamIneligibilityReason,
     TeamMemberDraft, initialize_local_auth_token,
@@ -803,7 +804,7 @@ fn authenticated_client_creates_and_reads_projects_over_the_real_socket() {
 }
 
 #[test]
-fn authenticated_client_forms_and_reads_a_project_team_over_the_real_socket() {
+fn authenticated_client_forms_a_team_and_admits_a_mission_over_the_real_socket() {
     let runtime = TestRuntime::new("teams");
     let address = serve_ollama_inspections(2);
     let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
@@ -887,9 +888,45 @@ fn authenticated_client_forms_and_reads_a_project_team_over_the_real_socket() {
         LocalErrorCode::InvalidTeam,
     );
 
+    assert!(client.missions(project.id).unwrap().is_empty());
+    let admitted = client
+        .admit_mission(MissionDraft {
+            project_id: project.id,
+            expected_charter_revision: project.charter.revision,
+            team_id: formed.id,
+            desired_outcome: "Ship one reviewed feature".to_owned(),
+            success_conditions: vec!["Relevant gates pass".to_owned()],
+            constraints: vec!["Keep authority explicit".to_owned()],
+            prohibitions: vec!["Do not deploy".to_owned()],
+            members: vec![MissionMemberDraft {
+                resident_id,
+                expected_configuration_id: configuration.id,
+            }],
+        })
+        .unwrap();
+    assert_eq!(admitted.lifecycle, MissionLifecycle::Admitted);
+    assert_eq!(admitted.admitted_by, MissionAdmissionActor::Operator);
+    assert_eq!(client.mission(admitted.id).unwrap(), admitted);
+    assert_eq!(
+        client.missions(project.id).unwrap(),
+        std::slice::from_ref(&admitted)
+    );
+    assert_remote_code(
+        client.mission(Uuid::new_v4()),
+        LocalErrorCode::MissionNotFound,
+    );
+
     client.lock().unwrap();
     assert_remote_code(client.team(formed.id), LocalErrorCode::NotAuthenticated);
     assert_remote_code(client.teams(project.id), LocalErrorCode::NotAuthenticated);
+    assert_remote_code(
+        client.mission(admitted.id),
+        LocalErrorCode::NotAuthenticated,
+    );
+    assert_remote_code(
+        client.missions(project.id),
+        LocalErrorCode::NotAuthenticated,
+    );
     running.store(false, Ordering::Release);
     thread.join().unwrap().unwrap();
 }

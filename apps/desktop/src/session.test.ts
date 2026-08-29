@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  admitMission,
   activateLocalModel,
   activateResident,
   clearResidentConfiguration,
@@ -18,6 +19,8 @@ import {
   loadAuthenticationCapabilities,
   inspectLocalModel,
   loadLocalModelActivations,
+  loadMission,
+  loadMissions,
   loadPlatformSessionMonitorStatus,
   loadProject,
   loadProjectCharterHistory,
@@ -394,6 +397,61 @@ describe("desktop session transport", () => {
       ["form_team", { draft }],
       ["team", { teamId: team.id }],
       ["teams", { projectId: team.projectId }],
+    ]);
+  });
+
+  it("maps Mission admission and rejects widened or incomplete authority records", async () => {
+    const mission = {
+      id: "88888888-8888-4888-8888-888888888888",
+      workspaceId: "11111111-1111-4111-8111-111111111111",
+      projectId: "33333333-3333-4333-8333-333333333333",
+      charterRevision: 2,
+      teamId: "55555555-5555-4555-8555-555555555555",
+      desiredOutcome: "Ship one reviewed feature",
+      successConditions: ["Relevant gates pass"],
+      constraints: ["Keep authority explicit"],
+      prohibitions: ["Do not deploy"],
+      lifecycle: "admitted",
+      admittedBy: "operator",
+      admittedAtMs: 789,
+      members: [
+        {
+          residentId: "22222222-2222-4222-8222-222222222222",
+          admissionConfigurationId: "77777777-7777-4777-8777-777777777777",
+        },
+      ],
+    } as const;
+    const draft = {
+      projectId: mission.projectId,
+      expectedCharterRevision: mission.charterRevision,
+      teamId: mission.teamId,
+      desiredOutcome: mission.desiredOutcome,
+      successConditions: [...mission.successConditions],
+      constraints: [...mission.constraints],
+      prohibitions: [...mission.prohibitions],
+      members: mission.members.map((member) => ({
+        residentId: member.residentId,
+        expectedConfigurationId: member.admissionConfigurationId,
+      })),
+    };
+    invokeMock
+      .mockResolvedValueOnce([mission])
+      .mockResolvedValueOnce(mission)
+      .mockResolvedValueOnce(mission)
+      .mockResolvedValueOnce({ ...mission, leadResidentId: mission.members[0].residentId })
+      .mockResolvedValueOnce({ ...mission, successConditions: [] });
+
+    await expect(loadMissions(mission.projectId)).resolves.toEqual([mission]);
+    await expect(loadMission(mission.id)).resolves.toEqual(mission);
+    await expect(admitMission(draft)).resolves.toEqual(mission);
+    await expect(loadMission(mission.id)).rejects.toThrow("invalid Mission");
+    await expect(loadMissions(mission.projectId)).rejects.toThrow("invalid Mission list");
+    expect(invokeMock.mock.calls).toEqual([
+      ["missions", { projectId: mission.projectId }],
+      ["mission", { missionId: mission.id }],
+      ["admit_mission", { draft }],
+      ["mission", { missionId: mission.id }],
+      ["missions", { projectId: mission.projectId }],
     ]);
   });
 
