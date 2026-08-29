@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Bind a Project to its repository and declared checks before any execution path exists
