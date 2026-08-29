@@ -431,7 +431,82 @@ impl From<LocalTransportError> for CommandError {
                 "Beacon could not verify local-model activation state.",
                 None,
             ),
-            _ => (
+            LocalTransportError::Remote {
+                code: LocalErrorCode::InvalidMission,
+                ..
+            } => (
+                "invalid_mission",
+                "Review the Mission outcome, success conditions, Team, and exact member evidence.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::MissionNotFound,
+                ..
+            } => (
+                "mission_not_found",
+                "That Mission is no longer available in this Workspace.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::StaleMissionTeam,
+                ..
+            } => (
+                "stale_mission_team",
+                "The Team or a Resident configuration changed. Reload before admitting the Mission.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::MissionMemberIneligible,
+                ..
+            } => (
+                "mission_member_ineligible",
+                "A Team member is no longer eligible for Mission admission.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::MissionUnavailable,
+                ..
+            } => (
+                "mission_unavailable",
+                "Beacon could not verify Mission state.",
+                None,
+            ),
+            // Declared, not omitted. These codes have no `case` in session.ts
+            // today, so they surface under the generic message by decision.
+            // Listing them here instead of `_` means a new `LocalErrorCode`
+            // variant fails this build until someone either gives it a message
+            // or adds it to this list. The Policy and Mission tables both
+            // shipped with unreachable `case` strings because a wildcard hid
+            // the gap; the compiler is the guard now.
+            LocalTransportError::Remote {
+                code:
+                    LocalErrorCode::SetupNotStarted
+                    | LocalErrorCode::AccountAlreadyExists
+                    | LocalErrorCode::AccountMissing
+                    | LocalErrorCode::RemotePasswordNotAllowed
+                    | LocalErrorCode::NotAuthenticated
+                    | LocalErrorCode::AccountServiceUnavailable
+                    | LocalErrorCode::UnauthorizedClient
+                    | LocalErrorCode::ProtocolError,
+                ..
+            }
+            | LocalTransportError::Io(_)
+            | LocalTransportError::Json(_)
+            | LocalTransportError::InvalidTokenFile
+            | LocalTransportError::InsecurePermissions
+            | LocalTransportError::Protocol
+            | LocalTransportError::Supervisor(_)
+            | LocalTransportError::Account(_)
+            | LocalTransportError::StarterOrganization(_)
+            | LocalTransportError::ResidentLifecycle(_)
+            | LocalTransportError::ResidentConfiguration(_)
+            | LocalTransportError::Project(_)
+            | LocalTransportError::ProjectPolicy(_)
+            | LocalTransportError::ProjectRepository(_)
+            | LocalTransportError::Team(_)
+            | LocalTransportError::Mission(_)
+            | LocalTransportError::ResourceDiscovery(_)
+            | LocalTransportError::LocalModelActivation(_) => (
                 "account_service_unavailable",
                 "The local account service is unavailable.",
                 None,
@@ -1493,7 +1568,7 @@ mod tests {
 
     use beacond::{
         AutonomyProfile, BeaconCapability, DeclaredCheck, LocalServerConfig, LocalSupervisorClient,
-        LocalSupervisorServer, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft,
+        LocalSupervisorServer, MissionDraft, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft,
         RepositoryDraft, RepositorySourceKind, ResidentLifecycle, SecretString,
         StarterResidentDraft, StarterRole, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
         TeamLeadConflictRule, TeamLeadSelectionPolicy, TrackRecordEvidenceKind,
@@ -1504,9 +1579,9 @@ mod tests {
 
     use super::{
         DesktopState, accept_starter_organization_value, activate_resident_value,
-        authentication_capabilities_value, begin_password_setup_value,
+        admit_mission_value, authentication_capabilities_value, begin_password_setup_value,
         bind_project_repository_value, complete_operator_setup_value, create_project_value,
-        current_project_repository_value, migrate_legacy_app_data,
+        current_project_repository_value, migrate_legacy_app_data, mission_value,
         platform_session_monitor_status_value, prepare_runtime_directory,
         project_charter_history_value, project_policy_history_value, project_policy_value,
         project_repository_history_value, project_value, projects_value,
@@ -2088,6 +2163,43 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(stale.code, "stale_project_policy");
+    }
+
+    #[test]
+    fn mission_refusals_reach_the_interface_under_their_own_code() {
+        let state = TestState::new();
+        begin_password_setup_value(
+            &state.state,
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+        complete_operator_setup_value(&state.state, true).unwrap();
+        let project = create_project_value(&state.state, repository_project_draft()).unwrap();
+
+        // Before this change every Mission refusal fell through to
+        // "account_service_unavailable", so the five Mission `case` strings in
+        // session.ts were unreachable. The two refusals reachable without a
+        // local-model activation fixture are proven end to end here; the other
+        // three arms are held by the exhaustive match rather than a wildcard.
+        let missing = mission_value(&state.state, Uuid::new_v4()).unwrap_err();
+        assert_eq!(missing.code, "mission_not_found");
+
+        let invalid = admit_mission_value(
+            &state.state,
+            MissionDraft {
+                project_id: project.id,
+                expected_charter_revision: project.charter.revision,
+                team_id: Uuid::new_v4(),
+                desired_outcome: String::new(),
+                success_conditions: vec!["Relevant gates pass".to_owned()],
+                constraints: Vec::new(),
+                prohibitions: Vec::new(),
+                members: Vec::new(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(invalid.code, "invalid_mission");
     }
 
     fn repository_project_draft() -> ProjectDraft {
