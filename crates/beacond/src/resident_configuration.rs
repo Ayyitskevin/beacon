@@ -492,6 +492,16 @@ fn latest_configuration(
     )
 }
 
+pub(crate) fn current_configuration(
+    connection: &Connection,
+    workspace_id: Uuid,
+    resident_id: Uuid,
+) -> Result<Option<ResidentConfiguration>, ResidentConfigurationError> {
+    latest_configuration(connection, workspace_id, resident_id)?
+        .map(|decision| render_configuration(connection, decision))
+        .transpose()
+}
+
 fn configuration_by_id(
     connection: &Connection,
     workspace_id: Uuid,

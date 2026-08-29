@@ -23,6 +23,7 @@ import {
   completeLocalOperatorSetup,
   configureResident,
   createProject,
+  formTeam,
   deactivateLocalModel,
   discoverLocalModels,
   describeLocalAccountError,
@@ -40,6 +41,7 @@ import {
   loadSessionPolicy,
   loadSessionStatus,
   loadStarterOrganization,
+  loadTeams,
   lockLocalSession,
   type PlatformSessionMonitorStatus,
   type LocalModelDiscoveryReport,
@@ -51,6 +53,8 @@ import {
   type ProjectDraft,
   type ProjectSummary,
   type ProjectView,
+  type TeamDraft,
+  type TeamView,
   recordLocalOperatorActivity,
   reactivateResident,
   recoverLocalOperatorAccount,
@@ -257,8 +261,12 @@ export function App() {
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [selectedProject, setSelectedProject] = useState<ProjectView | null>(null);
   const [charterHistory, setCharterHistory] = useState<ProjectCharter[] | null>(null);
+  const [teams, setTeams] = useState<TeamView[] | null>(null);
+  const [teamConfigurations, setTeamConfigurations] =
+    useState<ResidentConfiguration[] | null>(null);
   const [projectComposerOpen, setProjectComposerOpen] = useState(false);
   const [charterComposerOpen, setCharterComposerOpen] = useState(false);
+  const [teamComposerOpen, setTeamComposerOpen] = useState(false);
   const [localModelDiscovery, setLocalModelDiscovery] =
     useState<LocalModelDiscoveryReport | null>(null);
   const [localModelActivations, setLocalModelActivations] =
@@ -290,8 +298,11 @@ export function App() {
       setProjects(null);
       setSelectedProject(null);
       setCharterHistory(null);
+      setTeams(null);
+      setTeamConfigurations(null);
       setProjectComposerOpen(false);
       setCharterComposerOpen(false);
+      setTeamComposerOpen(false);
       setActiveApplication("Briefing");
     }
     setForegroundVerified(
@@ -330,8 +341,11 @@ export function App() {
     setProjects(null);
     setSelectedProject(null);
     setCharterHistory(null);
+    setTeams(null);
+    setTeamConfigurations(null);
     setProjectComposerOpen(false);
     setCharterComposerOpen(false);
+    setTeamComposerOpen(false);
     setActiveApplication("Briefing");
     Promise.all([
       loadSessionPolicy(),
@@ -355,8 +369,11 @@ export function App() {
         setProjects(null);
         setSelectedProject(null);
         setCharterHistory(null);
+        setTeams(null);
+        setTeamConfigurations(null);
         setProjectComposerOpen(false);
         setCharterComposerOpen(false);
+        setTeamComposerOpen(false);
         setViewState("error");
       },
     );
@@ -402,6 +419,25 @@ export function App() {
   }, [activeApplication, projects, starterOrganization, unlocked]);
 
   useEffect(() => {
+    if (!unlocked || activeApplication !== "Projects" || !selectedProject) return;
+    let active = true;
+    setTeams(null);
+    setTeamConfigurations(null);
+    setTeamComposerOpen(false);
+    void loadTeams(selectedProject.id).then(
+      (loaded) => {
+        if (active) setTeams(loaded);
+      },
+      (error) => {
+        if (active) setActionError(describeLocalAccountError(error));
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [activeApplication, selectedProject?.id, unlocked]);
+
+  useEffect(() => {
     if (!unlocked) return;
     let active = true;
     let checking = false;
@@ -419,8 +455,11 @@ export function App() {
             setProjects(null);
             setSelectedProject(null);
             setCharterHistory(null);
+            setTeams(null);
+            setTeamConfigurations(null);
             setProjectComposerOpen(false);
             setCharterComposerOpen(false);
+            setTeamComposerOpen(false);
             setActiveApplication("Briefing");
           }
           setPlatformMonitor(monitor);
@@ -434,8 +473,11 @@ export function App() {
           setProjects(null);
           setSelectedProject(null);
           setCharterHistory(null);
+          setTeams(null);
+          setTeamConfigurations(null);
           setProjectComposerOpen(false);
           setCharterComposerOpen(false);
+          setTeamComposerOpen(false);
           setViewState("error");
         },
       ).finally(() => {
@@ -470,8 +512,11 @@ export function App() {
           setProjects(null);
           setSelectedProject(null);
           setCharterHistory(null);
+          setTeams(null);
+          setTeamConfigurations(null);
           setProjectComposerOpen(false);
           setCharterComposerOpen(false);
+          setTeamComposerOpen(false);
           setViewState("error");
         },
       ).finally(() => {
@@ -604,8 +649,11 @@ export function App() {
       setProjects(null);
       setSelectedProject(null);
       setCharterHistory(null);
+      setTeams(null);
+      setTeamConfigurations(null);
       setProjectComposerOpen(false);
       setCharterComposerOpen(false);
+      setTeamComposerOpen(false);
       setLocalModelDiscovery(null);
       setLocalModelActivations(null);
       setLocalModelReview(null);
@@ -801,8 +849,11 @@ export function App() {
       }
       setSelectedProject(project);
       setCharterHistory(history);
+      setTeams(null);
+      setTeamConfigurations(null);
       setProjectComposerOpen(false);
       setCharterComposerOpen(false);
+      setTeamComposerOpen(false);
     });
   }
 
@@ -821,8 +872,11 @@ export function App() {
       ]);
       setSelectedProject(created);
       setCharterHistory([created.charter]);
+      setTeams([]);
+      setTeamConfigurations(null);
       setProjectComposerOpen(false);
       setCharterComposerOpen(false);
+      setTeamComposerOpen(false);
     });
   }
 
@@ -848,6 +902,27 @@ export function App() {
         ) ?? null,
       );
       setCharterComposerOpen(false);
+    });
+  }
+
+  async function prepareTeamFormation() {
+    await runAction(async () => {
+      setTeamConfigurations(await loadResidentConfigurations());
+      setCharterComposerOpen(false);
+      setTeamComposerOpen(true);
+    });
+  }
+
+  async function formProjectTeam(draft: TeamDraft) {
+    await runAction(async () => {
+      const formed = await formTeam(draft);
+      setTeams((current) =>
+        [...(current ?? []), formed].sort(
+          (left, right) => left.formedAtMs - right.formedAtMs || left.id.localeCompare(right.id),
+        ),
+      );
+      setTeamComposerOpen(false);
+      setTeamConfigurations(null);
     });
   }
 
@@ -1020,15 +1095,22 @@ export function App() {
               projects={projects}
               selectedProject={selectedProject}
               charterHistory={charterHistory}
+              teams={teams}
+              residents={residents}
+              teamConfigurations={teamConfigurations}
               composerOpen={projectComposerOpen}
               charterComposerOpen={charterComposerOpen}
+              teamComposerOpen={teamComposerOpen}
               busy={busy}
               error={actionError}
               onCreate={() => {
                 setSelectedProject(null);
                 setCharterHistory(null);
+                setTeams(null);
+                setTeamConfigurations(null);
                 setProjectComposerOpen(true);
                 setCharterComposerOpen(false);
+                setTeamComposerOpen(false);
               }}
               onCancelCreate={() => setProjectComposerOpen(false)}
               onOpenProject={openProject}
@@ -1036,6 +1118,12 @@ export function App() {
               onReviseCharter={() => setCharterComposerOpen(true)}
               onCancelCharterRevision={() => setCharterComposerOpen(false)}
               onSubmitCharterRevision={publishCharterRevision}
+              onOpenTeamComposer={() => void prepareTeamFormation()}
+              onCancelTeamComposer={() => {
+                setTeamComposerOpen(false);
+                setTeamConfigurations(null);
+              }}
+              onSubmitTeam={(draft) => void formProjectTeam(draft)}
             />
           ) : (
             <Briefing
