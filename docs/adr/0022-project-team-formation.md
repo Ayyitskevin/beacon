@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Preserve Team formation separately from current eligibility and Mission leadership
@@ -32,4 +32,4 @@ Formation creates no Mission, Assignment, Route, Invocation, Run, credential, bu
 scope, external effect, or execution authority. Autonomous Resident formation remains unavailable
 until a real authenticated Agent command path and Policy module can attribute and adjudicate it.
 
-This proposal becomes accepted only with Product Steward sign-off on the reviewed branch.
+Accepted 2026-08-29 by the Product Steward. The reviewed branch merged to `main` as `672a422` on 2026-08-28; the Steward ruled on 2026-08-29 that every ADR merged under this convention is accepted.

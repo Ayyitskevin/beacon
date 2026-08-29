@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Publish Project Policy before evaluating Team Lead candidates
@@ -28,4 +28,4 @@ scope, external effect, aggregate Team authority, or execution authority. Track 
 candidate evaluation, appointment, replacement, and authenticated Resident commands remain
 separate decisions.
 
-This proposal becomes accepted only with Product Steward sign-off on the reviewed branch.
+Accepted 2026-08-29 by the Product Steward. The reviewed branch merged to `main` as `c59dde1` on 2026-08-29; the Steward ruled on 2026-08-29 that every ADR merged under this convention is accepted.
