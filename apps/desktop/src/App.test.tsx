@@ -404,6 +404,7 @@ describe("Beacon desktop shell", () => {
       if (command === "projects") return Promise.resolve([]);
       if (command === "create_project") return Promise.resolve(created);
       if (command === "revise_project_charter") return Promise.resolve(revised);
+      if (command === "teams") return Promise.resolve([]);
       if (command === "record_operator_activity") return Promise.resolve(null);
       return Promise.reject(new Error(`unexpected command: ${command} ${JSON.stringify(args)}`));
     });
@@ -520,6 +521,7 @@ describe("Beacon desktop shell", () => {
       if (command === "project_charter_history") {
         return Promise.resolve([revisionOne, revisionTwo]);
       }
+      if (command === "teams") return Promise.resolve([]);
       if (command === "record_operator_activity") return Promise.resolve(null);
       return Promise.reject(new Error(`unexpected command: ${command}`));
     });
@@ -538,6 +540,120 @@ describe("Beacon desktop shell", () => {
     expect(invokeMock).toHaveBeenCalledWith("project_charter_history", {
       projectId: project.id,
     });
+  });
+
+  it("forms a Project Team from exact eligible Resident configurations without implying authority", async () => {
+    const user = userEvent.setup();
+    const resident = {
+      ...inactiveResident,
+      displayName: "Northstar",
+      lifecycle: "active",
+      latestDecisionId: "66666666-6666-4666-8666-666666666666",
+      updatedAtMs: 110,
+    } as const;
+    const project = {
+      id: "33333333-3333-4333-8333-333333333333",
+      workspaceId: acceptedOrganization.workspaceId,
+      name: "Beacon Alpha",
+      charter: {
+        revision: 1,
+        purpose: "Build a trustworthy local software product.",
+        desiredOutcomes: ["Form an attributable Team"],
+        constraints: [],
+        prohibitions: [],
+        autonomyProfile: "supervised",
+        budgetBoundary: "no_spend",
+        externalEffects: "prohibited",
+        authoredAtMs: 123,
+      },
+      createdAtMs: 123,
+    } as const;
+    const summary = {
+      id: project.id,
+      name: project.name,
+      charterRevision: 1,
+      autonomyProfile: "supervised",
+      createdAtMs: 123,
+    } as const;
+    const configuration = {
+      id: "77777777-7777-4777-8777-777777777777",
+      workspaceId: acceptedOrganization.workspaceId,
+      residentId: resident.id,
+      state: "configured",
+      binding: {
+        activationId: activeLocalModel.id,
+        capabilities: ["work.create_mission"],
+        budgetBoundary: "no_spend",
+      },
+      predecessorId: null,
+      decidedAtMs: 124,
+      eligibleForTeam: true,
+      ineligibilityReasons: [],
+    } as const;
+    const formed = {
+      id: "55555555-5555-4555-8555-555555555555",
+      workspaceId: acceptedOrganization.workspaceId,
+      projectId: project.id,
+      name: "Alpha Team",
+      formedBy: "operator",
+      formedAtMs: 125,
+      members: [
+        {
+          residentId: resident.id,
+          formationConfigurationId: configuration.id,
+          currentConfigurationId: configuration.id,
+          eligibleNow: true,
+          ineligibilityReasons: [],
+        },
+      ],
+    } as const;
+    invokeMock.mockImplementation((command) => {
+      if (command === "session_status") return Promise.resolve(status("unlocked"));
+      if (command === "authentication_capabilities") return Promise.resolve(capabilities);
+      if (command === "session_policy") return Promise.resolve(sessionPolicy);
+      if (command === "platform_session_monitor_status") return Promise.resolve(monitorStatus);
+      if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
+      if (command === "residents") return Promise.resolve([resident]);
+      if (command === "record_operator_activity") return Promise.resolve(null);
+      if (command === "projects") return Promise.resolve([summary]);
+      if (command === "project") return Promise.resolve(project);
+      if (command === "project_charter_history") return Promise.resolve([project.charter]);
+      if (command === "teams") return Promise.resolve([]);
+      if (command === "resident_configurations") return Promise.resolve([configuration]);
+      if (command === "form_team") return Promise.resolve(formed);
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    await user.click(await screen.findByRole("button", { name: /Beacon Alpha/i }));
+    expect(await screen.findByText("No Teams have been formed for this Project.")).toBeVisible();
+    expect(screen.getByText(/no permanent lead/i)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Form Team" }));
+
+    expect(await screen.findByRole("form", { name: "Form Team" })).toBeVisible();
+    expect(screen.getByText(/starts no Mission, Run, spending, model invocation/i)).toBeVisible();
+    await user.type(screen.getByLabelText("Team name"), "Alpha Team");
+    await user.click(screen.getByRole("checkbox", { name: "Northstar — lead" }));
+    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
+    expect(results.violations).toEqual([]);
+    await user.click(screen.getByRole("button", { name: "Form Team" }));
+
+    expect(invokeMock).toHaveBeenCalledWith("form_team", {
+      draft: {
+        projectId: project.id,
+        name: "Alpha Team",
+        members: [
+          {
+            residentId: resident.id,
+            expectedConfigurationId: configuration.id,
+          },
+        ],
+      },
+    });
+    expect(await screen.findByText("Alpha Team")).toBeVisible();
+    expect(screen.getByText(/Operator formed · 1 member/i)).toBeVisible();
   });
 
   it("edits and explicitly admits the recommended Starter Organization", async () => {
@@ -1184,6 +1300,7 @@ describe("Beacon desktop shell", () => {
       }
       if (command === "project") return Promise.resolve(project);
       if (command === "project_charter_history") return Promise.resolve([charter]);
+      if (command === "teams") return Promise.resolve([]);
       return Promise.reject(new Error(`unexpected command: ${command}`));
     });
     const { container } = render(<App />);

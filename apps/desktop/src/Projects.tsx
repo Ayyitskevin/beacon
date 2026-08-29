@@ -18,7 +18,12 @@ import type {
   ProjectDraft,
   ProjectSummary,
   ProjectView,
+  ResidentAgentView,
+  ResidentConfiguration,
+  TeamDraft,
+  TeamView,
 } from "./session";
+import { ProjectTeams } from "./ProjectTeams";
 
 const useStyles = makeStyles({
   section: { width: "min(100%, 920px)" },
@@ -133,8 +138,12 @@ export function ProjectsWorkspace({
   projects,
   selectedProject,
   charterHistory,
+  teams,
+  residents,
+  teamConfigurations,
   composerOpen,
   charterComposerOpen,
+  teamComposerOpen,
   busy,
   error,
   onCreate,
@@ -144,12 +153,19 @@ export function ProjectsWorkspace({
   onReviseCharter,
   onCancelCharterRevision,
   onSubmitCharterRevision,
+  onOpenTeamComposer,
+  onCancelTeamComposer,
+  onSubmitTeam,
 }: {
   projects: ProjectSummary[] | null;
   selectedProject: ProjectView | null;
   charterHistory: ProjectCharter[] | null;
+  teams: TeamView[] | null;
+  residents: ResidentAgentView[] | null;
+  teamConfigurations: ResidentConfiguration[] | null;
   composerOpen: boolean;
   charterComposerOpen: boolean;
+  teamComposerOpen: boolean;
   busy: boolean;
   error: string;
   onCreate: () => void;
@@ -159,6 +175,9 @@ export function ProjectsWorkspace({
   onReviseCharter: () => void;
   onCancelCharterRevision: () => void;
   onSubmitCharterRevision: (draft: ProjectCharterDraft) => void;
+  onOpenTeamComposer: () => void;
+  onCancelTeamComposer: () => void;
+  onSubmitTeam: (draft: TeamDraft) => void;
 }) {
   const classes = useStyles();
   return (
@@ -172,7 +191,7 @@ export function ProjectsWorkspace({
             Durable bodies of work governed by an Operator-authored Charter.
           </p>
         </div>
-        {!composerOpen && !charterComposerOpen && (
+        {!composerOpen && !charterComposerOpen && !teamComposerOpen && (
           <Button appearance="primary" onClick={onCreate} disabled={busy}>
             Create Project
           </Button>
@@ -197,8 +216,15 @@ export function ProjectsWorkspace({
         <ProjectRecord
           project={selectedProject}
           history={charterHistory}
+          teams={teams}
+          residents={residents}
+          teamConfigurations={teamConfigurations}
+          teamComposerOpen={teamComposerOpen}
           busy={busy}
           onRevise={onReviseCharter}
+          onOpenTeamComposer={onOpenTeamComposer}
+          onCancelTeamComposer={onCancelTeamComposer}
+          onSubmitTeam={onSubmitTeam}
         />
       ) : projects === null ? (
         <p role="status">Loading Projects</p>
@@ -433,13 +459,27 @@ function draftFromForm(value: CharterFormState): ProjectCharterDraft {
 function ProjectRecord({
   project,
   history,
+  teams,
+  residents,
+  teamConfigurations,
+  teamComposerOpen,
   busy,
   onRevise,
+  onOpenTeamComposer,
+  onCancelTeamComposer,
+  onSubmitTeam,
 }: {
   project: ProjectView;
   history: ProjectCharter[] | null;
+  teams: TeamView[] | null;
+  residents: ResidentAgentView[] | null;
+  teamConfigurations: ResidentConfiguration[] | null;
+  teamComposerOpen: boolean;
   busy: boolean;
   onRevise: () => void;
+  onOpenTeamComposer: () => void;
+  onCancelTeamComposer: () => void;
+  onSubmitTeam: (draft: TeamDraft) => void;
 }) {
   const classes = useStyles();
   const charter = project.charter;
@@ -512,6 +552,17 @@ function ProjectRecord({
           )}
         </details>
       </section>
+      <ProjectTeams
+        projectId={project.id}
+        teams={teams}
+        residents={residents}
+        configurations={teamConfigurations}
+        composerOpen={teamComposerOpen}
+        busy={busy}
+        onOpenComposer={onOpenTeamComposer}
+        onCancel={onCancelTeamComposer}
+        onSubmit={onSubmitTeam}
+      />
     </article>
   );
 }

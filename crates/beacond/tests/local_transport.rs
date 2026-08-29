@@ -18,7 +18,8 @@ use beacond::{
     LocalSupervisorClient, LocalSupervisorServer, LocalTransportError, ModelActivation,
     OperatorSessionPhase, PlatformMonitorState, ProjectCharterDraft, ProjectDraft, ProviderFeature,
     ResidentConfigurationState, ResidentLifecycle, SecretString, StarterOrganizationDecision,
-    StarterResidentDraft, StarterRole, TeamIneligibilityReason, initialize_local_auth_token,
+    StarterResidentDraft, StarterRole, TeamDraft, TeamFormationActor, TeamIneligibilityReason,
+    TeamMemberDraft, initialize_local_auth_token,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -797,6 +798,98 @@ fn authenticated_client_creates_and_reads_projects_over_the_real_socket() {
     assert_eq!(client.projects().unwrap().len(), 2);
     assert_eq!(client.project(created.id).unwrap(), revised);
     assert_eq!(client.project_charter_history(created.id).unwrap().len(), 2);
+    running.store(false, Ordering::Release);
+    thread.join().unwrap().unwrap();
+}
+
+#[test]
+fn authenticated_client_forms_and_reads_a_project_team_over_the_real_socket() {
+    let runtime = TestRuntime::new("teams");
+    let address = serve_ollama_inspections(2);
+    let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+
+    assert_remote_code(
+        client.teams(Uuid::new_v4()),
+        LocalErrorCode::NotAuthenticated,
+    );
+    client
+        .begin_password_setup(
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+    client.complete_operator_setup(true).unwrap();
+    let resident_id = client
+        .accept_starter_organization(1, vec![draft(StarterRole::Lead, Some("Northstar"))])
+        .unwrap()
+        .residents[0]
+        .id;
+    client.activate_resident(resident_id, None).unwrap();
+    let review = client
+        .inspect_local_model(MODEL_NAME.to_owned(), MODEL_DIGEST.to_owned())
+        .unwrap();
+    let activation = client
+        .activate_local_model(review, vec![ProviderFeature::Completion])
+        .unwrap();
+    let configuration = client
+        .configure_resident(
+            resident_id,
+            None,
+            activation.id,
+            vec![BeaconCapability::WorkCreateMission],
+        )
+        .unwrap();
+    let project = client
+        .create_project(project_draft("Beacon Alpha", AutonomyProfile::Supervised))
+        .unwrap();
+
+    assert!(client.teams(project.id).unwrap().is_empty());
+    let formed = client
+        .form_team(TeamDraft {
+            project_id: project.id,
+            name: "Alpha Team".to_owned(),
+            members: vec![TeamMemberDraft {
+                resident_id,
+                expected_configuration_id: configuration.id,
+            }],
+        })
+        .unwrap();
+    assert_eq!(formed.formed_by, TeamFormationActor::Operator);
+    assert_eq!(
+        formed.members[0].formation_configuration_id,
+        configuration.id
+    );
+    assert_eq!(client.team(formed.id).unwrap(), formed);
+    assert_eq!(
+        client.teams(project.id).unwrap(),
+        std::slice::from_ref(&formed)
+    );
+    assert_remote_code(client.team(Uuid::new_v4()), LocalErrorCode::TeamNotFound);
+    assert_remote_code(
+        client.form_team(TeamDraft {
+            project_id: project.id,
+            name: "Duplicate Member".to_owned(),
+            members: vec![
+                TeamMemberDraft {
+                    resident_id,
+                    expected_configuration_id: configuration.id,
+                },
+                TeamMemberDraft {
+                    resident_id,
+                    expected_configuration_id: configuration.id,
+                },
+            ],
+        }),
+        LocalErrorCode::InvalidTeam,
+    );
+
+    client.lock().unwrap();
+    assert_remote_code(client.team(formed.id), LocalErrorCode::NotAuthenticated);
+    assert_remote_code(client.teams(project.id), LocalErrorCode::NotAuthenticated);
     running.store(false, Ordering::Release);
     thread.join().unwrap().unwrap();
 }
