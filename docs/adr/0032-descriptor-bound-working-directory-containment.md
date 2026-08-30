@@ -112,10 +112,13 @@ which are not ordinary symlinks. Current kernels also disable magic-link resolut
 effect of `RESOLVE_BENEATH`, but Linux documents that behavior as subject to change; naming
 `RESOLVE_NO_MAGICLINKS` makes the required policy explicit and future-proof.
 
-Ordinary symlinks that resolve **within** the worktree remain permitted. `RESOLVE_NO_SYMLINKS` is
-deliberately **not** used. Repositories legitimately contain internal symlinks, and refusing them
-would reject correct projects to prevent an escape the anchor already prevents. The invariant
-Beacon needs is "the result is beneath the worktree," not "no symlink was traversed."
+Ordinary **relative** symlinks that resolve within the worktree remain permitted.
+`RESOLVE_NO_SYMLINKS` is deliberately **not** used. `RESOLVE_BENEATH` refuses every absolute
+symlink target, including one whose text happens to name a location inside the worktree; that
+conservative refusal is part of this decision. Repositories legitimately contain relative internal
+symlinks, and refusing those would reject correct projects to prevent an escape the anchor already
+prevents. The invariant Beacon needs is "relative resolution stayed beneath the worktree," not "no
+symlink was traversed."
 
 Failure is closed and total. If `openat2` is unavailable or refuses resolution, or if child setup
 observes an already-unlinked descriptor, the target program does not start. The record uses the
@@ -150,6 +153,13 @@ A Declared Check is a bounded adversary: it executes operator-declared `argv`, i
 authority beneath the worktree, and it may be hostile or merely wrong. It may not escalate beyond
 what the sandbox grants.
 
+The adversary in this record is therefore repository content or a process confined by Beacon's
+Landlock ruleset. A same-UID host process, mount administrator, or other actor with independent
+write authority over both the worktree and a destination outside it is outside this threat model.
+That distinction matters after binding: a descriptor pins an object, not its continuing ancestry,
+so an independently privileged actor could rename the selected directory out of the worktree while
+the descriptor remains valid. Descriptor binding does not claim to defend that host-level case.
+
 **Committed relative escape.** A tracked relative entry is source-contained but resolves outside
 the disposable tree because the two roots have different parent layouts. Refused at execution
 bind: the target is not beneath the launcher anchor.
@@ -158,9 +168,11 @@ bind: the target is not beneath the launcher anchor.
 bind, because check two's resolution is performed fresh against the anchor at its own spawn, and
 the anchor cannot be climbed out of.
 
-**Concurrent swap.** A process races the resolution. There is no check-then-use window to hit; the
-descriptor names an inode, and a swapped entry afterward cannot retarget an already-open
-descriptor.
+**Concurrent swap by a confined check.** A process races the resolution. There is no
+check-then-use window to hit; the descriptor names an object, and replacing or renaming its entry
+within the worktree afterward cannot retarget an already-open descriptor. A cross-root rename by an
+actor with independent outside authority is the excluded host-level case above, not a guarantee of
+this mechanism.
 
 **Magic link.** Current `RESOLVE_BENEATH` behavior already refuses a planted path into
 `/proc/self/fd/N`; the explicit `RESOLVE_NO_MAGICLINKS` flag preserves that refusal if the kernel's
@@ -194,9 +206,10 @@ refusal the record is `NotStarted` and no target program executes.
 Name liveness is checked on the bound descriptor in the child: `fstat` requires `st_nlink > 0`
 immediately before `fchdir`. If it already observes an unlink, `pre_exec` fails and the target is
 `NotStarted`. This is a usability check, not the containment proof. An unlink raced after `fstat`
-may still leave the child in the pinned, now unnamed directory; it cannot retarget the descriptor
-or escape the worktree. The Receipt therefore makes no stronger claim that the bind-time locator
-remains a live name.
+may still leave the child in the pinned, now unnamed directory; it cannot retarget the descriptor.
+A Beacon-confined actor cannot move that directory outside its Landlock authority, but an
+independently privileged host actor could. The Receipt therefore makes no stronger claim that the
+bind-time locator remains a live name or that the object's ancestry was revalidated after binding.
 
 Both descriptors are `CLOEXEC`. They are used in the child **before** `exec` and must not survive
 into the executed program; `CLOEXEC` closes them at `exec` precisely then. This matches the
@@ -252,11 +265,13 @@ successful record means the child entered the directory descriptor atomically se
 locator; a refused record preserves the attempted locator while `outcome.reason` says why no target
 program started.
 
-If the selected directory is renamed after binding, the descriptor continues to name the selected
-directory object while `working_directory` remains the bind-time locator. Beacon does not
-canonicalize the name again to make the Receipt look current: a second pathname walk could describe
-an attacker-controlled replacement instead of the capability actually used. Durable inode identity
-would require a later Receipt version and is outside this slice.
+If a Beacon-confined actor renames the selected directory within the worktree after binding, the
+descriptor continues to name the selected directory object while `working_directory` remains the
+bind-time locator. Beacon does not canonicalize the name again to make the Receipt look current: a
+second pathname walk could describe an attacker-controlled replacement instead of the capability
+actually used. A cross-root rename by an independently privileged host actor is outside the stated
+threat model. Durable inode or post-bind ancestry evidence would require a later Receipt version and
+is outside this slice.
 
 Under ADR 0031, a refused bind is a terminal `NotStarted` record for that check. It does not stop
 dispatch of the remaining checks and contributes its uncertainty in the existing
@@ -288,7 +303,10 @@ Acceptance authorizes only:
   descriptor rather than reopening its pathname; global read policy remains unchanged;
 - `crates/beacond/src/declared_checks.rs` — construct one launcher before the first check, dispatch
   through it in canonical order, and preserve later-check continuation;
-- focused `crates/beacond/tests/declared_checks.rs` and sandbox tests — the matrix below; and
+- `crates/beacond/tests/declared_checks.rs`, `crates/beacond/tests/sandbox.rs`, and
+  `crates/beacond/tests/bounded_execution.rs` — the integration cases in the matrix below;
+- source-local `#[cfg(test)]` modules only inside the authorized Rust source files above, including
+  the resolver's exact-flag mutation guard; and
 - this ADR.
 
 No `worktree.rs`, preflight behavior, Receipt contract, migration, schema, wire, transport, or
@@ -304,34 +322,44 @@ change write confinement, does not add a `SandboxCapability` variant, does not i
 reachable over the wire, and does not alter `check_preflight`'s source-repository resolution —
 which remains correct for what it decides, namely admissibility against the bound repository.
 
-## Required RED and regression acceptance matrix
+## Required RED, staged-RED, mutation, and regression acceptance matrix
 
-Implementation begins by recording which guards fail on the current code. Rows marked **RED** must
-be observed failing before the change and green after. Rows marked **REGRESSION** express behavior
-the current code already gets right and must remain green; calling those red would be false
-evidence.
+Implementation begins by recording which guards fail on the current code. Rows marked **CURRENT
+RED** must fail behaviorally against unmodified current execution and pass after the fix. Rows marked
+**STAGED RED** require a neutral test-only barrier that does not alter execution semantics: that
+barrier lands first, the behavioral assertion is observed failing while string-based
+`Command::current_dir` still owns dispatch, and only then is descriptor binding implemented. A
+missing symbol or compile failure is not RED evidence. **MUTATION** guards are proven after the
+mechanism exists by deliberately removing the named protection and observing the test fail. Rows
+marked **REGRESSION** express behavior the current code already gets right and must remain green;
+calling those red would be false evidence.
 
-1. **RED — committed relative escape.** A tracked relative symlink that canonicalizes inside the source
+1. **CURRENT RED — committed relative escape.** A tracked relative symlink that canonicalizes inside the source
    repository but climbs outside the differently rooted disposable `tree` passes preflight, then
    yields a per-check `NotStarted` containment refusal. The execution record retains the attempted
    worktree locator; the embedded preflight receipt remains byte-for-byte unchanged. Fails if the
    test is rejected before dispatch or if the target program runs.
-2. **RED — prior-check swap.** Two checks in canonical order; the first replaces the second's declared
+2. **CURRENT RED — prior-check swap.** Two checks in canonical order; the first replaces the second's declared
    directory with a symlink outside the worktree. The second is refused. Fails if it runs at all,
    and fails if the first check's refusal is what makes the test pass.
-3. **RED — concurrent swap.** With a barrier or pipe — never a sleep — the entry is replaced between
-   bind and spawn. The outcome is the bound directory or a typed refusal, never an escaped cwd.
-   Fails if it passes only under a timing assumption.
-4. **RED — magic-link flag.** A module-level assertion must fail if the resolver's exact flag set omits
+3. **STAGED RED — concurrent swap.** A test-only barrier or pipe — never a sleep — first makes the
+   current pathname handoff deterministic; the entry is replaced after selection and before spawn,
+   and current string-based dispatch is observed entering the replacement. After descriptor binding,
+   the same interleaving yields the bound directory or a typed refusal, never an escaped cwd. Fails
+   if the pre-fix observation is only a missing symbol or if either result depends on timing luck.
+4. **MUTATION — magic-link flag.** A module-level assertion must fail if the resolver's exact flag set omits
    `RESOLVE_NO_MAGICLINKS`; a behavioral `/proc/self/fd/N` case is retained as defense in depth.
    The flag assertion matters because current kernels also reject magic links under
    `RESOLVE_BENEATH`, so behavior alone cannot detect the plausible wrong implementation.
-5. **RED — deleted and renamed cwd.** With a private barrier after descriptor binding and before child
-   setup, deletion observed by child `fstat` yields `NotStarted` and no target-program effect.
-   Renaming the selected directory and installing an outside symlink at its old name still runs in
-   the descriptor-pinned original. A deletion raced after `fstat` may produce a contained unnamed
-   cwd; no outcome may enter the outside replacement or claim name liveness.
-6. **REGRESSION — internal symlink.** A symlink resolving *within* the worktree is accepted and runs there.
+5. **STAGED RED — deleted and in-tree-renamed cwd.** A neutral test-only barrier first makes the
+   pre-spawn pathname race deterministic and proves current dispatch can enter a replacement. After
+   descriptor binding, deletion observed by child `fstat` yields `NotStarted` and no target-program
+   effect. A Beacon-confined actor renaming the selected directory within the worktree and installing
+   an outside symlink at its old name still runs in the descriptor-pinned original. A deletion raced
+   after `fstat` may produce a contained unnamed cwd; no outcome may enter the outside replacement
+   or claim name liveness. A cross-root rename by an independently privileged host actor is excluded,
+   as stated in the trust model.
+6. **REGRESSION — relative internal symlink.** A relative symlink resolving within the worktree is accepted and runs there.
    This is the test that fails if containment is implemented as `RESOLVE_NO_SYMLINKS` or as a
    string prefix comparison, and it is why it is in the matrix.
 7. **REGRESSION — Receipt separation.** The embedded preflight `resolved_working_directory` remains the
