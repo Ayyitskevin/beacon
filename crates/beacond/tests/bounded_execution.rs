@@ -155,6 +155,58 @@ fn a_run_that_never_ends_is_stopped_by_the_wall_clock_and_says_so() {
 }
 
 #[test]
+fn a_stopped_run_still_reports_what_it_printed_before_it_hung() {
+    if !enforcing_or_skip() {
+        return;
+    }
+    // The last line a check printed before hanging is the output an operator
+    // most wants, and nothing pinned it: the wall-clock test asserts the
+    // ceiling and never looks at stdout.
+    //
+    // What this test pins is the operator-visible guarantee, not the mechanism
+    // behind it. Three independent things currently hold it -- the stop grace,
+    // `terminate_group`'s TERM/KILL sleep, and the poll interval -- and any one
+    // suffices, which was measured: zeroing the grace alone leaves this green,
+    // and only zeroing all three loses the output (empty stdout,
+    // `output_incomplete: true`, while the Receipt still reads as honest).
+    //
+    // That redundancy is why the guarantee is worth asserting here rather than
+    // trusting: before the stop grace existed it rested entirely on two sleeps
+    // that exist for unrelated reasons, and either one being tidied away would
+    // have been survivable while both would not.
+    let scratch = std::env::temp_dir().join(format!("beacon-exec-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&scratch).unwrap();
+    let mut bounds = tiny_bounds();
+    bounds.wall_clock_ms = 800;
+    let record = run_bounded_for_test(
+        &[
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "echo the-last-thing-it-printed; sleep 30".to_owned(),
+        ],
+        &scratch,
+        bounds,
+        None,
+    );
+    assert_eq!(
+        record.outcome,
+        ExecutionOutcome::Bounded {
+            ceiling: Ceiling::WallClock
+        }
+    );
+    assert!(
+        record.stdout.contains("the-last-thing-it-printed"),
+        "a stopped Run lost the output the operator most needs: {:?}",
+        record.stdout
+    );
+    assert!(
+        !record.output_incomplete,
+        "output was reported incomplete even though the pipe had closed"
+    );
+    std::fs::remove_dir_all(&scratch).ok();
+}
+
+#[test]
 fn output_beyond_the_ceiling_is_truncated_and_the_record_admits_it() {
     if !enforcing_or_skip() {
         return;

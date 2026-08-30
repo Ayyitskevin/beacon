@@ -6,6 +6,17 @@
 //! requires — "time, output, memory, and cost are bounded" — and the interrupt
 //! it requires alongside them.
 //!
+//! # One resource this module does not bound
+//!
+//! A reader whose pipe is held by a process that never closes it blocks
+//! forever, and `std` offers no cancellation for a blocking read. The Run is
+//! bounded and the Receipt is honest, but that thread, its pipe descriptor,
+//! and up to `output_bytes` of buffer are retained for the life of the
+//! supervisor — once per such Run. A daemon that outlives `beacond` therefore
+//! leaks a thread per Run that spawned it. Stated here rather than discovered
+//! later: a module whose purpose is bounding resources should name the one it
+//! does not bound.
+//!
 //! # What runs where
 //!
 //! The parent builds the ruleset and the limits. The child, between `fork` and
@@ -25,9 +36,23 @@ use serde::{Deserialize, Serialize};
 use super::landlock::{self, Ruleset};
 
 /// How long a Run that ended on its own may take to finish reporting output.
-/// A Run the parent stopped gets none: whatever still holds its pipe is the
-/// reason it was stopped.
 const OUTPUT_GRACE_MS: u64 = 2_000;
+
+/// How long a Run the parent *stopped* may take to finish reporting.
+///
+/// This was zero, on the reasoning that whatever still holds the pipe is the
+/// reason the Run was stopped. That is true of an escaped descendant and wrong
+/// about the ordinary case: after `terminate_group` the child is already dead,
+/// EOF has already happened, and the reader's value is microseconds away. Zero
+/// made keeping that output depend on the scheduler — measurably so. Zeroing
+/// this module's incidental sleeps loses the output of every stopped Run, five
+/// times out of five, while the Receipt still reads as honest.
+///
+/// A bounded non-zero grace serves both cases: it cannot reintroduce anything
+/// like an unbounded wait, and it makes the ordinary stop a guarantee rather
+/// than a coincidence. The operator's most valuable output is the last thing a
+/// check printed before it hung.
+const STOP_OUTPUT_GRACE_MS: u64 = 250;
 
 /// The ceilings a Run may not exceed.
 ///
@@ -291,14 +316,14 @@ pub(crate) fn run_bounded(
                     (None, Some(signal)) => classify_signal(signal),
                     (None, None) => ExecutionOutcome::Signalled { signal: 0 },
                 };
-                // A Run that ended on its own gets a short grace to finish
-                // reporting; one the parent stopped gets none, because whatever
-                // still holds the pipe is exactly what it was stopped for.
-                let grace = if ended_cleanly {
-                    Duration::from_millis(OUTPUT_GRACE_MS)
+                // Both cases are bounded; a stopped Run simply gets less,
+                // because an escaped descendant will never close and waiting on
+                // it is what the ceiling exists to prevent.
+                let grace = Duration::from_millis(if ended_cleanly {
+                    OUTPUT_GRACE_MS
                 } else {
-                    Duration::ZERO
-                };
+                    STOP_OUTPUT_GRACE_MS
+                });
                 let (stdout, stderr, truncated, incomplete) = collect(grace);
                 return record(outcome, stdout, stderr, truncated, incomplete);
             }
