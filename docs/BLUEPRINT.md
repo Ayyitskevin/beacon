@@ -845,11 +845,10 @@ Alpha 1 demonstrates this exact workflow:
   budgets; capabilities; Rulings; or execution authority. The official hosted service is the
   default setup path, while an operator-hosted endpoint uses the same documented protocol and
   boundaries. The local product and self-hosted Cloud Link remain free without a time limit.
-  Official hosting costs $5 per month for managed sync and offers United States and European Union
-  regions at launch. Version history for synchronized preferences remains available locally and
-  when self-hosted; official hosting manages its remote copy. Region changes require an explicit
-  migration. Self-hosting uses a one-command Docker installer for Linux x86-64 and ARM64. Local use
-  requires neither.
+  Version history for synchronized preferences remains available locally and when self-hosted;
+  official hosting manages its remote copy. Region changes require an explicit migration.
+  Self-hosting uses a one-command Docker installer for Linux x86-64 and ARM64. Local use requires
+  neither.
 - Local account recovery works with an Operator-held offline Recovery Key when Cloud Link is absent
   or unreachable. Setup cannot complete until the Operator confirms that the key was saved. A
   successful rotation immediately invalidates the old key.
@@ -994,10 +993,9 @@ and the desktop can recover from a supervisor restart.
   checks plus manual keyboard and Orca screen-reader testing on supported Linux.
 - Package the verified Linux Alpha as an AppImage.
 
-Exit: every Alpha acceptance criterion in section 9 passes against the Operator's own fleet —
-the frozen pillar repositories held as Projects in one proving Workspace, with Janus as the first
-Mission's repository (ADR 0025). The bundled Sample Project must still pass the same criteria for a
-fresh public install; it is the onboarding path, not the proof.
+Exit: every Alpha acceptance criterion in section 9 passes in a fresh Installation against the
+bundled, disposable Rust task-tracker Sample Project (ADR 0028). The proof requires no Athena,
+Buzz, Minerva, Vulcan, Janus, or Icarus runtime, and no fleet repository is an Alpha proving target.
 
 Distribute initial builds as invite-only technical alphas. Expand access only after invited
 evaluators complete the core loop and the resulting safety, usability, and installation findings

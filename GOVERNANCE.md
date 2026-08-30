@@ -17,10 +17,19 @@ Maintainer authority does not override the Product Steward or Beacon's product a
 
 ## Decision process
 
-Small, reversible changes use normal review. Changes to public contracts, domain language,
-security, authority, persistence, compatibility, or governance require a written proposal and
-updated decision record. Evidence settles technical disagreements when possible. The Product
-Steward decides when a material disagreement remains.
+Small, reversible changes use normal review. A moderate change is any non-trivial product or
+repository change that does not enter a high-stakes category. It requires review by at least one
+person or agent who did not author the change before merge. The review binds to the exact commit
+and records re-runnable verification, including failures, skips, and warnings.
+
+Changes to public contracts, domain language, security, authority, persistence, compatibility, or
+governance are high-stakes, as is any change for which AGENTS.md requires human review. A
+high-stakes change requires a written proposal, an updated decision record, one non-author review,
+and explicit Product Steward sign-off before merge. An automated gate and an author's own review
+cannot substitute for the non-author review or Product Steward sign-off.
+
+Evidence settles technical disagreements when possible. The Product Steward decides when a
+material disagreement remains.
 
 ## Commercial boundary
 

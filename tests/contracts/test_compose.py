@@ -17,7 +17,7 @@ from beacon_legacy.contracts import (
 )
 
 PROV = Provenance(
-    source="git:/example/checkouts/icarus@af41796",
+    source="git:https://example.invalid/icarus.git@af41796",
     read_at="2026-08-24T23:30:00+00:00",
     module_version="af41796",
     tree_state="clean",
