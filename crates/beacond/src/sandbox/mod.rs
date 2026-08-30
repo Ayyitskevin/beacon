@@ -4,10 +4,65 @@
 //! real ruleset, applies it in a child, and reports only what that child
 //! observed. A sandbox that is assumed is not a sandbox.
 
+mod bounded;
 mod landlock;
 mod probe;
 
 use serde::{Deserialize, Serialize};
+
+pub(crate) use bounded::run_bounded;
+pub use bounded::{
+    Ceiling, ExecutionBounds, ExecutionOutcome, ExecutionRecord, Interrupt, interrupt_channel,
+};
+
+/// Run a command under a freshly built ruleset whose only write target is
+/// `working_directory`. Test-facing until the Execution surface composes a
+/// worktree with a Run; the composition is Slice B's seam, not this module's.
+pub fn run_bounded_for_test(
+    argv: &[String],
+    working_directory: &std::path::Path,
+    bounds: ExecutionBounds,
+    interrupt: Option<std::sync::mpsc::Receiver<()>>,
+) -> ExecutionRecord {
+    let capability = detect();
+    let Some(abi) = landlock::abi_version() else {
+        return ExecutionRecord {
+            argv: argv.to_vec(),
+            working_directory: working_directory.to_string_lossy().into_owned(),
+            outcome: ExecutionOutcome::NotStarted {
+                reason: "this host has no sandbox".to_owned(),
+            },
+            stdout: String::new(),
+            stderr: String::new(),
+            output_truncated: false,
+            elapsed_ms: 0,
+            sandbox_version: capability.receipt_version(),
+        };
+    };
+    match Ruleset::build(abi, &[working_directory], true) {
+        Ok(ruleset) => run_bounded(
+            argv,
+            working_directory,
+            &ruleset,
+            bounds,
+            &capability.receipt_version(),
+            interrupt,
+        ),
+        Err(error) => ExecutionRecord {
+            argv: argv.to_vec(),
+            working_directory: working_directory.to_string_lossy().into_owned(),
+            outcome: ExecutionOutcome::NotStarted {
+                reason: format!("the ruleset could not be built: {error}"),
+            },
+            stdout: String::new(),
+            stderr: String::new(),
+            output_truncated: false,
+            elapsed_ms: 0,
+            sandbox_version: capability.receipt_version(),
+        },
+    }
+}
+pub(crate) use landlock::Ruleset;
 
 /// What this host can actually enforce, as observed rather than as configured.
 ///
