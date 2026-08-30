@@ -27,6 +27,8 @@
     "allow-configure-resident",
     "allow-clear-resident-configuration",
     "allow-projects",
+    "allow-sample-project-status",
+    "allow-install-sample-project",
     "allow-project",
     "allow-project-charter-history",
     "allow-create-project",

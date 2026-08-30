@@ -23,6 +23,8 @@ const COMMANDS: &[&str] = &[
     "configure_resident",
     "clear_resident_configuration",
     "projects",
+    "sample_project_status",
+    "install_sample_project",
     "project",
     "project_charter_history",
     "create_project",

@@ -173,6 +173,35 @@ describe("Beacon desktop shell", () => {
     });
   });
 
+  it("exposes the opt-in Sample Project from the authenticated Projects application", async () => {
+    const user = userEvent.setup();
+    mockInitialState("unlocked");
+    const base = invokeMock.getMockImplementation();
+    if (!base) throw new Error("initial invoke mock is unavailable");
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "projects") return Promise.resolve([]);
+      if (command === "sample_project_status") {
+        return Promise.resolve({
+          state: "available",
+          bundleVersion: 1,
+          bundleDigest: {
+            algorithm: "sha256",
+            canonicalizer: "beacon.sample-project.bundle.v1",
+            value: "7bdcf0a732856553c529dee2ec7dfcf9bbf691a5fb9b2558e74f05c1559dde8f",
+          },
+        });
+      }
+      return base(command, args);
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+
+    expect(await screen.findByText("Optional local proving project")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Install Sample Project" })).toBeVisible();
+  });
+
   it("keeps Workspace material and Operator Commands closed before setup", async () => {
     mockInitialState("operator_setup_required");
 

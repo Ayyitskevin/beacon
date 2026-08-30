@@ -35,6 +35,7 @@ import { ProjectPolicySection } from "./ProjectPolicy";
 import { CheckPreflightSection } from "./CheckPreflight";
 import { ProjectRepositorySection } from "./ProjectRepository";
 import { ProjectTeams } from "./ProjectTeams";
+import { SampleProject } from "./SampleProject";
 
 const useStyles = makeStyles({
   section: { width: "min(100%, 920px)" },
@@ -186,6 +187,7 @@ export function ProjectsWorkspace({
   onOpenMissionComposer,
   onCancelMissionComposer,
   onSubmitMission,
+  onSampleProjectInstalled,
 }: {
   projects: ProjectSummary[] | null;
   selectedProject: ProjectView | null;
@@ -227,6 +229,7 @@ export function ProjectsWorkspace({
   onOpenMissionComposer: () => void;
   onCancelMissionComposer: () => void;
   onSubmitMission: (draft: MissionDraft) => void;
+  onSampleProjectInstalled: (projectId: string) => void;
 }) {
   const classes = useStyles();
   return (
@@ -256,6 +259,13 @@ export function ProjectsWorkspace({
           {error}
         </p>
       )}
+      {!selectedProject &&
+        !composerOpen &&
+        !charterComposerOpen &&
+        !policyComposerOpen &&
+        !repositoryComposerOpen &&
+        !teamComposerOpen &&
+        !missionComposerOpen && <SampleProject onInstalled={onSampleProjectInstalled} />}
       {composerOpen ? (
         <ProjectComposer busy={busy} onCancel={onCancelCreate} onSubmit={onSubmitProject} />
       ) : charterComposerOpen && selectedProject ? (

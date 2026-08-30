@@ -25,9 +25,10 @@ use crate::{
     ProjectRepositoryService, ProjectService, ProjectSummary, ProjectView, RecoveryKey,
     RepositoryDraft, ResidentAgentView, ResidentConfiguration, ResidentConfigurationError,
     ResidentConfigurationService, ResidentLifecycleError, ResidentLifecycleService,
-    ResourceDiscoveryError, ResourceDiscoveryService, SecretString, StarterOrganizationError,
-    StarterOrganizationService, StarterOrganizationView, StarterResidentDraft, StartupConfig,
-    Supervisor, TeamDraft, TeamError, TeamService, TeamView,
+    ResourceDiscoveryError, ResourceDiscoveryService, SampleProjectError,
+    SampleProjectInstallResult, SampleProjectService, SampleProjectStatus, SecretString,
+    StarterOrganizationError, StarterOrganizationService, StarterOrganizationView,
+    StarterResidentDraft, StartupConfig, Supervisor, TeamDraft, TeamError, TeamService, TeamView,
 };
 
 const PROTOCOL_VERSION: u16 = 1;
@@ -91,6 +92,7 @@ pub enum LocalErrorCode {
     ProjectRepositoryUnavailable,
     RepositoryNotBound,
     PreflightUnavailable,
+    SampleProjectUnavailable,
     InvalidTeam,
     TeamNotFound,
     StaleTeamMemberConfiguration,
@@ -133,6 +135,7 @@ pub enum LocalTransportError {
     ProjectPolicy(ProjectPolicyError),
     ProjectRepository(ProjectRepositoryError),
     CheckPreflight(CheckPreflightError),
+    SampleProject(SampleProjectError),
     Team(TeamError),
     Mission(MissionError),
     ResourceDiscovery(ResourceDiscoveryError),
@@ -170,6 +173,7 @@ impl fmt::Display for LocalTransportError {
                 write!(formatter, "Project Repository failed: {error}")
             }
             Self::CheckPreflight(error) => write!(formatter, "check preflight failed: {error}"),
+            Self::SampleProject(error) => write!(formatter, "Sample Project failed: {error}"),
             Self::Team(error) => write!(formatter, "Team operation failed: {error}"),
             Self::Mission(error) => write!(formatter, "Mission operation failed: {error}"),
             Self::ResourceDiscovery(error) => {
@@ -247,6 +251,12 @@ impl From<ProjectRepositoryError> for LocalTransportError {
 impl From<CheckPreflightError> for LocalTransportError {
     fn from(error: CheckPreflightError) -> Self {
         Self::CheckPreflight(error)
+    }
+}
+
+impl From<SampleProjectError> for LocalTransportError {
+    fn from(error: SampleProjectError) -> Self {
+        Self::SampleProject(error)
     }
 }
 
@@ -484,6 +494,8 @@ enum LocalCommand {
         expected_decision_id: uuid::Uuid,
     },
     Projects,
+    SampleProjectStatus,
+    InstallSampleProject,
     Project {
         project_id: uuid::Uuid,
     },
@@ -605,6 +617,12 @@ enum LocalResult {
     Projects {
         projects: Vec<ProjectSummary>,
     },
+    SampleProjectStatus {
+        status: SampleProjectStatus,
+    },
+    SampleProjectInstallResult {
+        result: SampleProjectInstallResult,
+    },
     Project {
         project: ProjectView,
     },
@@ -673,6 +691,7 @@ pub struct LocalSupervisorServer {
     resident_lifecycle: ResidentLifecycleService,
     resident_configuration: ResidentConfigurationService,
     projects: ProjectService,
+    sample_projects: SampleProjectService,
     project_policies: ProjectPolicyService,
     project_repositories: ProjectRepositoryService,
     check_preflights: CheckPreflightService,
@@ -707,6 +726,11 @@ impl LocalSupervisorServer {
         let resident_configuration =
             ResidentConfigurationService::new(Arc::clone(&accounts), report.workspace.id);
         let projects = ProjectService::new(Arc::clone(&accounts), report.workspace.id);
+        let sample_projects = SampleProjectService::new(
+            Arc::clone(&accounts),
+            report.workspace.id,
+            &config.store_path,
+        )?;
         let project_policies =
             ProjectPolicyService::new(Arc::clone(&accounts), report.workspace.id);
         let project_repositories =
@@ -739,6 +763,7 @@ impl LocalSupervisorServer {
             resident_lifecycle,
             resident_configuration,
             projects,
+            sample_projects,
             project_policies,
             project_repositories,
             check_preflights,
@@ -939,6 +964,12 @@ impl LocalSupervisorServer {
             },
             LocalCommand::Projects => LocalResult::Projects {
                 projects: self.projects.list()?,
+            },
+            LocalCommand::SampleProjectStatus => LocalResult::SampleProjectStatus {
+                status: self.sample_projects.status()?,
+            },
+            LocalCommand::InstallSampleProject => LocalResult::SampleProjectInstallResult {
+                result: self.sample_projects.install()?,
             },
             LocalCommand::Project { project_id } => LocalResult::Project {
                 project: self.projects.get(project_id)?,
@@ -1308,6 +1339,16 @@ impl LocalSupervisorClient {
         expect_projects(self.send(LocalCommand::Projects)?)
     }
 
+    pub fn sample_project_status(&self) -> Result<SampleProjectStatus, LocalTransportError> {
+        expect_sample_project_status(self.send(LocalCommand::SampleProjectStatus)?)
+    }
+
+    pub fn install_sample_project(
+        &self,
+    ) -> Result<SampleProjectInstallResult, LocalTransportError> {
+        expect_sample_project_install_result(self.send(LocalCommand::InstallSampleProject)?)
+    }
+
     pub fn project(&self, project_id: uuid::Uuid) -> Result<ProjectView, LocalTransportError> {
         expect_project(self.send(LocalCommand::Project { project_id })?)
     }
@@ -1603,6 +1644,24 @@ fn expect_projects(result: LocalResult) -> Result<Vec<ProjectSummary>, LocalTran
     }
 }
 
+fn expect_sample_project_status(
+    result: LocalResult,
+) -> Result<SampleProjectStatus, LocalTransportError> {
+    match result {
+        LocalResult::SampleProjectStatus { status } => Ok(status),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
+fn expect_sample_project_install_result(
+    result: LocalResult,
+) -> Result<SampleProjectInstallResult, LocalTransportError> {
+    match result {
+        LocalResult::SampleProjectInstallResult { result } => Ok(result),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
 fn expect_project(result: LocalResult) -> Result<ProjectView, LocalTransportError> {
     match result {
         LocalResult::Project { project } => Ok(project),
@@ -1748,6 +1807,7 @@ fn response_from_transport_error(error: LocalTransportError) -> ResponseEnvelope
         LocalTransportError::ProjectRepository(error) => wire_error_from_project_repository(error),
         LocalTransportError::Team(error) => wire_error_from_team(error),
         LocalTransportError::CheckPreflight(error) => wire_error_from_check_preflight(error),
+        LocalTransportError::SampleProject(error) => wire_error_from_sample_project(error),
         LocalTransportError::Mission(error) => wire_error_from_mission(error),
         LocalTransportError::ResourceDiscovery(ResourceDiscoveryError::Account(error)) => {
             wire_error_from_account(error)
@@ -1900,6 +1960,24 @@ fn wire_error_from_check_preflight(error: CheckPreflightError) -> WireError {
     }
 }
 
+fn wire_error_from_sample_project(error: SampleProjectError) -> WireError {
+    let code = match error {
+        SampleProjectError::Account(error) => return wire_error_from_account(error),
+        SampleProjectError::UnsafeDestination
+        | SampleProjectError::BundleMismatch
+        | SampleProjectError::MaterializationFailed
+        | SampleProjectError::TamperedInstallation
+        | SampleProjectError::InvalidStore
+        | SampleProjectError::Store(_)
+        | SampleProjectError::Io(_)
+        | SampleProjectError::Json(_) => LocalErrorCode::SampleProjectUnavailable,
+    };
+    WireError {
+        code,
+        retry_after_ms: None,
+    }
+}
+
 fn wire_error_from_project_policy(error: ProjectPolicyError) -> WireError {
     let code = match error {
         ProjectPolicyError::Account(error) => return wire_error_from_account(error),
@@ -2017,5 +2095,82 @@ fn wire_error_from_account(error: OperatorAccountError) -> WireError {
     WireError {
         code,
         retry_after_ms,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+
+    use uuid::Uuid;
+
+    use super::{
+        LocalErrorCode, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
+        LocalTransportError, initialize_local_auth_token,
+    };
+    use crate::{
+        LocalModelEndpoint, SampleProjectInstallOutcome, SampleProjectStatus, SecretString,
+    };
+
+    #[test]
+    fn sample_project_query_and_command_are_authenticated_over_local_transport() {
+        let root =
+            std::env::temp_dir().join(format!("beacond-sample-transport-{}", Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let store_path = root.join("beacon.sqlite3");
+        let socket_path = root.join("beacond.sock");
+        let token_path = root.join("beacond.token");
+        let lock_path = root.join("beacond.lock");
+        initialize_local_auth_token(&token_path).unwrap();
+        let server = LocalSupervisorServer::bind(LocalServerConfig {
+            store_path,
+            initial_workspace_name: "Personal".to_owned(),
+            socket_path: socket_path.clone(),
+            auth_token_path: token_path.clone(),
+            lock_path,
+            local_model_endpoint: LocalModelEndpoint::ollama_default(),
+        })
+        .unwrap();
+        let running = Arc::new(AtomicBool::new(true));
+        let thread_running = Arc::clone(&running);
+        let server_thread = thread::spawn(move || server.serve_until(thread_running).unwrap());
+        let client = LocalSupervisorClient::connect(&socket_path, &token_path).unwrap();
+
+        assert!(matches!(
+            client.sample_project_status(),
+            Err(LocalTransportError::Remote {
+                code: LocalErrorCode::NotAuthenticated,
+                ..
+            })
+        ));
+        assert!(matches!(
+            client.install_sample_project(),
+            Err(LocalTransportError::Remote {
+                code: LocalErrorCode::NotAuthenticated,
+                ..
+            })
+        ));
+        client
+            .begin_password_setup(
+                SecretString::new("a long local passphrase".to_owned()),
+                SecretString::new("a long local passphrase".to_owned()),
+            )
+            .unwrap();
+        client.complete_operator_setup(true).unwrap();
+        assert!(matches!(
+            client.sample_project_status().unwrap(),
+            SampleProjectStatus::Available { .. }
+        ));
+        let installed = client.install_sample_project().unwrap();
+        assert_eq!(installed.outcome, SampleProjectInstallOutcome::Installed);
+
+        running.store(false, Ordering::Release);
+        server_thread.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 }

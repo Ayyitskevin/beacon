@@ -18,7 +18,7 @@ use beacond::{
     SecretString, StartupConfig, Supervisor, SupervisorError, Worktree, detect_sandbox,
     run_bounded_for_test,
 };
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use uuid::Uuid;
 
 struct TestStore {
@@ -198,6 +198,9 @@ fn downgrade_execution_schema_to_v15(store_path: &Path) {
     };
     let runs_table = schema_sql("runs");
     let receipts_table = schema_sql("receipts");
+    let events_table = schema_sql("events");
+    let team_roster_trigger = schema_sql("team_formation_members_no_insert_after_formation");
+    let mission_roster_trigger = schema_sql("mission_admission_members_no_insert_after_admission");
     let remaining_objects = [
         "runs_project_started",
         "runs_open_lease",
@@ -209,6 +212,50 @@ fn downgrade_execution_schema_to_v15(store_path: &Path) {
     .map(schema_sql);
 
     let connection = Connection::open(store_path).unwrap();
+    let read_events = |connection: &Connection| {
+        let mut statement = connection
+            .prepare(
+                "SELECT sequence, workspace_id, kind, payload_json, occurred_at_ms
+                 FROM events ORDER BY sequence",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    let events_before = read_events(&connection);
+    connection
+        .execute_batch(
+            "BEGIN IMMEDIATE;
+             DROP TRIGGER sample_project_installations_no_update;
+             DROP TRIGGER sample_project_installations_no_delete;
+             DROP TABLE sample_project_installations;
+             DROP TRIGGER team_formation_members_no_insert_after_formation;
+             DROP TRIGGER mission_admission_members_no_insert_after_admission;
+             ALTER TABLE events RENAME TO events_v17;",
+        )
+        .unwrap();
+    connection.execute_batch(&events_table).unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO events (sequence, workspace_id, kind, payload_json, occurred_at_ms)
+             SELECT sequence, workspace_id, kind, payload_json, occurred_at_ms
+             FROM events_v17 ORDER BY sequence;
+             DROP TABLE events_v17;",
+        )
+        .unwrap();
+    connection.execute_batch(&team_roster_trigger).unwrap();
+    connection.execute_batch(&mission_roster_trigger).unwrap();
     connection
         .execute_batch(
             "DROP TRIGGER runs_no_delete;
@@ -232,9 +279,42 @@ fn downgrade_execution_schema_to_v15(store_path: &Path) {
              INSERT INTO receipts SELECT * FROM receipts_v16;
              DROP TABLE receipts_v16;
              DROP TABLE runs_v16;
-             UPDATE schema_meta SET version = 15 WHERE singleton = 1;",
+             UPDATE schema_meta SET version = 15 WHERE singleton = 1;
+             COMMIT;",
         )
         .unwrap();
+    assert_eq!(read_events(&connection), events_before);
+    let read_schema = |connection: &Connection| {
+        let mut statement = connection
+            .prepare(
+                r"SELECT type, name, tbl_name, sql
+                 FROM sqlite_schema
+                 WHERE name NOT LIKE 'sqlite\_%' ESCAPE '\'
+                 ORDER BY type, name",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(read_schema(&connection), read_schema(&expected));
+    assert_eq!(
+        connection
+            .query_row("PRAGMA foreign_key_check", [], |row| row
+                .get::<_, String>(0))
+            .optional()
+            .unwrap(),
+        None
+    );
 }
 
 fn project_draft() -> ProjectDraft {
@@ -1503,7 +1583,7 @@ fn migration_preserves_real_v1_bytes_through_rollback_and_forward_startup() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 16);
+    assert_eq!(report.diagnostics.schema_version, 17);
     let connection = Connection::open(&store.path).unwrap();
     assert_v1_bytes(&connection, run_id, &v1_payload);
 }

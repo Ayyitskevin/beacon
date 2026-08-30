@@ -14,8 +14,9 @@ use beacond::{
     OperatorSessionStatus, PlatformSessionMonitorStatus, PreflightReceipt, ProjectCharter,
     ProjectCharterDraft, ProjectDraft, ProjectPolicy, ProjectPolicyDraft, ProjectRepository,
     ProjectSummary, ProjectView, ProviderFeature, RepositoryDraft, ResidentAgentView,
-    ResidentConfiguration, SecretString, StarterOrganizationView, StarterResidentDraft, TeamDraft,
-    TeamView, initialize_local_auth_token,
+    ResidentConfiguration, SampleProjectInstallResult, SampleProjectStatus, SecretString,
+    StarterOrganizationView, StarterResidentDraft, TeamDraft, TeamView,
+    initialize_local_auth_token,
 };
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -448,6 +449,14 @@ impl From<LocalTransportError> for CommandError {
                 None,
             ),
             LocalTransportError::Remote {
+                code: LocalErrorCode::SampleProjectUnavailable,
+                ..
+            } => (
+                "sample_project_unavailable",
+                "Beacon refused the Sample Project installation. No Project was published.",
+                None,
+            ),
+            LocalTransportError::Remote {
                 code: LocalErrorCode::InvalidMission,
                 ..
             } => (
@@ -522,6 +531,7 @@ impl From<LocalTransportError> for CommandError {
             | LocalTransportError::Team(_)
             | LocalTransportError::Mission(_)
             | LocalTransportError::CheckPreflight(_)
+            | LocalTransportError::SampleProject(_)
             | LocalTransportError::ResourceDiscovery(_)
             | LocalTransportError::LocalModelActivation(_) => (
                 "account_service_unavailable",
@@ -730,6 +740,19 @@ fn clear_resident_configuration_value(
 
 fn projects_value(state: &DesktopState) -> Result<Vec<ProjectSummary>, CommandError> {
     state.supervisor.projects().map_err(Into::into)
+}
+
+fn sample_project_status_value(state: &DesktopState) -> Result<SampleProjectStatus, CommandError> {
+    state.supervisor.sample_project_status().map_err(Into::into)
+}
+
+fn install_sample_project_value(
+    state: &DesktopState,
+) -> Result<SampleProjectInstallResult, CommandError> {
+    state
+        .supervisor
+        .install_sample_project()
+        .map_err(Into::into)
 }
 
 fn project_value(
@@ -1153,6 +1176,20 @@ fn clear_resident_configuration(
 #[tauri::command]
 fn projects(state: State<'_, DesktopState>) -> Result<Vec<ProjectSummary>, CommandError> {
     projects_value(&state)
+}
+
+#[tauri::command]
+fn sample_project_status(
+    state: State<'_, DesktopState>,
+) -> Result<SampleProjectStatus, CommandError> {
+    sample_project_status_value(&state)
+}
+
+#[tauri::command]
+fn install_sample_project(
+    state: State<'_, DesktopState>,
+) -> Result<SampleProjectInstallResult, CommandError> {
+    install_sample_project_value(&state)
 }
 
 #[tauri::command]
@@ -1584,6 +1621,8 @@ pub fn run() {
             configure_resident,
             clear_resident_configuration,
             projects,
+            sample_project_status,
+            install_sample_project,
             project,
             project_charter_history,
             create_project,
@@ -1624,10 +1663,11 @@ mod tests {
     use beacond::{
         AutonomyProfile, BeaconCapability, DeclaredCheck, LocalServerConfig, LocalSupervisorClient,
         LocalSupervisorServer, MissionDraft, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft,
-        RepositoryDraft, RepositorySourceKind, ResidentLifecycle, SecretString,
-        StarterResidentDraft, StarterRole, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
-        TeamLeadConflictRule, TeamLeadSelectionPolicy, TrackRecordEvidenceKind,
-        TrackRecordRequirement, initialize_local_auth_token,
+        RepositoryDraft, RepositorySourceKind, ResidentLifecycle, SampleProjectInstallOutcome,
+        SampleProjectStatus, SecretString, StarterResidentDraft, StarterRole,
+        TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule,
+        TeamLeadSelectionPolicy, TrackRecordEvidenceKind, TrackRecordRequirement,
+        initialize_local_auth_token,
     };
     use serde_json::Value;
     use uuid::Uuid;
@@ -1636,14 +1676,14 @@ mod tests {
         DesktopState, accept_starter_organization_value, activate_resident_value,
         admit_mission_value, authentication_capabilities_value, begin_password_setup_value,
         bind_project_repository_value, complete_operator_setup_value, create_project_value,
-        current_project_repository_value, migrate_legacy_app_data, mission_value,
-        platform_session_monitor_status_value, preflight_project_checks_value,
+        current_project_repository_value, install_sample_project_value, migrate_legacy_app_data,
+        mission_value, platform_session_monitor_status_value, preflight_project_checks_value,
         preflight_receipts_value, prepare_runtime_directory, project_charter_history_value,
         project_policy_history_value, project_policy_value, project_repository_history_value,
         project_value, projects_value, publish_project_policy_value, reactivate_resident_value,
-        residents_value, retire_resident_value, revise_project_charter_value, session_policy_value,
-        session_status_value, set_session_timeout_value, starter_organization_value,
-        suspend_resident_value,
+        residents_value, retire_resident_value, revise_project_charter_value,
+        sample_project_status_value, session_policy_value, session_status_value,
+        set_session_timeout_value, starter_organization_value, suspend_resident_value,
     };
 
     #[test]
@@ -1795,6 +1835,8 @@ mod tests {
                 "allow-configure-resident",
                 "allow-clear-resident-configuration",
                 "allow-projects",
+                "allow-sample-project-status",
+                "allow-install-sample-project",
                 "allow-project",
                 "allow-project-charter-history",
                 "allow-create-project",
@@ -1949,6 +1991,35 @@ mod tests {
                 .unwrap();
         assert_eq!(monitor["screenLock"], "starting");
         assert_eq!(monitor["suspend"], "starting");
+    }
+
+    #[test]
+    fn command_adapter_installs_and_reports_the_opt_in_sample_project() {
+        let state = TestState::new();
+        begin_password_setup_value(
+            &state.state,
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+        complete_operator_setup_value(&state.state, true).unwrap();
+
+        assert!(matches!(
+            sample_project_status_value(&state.state).unwrap(),
+            SampleProjectStatus::Available {
+                bundle_version: 1,
+                ..
+            }
+        ));
+        let installed = install_sample_project_value(&state.state).unwrap();
+        assert_eq!(installed.outcome, SampleProjectInstallOutcome::Installed);
+        assert_eq!(installed.installation.charter_revision, 1);
+        assert_eq!(installed.installation.repository_revision, 1);
+        assert!(matches!(
+            sample_project_status_value(&state.state).unwrap(),
+            SampleProjectStatus::Installed { installation }
+                if installation == installed.installation
+        ));
     }
 
     #[test]

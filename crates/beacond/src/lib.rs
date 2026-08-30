@@ -24,6 +24,7 @@ mod project_repository;
 mod resident_configuration;
 mod resident_lifecycle;
 mod resource_discovery;
+mod sample_project;
 mod sandbox;
 mod starter_organization;
 mod team;
@@ -92,6 +93,11 @@ pub use resource_discovery::{
     LocalModelEndpoint, ModelActivation, ModelProvider, ResourceDiscoveryError,
     ResourceDiscoveryService,
 };
+pub use sample_project::{
+    SAMPLE_PROJECT_BUNDLE_VERSION, SampleProjectDigest, SampleProjectError,
+    SampleProjectInstallOutcome, SampleProjectInstallResult, SampleProjectInstallation,
+    SampleProjectProvenance, SampleProjectService, SampleProjectStatus,
+};
 pub use starter_organization::{
     ResidentAgentSummary, StarterOrganizationDecision, StarterOrganizationError,
     StarterOrganizationService, StarterOrganizationView, StarterResidentDraft, StarterRole,
@@ -103,7 +109,7 @@ pub use team::{
 };
 pub use worktree::{CleanupOutcome, KeepReason, Worktree, WorktreeError};
 
-const SCHEMA_VERSION: i64 = 16;
+const SCHEMA_VERSION: i64 = 17;
 const MAX_WORKSPACE_NAME_CHARS: usize = 120;
 
 const SCHEMA_V1: &str = include_str!("../migrations/0001_initial.sql");
@@ -121,7 +127,15 @@ const MIGRATION_V12: &str = include_str!("../migrations/0012_project_policy.sql"
 const MIGRATION_V13: &str = include_str!("../migrations/0013_project_repository.sql");
 const MIGRATION_V14: &str = include_str!("../migrations/0014_run_receipt.sql");
 const MIGRATION_V15: &str = include_str!("../migrations/0015_declared_check_runs.sql");
-const MIGRATION_V16: &str = include_str!("../migrations/0016_execution_receipt_v2.sql");
+// Bootstrap paths below always advance through the current schema. Schema-shape
+// verification keeps the individual steps so a declared v16 store is checked
+// before the additive v17 migration is applied.
+const MIGRATION_V16: &str = concat!(
+    include_str!("../migrations/0016_execution_receipt_v2.sql"),
+    include_str!("../migrations/0017_sample_project.sql")
+);
+const MIGRATION_V16_ONLY: &str = include_str!("../migrations/0016_execution_receipt_v2.sql");
+const MIGRATION_V17: &str = include_str!("../migrations/0017_sample_project.sql");
 
 #[derive(Debug, Clone)]
 pub struct StartupConfig {
@@ -198,6 +212,8 @@ pub enum SupervisorError {
     ProjectPolicyStateMismatch,
     ProjectRepositoryEventMismatch(i64),
     ProjectRepositoryStateMismatch,
+    SampleProjectEventMismatch(i64),
+    SampleProjectStateMismatch,
     RunEventMismatch(i64),
     RunStateMismatch,
     SchemaMismatch,
@@ -313,6 +329,16 @@ impl fmt::Display for SupervisorError {
                 write!(
                     formatter,
                     "Project Repository state has no exact audit Event"
+                )
+            }
+            Self::SampleProjectEventMismatch(sequence) => write!(
+                formatter,
+                "Event sequence {sequence} does not match Sample Project installation state"
+            ),
+            Self::SampleProjectStateMismatch => {
+                write!(
+                    formatter,
+                    "Sample Project state has no exact installation audit Event"
                 )
             }
             Self::RunEventMismatch(sequence) => {
@@ -563,6 +589,11 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V16)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
+                16 => {
+                    verify_schema(&transaction, 16)?;
+                    transaction.execute_batch(MIGRATION_V17)?;
+                    verify_schema(&transaction, SCHEMA_VERSION)?;
+                }
                 SCHEMA_VERSION => verify_schema(&transaction, SCHEMA_VERSION)?,
                 version => return Err(SupervisorError::UnsupportedSchemaVersion(version)),
             }
@@ -802,7 +833,10 @@ fn verify_schema(connection: &Connection, version: i64) -> Result<(), Supervisor
         expected_connection.execute_batch(MIGRATION_V15)?;
     }
     if version >= 16 {
-        expected_connection.execute_batch(MIGRATION_V16)?;
+        expected_connection.execute_batch(MIGRATION_V16_ONLY)?;
+    }
+    if version >= 17 {
+        expected_connection.execute_batch(MIGRATION_V17)?;
     }
     if !(1..=SCHEMA_VERSION).contains(&version) {
         return Err(SupervisorError::UnsupportedSchemaVersion(version));
@@ -877,6 +911,7 @@ enum PersistedEventKind {
     MissionAdmitted,
     RunPreflighted,
     RunExecuted,
+    SampleProjectInstalled,
 }
 
 impl PersistedEventKind {
@@ -901,6 +936,7 @@ impl PersistedEventKind {
             Self::MissionAdmitted => "mission.admitted",
             Self::RunPreflighted => "run.preflighted",
             Self::RunExecuted => "run.executed",
+            Self::SampleProjectInstalled => "sample_project.installed",
         }
     }
 
@@ -925,6 +961,7 @@ impl PersistedEventKind {
             "mission.admitted" => Ok(Self::MissionAdmitted),
             "run.preflighted" => Ok(Self::RunPreflighted),
             "run.executed" => Ok(Self::RunExecuted),
+            "sample_project.installed" => Ok(Self::SampleProjectInstalled),
             _ => Err(SupervisorError::InvalidEventKind(value)),
         }
     }
@@ -966,6 +1003,8 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
         .map_err(|_| SupervisorError::ProjectPolicyStateMismatch)?;
     project_repository::verify_project_repository_state(connection)
         .map_err(|_| SupervisorError::ProjectRepositoryStateMismatch)?;
+    sample_project::verify_sample_project_state(connection)
+        .map_err(|_| SupervisorError::SampleProjectStateMismatch)?;
     // A Run whose lease expired without a terminal Receipt becomes unconfirmed
     // here. Lease expiry is what proves that state; the Run is never removed.
     check_preflight::verify_run_state(connection).map_err(|_| SupervisorError::RunStateMismatch)?;
@@ -1096,6 +1135,15 @@ fn verify_persisted_events(connection: &Connection) -> Result<u64, SupervisorErr
                 )
                 .map_err(|_| SupervisorError::ProjectRepositoryEventMismatch(sequence))?;
             }
+            PersistedEventKind::SampleProjectInstalled => {
+                sample_project::verify_sample_project_event(
+                    connection,
+                    workspace_id,
+                    occurred_at_ms,
+                    &payload_json,
+                )
+                .map_err(|_| SupervisorError::SampleProjectEventMismatch(sequence))?;
+            }
             PersistedEventKind::LocalModelActivated => {
                 local_model_activation::verify_activation_event(
                     connection,
@@ -1195,10 +1243,11 @@ mod tests {
     use super::{
         AutonomyProfile, CheckPreflightService, DeclaredCheck, DiagnosticStatus, MIGRATION_V2,
         MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6, MIGRATION_V7, MIGRATION_V8,
-        MIGRATION_V9, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12, MIGRATION_V13,
-        OperatorAccountService, PreflightOutcome, PreflightReceipt, ProjectCharterDraft,
-        ProjectDraft, ProjectRepositoryService, ProjectService, RepositoryDraft,
-        RepositorySourceKind, SCHEMA_V1, SecretString, StartupConfig, Supervisor, SupervisorError,
+        MIGRATION_V9, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12, MIGRATION_V13, MIGRATION_V14,
+        MIGRATION_V15, MIGRATION_V16_ONLY, MIGRATION_V17, OperatorAccountService, PreflightOutcome,
+        PreflightReceipt, ProjectCharterDraft, ProjectDraft, ProjectRepositoryService,
+        ProjectService, RepositoryDraft, RepositorySourceKind, SCHEMA_V1, SecretString,
+        StartupConfig, Supervisor, SupervisorError,
     };
 
     struct TestStore {
@@ -1461,7 +1510,7 @@ mod tests {
         assert!(report.workspace.created);
         assert_eq!(report.workspace.name, "Personal");
         assert_eq!(report.diagnostics.status, DiagnosticStatus::Ready);
-        assert_eq!(report.diagnostics.schema_version, 16);
+        assert_eq!(report.diagnostics.schema_version, 17);
         assert_eq!(report.diagnostics.integrity_check, "ok");
         assert_eq!(report.diagnostics.foreign_key_violations, 0);
         assert_eq!(report.diagnostics.workspace_count, 1);
@@ -1544,7 +1593,7 @@ mod tests {
         assert_eq!(report.workspace.id, workspace_id);
         assert_eq!(report.workspace.name, "Existing");
         assert!(!report.workspace.created);
-        assert_eq!(report.diagnostics.schema_version, 16);
+        assert_eq!(report.diagnostics.schema_version, 17);
         assert_eq!(report.diagnostics.workspace_count, 1);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         assert_eq!(report.diagnostics.security_event_count, 0);
@@ -1583,7 +1632,7 @@ mod tests {
 
         let report = Supervisor::bootstrap(config(&store.path, "Personal")).unwrap();
 
-        assert_eq!(report.diagnostics.schema_version, 16);
+        assert_eq!(report.diagnostics.schema_version, 17);
         assert_eq!(report.diagnostics.security_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(
@@ -1642,7 +1691,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 16);
+        assert_eq!(report.diagnostics.schema_version, 17);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(
             connection
@@ -1745,7 +1794,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 16);
+        assert_eq!(report.diagnostics.schema_version, 17);
         assert_eq!(report.diagnostics.persisted_event_count, 2);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(
@@ -1807,7 +1856,7 @@ mod tests {
 
         assert_eq!(report.workspace.id, workspace_id);
         assert_eq!(report.workspace.name, "Existing");
-        assert_eq!(report.diagnostics.schema_version, 16);
+        assert_eq!(report.diagnostics.schema_version, 17);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(
@@ -1906,7 +1955,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 16);
+        assert_eq!(report.diagnostics.schema_version, 17);
         assert_eq!(report.diagnostics.persisted_event_count, 2);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(
@@ -1967,7 +2016,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 16);
+        assert_eq!(report.diagnostics.schema_version, 17);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         let event = connection
@@ -2042,7 +2091,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 16);
+        assert_eq!(report.diagnostics.schema_version, 17);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         let event = connection
@@ -2115,7 +2164,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 16);
+        assert_eq!(report.diagnostics.schema_version, 17);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         let event = connection
@@ -2215,7 +2264,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 16);
+        assert_eq!(report.diagnostics.schema_version, 17);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         let event = connection
@@ -2323,7 +2372,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 16);
+        assert_eq!(report.diagnostics.schema_version, 17);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         let event = connection
@@ -2383,6 +2432,247 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn version_sixteen_store_preserves_event_bytes_and_adds_empty_sample_state() {
+        let store = TestStore::new("version-sixteen-sample-project-migration");
+        let workspace_id = Uuid::new_v4();
+        let payload = format!("{{ \"workspace_id\": \"{workspace_id}\", \"name\": \"Existing\" }}");
+        let connection = Connection::open(&store.path).unwrap();
+        connection.execute_batch(SCHEMA_V1).unwrap();
+        for migration in [
+            MIGRATION_V2,
+            MIGRATION_V3,
+            MIGRATION_V4,
+            MIGRATION_V5,
+            MIGRATION_V6,
+            MIGRATION_V7,
+            MIGRATION_V8,
+            MIGRATION_V9,
+            MIGRATION_V10,
+            MIGRATION_V11,
+            MIGRATION_V12,
+            MIGRATION_V13,
+            MIGRATION_V14,
+            MIGRATION_V15,
+            MIGRATION_V16_ONLY,
+        ] {
+            connection.execute_batch(migration).unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO workspaces (id, name, created_at_ms) VALUES (?1, 'Existing', 7)",
+                [workspace_id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+                 VALUES (?1, 'workspace.created', ?2, 7)",
+                rusqlite::params![workspace_id.to_string(), payload],
+            )
+            .unwrap();
+        drop(connection);
+
+        let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
+
+        assert_eq!(report.diagnostics.schema_version, 17);
+        assert_eq!(report.diagnostics.persisted_event_count, 1);
+        let connection = Connection::open(&store.path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT payload_json FROM events WHERE sequence = 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            payload
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM sample_project_installations",
+                    [],
+                    |row| { row.get::<_, i64>(0) }
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("PRAGMA foreign_key_check", [], |row| row
+                    .get::<_, String>(0))
+                .optional()
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn migration_seventeen_rolls_back_exactly_before_forward_startup() {
+        let store = TestStore::new("version-seventeen-rollback");
+        let workspace_id = Uuid::new_v4();
+        let payload = format!("{{ \"workspace_id\": \"{workspace_id}\", \"name\": \"Existing\" }}");
+        let connection = Connection::open(&store.path).unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .unwrap();
+        connection.execute_batch(SCHEMA_V1).unwrap();
+        for migration in [
+            MIGRATION_V2,
+            MIGRATION_V3,
+            MIGRATION_V4,
+            MIGRATION_V5,
+            MIGRATION_V6,
+            MIGRATION_V7,
+            MIGRATION_V8,
+            MIGRATION_V9,
+            MIGRATION_V10,
+            MIGRATION_V11,
+            MIGRATION_V12,
+            MIGRATION_V13,
+            MIGRATION_V14,
+            MIGRATION_V15,
+            MIGRATION_V16_ONLY,
+        ] {
+            connection.execute_batch(migration).unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO workspaces (id, name, created_at_ms) VALUES (?1, 'Existing', 7)",
+                [workspace_id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+                 VALUES (?1, 'workspace.created', ?2, 7)",
+                rusqlite::params![workspace_id.to_string(), payload],
+            )
+            .unwrap();
+
+        let read_events = |connection: &Connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT sequence, workspace_id, kind, payload_json, occurred_at_ms
+                     FROM events ORDER BY sequence",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        let read_roster_triggers = |connection: &Connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT name, sql FROM sqlite_schema
+                     WHERE type = 'trigger'
+                       AND name IN (
+                           'team_formation_members_no_insert_after_formation',
+                           'mission_admission_members_no_insert_after_admission'
+                       )
+                     ORDER BY name",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        let read_sqlite_sequence = |connection: &Connection| {
+            let mut statement = connection
+                .prepare("SELECT name, seq FROM sqlite_sequence ORDER BY name")
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        let read_foreign_key_violations = |connection: &Connection| {
+            let mut statement = connection.prepare("PRAGMA foreign_key_check").unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+
+        let schema_before = super::schema_signature(&connection).unwrap();
+        let events_before = read_events(&connection);
+        let roster_triggers_before = read_roster_triggers(&connection);
+        let sqlite_sequence_before = read_sqlite_sequence(&connection);
+        let foreign_keys_before = read_foreign_key_violations(&connection);
+        assert_eq!(roster_triggers_before.len(), 2);
+        assert!(foreign_keys_before.is_empty());
+
+        connection.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        connection.execute_batch(MIGRATION_V17).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT version FROM schema_meta WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            17
+        );
+        connection.execute_batch("ROLLBACK;").unwrap();
+
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT version FROM schema_meta WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            16
+        );
+        assert_eq!(super::schema_signature(&connection).unwrap(), schema_before);
+        assert_eq!(read_events(&connection), events_before);
+        assert_eq!(read_roster_triggers(&connection), roster_triggers_before);
+        assert_eq!(read_sqlite_sequence(&connection), sqlite_sequence_before);
+        assert_eq!(
+            read_foreign_key_violations(&connection),
+            foreign_keys_before
+        );
+        drop(connection);
+
+        let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
+        assert_eq!(report.diagnostics.schema_version, 17);
+        assert_eq!(report.diagnostics.persisted_event_count, 1);
+        let connection = Connection::open(&store.path).unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .unwrap();
+        assert_eq!(read_events(&connection), events_before);
+        assert!(read_foreign_key_violations(&connection).is_empty());
     }
 
     #[test]
