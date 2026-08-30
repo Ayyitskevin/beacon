@@ -24,6 +24,11 @@ use serde::{Deserialize, Serialize};
 
 use super::landlock::{self, Ruleset};
 
+/// How long a Run that ended on its own may take to finish reporting output.
+/// A Run the parent stopped gets none: whatever still holds its pipe is the
+/// reason it was stopped.
+const OUTPUT_GRACE_MS: u64 = 2_000;
+
 /// The ceilings a Run may not exceed.
 ///
 /// Every field is a hard bound rather than a hint. A Run that reaches one is
@@ -83,9 +88,15 @@ pub enum ExecutionOutcome {
 pub enum Ceiling {
     WallClock,
     Cpu,
-    AddressSpace,
     FileSize,
 }
+
+// `RLIMIT_AS` is still set, but deliberately has no `Ceiling`. Exceeding it
+// surfaces as an allocation failure *inside* the program, never as a status the
+// parent can read, so a variant for it would be a vocabulary entry nothing can
+// produce — which reads as coverage later. What we set is recorded in the
+// bounds; what we observed is recorded in the outcome, and they are not the
+// same claim.
 
 /// What one bounded Run produced.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -99,6 +110,11 @@ pub struct ExecutionRecord {
     /// Whether either stream hit the output ceiling. A truncated log that does
     /// not say it was truncated is a lie a Receipt must not tell.
     pub output_truncated: bool,
+    /// Whether a reader was still blocked when the Run's budget ran out — a
+    /// detached descendant is holding the pipe open. Distinct from
+    /// `output_truncated`: one means "there was more than we would keep", the
+    /// other means "we stopped waiting to find out".
+    pub output_incomplete: bool,
     pub elapsed_ms: u64,
     pub sandbox_version: String,
 }
@@ -127,13 +143,14 @@ pub(crate) fn run_bounded(
     interrupt: Option<mpsc::Receiver<()>>,
 ) -> ExecutionRecord {
     let started = Instant::now();
-    let record = |outcome, stdout: String, stderr: String, truncated| ExecutionRecord {
+    let record = |outcome, stdout: String, stderr: String, truncated, incomplete| ExecutionRecord {
         argv: argv.to_vec(),
         working_directory: working_directory.to_string_lossy().into_owned(),
         outcome,
         stdout,
         stderr,
         output_truncated: truncated,
+        output_incomplete: incomplete,
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         sandbox_version: sandbox_version.to_owned(),
     };
@@ -145,6 +162,7 @@ pub(crate) fn run_bounded(
             },
             String::new(),
             String::new(),
+            false,
             false,
         );
     };
@@ -165,9 +183,23 @@ pub(crate) fn run_bounded(
     // Landlock syscall. Nothing allocates and nothing takes a lock.
     unsafe {
         command.pre_exec(move || {
-            apply_rlimit(libc::RLIMIT_CPU, limits.cpu_seconds)?;
-            apply_rlimit(libc::RLIMIT_AS, limits.address_space_bytes)?;
-            apply_rlimit(libc::RLIMIT_FSIZE, limits.file_size_bytes)?;
+            // Soft below hard for the two that signal: the kernel sends
+            // SIGXCPU/SIGXFSZ at the soft limit and SIGKILL at the hard one,
+            // and with them equal the two coincide and the ceiling becomes
+            // unobservable.
+            apply_rlimit(libc::RLIMIT_CPU, limits.cpu_seconds, limits.cpu_seconds + 5)?;
+            apply_rlimit(
+                libc::RLIMIT_FSIZE,
+                limits.file_size_bytes,
+                limits.file_size_bytes.saturating_add(1 << 20),
+            )?;
+            // No soft/hard split: RLIMIT_AS is never signalled, so there is
+            // nothing to observe between them.
+            apply_rlimit(
+                libc::RLIMIT_AS,
+                limits.address_space_bytes,
+                limits.address_space_bytes,
+            )?;
             // A fresh process group, so an interrupt reaches descendants rather
             // than only the process Beacon happens to know about.
             if libc::setpgid(0, 0) != 0 {
@@ -191,6 +223,7 @@ pub(crate) fn run_bounded(
                 String::new(),
                 String::new(),
                 false,
+                false,
             );
         }
     };
@@ -203,16 +236,41 @@ pub(crate) fn run_bounded(
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
     let cap = bounds.output_bytes;
-    let stdout_reader = std::thread::spawn(move || read_capped(stdout_pipe, cap));
-    let stderr_reader = std::thread::spawn(move || read_capped(stderr_pipe, cap));
-    let collect = move || {
-        let (stdout, stdout_truncated) = stdout_reader
-            .join()
-            .unwrap_or_else(|_| (String::new(), false));
-        let (stderr, stderr_truncated) = stderr_reader
-            .join()
-            .unwrap_or_else(|_| (String::new(), false));
-        (stdout, stderr, stdout_truncated || stderr_truncated)
+    // Readers report over a channel rather than being joined. `read_to_end`
+    // returns at EOF, and EOF on an inherited pipe arrives when the LAST holder
+    // closes it -- not when our direct child exits. A Declared Check that leaves
+    // a detached descendant holding stdout would otherwise block the collector
+    // forever, and `terminate_group` cannot reach a process that left the group.
+    // Joining here would put the same unbounded wait we removed from the loop
+    // straight back into the collection step.
+    let (stdout_tx, stdout_rx) = mpsc::channel();
+    let (stderr_tx, stderr_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = stdout_tx.send(read_capped(stdout_pipe, cap));
+    });
+    std::thread::spawn(move || {
+        let _ = stderr_tx.send(read_capped(stderr_pipe, cap));
+    });
+    let collect = move |grace: Duration| {
+        let deadline = Instant::now() + grace;
+        let take = |channel: &mpsc::Receiver<(String, bool)>| {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match channel.recv_timeout(remaining) {
+                Ok((text, truncated)) => (text, truncated, false),
+                // The reader is still blocked on a pipe someone else holds. We
+                // report what we have and say plainly that we stopped waiting;
+                // that thread ends on its own when the holder finally closes.
+                Err(_) => (String::new(), false, true),
+            }
+        };
+        let (stdout, stdout_truncated, stdout_incomplete) = take(&stdout_rx);
+        let (stderr, stderr_truncated, stderr_incomplete) = take(&stderr_rx);
+        (
+            stdout,
+            stderr,
+            stdout_truncated || stderr_truncated,
+            stdout_incomplete || stderr_incomplete,
+        )
     };
 
     // Wall clock and interrupt are the parent's job. A child blocked on I/O
@@ -222,22 +280,32 @@ pub(crate) fn run_bounded(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                let ended_cleanly = ended_by.is_none();
                 let outcome = match (status.code(), status.signal()) {
                     // A Run stopped by the parent reports why the parent
                     // stopped it, not merely that a signal arrived.
                     (_, _) if ended_by.is_some() => ended_by
                         .take()
                         .unwrap_or(ExecutionOutcome::Signalled { signal: 0 }),
-                    (Some(code), _) => classify_exit(code),
-                    (None, Some(signal)) => ExecutionOutcome::Signalled { signal },
+                    (Some(code), _) => ExecutionOutcome::Exited { code },
+                    (None, Some(signal)) => classify_signal(signal),
                     (None, None) => ExecutionOutcome::Signalled { signal: 0 },
                 };
-                let (stdout, stderr, truncated) = collect();
-                return record(outcome, stdout, stderr, truncated);
+                // A Run that ended on its own gets a short grace to finish
+                // reporting; one the parent stopped gets none, because whatever
+                // still holds the pipe is exactly what it was stopped for.
+                let grace = if ended_cleanly {
+                    Duration::from_millis(OUTPUT_GRACE_MS)
+                } else {
+                    Duration::ZERO
+                };
+                let (stdout, stderr, truncated, incomplete) = collect(grace);
+                return record(outcome, stdout, stderr, truncated, incomplete);
             }
             Ok(None) => {}
             Err(error) => {
-                let (stdout, stderr, truncated) = collect();
+                let (stdout, stderr, truncated, incomplete) =
+                    collect(Duration::from_millis(OUTPUT_GRACE_MS));
                 return record(
                     ExecutionOutcome::NotStarted {
                         reason: format!("the Run could not be awaited: {error}"),
@@ -245,6 +313,7 @@ pub(crate) fn run_bounded(
                     stdout,
                     stderr,
                     truncated,
+                    incomplete,
                 );
             }
         }
@@ -266,19 +335,28 @@ pub(crate) fn run_bounded(
     }
 }
 
-/// A kernel ceiling surfaces as a signal or a conventional shell code. Naming
-/// which ceiling ended a Run keeps "it failed" and "it exceeded its budget"
-/// apart in the Receipt.
-fn classify_exit(code: i32) -> ExecutionOutcome {
-    match code {
-        // 128 + SIGXCPU / SIGXFSZ, as a shell reports them.
-        152 => ExecutionOutcome::Bounded {
+/// Classify a terminating signal.
+///
+/// The kernel delivers SIGXCPU and SIGXFSZ when a *soft* limit is crossed, so
+/// the soft limits below sit strictly under their hard ones — otherwise the
+/// soft signal and the hard SIGKILL arrive at the same instant and a real CPU
+/// ceiling is indistinguishable from any other kill.
+///
+/// Classification reads the signal and never an exit code. A shell reports
+/// these as 128+n, but a Run's exit code is a value the Run itself chooses,
+/// and a Declared Check runs the repository's own code: keying a ceiling on it
+/// would let a Run that merely wants to look throttled say so and be believed.
+/// That is the guard-on-caller-supplied-value trap this crate documents
+/// elsewhere and had fallen into here.
+fn classify_signal(signal: i32) -> ExecutionOutcome {
+    match signal {
+        libc::SIGXCPU => ExecutionOutcome::Bounded {
             ceiling: Ceiling::Cpu,
         },
-        153 => ExecutionOutcome::Bounded {
+        libc::SIGXFSZ => ExecutionOutcome::Bounded {
             ceiling: Ceiling::FileSize,
         },
-        code => ExecutionOutcome::Exited { code },
+        signal => ExecutionOutcome::Signalled { signal },
     }
 }
 
@@ -316,10 +394,10 @@ fn read_capped(pipe: Option<impl Read>, cap: u64) -> (String, bool) {
 }
 
 /// Set one resource limit. Child-side; async-signal-safe.
-fn apply_rlimit(resource: libc::__rlimit_resource_t, value: u64) -> std::io::Result<()> {
+fn apply_rlimit(resource: libc::__rlimit_resource_t, soft: u64, hard: u64) -> std::io::Result<()> {
     let limit = libc::rlimit {
-        rlim_cur: value,
-        rlim_max: value,
+        rlim_cur: soft,
+        rlim_max: hard,
     };
     // SAFETY: `limit` is a live, fully initialized value and `resource` is a
     // kernel constant.

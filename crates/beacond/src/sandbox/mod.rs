@@ -35,6 +35,7 @@ pub fn run_bounded_for_test(
             stdout: String::new(),
             stderr: String::new(),
             output_truncated: false,
+            output_incomplete: false,
             elapsed_ms: 0,
             sandbox_version: capability.receipt_version(),
         };
@@ -57,6 +58,7 @@ pub fn run_bounded_for_test(
             stdout: String::new(),
             stderr: String::new(),
             output_truncated: false,
+            output_incomplete: false,
             elapsed_ms: 0,
             sandbox_version: capability.receipt_version(),
         },
