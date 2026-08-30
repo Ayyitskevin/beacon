@@ -11,11 +11,11 @@ use beacond::{
     AccessOrigin, BeaconCapability, BeaconCapabilityDescriptor, LocalErrorCode,
     LocalModelActivation, LocalModelActivationReview, LocalModelDiscoveryReport,
     LocalSupervisorClient, LocalTransportError, MissionDraft, MissionView, OperatorSessionPolicy,
-    OperatorSessionStatus, PlatformSessionMonitorStatus, ProjectCharter, ProjectCharterDraft,
-    ProjectDraft, ProjectPolicy, ProjectPolicyDraft, ProjectRepository, ProjectSummary,
-    ProjectView, ProviderFeature, RepositoryDraft, ResidentAgentView, ResidentConfiguration,
-    SecretString, StarterOrganizationView, StarterResidentDraft, TeamDraft, TeamView,
-    initialize_local_auth_token,
+    OperatorSessionStatus, PlatformSessionMonitorStatus, PreflightReceipt, ProjectCharter,
+    ProjectCharterDraft, ProjectDraft, ProjectPolicy, ProjectPolicyDraft, ProjectRepository,
+    ProjectSummary, ProjectView, ProviderFeature, RepositoryDraft, ResidentAgentView,
+    ResidentConfiguration, SecretString, StarterOrganizationView, StarterResidentDraft, TeamDraft,
+    TeamView, initialize_local_auth_token,
 };
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -432,6 +432,22 @@ impl From<LocalTransportError> for CommandError {
                 None,
             ),
             LocalTransportError::Remote {
+                code: LocalErrorCode::RepositoryNotBound,
+                ..
+            } => (
+                "repository_not_bound",
+                "Bind a repository to this Project before preflighting its checks.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::PreflightUnavailable,
+                ..
+            } => (
+                "preflight_unavailable",
+                "Beacon could not record the preflight.",
+                None,
+            ),
+            LocalTransportError::Remote {
                 code: LocalErrorCode::InvalidMission,
                 ..
             } => (
@@ -505,6 +521,7 @@ impl From<LocalTransportError> for CommandError {
             | LocalTransportError::ProjectRepository(_)
             | LocalTransportError::Team(_)
             | LocalTransportError::Mission(_)
+            | LocalTransportError::CheckPreflight(_)
             | LocalTransportError::ResourceDiscovery(_)
             | LocalTransportError::LocalModelActivation(_) => (
                 "account_service_unavailable",
@@ -824,6 +841,26 @@ fn bind_project_repository_value(
             expected_prior_repository_revision,
             draft,
         )
+        .map_err(Into::into)
+}
+
+fn preflight_project_checks_value(
+    state: &DesktopState,
+    project_id: uuid::Uuid,
+) -> Result<PreflightReceipt, CommandError> {
+    state
+        .supervisor
+        .preflight_project_checks(project_id)
+        .map_err(Into::into)
+}
+
+fn preflight_receipts_value(
+    state: &DesktopState,
+    project_id: uuid::Uuid,
+) -> Result<Vec<PreflightReceipt>, CommandError> {
+    state
+        .supervisor
+        .preflight_receipts(project_id)
         .map_err(Into::into)
 }
 
@@ -1219,6 +1256,22 @@ fn bind_project_repository(
 }
 
 #[tauri::command]
+fn preflight_project_checks(
+    state: State<'_, DesktopState>,
+    project_id: uuid::Uuid,
+) -> Result<PreflightReceipt, CommandError> {
+    preflight_project_checks_value(&state, project_id)
+}
+
+#[tauri::command]
+fn preflight_receipts(
+    state: State<'_, DesktopState>,
+    project_id: uuid::Uuid,
+) -> Result<Vec<PreflightReceipt>, CommandError> {
+    preflight_receipts_value(&state, project_id)
+}
+
+#[tauri::command]
 fn teams(
     state: State<'_, DesktopState>,
     project_id: uuid::Uuid,
@@ -1541,6 +1594,8 @@ pub fn run() {
             current_project_repository,
             project_repository_history,
             bind_project_repository,
+            preflight_project_checks,
+            preflight_receipts,
             teams,
             team,
             form_team,
@@ -1582,11 +1637,11 @@ mod tests {
         admit_mission_value, authentication_capabilities_value, begin_password_setup_value,
         bind_project_repository_value, complete_operator_setup_value, create_project_value,
         current_project_repository_value, migrate_legacy_app_data, mission_value,
-        platform_session_monitor_status_value, prepare_runtime_directory,
-        project_charter_history_value, project_policy_history_value, project_policy_value,
-        project_repository_history_value, project_value, projects_value,
-        publish_project_policy_value, reactivate_resident_value, residents_value,
-        retire_resident_value, revise_project_charter_value, session_policy_value,
+        platform_session_monitor_status_value, preflight_project_checks_value,
+        preflight_receipts_value, prepare_runtime_directory, project_charter_history_value,
+        project_policy_history_value, project_policy_value, project_repository_history_value,
+        project_value, projects_value, publish_project_policy_value, reactivate_resident_value,
+        residents_value, retire_resident_value, revise_project_charter_value, session_policy_value,
         session_status_value, set_session_timeout_value, starter_organization_value,
         suspend_resident_value,
     };
@@ -2200,6 +2255,35 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(invalid.code, "invalid_mission");
+    }
+
+    #[test]
+    fn preflight_refusals_reach_the_interface_under_their_own_code() {
+        let state = TestState::new();
+        begin_password_setup_value(
+            &state.state,
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+        complete_operator_setup_value(&state.state, true).unwrap();
+        let project = create_project_value(&state.state, repository_project_draft()).unwrap();
+
+        // A Project with no Repository Binding has nothing to preflight. Before
+        // the exhaustive error table this refusal reached the operator as
+        // "the local account service is unavailable".
+        let unbound = preflight_project_checks_value(&state.state, project.id).unwrap_err();
+        assert_eq!(unbound.code, "repository_not_bound");
+
+        let missing = preflight_project_checks_value(&state.state, Uuid::new_v4()).unwrap_err();
+        assert_eq!(missing.code, "project_not_found");
+
+        // Listing Receipts for a Project that has none is empty, not an error.
+        assert!(
+            preflight_receipts_value(&state.state, project.id)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     fn repository_project_draft() -> ProjectDraft {
