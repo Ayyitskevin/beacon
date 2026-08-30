@@ -23,7 +23,7 @@ Focused command, with `<quota>` replaced by a percentage:
 ```sh
 systemd-run --quiet --user --wait --collect --pipe \
   -p CPUQuota=<quota>% \
-  --working-directory=/example/checkouts/beacon \
+  --working-directory="$PWD" \
   cargo test -p beacond --test operator_account \
   repeated_password_failures_are_throttled_and_success_clears_the_counter \
   -- --exact --nocapture
@@ -65,6 +65,3 @@ cargo test -p beacond --lib
 Observed: 9/9 operator-account integration tests and 28/28 beacond library tests passed. The final
 whole-repository gate, independent review, and hosted CI belong to the exact branch handoff; this
 evaluation does not authorize merge or deployment.
-
-
-> Privacy rewrite: machine names, paths and endpoint examples in this document are illustrative, not a live infrastructure map. Historical measurements and prior byte-hash/review claims refer to retained original evidence, not these edited public bytes; no authority transfers through this rewrite.

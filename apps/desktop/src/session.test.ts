@@ -448,8 +448,8 @@ describe("desktop session transport", () => {
       revision: 1,
       charterRevision: 2,
       sourceKind: "local_path",
-      source: "/example/checkouts/janus",
-      baseRevision: "6b62110e9c918c67219ab0b45dbf4dd9937d6620",
+      source: "/home/operator/projects/sample-tracker",
+      baseRevision: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
       declaredChecks: [
         { name: "pytest", argv: ["pytest", "tests/test_invariants.py", "-q"], workingDirectory: "." },
         { name: "ruff", argv: ["ruff", "check", "."], workingDirectory: "." },
@@ -473,7 +473,7 @@ describe("desktop session transport", () => {
       .mockResolvedValueOnce(repository)
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce({ ...repository, worktreePath: "/tmp/beacon-worktree" })
-      .mockResolvedValueOnce({ ...repository, baseRevision: "6b62110" })
+      .mockResolvedValueOnce({ ...repository, baseRevision: "0123456" })
       .mockResolvedValueOnce({
         ...repository,
         declaredChecks: [repository.declaredChecks[1], repository.declaredChecks[0]],
@@ -1026,7 +1026,7 @@ describe("desktop session transport", () => {
       outcome: "sandbox_unavailable",
       sourceKind: "local_path",
       source: "/home/operator/project",
-      baseRevision: "6b62110e9c918c67219ab0b45dbf4dd9937d6620",
+      baseRevision: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
       resolvedChecks: [
         {
           name: "pytest",

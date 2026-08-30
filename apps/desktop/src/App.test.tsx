@@ -695,8 +695,8 @@ describe("Beacon desktop shell", () => {
       revision: 1,
       charterRevision: charter.revision,
       sourceKind: "local_path",
-      source: "/example/checkouts/janus",
-      baseRevision: "6b62110e9c918c67219ab0b45dbf4dd9937d6620",
+      source: "/home/operator/projects/sample-tracker",
+      baseRevision: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
       declaredChecks: [
         {
           name: "pytest",
@@ -810,8 +810,8 @@ describe("Beacon desktop shell", () => {
       revision: 1,
       charterRevision: 1,
       sourceKind: "local_path",
-      source: "/example/checkouts/janus",
-      baseRevision: "6b62110e9c918c67219ab0b45dbf4dd9937d6620",
+      source: "/home/operator/projects/sample-tracker",
+      baseRevision: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
       declaredChecks: [
         {
           name: "pytest",
