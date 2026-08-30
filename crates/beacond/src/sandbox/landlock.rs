@@ -12,7 +12,7 @@
 //! and `exec`, or inside a probe child that exists to be thrown away.
 
 use std::ffi::CString;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
@@ -130,6 +130,31 @@ impl Ruleset {
         write_targets: &[&Path],
         restrict_network: bool,
     ) -> std::io::Result<Self> {
+        let ruleset = Self::empty(abi, restrict_network)?;
+        ruleset.grant(Path::new("/"), READ_RIGHTS)?;
+        for target in write_targets {
+            ruleset.grant(target, READ_RIGHTS | WRITE_RIGHTS)?;
+        }
+        Ok(ruleset)
+    }
+
+    /// Build the execution ruleset from the launcher's retained root.
+    ///
+    /// The borrow is used only while adding the rule. The ruleset stores the
+    /// kernel's reference to that object; it neither stores nor closes the
+    /// caller's descriptor.
+    pub(crate) fn build_for_worktree(
+        abi: u8,
+        worktree_root: BorrowedFd<'_>,
+        restrict_network: bool,
+    ) -> std::io::Result<Self> {
+        let ruleset = Self::empty(abi, restrict_network)?;
+        ruleset.grant(Path::new("/"), READ_RIGHTS)?;
+        ruleset.grant_fd(worktree_root, READ_RIGHTS | WRITE_RIGHTS)?;
+        Ok(ruleset)
+    }
+
+    fn empty(abi: u8, restrict_network: bool) -> std::io::Result<Self> {
         let restricts_network = restrict_network && abi >= NETWORK_ABI_FLOOR;
         let attr = RulesetAttr {
             handled_access_fs: HANDLED_FS,
@@ -159,10 +184,6 @@ impl Ruleset {
             fd: unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd) },
             restricts_network,
         };
-        ruleset.grant(Path::new("/"), READ_RIGHTS)?;
-        for target in write_targets {
-            ruleset.grant(target, READ_RIGHTS | WRITE_RIGHTS)?;
-        }
         Ok(ruleset)
     }
 
@@ -174,12 +195,19 @@ impl Ruleset {
         if parent < 0 {
             return Err(std::io::Error::last_os_error());
         }
+        // SAFETY: `open` returned a fresh descriptor owned here.
+        let parent = unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(parent) };
+        self.grant_fd(parent.as_fd(), allowed_access)
+    }
+
+    fn grant_fd(&self, parent: BorrowedFd<'_>, allowed_access: u64) -> std::io::Result<()> {
         let attr = PathBeneathAttr {
             allowed_access,
-            parent_fd: parent,
+            parent_fd: parent.as_raw_fd(),
         };
         // SAFETY: `attr` matches the kernel's packed layout, its size is taken
-        // from `size_of` (asserted 12 above), and `parent` is open for the call.
+        // from `size_of` (asserted 12 above), and the borrowed parent remains
+        // open for the duration of the syscall.
         let added = unsafe {
             libc::syscall(
                 SYS_LANDLOCK_ADD_RULE,
@@ -189,8 +217,6 @@ impl Ruleset {
                 0usize,
             )
         };
-        // SAFETY: `parent` was opened above and is not used again.
-        unsafe { libc::close(parent) };
         if added != 0 {
             return Err(std::io::Error::last_os_error());
         }
@@ -232,4 +258,119 @@ pub(crate) unsafe fn restrict_current_thread(ruleset_fd: libc::c_int) -> Result<
 
 fn errno() -> i32 {
     std::io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::CString;
+    use std::fs;
+    use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::{Path, PathBuf};
+
+    use uuid::Uuid;
+
+    use super::*;
+
+    struct TempDirectory(PathBuf);
+
+    impl TempDirectory {
+        fn new() -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("beacon-landlock-borrowed-root-{}", Uuid::new_v4()));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn open_path(path: &Path) -> OwnedFd {
+        let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: the path is live and NUL-terminated for this call.
+        let fd = unsafe {
+            libc::open(
+                path.as_ptr(),
+                libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        assert!(
+            fd >= 0,
+            "anchor open failed: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: `open` returned a fresh descriptor owned here.
+        unsafe { OwnedFd::from_raw_fd(fd) }
+    }
+
+    #[test]
+    fn borrowed_worktree_anchor_keeps_identity_and_remains_live() {
+        let Some(abi) = abi_version() else {
+            eprintln!("skipped: this host reports no Landlock ABI");
+            return;
+        };
+        let scratch = TempDirectory::new();
+        let original_name = scratch.0.join("anchor");
+        let moved_name = scratch.0.join("descriptor-pinned");
+        fs::create_dir(&original_name).unwrap();
+        let anchor = open_path(&original_name);
+        fs::rename(&original_name, &moved_name).unwrap();
+        fs::create_dir(&original_name).unwrap();
+
+        let ruleset = Ruleset::build_for_worktree(abi, anchor.as_fd(), false).unwrap();
+        // The helper borrowed rather than consumed or closed the descriptor.
+        let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: `anchor` is expected to remain live and `metadata` is writable.
+        assert_eq!(
+            unsafe { libc::fstat(anchor.as_raw_fd(), metadata.as_mut_ptr()) },
+            0
+        );
+
+        let allowed = CString::new(moved_name.join("allowed").as_os_str().as_bytes()).unwrap();
+        let denied = CString::new(original_name.join("denied").as_os_str().as_bytes()).unwrap();
+        // SAFETY: the child uses raw async-signal-safe syscalls only and exits.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            // SAFETY: child side; restriction is intended to be irreversible.
+            unsafe {
+                if restrict_current_thread(ruleset.raw_fd()).is_err() {
+                    libc::_exit(64);
+                }
+                let allowed_fd = libc::open(
+                    allowed.as_ptr(),
+                    libc::O_WRONLY | libc::O_CREAT | libc::O_CLOEXEC,
+                    0o600,
+                );
+                let denied_fd = libc::open(
+                    denied.as_ptr(),
+                    libc::O_WRONLY | libc::O_CREAT | libc::O_CLOEXEC,
+                    0o600,
+                );
+                let mut result = 0;
+                if allowed_fd >= 0 {
+                    result |= 1;
+                    libc::close(allowed_fd);
+                }
+                if denied_fd < 0 {
+                    result |= 2;
+                } else {
+                    libc::close(denied_fd);
+                }
+                libc::_exit(result);
+            }
+        }
+
+        let mut status = 0;
+        // SAFETY: `pid` is this process's child and `status` is writable.
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(libc::WIFEXITED(status));
+        assert_eq!(libc::WEXITSTATUS(status), 3);
+        assert!(moved_name.join("allowed").exists());
+        assert!(!original_name.join("denied").exists());
+    }
 }
