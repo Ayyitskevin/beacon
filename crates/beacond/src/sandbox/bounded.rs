@@ -25,6 +25,7 @@
 //! *whether* a command may run; that is the capability's job.
 
 use std::io::Read;
+use std::os::fd::{AsRawFd, BorrowedFd};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -34,6 +35,17 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use super::landlock::{self, Ruleset};
+
+pub(super) struct BoundWorkingDirectory<'a> {
+    display: &'a Path,
+    fd: BorrowedFd<'a>,
+}
+
+impl<'a> BoundWorkingDirectory<'a> {
+    pub(super) fn new(display: &'a Path, fd: BorrowedFd<'a>) -> Self {
+        Self { display, fd }
+    }
+}
 
 /// How long a Run that ended on its own may take to finish reporting output.
 const OUTPUT_GRACE_MS: u64 = 2_000;
@@ -162,18 +174,19 @@ impl Interrupt {
 ///
 /// The environment is cleared: a Run receives only what it is given, never the
 /// supervisor's variables, which is where credentials live.
-pub(crate) fn run_bounded(
+pub(super) fn run_bounded(
     argv: &[String],
-    working_directory: &Path,
+    working_directory: BoundWorkingDirectory<'_>,
     ruleset: &Ruleset,
     bounds: ExecutionBounds,
     sandbox_version: &str,
     interrupt: Option<mpsc::Receiver<()>>,
+    before_spawn: impl FnOnce(),
 ) -> ExecutionRecord {
     let started = Instant::now();
     let record = |outcome, stdout: String, stderr: String, truncated, incomplete| ExecutionRecord {
         argv: argv.to_vec(),
-        working_directory: working_directory.to_string_lossy().into_owned(),
+        working_directory: working_directory.display.to_string_lossy().into_owned(),
         outcome,
         stdout,
         stderr,
@@ -198,19 +211,30 @@ pub(crate) fn run_bounded(
     let mut command = Command::new(program);
     command
         .args(arguments)
-        .current_dir(working_directory)
         .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
     let ruleset_fd = ruleset.raw_fd();
+    let working_directory_fd = working_directory.fd.as_raw_fd();
     let limits = bounds;
     // SAFETY: `pre_exec` runs between `fork` and `exec`. Everything in the
-    // closure is async-signal-safe: `setrlimit`, `setpgid`, `prctl`, and one
-    // Landlock syscall. Nothing allocates and nothing takes a lock.
+    // closure is async-signal-safe: `fstat`, `fchdir`, `setrlimit`, `setpgid`,
+    // `prctl`, and one Landlock syscall. Nothing allocates and nothing takes a
+    // lock. The supervisor-side barrier above `spawn` never enters this closure.
     unsafe {
         command.pre_exec(move || {
+            let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+            if libc::fstat(working_directory_fd, metadata.as_mut_ptr()) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if metadata.assume_init().st_nlink == 0 {
+                return Err(std::io::Error::from_raw_os_error(libc::ESTALE));
+            }
+            if libc::fchdir(working_directory_fd) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
             // Soft below hard for the two that signal: the kernel sends
             // SIGXCPU/SIGXFSZ at the soft limit and SIGKILL at the hard one,
             // and with them equal the two coincide and the ceiling becomes
@@ -241,12 +265,13 @@ pub(crate) fn run_bounded(
         })
     };
 
+    before_spawn();
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
             return record(
                 ExecutionOutcome::NotStarted {
-                    reason: format!("the command could not be started: {error}"),
+                    reason: start_failure_reason(&error),
                 },
                 String::new(),
                 String::new(),
@@ -385,6 +410,14 @@ pub(crate) fn run_bounded(
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn start_failure_reason(error: &std::io::Error) -> String {
+    let errno = error.raw_os_error().unwrap_or(-1);
+    if errno == libc::ESTALE {
+        return format!("working-directory descriptor was unlinked before launch (errno {errno})");
+    }
+    format!("child setup or command start failed (errno {errno})")
 }
 
 /// Classify a terminating signal.

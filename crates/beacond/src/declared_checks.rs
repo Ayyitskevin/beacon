@@ -235,23 +235,11 @@ impl DeclaredCheckService {
         bounds: ExecutionBounds,
     ) -> Vec<ExecutionRecord> {
         let capability = sandbox::detect();
+        let launcher = sandbox::WorktreeLauncher::bind(worktree.path(), &capability);
         admitted_by
             .resolved_checks
             .iter()
-            .map(|check| {
-                // The declared directory is re-resolved against *this*
-                // worktree. The preflight resolved it against the source
-                // repository, and that path is not this one.
-                let cwd = worktree.path().join(&check.declared_working_directory);
-                sandbox::run_in(
-                    &check.argv,
-                    &cwd,
-                    worktree.path(),
-                    bounds,
-                    &capability,
-                    None,
-                )
-            })
+            .map(|check| launcher.run(&check.argv, &check.declared_working_directory, bounds, None))
             .collect()
     }
 

@@ -5,6 +5,7 @@
 //! test that stubbed any of them would prove nothing.
 
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -13,8 +14,9 @@ use beacond::{
     AutonomyProfile, Ceiling, CheckPreflightService, CleanupOutcome, DeclaredCheck,
     DeclaredCheckService, ExecutionBounds, ExecutionOutcome, ExecutionSummary, KeepReason,
     OperatorAccountService, OperatorSessionPhase, ProjectCharterDraft, ProjectDraft,
-    ProjectRepositoryService, ProjectService, RepositoryDraft, RepositorySourceKind, SecretString,
-    StartupConfig, Supervisor, SupervisorError, Worktree, detect_sandbox, run_bounded_for_test,
+    ProjectRepositoryService, ProjectService, Recorded, RepositoryDraft, RepositorySourceKind,
+    SecretString, StartupConfig, Supervisor, SupervisorError, Worktree, detect_sandbox,
+    run_bounded_for_test,
 };
 use rusqlite::Connection;
 use uuid::Uuid;
@@ -89,6 +91,15 @@ fn fixture_repository(label: &str) -> (TempDir, String) {
         .unwrap();
     let revision = String::from_utf8(output.stdout).unwrap().trim().to_owned();
     (directory, revision)
+}
+
+fn revision(repository: &Path) -> String {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repository)
+        .output()
+        .unwrap();
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
 fn enrolled(
@@ -333,6 +344,216 @@ fn a_declared_check_runs_in_a_worktree_at_the_pinned_revision() {
             "UDP egress (Landlock restricts TCP only)",
             "complete filesystem effects and diff digest (not recorded)",
         ]
+    );
+}
+
+#[test]
+fn a_committed_relative_symlink_cannot_escape_the_execution_worktree() {
+    if !enforcing_or_skip() {
+        return;
+    }
+
+    // The source tree is deliberately one directory deeper than Beacon's
+    // `scratch/tree` layout. This relative symlink resolves back inside the
+    // source repository during preflight, but into the independently created
+    // outside directory when interpreted from the disposable worktree.
+    let container = TempDir::new("committed-relative-escape-source");
+    let unique = format!("beacon-escape-{}", Uuid::new_v4());
+    let repository_path = container.path.join("parent").join(&unique).join("source");
+    let outside = TempDir {
+        path: std::env::temp_dir().join(&unique),
+    };
+    let outside_path = outside.path.join("source/inside");
+    fs::create_dir_all(repository_path.join("nested")).unwrap();
+    fs::create_dir_all(repository_path.join("inside")).unwrap();
+    fs::create_dir_all(&outside_path).unwrap();
+    symlink(
+        format!("../../../{unique}/source/inside"),
+        repository_path.join("nested/cwd"),
+    )
+    .unwrap();
+    git(&repository_path, &["init", "--quiet"]);
+    git(&repository_path, &["add", "."]);
+    git(&repository_path, &["commit", "--quiet", "-m", "one"]);
+    let revision = revision(&repository_path);
+
+    let source = repository_path.to_string_lossy().into_owned();
+    let (_store, projects, repositories, checks) = enrolled("committed-relative-escape");
+    let project = projects.create(project_draft()).unwrap();
+    repositories
+        .bind(
+            project.id,
+            project.charter.revision,
+            None,
+            RepositoryDraft {
+                source_kind: RepositorySourceKind::LocalPath,
+                source,
+                base_revision: revision,
+                declared_checks: vec![check("escaped", &["/bin/pwd"], "nested/cwd")],
+            },
+        )
+        .unwrap();
+
+    let receipt = checks.execute(project.id, bounds()).unwrap();
+    let record = &receipt.checks[0];
+    let expected_reason = format!(
+        "unsafe or raced working-directory resolution (errno {})",
+        libc::EXDEV
+    );
+    assert!(matches!(
+        &record.outcome,
+        ExecutionOutcome::NotStarted { reason }
+            if reason == &expected_reason
+    ));
+    assert!(record.stdout.is_empty(), "the escaped target program ran");
+    assert!(
+        record.working_directory.ends_with("nested/cwd"),
+        "the Receipt lost the attempted worktree locator"
+    );
+    assert_eq!(
+        receipt.admitted_by.resolved_checks[0].resolved_working_directory,
+        Recorded::Present {
+            value: repository_path
+                .join("inside")
+                .to_string_lossy()
+                .into_owned()
+        }
+    );
+}
+
+#[test]
+fn a_prior_check_cannot_redirect_the_next_cwd_and_later_checks_continue() {
+    if !enforcing_or_skip() {
+        return;
+    }
+    let (repository, _first_revision) = fixture_repository("prior-check-cwd-swap");
+    fs::create_dir_all(repository.path.join("victim")).unwrap();
+    fs::write(repository.path.join("victim/tracked.txt"), "tracked\n").unwrap();
+    git(&repository.path, &["add", "."]);
+    git(&repository.path, &["commit", "--quiet", "-m", "two"]);
+    let revision = revision(&repository.path);
+    let outside = TempDir::new("prior-check-cwd-swap-outside");
+    let source = repository.path.to_string_lossy().into_owned();
+    let (_store, projects, repositories, checks) = enrolled("prior-check-cwd-swap");
+    let project = projects.create(project_draft()).unwrap();
+    repositories
+        .bind(
+            project.id,
+            project.charter.revision,
+            None,
+            RepositoryDraft {
+                source_kind: RepositorySourceKind::LocalPath,
+                source,
+                base_revision: revision,
+                declared_checks: vec![
+                    check(
+                        "a-swap",
+                        &[
+                            "/bin/sh",
+                            "-c",
+                            &format!(
+                                "/bin/rm -rf victim && /bin/ln -s {} victim",
+                                outside.path.display()
+                            ),
+                        ],
+                        ".",
+                    ),
+                    check("b-victim", &["/bin/pwd"], "victim"),
+                    check("c-continues", &["/bin/echo", "continued"], "."),
+                ],
+            },
+        )
+        .unwrap();
+
+    let receipt = checks.execute(project.id, bounds()).unwrap();
+    assert_eq!(
+        receipt.checks[0].outcome,
+        ExecutionOutcome::Exited { code: 0 }
+    );
+    assert!(matches!(
+        receipt.checks[1].outcome,
+        ExecutionOutcome::NotStarted { .. }
+    ));
+    assert!(
+        receipt.checks[1].stdout.is_empty(),
+        "the redirected target program ran"
+    );
+    assert_eq!(receipt.checks[2].stdout.trim(), "continued");
+
+    let worktree_root = Path::new(&receipt.checks[0].working_directory);
+    git(
+        &repository.path,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            worktree_root.to_string_lossy().as_ref(),
+        ],
+    );
+    if let Some(scratch_root) = worktree_root.parent() {
+        let _ = fs::remove_dir(scratch_root);
+    }
+}
+
+#[test]
+fn relative_internal_symlinks_run_while_absolute_targets_refuse() {
+    if !enforcing_or_skip() {
+        return;
+    }
+    let (repository, _first_revision) = fixture_repository("symlink-policy");
+    fs::create_dir_all(repository.path.join("inside")).unwrap();
+    fs::write(repository.path.join("inside/value.txt"), "inside\n").unwrap();
+    symlink("inside", repository.path.join("relative-inside")).unwrap();
+    symlink(&repository.path, repository.path.join("absolute-inside")).unwrap();
+    git(&repository.path, &["add", "."]);
+    git(&repository.path, &["commit", "--quiet", "-m", "two"]);
+    let revision = revision(&repository.path);
+    let source = repository.path.to_string_lossy().into_owned();
+    let (_store, projects, repositories, checks) = enrolled("symlink-policy");
+    let project = projects.create(project_draft()).unwrap();
+    repositories
+        .bind(
+            project.id,
+            project.charter.revision,
+            None,
+            RepositoryDraft {
+                source_kind: RepositorySourceKind::LocalPath,
+                source,
+                base_revision: revision,
+                declared_checks: vec![
+                    check("a-absolute", &["/bin/pwd"], "absolute-inside"),
+                    check("b-relative", &["/bin/cat", "value.txt"], "relative-inside"),
+                ],
+            },
+        )
+        .unwrap();
+
+    let receipt = checks.execute(project.id, bounds()).unwrap();
+    assert!(matches!(
+        &receipt.checks[0].outcome,
+        ExecutionOutcome::NotStarted { reason }
+            if reason.starts_with("unsafe or raced working-directory resolution (errno ")
+    ));
+    assert!(receipt.checks[0].stdout.is_empty());
+    assert_eq!(
+        receipt.checks[1].outcome,
+        ExecutionOutcome::Exited { code: 0 }
+    );
+    assert_eq!(receipt.checks[1].stdout.trim(), "inside");
+    assert!(
+        receipt.checks[1]
+            .working_directory
+            .ends_with("relative-inside")
+    );
+    assert_eq!(
+        receipt.admitted_by.resolved_checks[1].resolved_working_directory,
+        Recorded::Present {
+            value: repository
+                .path
+                .join("inside")
+                .to_string_lossy()
+                .into_owned()
+        }
     );
 }
 

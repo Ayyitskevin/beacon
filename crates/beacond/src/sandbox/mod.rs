@@ -7,65 +7,17 @@
 mod bounded;
 mod landlock;
 mod probe;
+mod worktree_launcher;
 
 use serde::{Deserialize, Serialize};
 
-pub(crate) use bounded::run_bounded;
 pub use bounded::{
     Ceiling, ExecutionBounds, ExecutionOutcome, ExecutionRecord, Interrupt, interrupt_channel,
 };
 
-/// Run one command inside `working_directory`, writable only beneath
-/// `write_target`.
-///
-/// The write target is the worktree root rather than the working directory: a
-/// check declares where it runs, and a Run may write anywhere in the tree it
-/// was given. Refuses without an enforcing capability — a Run that cannot be
-/// contained does not start, and says so rather than running unconfined.
-pub(crate) fn run_in(
-    argv: &[String],
-    working_directory: &std::path::Path,
-    write_target: &std::path::Path,
-    bounds: ExecutionBounds,
-    capability: &SandboxCapability,
-    interrupt: Option<std::sync::mpsc::Receiver<()>>,
-) -> ExecutionRecord {
-    let refuse = |reason: String| ExecutionRecord {
-        argv: argv.to_vec(),
-        working_directory: working_directory.to_string_lossy().into_owned(),
-        outcome: ExecutionOutcome::NotStarted { reason },
-        stdout: String::new(),
-        stderr: String::new(),
-        output_truncated: false,
-        output_incomplete: false,
-        elapsed_ms: 0,
-        sandbox_version: capability.receipt_version(),
-    };
-    if !capability.admits_execution() {
-        return refuse(format!(
-            "this host cannot contain a Run ({})",
-            capability.receipt_version()
-        ));
-    }
-    let Some(abi) = landlock::abi_version() else {
-        return refuse("this host has no sandbox".to_owned());
-    };
-    match Ruleset::build(abi, &[write_target], true) {
-        Ok(ruleset) => run_bounded(
-            argv,
-            working_directory,
-            &ruleset,
-            bounds,
-            &capability.receipt_version(),
-            interrupt,
-        ),
-        Err(error) => refuse(format!("the ruleset could not be built: {error}")),
-    }
-}
-
-/// Run a command under a freshly built ruleset whose only write target is
-/// `working_directory`. Test-facing until the Execution surface composes a
-/// worktree with a Run; the composition is Slice B's seam, not this module's.
+/// Public test-facing entry for a bounded Run whose only write target is
+/// `working_directory`. It exercises the same descriptor-bound launcher used
+/// by Declared Check execution.
 pub fn run_bounded_for_test(
     argv: &[String],
     working_directory: &std::path::Path,
@@ -73,46 +25,9 @@ pub fn run_bounded_for_test(
     interrupt: Option<std::sync::mpsc::Receiver<()>>,
 ) -> ExecutionRecord {
     let capability = detect();
-    let Some(abi) = landlock::abi_version() else {
-        return ExecutionRecord {
-            argv: argv.to_vec(),
-            working_directory: working_directory.to_string_lossy().into_owned(),
-            outcome: ExecutionOutcome::NotStarted {
-                reason: "this host has no sandbox".to_owned(),
-            },
-            stdout: String::new(),
-            stderr: String::new(),
-            output_truncated: false,
-            output_incomplete: false,
-            elapsed_ms: 0,
-            sandbox_version: capability.receipt_version(),
-        };
-    };
-    match Ruleset::build(abi, &[working_directory], true) {
-        Ok(ruleset) => run_bounded(
-            argv,
-            working_directory,
-            &ruleset,
-            bounds,
-            &capability.receipt_version(),
-            interrupt,
-        ),
-        Err(error) => ExecutionRecord {
-            argv: argv.to_vec(),
-            working_directory: working_directory.to_string_lossy().into_owned(),
-            outcome: ExecutionOutcome::NotStarted {
-                reason: format!("the ruleset could not be built: {error}"),
-            },
-            stdout: String::new(),
-            stderr: String::new(),
-            output_truncated: false,
-            output_incomplete: false,
-            elapsed_ms: 0,
-            sandbox_version: capability.receipt_version(),
-        },
-    }
+    WorktreeLauncher::bind(working_directory, &capability).run(argv, ".", bounds, interrupt)
 }
-pub(crate) use landlock::Ruleset;
+pub(crate) use worktree_launcher::WorktreeLauncher;
 
 /// What this host can actually enforce, as observed rather than as configured.
 ///
@@ -255,4 +170,141 @@ pub fn detect() -> SandboxCapability {
         };
     };
     probe::verify(abi)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::os::unix::fs::symlink;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Barrier};
+
+    use uuid::Uuid;
+
+    use super::*;
+
+    struct TempDirectory(PathBuf);
+
+    impl TempDirectory {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("beacon-{label}-{}", Uuid::new_v4()));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn bounds() -> ExecutionBounds {
+        ExecutionBounds {
+            wall_clock_ms: 5_000,
+            cpu_seconds: 2,
+            address_space_bytes: 512 * 1024 * 1024,
+            file_size_bytes: 1024 * 1024,
+            output_bytes: 4096,
+        }
+    }
+
+    #[test]
+    fn a_concurrent_swap_cannot_retarget_a_selected_working_directory() {
+        let capability = detect();
+        if !capability.admits_execution() {
+            eprintln!("skipped: this host reports no enforcing sandbox");
+            return;
+        }
+        let root = TempDirectory::new("concurrent-cwd-root");
+        let outside = TempDirectory::new("concurrent-cwd-outside");
+        let selected = root.0.join("selected");
+        let moved = root.0.join("descriptor-pinned");
+        fs::create_dir(&selected).unwrap();
+        let handoff = Arc::new(Barrier::new(2));
+        let swapped = Arc::new(Barrier::new(2));
+        let worker_handoff = Arc::clone(&handoff);
+        let worker_swapped = Arc::clone(&swapped);
+        let worker_selected = selected.clone();
+        let worker_moved = moved.clone();
+        let worker_outside = outside.0.clone();
+        let worker = std::thread::spawn(move || {
+            worker_handoff.wait();
+            fs::rename(&worker_selected, &worker_moved).unwrap();
+            symlink(&worker_outside, &worker_selected).unwrap();
+            worker_swapped.wait();
+        });
+
+        let launcher = WorktreeLauncher::bind(&root.0, &capability);
+        let record = launcher.run_with_before_spawn(
+            &["/bin/pwd".to_owned()],
+            "selected",
+            bounds(),
+            None,
+            || {
+                handoff.wait();
+                swapped.wait();
+            },
+        );
+        worker.join().unwrap();
+
+        assert_eq!(record.outcome, ExecutionOutcome::Exited { code: 0 });
+        assert_eq!(
+            record.stdout.trim(),
+            moved.to_string_lossy(),
+            "the child did not enter the descriptor-pinned directory"
+        );
+    }
+
+    #[test]
+    fn deletion_after_selection_cannot_run_in_a_replacement_directory() {
+        let capability = detect();
+        if !capability.admits_execution() {
+            eprintln!("skipped: this host reports no enforcing sandbox");
+            return;
+        }
+        let root = TempDirectory::new("deleted-cwd-root");
+        let selected = root.0.join("selected");
+        let marker = selected.join("replacement-ran");
+        fs::create_dir(&selected).unwrap();
+        let handoff = Arc::new(Barrier::new(2));
+        let replaced = Arc::new(Barrier::new(2));
+        let worker_handoff = Arc::clone(&handoff);
+        let worker_replaced = Arc::clone(&replaced);
+        let worker_selected = selected.clone();
+        let worker = std::thread::spawn(move || {
+            worker_handoff.wait();
+            fs::remove_dir(&worker_selected).unwrap();
+            fs::create_dir(&worker_selected).unwrap();
+            worker_replaced.wait();
+        });
+
+        let launcher = WorktreeLauncher::bind(&root.0, &capability);
+        let record = launcher.run_with_before_spawn(
+            &[
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                "printf ran > replacement-ran".to_owned(),
+            ],
+            "selected",
+            bounds(),
+            None,
+            || {
+                handoff.wait();
+                replaced.wait();
+            },
+        );
+        worker.join().unwrap();
+
+        let expected_reason = format!(
+            "working-directory descriptor was unlinked before launch (errno {})",
+            libc::ESTALE
+        );
+        assert!(matches!(
+            &record.outcome,
+            ExecutionOutcome::NotStarted { reason }
+                if reason == &expected_reason
+        ));
+        assert!(!marker.exists(), "the replacement target program ran");
+    }
 }
