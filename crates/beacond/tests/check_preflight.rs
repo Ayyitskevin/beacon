@@ -16,7 +16,7 @@ use beacond::{
     AutonomyProfile, CheckPreflightError, CheckPreflightService, DeclaredCheck,
     OperatorAccountService, OperatorSessionPhase, PreflightOutcome, PreflightReceipt,
     ProjectCharterDraft, ProjectDraft, ProjectRepositoryService, ProjectService, Recorded,
-    RepositoryDraft, RepositorySourceKind, SecretString, StartupConfig, Supervisor,
+    RepositoryDraft, RepositorySourceKind, SecretString, StartupConfig, Supervisor, detect_sandbox,
 };
 use rusqlite::Connection;
 use uuid::Uuid;
@@ -204,7 +204,7 @@ const REACHABILITY_GAP: &str =
     "base revision reachability from a ref (object presence verified only)";
 
 #[test]
-fn a_binding_that_satisfies_every_step_is_refused_because_no_sandbox_exists() {
+fn a_binding_that_satisfies_every_step_is_admissible_when_the_sandbox_is_proven() {
     let (repository, revision) = fixture_repository("admissible");
     let source = repository.path.to_string_lossy().into_owned();
     let (store, receipt, project_id) = bind_and_preflight(
@@ -212,10 +212,48 @@ fn a_binding_that_satisfies_every_step_is_refused_because_no_sandbox_exists() {
         draft(RepositorySourceKind::LocalPath, &source, &revision),
     );
 
-    assert_eq!(receipt.outcome, PreflightOutcome::SandboxUnavailable);
+    // Every verification step held. Whether that means execution is admissible
+    // depends on what this host can prove it enforces, so the assertion follows
+    // the capability rather than assuming one — a kernel without Landlock is a
+    // legitimate host that simply may not run checks.
+    let capability = detect_sandbox();
+    if capability.admits_execution() {
+        assert_eq!(receipt.outcome, PreflightOutcome::Verified);
+        assert!(
+            !receipt
+                .not_verified
+                .iter()
+                .any(|entry| entry.starts_with("sandbox enforcement")),
+            "a proven sandbox must leave the residual-uncertainty list"
+        );
+        // What the sandbox still does not bound stays named.
+        assert!(
+            receipt
+                .not_verified
+                .iter()
+                .any(|entry| entry.contains("CPU, memory, and wall-clock"))
+        );
+        assert!(
+            receipt
+                .not_verified
+                .iter()
+                .any(|entry| entry.contains("UDP"))
+        );
+    } else {
+        assert_eq!(receipt.outcome, PreflightOutcome::SandboxUnavailable);
+        assert!(
+            receipt
+                .not_verified
+                .iter()
+                .any(|entry| entry.starts_with("sandbox enforcement"))
+        );
+    }
+    // The Receipt records the capability it ran under, never the bare word that
+    // preceded this slice.
+    assert_eq!(receipt.sandbox_version, capability.receipt_version());
+    assert_ne!(receipt.sandbox_version, "none");
     assert_eq!(receipt.version, 1);
     assert_eq!(receipt.project_id, project_id);
-    assert_eq!(receipt.sandbox_version, "none");
     assert_eq!(receipt.base_revision, revision);
 
     // The check resolved, so containment was decided on a real path.
@@ -233,12 +271,6 @@ fn a_binding_that_satisfies_every_step_is_refused_because_no_sandbox_exists() {
             .not_verified
             .iter()
             .any(|entry| entry == REACHABILITY_GAP)
-    );
-    assert!(
-        receipt
-            .not_verified
-            .iter()
-            .any(|entry| entry.contains("no sandbox capability exists"))
     );
 
     // Spec fields a preflight cannot honour are absent, never empty.
@@ -259,7 +291,14 @@ fn a_binding_that_satisfies_every_step_is_refused_because_no_sandbox_exists() {
     // Receipt rather than a delta.
     let rows = runs(&store);
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].1, "refused");
+    assert_eq!(
+        rows[0].1,
+        if capability.admits_execution() {
+            "verified"
+        } else {
+            "refused"
+        }
+    );
     assert!(rows[0].2.is_some());
     let events = preflight_events(&store);
     assert_eq!(events.len(), 1);
@@ -388,7 +427,12 @@ fn a_base_revision_only_in_a_pack_still_satisfies_the_step() {
         "packed-revision",
         draft(RepositorySourceKind::LocalPath, &source, &revision),
     );
-    assert_eq!(receipt.outcome, PreflightOutcome::SandboxUnavailable);
+    // The step under test is base-revision presence, so this asserts that the
+    // run reached the end rather than which terminal outcome it reached.
+    assert!(matches!(
+        receipt.outcome,
+        PreflightOutcome::Verified | PreflightOutcome::SandboxUnavailable
+    ));
 }
 
 #[test]

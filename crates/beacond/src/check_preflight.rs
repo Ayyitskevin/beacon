@@ -26,6 +26,7 @@ use crate::project_repository::{
     PreflightBinding, ProjectRepositoryError, RepositorySourceKind,
     latest_repository_for_preflight, stored_repository_for_preflight,
 };
+use crate::sandbox::SandboxCapability;
 
 /// How long a Run may hold its lease before reconciliation calls it unconfirmed.
 const LEASE_MS: u64 = 30_000;
@@ -346,7 +347,10 @@ impl CheckPreflightService {
                 source: opened.binding.source.clone(),
                 base_revision: opened.binding.base_revision.clone(),
                 resolved_checks: inspection.resolved_checks.clone(),
-                sandbox_version: "none".to_owned(),
+                sandbox_version: inspection
+                    .sandbox
+                    .as_ref()
+                    .map_or_else(|| "none".to_owned(), SandboxCapability::receipt_version),
                 policy_charter_revision: opened.binding.charter_revision,
                 policy_repository_revision: opened.binding.revision,
                 started_at_ms: opened.started_at_ms,
@@ -426,6 +430,8 @@ struct Inspection {
     outcome: PreflightOutcome,
     resolved_checks: Vec<ResolvedCheck>,
     not_verified: Vec<String>,
+    /// What the sandbox step proved, when it was reached.
+    sandbox: Option<SandboxCapability>,
 }
 
 /// Perform the verification steps in order, stopping at the first that fails.
@@ -453,6 +459,8 @@ fn inspect(opened: &OpenRun) -> Inspection {
         outcome,
         resolved_checks: declared_checks.clone(),
         not_verified: reached.iter().map(|entry| (*entry).to_owned()).collect(),
+        // A refusal before the sandbox step proves nothing about the sandbox.
+        sandbox: None,
     };
 
     // Step 0: the binding applies to the current Charter revision.
@@ -584,15 +592,39 @@ fn inspect(opened: &OpenRun) -> Inspection {
         }
     }
 
-    // Step 5: execution needs a sandbox, and none exists.
+    // Step 5: execution requires a sandbox this host can prove it enforces.
+    // `detect` builds a real ruleset and applies it in a child, so what comes
+    // back is an observation rather than a configuration (ADR 0029).
+    let capability = crate::sandbox::detect();
+    let mut not_verified = vec![
+        REACHABILITY_GAP.to_owned(),
+        "check execution, exit statuses, and their effects (preflight never runs a check)"
+            .to_owned(),
+    ];
+    if !capability.admits_execution() {
+        not_verified.push(format!(
+            "sandbox enforcement ({})",
+            capability.receipt_version()
+        ));
+        return Inspection {
+            outcome: PreflightOutcome::SandboxUnavailable,
+            resolved_checks,
+            not_verified,
+            sandbox: Some(capability),
+        };
+    }
+    // Containment is proven, so it leaves the residual-uncertainty list. What
+    // the sandbox still does not bound stays on it: Landlock governs
+    // filesystem access and TCP, and nothing else.
+    not_verified.push(
+        "CPU, memory, and wall-clock bounds (the sandbox contains, it does not meter)".to_owned(),
+    );
+    not_verified.push("UDP egress (Landlock restricts TCP only)".to_owned());
     Inspection {
-        outcome: PreflightOutcome::SandboxUnavailable,
+        outcome: PreflightOutcome::Verified,
         resolved_checks,
-        not_verified: vec![
-            REACHABILITY_GAP.to_owned(),
-            "check execution, exit statuses, and their effects (no sandbox capability exists)"
-                .to_owned(),
-        ],
+        not_verified,
+        sandbox: Some(capability),
     }
 }
 
