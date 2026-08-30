@@ -203,7 +203,7 @@ fn an_interrupt_stops_a_run_and_is_distinguished_from_a_ceiling() {
     assert!(started.elapsed() < Duration::from_secs(20));
     assert_eq!(
         record.outcome,
-        ExecutionOutcome::Interrupted,
+        ExecutionOutcome::Interrupted {},
         "an operator interrupt is not a budget exhaustion"
     );
     std::fs::remove_dir_all(&scratch).ok();
@@ -228,4 +228,19 @@ fn a_missing_program_never_started_rather_than_exited() {
         ExecutionOutcome::NotStarted { .. }
     ));
     std::fs::remove_dir_all(&scratch).ok();
+}
+
+#[test]
+fn an_interrupted_outcome_rejects_a_smuggled_field() {
+    // Same hazard as SandboxUnavailableReason: Interrupted carries no data, so
+    // without an empty struct body its guard would be inert.
+    assert_eq!(
+        serde_json::to_string(&ExecutionOutcome::Interrupted {}).unwrap(),
+        r#"{"kind":"interrupted"}"#
+    );
+    assert!(
+        serde_json::from_str::<ExecutionOutcome>(r#"{"kind":"interrupted","ceiling":"cpu"}"#)
+            .is_err(),
+        "an interrupted Run must not accept a ceiling it never hit"
+    );
 }
