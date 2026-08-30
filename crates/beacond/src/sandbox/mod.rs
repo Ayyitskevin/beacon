@@ -95,7 +95,12 @@ pub enum SandboxCapability {
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum SandboxUnavailableReason {
     /// The kernel does not implement Landlock.
-    LandlockAbsent,
+    ///
+    /// Braces are deliberate. `deny_unknown_fields` is inert on a *unit*
+    /// variant of an internally tagged enum — serde reads the tag and matches
+    /// the rest leniently — so an empty struct body is what makes the guard
+    /// real. Found by claude-69 while building Slice B.
+    LandlockAbsent {},
     /// The ruleset could not be constructed.
     RulesetRefused { errno: i32 },
     /// `PR_SET_NO_NEW_PRIVS` was refused, so Landlock cannot arm.
@@ -107,8 +112,8 @@ pub enum SandboxUnavailableReason {
     ProbeRefused { observed: ProbeObservation },
     /// The probe child never reported. Not the same as reporting failure.
     ProbeInconclusive { detail: String },
-    /// Not a Linux host.
-    UnsupportedPlatform,
+    /// Not a Linux host. Braces deliberate; see `LandlockAbsent`.
+    UnsupportedPlatform {},
 }
 
 impl SandboxCapability {
@@ -152,13 +157,13 @@ impl SandboxCapability {
 impl SandboxUnavailableReason {
     fn slug(&self) -> &'static str {
         match self {
-            Self::LandlockAbsent => "landlock-absent",
+            Self::LandlockAbsent { .. } => "landlock-absent",
             Self::RulesetRefused { .. } => "ruleset-refused",
             Self::NoNewPrivsRefused { .. } => "no-new-privs-refused",
             Self::RestrictRefused { .. } => "restrict-refused",
             Self::ProbeRefused { .. } => "probe-refused",
             Self::ProbeInconclusive { .. } => "probe-inconclusive",
-            Self::UnsupportedPlatform => "unsupported-platform",
+            Self::UnsupportedPlatform { .. } => "unsupported-platform",
         }
     }
 }
@@ -191,12 +196,12 @@ impl ProbeObservation {
 pub fn detect() -> SandboxCapability {
     if !cfg!(target_os = "linux") {
         return SandboxCapability::Unavailable {
-            reason: SandboxUnavailableReason::UnsupportedPlatform,
+            reason: SandboxUnavailableReason::UnsupportedPlatform {},
         };
     }
     let Some(abi) = landlock::abi_version() else {
         return SandboxCapability::Unavailable {
-            reason: SandboxUnavailableReason::LandlockAbsent,
+            reason: SandboxUnavailableReason::LandlockAbsent {},
         };
     };
     probe::verify(abi)
