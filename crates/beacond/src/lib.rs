@@ -103,7 +103,7 @@ pub use team::{
 };
 pub use worktree::{CleanupOutcome, KeepReason, Worktree, WorktreeError};
 
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 16;
 const MAX_WORKSPACE_NAME_CHARS: usize = 120;
 
 const SCHEMA_V1: &str = include_str!("../migrations/0001_initial.sql");
@@ -121,6 +121,7 @@ const MIGRATION_V12: &str = include_str!("../migrations/0012_project_policy.sql"
 const MIGRATION_V13: &str = include_str!("../migrations/0013_project_repository.sql");
 const MIGRATION_V14: &str = include_str!("../migrations/0014_run_receipt.sql");
 const MIGRATION_V15: &str = include_str!("../migrations/0015_declared_check_runs.sql");
+const MIGRATION_V16: &str = include_str!("../migrations/0016_execution_receipt_v2.sql");
 
 #[derive(Debug, Clone)]
 pub struct StartupConfig {
@@ -398,6 +399,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V13)?;
                     transaction.execute_batch(MIGRATION_V14)?;
                     transaction.execute_batch(MIGRATION_V15)?;
+                    transaction.execute_batch(MIGRATION_V16)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 2 => {
@@ -415,6 +417,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V13)?;
                     transaction.execute_batch(MIGRATION_V14)?;
                     transaction.execute_batch(MIGRATION_V15)?;
+                    transaction.execute_batch(MIGRATION_V16)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 3 => {
@@ -431,6 +434,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V13)?;
                     transaction.execute_batch(MIGRATION_V14)?;
                     transaction.execute_batch(MIGRATION_V15)?;
+                    transaction.execute_batch(MIGRATION_V16)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 4 => {
@@ -446,6 +450,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V13)?;
                     transaction.execute_batch(MIGRATION_V14)?;
                     transaction.execute_batch(MIGRATION_V15)?;
+                    transaction.execute_batch(MIGRATION_V16)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 5 => {
@@ -460,6 +465,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V13)?;
                     transaction.execute_batch(MIGRATION_V14)?;
                     transaction.execute_batch(MIGRATION_V15)?;
+                    transaction.execute_batch(MIGRATION_V16)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 6 => {
@@ -473,6 +479,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V13)?;
                     transaction.execute_batch(MIGRATION_V14)?;
                     transaction.execute_batch(MIGRATION_V15)?;
+                    transaction.execute_batch(MIGRATION_V16)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 7 => {
@@ -485,6 +492,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V13)?;
                     transaction.execute_batch(MIGRATION_V14)?;
                     transaction.execute_batch(MIGRATION_V15)?;
+                    transaction.execute_batch(MIGRATION_V16)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 8 => {
@@ -496,6 +504,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V13)?;
                     transaction.execute_batch(MIGRATION_V14)?;
                     transaction.execute_batch(MIGRATION_V15)?;
+                    transaction.execute_batch(MIGRATION_V16)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 9 => {
@@ -506,6 +515,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V13)?;
                     transaction.execute_batch(MIGRATION_V14)?;
                     transaction.execute_batch(MIGRATION_V15)?;
+                    transaction.execute_batch(MIGRATION_V16)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 10 => {
@@ -515,6 +525,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V13)?;
                     transaction.execute_batch(MIGRATION_V14)?;
                     transaction.execute_batch(MIGRATION_V15)?;
+                    transaction.execute_batch(MIGRATION_V16)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 11 => {
@@ -523,6 +534,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V13)?;
                     transaction.execute_batch(MIGRATION_V14)?;
                     transaction.execute_batch(MIGRATION_V15)?;
+                    transaction.execute_batch(MIGRATION_V16)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 12 => {
@@ -530,17 +542,25 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V13)?;
                     transaction.execute_batch(MIGRATION_V14)?;
                     transaction.execute_batch(MIGRATION_V15)?;
+                    transaction.execute_batch(MIGRATION_V16)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 13 => {
                     verify_schema(&transaction, 13)?;
                     transaction.execute_batch(MIGRATION_V14)?;
                     transaction.execute_batch(MIGRATION_V15)?;
+                    transaction.execute_batch(MIGRATION_V16)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 14 => {
                     verify_schema(&transaction, 14)?;
                     transaction.execute_batch(MIGRATION_V15)?;
+                    transaction.execute_batch(MIGRATION_V16)?;
+                    verify_schema(&transaction, SCHEMA_VERSION)?;
+                }
+                15 => {
+                    verify_schema(&transaction, 15)?;
+                    transaction.execute_batch(MIGRATION_V16)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 SCHEMA_VERSION => verify_schema(&transaction, SCHEMA_VERSION)?,
@@ -562,6 +582,7 @@ impl Supervisor {
             transaction.execute_batch(MIGRATION_V13)?;
             transaction.execute_batch(MIGRATION_V14)?;
             transaction.execute_batch(MIGRATION_V15)?;
+            transaction.execute_batch(MIGRATION_V16)?;
             verify_schema(&transaction, SCHEMA_VERSION)?;
         }
 
@@ -779,6 +800,9 @@ fn verify_schema(connection: &Connection, version: i64) -> Result<(), Supervisor
     }
     if version >= 15 {
         expected_connection.execute_batch(MIGRATION_V15)?;
+    }
+    if version >= 16 {
+        expected_connection.execute_batch(MIGRATION_V16)?;
     }
     if !(1..=SCHEMA_VERSION).contains(&version) {
         return Err(SupervisorError::UnsupportedSchemaVersion(version));
@@ -1045,13 +1069,23 @@ fn verify_persisted_events(connection: &Connection) -> Result<u64, SupervisorErr
                 .map_err(|_| SupervisorError::RunEventMismatch(sequence))?;
             }
             PersistedEventKind::RunPreflighted => {
-                check_preflight::verify_run_event(
+                match check_preflight::verify_run_event(
                     connection,
                     workspace_id,
                     occurred_at_ms,
                     &payload_json,
-                )
-                .map_err(|_| SupervisorError::RunEventMismatch(sequence))?;
+                ) {
+                    Ok(()) => {}
+                    Err(check_preflight::RunEventReplayError::RunStateMismatch) => {
+                        return Err(SupervisorError::RunStateMismatch);
+                    }
+                    Err(check_preflight::RunEventReplayError::EvidenceMismatch) => {
+                        return Err(SupervisorError::RunEventMismatch(sequence));
+                    }
+                    Err(check_preflight::RunEventReplayError::Store(error)) => {
+                        return Err(SupervisorError::Store(error));
+                    }
+                }
             }
             PersistedEventKind::ProjectRepositoryBound => {
                 project_repository::verify_project_repository_event(
@@ -1151,6 +1185,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::sync::{Arc, Barrier};
     use std::thread;
 
@@ -1158,9 +1193,12 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        DiagnosticStatus, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6,
-        MIGRATION_V7, MIGRATION_V8, MIGRATION_V9, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12,
-        MIGRATION_V13, SCHEMA_V1, StartupConfig, Supervisor, SupervisorError,
+        AutonomyProfile, CheckPreflightService, DeclaredCheck, DiagnosticStatus, MIGRATION_V2,
+        MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6, MIGRATION_V7, MIGRATION_V8,
+        MIGRATION_V9, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12, MIGRATION_V13,
+        OperatorAccountService, PreflightOutcome, PreflightReceipt, ProjectCharterDraft,
+        ProjectDraft, ProjectRepositoryService, ProjectService, RepositoryDraft,
+        RepositorySourceKind, SCHEMA_V1, SecretString, StartupConfig, Supervisor, SupervisorError,
     };
 
     struct TestStore {
@@ -1184,11 +1222,234 @@ mod tests {
         }
     }
 
+    struct TestRepository {
+        path: PathBuf,
+    }
+
+    impl TestRepository {
+        fn new(label: &str) -> (Self, String) {
+            let path =
+                std::env::temp_dir().join(format!("beacond-{label}-repository-{}", Uuid::new_v4()));
+            fs::create_dir_all(&path).unwrap();
+            let git = |arguments: &[&str]| {
+                let status = Command::new("git")
+                    .args(arguments)
+                    .current_dir(&path)
+                    .env("GIT_AUTHOR_NAME", "Beacon Test")
+                    .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+                    .env("GIT_COMMITTER_NAME", "Beacon Test")
+                    .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+                    .status()
+                    .unwrap();
+                assert!(status.success(), "git {arguments:?} failed");
+            };
+            git(&["init", "--quiet"]);
+            fs::write(path.join("tracked.txt"), "preflight evidence").unwrap();
+            git(&["add", "."]);
+            git(&["commit", "--quiet", "-m", "fixture"]);
+            let output = Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&path)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let revision = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+            (Self { path }, revision)
+        }
+    }
+
+    impl Drop for TestRepository {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
     fn config(path: &Path, workspace_name: &str) -> StartupConfig {
         StartupConfig {
             store_path: path.to_owned(),
             initial_workspace_name: workspace_name.to_owned(),
         }
+    }
+
+    fn written_preflight(
+        label: &str,
+        repository: RepositoryDraft,
+    ) -> (TestStore, PreflightReceipt) {
+        let store = TestStore::new(label);
+        let report = Supervisor::bootstrap(config(&store.path, "Personal")).unwrap();
+        let accounts = Arc::new(OperatorAccountService::open(&store.path).unwrap());
+        accounts
+            .begin_password_setup(
+                SecretString::new("a long local passphrase".to_owned()),
+                SecretString::new("a long local passphrase".to_owned()),
+            )
+            .unwrap();
+        accounts.complete_operator_setup(true).unwrap();
+        let projects = ProjectService::new(Arc::clone(&accounts), report.workspace.id);
+        let repositories =
+            ProjectRepositoryService::new(Arc::clone(&accounts), report.workspace.id);
+        let preflights = CheckPreflightService::new(accounts, report.workspace.id);
+        let project = projects
+            .create(ProjectDraft {
+                name: "Beacon Alpha".to_owned(),
+                charter: ProjectCharterDraft {
+                    purpose: "Exercise exact startup reconciliation.".to_owned(),
+                    desired_outcomes: vec!["Reject mismatched evidence".to_owned()],
+                    constraints: vec!["Keep Workspace data local".to_owned()],
+                    prohibitions: vec!["Do not execute".to_owned()],
+                    autonomy_profile: AutonomyProfile::Supervised,
+                },
+            })
+            .unwrap();
+        repositories
+            .bind(project.id, project.charter.revision, None, repository)
+            .unwrap();
+        let receipt = preflights.preflight(project.id).unwrap();
+
+        (store, receipt)
+    }
+
+    fn written_refused_preflight(label: &str) -> (TestStore, PreflightReceipt) {
+        written_preflight(
+            label,
+            RepositoryDraft {
+                source_kind: RepositorySourceKind::GitUrl,
+                source: "https://example.invalid/preflight-metadata.git".to_owned(),
+                base_revision: "a".repeat(40),
+                declared_checks: vec![DeclaredCheck {
+                    name: "never".to_owned(),
+                    argv: vec!["/bin/true".to_owned()],
+                    working_directory: ".".to_owned(),
+                }],
+            },
+        )
+    }
+
+    fn written_verified_preflight(label: &str) -> (TestStore, PreflightReceipt) {
+        let (repository, revision) = TestRepository::new(label);
+        let written = written_preflight(
+            label,
+            RepositoryDraft {
+                source_kind: RepositorySourceKind::LocalPath,
+                source: repository.path.to_string_lossy().into_owned(),
+                base_revision: revision,
+                declared_checks: vec![DeclaredCheck {
+                    name: "never".to_owned(),
+                    argv: vec!["/bin/true".to_owned()],
+                    working_directory: ".".to_owned(),
+                }],
+            },
+        );
+        assert_eq!(written.1.outcome, PreflightOutcome::Verified);
+        written
+    }
+
+    fn tamper_preflight_run_state(store: &TestStore, receipt: &PreflightReceipt, state: &str) {
+        let connection = Connection::open(&store.path).unwrap();
+        let trigger_sql: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                 WHERE type = 'trigger' AND name = 'runs_single_terminal_transition'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        connection
+            .execute_batch("DROP TRIGGER runs_single_terminal_transition;")
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE runs SET state = ?2 WHERE id = ?1",
+                rusqlite::params![receipt.run_id.to_string(), state],
+            )
+            .unwrap();
+        connection.execute_batch(&trigger_sql).unwrap();
+    }
+
+    fn preflight_sql_metadata_tamper_error(label: &str, update: &str) -> SupervisorError {
+        let (store, receipt) = written_refused_preflight(label);
+
+        let connection = Connection::open(&store.path).unwrap();
+        let trigger_sql: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                 WHERE type = 'trigger' AND name = 'receipts_no_update'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        connection
+            .execute_batch("DROP TRIGGER receipts_no_update;")
+            .unwrap();
+        connection
+            .execute(update, [receipt.run_id.to_string()])
+            .unwrap();
+        connection.execute_batch(&trigger_sql).unwrap();
+        drop(connection);
+
+        Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap_err()
+    }
+
+    #[test]
+    fn startup_rejects_preflight_sql_version_that_disagrees_with_v1_json() {
+        let error = preflight_sql_metadata_tamper_error(
+            "preflight-sql-version",
+            "UPDATE receipts SET version = 2 WHERE run_id = ?1",
+        );
+        assert!(matches!(error, SupervisorError::RunEventMismatch(_)));
+    }
+
+    #[test]
+    fn startup_rejects_preflight_event_bytes_that_differ_from_receipt_bytes() {
+        let (store, receipt) = written_refused_preflight("preflight-event-bytes");
+        let connection = Connection::open(&store.path).unwrap();
+        connection
+            .execute(
+                "UPDATE events SET payload_json = ' ' || payload_json
+                 WHERE kind = 'run.preflighted'
+                   AND json_extract(payload_json, '$.runId') = ?1",
+                [receipt.run_id.to_string()],
+            )
+            .unwrap();
+        drop(connection);
+
+        let error = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap_err();
+
+        assert!(matches!(error, SupervisorError::RunEventMismatch(_)));
+    }
+
+    #[test]
+    fn startup_rejects_refused_preflight_evidence_with_verified_run_state() {
+        let (store, receipt) = written_refused_preflight("refused-as-verified");
+        assert_ne!(receipt.outcome, PreflightOutcome::Verified);
+        tamper_preflight_run_state(&store, &receipt, "verified");
+
+        let error = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap_err();
+
+        assert!(matches!(error, SupervisorError::RunStateMismatch));
+    }
+
+    #[test]
+    fn startup_rejects_verified_preflight_evidence_with_refused_run_state() {
+        if !super::detect_sandbox().admits_execution() {
+            eprintln!("skipped: this host reports no enforcing sandbox");
+            return;
+        }
+        let (store, receipt) = written_verified_preflight("verified-as-refused");
+        tamper_preflight_run_state(&store, &receipt, "refused");
+
+        let error = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap_err();
+
+        assert!(matches!(error, SupervisorError::RunStateMismatch));
+    }
+
+    #[test]
+    fn startup_rejects_preflight_sql_outcome_that_disagrees_with_v1_json() {
+        let error = preflight_sql_metadata_tamper_error(
+            "preflight-sql-outcome",
+            "UPDATE receipts SET outcome = 'completed' WHERE run_id = ?1",
+        );
+        assert!(matches!(error, SupervisorError::RunEventMismatch(_)));
     }
 
     #[test]
@@ -1200,7 +1461,7 @@ mod tests {
         assert!(report.workspace.created);
         assert_eq!(report.workspace.name, "Personal");
         assert_eq!(report.diagnostics.status, DiagnosticStatus::Ready);
-        assert_eq!(report.diagnostics.schema_version, 15);
+        assert_eq!(report.diagnostics.schema_version, 16);
         assert_eq!(report.diagnostics.integrity_check, "ok");
         assert_eq!(report.diagnostics.foreign_key_violations, 0);
         assert_eq!(report.diagnostics.workspace_count, 1);
@@ -1283,7 +1544,7 @@ mod tests {
         assert_eq!(report.workspace.id, workspace_id);
         assert_eq!(report.workspace.name, "Existing");
         assert!(!report.workspace.created);
-        assert_eq!(report.diagnostics.schema_version, 15);
+        assert_eq!(report.diagnostics.schema_version, 16);
         assert_eq!(report.diagnostics.workspace_count, 1);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         assert_eq!(report.diagnostics.security_event_count, 0);
@@ -1322,7 +1583,7 @@ mod tests {
 
         let report = Supervisor::bootstrap(config(&store.path, "Personal")).unwrap();
 
-        assert_eq!(report.diagnostics.schema_version, 15);
+        assert_eq!(report.diagnostics.schema_version, 16);
         assert_eq!(report.diagnostics.security_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(
@@ -1381,7 +1642,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 15);
+        assert_eq!(report.diagnostics.schema_version, 16);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(
             connection
@@ -1484,7 +1745,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 15);
+        assert_eq!(report.diagnostics.schema_version, 16);
         assert_eq!(report.diagnostics.persisted_event_count, 2);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(
@@ -1546,7 +1807,7 @@ mod tests {
 
         assert_eq!(report.workspace.id, workspace_id);
         assert_eq!(report.workspace.name, "Existing");
-        assert_eq!(report.diagnostics.schema_version, 15);
+        assert_eq!(report.diagnostics.schema_version, 16);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(
@@ -1645,7 +1906,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 15);
+        assert_eq!(report.diagnostics.schema_version, 16);
         assert_eq!(report.diagnostics.persisted_event_count, 2);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(
@@ -1706,7 +1967,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 15);
+        assert_eq!(report.diagnostics.schema_version, 16);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         let event = connection
@@ -1781,7 +2042,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 15);
+        assert_eq!(report.diagnostics.schema_version, 16);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         let event = connection
@@ -1854,7 +2115,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 15);
+        assert_eq!(report.diagnostics.schema_version, 16);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         let event = connection
@@ -1954,7 +2215,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 15);
+        assert_eq!(report.diagnostics.schema_version, 16);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         let event = connection
@@ -2062,7 +2323,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 15);
+        assert_eq!(report.diagnostics.schema_version, 16);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         let event = connection

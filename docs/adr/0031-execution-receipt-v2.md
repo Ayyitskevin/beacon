@@ -1,8 +1,11 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Record truthful Declared Check execution in Receipt v2
+
+Product Steward ruling, 2026-08-30: accept this Receipt v2 contract and its bounded backend
+implementation fence.
 
 Declared Check execution currently records Receipt v1 after composing the preflight, Landlock,
 bounded-command, disposable-worktree, and cleanup mechanisms accepted in ADRs 0027, 0029, and
@@ -96,7 +99,13 @@ observations. Proven sandbox and working-directory containment do not remain as 
 An early `NotAdmissible` or `WorktreeUnavailable` Receipt instead derives the still-live gaps from
 its typed preflight outcome and the observed refusal point, followed by the fact that the declared
 checks did not run. It does not copy strings from `admitted_by.not_verified`, and it does not claim
-that configured bounds were exercised.
+that configured bounds were exercised. `NotAdmissible` exhaustively retains the failed typed
+preflight stage and every later stage that was not established, in execution order. A non-empty,
+complete set of resolved-check paths may discharge source reading, object presence, and containment
+only where that captured-binding evidence is sound; it never proves sandbox enforcement or a
+changed current binding. `WorktreeUnavailable` always records the same three gaps: retained
+reachability-from-ref, worktree creation and possible partial-checkout effects at the observed
+refusal point, and that no check ran. Dynamic Git or filesystem error display text is not persisted.
 
 ## Persistence and replay
 
@@ -123,16 +132,20 @@ lets a current nested type silently widen either versioned contract.
 
 Startup reconciliation requires all representations to agree:
 
-- SQL `receipts.version` equals the JSON version;
-- SQL `receipts.outcome` equals the JSON execution summary;
+- SQL `receipts.version` and `receipts.outcome` equal the decoded JSON version and outcome for
+  both preflight and execution Receipts;
 - `runs.kind` is `declared_checks` for an execution Receipt;
 - `NotAdmissible` and `WorktreeUnavailable` pair only with Run state `refused`;
 - `Incomplete` pairs only with Run state `incomplete`;
 - `Completed` pairs only with Run state `verified`;
+- `check_preflight` Runs never use the execution-only `incomplete` state;
 - every terminal `refused`, `incomplete`, or `verified` Run has exactly one Receipt, while
   `preflighting` and `unconfirmed` have none; and
-- stored Receipt bytes and `run.executed` event bytes decode to the same versioned value and remain
-  exactly equal.
+- every terminal `check_preflight` Run has exactly one matching `run.preflighted` event;
+- every terminal `declared_checks` Run has exactly one matching `run.executed` event;
+- `preflighting` and `unconfirmed` Runs have no matching terminal event of either kind; and
+- that event and the stored Receipt decode to the same versioned value and remain exactly
+  byte-equal.
 
 An unknown version, malformed versioned shape, unknown summary or outcome, or mismatch among JSON,
 SQL, Run state, and event fails startup reconciliation closed. V1 remains accepted only through its
@@ -154,14 +167,17 @@ Acceptance authorizes only the later backend persistence slice in:
 
 - `crates/beacond/src/declared_checks.rs` — v1/v2 types, summary derivation, uncertainty derivation,
   and versioned replay;
-- `crates/beacond/src/check_preflight.rs` — only the generic startup Receipt-cardinality rule for
-  the new terminal `incomplete` Run state, with no preflight behavior or Receipt change;
+- `crates/beacond/src/check_preflight.rs` — only generic startup Receipt/event cardinality and exact
+  preflight startup reconciliation, with no preflight execution behavior or Receipt
+  shape/serialization change;
 - `crates/beacond/src/sandbox/bounded.rs` — only classify the existing post-spawn observation-error
   branch as `ObservationFailed` while keeping pre-spawn failures `NotStarted`;
 - `crates/beacond/src/lib.rs` — migration registration, schema reconciliation, and migration/replay
   tests;
 - `crates/beacond/migrations/0016_execution_receipt_v2.sql` — byte-preserving schema expansion;
 - `crates/beacond/tests/declared_checks.rs` — observable execution-contract regressions; and
+- `crates/beacond/tests/mission.rs` — schema-version consumer evidence only; and
+- `crates/beacond/tests/team.rs` — schema-version consumer evidence only; and
 - this ADR.
 
 No `check_preflight` execution or Receipt contract, wire or desktop interface, dependency,
@@ -186,8 +202,9 @@ Implementation begins with tests that fail against these plausible wrong answers
 4. A post-dispatch case in which every record is `NotStarted` still asserts the single `Incomplete`
    summary and `incomplete` state; no second zero-start summary is introduced.
 5. Early inadmissible-preflight and worktree-creation failures assert `refused`, no fabricated
-   records, and no fabricated working directory, while the positive terminal outcomes—including
-   non-zero exit, signal, bound, and interruption—remain eligible for `Completed`/`verified`.
+   records, no fabricated working directory, and fixed recomputable gaps with no dynamic error
+   prose, while the positive terminal outcomes—including non-zero exit, signal, bound, and
+   interruption—remain eligible for `Completed`/`verified`.
 6. Declared Check integration runs `setsid sleep 5 & echo started; exit 0` on an enforcing host and
    asserts `Exited { code: 0 }`, `output_incomplete = true`, `output_truncated = false`, and the
    matching uncertainty. A separate small-output cap asserts truncation without incompleteness;
@@ -196,15 +213,22 @@ Implementation begins with tests that fail against these plausible wrong answers
    uncertainty ordering is run, canonical checks, cleanup rather than collection accident.
 8. A dispatched v2 Receipt asserts retained reachability-from-ref, conditional UDP, and
    filesystem-effect/diff gaps, while rejecting copied preflight never-ran-checks and resource-bound
-   prose. Per-outcome cases assert each exact gap and that non-zero exit is not uncertainty.
+   prose. Table-driven early-refusal cases cover every `PreflightOutcome` and retain each later
+   unestablished stage. Per-outcome cases assert exact `NotStarted`, `Interrupted`, and
+   `ObservationFailed` gaps and that non-zero exit is not uncertainty.
 9. Tamper cases independently mismatch SQL version, SQL outcome, Run state, Receipt JSON, and event
    JSON; malformed and unknown v1/v2 shapes also fail startup closed. For each version, strict
    decoder cases inject an unknown embedded preflight outcome and unknown cleanup outcome or keep
    reason and assert rejection, proving recursive closure rather than top-level strictness alone.
+   Unknown summaries and execution outcomes, missing or duplicate identical `run.executed` events,
+   a relabelled execution with no matching `run.preflighted` event, and a `check_preflight` Run
+   carrying execution-only state `incomplete` also fail closed. Independent preflight cases
+   mismatch SQL version and outcome while leaving its exact v1 JSON and event valid. V1 rejects
+   both `incomplete` and unknown future summaries.
 10. A synthetic v2 `ObservationFailed` record asserts `Incomplete`, Run state `incomplete`, its
     exact status/output/effects uncertainty, and retained UDP uncertainty. Strict-decoder cases
     assert v2 accepts that shape, v1 rejects it, and a historical v1 `NotStarted` await-error record
     remains replayable only through the frozen nested v1 decoder.
 
-This proposal becomes accepted only with non-author review of the exact commit and explicit Product
-Steward sign-off before merge.
+Accepted 2026-08-30 by the Product Steward. The implementation still requires non-author review of
+the exact commit before merge under the repository's moderate-change rule.

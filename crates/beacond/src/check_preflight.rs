@@ -683,30 +683,67 @@ pub(crate) fn verify_run_state(connection: &Connection) -> Result<u64, CheckPref
         params![now],
     )?;
 
-    // Every terminal Run has exactly one Receipt, and no open Run has any.
+    // One reconciliation owns kind, state, Receipt, and terminal-event
+    // cardinality so compound relabelling cannot move a Run between separate
+    // validators and disappear from both.
     let mut statement = connection.prepare(
-        "SELECT runs.state, count(receipts.run_id)
-         FROM runs LEFT JOIN receipts
-           ON receipts.workspace_id = runs.workspace_id AND receipts.run_id = runs.id
-         GROUP BY runs.workspace_id, runs.id",
+        "SELECT runs.kind, runs.state,
+                (SELECT count(*) FROM receipts
+                 WHERE receipts.workspace_id = runs.workspace_id
+                   AND receipts.run_id = runs.id),
+                (SELECT count(*) FROM events
+                 WHERE events.workspace_id = runs.workspace_id
+                   AND events.kind = 'run.preflighted'
+                   AND json_extract(events.payload_json, '$.runId') = runs.id),
+                (SELECT count(*) FROM events
+                 WHERE events.workspace_id = runs.workspace_id
+                   AND events.kind = 'run.executed'
+                   AND json_extract(events.payload_json, '$.runId') = runs.id)
+         FROM runs",
     )?;
     let rows = statement
         .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    for (state, receipts) in rows {
-        let expected = match state.as_str() {
-            "refused" | "verified" => 1,
+    for (kind, state, receipts, preflight_events, execution_events) in rows {
+        let expected = match (kind.as_str(), state.as_str()) {
+            ("check_preflight", "refused" | "verified") => (1, 1, 0),
+            ("declared_checks", "refused" | "verified" | "incomplete") => (1, 0, 1),
             // An unconfirmed Run is precisely one that never recorded a Receipt.
-            "preflighting" | "unconfirmed" => 0,
+            ("check_preflight" | "declared_checks", "preflighting" | "unconfirmed") => (0, 0, 0),
             _ => return Err(CheckPreflightError::InvalidStore),
         };
-        if receipts != expected {
+        if (receipts, preflight_events, execution_events) != expected {
             return Err(CheckPreflightError::InvalidStore);
         }
     }
     u64::try_from(expired).map_err(|_| CheckPreflightError::InvalidStore)
+}
+
+#[derive(Debug)]
+pub(crate) enum RunEventReplayError {
+    EvidenceMismatch,
+    RunStateMismatch,
+    Store(rusqlite::Error),
+}
+
+impl From<rusqlite::Error> for RunEventReplayError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Store(error)
+    }
+}
+
+impl From<serde_json::Error> for RunEventReplayError {
+    fn from(_error: serde_json::Error) -> Self {
+        Self::EvidenceMismatch
+    }
 }
 
 /// Replay one `run.preflighted` event against the stored Receipt.
@@ -715,22 +752,70 @@ pub(crate) fn verify_run_event(
     workspace_id: Uuid,
     occurred_at_ms: u64,
     payload_json: &str,
-) -> Result<(), CheckPreflightError> {
+) -> Result<(), RunEventReplayError> {
     let receipt: PreflightReceipt = serde_json::from_str(payload_json)?;
     if receipt.version != 1 || receipt.ended_at_ms != occurred_at_ms {
-        return Err(CheckPreflightError::InvalidStore);
+        return Err(RunEventReplayError::EvidenceMismatch);
     }
-    let stored: Option<String> = connection
+    let stored: Option<(i64, String, String, String, String)> = connection
         .query_row(
-            "SELECT receipt_json FROM receipts WHERE workspace_id = ?1 AND run_id = ?2",
+            "SELECT receipts.version, receipts.outcome, receipts.receipt_json,
+                    runs.kind, runs.state
+             FROM receipts
+             JOIN runs
+               ON runs.workspace_id = receipts.workspace_id
+              AND runs.id = receipts.run_id
+             WHERE receipts.workspace_id = ?1 AND receipts.run_id = ?2",
             params![workspace_id.to_string(), receipt.run_id.to_string()],
-            |row| row.get(0),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .optional()?;
-    let stored = stored.ok_or(CheckPreflightError::InvalidStore)?;
-    let stored: PreflightReceipt = serde_json::from_str(&stored)?;
-    if stored != receipt {
-        return Err(CheckPreflightError::InvalidStore);
+    let (stored_version, stored_outcome, stored_json, run_kind, run_state) =
+        stored.ok_or(RunEventReplayError::EvidenceMismatch)?;
+    let stored: PreflightReceipt = serde_json::from_str(&stored_json)?;
+    if stored_version != i64::from(receipt.version)
+        || stored_outcome != receipt.outcome.as_str()
+        || stored_json != payload_json
+        || stored != receipt
+    {
+        return Err(RunEventReplayError::EvidenceMismatch);
+    }
+    if run_kind != "check_preflight" || run_state != receipt.outcome.run_state() {
+        return Err(RunEventReplayError::RunStateMismatch);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::Connection;
+
+    use super::RunEventReplayError;
+
+    #[test]
+    fn run_event_replay_preserves_sqlite_errors_as_store_failures() {
+        let connection = Connection::open_in_memory().unwrap();
+        let sqlite_error = connection
+            .query_row("SELECT value FROM missing_table", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap_err();
+
+        let replay_error = RunEventReplayError::from(sqlite_error);
+
+        match replay_error {
+            RunEventReplayError::Store(rusqlite::Error::SqliteFailure(_, Some(message))) => {
+                assert!(message.contains("no such table"));
+            }
+            other => panic!("SQLite error was not preserved as Store: {other:?}"),
+        }
+    }
 }
