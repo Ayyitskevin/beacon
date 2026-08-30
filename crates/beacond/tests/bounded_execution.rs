@@ -244,3 +244,108 @@ fn an_interrupted_outcome_rejects_a_smuggled_field() {
         "an interrupted Run must not accept a ceiling it never hit"
     );
 }
+
+#[test]
+fn a_detached_descendant_holding_the_pipe_cannot_outlast_the_ceiling() {
+    if !enforcing_or_skip() {
+        return;
+    }
+    // The regression that motivated the bounded collector. The direct child
+    // exits at once, but leaves a `setsid` grandchild holding stdout. EOF
+    // arrives only when the LAST holder closes, and `terminate_group` cannot
+    // reach a process that left the group -- so joining the reader put the same
+    // unbounded wait back that had just been removed from the poll loop.
+    //
+    // Every existing test here uses a direct child with no descendants, which
+    // is exactly why none of them could see it.
+    let scratch = std::env::temp_dir().join(format!("beacon-exec-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&scratch).unwrap();
+    let mut bounds = tiny_bounds();
+    bounds.wall_clock_ms = 1_000;
+    let started = Instant::now();
+    let record = run_bounded_for_test(
+        &[
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "setsid sleep 8 & echo started; exit 0".to_owned(),
+        ],
+        &scratch,
+        bounds,
+        None,
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "run_bounded took {}ms under a 1000ms ceiling: a descendant held it open",
+        elapsed.as_millis()
+    );
+    // The child really did exit cleanly, so the outcome is its exit -- the
+    // ceiling bounded the *collector*, not the process.
+    assert_eq!(record.outcome, ExecutionOutcome::Exited { code: 0 });
+    std::fs::remove_dir_all(&scratch).ok();
+}
+
+#[test]
+fn a_real_cpu_ceiling_reaches_bounded_rather_than_signalled() {
+    if !enforcing_or_skip() {
+        return;
+    }
+    // With `rlim_cur == rlim_max` the kernel's SIGXCPU and its SIGKILL arrive
+    // at the same instant, so a real CPU ceiling was indistinguishable from any
+    // other kill and reported `Signalled { signal: 9 }`. The soft limit now
+    // sits strictly below the hard one so the ceiling is observable.
+    let scratch = std::env::temp_dir().join(format!("beacon-exec-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&scratch).unwrap();
+    let mut bounds = tiny_bounds();
+    bounds.cpu_seconds = 1;
+    bounds.wall_clock_ms = 30_000;
+    let record = run_bounded_for_test(
+        &[
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "while :; do :; done".to_owned(),
+        ],
+        &scratch,
+        bounds,
+        None,
+    );
+    assert_eq!(
+        record.outcome,
+        ExecutionOutcome::Bounded {
+            ceiling: Ceiling::Cpu
+        },
+        "a Run that burned its CPU budget must name the ceiling"
+    );
+    std::fs::remove_dir_all(&scratch).ok();
+}
+
+#[test]
+fn a_ceiling_cannot_be_forged_by_the_run_itself() {
+    if !enforcing_or_skip() {
+        return;
+    }
+    // Classification reads the delivered signal, never the exit code. A
+    // Declared Check runs the repository's own code, so a ceiling keyed on an
+    // exit code would let a Run that merely wants to look throttled say so and
+    // be believed -- a guard on a value the guarded path supplies.
+    let scratch = std::env::temp_dir().join(format!("beacon-exec-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&scratch).unwrap();
+    for code in [152, 153, 137] {
+        let record = run_bounded_for_test(
+            &[
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                format!("exit {code}"),
+            ],
+            &scratch,
+            tiny_bounds(),
+            None,
+        );
+        assert_eq!(
+            record.outcome,
+            ExecutionOutcome::Exited { code },
+            "exit {code} must stay an exit, not become a ceiling the Run chose"
+        );
+    }
+    std::fs::remove_dir_all(&scratch).ok();
+}
