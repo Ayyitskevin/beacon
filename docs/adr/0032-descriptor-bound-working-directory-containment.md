@@ -144,6 +144,14 @@ repository-relative locator to a launcher that has no uncontained execution path
 launcher before the first check also keeps its root stable without making worktree creation own a
 sandbox concern or lose a cleanup-capable `Worktree` handle when descriptor setup is refused.
 
+The Landlock seam makes ownership explicit rather than passing a raw integer into today's
+path-owning helper. A private `Ruleset::build_for_worktree` (name not public API) receives
+`BorrowedFd<'_>` for the launcher's anchor and adds the write rule through a borrowed-descriptor
+variant that neither closes nor reopens it. `Ruleset` owns only its ruleset descriptor; the launcher
+continues to own the anchor. The existing path-opening helper remains only for the global `/` read
+grant. This contract prevents both a pathname re-resolution and an accidental close/recycled-fd
+failure while later `openat2` calls still depend on the anchor.
+
 ## Trust model and abuse cases
 
 Beacon trusts the source repository's *identity* — the operator bound it — and trusts nothing
@@ -217,7 +225,7 @@ into the executed program; `CLOEXEC` closes them at `exec` precisely then. This 
 existing treatment of the Landlock ruleset descriptor, which is likewise used in `pre_exec` and
 never leaks.
 
-The child's order inside `pre_exec`, which is the load-bearing part of this record:
+The child's chosen order inside `pre_exec`:
 
 1. `fstat(bound_fd)` and refuse an already-unlinked directory.
 2. `fchdir(bound_fd)` — adopt the bound directory while it cannot be retargeted by name.
@@ -225,6 +233,11 @@ The child's order inside `pre_exec`, which is the load-bearing part of this reco
 4. `setpgid(0, 0)` — unchanged.
 5. `landlock_restrict_self(ruleset_fd)` — last, unchanged, still irreversible.
 6. `exec` — descriptors close.
+
+The load-bearing ordering edges are `fstat` before `fchdir`, both before Landlock and `exec`, and
+Landlock last before `exec`. Placing `fchdir` before the unchanged limits and process-group calls is
+the selected deterministic sequence, not a separate claim that those calls would weaken descriptor
+binding if they preceded it.
 
 `fstat` and `fchdir` are syscalls that allocate nothing and take no userspace lock, so they are
 legal between `fork` and `exec`, which the existing closure's safety comment already requires of
@@ -241,9 +254,12 @@ a host whose Landlock capability it cannot prove, so a second kernel floor intro
 of refusal. A host without `openat2` — `ENOSYS`, or `E2BIG` from an unrecognised `open_how` size —
 produces `NotStarted` with a reason naming the missing capability. `EXDEV` and `EAGAIN` from
 `RESOLVE_BENEATH` are refusals, not retries. The private resolver classifies `EXDEV`, `ELOOP`, and
-`EAGAIN` as unsafe or raced resolution; `ENOENT` and `ENOTDIR` as unavailable or not a directory;
-and `ENOSYS`, `EINVAL`, `E2BIG`, or policy `EPERM` as an unavailable resolver. The Receipt carries a
-stable human-readable category and observed errno, never an unbounded retry loop.
+`EAGAIN` as unsafe or raced resolution; `EACCES`, `ENOENT`, `ENOTDIR`, and `ENAMETOOLONG` as an
+unavailable or invalid directory; `EMFILE`, `ENFILE`, and `ENOMEM` as supervisor resource failure;
+and `ENOSYS`, `EINVAL`, `E2BIG`, or policy `EPERM` as an unavailable resolver. `EBADF` is an internal
+descriptor-invariant failure. Any other errno is an uncategorized resolver failure, still retained
+and still fail-closed. The Receipt carries a stable human-readable category and observed errno,
+never an unbounded retry loop.
 
 `SandboxCapability` is not extended in this record. The capability enum reports what the *sandbox*
 enforces; working-directory binding is a property of dispatch, not of the ruleset, and conflating
@@ -300,20 +316,22 @@ Acceptance authorizes only:
 - `crates/beacond/src/sandbox/bounded.rs` — add child-side `fstat` and `fchdir`, remove
   `current_dir`, and keep the existing limits, process group, output collection, ceilings, and
   Landlock-last rule;
-- `crates/beacond/src/sandbox/landlock.rs` — grant worktree writes from the launcher's retained root
-  descriptor rather than reopening its pathname; global read policy remains unchanged;
+- `crates/beacond/src/sandbox/landlock.rs` — add the private borrowed-descriptor constructor/grant
+  above, never close or reopen the launcher's anchor, and leave the global path-opened read grant
+  unchanged;
 - `crates/beacond/src/declared_checks.rs` — construct one launcher before the first check, dispatch
   through it in canonical order, and preserve later-check continuation;
-- `crates/beacond/tests/declared_checks.rs`, `crates/beacond/tests/sandbox.rs`, and
-  `crates/beacond/tests/bounded_execution.rs` — the integration cases in the matrix below;
+- `crates/beacond/tests/declared_checks.rs` and `crates/beacond/tests/bounded_execution.rs` — the
+  integration cases in the matrix below;
 - source-local `#[cfg(test)]` modules only inside the authorized Rust source files above, including
   the resolver's exact-flag mutation guard; and
 - this ADR.
 
-No `worktree.rs`, preflight behavior, Receipt contract, migration, schema, wire, transport, or
-desktop interface change; no new dependency; and no change to Proposal, Ruling, or authority.
-Declared Check execution remains a backend-only Owner-bound method unavailable over Beacon's
-production transport; this record does not make it an Agent execution path.
+No `crates/beacond/src/worktree.rs`, `crates/beacond/tests/worktree.rs`,
+`crates/beacond/tests/sandbox.rs`, preflight behavior, Receipt contract, migration, schema, wire,
+transport, or desktop interface change; no new dependency; and no change to Proposal, Ruling, or
+authority. Declared Check execution remains a backend-only Owner-bound method unavailable over
+Beacon's production transport; this record does not make it an Agent execution path.
 
 ## Non-goals
 
@@ -352,7 +370,13 @@ calling those red would be false evidence.
    `RESOLVE_NO_MAGICLINKS`; a behavioral `/proc/self/fd/N` case is retained as defense in depth.
    The flag assertion matters because current kernels also reject magic links under
    `RESOLVE_BENEATH`, so behavior alone cannot detect the plausible wrong implementation.
-5. **STAGED RED — deleted and in-tree-renamed cwd.** A neutral test-only barrier first makes the
+5. **MUTATION — borrowed anchor identity and lifetime.** A source-local test opens the anchor, moves
+   its pathname and installs a decoy at the old name, then builds the write rule through the borrowed
+   descriptor. The anchor descriptor must remain valid after ruleset construction, and an isolated
+   restricted child must prove that the rule grants the descriptor-pinned original rather than the
+   decoy. The test fails if the borrowed helper closes the caller's descriptor or reopens the old
+   pathname; ordinary write-confinement behavior alone cannot distinguish either wrong answer.
+6. **STAGED RED — deleted and in-tree-renamed cwd.** A neutral test-only barrier first makes the
    pre-spawn pathname race deterministic and proves current dispatch can enter a replacement. After
    descriptor binding, deletion observed by child `fstat` yields `NotStarted` and no target-program
    effect. A Beacon-confined actor renaming the selected directory within the worktree and installing
@@ -361,20 +385,20 @@ calling those red would be false evidence.
    to the outside replacement, but its ancestry is not re-established and no outcome may claim name
    liveness. A cross-root rename by an independently privileged host actor is excluded, as stated in
    the trust model.
-6. **REGRESSION — relative internal symlink.** A relative symlink resolving within the worktree is accepted and runs there.
+7. **REGRESSION — relative internal symlink.** A relative symlink resolving within the worktree is accepted and runs there.
    This is the regression that fails if containment is implemented as `RESOLVE_NO_SYMLINKS`. Rows
    1–3, not this case, detect a string-prefix implementation.
-7. **REGRESSION — Receipt separation.** The embedded preflight `resolved_working_directory` remains the
+8. **REGRESSION — Receipt separation.** The embedded preflight `resolved_working_directory` remains the
    source-tree value and is unchanged after execution. `ExecutionRecord.working_directory` is the
    attempted disposable-worktree locator on both success and refusal. Fails if execution mutates
    preflight evidence, calls the display locator canonical, or omits the attempted locator.
-8. **REGRESSION — later-check continuation.** A refused bind in check two does not stop check three: one record
+9. **REGRESSION — later-check continuation.** A refused bind in check two does not stop check three: one record
    per declaration, canonical order, existing summary and Run-state rules from ADR 0031 unchanged.
-9. **REGRESSION — existing write confinement.** A check that reaches a contained directory still cannot write
+10. **REGRESSION — existing write confinement.** A check that reaches a contained directory still cannot write
    outside the worktree. This is a regression guard on ADR 0029, and it must be red if the
    ruleset's write target is disturbed.
 
-A tenth is a property, not a case: no test may pass while `Command::current_dir` remains on this
+An eleventh is a property, not a case: no test may pass while `Command::current_dir` remains on this
 path. A grep-level assertion is acceptable evidence for it.
 
 ## Rollout and reversal
