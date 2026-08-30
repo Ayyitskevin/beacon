@@ -40,7 +40,9 @@ pub use local_transport::{
 };
 #[cfg(unix)]
 pub use sandbox::{
-    ProbeObservation, SandboxCapability, SandboxUnavailableReason, detect as detect_sandbox,
+    Ceiling, ExecutionBounds, ExecutionOutcome, ExecutionRecord, Interrupt, ProbeObservation,
+    SandboxCapability, SandboxUnavailableReason, detect as detect_sandbox, interrupt_channel,
+    run_bounded_for_test,
 };
 
 pub use local_model_activation::{
