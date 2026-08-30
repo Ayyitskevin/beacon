@@ -1037,11 +1037,11 @@ fn authenticated_client_binds_project_repository_over_the_real_socket() {
             .is_none()
     );
 
-    // Declaration only: the Janus repository at 6b62110 is never opened by this test.
+    // Declaration only: this fabricated path is never opened by this test.
     let draft = RepositoryDraft {
         source_kind: RepositorySourceKind::LocalPath,
-        source: "/home/kevin-lee/ai-workspace/janus".to_owned(),
-        base_revision: "6b62110e9c918c67219ab0b45dbf4dd9937d6620".to_owned(),
+        source: "/home/operator/projects/sample-tracker".to_owned(),
+        base_revision: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2".to_owned(),
         declared_checks: vec![DeclaredCheck {
             name: "pytest".to_owned(),
             argv: vec![

@@ -7,10 +7,16 @@
 | Beacon tree under test | branch `claude/project-repository-binding`, single commit on base `main@6294d79` |
 | Beacon crate versions | `beacond` 0.1.0, `beacon-desktop` 0.1.0 |
 | Schema version under test | 13 (`0013_project_repository.sql`) |
-| Janus fixture declared by the tests | `6b62110e9c918c67219ab0b45dbf4dd9937d6620` at `/home/kevin-lee/ai-workspace/janus` |
-| How the fixture commit was resolved | `git -C /home/kevin-lee/ai-workspace/janus rev-parse 6b62110`, run once by the orchestrator on 2026-08-29 and hard-coded |
+| Repository fixture declared by the tests | `6b62110…` at `<author checkout>/janus` — redacted, and since replaced; see the note below |
+| How the fixture commit was resolved | `git rev-parse` against a repository on the author's machine, run once by the orchestrator on 2026-08-29 and hard-coded |
 | What the fixture is | a declaration only — no test in this slice opens that directory, reads `.git`, or runs a declared check |
 | Host | Linux, `cargo test`/`vitest` on the repository's own `.venv`, Node 22, npm 10.9.8 |
+
+> **Redacted 2026-08-30.** This eval ran against a fixture that named an absolute path inside the
+> author's home directory. ADR 0028 made Beacon a standalone public product and removed such
+> fixtures; the tests now declare a fabricated path and a synthetic commit id instead. The rows
+> above are preserved as a record of what was verified on 2026-08-29, with the path redacted. The
+> verification itself is unaffected — the fixture was a declaration that no test ever opened.
 
 Scope: schema-v13 migration, public Project Repository service, authenticated Unix transport, Tauri
 command manifest and wire-error mapping, strict TypeScript parsing, and the accessible
@@ -110,7 +116,7 @@ green before the next one.
 
 The whole-repository gate passed after the v13 migration preserved both closure triggers and the
 Tauri capability assertion included every new command. This evidence covers a declaration record
-only: it does not establish that the Janus repository exists at that commit, that its checks pass,
+only: it does not establish that the declared repository exists at that commit, that its checks pass,
 or that any check has ever run. Independent exact-candidate review and Product Steward sign-off
 still belong to the branch handoff. This evidence does not authorize merge, deployment, or live
 migration.

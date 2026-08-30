@@ -12,15 +12,18 @@ use beacond::{
 use rusqlite::Connection;
 use uuid::Uuid;
 
-/// The first real Repository Binding named by ADR 0025: the Janus repository at `6b62110`.
+/// A fabricated Repository Binding: a plausible local path and a synthetic commit id, neither of
+/// which names anything that exists.
 ///
-/// The 40-hex base revision below is the output of
-/// `git -C /home/kevin-lee/ai-workspace/janus rev-parse 6b62110`, resolved on 2026-08-29 and
-/// hard-coded here on purpose. These tests never open that directory, never run `git`, and never
-/// run a declared check: a Repository Binding is a declaration, and confirming that the commit
-/// exists is a liveness claim this slice deliberately does not make.
-const JANUS_SOURCE: &str = "/home/kevin-lee/ai-workspace/janus";
-const JANUS_BASE_REVISION: &str = "6b62110e9c918c67219ab0b45dbf4dd9937d6620";
+/// ADR 0026 makes a Binding a pure declaration, so these tests never open the directory, never run
+/// `git`, and never run a declared check — confirming that a commit exists is a liveness claim this
+/// slice deliberately does not make. Nothing here needs a real repository, and ADR 0028 requires
+/// that a fixture be constructed by the test rather than borrowed from the machine that wrote it.
+///
+/// The revision is patterned rather than random so that no reader mistakes it for a commit that
+/// could be looked up somewhere.
+const SAMPLE_SOURCE: &str = "/home/operator/projects/sample-tracker";
+const SAMPLE_BASE_REVISION: &str = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
 
 struct TestStore {
     path: PathBuf,
@@ -115,8 +118,8 @@ fn ruff_check() -> DeclaredCheck {
 fn repository_draft() -> RepositoryDraft {
     RepositoryDraft {
         source_kind: RepositorySourceKind::LocalPath,
-        source: JANUS_SOURCE.to_owned(),
-        base_revision: JANUS_BASE_REVISION.to_owned(),
+        source: SAMPLE_SOURCE.to_owned(),
+        base_revision: SAMPLE_BASE_REVISION.to_owned(),
         declared_checks: vec![pytest_check()],
     }
 }
@@ -151,8 +154,8 @@ fn operator_binds_first_repository_revision_to_the_current_charter() {
     assert_eq!(repository.revision, 1);
     assert_eq!(repository.charter_revision, project.charter.revision);
     assert_eq!(repository.source_kind, RepositorySourceKind::LocalPath);
-    assert_eq!(repository.source, JANUS_SOURCE);
-    assert_eq!(repository.base_revision, JANUS_BASE_REVISION);
+    assert_eq!(repository.source, SAMPLE_SOURCE);
+    assert_eq!(repository.base_revision, SAMPLE_BASE_REVISION);
     assert_eq!(repository.declared_checks, vec![pytest_check()]);
     assert_eq!(repository.author_kind, RepositoryAuthor::Operator);
     assert!(repository.applies_to_current_charter);
@@ -198,8 +201,8 @@ fn operator_binds_first_repository_revision_to_the_current_charter() {
             project.id.to_string(),
             1,
             "local_path".to_owned(),
-            JANUS_SOURCE.to_owned(),
-            JANUS_BASE_REVISION.to_owned(),
+            SAMPLE_SOURCE.to_owned(),
+            SAMPLE_BASE_REVISION.to_owned(),
             "pytest".to_owned(),
             "operator".to_owned(),
             i64::try_from(repository.authored_at_ms).unwrap(),
@@ -237,7 +240,7 @@ fn invalid_repository_drafts_are_refused_without_partial_state() {
     let mut short_revision = repository_draft();
     short_revision.base_revision.truncate(39);
     let mut uppercase_revision = repository_draft();
-    uppercase_revision.base_revision = JANUS_BASE_REVISION.to_uppercase();
+    uppercase_revision.base_revision = SAMPLE_BASE_REVISION.to_uppercase();
     let mut nonhex_revision = repository_draft();
     nonhex_revision.base_revision = "z".repeat(40);
     for draft in [short_revision, uppercase_revision, nonhex_revision] {
@@ -250,12 +253,12 @@ fn invalid_repository_drafts_are_refused_without_partial_state() {
     }
 
     let mut relative_path = repository_draft();
-    relative_path.source = "ai-workspace/janus".to_owned();
+    relative_path.source = "projects/sample-tracker".to_owned();
     let mut trailing_slash = repository_draft();
-    trailing_slash.source = format!("{JANUS_SOURCE}/");
+    trailing_slash.source = format!("{SAMPLE_SOURCE}/");
     let mut schemeless_url = repository_draft();
     schemeless_url.source_kind = RepositorySourceKind::GitUrl;
-    schemeless_url.source = "github.com/kevin/janus.git".to_owned();
+    schemeless_url.source = "git.example.invalid/operator/sample-tracker.git".to_owned();
     let mut empty_source = repository_draft();
     empty_source.source = String::new();
     for draft in [relative_path, trailing_slash, schemeless_url, empty_source] {
@@ -324,12 +327,15 @@ fn a_git_url_binding_is_accepted_without_contacting_the_remote() {
 
     let mut draft = repository_draft();
     draft.source_kind = RepositorySourceKind::GitUrl;
-    draft.source = "https://github.com/kevin/janus.git".to_owned();
+    draft.source = "https://git.example.invalid/operator/sample-tracker.git".to_owned();
 
     let repository = repositories.bind(project.id, 1, None, draft).unwrap();
 
     assert_eq!(repository.source_kind, RepositorySourceKind::GitUrl);
-    assert_eq!(repository.source, "https://github.com/kevin/janus.git");
+    assert_eq!(
+        repository.source,
+        "https://git.example.invalid/operator/sample-tracker.git"
+    );
 }
 
 #[test]
