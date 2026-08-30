@@ -124,8 +124,9 @@ Failure is closed and total. If `openat2` is unavailable or refuses resolution, 
 observes an already-unlinked descriptor, the target program does not start. The record uses the
 typed `ExecutionOutcome::NotStarted` variant with a stable categorized reason. **There is no
 string-canonicalization fallback.** A fallback would reintroduce exactly the check-then-use gap
-this record exists to close. An unlink that wins only after the child-side liveness check remains
-contained by the descriptor, as specified below, rather than being overstated as detectable.
+this record exists to close. An unlink that wins only after the child-side liveness check leaves a
+descriptor-pinned but possibly unnamed or disconnected directory: it cannot retarget to a
+replacement, but its ancestry is not re-established or overstated as detectable.
 
 ### Deep module boundary
 
@@ -280,11 +281,11 @@ run-then-checks-then-cleanup order.
 ## Concurrency testing
 
 Concurrency tests are deterministic or they are not evidence. No test in this work may sleep to
-create an interleaving. Ordering is established with an explicit barrier or a pipe: the test
-process blocks the child at a known point, performs the swap, releases it, and asserts the
-outcome. A test that passes only because a `sleep` happened to be long enough is a test that
-cannot fail for the right reason, and it will silently stop testing the race the first time CI is
-slow.
+create an interleaving. Ordering is established with an explicit barrier or a pipe: a test-only
+hook pauses the supervisor or dispatch thread after pathname handoff or descriptor binding and
+before spawn, the test process performs the swap, and the hook releases dispatch to assert the
+outcome. A test that passes only because a `sleep` happened to be long enough is a test that cannot
+fail for the right reason, and it will silently stop testing the race the first time CI is slow.
 
 ## Smallest implementation fence
 
@@ -356,12 +357,13 @@ calling those red would be false evidence.
    descriptor binding, deletion observed by child `fstat` yields `NotStarted` and no target-program
    effect. A Beacon-confined actor renaming the selected directory within the worktree and installing
    an outside symlink at its old name still runs in the descriptor-pinned original. A deletion raced
-   after `fstat` may produce a contained unnamed cwd; no outcome may enter the outside replacement
-   or claim name liveness. A cross-root rename by an independently privileged host actor is excluded,
-   as stated in the trust model.
+   after `fstat` may produce a descriptor-pinned but unnamed or disconnected cwd; it cannot retarget
+   to the outside replacement, but its ancestry is not re-established and no outcome may claim name
+   liveness. A cross-root rename by an independently privileged host actor is excluded, as stated in
+   the trust model.
 6. **REGRESSION — relative internal symlink.** A relative symlink resolving within the worktree is accepted and runs there.
-   This is the test that fails if containment is implemented as `RESOLVE_NO_SYMLINKS` or as a
-   string prefix comparison, and it is why it is in the matrix.
+   This is the regression that fails if containment is implemented as `RESOLVE_NO_SYMLINKS`. Rows
+   1–3, not this case, detect a string-prefix implementation.
 7. **REGRESSION — Receipt separation.** The embedded preflight `resolved_working_directory` remains the
    source-tree value and is unchanged after execution. `ExecutionRecord.working_directory` is the
    attempted disposable-worktree locator on both success and refusal. Fails if execution mutates
