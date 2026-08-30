@@ -39,6 +39,7 @@ import {
   loadProjectPolicy,
   loadProjectPolicyHistory,
   loadProjectRepository,
+  preflightProjectChecks,
   loadProjectRepositoryHistory,
   loadProjects,
   loadResidentCapabilityCatalog,
@@ -59,6 +60,7 @@ import {
   type ProjectDraft,
   type ProjectPolicy,
   type ProjectPolicyDraft,
+  type PreflightReceipt,
   type ProjectRepository,
   type RepositoryDraft,
   type ProjectSummary,
@@ -278,6 +280,7 @@ export function App() {
   const [projectPolicy, setProjectPolicy] = useState<ProjectPolicy | null>(null);
   const [projectPolicyHistory, setProjectPolicyHistory] = useState<ProjectPolicy[] | null>(null);
   const [projectRepository, setProjectRepository] = useState<ProjectRepository | null>(null);
+  const [preflightReceipt, setPreflightReceipt] = useState<PreflightReceipt | null>(null);
   const [projectRepositoryHistory, setProjectRepositoryHistory] = useState<
     ProjectRepository[] | null
   >(null);
@@ -325,6 +328,8 @@ export function App() {
       setProjectPolicy(null);
       setProjectPolicyHistory(null);
       setProjectRepository(null);
+    setPreflightReceipt(null);
+      setPreflightReceipt(null);
       setProjectRepositoryHistory(null);
       setTeams(null);
       setMissions(null);
@@ -376,6 +381,7 @@ export function App() {
     setProjectPolicy(null);
     setProjectPolicyHistory(null);
     setProjectRepository(null);
+    setPreflightReceipt(null);
     setProjectRepositoryHistory(null);
     setTeams(null);
     setMissions(null);
@@ -412,6 +418,8 @@ export function App() {
         setProjectPolicy(null);
         setProjectPolicyHistory(null);
         setProjectRepository(null);
+    setPreflightReceipt(null);
+      setPreflightReceipt(null);
         setProjectRepositoryHistory(null);
         setTeams(null);
         setMissions(null);
@@ -512,6 +520,8 @@ export function App() {
             setProjectPolicy(null);
             setProjectPolicyHistory(null);
             setProjectRepository(null);
+    setPreflightReceipt(null);
+      setPreflightReceipt(null);
             setProjectRepositoryHistory(null);
             setTeams(null);
             setMissions(null);
@@ -538,6 +548,8 @@ export function App() {
           setProjectPolicy(null);
           setProjectPolicyHistory(null);
           setProjectRepository(null);
+    setPreflightReceipt(null);
+      setPreflightReceipt(null);
           setProjectRepositoryHistory(null);
           setTeams(null);
           setMissions(null);
@@ -585,6 +597,8 @@ export function App() {
           setProjectPolicy(null);
           setProjectPolicyHistory(null);
           setProjectRepository(null);
+    setPreflightReceipt(null);
+      setPreflightReceipt(null);
           setProjectRepositoryHistory(null);
           setTeams(null);
           setMissions(null);
@@ -730,6 +744,8 @@ export function App() {
       setProjectPolicy(null);
       setProjectPolicyHistory(null);
       setProjectRepository(null);
+    setPreflightReceipt(null);
+      setPreflightReceipt(null);
       setProjectRepositoryHistory(null);
       setTeams(null);
       setMissions(null);
@@ -980,6 +996,8 @@ export function App() {
       setProjectPolicy(null);
       setProjectPolicyHistory([]);
       setProjectRepository(null);
+    setPreflightReceipt(null);
+      setPreflightReceipt(null);
       setProjectRepositoryHistory([]);
       setTeams([]);
       setMissions([]);
@@ -1057,7 +1075,16 @@ export function App() {
       );
       setProjectRepository(bound);
       setProjectRepositoryHistory((current) => [...(current ?? []), bound]);
+      // The Receipt described the previous binding, so it no longer applies.
+      setPreflightReceipt(null);
       setRepositoryComposerOpen(false);
+    });
+  }
+
+  async function preflightChecks() {
+    if (!selectedProject) return;
+    await runAction(async () => {
+      setPreflightReceipt(await preflightProjectChecks(selectedProject.id));
     });
   }
 
@@ -1288,6 +1315,7 @@ export function App() {
               charterComposerOpen={charterComposerOpen}
               policyComposerOpen={policyComposerOpen}
               repositoryComposerOpen={repositoryComposerOpen}
+              preflightReceipt={preflightReceipt}
               teamComposerOpen={teamComposerOpen}
               missionComposerOpen={missionComposerOpen}
               busy={busy}
@@ -1298,6 +1326,8 @@ export function App() {
                 setProjectPolicy(null);
                 setProjectPolicyHistory(null);
                 setProjectRepository(null);
+    setPreflightReceipt(null);
+      setPreflightReceipt(null);
                 setProjectRepositoryHistory(null);
                 setTeams(null);
                 setMissions(null);
@@ -1342,6 +1372,7 @@ export function App() {
               }}
               onCancelRepositoryComposer={() => setRepositoryComposerOpen(false)}
               onSubmitProjectRepository={(draft) => void bindRepository(draft)}
+              onPreflightChecks={() => void preflightChecks()}
               onOpenTeamComposer={() => void prepareTeamFormation()}
               onCancelTeamComposer={() => {
                 setTeamComposerOpen(false);

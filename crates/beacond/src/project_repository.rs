@@ -457,6 +457,62 @@ fn is_repository_relative(working_directory: &str) -> bool {
         .all(|component| !component.is_empty() && component != "." && component != "..")
 }
 
+/// The parts of a Repository Binding that Check Preflight verifies.
+///
+/// A narrow projection rather than the full [`ProjectRepository`] view: preflight
+/// needs the declaration, not its presentation, and comparing this type is how a
+/// Run detects that its binding moved underneath it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreflightBinding {
+    pub revision: u32,
+    pub charter_revision: u32,
+    pub source_kind: RepositorySourceKind,
+    pub source: String,
+    pub base_revision: String,
+    pub declared_checks: Vec<DeclaredCheck>,
+    pub applies_to_current_charter: bool,
+}
+
+impl PreflightBinding {
+    fn from_stored(stored: StoredProjectRepository, current_charter: u32) -> Self {
+        Self {
+            revision: stored.revision,
+            charter_revision: stored.charter_revision,
+            source_kind: stored.source_kind,
+            source: stored.source,
+            base_revision: stored.base_revision,
+            declared_checks: stored.declared_checks,
+            applies_to_current_charter: stored.charter_revision == current_charter,
+        }
+    }
+}
+
+/// The current Charter revision and the latest Repository Binding, if one exists.
+pub(crate) fn latest_repository_for_preflight(
+    connection: &Connection,
+    workspace_id: Uuid,
+    project_id: Uuid,
+) -> Result<(u32, Option<PreflightBinding>), ProjectRepositoryError> {
+    let current_charter = require_project(connection, workspace_id, project_id)?;
+    let latest = latest_stored_repository(connection, workspace_id, project_id)?
+        .map(|stored| PreflightBinding::from_stored(stored, current_charter));
+    Ok((current_charter, latest))
+}
+
+/// One stored Repository Binding revision, as preflight compares it.
+pub(crate) fn stored_repository_for_preflight(
+    connection: &Connection,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    revision: u32,
+) -> Result<Option<PreflightBinding>, ProjectRepositoryError> {
+    let current_charter = require_project(connection, workspace_id, project_id)?;
+    Ok(
+        load_stored_repository(connection, workspace_id, project_id, revision)?
+            .map(|stored| PreflightBinding::from_stored(stored, current_charter)),
+    )
+}
+
 fn require_project(
     connection: &Connection,
     workspace_id: Uuid,

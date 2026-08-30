@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   admitMission,
   bindProjectRepository,
+  preflightProjectChecks,
   activateLocalModel,
   activateResident,
   clearResidentConfiguration,
@@ -1011,5 +1012,75 @@ describe("desktop session transport", () => {
       ],
       ["resident_configurations"],
     ]);
+  });
+
+  it("accepts an exact preflight Receipt and rejects one that hides what it skipped", async () => {
+    const absent = (reason: string) => ({ kind: "absent", reason });
+    const receipt = {
+      version: 1,
+      runId: "7f1d5a9c-3b2e-4c8a-9d6f-1e2b3c4d5e6f",
+      workspaceId: "1a2b3c4d-5e6f-4a8b-9c0d-1e2f3a4b5c6d",
+      projectId: "2b3c4d5e-6f7a-4b8c-9d0e-2f3a4b5c6d7e",
+      repositoryRevision: 1,
+      charterRevision: 1,
+      outcome: "sandbox_unavailable",
+      sourceKind: "local_path",
+      source: "/home/operator/project",
+      baseRevision: "6b62110e9c918c67219ab0b45dbf4dd9937d6620",
+      resolvedChecks: [
+        {
+          name: "pytest",
+          argv: ["pytest", "-q"],
+          declaredWorkingDirectory: ".",
+          resolvedWorkingDirectory: { kind: "present", value: "/home/operator/project" },
+        },
+      ],
+      sandboxVersion: "none",
+      policyCharterRevision: 1,
+      policyRepositoryRevision: 1,
+      startedAtMs: 1,
+      endedAtMs: 2,
+      notVerified: ["base revision reachability from a ref (object presence verified only)"],
+      unavailable: {
+        proposalDigest: absent("no Proposal surface exists"),
+        rulingDigest: absent("no Proposal surface exists"),
+        resultingRevision: absent("preflight refuses to execute, so nothing ran"),
+        filesystemEffects: absent("preflight refuses to execute, so nothing ran"),
+        diffDigest: absent("preflight refuses to execute, so nothing ran"),
+        modelInvocations: absent("preflight performs no model inference"),
+        costUsdMicros: absent("preflight performs no model inference"),
+      },
+    };
+    invokeMock.mockResolvedValue(receipt);
+    await expect(preflightProjectChecks(receipt.projectId)).resolves.toEqual(receipt);
+    expect(invokeMock).toHaveBeenCalledWith("preflight_project_checks", {
+      projectId: receipt.projectId,
+    });
+
+    // A Receipt that cannot say what it skipped is not evidence.
+    const { notVerified: _dropped, ...withoutNotVerified } = receipt;
+    invokeMock.mockResolvedValue(withoutNotVerified);
+    await expect(preflightProjectChecks(receipt.projectId)).rejects.toThrow(
+      "invalid preflight Receipt",
+    );
+
+    invokeMock.mockResolvedValue({ ...receipt, surprise: true });
+    await expect(preflightProjectChecks(receipt.projectId)).rejects.toThrow(
+      "invalid preflight Receipt",
+    );
+
+    // An unavailable value is not an empty one.
+    invokeMock.mockResolvedValue({
+      ...receipt,
+      unavailable: { ...receipt.unavailable, proposalDigest: { kind: "present", value: "" } },
+    });
+    await expect(preflightProjectChecks(receipt.projectId)).resolves.toBeTruthy();
+    invokeMock.mockResolvedValue({
+      ...receipt,
+      unavailable: { ...receipt.unavailable, proposalDigest: { kind: "absent" } },
+    });
+    await expect(preflightProjectChecks(receipt.projectId)).rejects.toThrow(
+      "invalid preflight Receipt",
+    );
   });
 });

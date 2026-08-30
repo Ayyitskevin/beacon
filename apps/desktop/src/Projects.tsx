@@ -18,6 +18,7 @@ import type {
   ProjectDraft,
   ProjectPolicy,
   ProjectPolicyDraft,
+  PreflightReceipt,
   ProjectRepository,
   ProjectSummary,
   ProjectView,
@@ -31,6 +32,7 @@ import type {
 } from "./session";
 import { ProjectMissions } from "./ProjectMissions";
 import { ProjectPolicySection } from "./ProjectPolicy";
+import { CheckPreflightSection } from "./CheckPreflight";
 import { ProjectRepositorySection } from "./ProjectRepository";
 import { ProjectTeams } from "./ProjectTeams";
 
@@ -159,6 +161,7 @@ export function ProjectsWorkspace({
   charterComposerOpen,
   policyComposerOpen,
   repositoryComposerOpen,
+  preflightReceipt,
   teamComposerOpen,
   missionComposerOpen,
   busy,
@@ -176,6 +179,7 @@ export function ProjectsWorkspace({
   onOpenRepositoryComposer,
   onCancelRepositoryComposer,
   onSubmitProjectRepository,
+  onPreflightChecks,
   onOpenTeamComposer,
   onCancelTeamComposer,
   onSubmitTeam,
@@ -198,6 +202,7 @@ export function ProjectsWorkspace({
   charterComposerOpen: boolean;
   policyComposerOpen: boolean;
   repositoryComposerOpen: boolean;
+  preflightReceipt: PreflightReceipt | null;
   teamComposerOpen: boolean;
   missionComposerOpen: boolean;
   busy: boolean;
@@ -215,6 +220,7 @@ export function ProjectsWorkspace({
   onOpenRepositoryComposer: () => void;
   onCancelRepositoryComposer: () => void;
   onSubmitProjectRepository: (draft: RepositoryDraft) => void;
+  onPreflightChecks: () => void;
   onOpenTeamComposer: () => void;
   onCancelTeamComposer: () => void;
   onSubmitTeam: (draft: TeamDraft) => void;
@@ -275,6 +281,7 @@ export function ProjectsWorkspace({
           teamComposerOpen={teamComposerOpen}
           policyComposerOpen={policyComposerOpen}
           repositoryComposerOpen={repositoryComposerOpen}
+          preflightReceipt={preflightReceipt}
           missionComposerOpen={missionComposerOpen}
           busy={busy}
           onRevise={onReviseCharter}
@@ -284,6 +291,7 @@ export function ProjectsWorkspace({
           onOpenRepositoryComposer={onOpenRepositoryComposer}
           onCancelRepositoryComposer={onCancelRepositoryComposer}
           onSubmitProjectRepository={onSubmitProjectRepository}
+          onPreflightChecks={onPreflightChecks}
           onOpenTeamComposer={onOpenTeamComposer}
           onCancelTeamComposer={onCancelTeamComposer}
           onSubmitTeam={onSubmitTeam}
@@ -535,6 +543,7 @@ function ProjectRecord({
   teamComposerOpen,
   policyComposerOpen,
   repositoryComposerOpen,
+  preflightReceipt,
   missionComposerOpen,
   busy,
   onRevise,
@@ -544,6 +553,7 @@ function ProjectRecord({
   onOpenRepositoryComposer,
   onCancelRepositoryComposer,
   onSubmitProjectRepository,
+  onPreflightChecks,
   onOpenTeamComposer,
   onCancelTeamComposer,
   onSubmitTeam,
@@ -564,6 +574,7 @@ function ProjectRecord({
   teamComposerOpen: boolean;
   policyComposerOpen: boolean;
   repositoryComposerOpen: boolean;
+  preflightReceipt: PreflightReceipt | null;
   missionComposerOpen: boolean;
   busy: boolean;
   onRevise: () => void;
@@ -573,6 +584,7 @@ function ProjectRecord({
   onOpenRepositoryComposer: () => void;
   onCancelRepositoryComposer: () => void;
   onSubmitProjectRepository: (draft: RepositoryDraft) => void;
+  onPreflightChecks: () => void;
   onOpenTeamComposer: () => void;
   onCancelTeamComposer: () => void;
   onSubmitTeam: (draft: TeamDraft) => void;
@@ -672,6 +684,12 @@ function ProjectRecord({
         onOpenComposer={onOpenRepositoryComposer}
         onCancel={onCancelRepositoryComposer}
         onSubmit={onSubmitProjectRepository}
+      />
+      <CheckPreflightSection
+        receipt={preflightReceipt}
+        busy={busy}
+        canPreflight={repository !== null}
+        onPreflight={onPreflightChecks}
       />
       <ProjectTeams
         projectId={project.id}
