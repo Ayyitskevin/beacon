@@ -23,13 +23,13 @@ mod project_repository;
 mod resident_configuration;
 mod resident_lifecycle;
 mod resource_discovery;
+mod sandbox;
 mod starter_organization;
 mod team;
 
 #[cfg(unix)]
 mod local_transport;
 
-#[cfg(unix)]
 pub use check_preflight::{
     CheckPreflightError, CheckPreflightService, PreflightOutcome, PreflightReceipt, Recorded,
     ResolvedCheck, UnavailableEvidence,
@@ -37,6 +37,10 @@ pub use check_preflight::{
 pub use local_transport::{
     LocalErrorCode, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
     LocalTransportError, initialize_local_auth_token,
+};
+#[cfg(unix)]
+pub use sandbox::{
+    ProbeObservation, SandboxCapability, SandboxUnavailableReason, detect as detect_sandbox,
 };
 
 pub use local_model_activation::{
