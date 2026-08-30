@@ -1,6 +1,13 @@
 ---
-status: accepted
+status: superseded
 ---
+
+> **Superseded by ADR 0028** (Product Steward ruling, 2026-08-30): Beacon is a standalone
+> product, the pillars remain live and are not absorbed, and Alpha 1 proves itself against the
+> bundled Sample Project. The safety properties this record establishes — "disposable" naming the
+> worktree rather than the target, Bounded staying unavailable for repositories anyone would miss,
+> and pillars being targets rather than dependencies — are carried forward by 0028. Kept intact
+> because an ADR records what was decided and why, including a decision later reversed.
 
 # Prove Alpha 1 against the Operator's own fleet
 
