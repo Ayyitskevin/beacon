@@ -1,12 +1,13 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Bind a Declared Check's working directory to a descriptor, not to a path
 
-Proposed 2026-08-30. This record awaits Kevin's acceptance as Product Steward. No implementation
-begins before that acceptance: the change is security-relevant under GOVERNANCE.md, so it requires
-a written proposal, this decision record, one non-author review, and explicit sign-off.
+Accepted 2026-08-30 by Kevin as Product Steward at exact proposal commit
+`207e8474fe87ec850e7ca02448002e3145e1cd10`. The change is security-relevant under
+GOVERNANCE.md, so implementation remains bound to this decision, the authorized fence, the RED
+matrix, and one non-author exact-commit review before merge.
 
 ## Context
 
@@ -420,13 +421,8 @@ purpose is to run untrusted commands safely.
 
 ## Product Steward decision
 
-Kevin decides. This record is `proposed` and no implementation may begin under it.
-
-- **Accept** — implementation proceeds within the fence above, with the RED matrix observed red
-  first and one non-author review binding to the exact commit.
-- **Accept with amendment** — most likely on the symlink policy (whether internal symlinks stay
-  permitted) or on whether an `openat2`-unavailable host should refuse Declared Check execution
-  entirely rather than per check.
-- **Reject** — the comment in `run_checks` claiming re-resolution must then be corrected to state
-  what the code actually does, because leaving it is the SECURITY.md defect independent of any
-  containment work.
+Kevin accepted exact proposal commit `207e8474fe87ec850e7ca02448002e3145e1cd10` on
+2026-08-30. Implementation may proceed only within the fence above, with the RED matrix observed
+red first and one non-author review binding to the exact implementation commit. A material change
+to the accepted mechanism, semantics, threat model, fence, or test matrix requires a new Product
+Steward ruling before merge.
