@@ -77,7 +77,9 @@ fn scrub(worktree_path: &Path) {
 fn reasons(outcome: &CleanupOutcome) -> &[KeepReason] {
     match outcome {
         CleanupOutcome::Kept { reasons } => reasons,
-        CleanupOutcome::Removed => panic!("expected the worktree to be kept, and it was removed"),
+        CleanupOutcome::Removed {} => {
+            panic!("expected the worktree to be kept, and it was removed")
+        }
     }
 }
 
@@ -104,7 +106,7 @@ fn a_worktree_is_created_outside_the_repository_at_the_pinned_revision() {
         .unwrap();
     assert_eq!(String::from_utf8(head.stdout).unwrap().trim(), revision);
 
-    assert_eq!(worktree.close(), CleanupOutcome::Removed);
+    assert_eq!(worktree.close(), CleanupOutcome::Removed {});
     scrub(&path);
 }
 
@@ -117,7 +119,7 @@ fn a_clean_worktree_is_removed_and_takes_its_scratch_root_with_it() {
 
     let outcome = worktree.close();
 
-    assert_eq!(outcome, CleanupOutcome::Removed);
+    assert_eq!(outcome, CleanupOutcome::Removed {});
     assert!(!path.exists());
     assert!(!scratch_root.exists());
 }
@@ -332,14 +334,13 @@ fn a_missing_source_is_refused_as_unreadable() {
 }
 
 #[test]
-fn a_cleanup_outcome_round_trips_and_refuses_a_tag_it_does_not_know() {
-    // What an internally tagged enum actually enforces. It does NOT reject an
-    // unknown sibling key, which is why `deny_unknown_fields` is not on the
-    // type: serde ignores that attribute in this representation, and an
-    // attribute that reads as enforcement while enforcing nothing is worse than
-    // its absence. This test is the record of which half is real.
+fn a_cleanup_outcome_round_trips_and_refuses_anything_it_does_not_know() {
+    // The braces on `Removed {}` are what make `deny_unknown_fields` real.
+    // Under `tag = "kind"` serde enforces the attribute on a struct variant and
+    // silently ignores it on a unit variant, so this test is the guard on the
+    // guard: drop the braces in `worktree.rs` and the last assertion fails.
     for outcome in [
-        CleanupOutcome::Removed,
+        CleanupOutcome::Removed {},
         CleanupOutcome::Kept {
             reasons: vec![KeepReason::GateTimedOut, KeepReason::CheckFailed],
         },
@@ -351,16 +352,24 @@ fn a_cleanup_outcome_round_trips_and_refuses_a_tag_it_does_not_know() {
         );
     }
 
+    // The wire form an empty struct variant produces is the one a unit variant
+    // would have produced. Nothing downstream can tell them apart.
+    assert_eq!(
+        serde_json::to_string(&CleanupOutcome::Removed {}).unwrap(),
+        r#"{"kind":"removed"}"#
+    );
+
     assert!(serde_json::from_str::<CleanupOutcome>(r#"{"kind":"vanished"}"#).is_err());
     assert!(serde_json::from_str::<CleanupOutcome>(r#"{"kind":"kept"}"#).is_err());
     assert!(
         serde_json::from_str::<CleanupOutcome>(r#"{"kind":"kept","reasons":["nope"]}"#).is_err()
     );
-
-    let unknown_sibling = r#"{"kind":"removed","surprise":true}"#;
-    assert_eq!(
-        serde_json::from_str::<CleanupOutcome>(unknown_sibling).unwrap(),
-        CleanupOutcome::Removed,
-        "an unknown sibling key is accepted; deny_unknown_fields would not change that"
+    assert!(
+        serde_json::from_str::<CleanupOutcome>(r#"{"kind":"kept","reasons":[],"surprise":true}"#)
+            .is_err()
+    );
+    assert!(
+        serde_json::from_str::<CleanupOutcome>(r#"{"kind":"removed","surprise":true}"#).is_err(),
+        "a unit variant would accept this; the braces on Removed {{}} are why it does not"
     );
 }

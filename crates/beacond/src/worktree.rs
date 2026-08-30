@@ -101,19 +101,21 @@ pub enum KeepReason {
 
 /// What cleanup did.
 ///
-/// `Removed` is only reported when `git worktree remove` succeeded. Every other
+/// `Removed {}` is only reported when `git worktree remove` succeeded. Every other
 /// terminal state — including a removal that did not finish — is `Kept`.
-// `deny_unknown_fields` is deliberately absent. Serde does not enforce it on an
-// internally tagged enum: it buffers the map to read the tag, and the remaining
-// keys are matched leniently. The attribute would read as a guard while
-// enforcing nothing, which is the failure this codebase keeps naming. What is
-// enforced — an unknown tag, and a `kept` with no reasons — is asserted in
-// `tests/worktree.rs`.
+// `Removed {}` is an empty struct variant rather than a unit variant, and the
+// braces are load-bearing. Under `tag = "kind"`, serde enforces
+// `deny_unknown_fields` on struct variants and silently ignores it on unit
+// variants — measured, not assumed. The wire form is identical either way
+// (`{"kind":"removed"}`), so the braces cost nothing and are the only thing
+// keeping the attribute from reading as a guard while enforcing nothing.
+// `a_cleanup_outcome_round_trips_and_refuses_anything_it_does_not_know` fails
+// if they are ever dropped.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum CleanupOutcome {
     /// Git removed the worktree.
-    Removed,
+    Removed {},
     /// The worktree is still on disk, for these reasons.
     Kept { reasons: Vec<KeepReason> },
 }
@@ -296,7 +298,7 @@ impl Worktree {
                 // Best effort, and non-recursive on purpose: the scratch root is
                 // removed only if Git left it empty.
                 let _ = fs::remove_dir(&self.scratch_root);
-                CleanupOutcome::Removed
+                CleanupOutcome::Removed {}
             }
             Bounded::Finished { success: false, .. } => CleanupOutcome::Kept {
                 reasons: vec![KeepReason::RemovalRefused],
