@@ -106,6 +106,9 @@ pub enum ExecutionOutcome {
     Interrupted {},
     /// It could not be started. Nothing ran, so no exit status exists.
     NotStarted { reason: String },
+    /// The process started, but Beacon could not establish its terminal
+    /// status. Effects and continued activity may therefore remain.
+    ObservationFailed { reason: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -356,7 +359,7 @@ pub(crate) fn run_bounded(
                 let (stdout, stderr, truncated, incomplete) =
                     collect(Duration::from_millis(OUTPUT_GRACE_MS));
                 return record(
-                    ExecutionOutcome::NotStarted {
+                    ExecutionOutcome::ObservationFailed {
                         reason: format!("the Run could not be awaited: {error}"),
                     },
                     stdout,
