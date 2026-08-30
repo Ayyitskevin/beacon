@@ -16,17 +16,18 @@ use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use crate::{
-    AccessOrigin, BeaconCapability, BeaconCapabilityDescriptor, MissionDraft, MissionError,
-    MissionService, MissionView, OperatorAccountError, OperatorAccountService,
-    OperatorSessionPolicy, OperatorSessionStatus, PlatformSessionMonitor,
-    PlatformSessionMonitorStatus, ProjectCharter, ProjectCharterDraft, ProjectDraft, ProjectError,
-    ProjectPolicy, ProjectPolicyDraft, ProjectPolicyError, ProjectPolicyService, ProjectRepository,
-    ProjectRepositoryError, ProjectRepositoryService, ProjectService, ProjectSummary, ProjectView,
-    RecoveryKey, RepositoryDraft, ResidentAgentView, ResidentConfiguration,
-    ResidentConfigurationError, ResidentConfigurationService, ResidentLifecycleError,
-    ResidentLifecycleService, ResourceDiscoveryError, ResourceDiscoveryService, SecretString,
-    StarterOrganizationError, StarterOrganizationService, StarterOrganizationView,
-    StarterResidentDraft, StartupConfig, Supervisor, TeamDraft, TeamError, TeamService, TeamView,
+    AccessOrigin, BeaconCapability, BeaconCapabilityDescriptor, CheckPreflightError,
+    CheckPreflightService, MissionDraft, MissionError, MissionService, MissionView,
+    OperatorAccountError, OperatorAccountService, OperatorSessionPolicy, OperatorSessionStatus,
+    PlatformSessionMonitor, PlatformSessionMonitorStatus, PreflightReceipt, ProjectCharter,
+    ProjectCharterDraft, ProjectDraft, ProjectError, ProjectPolicy, ProjectPolicyDraft,
+    ProjectPolicyError, ProjectPolicyService, ProjectRepository, ProjectRepositoryError,
+    ProjectRepositoryService, ProjectService, ProjectSummary, ProjectView, RecoveryKey,
+    RepositoryDraft, ResidentAgentView, ResidentConfiguration, ResidentConfigurationError,
+    ResidentConfigurationService, ResidentLifecycleError, ResidentLifecycleService,
+    ResourceDiscoveryError, ResourceDiscoveryService, SecretString, StarterOrganizationError,
+    StarterOrganizationService, StarterOrganizationView, StarterResidentDraft, StartupConfig,
+    Supervisor, TeamDraft, TeamError, TeamService, TeamView,
 };
 
 const PROTOCOL_VERSION: u16 = 1;
@@ -88,6 +89,8 @@ pub enum LocalErrorCode {
     StaleProjectRepository,
     UnchangedProjectRepository,
     ProjectRepositoryUnavailable,
+    RepositoryNotBound,
+    PreflightUnavailable,
     InvalidTeam,
     TeamNotFound,
     StaleTeamMemberConfiguration,
@@ -129,6 +132,7 @@ pub enum LocalTransportError {
     Project(ProjectError),
     ProjectPolicy(ProjectPolicyError),
     ProjectRepository(ProjectRepositoryError),
+    CheckPreflight(CheckPreflightError),
     Team(TeamError),
     Mission(MissionError),
     ResourceDiscovery(ResourceDiscoveryError),
@@ -165,6 +169,7 @@ impl fmt::Display for LocalTransportError {
             Self::ProjectRepository(error) => {
                 write!(formatter, "Project Repository failed: {error}")
             }
+            Self::CheckPreflight(error) => write!(formatter, "check preflight failed: {error}"),
             Self::Team(error) => write!(formatter, "Team operation failed: {error}"),
             Self::Mission(error) => write!(formatter, "Mission operation failed: {error}"),
             Self::ResourceDiscovery(error) => {
@@ -236,6 +241,12 @@ impl From<ProjectPolicyError> for LocalTransportError {
 impl From<ProjectRepositoryError> for LocalTransportError {
     fn from(error: ProjectRepositoryError) -> Self {
         Self::ProjectRepository(error)
+    }
+}
+
+impl From<CheckPreflightError> for LocalTransportError {
+    fn from(error: CheckPreflightError) -> Self {
+        Self::CheckPreflight(error)
     }
 }
 
@@ -511,6 +522,12 @@ enum LocalCommand {
         expected_prior_repository_revision: Option<u32>,
         draft: RepositoryDraft,
     },
+    PreflightProjectChecks {
+        project_id: uuid::Uuid,
+    },
+    PreflightReceipts {
+        project_id: uuid::Uuid,
+    },
     Teams {
         project_id: uuid::Uuid,
     },
@@ -606,6 +623,12 @@ enum LocalResult {
     ProjectRepositoryHistory {
         repositories: Vec<ProjectRepository>,
     },
+    PreflightReceipt {
+        receipt: PreflightReceipt,
+    },
+    PreflightReceipts {
+        receipts: Vec<PreflightReceipt>,
+    },
     Teams {
         teams: Vec<TeamView>,
     },
@@ -652,6 +675,7 @@ pub struct LocalSupervisorServer {
     projects: ProjectService,
     project_policies: ProjectPolicyService,
     project_repositories: ProjectRepositoryService,
+    check_preflights: CheckPreflightService,
     teams: TeamService,
     missions: MissionService,
     resource_discovery: ResourceDiscoveryService,
@@ -687,6 +711,8 @@ impl LocalSupervisorServer {
             ProjectPolicyService::new(Arc::clone(&accounts), report.workspace.id);
         let project_repositories =
             ProjectRepositoryService::new(Arc::clone(&accounts), report.workspace.id);
+        let check_preflights =
+            CheckPreflightService::new(Arc::clone(&accounts), report.workspace.id);
         let teams = TeamService::new(Arc::clone(&accounts), report.workspace.id);
         let missions = MissionService::new(Arc::clone(&accounts), report.workspace.id);
         let resource_discovery =
@@ -715,6 +741,7 @@ impl LocalSupervisorServer {
             projects,
             project_policies,
             project_repositories,
+            check_preflights,
             teams,
             missions,
             resource_discovery,
@@ -961,6 +988,12 @@ impl LocalSupervisorServer {
                     repository: self.project_repositories.current(project_id)?,
                 }
             }
+            LocalCommand::PreflightProjectChecks { project_id } => LocalResult::PreflightReceipt {
+                receipt: self.check_preflights.preflight(project_id)?,
+            },
+            LocalCommand::PreflightReceipts { project_id } => LocalResult::PreflightReceipts {
+                receipts: self.check_preflights.receipts(project_id)?,
+            },
             LocalCommand::ProjectRepositoryHistory { project_id } => {
                 LocalResult::ProjectRepositoryHistory {
                     repositories: self.project_repositories.history(project_id)?,
@@ -1342,6 +1375,20 @@ impl LocalSupervisorClient {
         expect_project_repository(self.send(LocalCommand::CurrentProjectRepository { project_id })?)
     }
 
+    pub fn preflight_project_checks(
+        &self,
+        project_id: uuid::Uuid,
+    ) -> Result<PreflightReceipt, LocalTransportError> {
+        expect_preflight_receipt(self.send(LocalCommand::PreflightProjectChecks { project_id })?)
+    }
+
+    pub fn preflight_receipts(
+        &self,
+        project_id: uuid::Uuid,
+    ) -> Result<Vec<PreflightReceipt>, LocalTransportError> {
+        expect_preflight_receipts(self.send(LocalCommand::PreflightReceipts { project_id })?)
+    }
+
     pub fn project_repository_history(
         &self,
         project_id: uuid::Uuid,
@@ -1599,6 +1646,22 @@ fn expect_project_repository(
     }
 }
 
+fn expect_preflight_receipt(result: LocalResult) -> Result<PreflightReceipt, LocalTransportError> {
+    match result {
+        LocalResult::PreflightReceipt { receipt } => Ok(receipt),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
+fn expect_preflight_receipts(
+    result: LocalResult,
+) -> Result<Vec<PreflightReceipt>, LocalTransportError> {
+    match result {
+        LocalResult::PreflightReceipts { receipts } => Ok(receipts),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
 fn expect_project_repository_history(
     result: LocalResult,
 ) -> Result<Vec<ProjectRepository>, LocalTransportError> {
@@ -1684,6 +1747,7 @@ fn response_from_transport_error(error: LocalTransportError) -> ResponseEnvelope
         LocalTransportError::ProjectPolicy(error) => wire_error_from_project_policy(error),
         LocalTransportError::ProjectRepository(error) => wire_error_from_project_repository(error),
         LocalTransportError::Team(error) => wire_error_from_team(error),
+        LocalTransportError::CheckPreflight(error) => wire_error_from_check_preflight(error),
         LocalTransportError::Mission(error) => wire_error_from_mission(error),
         LocalTransportError::ResourceDiscovery(ResourceDiscoveryError::Account(error)) => {
             wire_error_from_account(error)
@@ -1811,6 +1875,24 @@ fn wire_error_from_project_repository(error: ProjectRepositoryError) -> WireErro
         ProjectRepositoryError::InvalidStore
         | ProjectRepositoryError::Store(_)
         | ProjectRepositoryError::Json(_) => LocalErrorCode::ProjectRepositoryUnavailable,
+    };
+    WireError {
+        code,
+        retry_after_ms: None,
+    }
+}
+
+/// A preflight that produced a Receipt is a success, whatever its outcome: the
+/// operator asked whether execution would be admissible and got an answer.
+/// These codes are only for the cases where no preflight could be attempted.
+fn wire_error_from_check_preflight(error: CheckPreflightError) -> WireError {
+    let code = match error {
+        CheckPreflightError::Account(error) => return wire_error_from_account(error),
+        CheckPreflightError::ProjectNotFound => LocalErrorCode::ProjectNotFound,
+        CheckPreflightError::RepositoryNotBound => LocalErrorCode::RepositoryNotBound,
+        CheckPreflightError::InvalidStore
+        | CheckPreflightError::Store(_)
+        | CheckPreflightError::Json(_) => LocalErrorCode::PreflightUnavailable,
     };
     WireError {
         code,
