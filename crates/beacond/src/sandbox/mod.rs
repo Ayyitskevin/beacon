@@ -15,6 +15,54 @@ pub use bounded::{
     Ceiling, ExecutionBounds, ExecutionOutcome, ExecutionRecord, Interrupt, interrupt_channel,
 };
 
+/// Run one command inside `working_directory`, writable only beneath
+/// `write_target`.
+///
+/// The write target is the worktree root rather than the working directory: a
+/// check declares where it runs, and a Run may write anywhere in the tree it
+/// was given. Refuses without an enforcing capability — a Run that cannot be
+/// contained does not start, and says so rather than running unconfined.
+pub(crate) fn run_in(
+    argv: &[String],
+    working_directory: &std::path::Path,
+    write_target: &std::path::Path,
+    bounds: ExecutionBounds,
+    capability: &SandboxCapability,
+    interrupt: Option<std::sync::mpsc::Receiver<()>>,
+) -> ExecutionRecord {
+    let refuse = |reason: String| ExecutionRecord {
+        argv: argv.to_vec(),
+        working_directory: working_directory.to_string_lossy().into_owned(),
+        outcome: ExecutionOutcome::NotStarted { reason },
+        stdout: String::new(),
+        stderr: String::new(),
+        output_truncated: false,
+        output_incomplete: false,
+        elapsed_ms: 0,
+        sandbox_version: capability.receipt_version(),
+    };
+    if !capability.admits_execution() {
+        return refuse(format!(
+            "this host cannot contain a Run ({})",
+            capability.receipt_version()
+        ));
+    }
+    let Some(abi) = landlock::abi_version() else {
+        return refuse("this host has no sandbox".to_owned());
+    };
+    match Ruleset::build(abi, &[write_target], true) {
+        Ok(ruleset) => run_bounded(
+            argv,
+            working_directory,
+            &ruleset,
+            bounds,
+            &capability.receipt_version(),
+            interrupt,
+        ),
+        Err(error) => refuse(format!("the ruleset could not be built: {error}")),
+    }
+}
+
 /// Run a command under a freshly built ruleset whose only write target is
 /// `working_directory`. Test-facing until the Execution surface composes a
 /// worktree with a Run; the composition is Slice B's seam, not this module's.
