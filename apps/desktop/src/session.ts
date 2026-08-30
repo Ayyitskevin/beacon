@@ -132,6 +132,62 @@ export type DeclaredCheck = {
   argv: string[];
   workingDirectory: string;
 };
+export type PreflightOutcome =
+  | "verified"
+  | "source_kind_unsupported"
+  | "binding_stale_for_charter"
+  | "repository_unreadable"
+  | "base_revision_unreachable"
+  | "declared_checks_changed"
+  | "working_directory_escapes"
+  | "sandbox_unavailable"
+  | "preflight_failed"
+  | "preflight_timed_out";
+
+/** A value the Receipt specification requires that a preflight cannot supply.
+ *  Absent is not empty: one was never available, the other was measured. */
+export type Recorded<T> = { kind: "present"; value: T } | { kind: "absent"; reason: string };
+
+export type ResolvedCheck = {
+  name: string;
+  argv: string[];
+  declaredWorkingDirectory: string;
+  resolvedWorkingDirectory: Recorded<string>;
+};
+
+export type UnavailableEvidence = {
+  proposalDigest: Recorded<string>;
+  rulingDigest: Recorded<string>;
+  resultingRevision: Recorded<string>;
+  filesystemEffects: Recorded<string>;
+  diffDigest: Recorded<string>;
+  modelInvocations: Recorded<number>;
+  costUsdMicros: Recorded<number>;
+};
+
+export type PreflightReceipt = {
+  version: number;
+  runId: string;
+  workspaceId: string;
+  projectId: string;
+  repositoryRevision: number;
+  charterRevision: number;
+  outcome: PreflightOutcome;
+  sourceKind: RepositorySourceKind;
+  source: string;
+  baseRevision: string;
+  resolvedChecks: ResolvedCheck[];
+  sandboxVersion: string;
+  policyCharterRevision: number;
+  policyRepositoryRevision: number;
+  startedAtMs: number;
+  endedAtMs: number;
+  /** Every step this preflight did not perform. Required: a Receipt that cannot
+   *  say what it failed to check is not evidence. */
+  notVerified: string[];
+  unavailable: UnavailableEvidence;
+};
+
 export type RepositoryDraft = {
   sourceKind: RepositorySourceKind;
   source: string;
@@ -604,6 +660,24 @@ export async function bindProjectRepository(
   );
 }
 
+export async function preflightProjectChecks(projectId: string): Promise<PreflightReceipt> {
+  return invokeAndValidate(
+    "preflight_project_checks",
+    { projectId },
+    isPreflightReceipt,
+    "preflight Receipt",
+  );
+}
+
+export async function loadPreflightReceipts(projectId: string): Promise<PreflightReceipt[]> {
+  return invokeAndValidate(
+    "preflight_receipts",
+    { projectId },
+    isPreflightReceiptList,
+    "preflight Receipt list",
+  );
+}
+
 export async function loadTeams(projectId: string): Promise<TeamView[]> {
   return invokeAndValidate("teams", { projectId }, isTeamList, "Team list");
 }
@@ -764,6 +838,10 @@ export function describeLocalAccountError(error: unknown): string {
       return "A selected Resident is no longer eligible for Team membership.";
     case "team_unavailable":
       return "Beacon could not verify Team state.";
+    case "repository_not_bound":
+      return "Bind a repository to this Project before preflighting its checks.";
+    case "preflight_unavailable":
+      return "Beacon could not record the preflight.";
     case "invalid_mission":
       return "Review the Mission outcome, success conditions, Team, and exact member evidence.";
     case "mission_not_found":
@@ -1305,6 +1383,113 @@ function isProjectRepository(value: unknown): value is ProjectRepository {
     isNonnegativeInteger(value.authoredAtMs) &&
     typeof value.appliesToCurrentCharter === "boolean"
   );
+}
+
+const PREFLIGHT_OUTCOMES: readonly PreflightOutcome[] = [
+  "verified",
+  "source_kind_unsupported",
+  "binding_stale_for_charter",
+  "repository_unreadable",
+  "base_revision_unreachable",
+  "declared_checks_changed",
+  "working_directory_escapes",
+  "sandbox_unavailable",
+  "preflight_failed",
+  "preflight_timed_out",
+];
+
+function isRecorded<T>(value: unknown, isValue: (candidate: unknown) => candidate is T): boolean {
+  if (hasExactKeys(value, ["kind", "reason"])) {
+    return value.kind === "absent" && typeof value.reason === "string";
+  }
+  if (hasExactKeys(value, ["kind", "value"])) {
+    return value.kind === "present" && isValue(value.value);
+  }
+  return false;
+}
+
+const isString = (value: unknown): value is string => typeof value === "string";
+const isNumber = (value: unknown): value is number => typeof value === "number";
+
+function isResolvedCheck(value: unknown): value is ResolvedCheck {
+  return (
+    hasExactKeys(value, ["argv", "declaredWorkingDirectory", "name", "resolvedWorkingDirectory"]) &&
+    typeof value.name === "string" &&
+    Array.isArray(value.argv) &&
+    value.argv.every(isString) &&
+    typeof value.declaredWorkingDirectory === "string" &&
+    isRecorded(value.resolvedWorkingDirectory, isString)
+  );
+}
+
+function isUnavailableEvidence(value: unknown): value is UnavailableEvidence {
+  return (
+    hasExactKeys(value, [
+      "costUsdMicros",
+      "diffDigest",
+      "filesystemEffects",
+      "modelInvocations",
+      "proposalDigest",
+      "resultingRevision",
+      "rulingDigest",
+    ]) &&
+    isRecorded(value.proposalDigest, isString) &&
+    isRecorded(value.rulingDigest, isString) &&
+    isRecorded(value.resultingRevision, isString) &&
+    isRecorded(value.filesystemEffects, isString) &&
+    isRecorded(value.diffDigest, isString) &&
+    isRecorded(value.modelInvocations, isNumber) &&
+    isRecorded(value.costUsdMicros, isNumber)
+  );
+}
+
+export function isPreflightReceipt(value: unknown): value is PreflightReceipt {
+  return (
+    hasExactKeys(value, [
+      "baseRevision",
+      "charterRevision",
+      "endedAtMs",
+      "notVerified",
+      "outcome",
+      "policyCharterRevision",
+      "policyRepositoryRevision",
+      "projectId",
+      "repositoryRevision",
+      "resolvedChecks",
+      "runId",
+      "sandboxVersion",
+      "source",
+      "sourceKind",
+      "startedAtMs",
+      "unavailable",
+      "version",
+      "workspaceId",
+    ]) &&
+    value.version === 1 &&
+    isUuid(value.runId) &&
+    isUuid(value.workspaceId) &&
+    isUuid(value.projectId) &&
+    typeof value.repositoryRevision === "number" &&
+    typeof value.charterRevision === "number" &&
+    PREFLIGHT_OUTCOMES.includes(value.outcome as PreflightOutcome) &&
+    (value.sourceKind === "local_path" || value.sourceKind === "git_url") &&
+    typeof value.source === "string" &&
+    typeof value.baseRevision === "string" &&
+    Array.isArray(value.resolvedChecks) &&
+    value.resolvedChecks.every(isResolvedCheck) &&
+    typeof value.sandboxVersion === "string" &&
+    typeof value.policyCharterRevision === "number" &&
+    typeof value.policyRepositoryRevision === "number" &&
+    typeof value.startedAtMs === "number" &&
+    typeof value.endedAtMs === "number" &&
+    Array.isArray(value.notVerified) &&
+    value.notVerified.every(isString) &&
+    isUnavailableEvidence(value.unavailable)
+  );
+}
+
+function isPreflightReceiptList(value: unknown): value is PreflightReceipt[] {
+  return Array.isArray(value) && value.every(isPreflightReceipt);
 }
 
 function isProjectRepositoryOrNull(value: unknown): value is ProjectRepository | null {
