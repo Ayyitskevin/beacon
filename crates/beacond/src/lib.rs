@@ -26,6 +26,7 @@ mod resource_discovery;
 mod sandbox;
 mod starter_organization;
 mod team;
+mod worktree;
 
 #[cfg(unix)]
 mod local_transport;
@@ -94,6 +95,7 @@ pub use team::{
     TeamDraft, TeamError, TeamFormationActor, TeamMemberDraft, TeamMemberView, TeamService,
     TeamView,
 };
+pub use worktree::{CleanupOutcome, KeepReason, Worktree, WorktreeError};
 
 const SCHEMA_VERSION: i64 = 14;
 const MAX_WORKSPACE_NAME_CHARS: usize = 120;
