@@ -254,6 +254,23 @@ Provider Feature subset, activate it as revocable Workspace eligibility, and dea
 running the model or granting Agent authority. Inside one Project, the authenticated Owner can form
 an immutable named Team from the exact current configurations of one or more eligible Residents.
 Formation is truthfully Operator-attributed, keeps later eligibility separate from formation
-evidence, assigns no permanent lead, and creates no Mission or authority. Resident-issued Team
-formation, Missions, Cloud Link, passkeys, active agent work, and a downloadable installer do not
-exist yet. Do not describe this checkpoint as a usable Alpha.
+evidence, assigns no permanent lead, and creates no Mission or authority. The Owner can admit a
+finite Mission against the exact current Team evidence, and can bind a Project to one immutable
+Repository revision naming a source, a pinned base revision, and its Declared Checks; binding is a
+declaration that opens nothing and runs nothing.
+
+Execution exists as far as running a Project's own Declared Checks and no further. Beacon detects
+whether this host can contain a Run by building a Landlock ruleset, applying it in a child, and
+reporting only what that child observed; a sandbox it has not demonstrated is never reported as
+one. Check preflight re-verifies a binding against the current Charter, the repository, the pinned
+revision's presence in the object store, and each check's resolved working directory, then emits a
+Receipt that names what it did not verify. An admitted execution runs those checks inside a
+disposable Git worktree at the pinned revision, bounded in wall-clock, CPU, address space, file
+size, and captured output, interruptible, with the environment cleared and filesystem writes
+confined to the worktree. Every Run carries a lease and reaches a terminal Receipt or is recorded
+`unconfirmed`; a worktree that refuses removal is reported rather than overridden.
+
+Resident-issued Team formation, Conversations, Proposals, Rulings, Evaluations, model Invocations,
+Cloud Link, passkeys, active agent work, and a downloadable installer do not exist yet. Nothing an
+Agent authored has ever been executed: the only commands Beacon runs are the Declared Checks an
+Owner bound by hand. Do not describe this checkpoint as a usable Alpha.
