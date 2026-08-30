@@ -1382,6 +1382,7 @@ export function App() {
               onOpenMissionComposer={openMissionComposer}
               onCancelMissionComposer={() => setMissionComposerOpen(false)}
               onSubmitMission={(draft) => void admitProjectMission(draft)}
+              onSampleProjectInstalled={() => setProjects(null)}
             />
           ) : (
             <Briefing

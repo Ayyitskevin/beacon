@@ -98,6 +98,33 @@ export type ProjectSummary = {
   createdAtMs: number;
 };
 
+export type SampleProjectDigest = {
+  algorithm: "sha256";
+  canonicalizer: "beacon.sample-project.bundle.v1";
+  value: string;
+};
+export type SampleProjectInstallation = {
+  workspaceId: string;
+  projectId: string;
+  charterRevision: 1;
+  repositoryRevision: 1;
+  repositoryPath: string;
+  baseRevision: string;
+  provenance: {
+    source: "beacon_bundled_sample_project";
+    bundleVersion: 1;
+    bundleDigest: SampleProjectDigest;
+  };
+  installedAtMs: number;
+};
+export type SampleProjectStatus =
+  | { state: "available"; bundleVersion: 1; bundleDigest: SampleProjectDigest }
+  | { state: "installed"; installation: SampleProjectInstallation };
+export type SampleProjectInstallResult = {
+  outcome: "installed" | "already_installed";
+  installation: SampleProjectInstallation;
+};
+
 export type TrackRecordEvidenceKind =
   | "mission_outcome"
   | "evaluation"
@@ -562,6 +589,24 @@ export async function clearResidentConfiguration(
 
 export async function loadProjects(): Promise<ProjectSummary[]> {
   return invokeAndValidate("projects", undefined, isProjectSummaries, "Project list");
+}
+
+export async function loadSampleProjectStatus(): Promise<SampleProjectStatus> {
+  return invokeAndValidate(
+    "sample_project_status",
+    undefined,
+    isSampleProjectStatus,
+    "Sample Project status",
+  );
+}
+
+export async function installSampleProject(): Promise<SampleProjectInstallResult> {
+  return invokeAndValidate(
+    "install_sample_project",
+    undefined,
+    isSampleProjectInstallResult,
+    "Sample Project installation",
+  );
 }
 
 export async function loadProject(projectId: string): Promise<ProjectView> {
@@ -1166,6 +1211,65 @@ function isOrderedUniqueClosedValues<T extends string>(
 
 function isProjectSummaries(value: unknown): value is ProjectSummary[] {
   return Array.isArray(value) && value.every(isProjectSummary);
+}
+
+function isSampleProjectDigest(value: unknown): value is SampleProjectDigest {
+  return (
+    hasExactKeys(value, ["algorithm", "canonicalizer", "value"]) &&
+    value.algorithm === "sha256" &&
+    value.canonicalizer === "beacon.sample-project.bundle.v1" &&
+    typeof value.value === "string" &&
+    /^[0-9a-f]{64}$/.test(value.value)
+  );
+}
+
+function isSampleProjectInstallation(value: unknown): value is SampleProjectInstallation {
+  return (
+    hasExactKeys(value, [
+      "baseRevision",
+      "charterRevision",
+      "installedAtMs",
+      "projectId",
+      "provenance",
+      "repositoryPath",
+      "repositoryRevision",
+      "workspaceId",
+    ]) &&
+    isUuid(value.workspaceId) &&
+    isUuid(value.projectId) &&
+    value.charterRevision === 1 &&
+    value.repositoryRevision === 1 &&
+    isRepositorySource("local_path", value.repositoryPath) &&
+    isBaseRevision(value.baseRevision) &&
+    hasExactKeys(value.provenance, ["bundleDigest", "bundleVersion", "source"]) &&
+    value.provenance.source === "beacon_bundled_sample_project" &&
+    value.provenance.bundleVersion === 1 &&
+    isSampleProjectDigest(value.provenance.bundleDigest) &&
+    isNonnegativeInteger(value.installedAtMs)
+  );
+}
+
+function isSampleProjectStatus(value: unknown): value is SampleProjectStatus {
+  if (hasExactKeys(value, ["bundleDigest", "bundleVersion", "state"])) {
+    return (
+      value.state === "available" &&
+      value.bundleVersion === 1 &&
+      isSampleProjectDigest(value.bundleDigest)
+    );
+  }
+  return (
+    hasExactKeys(value, ["installation", "state"]) &&
+    value.state === "installed" &&
+    isSampleProjectInstallation(value.installation)
+  );
+}
+
+function isSampleProjectInstallResult(value: unknown): value is SampleProjectInstallResult {
+  return (
+    hasExactKeys(value, ["installation", "outcome"]) &&
+    (value.outcome === "installed" || value.outcome === "already_installed") &&
+    isSampleProjectInstallation(value.installation)
+  );
 }
 
 function isProjectSummary(value: unknown): value is ProjectSummary {
