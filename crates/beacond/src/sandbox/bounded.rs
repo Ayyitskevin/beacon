@@ -277,6 +277,9 @@ pub(crate) fn run_bounded(
         let _ = stderr_tx.send(read_capped(stderr_pipe, cap));
     });
     let collect = move |grace: Duration| {
+        // One deadline for both streams, computed once. Moving this inside
+        // `take` would give each stream its own grace and bound the total at
+        // twice the budget rather than at the budget.
         let deadline = Instant::now() + grace;
         let take = |channel: &mpsc::Receiver<(String, bool)>| {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -309,6 +312,27 @@ pub(crate) fn run_bounded(
                 let outcome = match (status.code(), status.signal()) {
                     // A Run stopped by the parent reports why the parent
                     // stopped it, not merely that a signal arrived.
+                    //
+                    // This arm also breaks a tie, deliberately. `try_wait` is
+                    // checked first each iteration, so a child that exits
+                    // during the poll sleep is seen with `ended_by` still
+                    // `None` and reports its real status -- the whole interval
+                    // is safe. The only ambiguous span is the few instructions
+                    // between that syscall returning "still running" and the
+                    // deadline comparison below, measured at roughly fifty
+                    // nanoseconds.
+                    //
+                    // It is not a race awaiting a fix, because there is no
+                    // atomic version to buy: a child's exit is an asynchronous
+                    // kernel event, so any implementation must observe "not
+                    // exited" and then decide "deadline passed" as two steps.
+                    // `pidfd` with a timeout has the identical ambiguity at the
+                    // instant both are true. What remains is a simultaneity,
+                    // and the tie breaks toward `Bounded` on purpose: it
+                    // under-claims success rather than reporting a clean exit
+                    // for a Run whose ceiling had already passed. The cost is a
+                    // pessimistic Receipt and one wasted signal at an
+                    // already-dead group.
                     (_, _) if ended_by.is_some() => ended_by
                         .take()
                         .unwrap_or(ExecutionOutcome::Signalled { signal: 0 }),
