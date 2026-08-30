@@ -141,10 +141,10 @@ fn a_receipt_version_is_recorded_for_every_capability() {
             },
         },
         SandboxCapability::Unavailable {
-            reason: SandboxUnavailableReason::LandlockAbsent,
+            reason: SandboxUnavailableReason::LandlockAbsent {},
         },
         SandboxCapability::Unavailable {
-            reason: SandboxUnavailableReason::UnsupportedPlatform,
+            reason: SandboxUnavailableReason::UnsupportedPlatform {},
         },
     ] {
         let version = capability.receipt_version();
@@ -152,4 +152,33 @@ fn a_receipt_version_is_recorded_for_every_capability() {
         // A Receipt must never record the bare word that preceded this slice.
         assert_ne!(version, "none");
     }
+}
+
+#[test]
+fn an_unknown_field_is_rejected_even_on_a_variant_that_carries_none() {
+    // `deny_unknown_fields` is INERT on a unit variant of an internally tagged
+    // enum: serde reads the tag and matches the rest leniently. Every variant
+    // here therefore carries an empty struct body, and this test is what keeps
+    // it that way — a future `LandlockAbsent,` without braces silently reopens
+    // the hole and nothing else would notice.
+    let honest = r#"{"kind":"landlockAbsent"}"#;
+    let decoded: SandboxUnavailableReason = serde_json::from_str(honest).unwrap();
+    assert_eq!(decoded, SandboxUnavailableReason::LandlockAbsent {});
+
+    for smuggled in [
+        r#"{"kind":"landlockAbsent","surprise":true}"#,
+        r#"{"kind":"unsupportedPlatform","errno":13}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<SandboxUnavailableReason>(smuggled).is_err(),
+            "an unknown field survived the guard: {smuggled}"
+        );
+    }
+
+    // The wire form of a braced variant is unchanged, so this is not a
+    // breaking change to anything already recorded.
+    assert_eq!(
+        serde_json::to_string(&SandboxUnavailableReason::LandlockAbsent {}).unwrap(),
+        honest
+    );
 }

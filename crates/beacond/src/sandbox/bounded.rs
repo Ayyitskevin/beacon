@@ -71,8 +71,9 @@ pub enum ExecutionOutcome {
     Signalled { signal: i32 },
     /// A ceiling ended it. Which ceiling is part of the record.
     Bounded { ceiling: Ceiling },
-    /// The operator interrupted it.
-    Interrupted,
+    /// The operator interrupted it. Braces deliberate: `deny_unknown_fields`
+    /// is inert on a unit variant of an internally tagged enum.
+    Interrupted {},
     /// It could not be started. Nothing ran, so no exit status exists.
     NotStarted { reason: String },
 }
@@ -257,7 +258,7 @@ pub(crate) fn run_bounded(
                 .as_ref()
                 .is_some_and(|channel| channel.try_recv().is_ok())
             {
-                ended_by = Some(ExecutionOutcome::Interrupted);
+                ended_by = Some(ExecutionOutcome::Interrupted {});
                 terminate_group(group);
             }
         }
