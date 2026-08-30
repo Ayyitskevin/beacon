@@ -23,7 +23,7 @@ Focused command, with `<quota>` replaced by a percentage:
 ```sh
 systemd-run --quiet --user --wait --collect --pipe \
   -p CPUQuota=<quota>% \
-  --working-directory=/home/kevin-lee/ai-workspace/codex/beacon \
+  --working-directory="$PWD" \
   cargo test -p beacond --test operator_account \
   repeated_password_failures_are_throttled_and_success_clears_the_counter \
   -- --exact --nocapture

@@ -2299,14 +2299,14 @@ mod tests {
         }
     }
 
-    /// The declaration under test: Janus at `6b62110`, resolved by
-    /// `git -C /home/kevin-lee/ai-workspace/janus rev-parse 6b62110` on 2026-08-29.
-    /// The adapter never opens that path — this is a record, not a checkout.
-    fn janus_repository_draft() -> RepositoryDraft {
+    /// The declaration under test: a fabricated local path and a synthetic commit id, neither
+    /// of which names anything that exists. The adapter never opens the path — this is a
+    /// record, not a checkout.
+    fn sample_repository_draft() -> RepositoryDraft {
         RepositoryDraft {
             source_kind: RepositorySourceKind::LocalPath,
-            source: "/home/kevin-lee/ai-workspace/janus".to_owned(),
-            base_revision: "6b62110e9c918c67219ab0b45dbf4dd9937d6620".to_owned(),
+            source: "/home/operator/projects/sample-tracker".to_owned(),
+            base_revision: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2".to_owned(),
             declared_checks: vec![DeclaredCheck {
                 name: "pytest".to_owned(),
                 argv: vec![
@@ -2341,7 +2341,7 @@ mod tests {
             project.id,
             project.charter.revision,
             None,
-            janus_repository_draft(),
+            sample_repository_draft(),
         )
         .unwrap();
 
@@ -2349,10 +2349,10 @@ mod tests {
         assert_eq!(value["revision"], 1);
         assert_eq!(value["authorKind"], "operator");
         assert_eq!(value["sourceKind"], "local_path");
-        assert_eq!(value["source"], "/home/kevin-lee/ai-workspace/janus");
+        assert_eq!(value["source"], "/home/operator/projects/sample-tracker");
         assert_eq!(
             value["baseRevision"],
-            "6b62110e9c918c67219ab0b45dbf4dd9937d6620"
+            "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
         );
         assert_eq!(value["declaredChecks"][0]["name"], "pytest");
         assert_eq!(value["declaredChecks"][0]["workingDirectory"], ".");
@@ -2383,8 +2383,8 @@ mod tests {
         complete_operator_setup_value(&state.state, true).unwrap();
         let project = create_project_value(&state.state, repository_project_draft()).unwrap();
 
-        let mut invalid = janus_repository_draft();
-        invalid.base_revision = "6b62110".to_owned();
+        let mut invalid = sample_repository_draft();
+        invalid.base_revision = "0123456".to_owned();
         let refusal = bind_project_repository_value(
             &state.state,
             project.id,
@@ -2400,7 +2400,7 @@ mod tests {
             project.id,
             project.charter.revision,
             None,
-            janus_repository_draft(),
+            sample_repository_draft(),
         )
         .unwrap();
         let unchanged = bind_project_repository_value(
@@ -2408,7 +2408,7 @@ mod tests {
             project.id,
             project.charter.revision,
             Some(1),
-            janus_repository_draft(),
+            sample_repository_draft(),
         )
         .unwrap_err();
         assert_eq!(unchanged.code, "unchanged_project_repository");
@@ -2417,7 +2417,7 @@ mod tests {
             project.id,
             project.charter.revision,
             None,
-            janus_repository_draft(),
+            sample_repository_draft(),
         )
         .unwrap_err();
         assert_eq!(stale.code, "stale_project_repository");
