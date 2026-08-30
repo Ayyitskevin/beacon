@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Beacon is a standalone product, and Alpha 1 proves itself on the bundled Sample Project

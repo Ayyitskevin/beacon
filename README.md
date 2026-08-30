@@ -211,10 +211,18 @@ The authenticated Owner can now also bind a Project to the repository it works o
 immutable revision naming one source (an absolute local path or a Git URL), one pinned
 40-character base revision, and one or more Declared Checks, each with a distinct name, an argument
 vector, and a repository-relative working directory. Like a Policy revision, it binds the exact
-current Charter revision and preserves earlier revisions. Binding is a declaration and nothing
-more: Beacon does not open, clone, or fetch the repository, does not confirm that the pinned commit
-exists, and does not run a declared check. Check execution, its evidence, and any Proposal that
-consumes a binding remain subsequent slices.
+current Charter revision and preserves earlier revisions. Binding itself remains a declaration:
+it does not open, clone, or fetch the repository, confirm that the pinned commit exists, or run a
+Declared Check.
+
+The current backend can separately preflight that binding and run its Declared Checks. Preflight
+re-verifies the current Charter and binding, repository readability, pinned revision, check set,
+working directories, and observed sandbox capability. On an enforcing Linux host, execution cuts
+a disposable worktree at the pinned revision and runs the Owner-declared checks with Landlock
+containment, a cleared environment, and wall-clock, CPU, address-space, file-size, and captured-
+output bounds. The resulting Receipt preserves each check outcome and reports whether cleanup
+removed or kept the worktree. This path remains backend-only and Owner-bound: it consumes no
+Agent-authored Artifact, Proposal, Evaluation, or Ruling and claims no Mission success.
 
 The Projects application is the first working suite surface after Briefing. The Owner can create
 a Project from a structured Charter containing its purpose, desired outcomes, constraints,
@@ -263,7 +271,10 @@ Operator-authored Team Lead selection criteria, exact Charter binding, and the n
 no-authority boundary.
 [The Project Repository checkpoint](docs/implementation/phase-1-project-repository.md) records the
 immutable repository, pinned base revision, and Declared Checks a Project names, and the
-declared-not-verified boundary that keeps clones, fetches, and check execution out of scope.
+declaration boundary that keeps opening, cloning, fetching, and execution out of binding itself.
+[The accepted Landlock decision](docs/adr/0029-landlock-sandbox-proven-before-trusted.md) and
+[fails-toward-keep cleanup decision](docs/adr/0030-fails-toward-keep-worktree-cleanup.md) record the
+separate containment and disposable-worktree boundaries used by current Declared Check execution.
 Run `scripts/gate` to verify the
 preserved Beacon Legacy Desk, the Rust workspace, the web bundle, and the native desktop build.
 The exact pre-Beacon compatibility boundary is recorded in the

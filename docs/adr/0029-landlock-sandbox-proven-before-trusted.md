@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Enforce the execution sandbox with Landlock, and prove it before reporting it
