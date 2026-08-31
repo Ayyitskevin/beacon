@@ -1,8 +1,14 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Bind inert Proposal v1 to the exact bytes Beacon stores
+
+Kevin accepted exact proposal commit
+`5a3e400dcf501bb4e1174ea1315b8180c6d5b7df` on 2026-08-30 as Product Steward.
+Implementation remains bound to the backend-only, inert fence and required
+evidence below. Live migration, production transport, and execution exposure
+remain separate decisions.
 
 Beacon needs a stable Proposal identity before it can add Material Artifacts,
 Evaluations, Rulings, or dispatch. A Proposal is an immutable description of
@@ -324,9 +330,10 @@ action.
 - **Transport or desktop exposure in this slice:** creates an input surface before
   the authority, evaluation, and Run I/O paths exist.
 
-## Product Steward ruling required
+## Product Steward decision
 
-Acceptance of this exact record decides that:
+Kevin's acceptance of exact proposal commit `5a3e400dcf501bb4e1174ea1315b8180c6d5b7df`
+decides that:
 
 1. Proposal v1 uses the fixed binary canonicalizer above;
 2. readable context is mandatory and digest-bound, with `not_declared` distinct
@@ -338,5 +345,8 @@ Acceptance of this exact record decides that:
 5. identical submission is idempotent; and
 6. implementation remains backend-only and inert.
 
-No Proposal persistence implementation or merge is authorized until the Product
-Steward accepts or amends this candidate.
+Proposal persistence implementation may now proceed only within this exact
+contract and its required evidence. A material change to the canonical bytes,
+identity semantics, authority boundary, or implementation fence requires a new
+Product Steward ruling before merge. Applying migration 0018 to live data and
+opening any production transport or execution surface remain separately gated.
