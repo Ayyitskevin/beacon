@@ -73,9 +73,9 @@ must be one of its admitted members, and `resident_configuration_id` must equal
 that member's immutable admission Configuration. The Policy and Repository
 revisions must belong to the same Project and bind its named Charter revision.
 
-`summary` is trimmed, non-empty human text of at most 2,000 Unicode scalar
-values. The Owner bootstrap reason follows the same validation with a 500-scalar
-limit. Neither value may contain NUL or non-whitespace control characters.
+`summary` must arrive trimmed and contain non-empty human text of at most 2,000
+Unicode scalar values. The Owner bootstrap reason follows the same validation
+with a 500-scalar limit. Neither value may contain NUL or non-whitespace control characters.
 Future consumers render both as plain text, never as a link, path, or command.
 
 `target_paths` are distinct UTF-8 POSIX paths relative to the Repository root.
