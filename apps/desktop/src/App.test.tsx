@@ -173,6 +173,56 @@ describe("Beacon desktop shell", () => {
     });
   });
 
+  it("moves focus to main content from the skip link", async () => {
+    const user = userEvent.setup();
+    mockInitialState("unlocked");
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+
+    await user.tab();
+    const skipLink = screen.getByRole("link", { name: "Skip to main content" });
+    expect(skipLink).toHaveFocus();
+
+    await user.keyboard("{Enter}");
+    expect(screen.getByRole("main")).toHaveFocus();
+  });
+
+  it.each(["{Enter}", " "])(
+    "uses %s to enter Projects and continue past unavailable applications",
+    async (activationKey) => {
+      const user = userEvent.setup();
+      mockInitialState("unlocked");
+      const base = invokeMock.getMockImplementation();
+      if (!base) throw new Error("initial invoke mock is unavailable");
+      invokeMock.mockImplementation((command, args) => {
+        if (command === "projects") return Promise.resolve([]);
+        return base(command, args);
+      });
+
+      render(<App />);
+      await screen.findByRole("heading", { name: "Briefing" });
+      const suiteNavigation = screen.getByRole("navigation", { name: "Beacon applications" });
+      const briefing = within(suiteNavigation).getByRole("button", { name: "Briefing" });
+      const projects = within(suiteNavigation).getByRole("button", { name: "Projects" });
+
+      await user.tab();
+      await user.tab();
+      expect(briefing).toHaveFocus();
+      await user.tab();
+      expect(projects).toHaveFocus();
+      for (const application of ["Conversations", "Knowledge", "Software"]) {
+        expect(within(suiteNavigation).getByRole("button", { name: application })).toBeDisabled();
+      }
+
+      await user.keyboard(activationKey);
+      expect(await screen.findByRole("heading", { name: "Projects" })).toBeVisible();
+      expect(projects).toHaveAttribute("aria-current", "page");
+      await user.tab();
+      expect(screen.getByRole("button", { name: "Create Project" })).toHaveFocus();
+    },
+  );
+
   it("exposes the opt-in Sample Project from the authenticated Projects application", async () => {
     const user = userEvent.setup();
     mockInitialState("unlocked");
