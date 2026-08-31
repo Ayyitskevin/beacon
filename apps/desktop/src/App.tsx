@@ -252,6 +252,7 @@ const useStyles = makeStyles({
 
 export function App() {
   const classes = useStyles();
+  const mainContentRef = useRef<HTMLElement>(null);
   const [viewState, setViewState] = useState<SessionViewState>("loading");
   const [sessionAttempt, setSessionAttempt] = useState(0);
   const [session, setSession] = useState<DesktopSessionStatus | null>(null);
@@ -1151,7 +1152,9 @@ export function App() {
       className={classes.provider}
       theme={resolvedTheme === "dark" ? darkTheme : lightTheme}
     >
-      <a href="#main-content">Skip to main content</a>
+      <a href="#main-content" onClick={() => mainContentRef.current?.focus()}>
+        Skip to main content
+      </a>
       <div className={`${classes.shell} desktop-shell`}>
         <nav className={classes.rail} aria-label="Beacon applications">
           <div className={classes.brand}>Beacon</div>
@@ -1176,7 +1179,7 @@ export function App() {
             </Button>
           ))}
         </nav>
-        <main id="main-content" className={classes.main}>
+        <main ref={mainContentRef} id="main-content" className={classes.main} tabIndex={-1}>
           {viewState === "error" ? (
             <div role="alert">
               <p>Beacon could not verify the local session.</p>
