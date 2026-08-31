@@ -46,8 +46,10 @@ build yet. Do not run Beacon against anything you cannot afford to lose.
 These are known, recorded, and deliberate. A report that one of them is true is welcome as a
 discussion, but it is not a new finding.
 
-- **Landlock restricts TCP bind and connect, and does not restrict UDP.** A Run can still emit UDP
-  traffic. Recorded in [ADR 0029](docs/adr/0029-landlock-sandbox-proven-before-trusted.md).
+- **Beacon's current Landlock ruleset handles TCP bind and connect, but it does not handle UDP.**
+  The probe records its TCP check as refused; it does not test UDP. Landlock added UDP rights in
+  ABI 10, but Beacon does not request them, so a Run can still emit UDP traffic. Recorded in
+  [ADR 0029](docs/adr/0029-landlock-sandbox-proven-before-trusted.md).
 - **Hosts that are not Linux have no sandbox.** They report `Unavailable` and Execution refuses to
   run there. Alpha 1 names a Linux build.
 - **Alpha relies on operating-system disk encryption** for live Workspace data. Beacon does not
