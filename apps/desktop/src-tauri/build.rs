@@ -36,7 +36,6 @@ const COMMANDS: &[&str] = &[
     "project_repository_history",
     "bind_project_repository",
     "preflight_project_checks",
-    "preflight_receipts",
     "teams",
     "team",
     "form_team",
