@@ -460,8 +460,9 @@ fn is_repository_relative(working_directory: &str) -> bool {
 /// The parts of a Repository Binding that Check Preflight verifies.
 ///
 /// A narrow projection rather than the full [`ProjectRepository`] view: preflight
-/// needs the declaration, not its presentation, and comparing this type is how a
-/// Run detects that its binding moved underneath it.
+/// needs the declaration, not its presentation. `applies_to_charter` is
+/// evaluated against the Charter revision supplied by the Run, which may be
+/// current at open without remaining globally latest afterward.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreflightBinding {
     pub revision: u32,
@@ -470,7 +471,7 @@ pub struct PreflightBinding {
     pub source: String,
     pub base_revision: String,
     pub declared_checks: Vec<DeclaredCheck>,
-    pub applies_to_current_charter: bool,
+    pub applies_to_charter: bool,
 }
 
 impl PreflightBinding {
@@ -482,7 +483,7 @@ impl PreflightBinding {
             source: stored.source,
             base_revision: stored.base_revision,
             declared_checks: stored.declared_checks,
-            applies_to_current_charter: stored.charter_revision == current_charter,
+            applies_to_charter: stored.charter_revision == current_charter,
         }
     }
 }
@@ -499,7 +500,7 @@ pub(crate) fn latest_repository_for_preflight(
     Ok((current_charter, latest))
 }
 
-/// One stored Repository Binding revision, as preflight compares it.
+/// One stored Repository Binding revision, as proposal validation inspects it.
 pub(crate) fn stored_repository_for_preflight(
     connection: &Connection,
     workspace_id: Uuid,
@@ -510,6 +511,21 @@ pub(crate) fn stored_repository_for_preflight(
     Ok(
         load_stored_repository(connection, workspace_id, project_id, revision)?
             .map(|stored| PreflightBinding::from_stored(stored, current_charter)),
+    )
+}
+
+/// One stored Repository Binding revision as it applied to a Run's pinned
+/// Charter revision. A later Charter publication must not change this answer.
+pub(crate) fn repository_for_preflight_at(
+    connection: &Connection,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    repository_revision: u32,
+    charter_revision: u32,
+) -> Result<Option<PreflightBinding>, ProjectRepositoryError> {
+    Ok(
+        load_stored_repository(connection, workspace_id, project_id, repository_revision)?
+            .map(|stored| PreflightBinding::from_stored(stored, charter_revision)),
     )
 }
 

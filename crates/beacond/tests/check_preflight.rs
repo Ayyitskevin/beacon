@@ -385,7 +385,7 @@ fn a_binding_that_satisfies_every_step_is_admissible_when_the_sandbox_is_proven(
 }
 
 #[test]
-fn preflight_refuses_when_its_binding_is_superseded_after_the_opening_read() {
+fn preflight_finishes_against_its_pinned_binding_and_the_next_run_pins_the_new_one() {
     let (repository, revision) = fixture_repository("binding-moved-during-preflight");
     let source = repository.path.to_string_lossy().into_owned();
     let (store, projects, repositories, preflight) =
@@ -421,16 +421,20 @@ fn preflight_refuses_when_its_binding_is_superseded_after_the_opening_read() {
         .unwrap();
     drop(connection);
 
-    let receipt = preflight.preflight(project.id).unwrap();
+    let first = preflight.preflight(project.id).unwrap();
 
-    assert_eq!(receipt.repository_revision, 1);
-    assert_eq!(receipt.outcome, PreflightOutcome::DeclaredChecksChanged);
-    assert!(
-        receipt.not_verified.iter().any(|gap| {
-            gap == "every step: the Repository Binding changed while this Run was inspecting"
-        }),
-        "the final binding guard must remain visible in the Receipt"
-    );
+    assert_eq!(first.repository_revision, 1);
+    assert_eq!(first.outcome, PreflightOutcome::Verified);
+
+    let connection = Connection::open(&store.path).unwrap();
+    connection
+        .execute("DROP TRIGGER supersede_binding_when_preflight_opens", [])
+        .unwrap();
+    drop(connection);
+
+    let second = preflight.preflight(project.id).unwrap();
+    assert_eq!(second.repository_revision, 2);
+    assert_eq!(second.outcome, PreflightOutcome::Verified);
 }
 
 #[test]
