@@ -8,6 +8,7 @@ import {
 } from "@fluentui/react-components";
 import { type FormEvent, useMemo, useState } from "react";
 
+import type { AddressableObjectLink } from "./objectLinks";
 import type { MissionDraft, MissionView, ProjectView, TeamView } from "./session";
 
 const useStyles = makeStyles({
@@ -32,6 +33,12 @@ const useStyles = makeStyles({
     ...shorthands.border(tokens.strokeWidthThin, "solid", tokens.colorNeutralStroke2),
     ...shorthands.borderRadius(tokens.borderRadiusMedium),
     ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalM),
+  },
+  missionHeader: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "start",
+    columnGap: tokens.spacingHorizontalM,
   },
   outcome: { margin: 0, fontWeight: tokens.fontWeightSemibold },
   meta: {
@@ -61,20 +68,24 @@ export function ProjectMissions({
   project,
   teams,
   missions,
+  linkedMissionId,
   composerOpen,
   busy,
   onOpenComposer,
   onCancel,
   onSubmit,
+  onCopyObjectLink,
 }: {
   project: ProjectView;
   teams: TeamView[] | null;
   missions: MissionView[] | null;
+  linkedMissionId: string | null;
   composerOpen: boolean;
   busy: boolean;
   onOpenComposer: () => void;
   onCancel: () => void;
   onSubmit: (draft: MissionDraft) => void;
+  onCopyObjectLink: (link: AddressableObjectLink) => void;
 }) {
   const classes = useStyles();
   const eligibleTeams = useMemo(
@@ -123,8 +134,29 @@ export function ProjectMissions({
       ) : (
         <div className={classes.list} aria-label="Project Missions">
           {missions.map((mission) => (
-            <article className={classes.mission} key={mission.id}>
-              <p className={classes.outcome}>{mission.desiredOutcome}</p>
+            <article
+              className={classes.mission}
+              key={mission.id}
+              aria-current={linkedMissionId === mission.id ? "true" : undefined}
+            >
+              <div className={classes.missionHeader}>
+                <p className={classes.outcome}>{mission.desiredOutcome}</p>
+                <Button
+                  size="small"
+                  appearance="subtle"
+                  disabled={busy}
+                  onClick={() =>
+                    onCopyObjectLink({
+                      kind: "mission",
+                      workspaceId: mission.workspaceId,
+                      projectId: mission.projectId,
+                      missionId: mission.id,
+                    })
+                  }
+                >
+                  Copy Mission link
+                </Button>
+              </div>
               <p className={classes.meta}>
                 Operator admitted · Charter revision {mission.charterRevision}
               </p>

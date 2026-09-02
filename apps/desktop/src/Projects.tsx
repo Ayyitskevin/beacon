@@ -31,6 +31,7 @@ import type {
   TeamView,
 } from "./session";
 import { ProjectMissions } from "./ProjectMissions";
+import type { AddressableObjectLink } from "./objectLinks";
 import { ProjectPolicySection } from "./ProjectPolicy";
 import { CheckPreflightSection } from "./CheckPreflight";
 import { ProjectRepositorySection } from "./ProjectRepository";
@@ -156,6 +157,7 @@ export function ProjectsWorkspace({
   projectRepositoryHistory,
   teams,
   missions,
+  linkedMissionId,
   residents,
   teamConfigurations,
   composerOpen,
@@ -170,6 +172,7 @@ export function ProjectsWorkspace({
   onCreate,
   onCancelCreate,
   onOpenProject,
+  onCopyObjectLink,
   onSubmitProject,
   onReviseCharter,
   onCancelCharterRevision,
@@ -198,6 +201,7 @@ export function ProjectsWorkspace({
   projectRepositoryHistory: ProjectRepository[] | null;
   teams: TeamView[] | null;
   missions: MissionView[] | null;
+  linkedMissionId: string | null;
   residents: ResidentAgentView[] | null;
   teamConfigurations: ResidentConfiguration[] | null;
   composerOpen: boolean;
@@ -212,6 +216,7 @@ export function ProjectsWorkspace({
   onCreate: () => void;
   onCancelCreate: () => void;
   onOpenProject: (projectId: string) => void;
+  onCopyObjectLink: (link: AddressableObjectLink) => void;
   onSubmitProject: (draft: ProjectDraft) => void;
   onReviseCharter: () => void;
   onCancelCharterRevision: () => void;
@@ -286,6 +291,7 @@ export function ProjectsWorkspace({
           repositoryHistory={projectRepositoryHistory}
           teams={teams}
           missions={missions}
+          linkedMissionId={linkedMissionId}
           residents={residents}
           teamConfigurations={teamConfigurations}
           teamComposerOpen={teamComposerOpen}
@@ -295,6 +301,7 @@ export function ProjectsWorkspace({
           missionComposerOpen={missionComposerOpen}
           busy={busy}
           onRevise={onReviseCharter}
+          onCopyObjectLink={onCopyObjectLink}
           onOpenPolicyComposer={onOpenPolicyComposer}
           onCancelPolicyComposer={onCancelPolicyComposer}
           onSubmitProjectPolicy={onSubmitProjectPolicy}
@@ -548,6 +555,7 @@ function ProjectRecord({
   repositoryHistory,
   teams,
   missions,
+  linkedMissionId,
   residents,
   teamConfigurations,
   teamComposerOpen,
@@ -557,6 +565,7 @@ function ProjectRecord({
   missionComposerOpen,
   busy,
   onRevise,
+  onCopyObjectLink,
   onOpenPolicyComposer,
   onCancelPolicyComposer,
   onSubmitProjectPolicy,
@@ -579,6 +588,7 @@ function ProjectRecord({
   repositoryHistory: ProjectRepository[] | null;
   teams: TeamView[] | null;
   missions: MissionView[] | null;
+  linkedMissionId: string | null;
   residents: ResidentAgentView[] | null;
   teamConfigurations: ResidentConfiguration[] | null;
   teamComposerOpen: boolean;
@@ -588,6 +598,7 @@ function ProjectRecord({
   missionComposerOpen: boolean;
   busy: boolean;
   onRevise: () => void;
+  onCopyObjectLink: (link: AddressableObjectLink) => void;
   onOpenPolicyComposer: () => void;
   onCancelPolicyComposer: () => void;
   onSubmitProjectPolicy: (draft: ProjectPolicyDraft) => void;
@@ -613,9 +624,23 @@ function ProjectRecord({
             {project.name}
           </h2>
         </div>
-        <Button onClick={onRevise} disabled={busy}>
-          Revise Charter
-        </Button>
+        <div className={classes.actions}>
+          <Button
+            onClick={() =>
+              onCopyObjectLink({
+                kind: "project",
+                workspaceId: project.workspaceId,
+                projectId: project.id,
+              })
+            }
+            disabled={busy}
+          >
+            Copy Project link
+          </Button>
+          <Button onClick={onRevise} disabled={busy}>
+            Revise Charter
+          </Button>
+        </div>
       </div>
       <p className={classes.body}>{charter.purpose}</p>
       <section className={classes.charterSection} aria-labelledby="outcomes-heading">
@@ -716,11 +741,13 @@ function ProjectRecord({
         project={project}
         teams={teams}
         missions={missions}
+        linkedMissionId={linkedMissionId}
         composerOpen={missionComposerOpen}
         busy={busy}
         onOpenComposer={onOpenMissionComposer}
         onCancel={onCancelMissionComposer}
         onSubmit={onSubmitMission}
+        onCopyObjectLink={onCopyObjectLink}
       />
     </article>
   );

@@ -93,6 +93,15 @@ import {
   type StarterRole,
 } from "./session";
 import { LocalModels } from "./LocalModels";
+import {
+  formatObjectLink,
+  parseObjectLink,
+  routeObjectLink,
+  type AddressableObjectLink,
+  type LinkContext,
+  type LinkOutcome,
+  type ObjectLink,
+} from "./objectLinks";
 import { ProjectsWorkspace } from "./Projects";
 import { ResidentConfigurations } from "./ResidentConfigurations";
 import { darkTheme, lightTheme } from "./theme";
@@ -286,6 +295,12 @@ export function App() {
     useState<StarterOrganizationView | null>(null);
   const [residents, setResidents] = useState<ResidentAgentView[] | null>(null);
   const [activeApplication, setActiveApplication] = useState<Application>("Briefing");
+  const [objectLinkInput, setObjectLinkInput] = useState("");
+  const [pendingObjectLink, setPendingObjectLink] = useState<ObjectLink | null>(null);
+  const [objectLinkMessage, setObjectLinkMessage] = useState("");
+  const objectLinkEpoch = useRef(0);
+  const openingLinkedProject = useRef("");
+  const [linkedMissionId, setLinkedMissionId] = useState<string | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [selectedProject, setSelectedProject] = useState<ProjectView | null>(null);
   const [charterHistory, setCharterHistory] = useState<ProjectCharter[] | null>(null);
@@ -332,6 +347,122 @@ export function App() {
   const resolvedTheme =
     themeChoice === "system" ? (systemPrefersDark ? "dark" : "light") : themeChoice;
   const unlocked = session?.phase === "unlocked" && foregroundVerified;
+
+  function linkContext(): LinkContext {
+    const phase =
+      session?.phase === "unlocked" && !foregroundVerified ? "locked" : (session?.phase ?? "locked");
+    const workspaceId = starterOrganization?.workspaceId ?? null;
+    return {
+      phase,
+      workspaceId,
+      projects:
+        workspaceId !== null && projects !== null
+          ? { workspaceId, items: projects }
+          : null,
+      missions:
+        selectedProject !== null && missions !== null
+          ? { projectId: selectedProject.id, items: missions }
+          : null,
+    };
+  }
+
+  function submitObjectLink(event: FormEvent) {
+    event.preventDefault();
+    const link = parseObjectLink(objectLinkInput.trim());
+    objectLinkEpoch.current += 1;
+    setPendingObjectLink(link);
+    setObjectLinkMessage(describeObjectLinkOutcome(routeObjectLink(link, linkContext())));
+  }
+
+  async function copyObjectLink(link: AddressableObjectLink) {
+    const text = formatObjectLink(link);
+    setObjectLinkInput(text);
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
+      await navigator.clipboard.writeText(text);
+      setObjectLinkMessage(
+        `Copied ${link.kind === "project" ? "Project" : link.kind === "mission" ? "Mission" : "Briefing"} link.`,
+      );
+    } catch {
+      setObjectLinkMessage("Beacon could not copy the link. You can copy it from the link field.");
+    }
+  }
+
+  useEffect(() => {
+    if (pendingObjectLink === null) return;
+    const outcome = routeObjectLink(pendingObjectLink, linkContext());
+    setObjectLinkMessage(describeObjectLinkOutcome(outcome));
+
+    if (outcome.outcome === "awaitSetup" || outcome.outcome === "awaitUnlock") return;
+    if (
+      outcome.outcome === "malformed" ||
+      outcome.outcome === "otherWorkspace" ||
+      outcome.outcome === "absent" ||
+      outcome.outcome === "wrongScope"
+    ) {
+      setPendingObjectLink(null);
+      return;
+    }
+
+    if (outcome.outcome === "notLoaded") {
+      if (outcome.awaiting === "workspace") return;
+      setActiveApplication("Projects");
+      if (
+        outcome.awaiting === "missions" &&
+        pendingObjectLink.kind === "mission" &&
+        selectedProject?.id !== pendingObjectLink.projectId
+      ) {
+        openLinkedProject(pendingObjectLink.projectId, objectLinkEpoch.current);
+      }
+      return;
+    }
+
+    if (outcome.link.kind === "briefing") {
+      setActiveApplication("Briefing");
+      setLinkedMissionId(null);
+      setObjectLinkMessage("Opened Briefing from the Beacon link.");
+      setPendingObjectLink(null);
+      return;
+    }
+
+    setActiveApplication("Projects");
+    if (selectedProject?.id !== outcome.link.projectId) {
+      openLinkedProject(outcome.link.projectId, objectLinkEpoch.current);
+      return;
+    }
+
+    if (outcome.link.kind === "mission") {
+      setLinkedMissionId(outcome.link.missionId);
+      setObjectLinkMessage("Opened the named Mission from the Beacon link.");
+    } else {
+      setLinkedMissionId(null);
+      setObjectLinkMessage("Opened the named Project from the Beacon link.");
+    }
+    setPendingObjectLink(null);
+  }, [
+    foregroundVerified,
+    missions,
+    pendingObjectLink,
+    projects,
+    selectedProject?.id,
+    session?.phase,
+    starterOrganization?.workspaceId,
+  ]);
+
+  function openLinkedProject(projectId: string, expectedEpoch: number) {
+    const requestKey = `${expectedEpoch}:${projectId}`;
+    if (openingLinkedProject.current === requestKey) return;
+    openingLinkedProject.current = requestKey;
+    void openProject(projectId).then((opened) => {
+      if (objectLinkEpoch.current !== expectedEpoch) return;
+      if (!opened) {
+        setObjectLinkMessage("Beacon could not open the Project named by that link.");
+        setPendingObjectLink(null);
+      }
+    }).finally(() => {
+      if (openingLinkedProject.current === requestKey) openingLinkedProject.current = "";
+    });
+  }
 
   function applyVerifiedSession(nextSession: DesktopSessionStatus, expectedEpoch: number) {
     setSession(nextSession);
@@ -1021,7 +1152,8 @@ export function App() {
     });
   }
 
-  async function openProject(projectId: string) {
+  async function openProject(projectId: string): Promise<boolean> {
+    let opened = false;
     await runAction(async () => {
       const [project, history, policy, policyHistory, repository, repositoryHistory] =
         await Promise.all([
@@ -1056,7 +1188,10 @@ export function App() {
       setRepositoryComposerOpen(false);
       setTeamComposerOpen(false);
       setMissionComposerOpen(false);
+      setLinkedMissionId(null);
+      opened = true;
     });
+    return opened;
   }
 
   async function createProjectFromCharter(draft: ProjectDraft) {
@@ -1392,6 +1527,7 @@ export function App() {
               projectRepositoryHistory={projectRepositoryHistory}
               teams={teams}
               missions={missions}
+              linkedMissionId={linkedMissionId}
               residents={residents}
               teamConfigurations={teamConfigurations}
               composerOpen={projectComposerOpen}
@@ -1424,6 +1560,7 @@ export function App() {
               }}
               onCancelCreate={() => setProjectComposerOpen(false)}
               onOpenProject={openProject}
+              onCopyObjectLink={(link) => void copyObjectLink(link)}
               onSubmitProject={createProjectFromCharter}
               onReviseCharter={() => {
                 setPolicyComposerOpen(false);
@@ -1565,10 +1702,48 @@ export function App() {
               </Button>
             ))}
           </div>
+          <h3 className={classes.themeHeading}>Beacon links</h3>
+          <form className={classes.settingsForm} onSubmit={submitObjectLink}>
+            <Field
+              label="Beacon link"
+              hint="Paste a link copied from a Project or Mission in this Installation."
+            >
+              <Input
+                aria-label="Beacon link"
+                value={objectLinkInput}
+                onChange={(_, data) => setObjectLinkInput(data.value)}
+              />
+            </Field>
+            <Button type="submit" size="small" disabled={!session || objectLinkInput.trim() === ""}>
+              Open Beacon link
+            </Button>
+          </form>
+          {objectLinkMessage && <p role="status">{objectLinkMessage}</p>}
         </aside>
       </div>
     </FluentProvider>
   );
+}
+
+function describeObjectLinkOutcome(outcome: LinkOutcome): string {
+  switch (outcome.outcome) {
+    case "awaitSetup":
+      return "Finish setup to open the saved Beacon link.";
+    case "awaitUnlock":
+      return "Unlock Beacon to open the saved Beacon link.";
+    case "otherWorkspace":
+      return "Refused: this Beacon link belongs to another Workspace.";
+    case "absent":
+      return `No ${outcome.missing === "project" ? "Project" : "Mission"} with that identity exists in this Workspace.`;
+    case "notLoaded":
+      return `Beacon has not evaluated ${outcome.awaiting} yet. The saved link will open after it loads.`;
+    case "wrongScope":
+      return "Refused: the Mission does not belong to the Project named by this Beacon link.";
+    case "malformed":
+      return `Beacon did not recognize that link (${outcome.reason.replaceAll("_", " ")}).`;
+    case "open":
+      return `Opening ${outcome.link.kind === "briefing" ? "Briefing" : outcome.link.kind === "project" ? "Project" : "Mission"}.`;
+  }
 }
 
 type StyleClasses = ReturnType<typeof useStyles>;

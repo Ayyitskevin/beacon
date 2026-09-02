@@ -10,6 +10,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 const invokeMock = vi.mocked(invoke);
 const originalMatchMedia = window.matchMedia;
+const originalClipboard = Object.getOwnPropertyDescriptor(window.navigator, "clipboard");
 const capabilities = {
   preferredMethod: "passkey",
   passkey: { available: false, reason: "unsupported_linux_webkitgtk" },
@@ -240,6 +241,11 @@ describe("Beacon desktop shell", () => {
       writable: true,
       value: originalMatchMedia,
     });
+    if (originalClipboard) {
+      Object.defineProperty(window.navigator, "clipboard", originalClipboard);
+    } else {
+      Reflect.deleteProperty(window.navigator, "clipboard");
+    }
   });
 
   it("moves focus to main content from the skip link", async () => {
@@ -338,6 +344,309 @@ describe("Beacon desktop shell", () => {
     }
     expect(screen.queryByText("Personal")).not.toBeInTheDocument();
     expect(document.body).not.toHaveTextContent(/workspace[_ -]id/i);
+  });
+
+  it.each([
+    ["operator_setup_required", "Finish setup to open the saved Beacon link."],
+    ["locked", "Unlock Beacon to open the saved Beacon link."],
+  ] as const)("retains a pasted link while the session is %s", async (phase, message) => {
+    const user = userEvent.setup();
+    mockInitialState(phase);
+
+    render(<App />);
+    await screen.findByRole("heading", {
+      name: phase === "locked" ? "Welcome back" : "Set up your operator account",
+    });
+    await user.type(
+      screen.getByLabelText("Beacon link"),
+      `beacon:/${acceptedOrganization.workspaceId}/project/44444444-4444-4444-8444-444444444444`,
+    );
+    await user.click(screen.getByRole("button", { name: "Open Beacon link" }));
+
+    expect(screen.getByRole("status")).toHaveTextContent(message);
+  });
+
+  it("opens a retained link after the operator unlocks", async () => {
+    const user = userEvent.setup();
+    mockInitialState("locked");
+    const base = invokeMock.getMockImplementation();
+    if (!base) throw new Error("initial invoke mock is unavailable");
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "authenticate_password") return Promise.resolve(status("unlocked"));
+      return base(command, args);
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Welcome back" });
+    await user.type(
+      screen.getByLabelText("Beacon link"),
+      `beacon:/${acceptedOrganization.workspaceId}/briefing`,
+    );
+    await user.click(screen.getByRole("button", { name: "Open Beacon link" }));
+    expect(screen.getByText("Unlock Beacon to open the saved Beacon link.")).toBeVisible();
+
+    await user.type(screen.getByLabelText("Password"), "a long local passphrase");
+    await user.click(screen.getByRole("button", { name: "Unlock Beacon" }));
+
+    expect(await screen.findByRole("heading", { name: "Briefing" })).toBeVisible();
+    expect(screen.getByText("Opened Briefing from the Beacon link.")).toBeVisible();
+  });
+
+  it("shows a saved Project link as not evaluated while Projects load, then opens it", async () => {
+    const user = userEvent.setup();
+    const project = {
+      id: "44444444-4444-4444-8444-444444444444",
+      workspaceId: acceptedOrganization.workspaceId,
+      name: "Linked Project",
+      charter: {
+        revision: 1,
+        purpose: "Open only after membership is evaluated.",
+        desiredOutcomes: ["Reach the named Project"],
+        constraints: [],
+        prohibitions: [],
+        autonomyProfile: "supervised",
+        budgetBoundary: "no_spend",
+        externalEffects: "prohibited",
+        authoredAtMs: 123,
+      },
+      createdAtMs: 120,
+    } as const;
+    const summary = {
+      id: project.id,
+      name: project.name,
+      charterRevision: 1,
+      autonomyProfile: "supervised",
+      createdAtMs: 120,
+    } as const;
+    let resolveProjects!: (projects: (typeof summary)[]) => void;
+    const loadingProjects = new Promise<(typeof summary)[]>((resolve) => {
+      resolveProjects = resolve;
+    });
+    mockInitialState("unlocked");
+    const base = invokeMock.getMockImplementation();
+    if (!base) throw new Error("initial invoke mock is unavailable");
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "projects") return loadingProjects;
+      if (command === "project") return Promise.resolve(project);
+      if (command === "project_charter_history") return Promise.resolve([project.charter]);
+      if (command === "project_policy") return Promise.resolve(null);
+      if (command === "project_policy_history") return Promise.resolve([]);
+      if (command === "current_project_repository") return Promise.resolve(null);
+      if (command === "project_repository_history") return Promise.resolve([]);
+      if (command === "teams" || command === "missions") return Promise.resolve([]);
+      return base(command, args);
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.type(
+      screen.getByLabelText("Beacon link"),
+      `beacon:/${acceptedOrganization.workspaceId}/project/${project.id}`,
+    );
+    await user.click(screen.getByRole("button", { name: "Open Beacon link" }));
+
+    expect(screen.getByText(/Beacon has not evaluated projects yet/)).toBeVisible();
+    expect(screen.queryByText(/No Project with that identity/i)).not.toBeInTheDocument();
+    expect(invokeMock).toHaveBeenCalledWith("projects");
+
+    await act(async () => resolveProjects([summary]));
+    expect(await screen.findByRole("heading", { name: "Linked Project" })).toBeVisible();
+  });
+
+  it("visibly refuses a valid link from another Workspace", async () => {
+    const user = userEvent.setup();
+    mockInitialState("unlocked");
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.type(
+      screen.getByLabelText("Beacon link"),
+      "beacon:/99999999-9999-4999-8999-999999999999/project/44444444-4444-4444-8444-444444444444",
+    );
+    await user.click(screen.getByRole("button", { name: "Open Beacon link" }));
+
+    expect(
+      screen.getByText("Refused: this Beacon link belongs to another Workspace."),
+    ).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Briefing" })).toBeVisible();
+  });
+
+  it("keeps an absent Project distinct from an unevaluated Project", async () => {
+    const user = userEvent.setup();
+    mockInitialState("unlocked");
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.type(
+      screen.getByLabelText("Beacon link"),
+      `beacon:/${acceptedOrganization.workspaceId}/project/44444444-4444-4444-8444-444444444444`,
+    );
+    await user.click(screen.getByRole("button", { name: "Open Beacon link" }));
+
+    expect(
+      await screen.findByText("No Project with that identity exists in this Workspace."),
+    ).toBeVisible();
+    expect(screen.queryByText(/has not evaluated projects yet/i)).not.toBeInTheDocument();
+  });
+
+  it("copies canonical links from the Project and Mission that are shown", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const project = {
+      id: "44444444-4444-4444-8444-444444444444",
+      workspaceId: acceptedOrganization.workspaceId,
+      name: "Linked Project",
+      charter: {
+        revision: 1,
+        purpose: "Mint links from the object being shown.",
+        desiredOutcomes: ["One canonical link"],
+        constraints: [],
+        prohibitions: [],
+        autonomyProfile: "supervised",
+        budgetBoundary: "no_spend",
+        externalEffects: "prohibited",
+        authoredAtMs: 123,
+      },
+      createdAtMs: 120,
+    } as const;
+    const summary = {
+      id: project.id,
+      name: project.name,
+      charterRevision: 1,
+      autonomyProfile: "supervised",
+      createdAtMs: 120,
+    } as const;
+    const mission = {
+      id: "88888888-8888-4888-8888-888888888888",
+      workspaceId: project.workspaceId,
+      projectId: project.id,
+      charterRevision: 1,
+      teamId: "55555555-5555-4555-8555-555555555555",
+      desiredOutcome: "Open the copied Mission",
+      successConditions: ["The emitted link parses"],
+      constraints: [],
+      prohibitions: [],
+      lifecycle: "admitted",
+      admittedBy: "operator",
+      admittedAtMs: 126,
+      members: [
+        {
+          residentId: "66666666-6666-4666-8666-666666666666",
+          admissionConfigurationId: "77777777-7777-4777-8777-777777777777",
+        },
+      ],
+    } as const;
+    mockInitialState("unlocked");
+    const base = invokeMock.getMockImplementation();
+    if (!base) throw new Error("initial invoke mock is unavailable");
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "projects") return Promise.resolve([summary]);
+      if (command === "project") return Promise.resolve(project);
+      if (command === "project_charter_history") return Promise.resolve([project.charter]);
+      if (command === "project_policy") return Promise.resolve(null);
+      if (command === "project_policy_history") return Promise.resolve([]);
+      if (command === "current_project_repository") return Promise.resolve(null);
+      if (command === "project_repository_history") return Promise.resolve([]);
+      if (command === "teams") return Promise.resolve([]);
+      if (command === "missions") return Promise.resolve([mission]);
+      return base(command, args);
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    await user.click(await screen.findByRole("button", { name: /Linked Project/i }));
+    await screen.findByText("Open the copied Mission");
+
+    await user.click(screen.getByRole("button", { name: "Copy Project link" }));
+    const projectLink = `beacon:/${project.workspaceId}/project/${project.id}`;
+    expect(writeText).toHaveBeenLastCalledWith(projectLink);
+    expect(screen.getByLabelText("Beacon link")).toHaveValue(projectLink);
+
+    await user.click(screen.getByRole("button", { name: "Copy Mission link" }));
+    const missionLink = `${projectLink}/mission/${mission.id}`;
+    expect(writeText).toHaveBeenLastCalledWith(missionLink);
+    expect(screen.getByLabelText("Beacon link")).toHaveValue(missionLink);
+    expect(screen.getByText("Copied Mission link.")).toBeVisible();
+  });
+
+  it("opens a pasted Mission link after loading its Project and Mission roster", async () => {
+    const user = userEvent.setup();
+    const project = {
+      id: "44444444-4444-4444-8444-444444444444",
+      workspaceId: acceptedOrganization.workspaceId,
+      name: "Mission link Project",
+      charter: {
+        revision: 1,
+        purpose: "Resolve a Mission from the authenticated shell.",
+        desiredOutcomes: ["Reach the exact Mission"],
+        constraints: [],
+        prohibitions: [],
+        autonomyProfile: "supervised",
+        budgetBoundary: "no_spend",
+        externalEffects: "prohibited",
+        authoredAtMs: 123,
+      },
+      createdAtMs: 120,
+    } as const;
+    const summary = {
+      id: project.id,
+      name: project.name,
+      charterRevision: 1,
+      autonomyProfile: "supervised",
+      createdAtMs: 120,
+    } as const;
+    const mission = {
+      id: "88888888-8888-4888-8888-888888888888",
+      workspaceId: project.workspaceId,
+      projectId: project.id,
+      charterRevision: 1,
+      teamId: "55555555-5555-4555-8555-555555555555",
+      desiredOutcome: "Reach this exact linked Mission",
+      successConditions: ["The Mission is visibly selected"],
+      constraints: [],
+      prohibitions: [],
+      lifecycle: "admitted",
+      admittedBy: "operator",
+      admittedAtMs: 126,
+      members: [
+        {
+          residentId: "66666666-6666-4666-8666-666666666666",
+          admissionConfigurationId: "77777777-7777-4777-8777-777777777777",
+        },
+      ],
+    } as const;
+    mockInitialState("unlocked");
+    const base = invokeMock.getMockImplementation();
+    if (!base) throw new Error("initial invoke mock is unavailable");
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "projects") return Promise.resolve([summary]);
+      if (command === "project") return Promise.resolve(project);
+      if (command === "project_charter_history") return Promise.resolve([project.charter]);
+      if (command === "project_policy") return Promise.resolve(null);
+      if (command === "project_policy_history") return Promise.resolve([]);
+      if (command === "current_project_repository") return Promise.resolve(null);
+      if (command === "project_repository_history") return Promise.resolve([]);
+      if (command === "teams") return Promise.resolve([]);
+      if (command === "missions") return Promise.resolve([mission]);
+      return base(command, args);
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.type(
+      screen.getByLabelText("Beacon link"),
+      `beacon:/${project.workspaceId}/project/${project.id}/mission/${mission.id}`,
+    );
+    await user.click(screen.getByRole("button", { name: "Open Beacon link" }));
+
+    await screen.findByText("Opened the named Mission from the Beacon link.");
+    const outcome = screen.getByText(mission.desiredOutcome);
+    expect(outcome.closest("article")).toHaveAttribute("aria-current", "true");
   });
 
   it("enrolls the Owner only after the one-time Recovery Key is confirmed saved", async () => {
