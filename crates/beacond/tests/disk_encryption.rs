@@ -190,6 +190,27 @@ fn unreadable_dm_uuid_reports_unknown_not_enabled() {
 }
 
 #[test]
+fn unreadable_dm_name_reports_unknown() {
+    let fixture = Fixture::new("dm-name-unreadable");
+    let device = fixture.mounted_on_host_device();
+    let dm = fixture.node(&device).join("dm");
+    fs::create_dir_all(&dm).unwrap();
+    fs::write(
+        dm.join("uuid"),
+        "CRYPT-LUKS2-a1b2c3d4e5f60718293a4b5c6d7e8f90-live\n",
+    )
+    .unwrap();
+    // The uuid read succeeds and the name read does not. A read that fails
+    // after another succeeded is still a read that failed.
+    fs::create_dir_all(dm.join("name")).unwrap();
+
+    let report = fixture.read();
+
+    assert_eq!(report.state, LiveDataEncryption::Unknown);
+    assert!(reason(&report).contains("could not be read"));
+}
+
+#[test]
 fn unreadable_slave_device_number_reports_unknown() {
     let fixture = Fixture::new("slave-unreadable");
     let device = fixture.mounted_on_host_device();
