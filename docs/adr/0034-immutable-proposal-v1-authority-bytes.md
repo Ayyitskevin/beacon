@@ -353,11 +353,11 @@ opening any production transport or execution surface remain separately gated.
 
 ## Amendment (accepted 2026-09-02): the byte layout, recorded
 
-**Status: DRAFT. Proposed, not accepted.** The decision above remains `accepted`
-as written; nothing here changes it. This section records what
-`beacon.proposal.v1` *is*, at the level of detail a second implementation needs,
-so the grammar can be reproduced without reading Rust. Kevin's merge is the
-acceptance; until then this is a proposal from the implementing seat.
+**Status: accepted 2026-09-02** — the Product Steward's ruling at the merge of
+#38 (`6b0df56`). The decision above remains `accepted` as written; nothing here
+changes it. This section records what `beacon.proposal.v1` *is*, at the level of
+detail a second implementation needs, so the grammar can be reproduced without
+reading Rust.
 
 ### Why an amendment, not a new ADR
 
@@ -374,8 +374,9 @@ accepted behaviour. A layout that *differs* from this one is a different
 canonicalizer and takes a new identity (`beacon.proposal.v2`), never a silent
 change under the v1 name — which is the accepted text's own rule.
 
-Derived from `team/opus` at `0b44a58`, by reading `encode()`, its decoder, and
-the constants they share.
+Derived from `main` at `b93822a` (the rebase-merged form of the branch commit this
+amendment was written against — same patch-id), by reading `encode()`, its
+decoder, and the constants they share.
 
 ### Ordered field layout
 

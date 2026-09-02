@@ -34,7 +34,9 @@ beacon-desktop: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.39' not found 
 Each row is a clean container with no development packages, launching the
 AppImage under Xvfb and checking that the process survives 24 seconds, maps its
 window, starts `beacond`, and creates its store. Recorded in
-`C3-opus2-clean-host-report.md` and `C4-opus2-report.md`.
+`docs/evidence/2026-09-02-appimage-clean-host/` — the two reports
+(`C3-opus2-clean-host-report.md`, `C4-opus2-report.md`) and the scripts that
+produced them.
 
 | Host | glibc | Built on 24.04 | Built on 22.04 |
 |---|---|---|---|
