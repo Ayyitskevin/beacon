@@ -88,6 +88,9 @@ ls -l ../../target/release/bundle/appimage/Beacon.AppDir/usr/bin/
 Then, with the produced or downloaded AppImage, the repository-owned harness drives first-run setup
 on the three clean hosts:
 
+The launch-only matrix ADR 0036 cites lives in `docs/evidence/2026-09-02-appimage-clean-host/`;
+this harness supersedes it for first-run setup.
+
 ```sh
 scripts/clean-host-first-run ./Beacon_0.1.0_amd64.AppImage ./first-run-evidence
 ```
