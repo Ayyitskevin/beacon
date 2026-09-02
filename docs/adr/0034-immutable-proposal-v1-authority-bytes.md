@@ -616,7 +616,7 @@ also grants each declared-context Proposal its own budget rather than sharing on
 Those residuals are recorded in `docs/implementation/phase-2-proposal-v1.md`; the
 ADR should not be read as promising a bound that is not enforced.
 
-**A stated limit.** The "when the bound Repository is locally available …
+**A stated limit, superseded by the amendment below.** The "when the bound Repository is locally available …
 compares every entry with that revision" branch of this ADR's readable-context
 section is **not implemented**, and `ContentUnreadableAtRevision` is the terminal
 state today. Resolving a path to its bytes at a revision requires decompressing
@@ -639,3 +639,113 @@ envelope, mirrored in migration 0018 as
 `CHECK (length(canonical_bytes) BETWEEN 19 AND 65536)`. Whether to add those
 limits is an open question for the Product Steward, not a fact this amendment may
 record.
+
+
+## Amendment (proposed 2026-09-02): the readable-context comparison, as built
+
+**Status: DRAFT. Proposed, not accepted.** The decision above remains `accepted`
+as written; nothing here changes its bytes, its identity, or its authority
+boundary. This section records what the readable-context comparison now does, so
+the readiness vocabulary a consumer sees is described where the vocabulary is
+defined. Kevin's merge is the acceptance; until then this is a proposal from the
+implementing seat.
+
+### What changed
+
+The "A stated limit" section above is superseded. It said the comparison branch
+of this ADR was not implemented because `beacond` had no decompressor and
+`git_object_store.rs` was presence-only. Both stopped being true: `flate2` landed
+with the Git-hardening work, and the object store gained a loose-object reader and
+a commit → tree → blob path walk. `ContentUnreadableAtRevision` is no longer the
+terminal state for a local repository whose objects are loose.
+
+The comparison resolves each declared entry's path at the pinned base revision,
+reads the blob, and compares **SHA-256 of the file's bytes** with the entry's
+`content_sha256`. That is this ADR's own definition — "the SHA-256 identity of
+the exact file bytes presented as context" — and deliberately not the Git object
+name, which is a SHA-1 over a header and the same body. Comparing names would
+fail every entry that is actually correct.
+
+Every object on the path is proved to be the object its own name hashes to before
+anything is concluded from it, and a commit or tree that authenticates but does
+not parse as a commit or tree is refused rather than walked: authentication
+proves the bytes match the name, not that they are the object that name is
+supposed to hold.
+
+### One new readiness item
+
+`ReadableContextMismatch { entries }` joins the vocabulary. It is a fact about the
+**Repository**: the comparison ran, and one or more declared entries do not hold
+at the pinned revision. Each entry names its path and how it failed —
+`DigestDiffers` or `PathAbsent` — and deliberately not the digest that was
+actually found: knowing a declaration is wrong does not require publishing the
+contents of a file the Operator may not have meant to surface in a diagnostic.
+
+`ReadableContextNotVerified` keeps its meaning exactly: a fact about what **Beacon
+could reach**. The two are never collapsed, and no failure path produces silence,
+because silence is the only outcome that reads as agreement.
+
+### Three new not-verified reasons
+
+| reason | state |
+|---|---|
+| `PackedObjectUnreadable` | an object on the path is packed, and this reader reads only loose objects |
+| `ObjectTooLargeToInspect` | an object on the path exceeds the comparison's own byte bound |
+| `PathTooDeepToInspect` | the declared path is deeper than the comparison's walk descends |
+
+`PackedObjectUnreadable` is claimed **only after an authenticated pack lookup says
+the object is present**. An object that an authenticated commit or tree names and
+that lives in neither loose nor authenticated pack storage is `InspectionFailed`:
+that store is broken, and calling it "packed" would excuse a defect as a
+limitation of Beacon. The other two are resource refusals and are named
+separately from each other, because they are different limits and a reader
+deciding what to change needs to know which one was hit.
+
+### Mismatches are published only from a completed comparison
+
+A mismatch is an accusation about the Operator's declaration, and a walk that did
+not finish has not earned one — the entry it could not reach might have explained
+the one it did. So mismatches are buffered, and published only after **every**
+declared entry has completed from a fully read, self-authenticated object. If one
+entry disagrees and a later one is packed, oversized, too deep, malformed, or out
+of budget, the buffer is discarded and the whole comparison is not-verified.
+
+### What this amendment does not decide
+
+- **Packed and delta objects are not read.** A repository that has been cloned or
+  `git gc`-ed reports `PackedObjectUnreadable` for every entry, which may well be
+  the common case. The comparison is still worth having — it makes this ADR's
+  comparison branch true for a real class of repositories, namely the ones an
+  Operator has been working in — but nobody should read it as "the comparison now
+  runs". A pack reader is its own slice, with its own delta-format risks and caps.
+- **A path resolving to a symlink, gitlink, or directory is not-verified, not a
+  mismatch.** Git stores a `120000` symlink as a blob holding the link text, so
+  the mode alone does not establish which bytes the submitter presented, and this
+  ADR does not define the case. Treating it as a false declaration would invent
+  contract. Deciding it either way is a public authority contract and therefore
+  the Product Steward's, not the implementing seat's.
+- **Content that differs only because Git normalized it.** `core.autocrlf`,
+  `text=auto`, and clean/smudge filters mean a blob body can legitimately differ
+  from the file the submitter hashed. Such an entry is reported as
+  `DigestDiffers`, which is true and is not an accusation of misconduct. Whether
+  Beacon should distinguish that case, and how, is a contract question this
+  amendment deliberately leaves open.
+
+### Required evidence
+
+- a declared entry that holds at the pinned revision adds no readiness item;
+- an entry whose digest differs is a mismatch naming that entry;
+- an entry whose path is absent at the revision is a mismatch, not an inspection
+  failure;
+- a packed repository is not-verified, and the pack lookup is what earns the word
+  "packed"; an object present in no storage at all is `InspectionFailed`;
+- a mismatch found before an unreadable entry is discarded rather than published;
+- a path resolving to a symlink is not-verified rather than mismatched;
+- an object that does not hash to its own name, a commit that does not parse as a
+  commit, and a tree naming one path twice are each refused before any result is
+  drawn from them;
+- the comparison stops at its deadline rather than answering, at every step;
+- every bound the comparison owns is its own, not the object store's.
+
+The mapping from these to their tests is recorded in
+`docs/implementation/phase-2-proposal-v1.md`.
