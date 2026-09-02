@@ -1269,5 +1269,22 @@ describe("desktop session transport", () => {
     await expect(liveDataEncryptionStatus()).rejects.toThrow(
       "invalid live-data encryption report",
     );
+
+    // mountPoint and mechanism are rendered, so they are bounded like the
+    // evidence beside them. isRecorded on its own accepts any string.
+    invokeMock.mockResolvedValue({
+      ...report,
+      mechanism: { kind: "absent", reason: "x".repeat(201) },
+    });
+    await expect(liveDataEncryptionStatus()).rejects.toThrow(
+      "invalid live-data encryption report",
+    );
+    invokeMock.mockResolvedValue({
+      ...report,
+      mountPoint: { kind: "present", value: `/${"m".repeat(201)}` },
+    });
+    await expect(liveDataEncryptionStatus()).rejects.toThrow(
+      "invalid live-data encryption report",
+    );
   });
 });

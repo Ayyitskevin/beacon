@@ -268,7 +268,7 @@ fn inspect_linux(
         ),
     );
     let mount_point = Recorded::Present {
-        value: mount.mount_point.clone(),
+        value: bounded_text(mount.mount_point.clone()),
     };
 
     // A longest-prefix selection that picked the wrong entry would answer
@@ -315,7 +315,9 @@ fn inspect_linux(
         Walk::Encrypted { mechanism } => LiveDataEncryptionReport {
             state: LiveDataEncryption::Enabled,
             mount_point,
-            mechanism: Recorded::Present { value: mechanism },
+            mechanism: Recorded::Present {
+                value: bounded(mechanism),
+            },
             evidence,
             not_verified: vec![NOT_VERIFIED_KEY.to_owned()],
             observed_at_ms,
@@ -369,7 +371,12 @@ fn unknown_owned(
     LiveDataEncryptionReport {
         state: LiveDataEncryption::Unknown,
         mount_point,
-        mechanism: Recorded::Absent { reason },
+        // Bounded like the evidence beside it: these two fields are rendered,
+        // and the desktop adapter refuses text over the same limit. A reason
+        // carrying a long sysfs path must not make a whole report unreadable.
+        mechanism: Recorded::Absent {
+            reason: bounded(reason),
+        },
         evidence,
         not_verified: vec![
             NOT_VERIFIED_OPAL.to_owned(),
@@ -389,6 +396,27 @@ fn record(evidence: &mut Vec<EncryptionEvidence>, source: String, observation: S
         source: bounded(source),
         observation: bounded(observation),
     });
+}
+
+/// Bounds text without redacting it.
+///
+/// The mount point is how the operator recognises which volume the report is
+/// about, and it is a directory they chose, not a device identifier read out of
+/// the kernel. Redacting it would bound the wrong thing: the report would stop
+/// naming its own subject to hide something it did not learn from the stack.
+fn bounded_text(value: String) -> String {
+    let cleaned: String = value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .take(MAX_OBSERVATION_CHARS)
+        .collect();
+    cleaned.trim().to_owned()
 }
 
 fn bounded(value: String) -> String {

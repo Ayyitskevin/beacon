@@ -1971,8 +1971,8 @@ function isLiveDataEncryptionReport(value: unknown): value is LiveDataEncryption
   if (
     !["enabled", "disabled", "unknown"].includes(String(value.state)) ||
     !isNonnegativeInteger(value.observedAtMs) ||
-    !isRecorded(value.mountPoint, isString) ||
-    !isRecorded(value.mechanism, isString) ||
+    !isBoundedRecordedText(value.mountPoint) ||
+    !isBoundedRecordedText(value.mechanism) ||
     !Array.isArray(evidence) ||
     evidence.length > 32 ||
     !evidence.every(isEncryptionEvidence) ||
@@ -1987,6 +1987,21 @@ function isLiveDataEncryptionReport(value: unknown): value is LiveDataEncryption
   return (value.mechanism as Recorded<string>).kind === "present"
     ? value.state === "enabled"
     : value.state !== "enabled";
+}
+
+/** Both halves of a `Recorded<string>` bounded like the evidence beside them.
+ *
+ *  `isRecorded` accepts any present value and any absent reason, and both of
+ *  these fields are rendered. Unbounded text in a rendered field is a hole in a
+ *  boundary the rest of this adapter closes. */
+function isBoundedRecordedText(value: unknown): boolean {
+  if (hasExactKeys(value, ["kind", "reason"])) {
+    return value.kind === "absent" && isTrimmedTextWithoutControls(value.reason, 200);
+  }
+  if (hasExactKeys(value, ["kind", "value"])) {
+    return value.kind === "present" && isTrimmedTextWithoutControls(value.value, 200);
+  }
+  return false;
 }
 
 function isEncryptionEvidence(value: unknown): value is EncryptionEvidence {
