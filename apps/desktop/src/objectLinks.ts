@@ -44,12 +44,20 @@ export type LinkPhase = "operator_setup_required" | "locked" | "unlocked";
  *  `ProjectSummary`, `ProjectView` and `MissionView` all satisfy these, which
  *  the compile-checked fixture in the test file pins.
  *
- *  `LinkProject` carries no `workspaceId` because `ProjectSummary` has none:
- *  the Projects list is loaded for the current Workspace and IS the Workspace's
- *  scope, so Workspace membership is settled once, above, and never asked of a
- *  row. `LinkMission` carries both, because `MissionView` states both and an
- *  object that states its parents can be checked against them. */
-export type LinkProject = { readonly id: string };
+ *  `LinkProject` REFUSES a `workspaceId` rather than merely omitting one. The
+ *  reading is the scope -- `loadProjects()` returns the current Workspace's
+ *  Projects -- so a row has no parent to state, and a type that silently
+ *  ACCEPTED one would be ignoring a value it can see. That is the shape of
+ *  guard this codebase has been bitten by three times: a check keyed on
+ *  something next to the property. `workspaceId?: never` makes the erasure a
+ *  compile error instead of a comment, so a `ProjectView` carrying a foreign
+ *  Workspace cannot enter the reading at all. `ProjectSummary`, which states no
+ *  parent, still assigns with no cast.
+ *
+ *  `LinkMission` is the opposite case and takes the opposite rule: `MissionView`
+ *  states both parents, so both are checked. A type either states a parent and
+ *  is checked on it, or cannot state one. */
+export type LinkProject = { readonly id: string; readonly workspaceId?: never };
 export type LinkMission = {
   readonly id: string;
   readonly workspaceId: string;
@@ -67,12 +75,23 @@ export type LoadedMissions = {
   readonly items: readonly LinkMission[];
 };
 
+/** The Projects the shell holds, and the Workspace they were loaded for.
+ *
+ *  The same shape as `LoadedMissions`, for the same reason one layer up:
+ *  "the list is the current Workspace's" was a precondition stated in prose,
+ *  and prose does not refuse a reading carried over from another Workspace.
+ *  Naming the provenance makes it a fact the router checks. */
+export type LoadedProjects = {
+  readonly workspaceId: string;
+  readonly items: readonly LinkProject[];
+};
+
 export type LinkContext = {
   phase: LinkPhase;
   /** This Installation's Workspace, or null before it is known. */
   workspaceId: string | null;
-  /** The current Workspace's Projects, or null before they are loaded. */
-  projects: readonly LinkProject[] | null;
+  /** One Workspace's Projects, or null before they are loaded. */
+  projects: LoadedProjects | null;
   /** One Project's Missions, or null before any are loaded. */
   missions: LoadedMissions | null;
 };
@@ -175,8 +194,11 @@ export function routeObjectLink(link: ObjectLink, context: LinkContext): LinkOut
   }
   if (link.kind === "briefing") return { outcome: "open", link };
 
-  if (context.projects === null) return { outcome: "notLoaded", awaiting: "projects" };
-  const project = context.projects.find((candidate) => candidate.id === link.projectId);
+  // Projects loaded for a different Workspace say nothing about this one.
+  if (context.projects === null || context.projects.workspaceId !== link.workspaceId) {
+    return { outcome: "notLoaded", awaiting: "projects" };
+  }
+  const project = context.projects.items.find((candidate) => candidate.id === link.projectId);
   if (!project) return { outcome: "absent", missing: "project", id: link.projectId };
   if (link.kind === "project") return { outcome: "open", link };
 
