@@ -85,10 +85,11 @@ one host shape and open everywhere else.
 
 This is what was measured, not what we would like to promise.
 
-- **glibc 2.39 or newer.** The shell binary needs `GLIBC_2.39` and the bundled GTK and WebKit
-  libraries need `GLIBC_2.38`, because the package job builds on `ubuntu-latest`. It will not load
-  on Debian 12, Ubuntu 22.04, RHEL 9, or Mint 21; the failure is a loader error naming the missing
-  version, not a crash.
+- **glibc 2.35 or newer.** linuxdeploy bundles the build host's GTK and WebKit libraries, so the
+  package job's base image sets this floor; it is pinned to `ubuntu-22.04` for that reason. The
+  bundle was observed launching on Ubuntu 22.04, Debian 12, and Ubuntu 24.04. Anything older than
+  glibc 2.35 — RHEL 9 is 2.34 — fails with a loader error naming the missing version, not a crash.
+  Built on `ubuntu-latest` instead, the floor is 2.39 and Debian 12 and Ubuntu 22.04 both fail.
 - **A desktop's ordinary graphics and text libraries.** The bundle does not carry `libfribidi0`,
   `libharfbuzz0b`, `libegl1`, or `libgles2`. Every desktop install has them —
   `apt-get install --simulate ubuntu-desktop-minimal` pulls all four, `libgtk-3-0t64` depends on the
