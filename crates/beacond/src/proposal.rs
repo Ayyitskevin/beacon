@@ -1211,7 +1211,7 @@ fn check_ascending(previous: Option<&str>, current: &str) -> Result<(), Malforme
 
 /// Trimmed, non-empty, bounded human text, free of NUL and non-whitespace control characters.
 /// `char::is_control` covers NUL, and whitespace controls such as newline and tab stay legal.
-fn is_human_text(value: &str, max_scalars: usize) -> bool {
+pub(crate) fn is_human_text(value: &str, max_scalars: usize) -> bool {
     !value.is_empty()
         && value.trim() == value
         && value.chars().count() <= max_scalars
@@ -1261,14 +1261,14 @@ fn is_descriptor_token(value: &str) -> bool {
         })
 }
 
-fn is_base_revision(value: &str) -> bool {
+pub(crate) fn is_base_revision(value: &str) -> bool {
     value.len() == BASE_REVISION_CHARS
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn sha256(bytes: &[u8]) -> [u8; 32] {
+pub(crate) fn sha256(bytes: &[u8]) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(bytes);
     let output = digest.finalize();
@@ -1858,6 +1858,57 @@ fn verified_proposal(
         submitted_at_ms: stored.submitted_at_ms,
         readiness,
     })
+}
+
+/// What a stored Proposal binds, read out of its own bytes.
+///
+/// One bounded packet rather than four reads, and deliberately not `Proposal`: a Ruling needs the
+/// bindings it must copy, and returning the full record would also derive Proposal readiness --
+/// an object-store inspection with its own budget -- on every Ruling read, for an answer about a
+/// different question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProposalBindingFacts {
+    pub(crate) project_id: Uuid,
+    pub(crate) bindings: ProposalBindings,
+}
+
+/// The bindings of one stored Proposal, proved against its own bytes before they are returned.
+///
+/// `Ok(None)` means no Proposal in this Workspace has that digest, which is a different fact from
+/// a stored Proposal that disagrees with itself -- that is `InvalidStore`, and never a `None` a
+/// caller could read as "not recorded". Everything `verified_proposal` proves except readiness is
+/// proved here, so a caller never trusts the `proposals` row directly.
+pub(crate) fn proposal_binding_facts(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+) -> Result<Option<ProposalBindingFacts>, ProposalError> {
+    let Some(stored) = load_stored(connection, workspace_id, digest_value)? else {
+        return Ok(None);
+    };
+    if HEXLOWER.encode(&sha256(&stored.canonical_bytes)) != stored.digest_value {
+        return Err(ProposalError::InvalidStore);
+    }
+    let payload = decode(&stored.canonical_bytes).map_err(|_| ProposalError::InvalidStore)?;
+    if encode(&payload).map_err(|_| ProposalError::InvalidStore)? != stored.canonical_bytes {
+        return Err(ProposalError::InvalidStore);
+    }
+    if !columns_match(&stored, &payload) {
+        return Err(ProposalError::InvalidStore);
+    }
+    // The same rule `verified_proposal` applies on the way out: no owning module can resolve a
+    // bound descriptor yet, so a row presenting one is invalid state rather than a Proposal a
+    // Ruling could bind.
+    if constraints(&payload.requirements)
+        .iter()
+        .any(|constraint| constraint.is_declared())
+    {
+        return Err(ProposalError::InvalidStore);
+    }
+    Ok(Some(ProposalBindingFacts {
+        project_id: payload.scope.project_id,
+        bindings: payload.bindings,
+    }))
 }
 
 fn columns_match(stored: &StoredProposal, payload: &ProposalV1) -> bool {
