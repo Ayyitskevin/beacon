@@ -53,6 +53,14 @@ const MAX_CONFLICTS_BYTES: usize = MAX_CONFLICTS_SCALARS * 4;
 const MAX_SUMMARY_SCALARS: usize = 500;
 const MAX_SUMMARY_BYTES: usize = MAX_SUMMARY_SCALARS * 4;
 const MAX_DESCRIPTOR_TOKEN_BYTES: usize = 64;
+/// The whole record's own bound, and the one the store column repeats.
+///
+/// The per-field limits alone admit 145,941 bytes -- 64 findings of 500 four-byte scalars is
+/// 128,576 of them -- so a grammar with only per-field bounds is not total: a record every field
+/// table accepts could not be stored. This is the bound that makes it total, it is checked by the
+/// encoder before anything reaches SQL and by the decoder before it parses, and
+/// `0021_evaluations.sql` repeats it as a CHECK so the two cannot drift apart silently.
+const MAX_CANONICAL_BYTES: usize = 65_536;
 const MAX_CITED_RUNS: usize = 64;
 const MAX_FINDINGS: usize = 64;
 const DIGEST_HEX_CHARS: usize = 64;
@@ -278,6 +286,7 @@ pub enum MalformedEvaluation {
     TrailingBytes,
     InvalidUtf8,
     OverLimitLength,
+    RecordTooLarge,
     Subject,
     ProposalDigestValue,
     ProposalDigestEnvelope,
@@ -306,6 +315,7 @@ impl fmt::Display for MalformedEvaluation {
             Self::TrailingBytes => "bytes follow the record",
             Self::InvalidUtf8 => "a string is not valid UTF-8",
             Self::OverLimitLength => "a declared length exceeds its field's limit",
+            Self::RecordTooLarge => "the whole record exceeds its own byte bound",
             Self::Subject => "the subject tag is not an assigned value",
             Self::ProposalDigestValue => "the Proposal digest is not 64 lowercase hex characters",
             Self::ProposalDigestEnvelope => {
@@ -709,12 +719,24 @@ fn encode(payload: &EvaluationV1) -> Result<Vec<u8>, MalformedEvaluation> {
 
     // 20.
     encoder.u64(payload.evaluated_at_ms);
+
+    // The record's own bound. Per-field limits admit a record the store cannot hold, so the
+    // grammar is only total with this check -- and it is the encoder's, not SQL's, so a refusal
+    // is a fact about the bytes rather than a database error surfacing through a Command.
+    if encoder.out.len() > MAX_CANONICAL_BYTES {
+        return Err(MalformedEvaluation::RecordTooLarge);
+    }
     Ok(encoder.out)
 }
 
 /// Strict: every field is checked against its own vocabulary and bound, and bytes that decode to a
 /// value this grammar would not have produced are refused rather than normalised.
 fn decode(input: &[u8]) -> Result<EvaluationV1, MalformedEvaluation> {
+    // Checked BEFORE parsing: bytes can arrive from a store rather than from this encoder, and a
+    // decoder that measures after splitting has already done the work it meant to refuse.
+    if input.len() > MAX_CANONICAL_BYTES {
+        return Err(MalformedEvaluation::RecordTooLarge);
+    }
     let mut decoder = Decoder::new(input);
     decoder.magic()?;
 
@@ -1638,6 +1660,38 @@ mod tests {
         let mut payload = published_vector_payload();
         payload.cited_runs = vec![payload.cited_runs[0], payload.cited_runs[0]];
         assert_eq!(encode(&payload), Err(MalformedEvaluation::CitedRunOrder));
+    }
+
+    /// gpt2's S2: the per-field bounds admit a record the store cannot hold. 64 findings of 500
+    /// four-byte scalars each is 128,576 bytes of findings alone, and the whole record reaches
+    /// 145,941 -- every byte of it legal under the field table, and none of it recordable against
+    /// a 65,536-byte column. A grammar whose maximum value cannot be stored is not total, so the
+    /// record carries its OWN total bound and refuses before the store is asked.
+    #[test]
+    fn the_record_owns_a_total_bound_that_the_store_column_matches() {
+        let mut payload = published_vector_payload();
+        payload.findings = (0..MAX_FINDINGS)
+            .map(|_| Finding {
+                severity: FindingSeverity::Note,
+                // Four bytes per scalar, at the per-field maximum: every value here is legal.
+                summary: "\u{1F9EA}".repeat(MAX_SUMMARY_SCALARS),
+            })
+            .collect();
+        assert_eq!(encode(&payload), Err(MalformedEvaluation::RecordTooLarge));
+
+        // And the largest record that IS within the bound still encodes, decodes and round-trips,
+        // so the refusal above is a boundary rather than a ceiling nothing can reach.
+        let mut payload = published_vector_payload();
+        payload.rationale = "\u{1F9EA}".repeat(MAX_RATIONALE_SCALARS);
+        payload.conflicts = Conflicts::Declared("\u{1F9EA}".repeat(MAX_CONFLICTS_SCALARS));
+        let bytes = encode(&payload).expect("a large but bounded record encodes");
+        assert!(bytes.len() <= MAX_CANONICAL_BYTES, "{}", bytes.len());
+        assert_eq!(decode(&bytes).unwrap(), payload);
+
+        // The decoder owns the bound too, and checks it before parsing: bytes can arrive from a
+        // store rather than from this encoder.
+        let oversize = vec![0_u8; MAX_CANONICAL_BYTES + 1];
+        assert_eq!(decode(&oversize), Err(MalformedEvaluation::RecordTooLarge));
     }
 
     /// The envelope the bytes may name is closed. A digest produced by another canonicalizer is
