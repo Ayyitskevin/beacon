@@ -1308,11 +1308,13 @@ fn positive_u32(value: i64) -> Result<u32, SampleProjectError> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::{Read, Write};
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
     use std::sync::{Arc, Mutex};
 
+    use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
     use rusqlite::Connection;
     use uuid::Uuid;
 
@@ -1635,7 +1637,15 @@ mod tests {
         let mut permissions = fs::metadata(&object).unwrap().permissions();
         permissions.set_mode(0o600);
         fs::set_permissions(&object, permissions).unwrap();
-        fs::write(object, b"not the expected commit object").unwrap();
+        let compressed = fs::read(&object).unwrap();
+        let mut decoded = Vec::new();
+        ZlibDecoder::new(compressed.as_slice())
+            .read_to_end(&mut decoded)
+            .unwrap();
+        *decoded.last_mut().unwrap() ^= 0x01;
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&decoded).unwrap();
+        fs::write(object, encoder.finish().unwrap()).unwrap();
 
         assert!(matches!(
             service.install(),
