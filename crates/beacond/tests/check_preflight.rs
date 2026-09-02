@@ -385,6 +385,55 @@ fn a_binding_that_satisfies_every_step_is_admissible_when_the_sandbox_is_proven(
 }
 
 #[test]
+fn preflight_refuses_when_its_binding_is_superseded_after_the_opening_read() {
+    let (repository, revision) = fixture_repository("binding-moved-during-preflight");
+    let source = repository.path.to_string_lossy().into_owned();
+    let (store, projects, repositories, preflight) =
+        enrolled_services("binding-moved-during-preflight");
+    let project = projects.create(project_draft()).unwrap();
+    repositories
+        .bind(
+            project.id,
+            project.charter.revision,
+            None,
+            draft(RepositorySourceKind::LocalPath, &source, &revision),
+        )
+        .unwrap();
+    let connection = Connection::open(&store.path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER supersede_binding_when_preflight_opens
+             AFTER INSERT ON runs
+             WHEN NEW.kind = 'check_preflight'
+             BEGIN
+                 INSERT INTO project_repository_revisions (
+                     workspace_id, project_id, revision, charter_revision, source_kind,
+                     source, base_revision, declared_checks_json, author_kind, authored_at_ms
+                 )
+                 SELECT workspace_id, project_id, revision + 1, charter_revision, source_kind,
+                        source, base_revision, declared_checks_json, author_kind, authored_at_ms
+                 FROM project_repository_revisions
+                 WHERE workspace_id = NEW.workspace_id
+                   AND project_id = NEW.project_id
+                   AND revision = NEW.repository_revision;
+             END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let receipt = preflight.preflight(project.id).unwrap();
+
+    assert_eq!(receipt.repository_revision, 1);
+    assert_eq!(receipt.outcome, PreflightOutcome::DeclaredChecksChanged);
+    assert!(
+        receipt.not_verified.iter().any(|gap| {
+            gap == "every step: the Repository Binding changed while this Run was inspecting"
+        }),
+        "the final binding guard must remain visible in the Receipt"
+    );
+}
+
+#[test]
 fn a_git_url_is_unsupported_and_no_filesystem_read_is_attempted() {
     let (_store, receipt, _project) = bind_and_preflight(
         "git-url",
