@@ -2,14 +2,15 @@
 //!
 //! ADR 0017 relies on operating-system disk encryption for the open live store
 //! instead of adding an application-level database cipher. That trade is only
-//! honest if Beacon can say which of three things is true — the volume is
-//! encrypted by the operating system, it is not, or Beacon could not tell — and
-//! can show what it read to reach that answer.
+//! honest if Beacon never promotes an incomplete reading into an encryption
+//! claim. Version 1 therefore reports `Unknown` plus bounded observations only.
+//! The guarded detector candidate remains below as the executable specification
+//! for a later rewrite, but no production Query returns its confident states.
 //!
-//! The asymmetry below is the whole safety property: nothing reports `Enabled`
-//! except a device-mapper crypt UUID this module read itself. Every failure to
-//! read reports `Unknown` with its reason. No read failure can ever produce
-//! `Enabled` or `Disabled`.
+//! The asymmetry below is the whole safety property: every production reading
+//! is `Unknown`. When the candidate believes it reached a confident state, the
+//! Query reports `DetectionNotEvaluated` and retains only the bounded evidence
+//! it read. Read failures keep their more specific `Unknown` cause.
 //!
 //! Nothing here spawns a process, opens a socket, or writes anything. Every
 //! observation is a bounded read of `/proc/self/mountinfo` and `/sys/dev/block`
@@ -74,7 +75,8 @@ const NOT_VERIFIED_KEY: &str = "the strength, custody, or current lock state of 
 /// What Beacon proved about operating-system disk encryption for the volume
 /// holding this Installation's live data.
 ///
-/// Three states, closed.
+/// Three states, closed. Production v1 emits only `Unknown`; `Enabled` and
+/// `Disabled` remain the deferred detector candidate's executable vocabulary.
 ///
 /// `Enabled`: every branch of the stack was read to a physical leaf and every
 /// one of those paths passed through a crypt layer.
@@ -205,7 +207,10 @@ impl LiveDataEncryptionReport {
         not_verified: Vec<String>,
         observed_at_ms: u64,
     ) -> Option<Self> {
-        if evidence.len() > MAX_EVIDENCE_ENTRIES || not_verified.len() > MAX_NOT_VERIFIED_ENTRIES {
+        if evidence.len() > MAX_EVIDENCE_ENTRIES
+            || (omitted_evidence > 0 && evidence.len() != MAX_EVIDENCE_ENTRIES)
+            || not_verified.len() > MAX_NOT_VERIFIED_ENTRIES
+        {
             return None;
         }
         if !not_verified
@@ -418,6 +423,10 @@ pub enum ReasonCode {
     MappingWithoutBackingDevice,
     LoopbackImage,
     PlatformNotSupported,
+    /// Version 1 recorded bounded host observations but did not evaluate them
+    /// into an encryption claim. The full type-first detector rewrite is a
+    /// later slice.
+    DetectionNotEvaluated,
     /// The Query itself did not answer. This module never produces it -- it
     /// cannot report that it was not reached -- so its one production site is
     /// the desktop, which builds a report for a rejected `live_data_encryption_
@@ -518,7 +527,10 @@ impl LiveDataEncryptionConclusion {
         subjects: Vec<Subject>,
         omitted_subjects: u32,
     ) -> Option<Self> {
-        if subjects.len() > MAX_SUBJECTS || state != state_for(reason) {
+        if subjects.len() > MAX_SUBJECTS
+            || (omitted_subjects > 0 && subjects.len() != MAX_SUBJECTS)
+            || state != state_for(reason)
+        {
             return None;
         }
         // A conclusion missing a role its own sentence names renders "an
@@ -603,7 +615,15 @@ fn is_bounded_text(value: &str, max: usize) -> bool {
 
 fn is_device_number(value: &str) -> bool {
     match value.split_once(':') {
-        Some((major, minor)) => major.parse::<u32>().is_ok() && minor.parse::<u32>().is_ok(),
+        Some((major, minor)) => {
+            let Ok(major_number) = major.parse::<u32>() else {
+                return false;
+            };
+            let Ok(minor_number) = minor.parse::<u32>() else {
+                return false;
+            };
+            major_number.to_string() == major && minor_number.to_string() == minor
+        }
         None => false,
     }
 }
@@ -731,6 +751,10 @@ pub fn render_conclusion(conclusion: &LiveDataEncryptionConclusion) -> String {
             subjects_for_role(SubjectRole::Location)
         ),
         ReasonCode::PlatformNotSupported => "not detectable on this platform".to_owned(),
+        ReasonCode::DetectionNotEvaluated => {
+            "disk-encryption detection was not evaluated in this version; the recorded observations are evidence only"
+                .to_owned()
+        }
         ReasonCode::InitialReadFailed => format!(
             "the disk-encryption reading did not complete: {}",
             subjects_for_role(SubjectRole::Detail)
@@ -843,7 +867,28 @@ pub fn live_data_encryption_for_test(
     inspect(store_path, system, observed_at_ms)
 }
 
+/// The deferred detector candidate, exposed only so its seven rounds of
+/// regression fixtures remain executable while production ships the ruled
+/// unknown-only v1. A future detection rewrite must satisfy these guards
+/// before this candidate can be promoted back into `inspect`.
+pub fn disk_encryption_detection_candidate_for_test(
+    store_path: &Path,
+    system: &SystemView,
+    observed_at_ms: u64,
+) -> LiveDataEncryptionReport {
+    inspect_candidate(store_path, system, observed_at_ms)
+}
+
 fn inspect(
+    store_path: &Path,
+    system: &SystemView,
+    observed_at_ms: u64,
+) -> LiveDataEncryptionReport {
+    let candidate = inspect_candidate(store_path, system, observed_at_ms);
+    unknown_only_v1(candidate)
+}
+
+fn inspect_candidate(
     store_path: &Path,
     system: &SystemView,
     observed_at_ms: u64,
@@ -857,6 +902,27 @@ fn inspect(
         );
     }
     inspect_linux(store_path, system, observed_at_ms)
+}
+
+/// Applies the ruled v1 boundary after the bounded observation pass. Specific
+/// failures are already honest `Unknown` answers and keep their cause. A
+/// candidate confident state is deliberately not a production fact: the seven
+/// review rounds showed that the inference needs a fresh type-first rewrite.
+fn unknown_only_v1(mut candidate: LiveDataEncryptionReport) -> LiveDataEncryptionReport {
+    if candidate.conclusion.state() != LiveDataEncryption::Unknown {
+        candidate.conclusion = LiveDataEncryptionConclusion::new(
+            LiveDataEncryption::Unknown,
+            ReasonCode::DetectionNotEvaluated,
+            Vec::new(),
+        );
+        candidate.not_verified = vec![
+            NOT_VERIFIED_OPAL.to_owned(),
+            NOT_VERIFIED_FSCRYPT.to_owned(),
+            NOT_VERIFIED_BELOW_HOST.to_owned(),
+            NOT_VERIFIED_KEY.to_owned(),
+        ];
+    }
+    candidate
 }
 
 fn inspect_linux(
@@ -998,13 +1064,6 @@ fn inspect_linux(
                         .map(|device| Subject::device(*device))
                         .collect(),
                 ],
-            );
-            // Name the branches that are not covered in evidence too; a
-            // negative nobody can locate is not much better than no answer.
-            record(
-                &mut evidence,
-                system.sys_dev_block.display().to_string(),
-                render_conclusion(&conclusion),
             );
             report(
                 conclusion,
@@ -1539,7 +1598,8 @@ impl Walker<'_> {
         };
         let mut parents = Vec::new();
         if slaves_present {
-            let children = match fs::read_dir(&slaves) {
+            let remaining = MAX_STACK_NODES.saturating_sub(self.nodes) + 1;
+            let children = match bounded_children(&slaves, remaining) {
                 Ok(children) => children,
                 Err(error) => {
                     return Branch::Undetermined {
@@ -1553,8 +1613,7 @@ impl Walker<'_> {
             // the whole directory, and no fixture can see that from outside --
             // enumerating costs no open, so there is nothing to poison. Bounding
             // the iterator makes the property structural instead.
-            let remaining = MAX_STACK_NODES.saturating_sub(self.nodes) + 1;
-            for child in within_budget(children, remaining) {
+            for child in children {
                 // The budget bounds the work, so it is spent before the work:
                 // one more child means one more device to read and explore, and
                 // asking after the fan-out is enumerated lets a single wide node
@@ -1785,6 +1844,28 @@ fn within_budget<I: Iterator>(items: I, remaining: usize) -> std::iter::Take<I> 
     items.take(remaining)
 }
 
+/// The production door to a slaves directory. Its caller never receives an
+/// unbounded `ReadDir`, so the iterator bound cannot be bypassed by changing
+/// only the consuming loop. The helper's unit test counts the values returned
+/// through this exact door; changing its `take` bound makes that test red.
+struct BoundedChildren {
+    entries: std::iter::Take<fs::ReadDir>,
+}
+
+impl Iterator for BoundedChildren {
+    type Item = std::io::Result<fs::DirEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.entries.next()
+    }
+}
+
+fn bounded_children(path: &Path, remaining: usize) -> std::io::Result<BoundedChildren> {
+    Ok(BoundedChildren {
+        entries: within_budget(fs::read_dir(path)?, remaining),
+    })
+}
+
 fn over_stack_budget() -> Verdict {
     Verdict::bare(ReasonCode::StackOverBudget)
 }
@@ -1978,8 +2059,8 @@ mod tests {
     #[test]
     fn a_conclusion_cannot_outgrow_its_bound() {
         let widest = "m".repeat(MAX_SUBJECT_CHARS);
-        let mut checked = 0;
         for reason in EVERY_REASON {
+            let mut checked_for_reason = 0;
             for combination in 0..EVERY_ROLE.len().pow(MAX_SUBJECTS as u32) {
                 let mut roles = Vec::new();
                 let mut index = combination;
@@ -2018,7 +2099,7 @@ mod tests {
                     // becomes a rendered "an unnamed subject".
                     continue;
                 };
-                checked += 1;
+                checked_for_reason += 1;
                 let rendered = render_conclusion(&conclusion);
                 assert!(
                     rendered.chars().count() <= MAX_RENDERED_CONCLUSION_CHARS,
@@ -2031,9 +2112,11 @@ mod tests {
                     "{reason:?} accepted a conclusion missing a role it names"
                 );
             }
+            assert!(
+                checked_for_reason > 0,
+                "{reason:?} had no accepted maximum-width combination"
+            );
         }
-        // A property that silently exercised nothing is not a property.
-        assert!(checked > EVERY_REASON.len(), "only {checked} combinations");
     }
 
     /// The public door refuses what the constructors cannot make.
@@ -2084,6 +2167,17 @@ mod tests {
             "state": "disabled",
             "subjects": [{ "role": "device", "value": "8:1", "shortened": true }],
         }));
+        // Parsing is not canonicalization: the constructor emits exactly one
+        // decimal spelling, so the checked door must not admit aliases.
+        for value in ["+8:1", "08:01"] {
+            refused(serde_json::json!({
+                "reason": "no_crypt_on_any_path",
+                "state": "disabled",
+                "subjects": [{ "role": "device", "value": value, "shortened": false }],
+            }));
+        }
+        // An omission exists only after every subject slot was filled.
+        refused(serde_json::json!({ "omittedSubjects": 1 }));
         // Untrimmed and control-bearing text.
         refused(serde_json::json!({
             "subjects": [{ "role": "location", "value": " /x", "shortened": false }],
@@ -2159,6 +2253,8 @@ mod tests {
         refused(serde_json::json!({
             "notVerified": (0..MAX_NOT_VERIFIED_ENTRIES + 1).map(|_| NOT_VERIFIED_KEY).collect::<Vec<_>>(),
         }));
+        // A report can omit evidence only after every evidence slot was used.
+        refused(serde_json::json!({ "omittedEvidence": 1 }));
         // A volume is named by where it is mounted, never by a device.
         refused(serde_json::json!({
             "mountPoint": { "role": "device", "value": "8:1", "shortened": false },
@@ -2204,6 +2300,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_production_children_door_returns_only_its_budget() {
+        let root =
+            std::env::temp_dir().join(format!("beacon-bounded-children-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        for index in 0..5 {
+            fs::write(root.join(format!("child-{index}")), b"").unwrap();
+        }
+
+        let returned = bounded_children(&root, 2)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(returned.len(), 2);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// The fallback in `report` is unreachable only while the fixed caveats fit
     /// the bound the report checks them against. Checked, not assumed.
     #[test]
@@ -2239,7 +2353,7 @@ mod tests {
         SubjectRole::Detail,
     ];
 
-    const EVERY_REASON: [ReasonCode; 24] = [
+    const EVERY_REASON: [ReasonCode; 25] = [
         ReasonCode::CryptCoversEveryPath,
         ReasonCode::NoCryptOnAnyPath,
         ReasonCode::SomePathsUncovered,
@@ -2263,6 +2377,7 @@ mod tests {
         ReasonCode::MappingWithoutBackingDevice,
         ReasonCode::LoopbackImage,
         ReasonCode::PlatformNotSupported,
+        ReasonCode::DetectionNotEvaluated,
         ReasonCode::InitialReadFailed,
     ];
 }

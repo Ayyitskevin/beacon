@@ -142,6 +142,8 @@ Alpha relies on operating-system disk encryption for live Workspace data and say
 shows a persistent but unobtrusive warning without blocking local use when encryption is disabled
 or cannot be detected. The warning opens a one-click, operating-system-specific setup guide and
 status recheck; Beacon does not change system settings on its own.
+The current v1 reports `unknown` with bounded host observations; it does not guess `enabled` or
+`disabled` before the detector rewrite is accepted.
 Portable Safety Snapshots receive Beacon-managed encryption before leaving the Installation.
 
 Beacon is the canonical project and local-alpha product name. Active application IDs, commands,
