@@ -26,9 +26,12 @@
 //!
 //! # What this module deliberately does not do
 //!
-//! - **It does not execute a Declared Check.** The only programs it runs are
-//!   `git worktree add`, `git status`, and `git worktree remove`.
-//!   Bounded execution of repository-declared commands is a separate slice.
+//! - **It does not execute a Declared Check.** It runs `git rev-parse` and
+//!   `git config --file` as data-only reads: Beacon fixes their arguments and
+//!   file paths, while the repository supplies the bytes being inspected. It
+//!   also runs `git worktree add`, `git status`, and `git worktree remove`,
+//!   which operate on the bound source repository and linked worktree. Bounded
+//!   execution of repository-declared commands is a separate slice.
 //! - **It applies no sandbox.** No Landlock ruleset or resource limit applies.
 //!   Git runs with a closed environment and explicit configuration that disables
 //!   repository hooks, filesystem monitors, protocols, and ambient config. A
