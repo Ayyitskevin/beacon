@@ -1769,6 +1769,83 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn seccomp_statement(code: u16, value: u32) -> libc::sock_filter {
+        libc::sock_filter {
+            code,
+            jt: 0,
+            jf: 0,
+            k: value,
+        }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn seccomp_jump(code: u16, value: u32, jt: u8, jf: u8) -> libc::sock_filter {
+        libc::sock_filter {
+            code,
+            jt,
+            jf,
+            k: value,
+        }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn forbid_at_fdcwd_rename() -> std::io::Result<()> {
+        const BPF_LOAD_WORD_ABSOLUTE: u16 = 0x20;
+        const BPF_JUMP_EQUAL: u16 = 0x15;
+        const BPF_RETURN: u16 = 0x06;
+        const SECCOMP_DATA_ARCH_OFFSET: u32 = 4;
+        const SECCOMP_DATA_NUMBER_OFFSET: u32 = 0;
+        const SECCOMP_DATA_ARGUMENT_ZERO_OFFSET: u32 = 16;
+        const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
+        const SECCOMP_RETURN_KILL_PROCESS: u32 = 0x8000_0000;
+        const SECCOMP_RETURN_ERRNO: u32 = 0x0005_0000;
+        const SECCOMP_RETURN_ALLOW: u32 = 0x7fff_0000;
+        const AT_FDCWD_LOW_32: u32 = 0xffff_ff9c;
+
+        let mut filter = [
+            seccomp_statement(BPF_LOAD_WORD_ABSOLUTE, SECCOMP_DATA_ARCH_OFFSET),
+            seccomp_jump(BPF_JUMP_EQUAL, AUDIT_ARCH_X86_64, 1, 0),
+            seccomp_statement(BPF_RETURN, SECCOMP_RETURN_KILL_PROCESS),
+            seccomp_statement(BPF_LOAD_WORD_ABSOLUTE, SECCOMP_DATA_NUMBER_OFFSET),
+            seccomp_jump(BPF_JUMP_EQUAL, libc::SYS_rename as u32, 5, 0),
+            seccomp_jump(BPF_JUMP_EQUAL, libc::SYS_renameat as u32, 1, 0),
+            seccomp_jump(BPF_JUMP_EQUAL, libc::SYS_renameat2 as u32, 0, 2),
+            seccomp_statement(BPF_LOAD_WORD_ABSOLUTE, SECCOMP_DATA_ARGUMENT_ZERO_OFFSET),
+            seccomp_jump(BPF_JUMP_EQUAL, AT_FDCWD_LOW_32, 1, 0),
+            seccomp_statement(BPF_RETURN, SECCOMP_RETURN_ALLOW),
+            seccomp_statement(BPF_RETURN, SECCOMP_RETURN_ERRNO | libc::EPERM as u32),
+        ];
+        let program = libc::sock_fprog {
+            len: filter.len() as u16,
+            filter: filter.as_mut_ptr(),
+        };
+
+        // SAFETY: both prctl calls affect only this re-executed test thread.
+        // The BPF program is live for the duration of PR_SET_SECCOMP and its
+        // branches stay within the fixed instruction array above.
+        unsafe {
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::prctl(
+                libc::PR_SET_SECCOMP,
+                libc::SECCOMP_MODE_FILTER,
+                &program as *const libc::sock_fprog,
+            ) != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn sync_then_forbid_at_fdcwd_rename(path: &std::path::Path) -> std::io::Result<()> {
+        super::sync_directory_tree(path)?;
+        forbid_at_fdcwd_rename()
+    }
+
     #[test]
     fn authenticated_operator_installs_an_inert_supervised_sample_project() {
         let store = TestStore::new("install");
@@ -2307,6 +2384,42 @@ mod tests {
             fs::read(attacker_workspace.join("keep")).unwrap(),
             b"operator data"
         );
+    }
+
+    #[test]
+    fn publication_never_resolves_names_from_at_fdcwd() {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        {
+            const CHILD_ENV: &str = "BEACON_SAMPLE_PUBLICATION_SECCOMP_CHILD";
+            if std::env::var_os(CHILD_ENV).is_some() {
+                let store = TestStore::new("publication-seccomp-child");
+                let service = store
+                    .isolated_service()
+                    .with_repository_tree_sync(sync_then_forbid_at_fdcwd_rename);
+
+                let installed = service.install().unwrap();
+
+                assert_eq!(installed.outcome, SampleProjectInstallOutcome::Installed);
+                assert!(service.repository_path().is_dir());
+                return;
+            }
+
+            let output = Command::new(std::env::current_exe().unwrap())
+                .arg("sample_project::tests::publication_never_resolves_names_from_at_fdcwd")
+                .args(["--exact", "--test-threads=1"])
+                .env(CHILD_ENV, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "seccomp publication child failed: stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+        eprintln!("skipped: AT_FDCWD seccomp guard requires Linux x86_64");
     }
 
     #[test]
