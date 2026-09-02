@@ -1699,8 +1699,8 @@ mod tests {
                  /usr/bin/git \"$@\"\n\
                  if [ \"$is_init\" = 1 ]; then\n\
                    /usr/bin/mkdir -p .git/hooks\n\
-                   /usr/bin/printf '%s\\n' '#!/bin/sh' ': > \"{}\"' 'exit 0' > .git/hooks/post-checkout\n\
-                   /usr/bin/chmod 700 .git/hooks/post-checkout\n\
+                   /usr/bin/printf '%s\\n' '#!/bin/sh' ': > \"{}\"' 'exit 0' > .git/hooks/post-index-change\n\
+                   /usr/bin/chmod 700 .git/hooks/post-index-change\n\
                    /usr/bin/printf '%s\\n' '#!/bin/sh' ': > \"{}\"' 'cat' > .git/beacon-hostile-filter\n\
                    /usr/bin/chmod 700 .git/beacon-hostile-filter\n\
                    /usr/bin/printf '* filter=beacon-hostile\\n' > .gitattributes\n\
@@ -1879,7 +1879,7 @@ mod tests {
     }
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    fn assert_at_fdcwd_rename_filter_live(path: &std::path::Path) -> std::io::Result<()> {
+    fn assert_at_fdcwd_renameat2_filter_live(path: &std::path::Path) -> std::io::Result<()> {
         let scratch_directory = path
             .parent()
             .expect("staging directory has a parent")
@@ -1892,39 +1892,41 @@ mod tests {
         let source_path = CString::new(source_path.as_os_str().as_bytes()).unwrap();
         let destination_path = CString::new(destination_path.as_os_str().as_bytes()).unwrap();
         let at_fdcwd_result = unsafe {
-            libc::renameat(
+            libc::renameat2(
                 libc::AT_FDCWD,
                 source_path.as_ptr(),
                 libc::AT_FDCWD,
                 destination_path.as_ptr(),
+                libc::RENAME_NOREPLACE,
             )
         };
         let at_fdcwd_error = std::io::Error::last_os_error();
         assert_eq!(
             at_fdcwd_result, -1,
-            "AT_FDCWD rename unexpectedly bypassed the seccomp filter"
+            "AT_FDCWD renameat2 unexpectedly bypassed the seccomp filter"
         );
         assert_eq!(
             at_fdcwd_error.raw_os_error(),
             Some(libc::EPERM),
-            "AT_FDCWD rename failed for the wrong reason: {at_fdcwd_error}"
+            "AT_FDCWD renameat2 failed for the wrong reason: {at_fdcwd_error}"
         );
 
         let directory = fs::File::open(&scratch_directory)?;
         let source_name = CString::new("a").unwrap();
         let destination_name = CString::new("b").unwrap();
         let descriptor_relative_result = unsafe {
-            libc::renameat(
+            libc::renameat2(
                 directory.as_raw_fd(),
                 source_name.as_ptr(),
                 directory.as_raw_fd(),
                 destination_name.as_ptr(),
+                libc::RENAME_NOREPLACE,
             )
         };
         assert_eq!(
             descriptor_relative_result,
             0,
-            "descriptor-relative rename was blocked: {}",
+            "descriptor-relative renameat2 was blocked: {}",
             std::io::Error::last_os_error()
         );
         assert_eq!(fs::read(scratch_directory.join("b"))?, b"seccomp control");
@@ -1938,7 +1940,7 @@ mod tests {
     fn sync_then_forbid_at_fdcwd_rename(path: &std::path::Path) -> std::io::Result<()> {
         super::sync_directory_tree(path)?;
         forbid_at_fdcwd_rename()?;
-        assert_at_fdcwd_rename_filter_live(path)
+        assert_at_fdcwd_renameat2_filter_live(path)
     }
 
     #[test]
@@ -2293,7 +2295,7 @@ mod tests {
     #[test]
     fn sample_project_git_never_runs_repository_hooks_or_filter_drivers() {
         let store = TestStore::new("git-hardening");
-        let hook_sentinel = store.root.join("post-checkout-ran");
+        let hook_sentinel = store.root.join("post-index-change-ran");
         let filter_sentinel = store.root.join("filter-ran");
         let ready_sentinel = store.root.join("probe-ready");
         let git_program = store.root.join("hardening-probe-git");
@@ -2313,7 +2315,7 @@ mod tests {
         assert!(ready_sentinel.exists(), "the hardening probe did not run");
         assert!(
             !hook_sentinel.exists(),
-            "repository-controlled post-checkout hook ran"
+            "repository-controlled post-index-change hook ran"
         );
         assert!(
             !filter_sentinel.exists(),
