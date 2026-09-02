@@ -52,16 +52,22 @@ const MAX_SUMMARY_SCALARS: usize = 2_000;
 const MAX_BOOTSTRAP_REASON_SCALARS: usize = 500;
 const MAX_SUMMARY_BYTES: usize = MAX_SUMMARY_SCALARS * 4;
 const MAX_BOOTSTRAP_REASON_BYTES: usize = MAX_BOOTSTRAP_REASON_SCALARS * 4;
-const MAX_PATH_BYTES: usize = 4_096;
-const MAX_ARGUMENT_BYTES: usize = 4_096;
+// A string or list field's own limit is the canonical envelope, not an invented per-field number
+// (S4, gpt2 non-author review of PR #32). ADR 0034 states exactly two size limits: the 64 KiB
+// whole-record envelope (`MAX_CANONICAL_BYTES`) and the 40-character pinned base revision
+// (`BASE_REVISION_CHARS`). Where a field must exact-byte-match another module's Binding --
+// declared-check names, arguments, and working directories -- the limit is that module's own,
+// never a tighter one this grammar would invent: `MAX_CHECK_NAME_BYTES` mirrors
+// `project_repository.rs`'s `MAX_CHECK_NAME_CHARS`, and Repository Binding places no length limit
+// at all on an argument or a working directory, so none is placed here either. Every other string
+// and list below is bounded by `MAX_CANONICAL_BYTES` alone: a declared length or count that could
+// not possibly fit the record is refused before any entry is decoded (Decoder::string,
+// Decoder::count), which is what "the decoder first proves it fits within the remaining input and
+// the field's own limit" requires -- it does not require a second, narrower limit to exist.
 const MAX_CHECK_NAME_BYTES: usize = 64;
+/// ADR 0034: "`kind` and `canonicalizer` are lowercase ASCII tokens of at most 64 bytes."
 const MAX_DESCRIPTOR_TOKEN_BYTES: usize = 64;
-const MAX_TARGET_PATHS: usize = 1_024;
-const MAX_CONTEXT_ENTRIES: usize = 1_024;
-const MAX_MUTATIONS: usize = 2_048;
-const MAX_CHECK_RUNS: usize = 256;
-const MAX_DECLARED_CHECKS: usize = 256;
-const MAX_ARGV_ENTRIES: usize = 256;
+/// ADR 0034: "the pinned base revision must be a lowercase 40-character hexadecimal commit id."
 const BASE_REVISION_CHARS: usize = 40;
 
 /// The smallest number of bytes one entry of a list can occupy. A declared count is proved against
@@ -782,27 +788,30 @@ fn encode(payload: &ProposalV1) -> Result<Vec<u8>, MalformedProposal> {
             encoder.sha256(manifest_sha256);
         }
     }
-    encoder.count(payload.intent.target_paths.len(), MAX_TARGET_PATHS)?;
+    encoder.count(payload.intent.target_paths.len(), MAX_CANONICAL_BYTES)?;
     for target in &payload.intent.target_paths {
-        encoder.string(target, MAX_PATH_BYTES)?;
+        encoder.string(target, MAX_CANONICAL_BYTES)?;
     }
-    encoder.count(payload.intent.declared_mutations.len(), MAX_MUTATIONS)?;
+    encoder.count(payload.intent.declared_mutations.len(), MAX_CANONICAL_BYTES)?;
     for mutation in &payload.intent.declared_mutations {
         encoder.tag(mutation.kind.tag());
-        encoder.string(&mutation.target, MAX_PATH_BYTES)?;
+        encoder.string(&mutation.target, MAX_CANONICAL_BYTES)?;
     }
-    encoder.count(payload.intent.declared_check_runs.len(), MAX_CHECK_RUNS)?;
+    encoder.count(
+        payload.intent.declared_check_runs.len(),
+        MAX_CANONICAL_BYTES,
+    )?;
     for name in &payload.intent.declared_check_runs {
         encoder.string(name, MAX_CHECK_NAME_BYTES)?;
     }
-    encoder.count(payload.intent.declared_checks.len(), MAX_DECLARED_CHECKS)?;
+    encoder.count(payload.intent.declared_checks.len(), MAX_CANONICAL_BYTES)?;
     for check in &payload.intent.declared_checks {
         encoder.string(&check.name, MAX_CHECK_NAME_BYTES)?;
-        encoder.count(check.argv.len(), MAX_ARGV_ENTRIES)?;
+        encoder.count(check.argv.len(), MAX_CANONICAL_BYTES)?;
         for argument in &check.argv {
-            encoder.string(argument, MAX_ARGUMENT_BYTES)?;
+            encoder.string(argument, MAX_CANONICAL_BYTES)?;
         }
-        encoder.string(&check.working_directory, MAX_PATH_BYTES)?;
+        encoder.string(&check.working_directory, MAX_CANONICAL_BYTES)?;
     }
 
     for constraint in constraints(&payload.requirements) {
@@ -860,9 +869,9 @@ fn encode_context_entries(
     encoder: &mut Encoder,
     entries: &[ContextEntry],
 ) -> Result<(), MalformedProposal> {
-    encoder.count(entries.len(), MAX_CONTEXT_ENTRIES)?;
+    encoder.count(entries.len(), MAX_CANONICAL_BYTES)?;
     for entry in entries {
-        encoder.string(&entry.path, MAX_PATH_BYTES)?;
+        encoder.string(&entry.path, MAX_CANONICAL_BYTES)?;
         encoder.sha256(&entry.content_sha256);
     }
     Ok(())
@@ -989,10 +998,10 @@ fn decode_readable_context(
     match decoder.tag()? {
         TAG_CONTEXT_NOT_DECLARED => Ok(ReadableContext::NotDeclared),
         TAG_CONTEXT_DECLARED => {
-            let count = decoder.count(MAX_CONTEXT_ENTRIES, MIN_CONTEXT_ENTRY_BYTES)?;
+            let count = decoder.count(MAX_CANONICAL_BYTES, MIN_CONTEXT_ENTRY_BYTES)?;
             let mut entries: Vec<ContextEntry> = Vec::new();
             for _ in 0..count {
-                let path = decoder.string(MAX_PATH_BYTES)?;
+                let path = decoder.string(MAX_CANONICAL_BYTES)?;
                 if !is_repository_relative_path(&path) {
                     return Err(MalformedProposal::TargetPath);
                 }
@@ -1017,10 +1026,10 @@ fn decode_readable_context(
 }
 
 fn decode_target_paths(decoder: &mut Decoder<'_>) -> Result<Vec<String>, MalformedProposal> {
-    let count = decoder.count(MAX_TARGET_PATHS, MIN_STRING_ENTRY_BYTES)?;
+    let count = decoder.count(MAX_CANONICAL_BYTES, MIN_STRING_ENTRY_BYTES)?;
     let mut paths: Vec<String> = Vec::new();
     for _ in 0..count {
-        let path = decoder.string(MAX_PATH_BYTES)?;
+        let path = decoder.string(MAX_CANONICAL_BYTES)?;
         if !is_repository_relative_path(&path) {
             return Err(MalformedProposal::TargetPath);
         }
@@ -1034,12 +1043,12 @@ fn decode_mutations(
     decoder: &mut Decoder<'_>,
     target_paths: &[String],
 ) -> Result<Vec<DeclaredMutation>, MalformedProposal> {
-    let count = decoder.count(MAX_MUTATIONS, MIN_MUTATION_ENTRY_BYTES)?;
+    let count = decoder.count(MAX_CANONICAL_BYTES, MIN_MUTATION_ENTRY_BYTES)?;
     let mut mutations: Vec<DeclaredMutation> = Vec::new();
     let mut seen = HashSet::new();
     for _ in 0..count {
         let kind = MutationKind::parse(decoder.tag()?)?;
-        let target = decoder.string(MAX_PATH_BYTES)?;
+        let target = decoder.string(MAX_CANONICAL_BYTES)?;
         if !target_paths.iter().any(|path| path == &target) {
             return Err(MalformedProposal::MutationTarget);
         }
@@ -1060,7 +1069,7 @@ fn decode_mutations(
 }
 
 fn decode_check_runs(decoder: &mut Decoder<'_>) -> Result<Vec<String>, MalformedProposal> {
-    let count = decoder.count(MAX_CHECK_RUNS, MIN_STRING_ENTRY_BYTES)?;
+    let count = decoder.count(MAX_CANONICAL_BYTES, MIN_STRING_ENTRY_BYTES)?;
     let mut names: Vec<String> = Vec::new();
     for _ in 0..count {
         let name = decoder.string(MAX_CHECK_NAME_BYTES)?;
@@ -1076,7 +1085,7 @@ fn decode_check_runs(decoder: &mut Decoder<'_>) -> Result<Vec<String>, Malformed
 fn decode_declared_checks(
     decoder: &mut Decoder<'_>,
 ) -> Result<Vec<DeclaredCheck>, MalformedProposal> {
-    let count = decoder.count(MAX_DECLARED_CHECKS, MIN_DECLARED_CHECK_ENTRY_BYTES)?;
+    let count = decoder.count(MAX_CANONICAL_BYTES, MIN_DECLARED_CHECK_ENTRY_BYTES)?;
     let mut checks: Vec<DeclaredCheck> = Vec::new();
     for _ in 0..count {
         let name = decoder.string(MAX_CHECK_NAME_BYTES)?;
@@ -1084,10 +1093,10 @@ fn decode_declared_checks(
             return Err(MalformedProposal::DeclaredCheck);
         }
         check_ascending(checks.last().map(|check| check.name.as_str()), &name)?;
-        let argument_count = decoder.count(MAX_ARGV_ENTRIES, MIN_STRING_ENTRY_BYTES)?;
+        let argument_count = decoder.count(MAX_CANONICAL_BYTES, MIN_STRING_ENTRY_BYTES)?;
         let mut argv: Vec<String> = Vec::new();
         for _ in 0..argument_count {
-            let argument = decoder.string(MAX_ARGUMENT_BYTES)?;
+            let argument = decoder.string(MAX_CANONICAL_BYTES)?;
             if argument.is_empty() || argument.contains('\0') {
                 return Err(MalformedProposal::DeclaredCheck);
             }
@@ -1096,7 +1105,7 @@ fn decode_declared_checks(
         if argv.is_empty() {
             return Err(MalformedProposal::DeclaredCheck);
         }
-        let working_directory = decoder.string(MAX_PATH_BYTES)?;
+        let working_directory = decoder.string(MAX_CANONICAL_BYTES)?;
         if !is_working_directory(&working_directory) {
             return Err(MalformedProposal::DeclaredCheck);
         }
@@ -2070,22 +2079,31 @@ mod tests {
 
     #[test]
     fn a_declared_count_that_cannot_fit_is_refused_before_any_entry_is_read() {
-        // A four-billion-entry target list inside a truncated record. The decoder proves the count
-        // against the remaining input and its own limit before decoding an entry, and never uses
-        // a declared count to reserve capacity, so this is a refusal rather than an allocation.
+        // The decoder proves a declared count against the remaining input and the record's own
+        // 64 KiB envelope before decoding a single entry, and never uses the count to reserve
+        // capacity (S4: there is no separate, tighter per-field entry-count limit to invent --
+        // the envelope is the field's own limit). Two distinct refusals prove both halves of that
+        // proof independently: a count that could not exist in ANY legal record, and a count that
+        // is individually plausible but does not fit what is actually left in THIS one.
         let bytes = fixture_bytes();
         let marker = 2_u32.to_be_bytes();
         let targets_at = find_target_count_offset(&bytes);
         assert_eq!(&bytes[targets_at..targets_at + 4], &marker);
 
-        let mut mutated = bytes.clone();
-        mutated[targets_at..targets_at + 4].copy_from_slice(&u32::MAX.to_be_bytes());
-        assert_eq!(decode(&mutated), Err(MalformedProposal::OverLimitLength));
+        // A four-billion-entry target list: bigger than the entire 64 KiB envelope could ever
+        // hold no matter what the rest of the record contains.
+        let mut over_envelope = bytes.clone();
+        over_envelope[targets_at..targets_at + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert_eq!(
+            decode(&over_envelope),
+            Err(MalformedProposal::OverLimitLength)
+        );
 
-        let mut just_over = bytes.clone();
-        let over = u32::try_from(MAX_TARGET_PATHS + 1).unwrap();
-        just_over[targets_at..targets_at + 4].copy_from_slice(&over.to_be_bytes());
-        assert_eq!(decode(&just_over), Err(MalformedProposal::OverLimitLength));
+        // 10,000 entries: comfortably inside the 64 KiB envelope in the abstract, but this
+        // record's remaining bytes cannot possibly hold that many minimum-sized entries.
+        let mut over_remaining = bytes.clone();
+        over_remaining[targets_at..targets_at + 4].copy_from_slice(&10_000_u32.to_be_bytes());
+        assert_eq!(decode(&over_remaining), Err(MalformedProposal::Truncated));
     }
 
     /// The offset of the target-path list count: immediately after the readable context, which
