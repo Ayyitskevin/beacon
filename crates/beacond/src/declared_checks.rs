@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -173,9 +173,16 @@ impl DeclaredCheckService {
         // Admissibility is re-established, never inherited from a previous
         // answer: the binding, the repository, and the sandbox can all have
         // changed since anyone last looked.
-        let admitted_by = self.preflights.preflight(project_id)?;
+        let mut admitted_by = self.preflights.preflight(project_id)?;
 
         let opened = self.open_run(project_id, &admitted_by)?;
+        if !opened.binding_unchanged {
+            admitted_by.outcome = PreflightOutcome::DeclaredChecksChanged;
+            admitted_by.not_verified.push(
+                "every step: the Repository Binding changed between preflight and execution Run open"
+                    .to_owned(),
+            );
+        }
 
         if admitted_by.outcome != PreflightOutcome::Verified {
             let not_verified = early_refusal_not_verified(&admitted_by, false);
@@ -251,7 +258,9 @@ impl DeclaredCheckService {
         self.accounts.with_authenticated_store(|connection, now| {
             let started_at_ms = u64::try_from(now).map_err(|_| DeclaredCheckError::InvalidStore)?;
             let run_id = Uuid::new_v4();
-            connection.execute(
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute(
                 "INSERT INTO runs (
                      workspace_id, id, project_id, kind, repository_revision, charter_revision,
                      state, lease_expires_at_ms, started_at_ms, ended_at_ms
@@ -267,10 +276,20 @@ impl DeclaredCheckService {
                     i64::try_from(started_at_ms).map_err(|_| DeclaredCheckError::InvalidStore)?,
                 ],
             )?;
+            let latest_revision = transaction.query_row(
+                "SELECT max(revision) FROM project_repository_revisions
+                 WHERE workspace_id = ?1 AND project_id = ?2",
+                params![self.workspace_id.to_string(), project_id.to_string(),],
+                |row| row.get::<_, Option<i64>>(0),
+            )?;
+            let binding_unchanged =
+                latest_revision == Some(i64::from(admitted_by.repository_revision));
+            transaction.commit()?;
             Ok(OpenRun {
                 run_id,
                 project_id,
                 started_at_ms,
+                binding_unchanged,
             })
         })
     }
@@ -346,6 +365,7 @@ struct OpenRun {
     run_id: Uuid,
     project_id: Uuid,
     started_at_ms: u64,
+    binding_unchanged: bool,
 }
 
 fn execution_summary(checks: &[ExecutionRecord]) -> ExecutionSummary {

@@ -13,10 +13,10 @@ use std::sync::Arc;
 use beacond::{
     AutonomyProfile, Ceiling, CheckPreflightService, CleanupOutcome, DeclaredCheck,
     DeclaredCheckService, ExecutionBounds, ExecutionOutcome, ExecutionSummary, KeepReason,
-    OperatorAccountService, OperatorSessionPhase, ProjectCharterDraft, ProjectDraft,
-    ProjectRepositoryService, ProjectService, Recorded, RepositoryDraft, RepositorySourceKind,
-    SecretString, StartupConfig, Supervisor, SupervisorError, Worktree, detect_sandbox,
-    run_bounded_for_test,
+    OperatorAccountService, OperatorSessionPhase, PreflightOutcome, ProjectCharterDraft,
+    ProjectDraft, ProjectRepositoryService, ProjectService, Recorded, RepositoryDraft,
+    RepositorySourceKind, SecretString, StartupConfig, Supervisor, SupervisorError, Worktree,
+    detect_sandbox, run_bounded_for_test,
 };
 use rusqlite::{Connection, OptionalExtension};
 use uuid::Uuid;
@@ -1105,6 +1105,62 @@ fn an_inadmissible_preflight_refuses_before_anything_runs() {
             "every Declared Check (preflight did not admit execution, so no check ran)",
         ]
     );
+}
+
+#[test]
+fn execution_refuses_if_the_binding_moves_between_preflight_and_run_open() {
+    if !enforcing_or_skip() {
+        return;
+    }
+    let (repository, revision) = fixture_repository("binding-moved-before-execution");
+    let source = repository.path.to_string_lossy().into_owned();
+    let (store, projects, repositories, checks) = enrolled("binding-moved-before-execution");
+    let project = projects.create(project_draft()).unwrap();
+    repositories
+        .bind(
+            project.id,
+            project.charter.revision,
+            None,
+            RepositoryDraft {
+                source_kind: RepositorySourceKind::LocalPath,
+                source,
+                base_revision: revision,
+                declared_checks: vec![check("must-not-run", &["/bin/true"], ".")],
+            },
+        )
+        .unwrap();
+    let connection = Connection::open(&store.path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER supersede_binding_when_execution_opens
+             AFTER INSERT ON runs
+             WHEN NEW.kind = 'declared_checks'
+             BEGIN
+                 INSERT INTO project_repository_revisions (
+                     workspace_id, project_id, revision, charter_revision, source_kind,
+                     source, base_revision, declared_checks_json, author_kind, authored_at_ms
+                 )
+                 SELECT workspace_id, project_id, revision + 1, charter_revision, source_kind,
+                        source, base_revision, declared_checks_json, author_kind, authored_at_ms
+                 FROM project_repository_revisions
+                 WHERE workspace_id = NEW.workspace_id
+                   AND project_id = NEW.project_id
+                   AND revision = NEW.repository_revision;
+             END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let receipt = checks.execute(project.id, bounds()).unwrap();
+
+    assert_eq!(receipt.summary, ExecutionSummary::NotAdmissible);
+    assert_eq!(
+        receipt.admitted_by.outcome,
+        PreflightOutcome::DeclaredChecksChanged
+    );
+    assert!(receipt.checks.is_empty(), "a refused Run ran no check");
+    assert_eq!(receipt.worktree, None, "no worktree was created");
+    assert_eq!(runs_of_kind(&store, "declared_checks")[0].1, "refused");
 }
 
 #[test]
