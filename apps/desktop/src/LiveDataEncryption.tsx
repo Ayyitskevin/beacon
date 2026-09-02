@@ -99,11 +99,16 @@ export function LiveDataEncryptionStatus({
               Beacon does not encrypt the open live store.
             </p>
           ) : report.state === "disabled" ? (
+            // Not "found no encryption": a volume can have one encrypted member
+            // and one plain one, and the reading says which. Denying what the
+            // same report shows in its evidence teaches the operator to
+            // disbelieve the warning.
             <p className={styles.body}>
-              <strong>Live data is not protected by disk encryption.</strong> Beacon found no
-              operating-system disk encryption on the volume holding this Installation's live data.
-              Beacon does not encrypt the open live store itself. Turn on your operating system's
-              disk encryption to protect this data at rest.
+              <strong>Live data is not fully protected by disk encryption.</strong> At least one
+              path to the disk holding this Installation's live data has no operating-system disk
+              encryption
+              {reason ? `: ${reason}` : ""}. Beacon does not encrypt the open live store itself.
+              Turn on your operating system's disk encryption to protect this data at rest.
             </p>
           ) : (
             <p className={styles.body}>
