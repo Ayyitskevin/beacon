@@ -52,6 +52,11 @@ const MAX_PATH_ANCESTORS: usize = 32;
 /// A path inside a one-sentence conclusion keeps its tail, which is the part
 /// that says which device it is.
 const MAX_PATH_IN_REASON: usize = 96;
+/// A device or mapping name inside a conclusion. Small enough that the sentence
+/// around it always fits, with the count of anything omitted.
+const MAX_NAME_IN_REASON: usize = 40;
+const MAX_MAPPINGS_IN_REASON: usize = 2;
+const MAX_LEAVES_IN_REASON: usize = 3;
 /// A hexadecimal run at least this long is treated as an identifier, not text.
 const MAX_IDENTIFIER_RUN_CHARS: usize = 12;
 
@@ -67,16 +72,52 @@ const NOT_VERIFIED_KEY: &str = "the strength, custody, or current lock state of 
 /// encryption" is false there and the operator would rightly disbelieve the
 /// warning. Name the covered mapping and the path that is not covered.
 fn uncovered_reason(uncovered: &[DeviceNumber], crypt_seen: &[String]) -> String {
-    let leaves = uncovered
-        .iter()
-        .map(DeviceNumber::to_string)
-        .collect::<Vec<_>>()
-        .join(", ");
+    let leaves = summarize(
+        &uncovered
+            .iter()
+            .map(DeviceNumber::to_string)
+            .collect::<Vec<_>>(),
+        MAX_LEAVES_IN_REASON,
+    );
     if crypt_seen.is_empty() {
         format!("at least one path to disk has no crypt layer: {leaves}")
     } else {
-        format!("{} is encrypted; {leaves} is not", crypt_seen.join(", "))
+        format!(
+            "{} is encrypted; {leaves} is not",
+            summarize(crypt_seen, MAX_MAPPINGS_IN_REASON)
+        )
     }
+}
+
+/// Lists a few names inside a sentence, shortening each and counting the rest.
+///
+/// The bound belongs on the components, never on the assembled sentence.
+/// Truncating the sentence is how a conclusion becomes a fragment of a device
+/// name: two valid 120-character mapping names spent the whole budget before
+/// either half of "<mapping> is encrypted; <leaf> is not" was reached, and the
+/// report still called itself Disabled while explaining nothing.
+fn summarize(names: &[String], keep: usize) -> String {
+    let shown = names
+        .iter()
+        .take(keep)
+        .map(|name| shorten(name, MAX_NAME_IN_REASON))
+        .collect::<Vec<_>>()
+        .join(", ");
+    match names.len().saturating_sub(keep) {
+        0 => shown,
+        1 => format!("{shown} and 1 more"),
+        rest => format!("{shown} and {rest} more"),
+    }
+}
+
+/// Keeps the head of a name and marks what was dropped. A name that was
+/// shortened must say so, or the report quietly renames the operator's volume.
+fn shorten(value: &str, keep: usize) -> String {
+    if value.chars().count() <= keep {
+        return value.to_owned();
+    }
+    let head: String = value.chars().take(keep.saturating_sub(1)).collect();
+    format!("{head}\u{2026}")
 }
 
 /// What Beacon proved about operating-system disk encryption for the volume
@@ -324,7 +365,7 @@ fn inspect_linux(
             state: LiveDataEncryption::Enabled,
             mount_point,
             mechanism: Recorded::Present {
-                value: bounded(mechanism),
+                value: conclusion(mechanism),
             },
             evidence,
             not_verified: vec![NOT_VERIFIED_KEY.to_owned()],
@@ -334,7 +375,7 @@ fn inspect_linux(
             uncovered,
             crypt_seen,
         } => {
-            let reason = bounded(uncovered_reason(&uncovered, &crypt_seen));
+            let reason = conclusion(uncovered_reason(&uncovered, &crypt_seen));
             // Name the branches that are not covered in evidence too; a
             // negative nobody can locate is not much better than no answer.
             record(
@@ -383,7 +424,7 @@ fn unknown_owned(
         // and the desktop adapter refuses text over the same limit. A reason
         // carrying a long sysfs path must not make a whole report unreadable.
         mechanism: Recorded::Absent {
-            reason: bounded(reason),
+            reason: conclusion(reason),
         },
         evidence,
         not_verified: vec![
@@ -425,6 +466,24 @@ fn bounded_text(value: String) -> String {
         .take(MAX_OBSERVATION_CHARS)
         .collect();
     cleaned.trim().to_owned()
+}
+
+/// A conclusion: redacted and stripped of control characters like evidence, but
+/// never truncated. It is assembled from components that were already
+/// shortened, so bounding it again could only remove the answer.
+fn conclusion(value: String) -> String {
+    redact_identifiers(&value)
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .trim()
+        .to_owned()
 }
 
 fn bounded(value: String) -> String {
@@ -838,7 +897,10 @@ impl Walker<'_> {
                 };
                 return Branch::Undetermined {
                     reason: format!(
-                        "the volume is a loopback image backed by {path}; Beacon does not follow the backing file"
+                        "the volume is a loopback image backed by {}; Beacon does not follow the backing file",
+                        // A sysfs value, so up to the read budget long. Shorten
+                        // the component; the sentence around it must survive.
+                        shorten(&path, MAX_PATH_IN_REASON)
                     ),
                 };
             }

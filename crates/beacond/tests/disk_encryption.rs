@@ -202,6 +202,52 @@ fn encrypted_branch_does_not_mask_a_plain_sibling() {
 }
 
 #[test]
+fn review_r3_long_mixed_mapping_names_preserve_the_disabled_conclusion() {
+    let fixture = Fixture::new("long-names");
+    let device = fixture.mounted_on_host_device();
+    fixture.dm(&device, "LVM-9f8e7d6c5b4a39281706f5e4d3c2b1a0", "vg0-root");
+    fixture.slaves(
+        &device,
+        &[("dm-0", "253:0"), ("dm-1", "253:1"), ("sdb1", "8:17")],
+    );
+    // Valid, non-hex, and long enough that concatenating the names would spend
+    // the whole 200-character bound before either half of the sentence.
+    let first = "encrypted-volume-".repeat(20);
+    let second = "another-encrypted-volume-".repeat(12);
+    fixture.dm(
+        "253:0",
+        "CRYPT-LUKS2-0011223344556677889900aabbccddee-a",
+        &first,
+    );
+    fixture.slaves("253:0", &[("sda2", "8:2")]);
+    fixture.dm(
+        "253:1",
+        "CRYPT-LUKS2-1122334455667788990011bbccddeeff-b",
+        &second,
+    );
+    fixture.slaves("253:1", &[("sda3", "8:3")]);
+    fixture.node("8:2");
+    fixture.node("8:3");
+    fixture.node("8:17");
+
+    let report = fixture.read();
+
+    assert_eq!(report.state, LiveDataEncryption::Disabled);
+    // The conclusion is not evidence and is never truncated away: both halves
+    // of the sentence survive names long enough to consume the bound.
+    let reason = reason(&report);
+    assert!(reason.contains("is encrypted"), "{reason}");
+    assert!(reason.contains("8:17 is not"), "{reason}");
+    assert!(
+        reason.chars().count() <= 200,
+        "{} chars",
+        reason.chars().count()
+    );
+    // The names are shortened rather than dropped, and say that they were.
+    assert!(reason.contains('\u{2026}'), "{reason}");
+}
+
+#[test]
 fn review_crypt_mapping_without_a_physical_leaf_is_unknown() {
     let fixture = Fixture::new("crypt-no-leaf");
     let device = fixture.mounted_on_host_device();
@@ -731,6 +777,35 @@ fn loopback_backed_volume_reports_unknown() {
     assert!(reason.contains("loopback image"));
     // The backing path is recorded so a later slice can follow it.
     assert!(reason.contains("/srv/images/beacon.img"));
+    assert!(reason.chars().count() <= 200);
+}
+
+#[test]
+fn a_long_backing_file_shortens_the_path_not_the_sentence() {
+    let fixture = Fixture::new("long-backing");
+    let device = fixture.mounted_on_host_device();
+    let loop_dir = fixture.node(&device).join("loop");
+    fs::create_dir_all(&loop_dir).unwrap();
+    // backing_file is a sysfs value, so it can be as long as the read budget.
+    let path = format!("/srv/{}/beacon.img", "very-long-directory-name/".repeat(40));
+    fs::write(loop_dir.join("backing_file"), format!("{path}\n")).unwrap();
+
+    let report = fixture.read();
+
+    assert_eq!(report.state, LiveDataEncryption::Unknown);
+    let reason = reason(&report);
+    // The sentence survives; the path is shortened and says so.
+    assert!(reason.contains("loopback image"), "{reason}");
+    assert!(
+        reason.contains("Beacon does not follow the backing file"),
+        "{reason}"
+    );
+    assert!(reason.contains('\u{2026}'), "{reason}");
+    assert!(
+        reason.chars().count() <= 200,
+        "{} chars",
+        reason.chars().count()
+    );
 }
 
 #[test]
