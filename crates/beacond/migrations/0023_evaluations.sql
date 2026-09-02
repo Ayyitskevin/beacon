@@ -90,6 +90,10 @@ CREATE TABLE evaluations (
         length(digest_value) = 64
         AND digest_value NOT GLOB '*[^0-9a-f]*'
     ),
+    -- The upper bound repeats `MAX_CANONICAL_BYTES`, which the encoder enforces first. The
+    -- per-field limits alone admit 145,941 bytes, so without an owned total bound a record every
+    -- field table accepts would be refused here instead -- a database error surfacing through a
+    -- Command rather than a fact about the bytes.
     canonical_bytes BLOB NOT NULL CHECK (length(canonical_bytes) BETWEEN 21 AND 65536),
     -- The bound Proposal's identity, COPIED whole: value, algorithm and canonicalizer, so a reader
     -- never has to assume which function produced the digest it is looking at.

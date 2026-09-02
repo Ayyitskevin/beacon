@@ -85,6 +85,14 @@ that presents as a negative is a different lie from one that says so.
 requires conflicts to be *recorded* — absence must encode as a statement rather
 than as a missing field.
 
+**The record has its own total bound: 65,536 bytes.** The per-field limits
+alone admit 145,941 — 64 findings of 500 four-byte scalars is 128,576 of them —
+so a grammar with only per-field bounds is not total: a record every row of the
+table above accepts could not be stored. The encoder refuses over the bound
+before anything reaches SQL, the decoder refuses before it parses, and the
+`canonical_bytes` column repeats the number so the two cannot drift apart in
+silence.
+
 `cited_runs` is a set so that a permutation of the same inputs cannot produce a
 second identity for one evaluation. `findings` is a sequence because the
 evaluator wrote them in an order, and re-sorting by severity would be the
