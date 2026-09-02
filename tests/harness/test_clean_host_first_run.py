@@ -74,6 +74,7 @@ cat > "$evidence/result.json" <<'JSON'
   }
 }
 JSON
+[ -z "${PLANTED_SECRET:-}" ] || printf '%s\n' "$PLANTED_SECRET"
 exit 0
 """
 
@@ -165,6 +166,7 @@ def test_a_single_host_run_leaves_other_hosts_not_evaluated(tmp_path: Path) -> N
         "debian-12": "observed",
         "ubuntu-24.04": "not_evaluated",
     }
+    assert (output / ".export-safe").is_file()
 
 
 def test_a_dead_inner_driver_cannot_create_an_observed_host(tmp_path: Path) -> None:
@@ -187,6 +189,46 @@ def test_a_dead_inner_driver_cannot_create_an_observed_host(tmp_path: Path) -> N
     assert row["evidence_error"] == "result.json is absent"
     assert not (output / "ubuntu-22.04" / "result.json").exists()
     assert "inner evidence is broken" in result.stderr
+
+
+def test_secrets_in_a_persisted_driver_log_refuse_export(tmp_path: Path) -> None:
+    planted_secrets = (
+        "beacon-clean-host-passphrase-2026",
+        "ABCD-EFGH-JKLM-NPQR-STUV-WXYZ-2345-6723",
+        "client_token=beacon-review-token-1234567890",
+    )
+
+    for index, planted_secret in enumerate(planted_secrets):
+        case = tmp_path / str(index)
+        case.mkdir()
+        root, environment = _isolated_harness(case)
+        environment["PLANTED_SECRET"] = planted_secret
+        output = case / "evidence"
+
+        result = _run(
+            root,
+            environment,
+            case / "Beacon.AppImage",
+            output,
+            "ubuntu-22.04",
+        )
+
+        assert result.returncode != 0
+        assert not (output / ".export-safe").exists()
+        matrix = json.loads((output / "matrix.json").read_text())
+        assert matrix["environments"]["ubuntu-22.04"]["status"] == "observed"
+        assert matrix["export"] == {
+            "status": "broken",
+            "detail": "secret scan refused evidence export",
+        }
+        assert "refusing evidence export" in result.stderr
+        assert planted_secret not in result.stderr
+
+
+def test_ci_upload_requires_the_export_clearance_marker() -> None:
+    workflow = (REPO / ".github" / "workflows" / "ci.yml").read_text()
+
+    assert "hashFiles('target/clean-host-first-run/.export-safe') != ''" in workflow
 
 
 def test_an_absent_appimage_is_not_reported_as_a_broken_host(tmp_path: Path) -> None:

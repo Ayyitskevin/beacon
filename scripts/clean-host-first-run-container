@@ -87,7 +87,7 @@ trap cleanup EXIT INT TERM
 cp /opt/beacon/Beacon.AppImage /work/Beacon.AppImage
 chmod 700 /work/Beacon.AppImage
 
-Xvfb "$DISPLAY" -screen 0 1280x800x24 -nolisten tcp > /evidence/xvfb.log 2>&1 &
+Xvfb "$DISPLAY" -screen 0 1280x800x24 -nolisten tcp > /work/xvfb.log 2>&1 &
 xvfb_pid=$!
 
 for _ in $(seq 1 50); do
@@ -100,7 +100,7 @@ xdpyinfo -display "$DISPLAY" >/dev/null 2>&1 || \
 
 cd /work
 ./Beacon.AppImage --appimage-extract-and-run \
-    > /evidence/app.stdout 2> /evidence/app.stderr &
+    > /work/app.stdout 2> /work/app.stderr &
 app_pid=$!
 
 window=""
@@ -396,5 +396,18 @@ states = {name: row["status"] for name, row in document["steps"].items()}
 if set(states.values()) != {"observed"}:
     raise SystemExit(f"drive-first-run: incomplete observation set: {states}")
 PY
+
+# Raw process logs are useful evidence, but they cross the same export boundary
+# as screenshots and socket responses. Keep them in tmpfs until every byte of
+# both the candidate logs and already-materialized evidence passes the scan.
+if ! first_run_scan_for_secrets \
+    /evidence /work/xvfb.log /work/app.stdout /work/app.stderr
+then
+    echo "drive-first-run: refusing raw-log export after secret scan" >&2
+    exit 1
+fi
+install -m 600 /work/xvfb.log /evidence/xvfb.log
+install -m 600 /work/app.stdout /evidence/app.stdout
+install -m 600 /work/app.stderr /evidence/app.stderr
 
 echo "drive-first-run: all first-run observations are materialized in /evidence"

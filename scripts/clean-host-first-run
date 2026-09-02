@@ -42,6 +42,7 @@ path, appimage = sys.argv[1:]
 document = {
     "appimage": appimage,
     "input": "not_evaluated",
+    "export": {"status": "not_evaluated"},
     "environments": {
         "ubuntu-22.04": {"image": "ubuntu:22.04", "status": "not_evaluated"},
         "debian-12": {"image": "debian:12", "status": "not_evaluated"},
@@ -63,6 +64,8 @@ with open(path, encoding="utf-8") as handle:
     document = json.load(handle)
 if section == "input":
     document["input"] = value
+elif section == "export":
+    document["export"][key] = value
 else:
     document["environments"][section][key] = value
 with open(path, "w", encoding="utf-8") as handle:
@@ -150,6 +153,7 @@ if [ ! -r "$state_helper" ]; then
     echo "clean-host-first-run: state helper is absent or unreadable: $state_helper" >&2
     exit 1
 fi
+source "$state_helper"
 
 labels=(ubuntu-22.04 debian-12 ubuntu-24.04)
 images=(ubuntu:22.04 debian:12 ubuntu:24.04)
@@ -210,6 +214,17 @@ for index in "${!labels[@]}"; do
         failed=1
     fi
 done
+
+rm -f "$evidence_dir/.export-safe"
+if first_run_scan_for_secrets "$evidence_dir"; then
+    set_matrix_field export status observed
+    : > "$evidence_dir/.export-safe"
+else
+    set_matrix_field export status broken
+    set_matrix_field export detail "secret scan refused evidence export"
+    echo "clean-host-first-run: refusing evidence export; no clearance marker was written" >&2
+    exit 1
+fi
 
 if [ "$failed" -ne 0 ]; then
     echo "clean-host-first-run: one or more environments are broken; unrun rows remain not_evaluated" >&2
