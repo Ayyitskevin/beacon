@@ -135,6 +135,10 @@ fn luks2_volume_reports_enabled_with_the_dm_uuid_it_read() {
         "CRYPT-LUKS2-a1b2c3d4e5f60718293a4b5c6d7e8f90-live",
         "live",
     );
+    // A crypt mapping sits on a partition. Without one the stack terminates
+    // nowhere, and an unread stack is not an encrypted one.
+    fixture.slaves(&device, &[("sda2", "8:2")]);
+    fixture.node("8:2");
 
     let report = fixture.read();
 
@@ -154,6 +158,8 @@ fn luks_under_lvm_reports_enabled_through_the_slaves_chain() {
         "CRYPT-LUKS2-0011223344556677889900aabbccddee-root",
         "root",
     );
+    fixture.slaves("253:0", &[("sda2", "8:2")]);
+    fixture.node("8:2");
 
     let report = fixture.read();
 
@@ -186,6 +192,93 @@ fn encrypted_branch_does_not_mask_a_plain_sibling() {
     assert!(evidence_text(&report).contains("8:17"));
     // And still say what it did find, so the operator is not told "nothing".
     assert!(evidence_text(&report).contains("CRYPT-LUKS2"));
+}
+
+#[test]
+fn review_crypt_mapping_without_a_physical_leaf_is_unknown() {
+    let fixture = Fixture::new("crypt-no-leaf");
+    let device = fixture.mounted_on_host_device();
+    // A crypt mapping over nothing. Real LUKS always sits on a partition or a
+    // disk; a mapping whose backing device Beacon never saw is an unread stack,
+    // not an encrypted one.
+    fixture.dm(
+        &device,
+        "CRYPT-LUKS2-a1b2c3d4e5f60718293a4b5c6d7e8f90-live",
+        "live",
+    );
+    fs::create_dir_all(fixture.node(&device).join("slaves")).unwrap();
+
+    let report = fixture.read();
+
+    assert_eq!(report.state, LiveDataEncryption::Unknown);
+    assert!(reason(&report).contains("no readable backing device"));
+}
+
+#[test]
+fn review_one_covered_leaf_cannot_mask_a_cyclic_sibling() {
+    let fixture = Fixture::new("covered-plus-cycle");
+    let device = fixture.mounted_on_host_device();
+    fixture.dm(
+        &device,
+        "CRYPT-LUKS2-aabbccddeeff00112233445566778899-live",
+        "live",
+    );
+    fixture.slaves(&device, &[("sda2", "8:2"), ("dm-9", "253:9")]);
+    fixture.node("8:2");
+    // One branch terminates at a real disk under the crypt layer. The other
+    // never terminates, so the volume's topology was never established -- and a
+    // sibling that finished is not proof about the branch that did not.
+    fixture.node("253:9");
+    fixture.slaves("253:9", &[("loop", "253:9")]);
+
+    let report = fixture.read();
+
+    assert_ne!(report.state, LiveDataEncryption::Enabled);
+    assert_eq!(report.state, LiveDataEncryption::Unknown);
+}
+
+#[test]
+fn review_crypt_above_a_nested_fan_out_covers_both_plain_leaves() {
+    let fixture = Fixture::new("nested-fan-out");
+    let device = fixture.mounted_on_host_device();
+    fixture.dm(&device, "LVM-1122334455667788990011223344556677", "outer");
+    fixture.slaves(&device, &[("dm-0", "253:0")]);
+    fixture.dm(
+        "253:0",
+        "CRYPT-LUKS2-0011223344556677889900aabbccddee-crypt",
+        "crypt",
+    );
+    fixture.slaves("253:0", &[("dm-1", "253:1")]);
+    fixture.dm("253:1", "LVM-9f8e7d6c5b4a39281706f5e4d3c2b1a0", "inner");
+    fixture.slaves("253:1", &[("sda2", "8:2"), ("sdb1", "8:17")]);
+    fixture.node("8:2");
+    fixture.node("8:17");
+
+    let report = fixture.read();
+
+    assert_eq!(report.state, LiveDataEncryption::Enabled);
+    assert_eq!(mechanism(&report), "dm-crypt (LUKS2)");
+}
+
+#[test]
+fn review_unreadable_leaf_next_to_a_luks_branch_is_unknown() {
+    let fixture = Fixture::new("unreadable-sibling");
+    let device = fixture.mounted_on_host_device();
+    fixture.dm(&device, "LVM-9f8e7d6c5b4a39281706f5e4d3c2b1a0", "vg0-root");
+    fixture.slaves(&device, &[("dm-0", "253:0"), ("sdb1", "8:17")]);
+    fixture.dm(
+        "253:0",
+        "CRYPT-LUKS2-0011223344556677889900aabbccddee-pv0",
+        "pv0",
+    );
+    fixture.slaves("253:0", &[("sda2", "8:2")]);
+    fixture.node("8:2");
+    // 8:17 is never created: one complete LUKS path, one branch Beacon cannot read.
+
+    let report = fixture.read();
+
+    assert_ne!(report.state, LiveDataEncryption::Enabled);
+    assert_eq!(report.state, LiveDataEncryption::Unknown);
 }
 
 #[test]
@@ -604,6 +697,8 @@ fn dm_uuid_prefix_only_appears_in_evidence() {
         "CRYPT-LUKS2-4f8c1d2e9a7b6c5d4e3f2a1b0c9d8e7f-luks-4f8c1d2e9a7b6c5d4e3f2a1b0c9d8e7f",
         "luks-4f8c1d2e9a7b6c5d4e3f2a1b0c9d8e7f",
     );
+    fixture.slaves(&device, &[("sda2", "8:2")]);
+    fixture.node("8:2");
 
     let report = fixture.read();
 
@@ -627,6 +722,8 @@ fn two_calls_re_read_live_state() {
         "CRYPT-LUKS2-aabbccddeeff00112233445566778899-live",
         "live",
     );
+    fixture.slaves(&device, &[("sda2", "8:2")]);
+    fixture.node("8:2");
     let after = fixture.read();
 
     assert_eq!(after.state, LiveDataEncryption::Enabled);
