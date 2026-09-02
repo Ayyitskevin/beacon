@@ -170,6 +170,26 @@ fully read, self-authenticated object. A mismatch is an accusation about the Ope
 and an unfinished walk has not earned one, so a later packed, oversized, too-deep or malformed entry
 discards the buffer and the whole comparison is not-verified.
 
+### The amendment's required evidence, bullet by bullet
+
+The proposed ADR 0034 amendment says this mapping lives here, so here it is. **[u]** =
+`crates/beacond/src/git_object_store.rs` or `src/proposal.rs` unit tests, **[i]** =
+`crates/beacond/tests/proposal.rs`.
+
+| bullet | test |
+|---|---|
+| a declared entry that holds adds no readiness item | `a_declared_entry_that_holds_at_the_pinned_revision_adds_no_readiness_item` [i] |
+| an entry whose digest differs is a mismatch naming it | `a_declared_entry_that_does_not_hold_at_the_pinned_revision_is_a_mismatch_naming_it` [i] |
+| an absent path is a mismatch, not an inspection failure | `a_declared_path_absent_at_the_pinned_revision_is_a_mismatch_not_an_inspection_failure` [i] |
+| a packed repository is not-verified, and "packed" is earned by the lookup | `a_packed_repository_is_not_verified_rather_than_mismatched` [i] · `an_object_in_no_storage_at_all_is_an_inspection_failure_not_a_packed_object` [i] |
+| a mismatch found before an unreadable entry is discarded | `a_mismatch_found_before_an_unreadable_entry_is_discarded_rather_than_published` [i] · `a_buffered_mismatch_is_discarded_by_every_way_the_walk_can_stop` [u] |
+| a symlink is not-verified rather than mismatched | `a_symlink_is_not_followed_and_is_not_reported_as_a_file` [u] · the buffering test above [i] |
+| an object that does not hash to its own name is refused | `an_object_that_does_not_hash_to_its_own_name_is_refused` [u] · `a_tampered_tree_on_the_path_is_refused_by_its_own_name` [u] |
+| a commit that does not parse as a commit is refused | `a_commit_is_validated_as_a_commit_and_not_merely_authenticated` [u] |
+| a tree naming one path twice is refused | `a_tree_naming_one_path_twice_is_refused_whatever_the_modes` [u], including the nonadjacent case |
+| the comparison stops at its deadline rather than answering | `a_deadline_that_expires_mid_read_is_not_published_as_an_outcome` [u] · `a_walk_whose_deadline_expires_mid_traversal_publishes_nothing` [u] · `an_io_failure_after_the_budget_expires_is_elapsed_not_a_broken_repository` [u] |
+| every bound the comparison owns is its own | `the_aggregate_budget_is_charged_by_every_object_and_is_its_own_refusal` [u] · the per-object rows below |
+
 ### The comparison's bounds, and which are proved
 
 The comparison owns its bounds rather than inheriting them, because `read_loose_object` deliberately
@@ -180,16 +200,17 @@ legitimate file may be, applied where nothing knows what the file is for.
 |---|---|---|
 | one object's compressed and inflated size | the caller, per read | `an_object_larger_than_the_callers_bound_is_a_refusal_not_a_broken_object`, `an_object_that_inflates_past_the_bound_is_a_refusal_not_a_broken_object` |
 | path depth | the walk (`MAX_PATH_COMPONENTS`) | `a_malformed_or_over_deep_path_is_refused_before_the_walk_trusts_it`, both sides of the boundary |
-| `CONTEXT_OBJECT_BYTES` | the comparison | at the walk layer only — see below |
-| `CONTEXT_TOTAL_BYTES` | the comparison | **not proved — see below** |
+| `CONTEXT_OBJECT_BYTES` | the comparison | `a_bound_that_excludes_an_object_on_the_path_is_a_refusal_not_an_absence` |
+| `CONTEXT_TOTAL_BYTES` | the comparison, charged by **every** object the walk reads | `the_aggregate_budget_is_charged_by_every_object_and_is_its_own_refusal`, both sides of the boundary |
 
-**Two bounds have no test at the comparison layer, and this says so rather than implying otherwise.**
-Exhausting `CONTEXT_TOTAL_BYTES` needs a 64 MiB fixture, and neither constant is reachable from an
-integration test, so a mutant deleting the total budget stays green. Both are exercised one layer
-down, where the walk's `maximum` parameter is testable with a small bound. Closing the gap means
-threading the budget as a parameter the way the deadline already is — which is exactly why the
-deadline is a parameter — and it is recorded here rather than papered over with a test that cannot
-fail.
+**The aggregate bound was neither total nor guarded, and both are fixed.** It charged only the final
+blob body, so the commit, every tree and every absent-path traversal were free; and a mutant
+replacing the subtraction with a no-op left every test green. Two non-author reviews found the two
+halves independently. The budget is now threaded as a parameter — for the reason the deadline is
+one, that it is the seam making the outcome reachable without a 64 MiB fixture — every object the
+walk reads is charged against it, and exhausting it is `ContextBudgetExhausted` rather than
+`ObjectTooLargeToInspect`. Reporting the second as the first told an Operator their six-byte file
+was too large, which sends them to shrink the wrong thing.
 
 ### Object validation, and why authentication is not enough
 
