@@ -192,6 +192,12 @@ export type UnavailableEvidence = {
   costUsdMicros: Recorded<number>;
 };
 
+/** The most Receipts one Project's page may carry, matching the repository
+ *  history cap. The daemon applies no LIMIT, so this is the desktop's, and it
+ *  is named because Briefing's collection bound is stated in terms of it:
+ *  what a reading holds never exceeds its aggregate cap plus ONE page. */
+export const MAX_PROJECT_RECEIPT_PAGE = 512;
+
 export type PreflightReceipt = {
   version: number;
   runId: string;
@@ -1615,7 +1621,11 @@ function isRenderableInstant(value: unknown): value is number {
 }
 
 function isPreflightReceiptList(value: unknown): value is PreflightReceipt[] {
-  return Array.isArray(value) && value.length <= 512 && value.every(isPreflightReceipt);
+  return (
+    Array.isArray(value) &&
+    value.length <= MAX_PROJECT_RECEIPT_PAGE &&
+    value.every(isPreflightReceipt)
+  );
 }
 
 function isProjectRepositoryOrNull(value: unknown): value is ProjectRepository | null {

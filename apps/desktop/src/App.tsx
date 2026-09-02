@@ -12,10 +12,8 @@ import { type FormEvent, useEffect, useRef, useState } from "react";
 
 import {
   BriefingReceipts,
-  RECEIPT_AGGREGATE_LIMIT,
   RECEIPT_PROJECT_BUDGET,
-  RECEIPT_READ_CONCURRENCY,
-  orderReceipts,
+  collectRecentReceipts,
   type ReceiptRow,
 } from "./BriefingReceipts";
 
@@ -950,29 +948,11 @@ export function App() {
         return right.id.localeCompare(left.id);
       });
       const readable = ordered.slice(0, RECEIPT_PROJECT_BUDGET);
-      // The cap applies WHILE collecting. Slicing at the end still retained
-      // every row first -- eight Projects at the per-Project cap held 4,096 --
-      // and then reported the capped count as the total, so 3,840 rows the
-      // reading had actually seen disappeared from the disclosure.
-      let kept: ReceiptRow[] = [];
-      let found = 0;
-      // A bounded window rather than Promise.all: concurrency is work in
-      // flight, and the daemon dispatch is synchronous on its accept loop.
-      for (let index = 0; index < readable.length; index += RECEIPT_READ_CONCURRENCY) {
-        const window = readable.slice(index, index + RECEIPT_READ_CONCURRENCY);
-        const batch = await Promise.all(
-          window.map(async (project) => {
-            const receipts = await loadPreflightReceipts(project.id);
-            return receipts.map((receipt) => ({ receipt, projectName: project.name }));
-          }),
-        );
-        for (const page of batch) {
-          found += page.length;
-          // Merge one page, then trim: what is held never exceeds the cap plus
-          // one page, whatever the Workspace holds.
-          kept = orderReceipts([...kept, ...page]).slice(0, RECEIPT_AGGREGATE_LIMIT);
-        }
-      }
+      // The cap applies WHILE collecting, one Project at a time. Slicing at the
+      // end retained every row first -- eight Projects at the per-Project cap
+      // held 4,096 -- and then reported the capped count as the total, so 3,840
+      // rows the reading had actually seen disappeared from the disclosure.
+      const { rows: kept, found } = await collectRecentReceipts(readable, loadPreflightReceipts);
       if (requestEpoch !== recentReceiptEpoch.current) return;
       setRecentReceipts(kept);
       // The true number found, not the number kept: the panel's "of N" is a
