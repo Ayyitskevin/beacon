@@ -2083,6 +2083,91 @@ fn startup_refuses_a_ruling_whose_owner_account_is_gone() {
 }
 
 #[test]
+fn each_composite_foreign_key_independently_refuses_a_cross_proposal_relation() {
+    // gpt2's surviving mutant: deleting the relation's CHILD-end composite foreign key left every
+    // committed test green, because the tamper helper turns constraints off and so proves nothing
+    // about them. Each end therefore gets a row that violates only that end, with foreign keys
+    // explicitly ON -- otherwise this test would pass against no schema at all.
+    let fixture = admitted_mission("relation-scope");
+    let one = fixture.submit("The first Proposal.");
+    let two = fixture.submit("The second, different Proposal.");
+    let ruling_on_one = fixture
+        .rulings
+        .rule(
+            &one,
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap()
+        .digest()
+        .value
+        .clone();
+    let ruling_on_two = fixture
+        .rulings
+        .rule(
+            &two,
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap()
+        .digest()
+        .value
+        .clone();
+
+    let connection = fixture.store.connect();
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .unwrap();
+    let insert = |proposal: &str, ruling: &str, supersedes: &str| {
+        connection.execute(
+            "INSERT INTO ruling_supersessions (
+                 workspace_id, proposal_digest, ruling_digest, supersedes_ruling_digest
+             ) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                fixture.workspace_id.to_string(),
+                proposal,
+                ruling,
+                supersedes
+            ],
+        )
+    };
+
+    // Child end alone: the citing Ruling belongs to the OTHER Proposal, while the predecessor
+    // belongs to this one. Only `(workspace_id, proposal_digest, ruling_digest)` is violated.
+    let error = insert(&one, &ruling_on_two, &ruling_on_one).unwrap_err();
+    assert!(error.to_string().contains("FOREIGN KEY"), "{error}");
+
+    // Predecessor end alone: the citing Ruling belongs to this Proposal and the predecessor does
+    // not. Only `(workspace_id, proposal_digest, supersedes_ruling_digest)` is violated.
+    let error = insert(&two, &ruling_on_two, &ruling_on_one).unwrap_err();
+    assert!(error.to_string().contains("FOREIGN KEY"), "{error}");
+
+    // The same rows are refused across Workspaces for the same structural reason, so a cross-scope
+    // link is impossible to store rather than merely refused by a Command something could bypass.
+    let elsewhere = connection.execute(
+        "INSERT INTO ruling_supersessions (
+             workspace_id, proposal_digest, ruling_digest, supersedes_ruling_digest
+         ) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![
+            Uuid::new_v4().to_string(),
+            one,
+            ruling_on_one,
+            ruling_on_two
+        ],
+    );
+    assert!(
+        elsewhere.unwrap_err().to_string().contains("FOREIGN KEY"),
+        "a cross-Workspace supersession was stored"
+    );
+    assert_eq!(
+        fixture.count("SELECT count(*) FROM ruling_supersessions"),
+        0
+    );
+}
+
+#[test]
 fn the_store_refuses_a_second_predecessor_and_a_second_supersession() {
     // The two structural halves of "no forks", each removable independently, so each gets its own
     // wrong answer. Neither needs the immutability triggers dropped: both are INSERTs.
