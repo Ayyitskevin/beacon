@@ -1807,9 +1807,13 @@ fn presence(path: &Path) -> Result<Presence, Verdict> {
         // Not there -- or a parent component is a link to nothing, which is a
         // different fact and reaches this arm with the same error.
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            for ancestor in path.ancestors().skip(1).take(MAX_PATH_ANCESTORS) {
+            let mut ancestors = path.ancestors().skip(1);
+            for _ in 0..MAX_PATH_ANCESTORS {
+                let Some(ancestor) = ancestors.next() else {
+                    return Ok(Presence::Missing);
+                };
                 if ancestor.as_os_str().is_empty() {
-                    break;
+                    return Ok(Presence::Missing);
                 }
                 match fs::symlink_metadata(ancestor) {
                     Ok(_) => match fs::metadata(ancestor) {
@@ -1824,7 +1828,7 @@ fn presence(path: &Path) -> Result<Presence, Verdict> {
                     Err(error) => return Err(unreadable_reason(ancestor, error.kind())),
                 }
             }
-            Ok(Presence::Missing)
+            Err(over_stack_budget())
         }
         Err(error) => Err(unreadable_reason(path, error.kind())),
     }
@@ -1952,6 +1956,35 @@ fn read_sysfs(path: &Path) -> Result<String, Verdict> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ancestor_budget_exhaustion_is_broken_not_absent() {
+        let root = std::env::temp_dir().join(format!(
+            "beacon-presence-ancestors-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+
+        let dangling = root.join("dangling");
+        std::os::unix::fs::symlink("missing-target", &dangling).unwrap();
+        let beyond_budget = (0..=MAX_PATH_ANCESTORS)
+            .fold(dangling, |path, index| path.join(format!("level-{index}")))
+            .join("leaf");
+        assert_eq!(presence(&beyond_budget), Err(over_stack_budget()));
+
+        let existing_parent = (0..=MAX_PATH_ANCESTORS)
+            .fold(root.join("existing"), |path, index| {
+                path.join(format!("level-{index}"))
+            });
+        fs::create_dir_all(&existing_parent).unwrap();
+        assert_eq!(
+            presence(&existing_parent.join("missing")),
+            Ok(Presence::Missing),
+            "a deep leaf is absent once its immediate parent is known to resolve"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn decodes_the_kernels_device_number_encoding() {
