@@ -221,6 +221,57 @@ export type PreflightReceipt = {
   unavailable: UnavailableEvidence;
 };
 
+/** Which Run a Receipt belongs to. Closed on both sides of the wire. */
+export const RECEIPT_RUN_KINDS = ["check_preflight", "declared_checks"] as const;
+export type ReceiptRunKind = (typeof RECEIPT_RUN_KINDS)[number];
+
+/** How an execution ended. Four values, mirroring `ExecutionSummary`. */
+export const EXECUTION_SUMMARIES = [
+  "not_admissible",
+  "worktree_unavailable",
+  "completed",
+  "incomplete",
+] as const;
+export type ExecutionSummary = (typeof EXECUTION_SUMMARIES)[number];
+
+/** Closed PER KIND. The stored `outcome` column is one CHECK shared by both
+ *  kinds, so a flat union would let a preflight row carry `completed` and an
+ *  execution row carry `preflight_failed`. */
+export type RecentReceiptOutcome =
+  | { kind: "check_preflight"; outcome: PreflightOutcome }
+  | { kind: "declared_checks"; summary: ExecutionSummary };
+
+export type RecentReceipt = {
+  runId: string;
+  projectId: string;
+  projectName: string;
+  version: number;
+  outcome: RecentReceiptOutcome;
+  startedAtMs: number;
+  endedAtMs: number;
+  recordedAtMs: number;
+};
+
+/** One bounded reading.
+ *
+ *  The window is over RUNS, not Receipts: a request for 50 can return fewer
+ *  than 50 Receipts while older Receipts exist, and `moreRunsExist` can be
+ *  true because an older Run WITHOUT a Receipt exists. Every name says so, and
+ *  the panel must never turn one of these counts back into a bare "and more".
+ *
+ *  `runsUnconfirmedInWindow` is NOT the Resume Work review set: an unconfirmed
+ *  Run older than the window is not in it. */
+export type RecentReceiptPage = {
+  receipts: RecentReceipt[];
+  runsInFlightInWindow: number;
+  runsUnconfirmedInWindow: number;
+  runWindowApplied: number;
+  moreRunsExist: boolean;
+};
+
+/** Rust counts these in a `u32`; larger is a shape the reader cannot produce. */
+const MAX_U32_COUNT = 4_294_967_295;
+
 export type RepositoryDraft = {
   sourceKind: RepositorySourceKind;
   source: string;
@@ -720,14 +771,19 @@ export async function preflightProjectChecks(projectId: string): Promise<Preflig
   );
 }
 
-export async function loadPreflightReceipts(projectId: string): Promise<PreflightReceipt[]> {
+/** Every Receipt kind, for the Workspace, newest first, under a bound the
+ *  daemon owns. The Project-scoped Query this replaces made Briefing choose
+ *  which Projects to open, in what order, how many rows to hold, and how to
+ *  merge them -- a domain join, a bound and an ordering policy in a UI app. */
+export async function recentReceipts(window: number): Promise<RecentReceiptPage> {
   return invokeAndValidate(
-    "preflight_receipts",
-    { projectId },
-    isPreflightReceiptList,
-    "preflight Receipt list",
+    "recent_receipts",
+    { window },
+    isRecentReceiptPage,
+    "recent Receipt page",
   );
 }
+
 
 export async function loadTeams(projectId: string): Promise<TeamView[]> {
   return invokeAndValidate("teams", { projectId }, isTeamList, "Team list");
@@ -803,6 +859,21 @@ export async function deactivateLocalModel(
     { expectedActivationId },
     isLocalModelActivation,
     "local-model activation",
+  );
+}
+
+/** True when the daemon refused with the shared `preflight_unavailable` code.
+ *
+ *  The recent-Receipts Query reuses that code rather than inventing one, but
+ *  its shared sentence -- "Beacon could not record the preflight" -- is false
+ *  for a Query that records nothing. Callers that need a truthful sentence
+ *  translate at their own seam; the preflight command keeps the specific one. */
+export function isPreflightUnavailable(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    !Array.isArray(error) &&
+    (error as Record<string, unknown>).code === "preflight_unavailable"
   );
 }
 
@@ -1495,6 +1566,88 @@ function isProjectRepository(value: unknown): value is ProjectRepository {
   );
 }
 
+function isRecentReceiptOutcome(value: unknown): value is RecentReceiptOutcome {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const kind = (value as Record<string, unknown>).kind;
+  if (kind === "check_preflight") {
+    return (
+      hasExactKeys(value, ["kind", "outcome"]) &&
+      PREFLIGHT_OUTCOMES.includes(value.outcome as PreflightOutcome)
+    );
+  }
+  if (kind === "declared_checks") {
+    return (
+      hasExactKeys(value, ["kind", "summary"]) &&
+      EXECUTION_SUMMARIES.includes(value.summary as ExecutionSummary)
+    );
+  }
+  return false;
+}
+
+function isRecentReceipt(value: unknown): value is RecentReceipt {
+  return (
+    hasExactKeys(value, [
+      "endedAtMs",
+      "outcome",
+      "projectId",
+      "projectName",
+      "recordedAtMs",
+      "runId",
+      "startedAtMs",
+      "version",
+    ]) &&
+    isUuid(value.runId) &&
+    isUuid(value.projectId) &&
+    isTrimmedTextWithoutControls(value.projectName, 120) &&
+    isPositiveInteger(value.version) &&
+    isRecentReceiptOutcome(value.outcome) &&
+    isNonnegativeInteger(value.startedAtMs) &&
+    isNonnegativeInteger(value.endedAtMs) &&
+    isNonnegativeInteger(value.recordedAtMs) &&
+    (value.endedAtMs as number) >= (value.startedAtMs as number)
+  );
+}
+
+function isRecentReceiptPage(value: unknown): value is RecentReceiptPage {
+  if (
+    !hasExactKeys(value, [
+      "moreRunsExist",
+      "receipts",
+      "runWindowApplied",
+      "runsInFlightInWindow",
+      "runsUnconfirmedInWindow",
+    ])
+  ) {
+    return false;
+  }
+  const receipts = value.receipts;
+  if (
+    typeof value.moreRunsExist !== "boolean" ||
+    !isBoundedCount(value.runWindowApplied) ||
+    !isBoundedCount(value.runsInFlightInWindow) ||
+    !isBoundedCount(value.runsUnconfirmedInWindow) ||
+    !Array.isArray(receipts) ||
+    receipts.length > value.runWindowApplied ||
+    !receipts.every(isRecentReceipt)
+  ) {
+    return false;
+  }
+  // The daemon defines the order; re-sorting here would put the ordering
+  // policy back in the interface. Code points, not `localeCompare`: SQLite
+  // orders by BINARY, and a locale-sensitive comparison would refuse a
+  // correctly ordered page on some locales.
+  return (receipts as RecentReceipt[]).every((receipt, index) => {
+    if (index === 0) return true;
+    const prior = (receipts as RecentReceipt[])[index - 1];
+    if (prior.startedAtMs !== receipt.startedAtMs) return prior.startedAtMs > receipt.startedAtMs;
+    return prior.runId > receipt.runId;
+  });
+}
+
+function isBoundedCount(value: unknown): value is number {
+  return isNonnegativeInteger(value) && value <= MAX_U32_COUNT;
+}
+
 const PREFLIGHT_OUTCOMES: readonly PreflightOutcome[] = [
   "verified",
   "source_kind_unsupported",
@@ -1620,13 +1773,6 @@ function isRenderableInstant(value: unknown): value is number {
   );
 }
 
-function isPreflightReceiptList(value: unknown): value is PreflightReceipt[] {
-  return (
-    Array.isArray(value) &&
-    value.length <= MAX_PROJECT_RECEIPT_PAGE &&
-    value.every(isPreflightReceipt)
-  );
-}
 
 function isProjectRepositoryOrNull(value: unknown): value is ProjectRepository | null {
   return value === null || isProjectRepository(value);

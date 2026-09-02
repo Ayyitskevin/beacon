@@ -1,28 +1,13 @@
 import { Button, makeStyles, shorthands, tokens } from "@fluentui/react-components";
 
-import { preflightOutcomeCopy } from "./preflightOutcomes";
-import { MAX_PROJECT_RECEIPT_PAGE, type PreflightReceipt } from "./session";
+import { executionSummaryCopy, preflightOutcomeCopy } from "./preflightOutcomes";
+import type { RecentReceipt, RecentReceiptPage } from "./session";
 
 /** How many rows Briefing draws. It "optimizes for exceptions, not activity
- *  volume" (BLUEPRINT §3), and the Query it reads is unbounded, so the bound
- *  is a decision made here and stated to the operator when it bites. */
+ *  volume" (BLUEPRINT §3). This is a presentation choice on top of a reading
+ *  the daemon already bounded, and the line below says how many the reading
+ *  actually held. */
 export const RECENT_RECEIPT_LIMIT = 5;
-
-/** How many Projects one reading may open, and how many rows it may hold
- *  before sorting.
- *
- *  The Query is Project-scoped, so Briefing must fan out; an unbounded fan-out
- *  is not a design but an assumption about the Workspace. These are small,
- *  named, and disclosed when they bite -- a stopgap until a Workspace-scoped,
- *  server-bounded Query exists behind the interface.
- */
-export const RECEIPT_PROJECT_BUDGET = 8;
-export const RECEIPT_AGGREGATE_LIMIT = 256;
-
-/** The most rows one reading may hold at once: the cap it keeps, plus the one
- *  page it is merging. Named so a test can assert the bound rather than trust
- *  the prose that states it. */
-export const RECEIPT_HOLD_LIMIT = RECEIPT_AGGREGATE_LIMIT + MAX_PROJECT_RECEIPT_PAGE;
 
 const useStyles = makeStyles({
   section: { marginTop: tokens.spacingVerticalXL },
@@ -69,155 +54,127 @@ const useStyles = makeStyles({
   actions: { marginTop: tokens.spacingVerticalM },
 });
 
-
-export type ReceiptRow = { receipt: PreflightReceipt; projectName: string };
-
-/** Newest first, by the same key the daemon orders each Project's Receipts on,
- *  extended across a merge of several Projects so the order is stable. */
-export function orderReceipts(rows: readonly ReceiptRow[]): ReceiptRow[] {
-  return [...rows].sort((left, right) => {
-    if (left.receipt.startedAtMs !== right.receipt.startedAtMs) {
-      return right.receipt.startedAtMs - left.receipt.startedAtMs;
-    }
-    return right.receipt.runId.localeCompare(left.receipt.runId);
-  });
-}
-
-/** What one reading gathered, and what it cost to gather it. */
-export type ReceiptCollection = {
-  /** Newest first, never more than the aggregate cap. */
-  rows: ReceiptRow[];
-  /** Every row the reading saw -- not the number kept. The panel's "of N" is a
-   *  count of what exists, and a capped count there is a quiet completeness
-   *  claim. */
-  found: number;
-  /** The most rows this reading ever held at once.
-   *
-   *  It is returned because the bound cannot be seen any other way: a rendered
-   *  list of five looks identical whether the reading held 768 rows or 4,096,
-   *  which is how the previous guard survived a gather-every-page-then-slice
-   *  implementation. The guard reads this; the interface does not. */
-  peakHeld: number;
-};
-
-/** Merges each Project's page into a running top-N and throws the rest away.
- *
- *  ONE Project at a time. A concurrent window is not free here: a page in
- *  flight is a page held, so four concurrent reads of a 512-row page held
- *  2,048 rows beside the 256 kept -- three times the bound this function
- *  documents, and the reason round three held. The daemon dispatches on a
- *  single accept loop, so the window bought little to begin with.
- *
- *  What it holds never exceeds `RECEIPT_HOLD_LIMIT`, whatever the Workspace
- *  contains -- and there is no argument that can raise it. The cap was once a
- *  parameter defaulting to `RECEIPT_AGGREGATE_LIMIT`, which made the documented
- *  bound a promise about the DEFAULT rather than about the function: a valid
- *  call passing 1024 over eight full pages returned 1,024 rows and held 1,536,
- *  twice the bound the type above states. Nothing in the interface ever passed
- *  it; one test did, which is the whole of what it bought.
- *
- *  Trimming only after the loop retained every row first, and then reported the
- *  capped length as the total.
- */
-export async function collectRecentReceipts(
-  projects: readonly { id: string; name: string }[],
-  readPage: (projectId: string) => Promise<readonly PreflightReceipt[]>,
-): Promise<ReceiptCollection> {
-  let rows: ReceiptRow[] = [];
-  let found = 0;
-  let peakHeld = 0;
-  for (const project of projects) {
-    const page = (await readPage(project.id)).map((receipt) => ({
-      receipt,
-      projectName: project.name,
-    }));
-    found += page.length;
-    // Measured before the merge, which is where the peak actually is: the
-    // merge builds one array of exactly this length before trimming it.
-    peakHeld = Math.max(peakHeld, rows.length + page.length);
-    rows = orderReceipts([...rows, ...page]).slice(0, RECEIPT_AGGREGATE_LIMIT);
-  }
-  return { rows, found, peakHeld };
-}
-
 function shortRunId(runId: string): string {
   return runId.slice(0, 8);
 }
 
-/** Briefing's recent PREFLIGHT Receipts.
+/** One vocabulary per kind, chosen by the tag the daemon sent. A single line
+ *  for both kinds would have to invent words neither map owns. */
+function outcomeLine(receipt: RecentReceipt): string {
+  return receipt.outcome.kind === "check_preflight"
+    ? `Check preflight — ${preflightOutcomeCopy[receipt.outcome.outcome].summary}`
+    : `Declared checks — ${executionSummaryCopy[receipt.outcome.summary].summary}`;
+}
+
+/** Runs in the window that recorded no Receipt. */
+function windowRuns(page: RecentReceiptPage): number {
+  return page.runsInFlightInWindow + page.runsUnconfirmedInWindow;
+}
+
+/** What the reading covered, in the daemon's own terms.
  *
- *  This is not yet BLUEPRINT §3's general "recent receipts" item. The Query it
- *  reads filters `runs.kind = 'check_preflight'`, and Beacon already writes
- *  execution Receipts for declared-check Runs into the same store. The general,
- *  cross-kind list needs a Workspace-scoped Query behind the interface; see
- *  `docs/implementation/phase-1-briefing-recent-receipts.md`.
+ *  Every number here is a number the page carries. The window is over RUNS, so
+ *  "more" is about Runs and never claims another Receipt exists -- an older Run
+ *  that recorded none sets the same flag. The two receiptless counts are stated
+ *  separately because a live lease and an expired one are two conditions, and
+ *  because a bool where the page has a count throws away what it knows. */
+function describeReading(page: RecentReceiptPage): string {
+  const receipts = `${page.receipts.length} ${page.receipts.length === 1 ? "Receipt" : "Receipts"}`;
+  const clauses = [
+    `this reading covered the ${page.runWindowApplied} most recent Runs and found ${receipts}`,
+  ];
+  if (page.runsUnconfirmedInWindow > 0) {
+    clauses.push(
+      `${page.runsUnconfirmedInWindow} ended without one`,
+    );
+  }
+  if (page.runsInFlightInWindow > 0) {
+    clauses.push(`${page.runsInFlightInWindow} ${page.runsInFlightInWindow === 1 ? "is" : "are"} still running`);
+  }
+  // Runs, not Receipts. Whether an older Receipt exists is not something this
+  // reading established.
+  if (page.moreRunsExist) {
+    clauses.push("older Runs exist");
+  }
+  return `${clauses.join("; ")}.`;
+}
+
+/** Briefing's recent Receipts — BLUEPRINT:171's item, across every Run kind.
+ *
+ *  One Workspace-scoped Query answers this now. The Project-scoped fan-out this
+ *  replaced made Briefing choose which Projects to open, in what order, how
+ *  many rows to hold and how to merge them; this component renders what one
+ *  reading answered and adds nothing to it -- no sort, no cap, no count of its
+ *  own. See `docs/implementation/phase-1-recent-receipts-query.md`.
  *
  *  Every row states the kind of Run, the outcome exactly as recorded, the Run
  *  it belongs to, and when it started. It never upgrades an outcome: nothing
  *  here says passed, completed, or succeeded, because a Receipt that does not
- *  say so is not evidence that it happened.
+ *  say so is not evidence that it happened -- and ADR 0031 is explicit that a
+ *  `completed` execution records that the checks RAN.
  */
 export function BriefingReceipts({
-  rows,
-  total,
+  page,
   loading,
   failure,
-  scope,
   disabled,
   onRefresh,
 }: {
-  rows: readonly ReceiptRow[] | null;
-  total: number;
+  /** One bounded reading, as the daemon answered it. Null before the first
+   *  read and after one that failed. */
+  page: RecentReceiptPage | null;
   loading: boolean;
   failure: string;
-  /** Empty when the reading was COMPLETE -- every Project covered and every
-   *  Receipt it found kept. Otherwise, what the reading covered.
-   *
-   *  The empty-state copy below depends on this: "No preflight Receipts yet"
-   *  is an absolute claim about the Workspace, and a bounded reading has not
-   *  earned it. Receipts may sit in the Projects this reading did not open. */
-  scope: string;
   /** Unrelated work in flight. Kept apart from `loading` so retiring a Resident
    *  does not label this button "Refreshing…" while no Receipt read is running. */
   disabled: boolean;
   onRefresh: () => void;
 }) {
   const styles = useStyles();
-  const shown = rows ? orderReceipts(rows).slice(0, RECENT_RECEIPT_LIMIT) : [];
-  const hidden = Math.max(0, total - shown.length);
+  // No sort here. The daemon defines the order and the adapter refuses a page
+  // that is not in it; re-establishing it would put the ordering policy back
+  // in the interface, which is what this Query exists to remove.
+  const shown = page ? page.receipts.slice(0, RECENT_RECEIPT_LIMIT) : [];
+  const hidden = page ? Math.max(0, page.receipts.length - shown.length) : 0;
 
   return (
     <section className={styles.section} aria-labelledby="briefing-receipts-heading">
       <h2 id="briefing-receipts-heading" className={styles.heading}>
-        Recent preflight Receipts
+        Recent Receipts
       </h2>
       <p className={styles.body}>
-        An immutable account of what each preflight Run did. Preflight establishes whether
-        execution would be admissible; it runs no check. This list does not include execution
-        Receipts, which Beacon also writes.
+        An immutable account of what each Run did. Preflight establishes whether execution would be
+        admissible and runs no check; an execution Receipt records that the Declared Checks ran, not
+        that they passed.
       </p>
 
       {failure ? (
         <p className={styles.body} role="status">
-          Recent preflight Receipts could not be read. {failure}
+          Recent Receipts could not be read. {failure}
         </p>
       ) : loading ? (
         <p className={styles.body} role="status">
-          Loading preflight Receipts
+          Loading Receipts
         </p>
-      ) : shown.length === 0 ? (
+      ) : !page ? null : shown.length === 0 ? (
         <p className={styles.body} role="status">
-          {scope ? "No preflight Receipts in this reading." : "No preflight Receipts yet."}
+          {/* The window is over RUNS, so an empty list is not an empty
+              Workspace: Runs in this window may have recorded no Receipt, and
+              older Runs may exist beyond it. Only a reading that saw every Run
+              and found no Receipt has earned the absolute sentence. */}
+          {page.moreRunsExist || windowRuns(page) > 0
+            ? "No Receipts among the Runs in this reading."
+            : "No Receipts yet."}
         </p>
       ) : (
         <>
-          <ul className={styles.list} aria-label="Recent preflight Receipts">
-            {shown.map(({ receipt, projectName }) => (
+          <ul className={styles.list} aria-label="Recent Receipts">
+            {shown.map((receipt) => (
               <li key={receipt.runId} className={styles.row}>
                 <span>
-                  <p className={styles.outcome}>Check preflight — {preflightOutcomeCopy[receipt.outcome].summary}</p>
+                  <p className={styles.outcome}>{outcomeLine(receipt)}</p>
                   <p className={styles.detail}>
-                    {projectName} · {new Date(receipt.startedAtMs).toISOString()}
+                    {receipt.projectName} · {new Date(receipt.startedAtMs).toISOString()}
                   </p>
                 </span>
                 <span className={styles.identity} title={receipt.runId}>
@@ -228,18 +185,21 @@ export function BriefingReceipts({
           </ul>
           {hidden > 0 ? (
             <p className={styles.truncation}>
-              Showing the {shown.length} most recent of {total}. Beacon has no full preflight
-              history view yet, so the rest are recorded but not readable here.
+              Showing the {shown.length} most recent of {page.receipts.length} in this reading.
+              Beacon has no full Receipt history view yet, so the rest are recorded but not readable
+              here.
             </p>
           ) : null}
         </>
       )}
 
-      {scope ? <p className={styles.truncation}>{scope}.</p> : null}
+      {page && !failure && !loading ? (
+        <p className={styles.truncation}>{describeReading(page)}</p>
+      ) : null}
 
       <div className={styles.actions}>
         <Button size="small" disabled={disabled || loading} onClick={onRefresh}>
-          {loading ? "Refreshing…" : "Refresh preflight Receipts"}
+          {loading ? "Refreshing…" : "Refresh Receipts"}
         </Button>
       </div>
     </section>

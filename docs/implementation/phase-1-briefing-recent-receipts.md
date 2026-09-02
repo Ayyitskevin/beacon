@@ -154,3 +154,16 @@ interface because the ordering, the bound and the join across kinds are domain w
 desktop cannot bound what it does not select. The row shape generalises with one addition — the Run
 kind, which today is a constant — and the closed outcome vocabulary becomes per-kind. Until that
 Query exists, Briefing's list is preflight-only and says so.
+
+---
+
+## Superseded
+
+This slice is closed. Briefing now reads one Workspace-scoped, bounded, cross-kind Query, and the
+Project-scoped fan-out this note describes — the Project budget, the aggregate cap, the collection
+bound, and the copy that disclosed them — is deleted along with the `preflight_receipts` path it
+read. What replaced it, and why the window is over Runs rather than Receipts, is in
+`phase-1-recent-receipts-query.md`.
+
+The findings this note records still stand and are not re-litigated there: the cap must apply while
+collecting, a capped list must say what it dropped, and one display claim per panel.

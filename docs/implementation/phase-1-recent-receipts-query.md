@@ -6,8 +6,15 @@ order, how many rows to hold, and how to merge them. AGENTS.md:173 is explicit t
 not join module tables, rebuild domain objects, or encode domain policy; that fan-out did all three.
 This module owns the join, the order, the bound, and the per-kind vocabulary.
 
-Slice 1 is the daemon only. The desktop panel still reads the Project-scoped Query; its migration and
-the retirement of that path are slice 2, after PR #40 lands.
+The panel reads this Query and nothing else. The Project-scoped `preflight_receipts` path is
+**retired end to end** — service method, transport command/result/client helper, Tauri command,
+capability entry, generated permission file, `build.rs` command list, the TypeScript adapter and its
+validator, and the tests of each. Nothing else read it: the only production consumer was Briefing's
+fan-out, and every other reference was a test of the path itself.
+
+The panel adds nothing to the reading. No sort (the daemon defines the order and the adapter refuses
+a page that is not in it), no cap of its own beyond the five rows it draws, and no count it computed
+— every number it shows is a number the page carries.
 
 ## The window is over Runs, not Receipts
 

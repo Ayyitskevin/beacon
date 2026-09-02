@@ -150,63 +150,54 @@ const briefingProjects = [
   },
 ] as const;
 
-const receiptAbsent = (reason: string) => ({ kind: "absent", reason }) as const;
-
-function briefingReceipt(
+/** One row of a recent-Receipt page, in the daemon's wire shape. */
+function recentRow(
   runId: string,
-  projectId: string,
-  outcome: string,
   startedAtMs: number,
+  outcome:
+    | { kind: "check_preflight"; outcome: string }
+    | { kind: "declared_checks"; summary: string },
+  projectName = "Task tracker",
 ) {
   return {
-    version: 1,
     runId,
-    workspaceId: acceptedOrganization.workspaceId,
-    projectId,
-    repositoryRevision: 1,
-    charterRevision: 1,
+    projectId: briefingProjects[0].id,
+    projectName,
+    version: outcome.kind === "check_preflight" ? 1 : 2,
     outcome,
-    sourceKind: "local_path",
-    source: "/private/beacon/repo",
-    baseRevision: "0123456789012345678901234567890123456789",
-    resolvedChecks: [],
-    sandboxVersion: "landlock-v1",
-    policyCharterRevision: 1,
-    policyRepositoryRevision: 1,
     startedAtMs,
     endedAtMs: startedAtMs + 1,
-    notVerified: ["preflight refuses to execute, so nothing ran"],
-    unavailable: {
-      proposalDigest: receiptAbsent("no Proposal surface exists"),
-      rulingDigest: receiptAbsent("no Proposal surface exists"),
-      resultingRevision: receiptAbsent("preflight refuses to execute, so nothing ran"),
-      filesystemEffects: receiptAbsent("preflight refuses to execute, so nothing ran"),
-      diffDigest: receiptAbsent("preflight refuses to execute, so nothing ran"),
-      modelInvocations: receiptAbsent("preflight performs no model inference"),
-      costUsdMicros: receiptAbsent("preflight performs no model inference"),
-    },
+    recordedAtMs: startedAtMs + 1,
   };
 }
 
-const receiptsByProject: Record<string, ReturnType<typeof briefingReceipt>[]> = {
-  [briefingProjects[0].id]: [
-    briefingReceipt("aaaaaaaa-1111-4111-8111-111111111111", briefingProjects[0].id, "verified", 100),
-    briefingReceipt(
-      "cccccccc-3333-4333-8333-333333333333",
-      briefingProjects[0].id,
-      "sandbox_unavailable",
-      300,
-    ),
-  ],
-  [briefingProjects[1].id]: [
-    briefingReceipt(
-      "bbbbbbbb-2222-4222-8222-222222222222",
-      briefingProjects[1].id,
-      "preflight_timed_out",
-      200,
-    ),
-  ],
-};
+/** A page as the daemon answers it: newest first, both kinds, counts scoped to
+ *  the Run window. */
+function recentPage(overrides: Record<string, unknown> = {}) {
+  return {
+    receipts: [
+      recentRow("cccccccc-3333-4333-8333-333333333333", 300, {
+        kind: "declared_checks",
+        summary: "completed",
+      }),
+      recentRow(
+        "bbbbbbbb-2222-4222-8222-222222222222",
+        200,
+        { kind: "check_preflight", outcome: "preflight_timed_out" },
+        "Ledger",
+      ),
+      recentRow("aaaaaaaa-1111-4111-8111-111111111111", 100, {
+        kind: "check_preflight",
+        outcome: "verified",
+      }),
+    ],
+    runsInFlightInWindow: 0,
+    runsUnconfirmedInWindow: 0,
+    runWindowApplied: 50,
+    moreRunsExist: false,
+    ...overrides,
+  };
+}
 
 type Phase = "operator_setup_required" | "locked" | "unlocked";
 
@@ -226,7 +217,7 @@ function mockInitialState(phase: Phase) {
     if (command === "record_operator_activity") return Promise.resolve(null);
     // Briefing reads its recent preflight Receipts by fanning out over the Projects.
     if (command === "projects") return Promise.resolve([]);
-    if (command === "preflight_receipts") return Promise.resolve([]);
+    if (command === "recent_receipts") return Promise.resolve(recentPage({ receipts: [] }));
     if (command === "set_session_timeout") {
       return Promise.resolve({
         inactivityTimeoutMinutes: (args as { inactivityTimeoutMinutes: number })
@@ -387,155 +378,139 @@ describe("Beacon desktop shell", () => {
     expect(within(suiteNavigation).getByRole("button", { name: "Software" })).toBeDisabled();
   });
 
-  it("shows Briefing's recent preflight Receipts merged across Projects, newest first", async () => {
+  it("shows Briefing's recent Receipts of every kind, in the order the daemon sent", async () => {
     mockInitialState("unlocked");
     const base = invokeMock.getMockImplementation()!;
     invokeMock.mockImplementation((command, args) => {
-      if (command === "projects") return Promise.resolve(briefingProjects);
-      if (command === "preflight_receipts") {
-        const { projectId } = args as { projectId: string };
-        return Promise.resolve(receiptsByProject[projectId] ?? []);
-      }
+      if (command === "recent_receipts") return Promise.resolve(recentPage());
       return base(command, args);
     });
 
     const { container } = render(<App />);
     await screen.findByRole("heading", { name: "Briefing" });
 
-    const list = await screen.findByRole("list", { name: "Recent preflight Receipts" });
+    const list = await screen.findByRole("list", { name: "Recent Receipts" });
     const rows = within(list).getAllByRole("listitem");
-    // Two Projects, merged. Per-Project order would put the tracker's older
-    // Receipt above the ledger's newer one.
     expect(rows.map((row) => row.textContent)).toEqual([
       expect.stringContaining("Run cccccccc"),
       expect.stringContaining("Run bbbbbbbb"),
       expect.stringContaining("Run aaaaaaaa"),
     ]);
+    // Both kinds, each in its own vocabulary. The Project-scoped Query this
+    // replaced could not carry an execution Receipt at all.
+    expect(rows[0].textContent).toContain("Declared checks");
+    expect(rows[1].textContent).toContain("Check preflight");
     expect(rows[1].textContent).toContain("Ledger");
+
+    // One Query, and no fan-out: Briefing no longer opens Projects to read
+    // Receipts.
+    expect(invokeMock).toHaveBeenCalledWith("recent_receipts", { window: 50 });
 
     const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
     expect(results.violations).toEqual([]);
   });
 
-  it("bounds the Receipt fan-out and says the reading is partial", async () => {
+  it("states the window, the receiptless Runs and the overflow the daemon reported", async () => {
+    // Every number the panel shows is a number the page carries. The bound is
+    // the daemon's; the interface reports it rather than choosing it.
     mockInitialState("unlocked");
     const base = invokeMock.getMockImplementation()!;
-    const many = Array.from({ length: 513 }, (_, index) => ({
-      id: `${index.toString(16).padStart(8, "0")}-4444-4444-8444-444444444444`,
-      name: `Project ${index}`,
-      charterRevision: 1,
-      autonomyProfile: "observe" as const,
-      createdAtMs: index,
-    }));
-    let reads = 0;
-    let concurrent = 0;
-    let peak = 0;
     invokeMock.mockImplementation((command, args) => {
-      if (command === "projects") return Promise.resolve(many);
-      if (command === "preflight_receipts") {
-        reads += 1;
-        concurrent += 1;
-        peak = Math.max(peak, concurrent);
-        return new Promise((resolve) => {
-          setTimeout(() => {
-            concurrent -= 1;
-            resolve([]);
-          }, 0);
-        });
+      if (command === "recent_receipts") {
+        return Promise.resolve(
+          recentPage({
+            runWindowApplied: 50,
+            runsUnconfirmedInWindow: 3,
+            runsInFlightInWindow: 1,
+            moreRunsExist: true,
+          }),
+        );
       }
       return base(command, args);
     });
 
     render(<App />);
     await screen.findByRole("heading", { name: "Briefing" });
-    // A Workspace with 513 Projects used to start 513 concurrent IPC calls and
-    // hold up to N x 512 Receipts before sorting to five.
-    expect(
-      await screen.findByText(/this reading covered the 8 most recent Projects of 513/),
-    ).toBeVisible();
-    // The scope sentence says what the READING covered. "showing ... Receipts
-    // for" made it a claim about what is on screen, which is the verb that
-    // contradicted the row list in the capped case below.
-    expect(screen.queryByText(/^showing /)).toBeNull();
-    expect(reads).toBe(8);
-    // ONE page in flight, because a page in flight is a page held: a window of
-    // four concurrent reads of a 512-row page held 2,048 rows beside the 256
-    // kept, three times the documented bound.
-    expect(peak).toBe(1);
+
+    const reading = await screen.findByText(/this reading covered the 50 most recent Runs/);
+    expect(reading.textContent).toMatch(/found 3 Receipts/);
+    expect(reading.textContent).toMatch(/3 ended without one/);
+    expect(reading.textContent).toMatch(/1 is still running/);
+    expect(reading.textContent).toMatch(/older Runs exist/);
+    // Runs, not Receipts: an older Run that recorded none sets the same flag.
+    expect(reading.textContent).not.toMatch(/more Receipts/);
   });
 
-  it("holds only the rows it will draw and reports the true number found", async () => {
+  it("does not call a window with no Receipts an empty Workspace", async () => {
+    // The honest-absence case: the daemon walked 50 Runs, four of them recorded
+    // no Receipt, and older Runs exist. "No Receipts yet" would be an absolute
+    // claim about the Workspace that this reading did not earn.
     mockInitialState("unlocked");
     const base = invokeMock.getMockImplementation()!;
-    const eight = Array.from({ length: 8 }, (_, index) => ({
-      id: `${index.toString(16).padStart(8, "0")}-4444-4444-8444-444444444444`,
-      name: `Project ${index}`,
-      charterRevision: 1,
-      autonomyProfile: "observe" as const,
-      createdAtMs: index,
-    }));
-    const page = (projectId: string, base: number) =>
-      Array.from({ length: 512 }, (_, index) =>
-        briefingReceipt(
-          `${(base + index).toString(16).padStart(8, "0")}-1111-4111-8111-111111111111`,
-          projectId,
-          "verified",
-          base + index,
-        ),
-      );
     invokeMock.mockImplementation((command, args) => {
-      if (command === "projects") return Promise.resolve(eight);
-      if (command === "preflight_receipts") {
-        const { projectId } = args as { projectId: string };
-        return Promise.resolve(page(projectId, eight.findIndex((p) => p.id === projectId) * 1000));
+      if (command === "recent_receipts") {
+        return Promise.resolve(
+          recentPage({ receipts: [], runsUnconfirmedInWindow: 4, moreRunsExist: true }),
+        );
       }
       return base(command, args);
     });
 
     render(<App />);
     await screen.findByRole("heading", { name: "Briefing" });
-    const list = await screen.findByRole("list", { name: "Recent preflight Receipts" });
 
-    // 8 x 512 = 4,096 Receipts exist. Capping to 256 and then reporting 256 as
-    // the total made 3,840 read rows vanish from the disclosure.
-    //
-    // Two sentences, two subjects, and they must not contradict each other:
-    // the panel makes ONE display claim, and the scope line describes the
-    // reading that claim was drawn from. "showing 256 most recent preflight
-    // Receipts" said 256 rows were on screen while five were, and every number
-    // in it was individually true.
-    expect(await screen.findByText(/Showing the 5 most recent of 4096/)).toBeVisible();
     expect(
-      screen.getByText(
-        /this reading covered 8 of 8 Projects and kept the 256 most recent Receipts of the 4096 it found/,
-      ),
+      await screen.findByText("No Receipts among the Runs in this reading."),
     ).toBeVisible();
-    expect(within(list).getAllByRole("listitem")).toHaveLength(5);
-    // No sentence claims the retained rows are the displayed ones.
-    expect(screen.queryByText(/showing 256/)).toBeNull();
-    expect(within(list).getAllByRole("listitem")).toHaveLength(5);
+    expect(screen.queryByText("No Receipts yet.")).toBeNull();
+    const reading = screen.getByText(/this reading covered the 50 most recent Runs/);
+    expect(reading.textContent).toMatch(/found 0 Receipts/);
+    expect(reading.textContent).toMatch(/4 ended without one/);
+  });
+
+  it("says the Workspace has no Receipts only when the reading saw every Run", async () => {
+    mockInitialState("unlocked");
+    const base = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "recent_receipts") return Promise.resolve(recentPage({ receipts: [] }));
+      return base(command, args);
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+
+    expect(await screen.findByText("No Receipts yet.")).toBeVisible();
+    expect(screen.queryByText("No Receipts among the Runs in this reading.")).toBeNull();
   });
 
   it("never presents a Receipt as work that succeeded", async () => {
     mockInitialState("unlocked");
     const base = invokeMock.getMockImplementation()!;
     invokeMock.mockImplementation((command, args) => {
-      if (command === "projects") return Promise.resolve(briefingProjects);
-      if (command === "preflight_receipts") {
-        const { projectId } = args as { projectId: string };
-        return Promise.resolve(receiptsByProject[projectId] ?? []);
-      }
+      if (command === "recent_receipts") return Promise.resolve(recentPage());
       return base(command, args);
     });
 
     render(<App />);
     await screen.findByRole("heading", { name: "Briefing" });
-    const list = await screen.findByRole("list", { name: "Recent preflight Receipts" });
 
-    // A Receipt records what a Run did. Preflight runs no check, so nothing
-    // here may read as a completed or passing one.
-    expect(list.textContent).not.toMatch(/passed|succeeded|completed|✓/i);
-    expect(within(list).getByText(/not a passing check/)).toBeVisible();
+    const list = await screen.findByRole("list", { name: "Recent Receipts" });
+    // A Receipt records what a Run did. Preflight runs no check, and a
+    // `completed` execution records that the checks RAN.
+    expect(within(list).getByText(/Execution would be admissible — not a passing check/)).toBeVisible();
+    expect(within(list).getByText(/every Declared Check ran — this does not say they passed/)).toBeVisible();
+    // A word match cannot tell a claim from its denial, and both kinds deny
+    // one. Every occurrence of an upgrade word in a row must be inside a
+    // denial, so count them: one per row, and only in the two rows that deny.
+    const rows = within(list).getAllByRole("listitem");
+    for (const row of rows) {
+      expect((row.textContent ?? "").match(/succeeded|success/gi) ?? []).toHaveLength(0);
+      const passes = (row.textContent ?? "").match(/passing|passed/gi) ?? [];
+      expect(passes.length).toBeLessThanOrEqual(1);
+      if (passes.length === 1) {
+        expect(row.textContent).toMatch(/not a passing check|does not say they passed/);
+      }
+    }
   });
 
   it("keeps a failed Receipt read apart from a Workspace with no Receipts", async () => {
@@ -544,11 +519,12 @@ describe("Beacon desktop shell", () => {
     const base = invokeMock.getMockImplementation()!;
     let attempts = 0;
     invokeMock.mockImplementation((command, args) => {
-      if (command === "projects") return Promise.resolve(briefingProjects);
-      if (command === "preflight_receipts") {
+      if (command === "recent_receipts") {
         attempts += 1;
-        if (attempts === 1) return Promise.reject({ code: "preflight_unavailable" });
-        return Promise.resolve([]);
+        if (attempts === 1) {
+          return Promise.reject({ code: "preflight_unavailable", message: "unused" });
+        }
+        return Promise.resolve(recentPage({ receipts: [] }));
       }
       return base(command, args);
     });
@@ -556,14 +532,16 @@ describe("Beacon desktop shell", () => {
     render(<App />);
     await screen.findByRole("heading", { name: "Briefing" });
 
-    expect(await screen.findByText(/Recent preflight Receipts could not be read/)).toBeVisible();
-    expect(screen.queryByText("No preflight Receipts yet.")).toBeNull();
+    // The shared code says "could not record the preflight", which is false for
+    // a Query that records nothing. Translated at this seam.
+    expect(
+      await screen.findByText(/Beacon could not read recent Run and Receipt state\./),
+    ).toBeVisible();
+    expect(screen.queryByText("No Receipts yet.")).toBeNull();
 
-    // The failure is retryable rather than terminal, and the retry can reach
-    // the genuinely-empty state.
-    await user.click(screen.getByRole("button", { name: "Refresh preflight Receipts" }));
-    expect(await screen.findByText("No preflight Receipts yet.")).toBeVisible();
-    expect(screen.queryByText(/Recent preflight Receipts could not be read/)).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Refresh Receipts" }));
+    expect(await screen.findByText("No Receipts yet.")).toBeVisible();
+    expect(screen.queryByText(/could not be read/)).toBeNull();
   });
 
   it("discovers installed local models as inactive resources from Briefing", async () => {

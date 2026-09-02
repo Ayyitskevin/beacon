@@ -416,29 +416,6 @@ impl CheckPreflightService {
             Ok(receipt)
         })
     }
-
-    /// Every preflight Receipt for a Project, newest first.
-    pub fn receipts(&self, project_id: Uuid) -> Result<Vec<PreflightReceipt>, CheckPreflightError> {
-        self.accounts.with_authenticated_store(|connection, _now| {
-            let mut statement = connection.prepare(
-                "SELECT receipts.receipt_json
-                 FROM receipts
-                 JOIN runs ON runs.workspace_id = receipts.workspace_id AND runs.id = receipts.run_id
-                 WHERE receipts.workspace_id = ?1 AND runs.project_id = ?2
-                   AND runs.kind = 'check_preflight'
-                 ORDER BY runs.started_at_ms DESC, runs.id DESC",
-            )?;
-            let rows = statement
-                .query_map(
-                    params![self.workspace_id.to_string(), project_id.to_string()],
-                    |row| row.get::<_, String>(0),
-                )?
-                .collect::<Result<Vec<_>, _>>()?;
-            rows.into_iter()
-                .map(|json| serde_json::from_str(&json).map_err(CheckPreflightError::from))
-                .collect()
-        })
-    }
 }
 
 /// What one Run captured when it opened.
