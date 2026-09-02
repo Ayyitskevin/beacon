@@ -30,6 +30,7 @@ import {
   deactivateLocalModel,
   discoverLocalModels,
   describeLocalAccountError,
+  verbatimFailure,
   discardStarterOrganization,
   loadAuthenticationCapabilities,
   inspectLocalModel,
@@ -467,7 +468,12 @@ export function App() {
       // cannot stay visible if the first read decides silence.
       (error) => {
         if (requestEpoch === liveDataEncryptionEpoch.current) {
-          setLiveDataEncryptionFailure(describeLocalAccountError(error));
+          // The original text, not a generic account message: a fallback that
+          // replaces the failure it fell back from has discarded the only
+          // thing that says what went wrong.
+          setLiveDataEncryptionFailure(
+            `initial read failed: ${verbatimFailure(error)}; showing fallback`,
+          );
         }
       },
     );
@@ -843,7 +849,9 @@ export function App() {
       if (requestEpoch === liveDataEncryptionEpoch.current) {
         // Both surfaces: the action error for the operator's current gesture,
         // and the panel's own line so the failure outlives the click.
-        setLiveDataEncryptionFailure(describeLocalAccountError(error));
+        setLiveDataEncryptionFailure(
+          `recheck failed: ${verbatimFailure(error)}; showing fallback`,
+        );
         setActionError(describeLocalAccountError(error));
       }
     } finally {
