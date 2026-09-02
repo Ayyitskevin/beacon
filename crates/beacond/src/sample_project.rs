@@ -1675,6 +1675,27 @@ mod tests {
         fs::set_permissions(path, permissions).unwrap();
     }
 
+    fn sync_then_swap_workspace_ancestor(path: &std::path::Path) -> std::io::Result<()> {
+        super::sync_directory_tree(path)?;
+        let workspace_root = path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("staging directory has no workspace parent"))?;
+        let managed_root = workspace_root
+            .parent()
+            .ok_or_else(|| std::io::Error::other("workspace has no managed parent"))?;
+        let test_root = managed_root
+            .parent()
+            .ok_or_else(|| std::io::Error::other("managed root has no test parent"))?;
+        let moved_workspace = test_root.join("post-sync-workspace");
+        let attacker_workspace = test_root.join("operator-publish");
+
+        fs::rename(workspace_root, &moved_workspace)?;
+        fs::create_dir(&attacker_workspace)?;
+        fs::write(attacker_workspace.join("keep"), b"operator data")?;
+        symlink(&attacker_workspace, workspace_root)?;
+        Ok(())
+    }
+
     #[test]
     fn authenticated_operator_installs_an_inert_supervised_sample_project() {
         let store = TestStore::new("install");
@@ -2145,6 +2166,38 @@ mod tests {
         assert_eq!(store.count("sample_project_events"), 0);
         assert_eq!(store.count("runs"), 0);
         assert_eq!(store.count("receipts"), 0);
+    }
+
+    #[test]
+    fn post_sync_ancestor_swap_publishes_only_beneath_held_workspace() {
+        let store = TestStore::new("post-sync-ancestor-swap");
+        let service = store
+            .isolated_service()
+            .with_repository_tree_sync(sync_then_swap_workspace_ancestor);
+        let destination = service.repository_path();
+
+        let revision = service.materialize_repository(&destination).unwrap();
+
+        assert_eq!(revision, EXPECTED_BASE_REVISION);
+        assert!(
+            store
+                .root
+                .join("post-sync-workspace")
+                .join(super::SAMPLE_REPOSITORY_DIRECTORY)
+                .is_dir(),
+            "publication did not stay beneath the held workspace descriptor"
+        );
+        let attacker_workspace = store.root.join("operator-publish");
+        assert!(
+            !attacker_workspace
+                .join(super::SAMPLE_REPOSITORY_DIRECTORY)
+                .exists(),
+            "publication followed the replaced workspace pathname"
+        );
+        assert_eq!(
+            fs::read(attacker_workspace.join("keep")).unwrap(),
+            b"operator data"
+        );
     }
 
     #[test]
