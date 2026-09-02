@@ -86,6 +86,11 @@ export type LinkContext = {
  *  collection folded into `absent` claims an object does not exist, and a null
  *  Workspace folded into `otherWorkspace` claims the link belongs to another
  *  Installation -- definite claims drawn from nothing having been looked at.
+ *  `wrongScope` is separate again: the object WAS found, and it names a parent
+ *  other than the one the link declares. That is a contradiction, and it is
+ *  refused rather than resolved in either direction -- opening it puts the
+ *  operator on an object from another Project believing it is the one they
+ *  clicked, and calling it absent denies a row that is right there.
  *  `malformed` is separate from `absent` because a mistyped identifier and a
  *  deleted Project are different facts, and collapsing absent, broken and
  *  not-checked is a defect this codebase has repaired more than once. */
@@ -96,6 +101,7 @@ export type LinkOutcome =
   | { outcome: "otherWorkspace"; workspaceId: string }
   | { outcome: "absent"; missing: "project" | "mission"; id: string }
   | { outcome: "notLoaded"; awaiting: "workspace" | "projects" | "missions" }
+  | { outcome: "wrongScope"; object: "mission"; id: string }
   | { outcome: "malformed"; reason: MalformedReason };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -168,5 +174,12 @@ export function routeObjectLink(link: ObjectLink, context: LinkContext): LinkOut
   }
   const mission = context.missions.items.find((candidate) => candidate.id === link.missionId);
   if (!mission) return { outcome: "absent", missing: "mission", id: link.missionId };
+
+  // Found, but it names a different parent than the link does. A Mission states
+  // its Workspace and its Project, so a nested link cannot escape the parents it
+  // declares by matching an id alone.
+  if (mission.workspaceId !== link.workspaceId || mission.projectId !== link.projectId) {
+    return { outcome: "wrongScope", object: "mission", id: link.missionId };
+  }
   return { outcome: "open", link };
 }
