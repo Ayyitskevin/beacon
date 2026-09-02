@@ -221,6 +221,32 @@ describe("routing an object link", () => {
     ).toEqual({ outcome: "notLoaded", awaiting: "missions" });
   });
 
+  it("refuses an object that names a parent other than the link's", () => {
+    // The decoy has the right Mission id in the wrong scope. Comparing ids
+    // alone opens it, and the operator lands on an object from another Project
+    // believing it is the one they clicked. A contradiction is refused rather
+    // than resolved in either direction: it is not `open`, and it is not
+    // `absent` either, because the id was found.
+    const otherProject = "77777777-7777-4777-8777-777777777777";
+    const otherWorkspace = "88888888-8888-4888-8888-888888888888";
+    const underAnotherProject: MissionView = { ...mission, projectId: otherProject };
+    const underAnotherWorkspace: MissionView = { ...mission, workspaceId: otherWorkspace };
+
+    expect(
+      routeObjectLink(
+        link(missionLink),
+        context({ missions: { projectId: PROJECT, items: [underAnotherProject] } }),
+      ),
+    ).toEqual({ outcome: "wrongScope", object: "mission", id: MISSION });
+
+    expect(
+      routeObjectLink(
+        link(missionLink),
+        context({ missions: { projectId: PROJECT, items: [underAnotherWorkspace] } }),
+      ),
+    ).toEqual({ outcome: "wrongScope", object: "mission", id: MISSION });
+  });
+
   it("opens what it can, and only that", () => {
     for (const raw of [briefing, projectLink, missionLink]) {
       const parsed = link(raw);
