@@ -197,6 +197,15 @@ ON evaluations (workspace_id, digest_value);
 -- on the pair would let an author re-evaluate their own Proposal by changing configuration, which
 -- is the dodge this trigger exists to close.
 --
+-- gpt2's E1 asked why a trigger comparing the (Resident, configuration) PAIR passes every test.
+-- It is unobservable at THIS layer, and the reason is one line up in 0011:
+-- `mission_admission_members` is UNIQUE (workspace_id, mission_id, resident_id), so a Resident
+-- appears at most once per Mission and the configuration is a function of the Resident there. A
+-- pair-keyed trigger and a Resident-keyed trigger therefore refuse exactly the same rows, because
+-- the membership foreign key has already refused every row where they would differ. The trigger is
+-- written on the Resident because that is the rule; the layer where the distinction is observable,
+-- and load-bearing, is the Command.
+--
 -- This is one of the two layers. It proves what SQL can prove -- that the stored projection does
 -- not name the author -- and the verified read and startup reconciliation prove the other half,
 -- that the projection agrees with the canonical bytes. Neither alone is the invariant.
