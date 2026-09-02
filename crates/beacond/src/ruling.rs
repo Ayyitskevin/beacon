@@ -1494,36 +1494,49 @@ mod tests {
         assert_ne!(MAGIC, b"beacon.proposal.v1\0");
     }
 
-    #[test]
-    fn a_known_fixture_reproduces_its_digest_from_the_bytes_alone() {
-        // Reproduced by hand from ADR 0037's table, so this asserts the published grammar rather
-        // than whatever the encoder happens to do.
-        let mut expected = Vec::new();
-        expected.extend_from_slice(b"beacon.ruling.v1\0");
-        expected.extend_from_slice(&HEXLOWER.decode(PROPOSAL.as_bytes()).unwrap());
-        expected.extend_from_slice(&6_u64.to_be_bytes());
-        expected.extend_from_slice(b"sha256");
-        expected.extend_from_slice(&18_u64.to_be_bytes());
-        expected.extend_from_slice(b"beacon.proposal.v1");
-        expected.extend_from_slice(&1_u32.to_be_bytes());
-        expected.extend_from_slice(&2_u32.to_be_bytes());
-        expected.extend_from_slice(&3_u32.to_be_bytes());
-        expected.extend_from_slice(&40_u64.to_be_bytes());
-        expected.extend_from_slice(BASE.as_bytes());
-        expected.push(0x01);
-        let reason = fixture().reason;
-        expected.extend_from_slice(&(reason.len() as u64).to_be_bytes());
-        expected.extend_from_slice(reason.as_bytes());
-        expected.push(0x01);
-        expected.push(0x00);
-        expected.extend_from_slice(&1_756_800_000_000_u64.to_be_bytes());
+    /// The published identity vector, pinned as literals (ADR 0037, "Published identity vector").
+    ///
+    /// Constructed independently from the ADR's table, in Python, by a non-author reviewer, and
+    /// byte-identical to this encoder's output -- checked before it was pinned, not after. The
+    /// earlier version of this test rebuilt `expected` in Rust from the same understanding the
+    /// encoder has and then compared digests, which is tautological once the byte comparison
+    /// passes: an encoder and its hand-built expected buffer can drift together, and nothing
+    /// outside this file would have noticed.
+    const FIXTURE_BYTES_HEX: &str = "626561636f6e2e72756c696e672e7631003b1f8c0e5d4a2b697f8e1d0c3a5b7e9d2f4a6c8e0b1d3f5a7c\
+         9e1b3d5f7a9c1e00000000000000067368613235360000000000000012626561636f6e2e70726f706f73\
+         616c2e763100000001000000020000000300000000000000286131623263336434653566366131623263\
+         3364346535663661316232633364346535663661316232010000000000000042546865206465636c6172\
+         65642065666665637473207374617920696e7369646520746865205265706f7369746f727920616e6420\
+         7370656e64206e6f7468696e672e0100000001990970a000";
+    const FIXTURE_DIGEST: &str = "8c9c3367fff1e77524014506a9bf48d0786d105b9011ccc373b79af0ae803b3d";
+    const FIXTURE_LENGTH: usize = 234;
 
-        let bytes = encode(&fixture()).unwrap();
-        assert_eq!(bytes, expected);
-        assert_eq!(
-            HEXLOWER.encode(&sha256(&bytes)),
-            HEXLOWER.encode(&sha256(&expected))
-        );
+    fn fixture_bytes() -> Vec<u8> {
+        // No whitespace stripping: the literal is exact, and a decoder that tolerated stray
+        // characters would let a typo inside a pinned identity vector go unnoticed. Rust's
+        // backslash line continuations remove the newlines and their indentation.
+        HEXLOWER
+            .decode(FIXTURE_BYTES_HEX.as_bytes())
+            .expect("the pinned vector is lowercase hexadecimal")
+    }
+
+    #[test]
+    fn the_encoder_produces_the_published_identity_vector() {
+        let bytes = fixture_bytes();
+        assert_eq!(bytes.len(), FIXTURE_LENGTH);
+        assert_eq!(encode(&fixture()).unwrap(), bytes);
+    }
+
+    #[test]
+    fn the_published_identity_vector_reproduces_its_digest_with_no_encoder() {
+        // Deliberately separate from the test above and from `encode` entirely: SHA-256 over
+        // literal bytes. It would still hold if the encoder were replaced wholesale, which is what
+        // makes the digest assertion evidence rather than a restatement of the byte assertion.
+        let bytes = fixture_bytes();
+        assert_eq!(HEXLOWER.encode(&sha256(&bytes)), FIXTURE_DIGEST);
+        // And those literal bytes decode to the value the fixture describes, so the vector pins
+        // the whole round trip rather than one direction of it.
+        assert_eq!(decode(&bytes).unwrap(), fixture());
     }
 
     #[test]
