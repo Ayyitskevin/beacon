@@ -950,7 +950,12 @@ export function App() {
         return right.id.localeCompare(left.id);
       });
       const readable = ordered.slice(0, RECEIPT_PROJECT_BUDGET);
-      const gathered: ReceiptRow[][] = [];
+      // The cap applies WHILE collecting. Slicing at the end still retained
+      // every row first -- eight Projects at the per-Project cap held 4,096 --
+      // and then reported the capped count as the total, so 3,840 rows the
+      // reading had actually seen disappeared from the disclosure.
+      let kept: ReceiptRow[] = [];
+      let found = 0;
       // A bounded window rather than Promise.all: concurrency is work in
       // flight, and the daemon dispatch is synchronous on its accept loop.
       for (let index = 0; index < readable.length; index += RECEIPT_READ_CONCURRENCY) {
@@ -961,16 +966,27 @@ export function App() {
             return receipts.map((receipt) => ({ receipt, projectName: project.name }));
           }),
         );
-        gathered.push(...batch);
+        for (const page of batch) {
+          found += page.length;
+          // Merge one page, then trim: what is held never exceeds the cap plus
+          // one page, whatever the Workspace holds.
+          kept = orderReceipts([...kept, ...page]).slice(0, RECEIPT_AGGREGATE_LIMIT);
+        }
       }
       if (requestEpoch !== recentReceiptEpoch.current) return;
-      const rows = orderReceipts(gathered.flat()).slice(0, RECEIPT_AGGREGATE_LIMIT);
-      setRecentReceipts(rows);
-      setRecentReceiptTotal(rows.length);
+      setRecentReceipts(kept);
+      // The true number found, not the number kept: the panel's "of N" is a
+      // count of what exists, and a capped count there is a quiet completeness
+      // claim.
+      setRecentReceiptTotal(found);
+      const projectsCapped = readable.length < ordered.length;
+      const rowsCapped = found > kept.length;
       setRecentReceiptScope(
-        readable.length < ordered.length
-          ? `showing preflight Receipts for the ${readable.length} most recent Projects of ${ordered.length}`
-          : "",
+        rowsCapped
+          ? `showing ${kept.length} most recent preflight Receipts from ${readable.length} of ${ordered.length} Projects; more exist`
+          : projectsCapped
+            ? `showing preflight Receipts for the ${readable.length} most recent Projects of ${ordered.length}`
+            : "",
       );
     } catch (error) {
       if (requestEpoch !== recentReceiptEpoch.current) return;

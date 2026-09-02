@@ -457,6 +457,49 @@ describe("Beacon desktop shell", () => {
     expect(peak).toBeLessThanOrEqual(4);
   });
 
+  it("holds only the rows it will draw and reports the true number found", async () => {
+    mockInitialState("unlocked");
+    const base = invokeMock.getMockImplementation()!;
+    const eight = Array.from({ length: 8 }, (_, index) => ({
+      id: `${index.toString(16).padStart(8, "0")}-4444-4444-8444-444444444444`,
+      name: `Project ${index}`,
+      charterRevision: 1,
+      autonomyProfile: "observe" as const,
+      createdAtMs: index,
+    }));
+    const page = (projectId: string, base: number) =>
+      Array.from({ length: 512 }, (_, index) =>
+        briefingReceipt(
+          `${(base + index).toString(16).padStart(8, "0")}-1111-4111-8111-111111111111`,
+          projectId,
+          "verified",
+          base + index,
+        ),
+      );
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "projects") return Promise.resolve(eight);
+      if (command === "preflight_receipts") {
+        const { projectId } = args as { projectId: string };
+        return Promise.resolve(page(projectId, eight.findIndex((p) => p.id === projectId) * 1000));
+      }
+      return base(command, args);
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    const list = await screen.findByRole("list", { name: "Recent preflight Receipts" });
+
+    // 8 x 512 = 4,096 Receipts exist. Capping to 256 and then reporting 256 as
+    // the total made 3,840 read rows vanish from the disclosure.
+    expect(await screen.findByText(/Showing the 5 most recent of 4096/)).toBeVisible();
+    expect(
+      screen.getByText(
+        /showing 256 most recent preflight Receipts from 8 of 8 Projects; more exist/,
+      ),
+    ).toBeVisible();
+    expect(within(list).getAllByRole("listitem")).toHaveLength(5);
+  });
+
   it("never presents a Receipt as work that succeeded", async () => {
     mockInitialState("unlocked");
     const base = invokeMock.getMockImplementation()!;
