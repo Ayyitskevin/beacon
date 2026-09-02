@@ -12,11 +12,11 @@ use std::sync::Arc;
 
 use beacond::{
     AutonomyProfile, Ceiling, CheckPreflightService, CleanupOutcome, DeclaredCheck,
-    DeclaredCheckService, ExecutionBounds, ExecutionOutcome, ExecutionSummary, KeepReason,
-    OperatorAccountService, OperatorSessionPhase, PreflightOutcome, ProjectCharterDraft,
-    ProjectDraft, ProjectRepositoryService, ProjectService, Recorded, RepositoryDraft,
-    RepositorySourceKind, SecretString, StartupConfig, Supervisor, SupervisorError, Worktree,
-    detect_sandbox, run_bounded_for_test,
+    DeclaredCheckService, DiagnosticStatus, ExecutionBounds, ExecutionOutcome, ExecutionSummary,
+    KeepReason, OperatorAccountService, OperatorSessionPhase, PreflightOutcome,
+    ProjectCharterDraft, ProjectDraft, ProjectRepositoryService, ProjectService, Recorded,
+    RepositoryDraft, RepositorySourceKind, SecretString, StartupConfig, Supervisor,
+    SupervisorError, Worktree, detect_sandbox, run_bounded_for_test,
 };
 use rusqlite::{Connection, OptionalExtension};
 use uuid::Uuid;
@@ -1442,6 +1442,115 @@ fn startup_rejects_execution_when_its_nested_preflight_differs_from_stored_evide
         matches!(error, SupervisorError::RunEventMismatch(_)),
         "nested preflight substitution failed through the wrong guard: {error:?}"
     );
+}
+
+#[test]
+fn startup_replay_requires_not_admissible_to_carry_a_refusing_preflight() {
+    if !enforcing_or_skip() {
+        return;
+    }
+
+    // Start with a real v2 refusal whose embedded preflight is Verified. Relabel
+    // the mutually consistent Receipt row and event as NotAdmissible while
+    // preserving the nested preflight bytes: startup must reject that pairing.
+    let (repository, revision) = fixture_repository("startup-verified-not-admissible");
+    let source = repository.path.to_string_lossy().into_owned();
+    let (store, projects, repositories, checks) = enrolled("startup-verified-not-admissible");
+    let project = projects.create(project_draft()).unwrap();
+    repositories
+        .bind(
+            project.id,
+            project.charter.revision,
+            None,
+            RepositoryDraft {
+                source_kind: RepositorySourceKind::LocalPath,
+                source,
+                base_revision: revision,
+                declared_checks: vec![check("never", &["/bin/true"], ".")],
+            },
+        )
+        .unwrap();
+    fs::write(repository.path.join(".git/config"), "[malformed\n").unwrap();
+    let receipt = checks.execute(project.id, bounds()).unwrap();
+    assert_eq!(receipt.summary, ExecutionSummary::WorktreeUnavailable);
+    assert_eq!(receipt.admitted_by.outcome, PreflightOutcome::Verified);
+    assert!(receipt.checks.is_empty());
+    assert_eq!(receipt.worktree, None);
+
+    let connection = Connection::open(&store.path).unwrap();
+    let stored: String = connection
+        .query_row(
+            "SELECT receipt_json FROM receipts WHERE run_id = ?1",
+            [receipt.run_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let impossible = stored.replacen(
+        "\"summary\":\"worktree_unavailable\"",
+        "\"summary\":\"not_admissible\"",
+        1,
+    );
+    assert_ne!(
+        impossible, stored,
+        "fixture did not locate the top-level summary"
+    );
+    replace_receipt_update_trigger(&connection, |connection| {
+        connection.execute(
+            "UPDATE receipts
+             SET outcome = 'not_admissible', receipt_json = ?1
+             WHERE run_id = ?2",
+            rusqlite::params![impossible, receipt.run_id.to_string()],
+        )
+    });
+    connection
+        .execute(
+            "UPDATE events SET payload_json = ?1
+             WHERE kind = 'run.executed'
+               AND json_extract(payload_json, '$.runId') = ?2",
+            rusqlite::params![impossible, receipt.run_id.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+
+    let error = Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .unwrap_err();
+    assert!(
+        matches!(error, SupervisorError::RunEventMismatch(_)),
+        "NotAdmissible with a Verified preflight failed through the wrong guard: {error:?}"
+    );
+
+    // A genuine NotAdmissible Receipt carries the refusal that prevented
+    // dispatch, and the same startup replay path accepts it as Ready.
+    let (repository, _revision) = fixture_repository("startup-refusing-not-admissible");
+    let source = repository.path.to_string_lossy().into_owned();
+    let (store, projects, repositories, checks) = enrolled("startup-refusing-not-admissible");
+    let project = projects.create(project_draft()).unwrap();
+    repositories
+        .bind(
+            project.id,
+            project.charter.revision,
+            None,
+            RepositoryDraft {
+                source_kind: RepositorySourceKind::LocalPath,
+                source,
+                base_revision: "b".repeat(40),
+                declared_checks: vec![check("never", &["/bin/true"], ".")],
+            },
+        )
+        .unwrap();
+    let receipt = checks.execute(project.id, bounds()).unwrap();
+    assert_eq!(receipt.summary, ExecutionSummary::NotAdmissible);
+    assert_ne!(receipt.admitted_by.outcome, PreflightOutcome::Verified);
+
+    let report = Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .unwrap();
+    assert_eq!(report.diagnostics.status, DiagnosticStatus::Ready);
 }
 
 #[test]
