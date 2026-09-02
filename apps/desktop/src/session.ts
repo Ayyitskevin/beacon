@@ -1601,9 +1601,14 @@ function isRecentReceipt(value: unknown): value is RecentReceipt {
     isTrimmedTextWithoutControls(value.projectName, 120) &&
     isPositiveInteger(value.version) &&
     isRecentReceiptOutcome(value.outcome) &&
-    isNonnegativeInteger(value.startedAtMs) &&
-    isNonnegativeInteger(value.endedAtMs) &&
-    isNonnegativeInteger(value.recordedAtMs) &&
+    // `isRenderableInstant`, not `isNonnegativeInteger`. The merged fix
+    // `4e1ff8b` bought this guard for the path this Query replaced, and the
+    // replacement dropped it: every value in
+    // `8_640_000_000_000_001 ..= 9_007_199_254_740_991` is a safe non-negative
+    // integer and none is a representable instant.
+    isRenderableInstant(value.startedAtMs) &&
+    isRenderableInstant(value.endedAtMs) &&
+    isRenderableInstant(value.recordedAtMs) &&
     (value.endedAtMs as number) >= (value.startedAtMs as number)
   );
 }
