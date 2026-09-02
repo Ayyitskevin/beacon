@@ -21,8 +21,25 @@ export type EncryptionGuide = {
   documentation: string;
 };
 
+const RUNNABLE_DESTRUCTIVE_COMMAND =
+  /\b(?:(?:sudo|doas)\s+)?(?:cryptsetup\s+(?:luksFormat|luksErase|reencrypt|erase)|cryptsetup-reencrypt|mkfs(?:\.[a-z0-9]+)?|wipefs|shred|dd\s+if=|rm\s+-rf|manage-bde|Enable-BitLocker)\b/i;
+const RUNNABLE_SHELL_SYNTAX = /```(?:sh|bash|shell)|(?:^|\n)\s*[$#]\s+\S|&&|\|\|/i;
+
+/** The construction door for bundled guidance.
+ *
+ *  The guide may name a destructive migration path and direct the Operator to
+ *  vendor documentation. It must not turn that warning into a runnable command.
+ */
+export function checkedEncryptionGuide(guide: EncryptionGuide): EncryptionGuide {
+  const text = [guide.title, ...guide.steps, guide.caution, guide.documentation].join("\n");
+  if (RUNNABLE_DESTRUCTIVE_COMMAND.test(text) || RUNNABLE_SHELL_SYNTAX.test(text)) {
+    throw new Error("an encryption guide contains a runnable destructive command");
+  }
+  return guide;
+}
+
 const guides: Record<GuidePlatform, EncryptionGuide> = {
-  linux: {
+  linux: checkedEncryptionGuide({
     platform: "linux",
     title: "Turning on disk encryption on Linux",
     steps: [
@@ -35,8 +52,8 @@ const guides: Record<GuidePlatform, EncryptionGuide> = {
       "Converting an existing installation can destroy all data on the volume if it is interrupted or if the backup you restore from turns out to be incomplete. Verify a restore before you begin.",
     documentation:
       "Follow your distribution's own disk-encryption documentation and the cryptsetup project's LUKS documentation. Beacon does not perform any of these steps for you.",
-  },
-  macos: {
+  }),
+  macos: checkedEncryptionGuide({
     platform: "macos",
     title: "Turning on disk encryption on macOS",
     steps: [
@@ -48,8 +65,8 @@ const guides: Record<GuidePlatform, EncryptionGuide> = {
       "Losing the FileVault recovery key without another unlock method makes the volume unreadable.",
     documentation:
       "Apple publishes FileVault setup in its own macOS User Guide. Beacon does not detect FileVault yet and will keep reporting this volume as unknown.",
-  },
-  windows: {
+  }),
+  windows: checkedEncryptionGuide({
     platform: "windows",
     title: "Turning on disk encryption on Windows",
     steps: [
@@ -61,14 +78,15 @@ const guides: Record<GuidePlatform, EncryptionGuide> = {
       "Losing the BitLocker recovery key without another unlock method makes the volume unreadable.",
     documentation:
       "Microsoft publishes BitLocker setup in its own Windows support documentation. Beacon does not detect BitLocker yet and will keep reporting this volume as unknown.",
-  },
+  }),
 };
 
 /** Which guide to show, from the browser's own platform string.
  *
  *  Every guide states the operating system it is for, so a wrong reading is
  *  visible to the operator rather than silently misleading. Linux is the
- *  default because it is the platform Beacon detects.
+ *  default because it is the platform unknown-only v1 reads bounded
+ *  observations from.
  */
 export function detectGuidePlatform(userAgent: string): GuidePlatform {
   if (/Mac OS X|Macintosh/i.test(userAgent)) return "macos";
