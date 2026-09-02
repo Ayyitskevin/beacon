@@ -206,7 +206,7 @@ raise an error, so a historical Ruling does not become corrupt because the world
 ADR 0037 states that each of its required-evidence bullets maps to one named test and that the
 mapping is recorded here, "so that 'maps to a test' is a fact a reviewer can check rather than a
 claim the author makes". This is that mapping. Bullets are numbered in the order the ADR lists them.
-Four of them do not map cleanly, and those are stated as such rather than papered over.
+Five of them do not map cleanly, and those are stated as such rather than papered over.
 
 Test locations: **[u]** = `crates/beacond/src/ruling.rs` unit tests, **[i]** =
 `crates/beacond/tests/ruling.rs`, **[m]** = `crates/beacond/src/lib.rs` migration tests.
@@ -232,7 +232,7 @@ Test locations: **[u]** = `crates/beacond/src/ruling.rs` unit tests, **[i]** =
 | 17 | `decision` and `decider` are closed: any unassigned tag is refused | `an_unassigned_tag_is_refused_in_every_closed_position` [u] · `the_store_refuses_a_ruling_row_whose_digest_envelopes_are_not_this_versions` [i] · `startup_refuses_an_event_naming_an_actor_this_version_has_no_arm_for` [i] |
 | 18 | a Ruling row with no Event, a duplicate Event, an orphan Event, an altered row, and a differently encoded Event payload each refuse startup | **duplicates bullet 14 — Residual 2 below.** Same tests. |
 | 19 | no accessor reports force as a boolean | **no test guards this — Residual 4 below.** Nearest behavioural evidence, which does *not* guard it: `a_ruling_can_be_both_superseded_and_drifted_and_says_so` [i] |
-| 20 | recording leaves Run, Receipt, worktree, process, Invocation, network, capability, and external-effect counts unchanged | `recording_a_ruling_creates_no_run_receipt_worktree_or_external_effect` [i] |
+| 20 | recording leaves Run, Receipt, worktree, process, Invocation, network, capability, and external-effect counts unchanged | `recording_a_ruling_creates_no_run_receipt_worktree_or_external_effect` [i] proves the *stored* half — Run, Receipt, security-event and Event rows, the empty `rulings` delta, and the absent `invocations`/`capabilities` tables. **Worktree, process, network, and general external effect are not observed — Residual 5 below.** |
 
 Bullet 19 is an **absence**, and the note previously called it "structural, not
 test-mappable" while still citing a test beside it. That was an overclaim; Residual 4 below says what
@@ -323,6 +323,31 @@ All four residuals are edits to ADR 0037, which is under non-author review at th
 They are recorded here rather than applied, so the reviewer is not reading a moving document.
 Residuals 1 and 2 were found by writing this mapping; residuals 3 and 4 were found by gpt2 reviewing
 it, which is the argument for having written it down at all.
+
+### Residual 5 — bullet 20 is proved for stored state only
+
+The test named for this bullet counts rows and checks that two tables still do not exist. That is
+the whole of what it observes, and the bullet's wording promises more: worktree, process, network,
+and "external-effect" counts. gpt2 showed the gap by mutating `rule` to spawn an actual `true`
+process; the test still passed.
+
+It is not an accident of this slice. `submission_creates_no_run_receipt_worktree_or_external_effect`
+in the Proposal suite has the same shape, so the repository's existing convention for this assertion
+is "no new stored state", stated in a sentence that claims more than it measures. Two honest ways
+out, and this is a decision rather than a defect to patch quietly:
+
+- **Narrow the bullet** to what the store can witness — no Run, Receipt, Ruling-adjacent or Event
+  row beyond the one recorded, and no Invocation or capability state — and say that process,
+  network, and filesystem inertness rest on the module having no such call sites, which is a review
+  property.
+- **Widen the test**: assert the worktree root is unchanged before and after, and observe process
+  and network inertness the way `sandbox` and `check_preflight` already do for Runs. That is real
+  work and belongs with dispatch, when there is something that could plausibly spawn.
+
+Until one is chosen, the mapping should not claim the bullet whole. Proposed wording for the narrow
+option: *"recording a Ruling adds no Run, Receipt, Invocation, or capability state and exactly one
+Event; process, network, and filesystem inertness follow from the module having no such call
+sites."*
 
 ## Knowingly unreachable checks
 
