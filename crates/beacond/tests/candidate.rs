@@ -1114,3 +1114,76 @@ fn an_event_naming_no_candidate_fails_startup() {
         "a duplicated Event started"
     );
 }
+
+#[test]
+fn a_candidate_read_for_use_proves_its_event_pairing_too() {
+    // gpt1's kernel read: a consumer that decides inside one transaction cannot borrow the last
+    // startup's conclusion, so the read a consumer performs must prove what startup proves. Here
+    // the row and its bytes are untouched and only the evidence is gone: a reader that checked the
+    // record and not its Event would hand this Candidate to a dispatch.
+    let fixture = admitted_mission("read-proves-event");
+    let proposal_digest = fixture.submit("Add a regression test for the invariant checker.");
+    fixture
+        .candidates
+        .record(&proposal_digest, &default_images())
+        .unwrap();
+    assert!(
+        fixture
+            .candidates
+            .for_proposal(&proposal_digest)
+            .unwrap()
+            .is_some(),
+        "the positive control: an untampered Candidate reads back"
+    );
+
+    fixture.tamper("DELETE FROM events WHERE kind = 'proposal.candidate_recorded'");
+
+    let outcome = fixture.candidates.for_proposal(&proposal_digest);
+    assert!(
+        matches!(outcome, Err(CandidateError::InvalidStore)),
+        "a Candidate with no evidence was handed out for use: {outcome:?}"
+    );
+}
+
+#[test]
+fn a_candidate_read_for_use_proves_the_copy_rule_too() {
+    // The same reasoning for the other half: entries that no longer match the Proposal's declared
+    // mutations must refuse at read time, not only at the next restart.
+    let fixture = admitted_mission("read-proves-copy");
+    let proposal_digest = fixture.submit("Add a regression test for the invariant checker.");
+    let candidate = fixture
+        .candidates
+        .record(&proposal_digest, &default_images())
+        .unwrap();
+
+    let mut drifted = expected_record(&proposal_digest, candidate.payload().recorded_at_ms);
+    drifted.entries[0].1 = "src/never-proposed.rs".to_owned();
+    let bytes = drifted.bytes();
+    let digest = drifted.digest();
+    let event_payload = serde_json::json!({
+        "candidate": {
+            "digest": {
+                "algorithm": "sha256",
+                "canonicalizer": "beacon.candidate.v1",
+                "value": digest,
+            },
+            "canonicalBytesBase64": BASE64.encode(&bytes),
+            "actor": "owner",
+            "recordedAtMs": candidate.payload().recorded_at_ms,
+        }
+    })
+    .to_string();
+    fixture.tamper(&format!(
+        "UPDATE candidates SET canonical_bytes = X'{}', digest_value = '{}';
+         UPDATE events SET payload_json = '{}' WHERE kind = 'proposal.candidate_recorded';",
+        HEXLOWER.encode(&bytes),
+        digest,
+        event_payload.replace('\'', "''")
+    ));
+
+    let outcome = fixture.candidates.for_proposal(&proposal_digest);
+    assert!(
+        matches!(outcome, Err(CandidateError::InvalidStore)),
+        "entries that no longer match their Proposal were handed out for use: {outcome:?}"
+    );
+}
