@@ -215,3 +215,35 @@ it("keeps loading, empty and failed apart, and stays accessible", async () => {
   const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
   expect(results.violations).toEqual([]);
 });
+
+it("does not take the panel down on an instant it cannot render", async () => {
+  // opus's P1-1, from the other side. The adapter is the primary guard and
+  // refuses a page carrying one of these, so this value cannot arrive through
+  // the Query -- but `toISOString` RAISES on it rather than returning "Invalid
+  // Date", and App's try/catch is around the fetch, not the render. An uncaught
+  // throw here does not degrade the panel, it removes it, and the failure copy
+  // that exists for exactly this case never appears.
+  //
+  // 9e15 is inside the gap the merged fix `4e1ff8b` named: a safe non-negative
+  // integer that is not a representable instant.
+  const unrenderable = receipt("aaaaaaaa-1111-4111-8111-111111111111", 9e15, {
+    kind: "check_preflight",
+    outcome: "verified",
+  });
+
+  expect(() =>
+    render(
+      <BriefingReceipts
+        page={page({ receipts: [unrenderable] })}
+        loading={false}
+        failure=""
+        disabled={false}
+        onRefresh={vi.fn()}
+      />,
+    ),
+  ).not.toThrow();
+
+  // And it says so rather than showing a plausible wrong time.
+  const list = screen.getByRole("list", { name: "Recent Receipts" });
+  expect(within(list).getAllByRole("listitem")[0].textContent).toMatch(/time not renderable/);
+});

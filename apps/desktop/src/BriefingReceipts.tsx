@@ -66,6 +66,22 @@ function outcomeLine(receipt: RecentReceipt): string {
     : `Declared checks — ${executionSummaryCopy[receipt.outcome.summary].summary}`;
 }
 
+/** The second line of defence on a time the interface cannot render.
+ *
+ *  The adapter is the primary guard and refuses a page carrying one, so this
+ *  fallback is not reachable through the Query. It exists because the failure
+ *  mode is not a wrong string: `toISOString` RAISES on a value outside the
+ *  ECMAScript Date range, and an uncaught throw inside render removes the panel
+ *  rather than degrading it -- App's try/catch is around the fetch. A surface
+ *  whose whole job is to stay quietly visible must not be one bad number away
+ *  from disappearing, and it must say which fact it lost rather than printing a
+ *  plausible wrong one. */
+function renderInstant(value: number): string {
+  return Number.isFinite(value) && Math.abs(value) <= 8.64e15
+    ? new Date(value).toISOString()
+    : "time not renderable";
+}
+
 /** Runs in the window that recorded no Receipt. */
 function windowRuns(page: RecentReceiptPage): number {
   return page.runsInFlightInWindow + page.runsUnconfirmedInWindow;
@@ -174,7 +190,7 @@ export function BriefingReceipts({
                 <span>
                   <p className={styles.outcome}>{outcomeLine(receipt)}</p>
                   <p className={styles.detail}>
-                    {receipt.projectName} · {new Date(receipt.startedAtMs).toISOString()}
+                    {receipt.projectName} · {renderInstant(receipt.startedAtMs)}
                   </p>
                 </span>
                 <span className={styles.identity} title={receipt.runId}>
