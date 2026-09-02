@@ -403,7 +403,6 @@ fn index_contains(
             return Err(ObjectStoreError::UnreadableIndex);
         }
     }
-
     let pack_length = pack
         .metadata()
         .map_err(|_| ObjectStoreError::UnreadableIndex)?
@@ -1015,6 +1014,53 @@ mod tests {
         let mut bytes = fs::read(&index).unwrap();
         let last = bytes.last_mut().unwrap();
         *last ^= 0xff;
+        fs::write(&index, bytes).unwrap();
+
+        let store = ObjectStore::open(&repository.path).unwrap();
+        assert_eq!(
+            store.contains(&revision, &mut never_elapsed()).unwrap_err(),
+            ObjectStoreError::UnreadableIndex
+        );
+    }
+
+    #[test]
+    fn names_unsorted_within_one_fanout_bucket_are_refused() {
+        let (repository, revision) = commit_repository("unsorted-pack-names");
+        git(&repository.path, &["gc", "--quiet", "--prune=now"]);
+        let pack_directory = repository.path.join(".git/objects/pack");
+        let index = fs::read_dir(&pack_directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.extension().is_some_and(|extension| extension == "idx"))
+            .expect("gc produced a pack index");
+        let mut permissions = fs::metadata(&index).unwrap().permissions();
+        permissions.set_mode(0o644);
+        fs::set_permissions(&index, permissions).unwrap();
+        let mut bytes = fs::read(&index).unwrap();
+        let total = u32::from_be_bytes(bytes[1028..1032].try_into().unwrap()) as usize;
+        assert!(total >= 2, "fixture needs two packed objects");
+        assert!(total <= 256, "controlled one-byte suffix must stay unique");
+
+        for bucket in 0..256 {
+            let count = if bucket < 0x42 { 0 } else { total as u32 };
+            let at = 8 + bucket * 4;
+            bytes[at..at + 4].copy_from_slice(&count.to_be_bytes());
+        }
+        let names_at = 8 + 256 * 4;
+        for row in 0..total {
+            let at = names_at + row * 20;
+            bytes[at..at + 20].fill(0);
+            bytes[at] = 0x42;
+            bytes[at + 19] = u8::try_from(row).unwrap();
+        }
+        let first = bytes[names_at..names_at + 20].to_vec();
+        let second = bytes[names_at + 20..names_at + 40].to_vec();
+        bytes[names_at..names_at + 20].copy_from_slice(&second);
+        bytes[names_at + 20..names_at + 40].copy_from_slice(&first);
+        let checksum_at = bytes.len() - 20;
+        let checksum = Sha1::digest(&bytes[..checksum_at]);
+        bytes[checksum_at..].copy_from_slice(&checksum);
         fs::write(&index, bytes).unwrap();
 
         let store = ObjectStore::open(&repository.path).unwrap();
