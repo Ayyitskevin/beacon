@@ -1650,19 +1650,33 @@ mod tests {
             ObjectStoreError::Elapsed
         );
 
-        // And the successful read: expiring on the very last check still refuses to answer.
+        // And the successful read. The COUNT is pinned, not measured: an earlier version of this
+        // test counted the checks the implementation performed and then expired at that number, so
+        // deleting a check simply moved the target and the test recalibrated around the mutant.
+        // gpt2 deleted both final guards and all 48 tests stayed green.
+        //
+        // Pinning the number is what makes it a guard. A read that stops consulting the deadline
+        // where it used to changes this constant, and changing it is a decision someone writes
+        // down rather than a number the test quietly follows.
+        const CHECKS_PER_SUCCESSFUL_READ: usize = 6;
         let mut counted = 0_usize;
         let _ = store.read_loose_object(&revision, 1_048_576, &mut || {
             counted += 1;
             false
         });
-        assert!(
-            counted >= 2,
-            "the read consulted the deadline {counted} times"
+        assert_eq!(
+            counted, CHECKS_PER_SUCCESSFUL_READ,
+            "a successful read consults the deadline a fixed number of times; if that changed on \
+             purpose, change the constant and say why"
         );
+        // Expiring at the last of them must still refuse to answer.
         assert_eq!(
             store
-                .read_loose_object(&revision, 1_048_576, &mut elapses_after(counted - 1))
+                .read_loose_object(
+                    &revision,
+                    1_048_576,
+                    &mut elapses_after(CHECKS_PER_SUCCESSFUL_READ - 1)
+                )
                 .unwrap_err(),
             ObjectStoreError::Elapsed,
             "a read that finished after its budget still returned an answer"
