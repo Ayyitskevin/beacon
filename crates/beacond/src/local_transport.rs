@@ -135,6 +135,7 @@ pub enum LocalTransportError {
     ProjectPolicy(ProjectPolicyError),
     ProjectRepository(ProjectRepositoryError),
     CheckPreflight(CheckPreflightError),
+    RecentReceipt(crate::RecentReceiptError),
     SampleProject(SampleProjectError),
     Team(TeamError),
     Mission(MissionError),
@@ -173,6 +174,7 @@ impl fmt::Display for LocalTransportError {
                 write!(formatter, "Project Repository failed: {error}")
             }
             Self::CheckPreflight(error) => write!(formatter, "check preflight failed: {error}"),
+            Self::RecentReceipt(error) => write!(formatter, "recent Receipts failed: {error}"),
             Self::SampleProject(error) => write!(formatter, "Sample Project failed: {error}"),
             Self::Team(error) => write!(formatter, "Team operation failed: {error}"),
             Self::Mission(error) => write!(formatter, "Mission operation failed: {error}"),
@@ -251,6 +253,12 @@ impl From<ProjectRepositoryError> for LocalTransportError {
 impl From<CheckPreflightError> for LocalTransportError {
     fn from(error: CheckPreflightError) -> Self {
         Self::CheckPreflight(error)
+    }
+}
+
+impl From<crate::RecentReceiptError> for LocalTransportError {
+    fn from(error: crate::RecentReceiptError) -> Self {
+        Self::RecentReceipt(error)
     }
 }
 
@@ -540,6 +548,9 @@ enum LocalCommand {
     PreflightReceipts {
         project_id: uuid::Uuid,
     },
+    RecentReceipts {
+        window: u32,
+    },
     Teams {
         project_id: uuid::Uuid,
     },
@@ -647,6 +658,9 @@ enum LocalResult {
     PreflightReceipts {
         receipts: Vec<PreflightReceipt>,
     },
+    RecentReceipts {
+        page: crate::RecentReceiptPage,
+    },
     Teams {
         teams: Vec<TeamView>,
     },
@@ -695,6 +709,7 @@ pub struct LocalSupervisorServer {
     project_policies: ProjectPolicyService,
     project_repositories: ProjectRepositoryService,
     check_preflights: CheckPreflightService,
+    recent_receipts: crate::RecentReceiptService,
     teams: TeamService,
     missions: MissionService,
     resource_discovery: ResourceDiscoveryService,
@@ -737,6 +752,8 @@ impl LocalSupervisorServer {
             ProjectRepositoryService::new(Arc::clone(&accounts), report.workspace.id);
         let check_preflights =
             CheckPreflightService::new(Arc::clone(&accounts), report.workspace.id);
+        let recent_receipts =
+            crate::RecentReceiptService::new(Arc::clone(&accounts), report.workspace.id);
         let teams = TeamService::new(Arc::clone(&accounts), report.workspace.id);
         let missions = MissionService::new(Arc::clone(&accounts), report.workspace.id);
         let resource_discovery =
@@ -767,6 +784,7 @@ impl LocalSupervisorServer {
             project_policies,
             project_repositories,
             check_preflights,
+            recent_receipts,
             teams,
             missions,
             resource_discovery,
@@ -1024,6 +1042,9 @@ impl LocalSupervisorServer {
             },
             LocalCommand::PreflightReceipts { project_id } => LocalResult::PreflightReceipts {
                 receipts: self.check_preflights.receipts(project_id)?,
+            },
+            LocalCommand::RecentReceipts { window } => LocalResult::RecentReceipts {
+                page: self.recent_receipts.recent(window)?,
             },
             LocalCommand::ProjectRepositoryHistory { project_id } => {
                 LocalResult::ProjectRepositoryHistory {
@@ -1430,6 +1451,13 @@ impl LocalSupervisorClient {
         expect_preflight_receipts(self.send(LocalCommand::PreflightReceipts { project_id })?)
     }
 
+    pub fn recent_receipts(
+        &self,
+        window: u32,
+    ) -> Result<crate::RecentReceiptPage, LocalTransportError> {
+        expect_recent_receipts(self.send(LocalCommand::RecentReceipts { window })?)
+    }
+
     pub fn project_repository_history(
         &self,
         project_id: uuid::Uuid,
@@ -1721,6 +1749,15 @@ fn expect_preflight_receipts(
     }
 }
 
+fn expect_recent_receipts(
+    result: LocalResult,
+) -> Result<crate::RecentReceiptPage, LocalTransportError> {
+    match result {
+        LocalResult::RecentReceipts { page } => Ok(page),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
 fn expect_project_repository_history(
     result: LocalResult,
 ) -> Result<Vec<ProjectRepository>, LocalTransportError> {
@@ -1807,6 +1844,7 @@ fn response_from_transport_error(error: LocalTransportError) -> ResponseEnvelope
         LocalTransportError::ProjectRepository(error) => wire_error_from_project_repository(error),
         LocalTransportError::Team(error) => wire_error_from_team(error),
         LocalTransportError::CheckPreflight(error) => wire_error_from_check_preflight(error),
+        LocalTransportError::RecentReceipt(error) => wire_error_from_recent_receipt(error),
         LocalTransportError::SampleProject(error) => wire_error_from_sample_project(error),
         LocalTransportError::Mission(error) => wire_error_from_mission(error),
         LocalTransportError::ResourceDiscovery(ResourceDiscoveryError::Account(error)) => {
@@ -1945,6 +1983,24 @@ fn wire_error_from_project_repository(error: ProjectRepositoryError) -> WireErro
 /// A preflight that produced a Receipt is a success, whatever its outcome: the
 /// operator asked whether execution would be admissible and got an answer.
 /// These codes are only for the cases where no preflight could be attempted.
+/// No new `LocalErrorCode`: a cross-kind read fails for the same two reasons a
+/// preflight read does -- a closed session, or a store it cannot trust. The
+/// desktop translates `preflight_unavailable` at the recent-Receipts seam,
+/// because "Beacon could not record the preflight" is false for a Query that
+/// records nothing.
+fn wire_error_from_recent_receipt(error: crate::RecentReceiptError) -> WireError {
+    let code = match error {
+        crate::RecentReceiptError::Account(error) => return wire_error_from_account(error),
+        crate::RecentReceiptError::InvalidStore | crate::RecentReceiptError::Store(_) => {
+            LocalErrorCode::PreflightUnavailable
+        }
+    };
+    WireError {
+        code,
+        retry_after_ms: None,
+    }
+}
+
 fn wire_error_from_check_preflight(error: CheckPreflightError) -> WireError {
     let code = match error {
         CheckPreflightError::Account(error) => return wire_error_from_account(error),
