@@ -5,6 +5,8 @@
 
 set -euo pipefail
 
+source /opt/beacon/first-run-state
+
 export HOME=/scratch-home
 export DISPLAY=:99
 mkdir -p "$HOME" /work /evidence
@@ -181,6 +183,27 @@ wait_for_text() {
     return 1
 }
 
+require_text() {
+    local step="$1"
+    local transition="$2"
+    local needle="$3"
+    local target="$4"
+    local recovery_crop="${5:-no}"
+    local wait_status=0
+    local failure
+    local status
+    local detail
+
+    wait_for_text "$needle" "$target" "$recovery_crop" || wait_status=$?
+    if [ "$wait_status" -eq 0 ]; then
+        return 0
+    fi
+    failure="$(first_run_wait_failure "$wait_status" "$transition")"
+    status="${failure%%$'\t'*}"
+    detail="${failure#*$'\t'}"
+    fail_step "$step" "$status" "$detail" "$(basename "$target")"
+}
+
 click_word() {
     local needle="$1"
     local raw=/work/click.png
@@ -266,10 +289,8 @@ PY
 }
 
 initial_screen=/evidence/01-operator-setup.png
-if ! wait_for_text "Set up your operator account" "$initial_screen"; then
-    fail_step operator_setup_form absent "operator setup form was not visible" \
-        01-operator-setup.png
-fi
+require_text operator_setup_form "Operator setup form" \
+    "Set up your operator account" "$initial_screen"
 if ! socket_response status /evidence/01-session-before.json; then
     fail_step operator_setup_form broken "supervisor status socket was unavailable" \
         01-operator-setup.png
@@ -294,10 +315,8 @@ xdotool type --clearmodifiers --delay 25 -- "$password"
 xdotool key --clearmodifiers Return
 
 recovery_screen=/evidence/02-recovery-confirmation-redacted.png
-if ! wait_for_text "Save this one-time Recovery Key" "$recovery_screen" yes; then
-    fail_step recovery_key_confirmation broken "UI did not advance to Recovery Key confirmation" \
-        02-recovery-confirmation-redacted.png
-fi
+require_text recovery_key_confirmation "Recovery Key confirmation" \
+    "Save this one-time Recovery Key" "$recovery_screen" yes
 set_step recovery_key_confirmation observed "one-time Recovery Key confirmation rendered; credential pixels excluded" \
     02-recovery-confirmation-redacted.png
 
@@ -313,10 +332,8 @@ xdotool key --clearmodifiers Tab
 xdotool key --clearmodifiers Return
 
 starter_screen=/evidence/03-starter-organization.png
-if ! wait_for_text "Build your starter organization" "$starter_screen"; then
-    fail_step account_and_workspace broken "UI did not advance to Workspace starter organization" \
-        03-starter-organization.png
-fi
+require_text account_and_workspace "Account and Workspace transition" \
+    "Build your starter organization" "$starter_screen"
 if ! socket_response status /evidence/03-session-unlocked.json; then
     fail_step account_and_workspace broken "unlocked session could not be observed over the socket" \
         03-starter-organization.png
@@ -335,10 +352,8 @@ set_step account_and_workspace observed "operator account unlocked its newly cre
 xdotool mousemove --sync 360 727 click 1
 
 briefing_screen=/evidence/05-authenticated-briefing.png
-if ! wait_for_text "Residents in this Workspace" "$briefing_screen"; then
-    fail_step authenticated_briefing broken "authenticated Briefing did not render" \
-        05-authenticated-briefing.png
-fi
+require_text authenticated_briefing "Authenticated Briefing" \
+    "Residents in this Workspace" "$briefing_screen"
 if ! socket_response starter_organization /evidence/04-starter-organization.json; then
     fail_step starter_organization broken "starter organization decision was unavailable" \
         05-authenticated-briefing.png
