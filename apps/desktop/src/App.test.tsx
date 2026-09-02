@@ -170,6 +170,7 @@ function encryptionReport(
     },
     mountPoint: { role: "location", value: "/home/operator", shortened: false },
     evidence: encryptionEvidence,
+    omittedEvidence: 0,
     notVerified: ["filesystem-level encryption such as fscrypt or ext4 encryption"],
     observedAtMs: 1_756_000_000_000,
   };
@@ -417,10 +418,14 @@ describe("Beacon desktop shell", () => {
     await screen.findByRole("heading", { name: "Briefing" });
 
     await screen.findByRole("heading", { name: "Live data" });
-    // The ORIGINAL failure, verbatim. Passing it through the generic account
-    // describer replaced the only text that says what actually went wrong.
-    expect(screen.getByText(/initial read failed: diagnostic transport failed/)).toBeVisible();
-    expect(screen.getByText(/showing fallback/)).toBeVisible();
+    // The failure is a REPORT now: a closed reason, and the ORIGINAL text as
+    // its bounded detail. Passing it through the generic account describer
+    // replaced the only text that says what actually went wrong, and carrying
+    // it as a free-text prop put an unbounded string beside a bounded one.
+    expect(screen.getByText(/Disk-encryption status could not be read\./)).toBeVisible();
+    expect(
+      screen.getByText(/the disk-encryption reading did not complete: diagnostic tra/),
+    ).toBeVisible();
     const recheck = screen.getByRole("button", { name: "Recheck" });
 
     await user.click(recheck);
@@ -430,6 +435,42 @@ describe("Beacon desktop shell", () => {
 
     const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
     expect(results.violations).toEqual([]);
+  });
+
+  it("does not present a stale reading when a recheck fails", async () => {
+    const user = userEvent.setup();
+    mockInitialState("unlocked");
+    const base = invokeMock.getMockImplementation()!;
+    let attempts = 0;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "live_data_encryption_status") {
+        attempts += 1;
+        if (attempts === 1) return Promise.resolve(encryptionReport("disabled"));
+        return Promise.reject(new Error("sysfs read denied"));
+      }
+      return base(command, args);
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    expect(
+      await screen.findByText(/Live data is not fully protected by disk encryption\./),
+    ).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Recheck" }));
+
+    // The previous reading described the host at ITS observed_at_ms and nothing
+    // else. Leaving it on screen after a failed recheck presents a stale
+    // reading as the current one; the failure replaces it and says why.
+    expect(await screen.findByText(/Disk-encryption status could not be read\./)).toBeVisible();
+    expect(
+      screen.getByText(/the disk-encryption reading did not complete: sysfs read denied/),
+    ).toBeVisible();
+    expect(
+      screen.queryByText(/Live data is not fully protected by disk encryption\./),
+    ).toBeNull();
+    // And it is still retryable.
+    expect(screen.getByRole("button", { name: "Recheck" })).toBeVisible();
   });
 
   it("does not deny encryption the reading itself observed", async () => {
