@@ -71,10 +71,49 @@ chmod +x ./*.AppImage
 ./Beacon_*.AppImage
 ```
 
-The package job proves that the AppImage builds and its downloaded bytes can be checked. First run
-on a clean Linux host is still unverified, so the downloaded-AppImage launch criterion is partial,
-not met. See the official upload action's [permission-loss
+The package job proves that the AppImage builds, that its downloaded bytes can be checked, and that
+the bundle contains both `beacon-desktop` and the `beacond` supervisor it spawns. See the official
+upload action's [permission-loss
 note](https://github.com/actions/upload-artifact/blob/v4.6.2/README.md#permission-loss).
+
+First launch has been observed on a clean `ubuntu:24.04` container — no development packages
+installed — through both AppImage entry paths. It has not been observed on a real desktop session,
+on Wayland, or on any distribution other than Ubuntu 24.04, so treat the criterion as met for that
+one host shape and open everywhere else.
+
+### What the AppImage requires of the host
+
+This is what was measured, not what we would like to promise.
+
+- **glibc 2.39 or newer.** The shell binary needs `GLIBC_2.39` and the bundled GTK and WebKit
+  libraries need `GLIBC_2.38`, because the package job builds on `ubuntu-latest`. It will not load
+  on Debian 12, Ubuntu 22.04, RHEL 9, or Mint 21; the failure is a loader error naming the missing
+  version, not a crash.
+- **A desktop's ordinary graphics and text libraries.** The bundle does not carry `libfribidi0`,
+  `libharfbuzz0b`, `libegl1`, or `libgles2`. Every desktop install has them —
+  `apt-get install --simulate ubuntu-desktop-minimal` pulls all four, `libgtk-3-0t64` depends on the
+  first two, `xserver-xorg-core` on `libegl1`, and `gnome-shell`, `mutter`, and `libwebkit2gtk-4.1-0`
+  on `libgles2` — but a bare container does not, and it fails there with a missing-library error.
+- **`libfuse2` only if you run the AppImage directly.** Ubuntu 24.04 ships `fuse3` and not
+  `libfuse2t64`, so a default desktop cannot double-click this file; it prints "Cannot mount
+  AppImage, please check your FUSE setup." Either install `libfuse2t64` or run
+  `./Beacon_*.AppImage --appimage-extract-and-run`, which needs no FUSE at all.
+
+### Building the bundle locally
+
+`npm run tauri build` from `apps/desktop` is the whole command. Its `beforeBuildCommand` builds
+`beacond` in release and stages it as the sidecar `tauri.conf.json` names, so there is no separate
+step to forget.
+
+Because that sidecar is a declared bundle input, `apps/desktop/src-tauri/build.rs` requires it to
+exist before the desktop crate compiles — including under `--no-bundle`. `scripts/gate all` is fine:
+its desktop stage runs `npm run tauri build -- --no-bundle` before any bare cargo command, and that
+stages the sidecar. But **`scripts/gate rust` or `cargo build --workspace` run alone on a fresh
+checkout will fail** with `resource path ... doesn't exist`. Run this once first:
+
+```sh
+cd apps/desktop && npm run tauri build -- --no-bundle
+```
 
 ## What good looks like here
 
