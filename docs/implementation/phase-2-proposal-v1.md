@@ -188,7 +188,7 @@ The proposed ADR 0034 amendment says this mapping lives here, so here it is. **[
 | a commit that does not parse as a commit is refused | `a_commit_is_validated_as_a_commit_and_not_merely_authenticated` [u] |
 | a tree naming one path twice is refused | `a_tree_naming_one_path_twice_is_refused_whatever_the_modes` [u], including the nonadjacent case |
 | the comparison stops at its deadline rather than answering | `a_deadline_that_expires_mid_read_is_not_published_as_an_outcome` [u] · `a_walk_whose_deadline_expires_mid_traversal_publishes_nothing` [u] · `an_io_failure_after_the_budget_expires_is_elapsed_not_a_broken_repository` [u] |
-| every bound the comparison owns is its own | `the_aggregate_budget_is_charged_by_every_object_and_is_its_own_refusal` [u] · the per-object rows below |
+| every bound the comparison owns is its own | `the_aggregate_budget_is_charged_by_every_object_and_is_its_own_refusal` [u] · `an_exhausted_aggregate_budget_is_the_reason_an_operator_reads` [u] · the per-object rows below |
 
 ### The comparison's bounds, and which are proved
 
@@ -201,7 +201,7 @@ legitimate file may be, applied where nothing knows what the file is for.
 | one object's compressed and inflated size | the caller, per read | `an_object_larger_than_the_callers_bound_is_a_refusal_not_a_broken_object`, `an_object_that_inflates_past_the_bound_is_a_refusal_not_a_broken_object` |
 | path depth | the walk (`MAX_PATH_COMPONENTS`) | `a_malformed_or_over_deep_path_is_refused_before_the_walk_trusts_it`, both sides of the boundary |
 | `CONTEXT_OBJECT_BYTES` | the comparison | `a_bound_that_excludes_an_object_on_the_path_is_a_refusal_not_an_absence` |
-| `CONTEXT_TOTAL_BYTES` | the comparison, charged by **every** object the walk reads | `the_aggregate_budget_is_charged_by_every_object_and_is_its_own_refusal`, both sides of the boundary |
+| `CONTEXT_TOTAL_BYTES` | the comparison, charged by **every** object the walk reads | `the_aggregate_budget_is_charged_by_every_object_and_is_its_own_refusal`, both sides of the boundary; `an_exhausted_aggregate_budget_is_the_reason_an_operator_reads`, for the reason the exhausted state becomes |
 
 **The aggregate bound was neither total nor guarded, and both are fixed.** It charged only the final
 blob body, so the commit, every tree and every absent-path traversal were free; and a mutant
@@ -211,6 +211,16 @@ one, that it is the seam making the outcome reachable without a 64 MiB fixture �
 walk reads is charged against it, and exhausting it is `ContextBudgetExhausted` rather than
 `ObjectTooLargeToInspect`. Reporting the second as the first told an Operator their six-byte file
 was too large, which sends them to shrink the wrong thing.
+
+**The reason an Operator reads is guarded separately from the state the walk produces**, because
+those are two facts and only the first is public. A third non-author review remapped the exhausted
+state to `ObjectTooLargeToInspect` at the comparison and every proposal test stayed green: the
+lower-layer charge was guarded, and the translation above it was not. The integration test that
+carried the rule's name never exhausted anything — submission runs the comparison with the constant,
+so nothing reachable from there can spend 64 MiB — and it has been renamed for what it does prove.
+`an_exhausted_aggregate_budget_is_the_reason_an_operator_reads` drives the comparison itself at a
+one-byte allowance, with a full-allowance positive control over the same declaration, so the remap
+is RED.
 
 ### Object validation, and why authentication is not enough
 

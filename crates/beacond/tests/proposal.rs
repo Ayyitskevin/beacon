@@ -1650,14 +1650,17 @@ fn a_declared_path_absent_at_the_pinned_revision_is_a_mismatch_not_an_inspection
 }
 
 #[test]
-fn an_exhausted_aggregate_budget_is_its_own_reason_and_not_a_large_object() {
-    // opus2's F1, at the surface an Operator reads. Their probe declared eight 8 MiB blobs and then
-    // a six-byte file, and Beacon told them the six-byte file was too large -- so they would shrink
-    // the wrong thing, or conclude Beacon is broken.
+fn a_declaration_that_fits_the_aggregate_budget_is_read_and_reported_as_agreement() {
+    // The Operator-surface half of opus2's F1: a declaration that fits the real 64 MiB allowance
+    // must reach agreement, so exhaustion is never reported for an ordinary submission.
     //
-    // The budget is a parameter here for the reason the deadline is: it is the seam that makes the
-    // outcome reachable without a 64 MiB fixture. gpt1 and opus2 both found that the constant was
-    // indistinguishable from its own deletion, and the fix for that is the same fix as this one.
+    // This test does NOT drive exhaustion, and its earlier name said it did. Submission runs the
+    // comparison with the constant, so nothing reachable from here can spend the allowance without
+    // a 64 MiB fixture -- gpt2 remapped the exhausted state to `ObjectTooLargeToInspect` and this
+    // test stayed green. The reason an Operator reads is guarded one layer down, where the budget
+    // is a parameter, by `an_exhausted_aggregate_budget_is_the_reason_an_operator_reads` in
+    // `src/proposal.rs`. The two together are the control: this one proves the budget does not
+    // refuse what fits, that one proves what does not fit is named correctly.
     let fixture = admitted_mission("context-budget");
     let (repository, real_revision) = TempRepository::with_one_commit("budget");
     let revision = fixture.rebind_repository(

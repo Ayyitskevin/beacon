@@ -2583,6 +2583,199 @@ mod tests {
         );
     }
 
+    /// A repository with one commit holding a 13-byte `src/lib.rs`, removed when the test ends.
+    ///
+    /// Written by `git` rather than by hand: the walk under test reads real loose objects, and a
+    /// fixture this file encoded itself would prove only that the reader agrees with the writer.
+    struct TempRepository {
+        path: std::path::PathBuf,
+    }
+
+    impl TempRepository {
+        fn with_one_commit(label: &str) -> (Self, String) {
+            let path =
+                std::env::temp_dir().join(format!("beacond-context-{label}-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(path.join("src")).unwrap();
+            std::fs::write(path.join("src/lib.rs"), "fn main() {}\n").unwrap();
+            let git = |arguments: &[&str]| {
+                let status = std::process::Command::new("git")
+                    .args(arguments)
+                    .current_dir(&path)
+                    .env("GIT_AUTHOR_NAME", "Beacon Test")
+                    .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+                    .env("GIT_COMMITTER_NAME", "Beacon Test")
+                    .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+                    .status()
+                    .expect("git is available in the test environment");
+                assert!(status.success(), "git {arguments:?} failed");
+            };
+            git(&["init", "--quiet"]);
+            git(&["add", "."]);
+            git(&["commit", "--quiet", "-m", "one"]);
+            let revision = String::from_utf8(
+                std::process::Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .current_dir(&path)
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap()
+            .trim()
+            .to_owned();
+            (Self { path }, revision)
+        }
+    }
+
+    impl Drop for TempRepository {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    /// A store file that removes itself, and the two identities a comparison needs from it.
+    struct BoundWorkspace {
+        path: std::path::PathBuf,
+        workspace_id: Uuid,
+        project_id: Uuid,
+        repository_revision: u32,
+    }
+
+    impl Drop for BoundWorkspace {
+        fn drop(&mut self) {
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{suffix}", self.path.display()));
+            }
+        }
+    }
+
+    /// A Workspace with one Project bound to `source` at `base_revision`.
+    ///
+    /// The Binding is written through the ordinary service rather than by an INSERT: a row this
+    /// test composed itself could hold a shape `bind` refuses, and the comparison would then be
+    /// reading a state production cannot produce.
+    fn workspace_bound_to(label: &str, source: &str, base_revision: &str) -> BoundWorkspace {
+        use crate::project::{ProjectCharterDraft, ProjectDraft, ProjectService};
+        use crate::project_repository::{ProjectRepositoryService, RepositoryDraft};
+        use crate::{AutonomyProfile, SecretString, StartupConfig, Supervisor};
+
+        let path = std::env::temp_dir().join(format!(
+            "beacond-context-{label}-{}.sqlite3",
+            Uuid::new_v4()
+        ));
+        let report = Supervisor::bootstrap(StartupConfig {
+            store_path: path.clone(),
+            initial_workspace_name: "Personal".to_owned(),
+        })
+        .unwrap();
+        let workspace_id = report.workspace.id;
+        let accounts = Arc::new(OperatorAccountService::open(&path).unwrap());
+        accounts
+            .begin_password_setup(
+                SecretString::new("a long local passphrase".to_owned()),
+                SecretString::new("a long local passphrase".to_owned()),
+            )
+            .unwrap();
+        accounts.complete_operator_setup(true).unwrap();
+
+        let project = ProjectService::new(Arc::clone(&accounts), workspace_id)
+            .create(ProjectDraft {
+                name: "Beacon Alpha".to_owned(),
+                charter: ProjectCharterDraft {
+                    purpose: "Prove the local agent office.".to_owned(),
+                    desired_outcomes: vec!["Complete one attributable Mission".to_owned()],
+                    constraints: vec!["Keep authority explicit".to_owned()],
+                    prohibitions: vec!["Do not deploy".to_owned()],
+                    autonomy_profile: AutonomyProfile::Supervised,
+                },
+            })
+            .unwrap();
+        let binding = ProjectRepositoryService::new(Arc::clone(&accounts), workspace_id)
+            .bind(
+                project.id,
+                project.charter.revision,
+                None,
+                RepositoryDraft {
+                    source_kind: RepositorySourceKind::LocalPath,
+                    source: source.to_owned(),
+                    base_revision: base_revision.to_owned(),
+                    declared_checks: vec![DeclaredCheck {
+                        name: "cargo-test".to_owned(),
+                        argv: vec!["cargo".to_owned(), "test".to_owned()],
+                        working_directory: ".".to_owned(),
+                    }],
+                },
+            )
+            .unwrap();
+        BoundWorkspace {
+            path,
+            workspace_id,
+            project_id: project.id,
+            repository_revision: binding.revision,
+        }
+    }
+
+    #[test]
+    fn an_exhausted_aggregate_budget_is_the_reason_an_operator_reads() {
+        // opus2's F1 at the surface an Operator actually reads, and gpt2's confirmation that the
+        // committed control never drove it: the integration test named for this rule submits one
+        // 13-byte file under the whole 64 MiB allowance, so remapping the exhausted state to
+        // `ObjectTooLargeToInspect` left all 30 proposal unit tests and all 43 proposal
+        // integration tests GREEN. The distinction the map carries is the whole point of the two
+        // reasons -- "this object will not fit" sends an Operator to shrink a file, "the reading
+        // ran out of room" tells them to declare less -- so the map needs its own control.
+        let (repository, revision) = TempRepository::with_one_commit("budget");
+        let bound = workspace_bound_to("budget", repository.path.to_str().unwrap(), &revision);
+
+        let mut payload = fixture_payload();
+        payload.scope.workspace_id = bound.workspace_id;
+        payload.scope.project_id = bound.project_id;
+        payload.bindings.repository_revision = bound.repository_revision;
+        payload.bindings.pinned_base_revision = revision;
+        let entries = vec![ContextEntry {
+            path: "src/lib.rs".to_owned(),
+            content_sha256: sha256(b"fn main() {}\n"),
+        }];
+        let manifest_sha256 = sha256(&encoded_context_entries(&entries).unwrap());
+        payload.intent.readable_context = ReadableContext::Declared {
+            entries,
+            manifest_sha256,
+        };
+
+        let connection = Connection::open(&bound.path).unwrap();
+        let mut plenty = || false;
+
+        // The positive control, first: with the real allowance this exact declaration resolves
+        // through commit, tree, and blob and agrees. Without it, the assertion below would also
+        // pass against a comparison that reported exhaustion for everything.
+        assert_eq!(
+            compare_readable_context_within(
+                &connection,
+                bound.workspace_id,
+                &payload,
+                CONTEXT_TOTAL_BYTES,
+                &mut plenty,
+            )
+            .unwrap(),
+            ContextOutcome::Agreed,
+        );
+
+        // One byte cannot pay for the commit the walk must read first. The per-object bound is
+        // untouched -- the blob is 13 bytes and the commit a few hundred -- so nothing here is
+        // too large, and saying so would be the wrong answer rather than a rounder one.
+        assert_eq!(
+            compare_readable_context_within(
+                &connection,
+                bound.workspace_id,
+                &payload,
+                1,
+                &mut plenty,
+            )
+            .unwrap(),
+            ContextOutcome::NotVerified(ContextComparison::ContextBudgetExhausted),
+        );
+    }
+
     #[test]
     fn a_known_fixture_reproduces_its_digest_from_the_bytes_alone() {
         // The encoder must produce exactly the recorded bytes...
