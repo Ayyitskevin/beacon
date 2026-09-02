@@ -275,8 +275,9 @@ declaration boundary that keeps opening, cloning, fetching, and execution out of
 [The accepted Landlock decision](docs/adr/0029-landlock-sandbox-proven-before-trusted.md) and
 [fails-toward-keep cleanup decision](docs/adr/0030-fails-toward-keep-worktree-cleanup.md) record the
 separate containment and disposable-worktree boundaries used by current Declared Check execution.
-Run `scripts/gate` to verify the
-preserved Beacon Legacy Desk, the Rust workspace, the web bundle, and the native desktop build.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for repository-root setup and gate instructions. Run
+`scripts/gate` to verify the preserved Beacon Legacy Desk, the Rust workspace, the web bundle, and
+the native desktop build.
 The exact pre-Beacon compatibility boundary is recorded in the
 [name migration note](docs/implementation/beacon-name-migration.md).
 
