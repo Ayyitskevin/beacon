@@ -498,11 +498,24 @@ impl Fixture {
     }
 
     /// Plants state the service refuses to write, then puts the immutability triggers back.
+    fn tamper(&self, statements: &str) {
+        self.without_immutability_triggers(|connection| {
+            connection.execute_batch(statements).unwrap();
+        });
+    }
+
+    /// Run `f` with the Ruling immutability triggers dropped, then put them back.
     ///
     /// Restoring them is not tidiness: startup verifies the schema signature before it verifies
-    /// any state, so a store left with triggers missing refuses startup for the wrong reason and a
+    /// any state, so a store left short a trigger refuses startup for the wrong reason and a
     /// reconciliation test passes without ever reaching reconciliation.
-    fn tamper(&self, statements: &str) {
+    ///
+    /// `f` returns its own result rather than unwrapping inside the drop window, which an earlier
+    /// version of this helper got wrong. A statement the store refused panicked before the restore
+    /// ran, the triggers stayed off, and the NEXT call's setup then panicked for an unrelated
+    /// reason -- which a test looking for a refusal happily counted as one. Two guards read green
+    /// that way.
+    fn without_immutability_triggers<T>(&self, f: impl FnOnce(&Connection) -> T) -> T {
         let connection = self.store.connect();
         let mut statement = connection
             .prepare(
@@ -527,10 +540,11 @@ impl Fixture {
                  DROP TRIGGER ruling_supersessions_no_delete;",
             )
             .unwrap();
-        connection.execute_batch(statements).unwrap();
+        let outcome = f(&connection);
         for trigger in triggers {
             connection.execute_batch(&trigger).unwrap();
         }
+        outcome
     }
 }
 
@@ -1562,6 +1576,34 @@ fn a_ruling_event_that_does_not_match_its_row_refuses_startup() {
 // everything else as a state mismatch. A test that pinned one arm would be testing the call order.
 // ---------------------------------------------------------------------------------------------
 
+/// The stored `ruling.recorded` Event payload for one Ruling, as JSON a test can edit.
+fn event_json(fixture: &Fixture, digest: &str) -> serde_json::Value {
+    let payload: String = fixture
+        .store
+        .connect()
+        .query_row(
+            "SELECT payload_json FROM events WHERE kind = 'ruling.recorded'
+             AND json_extract(payload_json, '$.ruling.digest.value') = ?1",
+            [digest],
+            |row| row.get(0),
+        )
+        .unwrap();
+    serde_json::from_str(&payload).unwrap()
+}
+
+fn replace_event(fixture: &Fixture, digest: &str, payload: &str) {
+    let updated = fixture
+        .store
+        .connect()
+        .execute(
+            "UPDATE events SET payload_json = ?1 WHERE kind = 'ruling.recorded'
+             AND json_extract(payload_json, '$.ruling.digest.value') = ?2",
+            rusqlite::params![payload, digest],
+        )
+        .unwrap();
+    assert_eq!(updated, 1, "no Event was replaced");
+}
+
 fn assert_refuses_startup(fixture: &Fixture, case: &str) {
     let error = fixture.restart().unwrap_err();
     assert!(
@@ -2068,6 +2110,99 @@ fn startup_refuses_a_ruling_time_that_goes_backwards_along_the_chain() {
         earlier.digest()
     );
     assert_refuses_startup(&fixture, "ruling time goes backwards");
+}
+
+#[test]
+fn startup_refuses_an_event_naming_an_actor_this_version_has_no_arm_for() {
+    // The Event names the authenticated command actor separately from the bytes' `decider`. The
+    // vocabulary is closed at one arm, so an Event claiming any other actor is evidence of a
+    // command this version cannot have issued.
+    let (fixture, _, first, _) = chained("startup-event-actor");
+    let mut payload = event_json(&fixture, &first);
+    payload["ruling"]["actor"] = "resident".into();
+    replace_event(&fixture, &first, &payload.to_string());
+
+    assert_refuses_startup(&fixture, "unknown actor");
+}
+
+#[test]
+fn startup_refuses_an_event_whose_time_disagrees_with_its_row() {
+    // A timestamp is evidence about when a decision was recorded. An Event whose own time and its
+    // row's time differ is two claims about one moment, and neither is then trustworthy.
+    let (fixture, _, first, _) = chained("startup-event-time");
+    let mut payload = event_json(&fixture, &first);
+    let stated = payload["ruling"]["ruledAtMs"].as_u64().unwrap();
+    payload["ruling"]["ruledAtMs"] = (stated + 1).into();
+    replace_event(&fixture, &first, &payload.to_string());
+
+    assert_refuses_startup(&fixture, "event time disagrees with its row");
+}
+
+#[test]
+fn startup_refuses_an_event_recorded_under_another_workspace() {
+    // Scope is not decoration. An Event filed under a Workspace that holds no such Ruling is
+    // evidence for a decision that Workspace never made, and reconciliation resolves the row
+    // through the Event's OWN Workspace rather than searching for a match anywhere.
+    let (fixture, _, first, _) = chained("startup-event-workspace");
+    let elsewhere = Uuid::new_v4();
+    let connection = fixture.store.connect();
+    connection
+        .execute(
+            "INSERT INTO workspaces (id, name, created_at_ms) VALUES (?1, 'Elsewhere', 1)",
+            [elsewhere.to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE events SET workspace_id = ?1 WHERE kind = 'ruling.recorded'
+             AND json_extract(payload_json, '$.ruling.digest.value') = ?2",
+            rusqlite::params![elsewhere.to_string(), first],
+        )
+        .unwrap();
+
+    assert_refuses_startup(&fixture, "event under another Workspace");
+}
+
+#[test]
+fn the_store_refuses_a_ruling_row_whose_digest_envelopes_are_not_this_versions() {
+    // Both envelopes and both closed vocabularies are pinned by CHECK constraints, which is why
+    // reconciliation does not re-compare them against the payload: the columns cannot hold a value
+    // the codec would disagree with. This is the guard that makes that true, so it is the guard
+    // that gets a test -- deleting any one of these CHECKs turns this red.
+    let (fixture, _, first, _) = chained("envelope-checks");
+    let cases = [
+        ("digest_algorithm", "sha512"),
+        ("digest_canonicalizer", "beacon.ruling.v2"),
+        ("proposal_digest_algorithm", "sha512"),
+        ("proposal_digest_canonicalizer", "beacon.proposal.v2"),
+        ("decider_basis", "resident"),
+        ("decision", "withdraw"),
+    ];
+    // Every statement runs inside ONE drop window and none of them unwraps, so a refusal cannot
+    // abandon the triggers and make the next case pass for the wrong reason.
+    let outcomes = fixture.without_immutability_triggers(|connection| {
+        cases
+            .iter()
+            .map(|(column, value)| {
+                connection
+                    .execute(
+                        &format!("UPDATE rulings SET {column} = ?1 WHERE digest_value = ?2"),
+                        rusqlite::params![value, first],
+                    )
+                    .err()
+            })
+            .collect::<Vec<_>>()
+    });
+    for ((column, value), outcome) in cases.iter().zip(outcomes) {
+        let error = outcome
+            .unwrap_or_else(|| panic!("{column} accepted '{value}'"))
+            .to_string();
+        assert!(
+            error.contains("CHECK constraint failed"),
+            "{column}: {error}"
+        );
+    }
+    fixture.restart().unwrap();
 }
 
 #[test]
