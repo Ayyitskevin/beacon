@@ -69,6 +69,13 @@ truncation line exists to prevent.
   whether the reading held 768 rows or 4,096, which is why the earlier guard — 4,096 fixture rows,
   asserting the rendered totals and five list items — survived a gather-every-page-then-slice
   implementation unchanged.
+
+  The cap is the function's, not a caller's. It was briefly a parameter defaulting to the aggregate
+  limit, which made this paragraph a promise about the default rather than about the function: a
+  valid call passing 1,024 over eight full pages returned 1,024 rows and held 1,536, twice the bound
+  stated above. Nothing in the interface passed it; one test did. A degree of freedom whose only
+  user is a test is not a smaller interface, it is a wider one — so the parameter is gone and the
+  ordering property is exercised at the real cap instead.
 - **The daemon applies no LIMIT.** `check_preflight.rs` returns every Receipt a Project has, so the
   bound is entirely the desktop's. The adapter now caps the list at 512, matching the repository
   history cap; the panel then draws five.

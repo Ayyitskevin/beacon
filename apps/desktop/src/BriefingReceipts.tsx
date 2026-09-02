@@ -109,13 +109,19 @@ export type ReceiptCollection = {
  *  single accept loop, so the window bought little to begin with.
  *
  *  What it holds never exceeds `RECEIPT_HOLD_LIMIT`, whatever the Workspace
- *  contains. Trimming only after the loop retained every row first, and then
- *  reported the capped length as the total.
+ *  contains -- and there is no argument that can raise it. The cap was once a
+ *  parameter defaulting to `RECEIPT_AGGREGATE_LIMIT`, which made the documented
+ *  bound a promise about the DEFAULT rather than about the function: a valid
+ *  call passing 1024 over eight full pages returned 1,024 rows and held 1,536,
+ *  twice the bound the type above states. Nothing in the interface ever passed
+ *  it; one test did, which is the whole of what it bought.
+ *
+ *  Trimming only after the loop retained every row first, and then reported the
+ *  capped length as the total.
  */
 export async function collectRecentReceipts(
   projects: readonly { id: string; name: string }[],
   readPage: (projectId: string) => Promise<readonly PreflightReceipt[]>,
-  limit: number = RECEIPT_AGGREGATE_LIMIT,
 ): Promise<ReceiptCollection> {
   let rows: ReceiptRow[] = [];
   let found = 0;
@@ -129,7 +135,7 @@ export async function collectRecentReceipts(
     // Measured before the merge, which is where the peak actually is: the
     // merge builds one array of exactly this length before trimming it.
     peakHeld = Math.max(peakHeld, rows.length + page.length);
-    rows = orderReceipts([...rows, ...page]).slice(0, limit);
+    rows = orderReceipts([...rows, ...page]).slice(0, RECEIPT_AGGREGATE_LIMIT);
   }
   return { rows, found, peakHeld };
 }

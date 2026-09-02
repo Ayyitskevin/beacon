@@ -257,20 +257,52 @@ it("reads one Project at a time, because a page in flight is a page held", async
 it("keeps the newest rows across the merge, not the first page it read", async () => {
   // Trimming per page is only correct if the trim is by the merge key. A
   // collection that kept whichever page arrived first would draw the oldest.
+  //
+  // At the REAL cap, not a small one passed in for the test's convenience. The
+  // parameter that allowed that made the function's documented bound a promise
+  // about its default: a valid call could hold twice it.
   const projects = [
     { id: "00000001-4444-4444-8444-444444444444", name: "Older" },
     { id: "00000002-4444-4444-8444-444444444444", name: "Newer" },
   ];
-  const collected = await collectRecentReceipts(
-    projects,
-    async (projectId) =>
-      projectId === projects[0].id
-        ? [receipt("aaaaaaaa-1111-4111-8111-111111111111", "verified", 100)]
-        : [receipt("bbbbbbbb-2222-4222-8222-222222222222", "verified", 900)],
-    1,
+  // The first Project alone fills the cap, so the newer row can only appear if
+  // the merge re-sorts rather than keeping what it already had.
+  const older = Array.from({ length: RECEIPT_AGGREGATE_LIMIT }, (_, index) =>
+    receipt(
+      `${index.toString(16).padStart(8, "0")}-1111-4111-8111-111111111111`,
+      "verified",
+      index,
+    ),
+  );
+  const collected = await collectRecentReceipts(projects, async (projectId) =>
+    projectId === projects[0].id
+      ? older
+      : [receipt("bbbbbbbb-2222-4222-8222-222222222222", "verified", 900)],
   );
 
-  expect(collected.found).toBe(2);
-  expect(collected.rows).toHaveLength(1);
+  expect(collected.found).toBe(RECEIPT_AGGREGATE_LIMIT + 1);
+  expect(collected.rows).toHaveLength(RECEIPT_AGGREGATE_LIMIT);
+  // The newest row is the one that arrived last, and the oldest was dropped to
+  // make room for it.
   expect(collected.rows[0].projectName).toBe("Newer");
+  expect(collected.rows.map((row) => row.receipt.startedAtMs)).not.toContain(0);
+});
+
+it("requires exactly the projects and the page read", async () => {
+  // gpt2's round-four finding: the function took an optional cap defaulting to
+  // the aggregate limit, so a valid call with 1024 over eight full pages
+  // returned 1,024 rows and held 1,536 against a documented bound of 768. The
+  // parameter had exactly one caller -- a test -- and removing it makes that
+  // call unwritable rather than merely unwise.
+  //
+  // What this asserts is only what it can: `length` counts REQUIRED
+  // parameters, so it fails a third required one and would NOT fail an
+  // optional one. The compiler is what makes the optional shape unwritable
+  // (`Expected 2 arguments, but got 3`), and that is stated here rather than
+  // left for a reader to assume this test covers it.
+  expect(collectRecentReceipts.length).toBe(2);
+  // And the bound holds at the far end of the input range too: no Projects is
+  // no rows held, not an empty answer arrived at by holding everything.
+  const empty = await collectRecentReceipts([], async () => []);
+  expect(empty).toEqual({ rows: [], found: 0, peakHeld: 0 });
 });
