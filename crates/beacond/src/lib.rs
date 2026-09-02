@@ -116,7 +116,7 @@ pub use resource_discovery::{
 };
 pub use ruling::{
     InconsistentRuling, MalformedRuling, Ruling, RulingDecider, RulingDecision, RulingDigest,
-    RulingError, RulingForce, RulingService, RulingSupersedes, RulingV1,
+    RulingError, RulingForce, RulingGrammar, RulingService, RulingSupersedes, RulingV1,
 };
 pub use sample_project::{
     SAMPLE_PROJECT_BUNDLE_VERSION, SampleProjectDigest, SampleProjectError,

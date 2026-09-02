@@ -34,6 +34,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::candidate::{CandidateDigest, InconsistentCandidate, verified_candidate_for_proposal};
 use crate::operator_account::owner_account_exists;
 use crate::project_policy::policy_revision_facts;
 use crate::project_repository::latest_repository_for_preflight;
@@ -49,6 +50,10 @@ use crate::{
 /// The canonicalizer identity. Any future grammar is a new canonicalizer; existing v1 bytes are
 /// never reinterpreted under v2 rules.
 const CANONICALIZER: &str = "beacon.ruling.v1";
+/// The second grammar. A new canonicalizer beside v1, never a reinterpretation of v1 bytes: a v1
+/// record decodes under v1 rules forever, and this one exists because dispatch needs a Ruling that
+/// names the exact change it authorizes (ADR 0039).
+const CANONICALIZER_V2: &str = "beacon.ruling.v2";
 const DIGEST_ALGORITHM: &str = "sha256";
 const DECIDER_BASIS: &str = "owner";
 
@@ -57,9 +62,15 @@ const DECIDER_BASIS: &str = "owner";
 /// ruled under are refused by the codec rather than only by a column constraint.
 const PROPOSAL_DIGEST_ALGORITHM: &str = "sha256";
 const PROPOSAL_CANONICALIZER: &str = "beacon.proposal.v1";
+/// The exact envelope a v2 Ruling may name as the Candidate it was shown.
+const CANDIDATE_DIGEST_ALGORITHM: &str = "sha256";
+const CANDIDATE_CANONICALIZER: &str = "beacon.candidate.v1";
 
 /// The literal ASCII magic that starts every record, including its terminating NUL: 17 bytes.
 const MAGIC: &[u8] = b"beacon.ruling.v1\0";
+/// The v2 magic, the same 17 bytes with one digit changed: the two grammars are distinguished by
+/// their first bytes, so no reader has to guess which rules to apply.
+const MAGIC_V2: &[u8] = b"beacon.ruling.v2\0";
 
 const MAX_REASON_SCALARS: usize = 2_000;
 const MAX_REASON_BYTES: usize = MAX_REASON_SCALARS * 4;
@@ -189,6 +200,42 @@ pub struct RulingDigest {
     pub value: String,
 }
 
+/// Which grammar's bytes a Ruling is.
+///
+/// Not a version number to compare: `V2` is not "newer and therefore better", it is the grammar
+/// that names a Candidate. Dispatch needs that name, so a `V1` Ruling is a complete record of a
+/// decision that dispatch cannot act on -- which is a fact about what it binds, never about its
+/// age.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RulingGrammar {
+    V1,
+    V2,
+}
+
+impl RulingGrammar {
+    fn canonicalizer(self) -> &'static str {
+        match self {
+            Self::V1 => CANONICALIZER,
+            Self::V2 => CANONICALIZER_V2,
+        }
+    }
+
+    fn magic(self) -> &'static [u8] {
+        match self {
+            Self::V1 => MAGIC,
+            Self::V2 => MAGIC_V2,
+        }
+    }
+
+    fn from_canonicalizer(value: &str) -> Option<Self> {
+        match value {
+            CANONICALIZER => Some(Self::V1),
+            CANONICALIZER_V2 => Some(Self::V2),
+            _ => None,
+        }
+    }
+}
+
 /// Two facts about whether a Ruling still applies, always reported together.
 ///
 /// A Ruling is in force exactly when `superseded_by` is `None` **and** `drift` is empty. Both are
@@ -233,6 +280,8 @@ pub struct Ruling {
     digest: RulingDigest,
     canonical_bytes: Vec<u8>,
     payload: RulingV1,
+    /// The Candidate this Ruling binds, present exactly when the bytes are `beacon.ruling.v2`.
+    candidate: Option<CandidateDigest>,
     force: RulingForce,
 }
 
@@ -251,6 +300,26 @@ impl Ruling {
 
     pub fn force(&self) -> &RulingForce {
         &self.force
+    }
+
+    /// Which grammar these bytes are.
+    pub fn grammar(&self) -> RulingGrammar {
+        if self.candidate.is_some() {
+            RulingGrammar::V2
+        } else {
+            RulingGrammar::V1
+        }
+    }
+
+    /// The Candidate this Ruling was shown, or `None` for a v1 Ruling.
+    ///
+    /// The whole envelope, never a bare hex value. `None` is not "not yet loaded" and not an
+    /// error: a v1 Ruling names no Candidate, which is precisely why dispatch cannot act on one.
+    /// There is deliberately no `is_dispatchable`, for the reason there is no `is_in_force`: a
+    /// consumer must read what the record binds and check it, not read a bit somebody else
+    /// computed.
+    pub fn candidate(&self) -> Option<&CandidateDigest> {
+        self.candidate.as_ref()
     }
 }
 
@@ -278,6 +347,10 @@ pub enum MalformedRuling {
     PinnedBaseRevision,
     Reason,
     SupersedesDigest,
+    /// The Candidate digest is not 64 lowercase hexadecimal characters.
+    CandidateDigestValue,
+    /// The Candidate digest names an algorithm or canonicalizer a v2 Ruling cannot have been shown.
+    CandidateDigestEnvelope,
 }
 
 impl MalformedRuling {
@@ -306,6 +379,10 @@ impl MalformedRuling {
             Self::SupersedesDigest => {
                 "a superseded Ruling must be named by a lowercase 64-character hexadecimal digest"
             }
+            Self::CandidateDigestValue => {
+                "the Candidate digest is not 64 lowercase hexadecimal characters"
+            }
+            Self::CandidateDigestEnvelope => "the Candidate digest names another canonicalizer",
         }
     }
 }
@@ -323,6 +400,15 @@ pub enum InconsistentRuling {
     SupersedesOtherProposal,
     NotTheCurrentTail,
     RuledBeforeTail,
+    /// A v2 Ruling was asked to bind a Candidate its Proposal does not have.
+    ///
+    /// Distinct from `CandidateDiffers`: this Proposal has no Candidate at all, so nothing was
+    /// shown to bind, and the correction is to record one first.
+    CandidateNotRecorded,
+    /// The Candidate this Proposal has is not the one the caller named. One Proposal has at most
+    /// one Candidate, so a different digest names a change that belongs to another Proposal, or
+    /// none at all.
+    CandidateDiffers,
 }
 
 impl InconsistentRuling {
@@ -342,6 +428,10 @@ impl InconsistentRuling {
             Self::RuledBeforeTail => {
                 "the ruling time is earlier than the Ruling this one supersedes"
             }
+            Self::CandidateNotRecorded => {
+                "the Proposal has no Candidate, so there are no bytes to bind"
+            }
+            Self::CandidateDiffers => "the Proposal's Candidate is not the one this Ruling names",
         }
     }
 }
@@ -408,9 +498,9 @@ struct Encoder {
 }
 
 impl Encoder {
-    fn new() -> Self {
+    fn for_grammar(grammar: RulingGrammar) -> Self {
         let mut out = Vec::new();
-        out.extend_from_slice(MAGIC);
+        out.extend_from_slice(grammar.magic());
         Self { out }
     }
 
@@ -466,9 +556,13 @@ impl<'a> Decoder<'a> {
         Ok(slice)
     }
 
-    fn magic(&mut self) -> Result<(), MalformedRuling> {
-        if self.take(MAGIC.len()).map_err(|_| MalformedRuling::Magic)? == MAGIC {
-            Ok(())
+    /// Which grammar these bytes are, decided by their first 17 bytes and nothing else.
+    fn magic(&mut self) -> Result<RulingGrammar, MalformedRuling> {
+        let magic = self.take(MAGIC.len()).map_err(|_| MalformedRuling::Magic)?;
+        if magic == MAGIC {
+            Ok(RulingGrammar::V1)
+        } else if magic == MAGIC_V2 {
+            Ok(RulingGrammar::V2)
         } else {
             Err(MalformedRuling::Magic)
         }
@@ -542,7 +636,27 @@ fn digest_bytes(value: &str, refusal: MalformedRuling) -> Result<[u8; 32], Malfo
 /// The field order, widths, and tag values are ADR 0037's table, and this is the executable form
 /// of it.
 fn encode(payload: &RulingV1) -> Result<Vec<u8>, MalformedRuling> {
-    let mut encoder = Encoder::new();
+    encode_with(payload, None)
+}
+
+/// The v2 encoding: v1's fields with the Candidate's envelope inserted after the Proposal's.
+///
+/// One function writes both grammars so they cannot drift: every field after the identity block is
+/// written by the same code, and the only difference between a v1 and a v2 record is the magic and
+/// whether the Candidate envelope is present.
+fn encode_v2(payload: &RulingV1, candidate: &CandidateDigest) -> Result<Vec<u8>, MalformedRuling> {
+    encode_with(payload, Some(candidate))
+}
+
+fn encode_with(
+    payload: &RulingV1,
+    candidate: Option<&CandidateDigest>,
+) -> Result<Vec<u8>, MalformedRuling> {
+    let grammar = match candidate {
+        None => RulingGrammar::V1,
+        Some(_) => RulingGrammar::V2,
+    };
+    let mut encoder = Encoder::for_grammar(grammar);
 
     // 2-4: the bound Proposal's identity, copied whole.
     if payload.proposal.algorithm != PROPOSAL_DIGEST_ALGORITHM
@@ -556,6 +670,22 @@ fn encode(payload: &RulingV1) -> Result<Vec<u8>, MalformedRuling> {
     )?);
     encoder.string(&payload.proposal.algorithm, MAX_DESCRIPTOR_TOKEN_BYTES)?;
     encoder.string(&payload.proposal.canonicalizer, MAX_DESCRIPTOR_TOKEN_BYTES)?;
+
+    // 4a-4c (v2 only): the Candidate's identity, copied whole. It sits beside the Proposal's
+    // because the two together are what was ruled on: the description, and the exact bytes.
+    if let Some(candidate) = candidate {
+        if candidate.algorithm != CANDIDATE_DIGEST_ALGORITHM
+            || candidate.canonicalizer != CANDIDATE_CANONICALIZER
+        {
+            return Err(MalformedRuling::CandidateDigestEnvelope);
+        }
+        encoder.sha256(&digest_bytes(
+            &candidate.value,
+            MalformedRuling::CandidateDigestValue,
+        )?);
+        encoder.string(&candidate.algorithm, MAX_DESCRIPTOR_TOKEN_BYTES)?;
+        encoder.string(&candidate.canonicalizer, MAX_DESCRIPTOR_TOKEN_BYTES)?;
+    }
 
     // 5-8: the four copied revisions.
     encoder.u32(payload.bindings.charter_revision);
@@ -590,9 +720,25 @@ fn encode(payload: &RulingV1) -> Result<Vec<u8>, MalformedRuling> {
     Ok(encoder.out)
 }
 
+/// The v1-strict decoder: refuses v2 bytes, so a caller that asked for v1 gets v1 or an error and
+/// never a silently narrowed view of a record binding more than it can see.
+///
+/// A test instrument. Production reads whichever grammar the bytes are, through `decode_any`, and
+/// then re-encodes under that same grammar -- there is no production question whose answer is "v1
+/// or refuse". Kept because the v1 grammar's own refusals are pinned against it, and a shared
+/// decoder would let a v1 assertion pass on v2 bytes.
+#[cfg(test)]
 fn decode(input: &[u8]) -> Result<RulingV1, MalformedRuling> {
+    match decode_any(input)? {
+        (payload, None) => Ok(payload),
+        (_, Some(_)) => Err(MalformedRuling::Magic),
+    }
+}
+
+/// Decodes either grammar, reporting which one it was by returning the Candidate or not.
+fn decode_any(input: &[u8]) -> Result<(RulingV1, Option<CandidateDigest>), MalformedRuling> {
     let mut decoder = Decoder::new(input);
-    decoder.magic()?;
+    let grammar = decoder.magic()?;
 
     let proposal_digest = HEXLOWER.encode(&decoder.sha256()?);
     let algorithm = decoder.string(MAX_DESCRIPTOR_TOKEN_BYTES)?;
@@ -600,6 +746,23 @@ fn decode(input: &[u8]) -> Result<RulingV1, MalformedRuling> {
     if algorithm != PROPOSAL_DIGEST_ALGORITHM || canonicalizer != PROPOSAL_CANONICALIZER {
         return Err(MalformedRuling::ProposalDigestEnvelope);
     }
+
+    let candidate = match grammar {
+        RulingGrammar::V1 => None,
+        RulingGrammar::V2 => {
+            let value = HEXLOWER.encode(&decoder.sha256()?);
+            let algorithm = decoder.string(MAX_DESCRIPTOR_TOKEN_BYTES)?;
+            let canonicalizer = decoder.string(MAX_DESCRIPTOR_TOKEN_BYTES)?;
+            if algorithm != CANDIDATE_DIGEST_ALGORITHM || canonicalizer != CANDIDATE_CANONICALIZER {
+                return Err(MalformedRuling::CandidateDigestEnvelope);
+            }
+            Some(CandidateDigest {
+                algorithm,
+                canonicalizer,
+                value,
+            })
+        }
+    };
 
     let charter_revision = decoder.u32()?;
     let project_policy_revision = decoder.u32()?;
@@ -626,24 +789,27 @@ fn decode(input: &[u8]) -> Result<RulingV1, MalformedRuling> {
     let ruled_at_ms = decoder.u64()?;
     decoder.finish()?;
 
-    Ok(RulingV1 {
-        proposal: ProposalDigest {
-            algorithm,
-            canonicalizer,
-            value: proposal_digest,
+    Ok((
+        RulingV1 {
+            proposal: ProposalDigest {
+                algorithm,
+                canonicalizer,
+                value: proposal_digest,
+            },
+            bindings: ProposalBindings {
+                charter_revision,
+                project_policy_revision,
+                repository_revision,
+                pinned_base_revision,
+            },
+            decision,
+            reason,
+            decider,
+            supersedes,
+            ruled_at_ms,
         },
-        bindings: ProposalBindings {
-            charter_revision,
-            project_policy_revision,
-            repository_revision,
-            pinned_base_revision,
-        },
-        decision,
-        reason,
-        decider,
-        supersedes,
-        ruled_at_ms,
-    })
+        candidate,
+    ))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -685,9 +851,52 @@ impl RulingService {
         reason: &str,
         supersedes: RulingSupersedes,
     ) -> Result<Ruling, RulingError> {
+        self.record(proposal_digest, None, decision, reason, supersedes)
+    }
+
+    /// Records one immutable **v2** Ruling: the same decision, naming the exact Candidate the
+    /// Operator was shown (ADR 0039).
+    ///
+    /// This is the Ruling dispatch may honour. A v1 Ruling is a complete record of a decision and
+    /// is simply not dispatchable, because it names no bytes -- so nothing already recorded is
+    /// invalidated by this grammar's arrival, and a Proposal becomes dispatchable by being ruled
+    /// again under it.
+    ///
+    /// The Candidate is not taken on trust: it is read back through its owning module's own proof
+    /// inside this transaction, and must be the one Candidate that Proposal has. A caller cannot
+    /// name another Proposal's change, and cannot name one that was never recorded.
+    pub fn rule_on_candidate(
+        &self,
+        proposal_digest: &str,
+        candidate_digest: &str,
+        decision: RulingDecision,
+        reason: &str,
+        supersedes: RulingSupersedes,
+    ) -> Result<Ruling, RulingError> {
+        self.record(
+            proposal_digest,
+            Some(candidate_digest),
+            decision,
+            reason,
+            supersedes,
+        )
+    }
+
+    fn record(
+        &self,
+        proposal_digest: &str,
+        candidate_digest: Option<&str>,
+        decision: RulingDecision,
+        reason: &str,
+        supersedes: RulingSupersedes,
+    ) -> Result<Ruling, RulingError> {
         self.accounts.with_authenticated_store(|connection, now| {
             digest_bytes(proposal_digest, MalformedRuling::ProposalDigestValue)
                 .map_err(RulingError::Malformed)?;
+            if let Some(candidate_digest) = candidate_digest {
+                digest_bytes(candidate_digest, MalformedRuling::CandidateDigestValue)
+                    .map_err(RulingError::Malformed)?;
+            }
             if !is_human_text(reason, MAX_REASON_SCALARS) {
                 return Err(RulingError::Malformed(MalformedRuling::Reason));
             }
@@ -747,6 +956,33 @@ impl RulingService {
                 }
             }
 
+            // The Candidate is read through `candidate`'s own transaction-bound proof -- digest
+            // over the stored bytes, strict decode and re-encode, indexed columns, its Event, and
+            // the copy rule against this Proposal -- so a v2 Ruling cannot bind bytes nothing
+            // verified, and cannot bind another Proposal's change.
+            let candidate = match candidate_digest {
+                None => None,
+                Some(named) => {
+                    let Some(candidate) = verified_candidate_for_proposal(
+                        &transaction,
+                        self.workspace_id,
+                        proposal_digest,
+                    )
+                    .map_err(map_candidate_error)?
+                    else {
+                        return Err(RulingError::Inconsistent(
+                            InconsistentRuling::CandidateNotRecorded,
+                        ));
+                    };
+                    if candidate.digest().value != named {
+                        return Err(RulingError::Inconsistent(
+                            InconsistentRuling::CandidateDiffers,
+                        ));
+                    }
+                    Some(candidate.digest().clone())
+                }
+            };
+
             let payload = RulingV1 {
                 // COPIED from the verified Proposal, never rebuilt from this module's constants.
                 // The store's CHECK constraints make the two equal today, but equality is not
@@ -760,11 +996,19 @@ impl RulingService {
                 supersedes,
                 ruled_at_ms,
             };
-            let canonical_bytes = encode(&payload).map_err(RulingError::Malformed)?;
+            let canonical_bytes = match &candidate {
+                None => encode(&payload),
+                Some(candidate) => encode_v2(&payload, candidate),
+            }
+            .map_err(RulingError::Malformed)?;
             let digest_value = HEXLOWER.encode(&sha256(&canonical_bytes));
 
             let stored = StoredRuling {
                 workspace_id: self.workspace_id,
+                grammar: match &candidate {
+                    None => RulingGrammar::V1,
+                    Some(_) => RulingGrammar::V2,
+                },
                 digest_value,
                 canonical_bytes,
                 proposal_digest: proposal_digest.to_owned(),
@@ -778,6 +1022,7 @@ impl RulingService {
                     RulingSupersedes::None => None,
                     RulingSupersedes::Ruling(digest) => Some(digest.clone()),
                 },
+                candidate: candidate.as_ref().map(|candidate| candidate.value.clone()),
                 ruled_at_ms,
             };
             insert_ruling(&transaction, &stored)?;
@@ -971,19 +1216,33 @@ fn derive_force(
     stored: &StoredRuling,
     payload: &RulingV1,
 ) -> Result<RulingForce, RulingError> {
+    // The successor's own canonicalizer is READ, never assumed to be this one's: the two Rulings
+    // in a supersession may be different grammars -- a v2 Ruling superseding a v1 one is the
+    // ordinary way a Proposal becomes dispatchable -- and reporting the wrong envelope would name
+    // bytes under a grammar that never produced them.
     let superseded_by = connection
         .query_row(
-            "SELECT ruling_digest FROM ruling_supersessions
-             WHERE workspace_id = ?1 AND proposal_digest = ?2 AND supersedes_ruling_digest = ?3",
+            "SELECT supersessions.ruling_digest, rulings.digest_canonicalizer
+             FROM ruling_supersessions AS supersessions
+             JOIN rulings ON rulings.workspace_id = supersessions.workspace_id
+                         AND rulings.digest_value = supersessions.ruling_digest
+             WHERE supersessions.workspace_id = ?1
+               AND supersessions.proposal_digest = ?2
+               AND supersessions.supersedes_ruling_digest = ?3",
             params![
                 workspace_id.to_string(),
                 stored.proposal_digest.as_str(),
                 stored.digest_value.as_str()
             ],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()?
-        .map(|value| digest_envelope(&value));
+        .map(|(value, canonicalizer)| {
+            RulingGrammar::from_canonicalizer(&canonicalizer)
+                .map(|grammar| digest_envelope(grammar, &value))
+                .ok_or(RulingError::InvalidStore)
+        })
+        .transpose()?;
 
     let Some(facts) = proposal_binding_facts(connection, workspace_id, &stored.proposal_digest)
         .map_err(map_proposal_error)?
@@ -1046,6 +1305,9 @@ fn derive_force(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StoredRuling {
     workspace_id: Uuid,
+    /// Which grammar the stored bytes are, read from the row's canonicalizer column and checked
+    /// against the bytes' own magic on every read.
+    grammar: RulingGrammar,
     digest_value: String,
     canonical_bytes: Vec<u8>,
     proposal_digest: String,
@@ -1056,6 +1318,9 @@ struct StoredRuling {
     decision: RulingDecision,
     reason: String,
     supersedes: Option<String>,
+    /// The Candidate this Ruling binds, as a relation: `None` is the absence of a row, exactly as
+    /// it is for supersession.
+    candidate: Option<String>,
     ruled_at_ms: u64,
 }
 
@@ -1087,10 +1352,10 @@ struct RulingRecordedPayload {
     ruling: RecordedRuling,
 }
 
-fn digest_envelope(value: &str) -> RulingDigest {
+fn digest_envelope(grammar: RulingGrammar, value: &str) -> RulingDigest {
     RulingDigest {
         algorithm: DIGEST_ALGORITHM.to_owned(),
-        canonicalizer: CANONICALIZER.to_owned(),
+        canonicalizer: grammar.canonicalizer().to_owned(),
         value: value.to_owned(),
     }
 }
@@ -1115,7 +1380,7 @@ fn insert_ruling(connection: &Connection, stored: &StoredRuling) -> Result<(), R
         params![
             stored.workspace_id.to_string(),
             DIGEST_ALGORITHM,
-            CANONICALIZER,
+            stored.grammar.canonicalizer(),
             stored.digest_value.as_str(),
             stored.canonical_bytes.as_slice(),
             stored.proposal_digest.as_str(),
@@ -1131,6 +1396,19 @@ fn insert_ruling(connection: &Connection, stored: &StoredRuling) -> Result<(), R
             ruled_at_ms,
         ],
     )?;
+    if let Some(candidate) = &stored.candidate {
+        connection.execute(
+            "INSERT INTO ruling_candidates (
+                 workspace_id, proposal_digest, ruling_digest, candidate_digest
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                stored.workspace_id.to_string(),
+                stored.proposal_digest.as_str(),
+                stored.digest_value.as_str(),
+                candidate.as_str(),
+            ],
+        )?;
+    }
     if let Some(superseded) = &stored.supersedes {
         connection.execute(
             "INSERT INTO ruling_supersessions (
@@ -1146,7 +1424,7 @@ fn insert_ruling(connection: &Connection, stored: &StoredRuling) -> Result<(), R
     }
     let payload = serde_json::to_string(&RulingRecordedPayload {
         ruling: RecordedRuling {
-            digest: digest_envelope(&stored.digest_value),
+            digest: digest_envelope(stored.grammar, &stored.digest_value),
             canonical_bytes_base64: BASE64.encode(&stored.canonical_bytes),
             actor: RulingActor::Owner,
             ruled_at_ms: stored.ruled_at_ms,
@@ -1197,8 +1475,12 @@ fn load_stored(
     let Some(row) = row else {
         return Ok(None);
     };
+    // The canonicalizer column decides which grammar these bytes claim to be; `verified_ruling`
+    // then proves the bytes' own magic agrees. A column naming neither grammar is invalid state.
+    let Some(grammar) = RulingGrammar::from_canonicalizer(&row.1) else {
+        return Err(RulingError::InvalidStore);
+    };
     if row.0 != DIGEST_ALGORITHM
-        || row.1 != CANONICALIZER
         || row.5 != PROPOSAL_DIGEST_ALGORITHM
         || row.6 != PROPOSAL_CANONICALIZER
         || row.13 != DECIDER_BASIS
@@ -1213,8 +1495,18 @@ fn load_stored(
             |row| row.get::<_, String>(0),
         )
         .optional()?;
+    // The Candidate binding, as a relation: no row means this Ruling names none.
+    let candidate = connection
+        .query_row(
+            "SELECT candidate_digest FROM ruling_candidates
+             WHERE workspace_id = ?1 AND ruling_digest = ?2",
+            params![workspace_id.to_string(), digest_value],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
     Ok(Some(StoredRuling {
         workspace_id,
+        grammar,
         digest_value: row.2,
         canonical_bytes: row.3,
         proposal_digest: row.4,
@@ -1225,6 +1517,7 @@ fn load_stored(
         decision: RulingDecision::from_str(&row.11).ok_or(RulingError::InvalidStore)?,
         reason: row.12,
         supersedes,
+        candidate,
         ruled_at_ms: u64::try_from(row.14).map_err(|_| RulingError::InvalidStore)?,
     }))
 }
@@ -1237,7 +1530,8 @@ fn verified_ruling(connection: &Connection, stored: StoredRuling) -> Result<Ruli
     if HEXLOWER.encode(&sha256(&stored.canonical_bytes)) != stored.digest_value {
         return Err(RulingError::InvalidStore);
     }
-    let payload = decode(&stored.canonical_bytes).map_err(|_| RulingError::InvalidStore)?;
+    let (payload, candidate) =
+        decode_any(&stored.canonical_bytes).map_err(|_| RulingError::InvalidStore)?;
     // ADR 0037's stated discipline: "strictly decodes and re-encodes them". No byte sequence this
     // grammar can decode re-encodes differently -- every field is fixed-width or exactly
     // length-prefixed, so there is no second spelling of one value and no test can reach this
@@ -1249,17 +1543,23 @@ fn verified_ruling(connection: &Connection, stored: StoredRuling) -> Result<Ruli
     // `an_unassigned_tag_is_refused_in_every_closed_position`, and
     // `hostile_stored_bytes_carrying_an_uppercase_base_revision_are_refused_by_the_decoder` closing
     // the ways a decoded value could differ from the bytes it came from.
-    if encode(&payload).map_err(|_| RulingError::InvalidStore)? != stored.canonical_bytes {
+    let re_encoded = match &candidate {
+        None => encode(&payload),
+        Some(candidate) => encode_v2(&payload, candidate),
+    }
+    .map_err(|_| RulingError::InvalidStore)?;
+    if re_encoded != stored.canonical_bytes {
         return Err(RulingError::InvalidStore);
     }
-    if !columns_match(&stored, &payload) {
+    if !columns_match(&stored, &payload, candidate.as_ref()) {
         return Err(RulingError::InvalidStore);
     }
     let force = derive_force(connection, stored.workspace_id, &stored, &payload)?;
     Ok(Ruling {
-        digest: digest_envelope(&stored.digest_value),
+        digest: digest_envelope(stored.grammar, &stored.digest_value),
         canonical_bytes: stored.canonical_bytes,
         payload,
+        candidate,
         force,
     })
 }
@@ -1268,13 +1568,28 @@ fn verified_ruling(connection: &Connection, stored: StoredRuling) -> Result<Ruli
 /// the byte tag, which is the agreement ADR 0037 promises reconciliation will check. It is checked
 /// here instead of only at startup because every read goes through this function, so a row and its
 /// relation cannot disagree even between two restarts.
-fn columns_match(stored: &StoredRuling, payload: &RulingV1) -> bool {
+fn columns_match(
+    stored: &StoredRuling,
+    payload: &RulingV1,
+    candidate: Option<&CandidateDigest>,
+) -> bool {
     let supersedes_agrees = match (&stored.supersedes, &payload.supersedes) {
         (None, RulingSupersedes::None) => true,
         (Some(recorded), RulingSupersedes::Ruling(encoded)) => recorded == encoded,
         _ => false,
     };
+    // The Candidate relation and the bytes' own grammar are one fact stated twice, and a store
+    // where they disagree is invalid: a row claiming v2 whose bytes name no Candidate would let a
+    // dispatch believe a Ruling bound bytes nobody was shown.
+    let candidate_agrees = match (&stored.candidate, candidate) {
+        (None, None) => stored.grammar == RulingGrammar::V1,
+        (Some(recorded), Some(encoded)) => {
+            stored.grammar == RulingGrammar::V2 && recorded == &encoded.value
+        }
+        _ => false,
+    };
     supersedes_agrees
+        && candidate_agrees
         && stored.proposal_digest == payload.proposal.value
         && stored.charter_revision == payload.bindings.charter_revision
         && stored.project_policy_revision == payload.bindings.project_policy_revision
@@ -1348,6 +1663,24 @@ pub(crate) fn verify_ruling_state(connection: &Connection) -> Result<(), RulingE
             return Err(RulingError::InvalidStore);
         }
 
+        // A v2 Ruling's Candidate must still be that Proposal's Candidate. `verified_ruling` has
+        // already proved the relation and the bytes agree about WHICH Candidate; this proves the
+        // Candidate itself still verifies and still belongs to this Proposal -- the check that
+        // makes "the Ruling names the change" true rather than merely recorded. A v1 Ruling names
+        // none, and reconciliation says so rather than skipping the question.
+        match ruling.candidate() {
+            None => {}
+            Some(candidate) => {
+                let bound =
+                    verified_candidate_for_proposal(connection, workspace_id, proposal_digest)
+                        .map_err(map_candidate_error)?
+                        .ok_or(RulingError::InvalidStore)?;
+                if bound.digest() != candidate {
+                    return Err(RulingError::InvalidStore);
+                }
+            }
+        }
+
         let chain_key = (workspace_id, proposal_digest.clone());
         if !chains.contains(&chain_key) {
             chains.push(chain_key);
@@ -1400,7 +1733,7 @@ pub(crate) fn verify_ruling_event(
     let payload: RulingRecordedPayload = serde_json::from_str(payload_json)?;
     let recorded = payload.ruling;
     if recorded.digest.algorithm != DIGEST_ALGORITHM
-        || recorded.digest.canonicalizer != CANONICALIZER
+        || RulingGrammar::from_canonicalizer(&recorded.digest.canonicalizer).is_none()
         || recorded.ruled_at_ms != occurred_at_ms
     {
         return Err(RulingError::InvalidStore);
@@ -1441,6 +1774,19 @@ fn positive_u32(value: i64) -> Result<u32, RulingError> {
 /// A Proposal that cannot be read is an invalid store from a Ruling's point of view: the Ruling
 /// binds it, so there is no version of "the Proposal is broken" that leaves this Ruling merely
 /// unready. Only a store failure stays a store failure.
+/// A Candidate module refusal, in this module's vocabulary. A store the other module calls invalid
+/// is invalid here too; its account and store errors pass through as themselves.
+fn map_candidate_error(error: crate::CandidateError) -> RulingError {
+    match error {
+        crate::CandidateError::Account(error) => RulingError::Account(error),
+        crate::CandidateError::Store(error) => RulingError::Store(error),
+        crate::CandidateError::Inconsistent(InconsistentCandidate::ProposalNotFound) => {
+            RulingError::Inconsistent(InconsistentRuling::ProposalNotFound)
+        }
+        _ => RulingError::InvalidStore,
+    }
+}
+
 fn map_proposal_error(error: ProposalError) -> RulingError {
     match error {
         ProposalError::Store(error) => RulingError::Store(error),

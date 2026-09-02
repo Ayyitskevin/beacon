@@ -5,12 +5,14 @@
 -- link: one immutable, digest-identified record per Proposal, holding one entry per declared
 -- mutation with the SHA-256 of the file bytes before and after.
 --
--- Two structural rules make it authority-bearing rather than decorative, and both are here rather
--- than in a Command that could be bypassed:
---   * UNIQUE per Proposal -- a revised change is a new Proposal, which is what ADR 0034 already
---     says about anything that changes a Proposal's identity;
---   * ordered before the Ruling -- enforced at dispatch time against `events.sequence`, the
---     store's own ordering primitive, so it needs no clock.
+-- A Candidate SELECTS bytes; it does not authorize them. Authority is `beacon.ruling.v2` below,
+-- which binds this record's digest after its diff has been shown. Two rules make the selection
+-- determinate:
+--   * UNIQUE per Proposal, enforced here rather than by a Command that could be bypassed -- a
+--     revised change is a new Proposal, which is what ADR 0034 already says about anything that
+--     changes a Proposal's identity;
+--   * ordered before the Ruling -- a dispatch-time comparison against `events.sequence`, the
+--     store's own ordering primitive, so it needs no clock. This table does not enforce it.
 --
 -- This file lands the vocabulary the dispatch slices write as they write it. It stays a single
 -- migration for the whole act (ADR 0039) rather than one per slice, and is extended in place while
@@ -115,9 +117,9 @@ CREATE TABLE candidates (
         REFERENCES proposals(workspace_id, digest_value) ON DELETE RESTRICT
 ) STRICT;
 
--- At most ONE Candidate per Proposal. A second set of post-image digests for one decision would
--- make "the bytes the Operator ruled on" ambiguous, and dispatch would have to choose. It does not
--- choose: the store refuses the second record, and a revised change is a new Proposal.
+-- At most ONE Candidate per Proposal. A second set of post-image digests would leave "which bytes"
+-- ambiguous and force dispatch to choose. It does not choose: the store refuses the second record,
+-- and a revised change is a new Proposal.
 CREATE UNIQUE INDEX candidates_one_per_proposal
 ON candidates (workspace_id, proposal_digest);
 
@@ -131,6 +133,154 @@ CREATE TRIGGER candidates_no_delete
 BEFORE DELETE ON candidates
 BEGIN
     SELECT RAISE(ABORT, 'Candidates are immutable');
+END;
+
+-- Ruling v2: the authority link. A Ruling that dispatch may honour binds the Candidate's digest
+-- envelope, so the bytes the Operator was shown are named by the record that authorizes them.
+-- Ruling v1 records stay valid and are simply not dispatchable, so their rows are copied untouched
+-- and their canonicalizer column keeps its exact old value.
+DROP TRIGGER rulings_no_update;
+DROP TRIGGER rulings_no_delete;
+DROP TRIGGER ruling_supersessions_no_update;
+DROP TRIGGER ruling_supersessions_no_delete;
+DROP INDEX rulings_scoped_identity;
+DROP INDEX rulings_by_proposal;
+
+-- The dependent relation moves first, so renaming `rulings` rewrites this preserved foreign key to
+-- `rulings_v19`; both old tables stay until both copies exist. Same shape as migration 0016.
+ALTER TABLE ruling_supersessions RENAME TO ruling_supersessions_v19;
+ALTER TABLE rulings RENAME TO rulings_v19;
+
+CREATE TABLE rulings (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+    digest_algorithm TEXT NOT NULL CHECK (digest_algorithm = 'sha256'),
+    -- Two grammars, both first-class. A v1 Ruling is a complete record of a decision; it simply
+    -- names no Candidate, and dispatch refuses it for that reason rather than because it is old.
+    digest_canonicalizer TEXT NOT NULL
+        CHECK (digest_canonicalizer IN ('beacon.ruling.v1', 'beacon.ruling.v2')),
+    digest_value TEXT NOT NULL PRIMARY KEY CHECK (
+        length(digest_value) = 64
+        AND digest_value NOT GLOB '*[^0-9a-f]*'
+    ),
+    canonical_bytes BLOB NOT NULL CHECK (length(canonical_bytes) BETWEEN 17 AND 65536),
+    proposal_digest TEXT NOT NULL CHECK (
+        length(proposal_digest) = 64
+        AND proposal_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    proposal_digest_algorithm TEXT NOT NULL CHECK (proposal_digest_algorithm = 'sha256'),
+    proposal_digest_canonicalizer TEXT NOT NULL
+        CHECK (proposal_digest_canonicalizer = 'beacon.proposal.v1'),
+    charter_revision INTEGER NOT NULL CHECK (charter_revision >= 1),
+    project_policy_revision INTEGER NOT NULL CHECK (project_policy_revision >= 1),
+    repository_revision INTEGER NOT NULL CHECK (repository_revision >= 1),
+    pinned_base_revision TEXT NOT NULL CHECK (
+        length(pinned_base_revision) = 40
+        AND pinned_base_revision NOT GLOB '*[^0-9a-f]*'
+    ),
+    decision TEXT NOT NULL CHECK (decision IN ('approve', 'refuse')),
+    reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 2000),
+    decider_basis TEXT NOT NULL CHECK (decider_basis = 'owner'),
+    ruled_at_ms INTEGER NOT NULL CHECK (ruled_at_ms >= 0),
+    FOREIGN KEY (workspace_id, proposal_digest)
+        REFERENCES proposals(workspace_id, digest_value) ON DELETE RESTRICT
+) STRICT;
+
+INSERT INTO rulings (
+    workspace_id, digest_algorithm, digest_canonicalizer, digest_value, canonical_bytes,
+    proposal_digest, proposal_digest_algorithm, proposal_digest_canonicalizer,
+    charter_revision, project_policy_revision, repository_revision, pinned_base_revision,
+    decision, reason, decider_basis, ruled_at_ms
+)
+SELECT
+    workspace_id, digest_algorithm, digest_canonicalizer, digest_value, canonical_bytes,
+    proposal_digest, proposal_digest_algorithm, proposal_digest_canonicalizer,
+    charter_revision, project_policy_revision, repository_revision, pinned_base_revision,
+    decision, reason, decider_basis, ruled_at_ms
+FROM rulings_v19;
+
+CREATE UNIQUE INDEX rulings_scoped_identity
+ON rulings (workspace_id, proposal_digest, digest_value);
+
+CREATE INDEX rulings_by_proposal
+ON rulings (workspace_id, proposal_digest, ruled_at_ms, digest_value);
+
+CREATE TABLE ruling_supersessions (
+    workspace_id TEXT NOT NULL,
+    proposal_digest TEXT NOT NULL,
+    ruling_digest TEXT NOT NULL,
+    supersedes_ruling_digest TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, proposal_digest, ruling_digest),
+    UNIQUE (workspace_id, proposal_digest, supersedes_ruling_digest),
+    CHECK (ruling_digest <> supersedes_ruling_digest),
+    FOREIGN KEY (workspace_id, proposal_digest, ruling_digest)
+        REFERENCES rulings(workspace_id, proposal_digest, digest_value) ON DELETE RESTRICT,
+    FOREIGN KEY (workspace_id, proposal_digest, supersedes_ruling_digest)
+        REFERENCES rulings(workspace_id, proposal_digest, digest_value) ON DELETE RESTRICT
+) STRICT;
+
+INSERT INTO ruling_supersessions (
+    workspace_id, proposal_digest, ruling_digest, supersedes_ruling_digest
+)
+SELECT workspace_id, proposal_digest, ruling_digest, supersedes_ruling_digest
+FROM ruling_supersessions_v19;
+
+DROP TABLE ruling_supersessions_v19;
+DROP TABLE rulings_v19;
+
+-- The Candidate a v2 Ruling binds, as a RELATION rather than a nullable column: "this Ruling names
+-- no Candidate" is the absence of a row, exactly as supersession models "no predecessor". A v2
+-- Ruling has exactly one row here and a v1 Ruling has none, and reconciliation checks that the
+-- relation and the canonicalizer in the bytes agree.
+CREATE TABLE ruling_candidates (
+    workspace_id TEXT NOT NULL,
+    proposal_digest TEXT NOT NULL,
+    ruling_digest TEXT NOT NULL,
+    candidate_digest TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, ruling_digest),
+    FOREIGN KEY (workspace_id, proposal_digest, ruling_digest)
+        REFERENCES rulings(workspace_id, proposal_digest, digest_value) ON DELETE RESTRICT,
+    FOREIGN KEY (workspace_id, candidate_digest)
+        REFERENCES candidates(workspace_id, digest_value) ON DELETE RESTRICT
+) STRICT;
+
+-- The Candidate's parent key, scoped by Workspace like every other binding in this store.
+CREATE UNIQUE INDEX candidates_workspace_digest
+ON candidates (workspace_id, digest_value);
+
+CREATE TRIGGER rulings_no_update
+BEFORE UPDATE ON rulings
+BEGIN
+    SELECT RAISE(ABORT, 'Rulings are immutable');
+END;
+
+CREATE TRIGGER rulings_no_delete
+BEFORE DELETE ON rulings
+BEGIN
+    SELECT RAISE(ABORT, 'Rulings are immutable');
+END;
+
+CREATE TRIGGER ruling_supersessions_no_update
+BEFORE UPDATE ON ruling_supersessions
+BEGIN
+    SELECT RAISE(ABORT, 'Ruling supersessions are immutable');
+END;
+
+CREATE TRIGGER ruling_supersessions_no_delete
+BEFORE DELETE ON ruling_supersessions
+BEGIN
+    SELECT RAISE(ABORT, 'Ruling supersessions are immutable');
+END;
+
+CREATE TRIGGER ruling_candidates_no_update
+BEFORE UPDATE ON ruling_candidates
+BEGIN
+    SELECT RAISE(ABORT, 'Ruling candidate bindings are immutable');
+END;
+
+CREATE TRIGGER ruling_candidates_no_delete
+BEFORE DELETE ON ruling_candidates
+BEGIN
+    SELECT RAISE(ABORT, 'Ruling candidate bindings are immutable');
 END;
 
 UPDATE schema_meta SET version = 22 WHERE singleton = 1 AND version = 20;
