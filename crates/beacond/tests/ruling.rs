@@ -1369,30 +1369,35 @@ fn a_forked_chain_has_no_last_link_and_is_refused() {
     // The store's primary key and unique index each forbid one shape of fork, but neither forbids
     // two independent chains under one Proposal. Re-deriving the chain is what catches that, and
     // it is the same function recording uses to find the tail.
-    let (fixture, proposal_digest, first) = ruled("forked");
-    let second = fixture
-        .rulings
-        .rule(
-            &proposal_digest,
-            RulingDecision::Refuse,
-            "Refused on second thought.",
-            RulingSupersedes::Ruling(first),
-        )
-        .unwrap();
-    // Remove the only link, leaving two Rulings that each claim to be the head.
-    fixture.tamper("DELETE FROM ruling_supersessions;");
+    //
+    // Both heads are planted SELF-CONSISTENT -- each says in its own bytes that it cites nobody,
+    // and no relation row contradicts either. An earlier version of this test made the fork by
+    // deleting the only link, which left the second Ruling's bytes disagreeing with the relation;
+    // `columns_match` then refused it, and whether the chain walk was reached at all depended on
+    // which head the iteration happened to pick first. A test that passes by hash ordering is not
+    // a test.
+    let fixture = admitted_mission("forked");
+    let proposal_digest = fixture.submit("Add a regression test.");
+    let head = record_for(&proposal_digest, "Approved by the first head.", 1);
+    let rival = record_for(&proposal_digest, "Approved by a second head.", 2);
+    fixture.plant(&head);
+    fixture.plant(&rival);
 
+    // Each reads back perfectly on its own. Only the question "what is this Proposal's chain?" has
+    // no answer, and that is the question `list_for_proposal` asks.
+    assert_eq!(
+        fixture.rulings.get(&head.digest()).unwrap().digest().value,
+        head.digest()
+    );
+    assert_eq!(
+        fixture.rulings.get(&rival.digest()).unwrap().digest().value,
+        rival.digest()
+    );
     assert!(matches!(
         fixture
             .rulings
             .list_for_proposal(&proposal_digest)
             .unwrap_err(),
-        RulingError::InvalidStore
-    ));
-    // And the second Ruling's own bytes still say it supersedes the first, so reading it directly
-    // is refused too: the row and the relation disagree.
-    assert!(matches!(
-        fixture.rulings.get(&second.digest().value).unwrap_err(),
         RulingError::InvalidStore
     ));
 }
@@ -1496,5 +1501,605 @@ fn a_ruling_event_that_does_not_match_its_row_refuses_startup() {
     assert!(
         matches!(error, SupervisorError::RulingEventMismatch(_)),
         "{error:?} / {error}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Startup reconciliation
+//
+// "Refuses startup" is concrete here: `Supervisor::bootstrap` returns an error instead of a
+// `StartupReport`, so no Workspace identity and no service is produced against that store.
+//
+// Two arms are accepted throughout, because which one fires is a fact about the order
+// `inspect_store` runs its checks in, not about the store. Per-Event evidence is verified before
+// whole-table state, so evidence a row cannot be matched against refuses as an Event mismatch and
+// everything else as a state mismatch. A test that pinned one arm would be testing the call order.
+// ---------------------------------------------------------------------------------------------
+
+fn assert_refuses_startup(fixture: &Fixture, case: &str) {
+    let error = fixture.restart().unwrap_err();
+    assert!(
+        matches!(
+            error,
+            SupervisorError::RulingEventMismatch(_) | SupervisorError::RulingStateMismatch
+        ),
+        "{case}: {error:?} / {error}"
+    );
+}
+
+impl Fixture {
+    /// The `ruling.recorded` Event payload for one record, exactly as the service writes it.
+    fn event_payload(&self, record: &RulingRecord) -> String {
+        serde_json::json!({
+            "ruling": {
+                "digest": {
+                    "algorithm": "sha256",
+                    "canonicalizer": "beacon.ruling.v1",
+                    "value": record.digest(),
+                },
+                "canonicalBytesBase64": BASE64.encode(&record.bytes()),
+                "actor": "owner",
+                "ruledAtMs": record.ruled_at_ms,
+            }
+        })
+        .to_string()
+    }
+
+    /// Plant one Ruling row and its audit Event by hand. `link` inserts the supersession row
+    /// separately, because a chain cannot be linked until both of its ends exist.
+    ///
+    /// Everything a read verifies agrees -- the digest names the bytes, the bytes re-encode, every
+    /// column repeats what they say, the relation matches the tag, the Event carries them. Only
+    /// what reconciliation re-derives ACROSS records can refuse such a fixture, which is what makes
+    /// these tests about reconciliation rather than about `verified_ruling` again.
+    fn plant(&self, record: &RulingRecord) {
+        let connection = self.store.connect();
+        connection
+            .execute(
+                "INSERT INTO rulings (
+                     workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+                     canonical_bytes, proposal_digest, proposal_digest_algorithm,
+                     proposal_digest_canonicalizer, charter_revision, project_policy_revision,
+                     repository_revision, pinned_base_revision, decision, reason, decider_basis,
+                     ruled_at_ms
+                 ) VALUES (?1, 'sha256', 'beacon.ruling.v1', ?2, ?3, ?4, 'sha256',
+                           'beacon.proposal.v1', ?5, ?6, ?7, ?8, ?9, ?10, 'owner', ?11)",
+                rusqlite::params![
+                    self.workspace_id.to_string(),
+                    record.digest(),
+                    record.bytes(),
+                    record.proposal_digest,
+                    i64::from(record.charter_revision),
+                    i64::from(record.policy_revision),
+                    i64::from(record.repository_revision),
+                    record.base_revision,
+                    if record.decision_tag == 0x01 {
+                        "approve"
+                    } else {
+                        "refuse"
+                    },
+                    record.reason,
+                    i64::try_from(record.ruled_at_ms).unwrap(),
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+                 VALUES (?1, 'ruling.recorded', ?2, ?3)",
+                rusqlite::params![
+                    self.workspace_id.to_string(),
+                    self.event_payload(record),
+                    i64::try_from(record.ruled_at_ms).unwrap(),
+                ],
+            )
+            .unwrap();
+    }
+}
+
+impl Fixture {
+    /// The supersession row a planted record's bytes claim.
+    fn link(&self, record: &RulingRecord) {
+        let superseded = record
+            .supersedes
+            .as_ref()
+            .expect("record cites a predecessor");
+        self.store
+            .connect()
+            .execute(
+                "INSERT INTO ruling_supersessions (
+                     workspace_id, proposal_digest, ruling_digest, supersedes_ruling_digest
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    self.workspace_id.to_string(),
+                    record.proposal_digest,
+                    record.digest(),
+                    superseded,
+                ],
+            )
+            .unwrap();
+    }
+}
+
+/// A truthful Ruling record for one Proposal, which a test then makes untruthful in one way.
+fn record_for(proposal_digest: &str, reason: &str, ruled_at_ms: u64) -> RulingRecord {
+    RulingRecord {
+        proposal_digest: proposal_digest.to_owned(),
+        charter_revision: 1,
+        policy_revision: 1,
+        repository_revision: 1,
+        base_revision: BASE_REVISION.to_owned(),
+        decision_tag: 0x01,
+        reason: reason.to_owned(),
+        decider_tag: 0x01,
+        supersedes: None,
+        ruled_at_ms,
+    }
+}
+
+/// One Proposal, two Rulings, the second superseding the first: the shape every refusal below is
+/// measured against.
+fn chained(label: &str) -> (Fixture, String, String, String) {
+    let fixture = admitted_mission(label);
+    let proposal_digest = fixture.submit("Add a regression test for the invariant checker.");
+    let first = fixture
+        .rulings
+        .rule(
+            &proposal_digest,
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap()
+        .digest()
+        .value
+        .clone();
+    let second = fixture
+        .rulings
+        .rule(
+            &proposal_digest,
+            RulingDecision::Refuse,
+            "Refused on second thought.",
+            RulingSupersedes::Ruling(first.clone()),
+        )
+        .unwrap()
+        .digest()
+        .value
+        .clone();
+    (fixture, proposal_digest, first, second)
+}
+
+#[test]
+fn a_truthful_store_starts_and_reconciles() {
+    // The control every refusal below is measured against: without it, a reconciliation that
+    // refused every store would pass every test in this section.
+    let (fixture, proposal_digest, first, second) = chained("startup-clean");
+
+    fixture.restart().unwrap();
+
+    let chain = fixture.rulings.list_for_proposal(&proposal_digest).unwrap();
+    assert_eq!(chain[0].digest().value, first);
+    assert_eq!(chain[1].digest().value, second);
+}
+
+#[test]
+fn a_drifted_chain_still_starts_and_stays_readable() {
+    // Drift is a diagnosis, not corruption. Force is derived during reconciliation and must never
+    // be what refuses it: a Ruling does not become invalid because the world moved past it.
+    let (fixture, proposal_digest, _, second) = chained("startup-drifted");
+    ProjectService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .revise_charter(
+            fixture.project_id,
+            1,
+            charter_draft("Prove the local agent office, revised."),
+        )
+        .unwrap();
+
+    fixture.restart().unwrap();
+
+    let tail = fixture.rulings.get(&second).unwrap();
+    assert_eq!(
+        tail.force().drift(),
+        [UnmetPrecondition::CharterRevisionMoved]
+    );
+    assert_eq!(
+        fixture
+            .rulings
+            .list_for_proposal(&proposal_digest)
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn startup_refuses_two_events_for_one_ruling_and_none_for_another() {
+    // The totals still balance: two Rulings, two `ruling.recorded` Events. Only counting the
+    // Events PER Ruling notices that one decision was recorded twice and the other not at all.
+    let (fixture, _, first, second) = chained("startup-events-swapped");
+    let connection = fixture.store.connect();
+    connection
+        .execute(
+            "DELETE FROM events WHERE kind = 'ruling.recorded'
+             AND json_extract(payload_json, '$.ruling.digest.value') = ?1",
+            [second],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+             SELECT workspace_id, kind, payload_json, occurred_at_ms FROM events
+             WHERE kind = 'ruling.recorded'
+               AND json_extract(payload_json, '$.ruling.digest.value') = ?1",
+            [first],
+        )
+        .unwrap();
+    assert_eq!(fixture.ruling_events(), 2);
+    assert_eq!(fixture.ruling_rows(), 2);
+
+    assert_refuses_startup(&fixture, "two events for one Ruling, none for the other");
+}
+
+#[test]
+fn startup_refuses_a_ruling_without_its_event() {
+    let (fixture, _, _, second) = chained("startup-missing-event");
+    fixture
+        .store
+        .connect()
+        .execute(
+            "DELETE FROM events WHERE kind = 'ruling.recorded'
+             AND json_extract(payload_json, '$.ruling.digest.value') = ?1",
+            [second],
+        )
+        .unwrap();
+
+    assert_refuses_startup(&fixture, "missing event");
+}
+
+#[test]
+fn startup_refuses_a_duplicate_ruling_event() {
+    // A byte-identical second Event. Reconciliation that only asked "is there an Event?" would
+    // accept two recordings of one decision.
+    let (fixture, _, _, _) = chained("startup-duplicate-event");
+    fixture
+        .store
+        .connect()
+        .execute(
+            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+             SELECT workspace_id, kind, payload_json, occurred_at_ms
+             FROM events WHERE kind = 'ruling.recorded' LIMIT 1",
+            [],
+        )
+        .unwrap();
+
+    assert_refuses_startup(&fixture, "duplicate event");
+}
+
+#[test]
+fn startup_refuses_an_orphan_ruling_event() {
+    // Evidence for a decision no row carries. The Event cannot be matched against anything, which
+    // is a different failure from a row whose Event disagrees with it.
+    let (fixture, proposal_digest, _, _) = chained("startup-orphan-event");
+    let orphan = record_for(&proposal_digest, "A decision that was never recorded.", 1);
+    fixture
+        .store
+        .connect()
+        .execute(
+            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+             VALUES (?1, 'ruling.recorded', ?2, 1)",
+            rusqlite::params![
+                fixture.workspace_id.to_string(),
+                fixture.event_payload(&orphan)
+            ],
+        )
+        .unwrap();
+
+    assert_refuses_startup(&fixture, "orphan event");
+}
+
+#[test]
+fn startup_refuses_altered_ruling_bytes() {
+    let (fixture, proposal_digest, first, _) = chained("startup-altered-bytes");
+    let altered = record_for(
+        &proposal_digest,
+        "A reason the recorded digest never covered.",
+        1,
+    );
+    fixture.tamper(&format!(
+        "UPDATE rulings SET canonical_bytes = x'{}' WHERE digest_value = '{first}'",
+        HEXLOWER.encode(&altered.bytes())
+    ));
+
+    assert_refuses_startup(&fixture, "altered bytes");
+}
+
+#[test]
+fn startup_refuses_an_indexed_column_that_disagrees_with_the_bytes() {
+    // The bytes are untouched and the digest still names them. Only the column lies. A
+    // reconciliation that trusted the columns, or never re-decoded the bytes to compare, would
+    // start cleanly on a store whose index disagrees with its own record.
+    let (fixture, _, first, _) = chained("startup-column-drift");
+    fixture.tamper(&format!(
+        "UPDATE rulings SET repository_revision = 7 WHERE digest_value = '{first}'"
+    ));
+
+    assert_refuses_startup(&fixture, "column drift");
+}
+
+#[test]
+fn startup_refuses_a_differently_encoded_event_payload() {
+    let fixture = admitted_mission("startup-unpadded-base64");
+    let proposal_digest = fixture.submit("Add a regression test.");
+    let recorded = fixture
+        .rulings
+        .rule(
+            &proposal_digest,
+            RulingDecision::Approve,
+            "Approved after review of the declared effects.",
+            RulingSupersedes::None,
+        )
+        .unwrap();
+    let first = recorded.digest().value.clone();
+    let bytes = recorded.canonical_bytes().to_vec();
+    let ruled_at_ms = recorded.payload().ruled_at_ms;
+    // The same bytes, encoded without padding: canonical RFC 4648 padded base64 is the recorded
+    // form, and evidence written another way is different evidence, not the same evidence
+    // reformatted. The two encodings coincide whenever the record's length is a multiple of three,
+    // so the reason above is chosen to avoid that -- and this asserts it rather than trusting it,
+    // because a fixture where they coincide is a test that asserts nothing.
+    assert_ne!(
+        BASE64.encode(&bytes),
+        data_encoding::BASE64_NOPAD.encode(&bytes)
+    );
+    let payload = serde_json::json!({
+        "ruling": {
+            "digest": {
+                "algorithm": "sha256",
+                "canonicalizer": "beacon.ruling.v1",
+                "value": first,
+            },
+            "canonicalBytesBase64": data_encoding::BASE64_NOPAD.encode(&bytes),
+            "actor": "owner",
+            "ruledAtMs": ruled_at_ms,
+        }
+    })
+    .to_string();
+    fixture
+        .store
+        .connect()
+        .execute(
+            "UPDATE events SET payload_json = ?1 WHERE kind = 'ruling.recorded'
+             AND json_extract(payload_json, '$.ruling.digest.value') = ?2",
+            rusqlite::params![payload, first],
+        )
+        .unwrap();
+
+    assert_refuses_startup(&fixture, "unpadded base64");
+}
+
+#[test]
+fn startup_refuses_copies_that_disagree_with_the_bound_proposal() {
+    // The check that belongs to reconciliation alone. This Ruling is internally perfect -- the
+    // digest names its bytes, the bytes re-encode, every column repeats them, the Event carries
+    // them -- and it still copies a Charter revision its Proposal never recorded. Nothing a read
+    // does would notice, and a Ruling whose copies disagree with its Proposal reports drift
+    // against the wrong baseline, which makes "ruled under this policy version" a claim nothing
+    // supports.
+    let fixture = admitted_mission("startup-copies-disagree");
+    let proposal_digest = fixture.submit("Add a regression test.");
+    let mut planted = record_for(
+        &proposal_digest,
+        "Ruled under a revision it never named.",
+        1,
+    );
+    planted.charter_revision = 9;
+    fixture.plant(&planted);
+
+    // Proof the fixture is otherwise sound: every read-time check passes, so only the
+    // cross-record comparison can be what refuses startup.
+    assert_eq!(
+        fixture
+            .rulings
+            .get(&planted.digest())
+            .unwrap()
+            .digest()
+            .value,
+        planted.digest()
+    );
+    assert_refuses_startup(&fixture, "copies disagree with the Proposal");
+}
+
+#[test]
+fn startup_refuses_a_forked_chain() {
+    // Two Rulings on one Proposal, each saying in its own bytes that it cites nobody, each with
+    // its own Event, neither contradicting anything a read checks. The store permits exactly this:
+    // the primary key forbids citing two predecessors and the unique index forbids being
+    // superseded twice, and a second head violates neither. Only re-deriving the chain refuses it,
+    // and until it is refused "the effective Ruling is the last link" has two answers.
+    let fixture = admitted_mission("startup-forked");
+    let proposal_digest = fixture.submit("Add a regression test.");
+    let head = record_for(&proposal_digest, "Approved by the first head.", 1);
+    let rival = record_for(&proposal_digest, "Approved by a second head.", 2);
+    fixture.plant(&head);
+    fixture.plant(&rival);
+
+    // Both are internally perfect, so nothing a read performs can be what refuses startup.
+    assert_eq!(
+        fixture.rulings.get(&head.digest()).unwrap().digest().value,
+        head.digest()
+    );
+    assert_eq!(
+        fixture.rulings.get(&rival.digest()).unwrap().digest().value,
+        rival.digest()
+    );
+    assert_eq!(
+        fixture.count("SELECT count(*) FROM ruling_supersessions"),
+        0
+    );
+
+    assert_refuses_startup(&fixture, "forked chain");
+}
+
+#[test]
+fn startup_refuses_a_supersession_cycle() {
+    // A cycle can only ever be a disagreement between the relation and the bytes, and that is what
+    // refuses this store -- the first Ruling's bytes say it cites nobody while a row says it cites
+    // the second. A cycle whose bytes AGREE with the relation is not merely unrecorded, it is
+    // cryptographically infeasible: each Ruling's canonical bytes contain its predecessor's
+    // digest, so a cycle of them would be a cycle of SHA-256 preimages. That is the same binding
+    // doing the work here that binds a Ruling to its Proposal.
+    let (fixture, proposal_digest, first, second) = chained("startup-cycle");
+    fixture.tamper(&format!(
+        "INSERT INTO ruling_supersessions (
+             workspace_id, proposal_digest, ruling_digest, supersedes_ruling_digest
+         ) VALUES ('{}', '{proposal_digest}', '{first}', '{second}');",
+        fixture.workspace_id
+    ));
+
+    assert_refuses_startup(&fixture, "supersession cycle");
+}
+
+#[test]
+fn startup_refuses_a_supersession_relation_that_disagrees_with_the_bytes() {
+    // The relation and the byte tag are two recordings of one fact. A link the decision never
+    // recorded would make the chain show a supersession that no Ruling's bytes claim.
+    let (fixture, proposal_digest, first, second) = chained("startup-relation-disagrees");
+    fixture.tamper(&format!(
+        "DELETE FROM ruling_supersessions;
+         INSERT INTO ruling_supersessions (
+             workspace_id, proposal_digest, ruling_digest, supersedes_ruling_digest
+         ) VALUES ('{}', '{proposal_digest}', '{first}', '{second}');",
+        fixture.workspace_id
+    ));
+
+    assert_refuses_startup(&fixture, "relation disagrees with the bytes");
+}
+
+#[test]
+fn startup_refuses_a_ruling_time_that_goes_backwards_along_the_chain() {
+    // The service refuses a backwards step at write time. Nothing else would notice a store that
+    // holds one, and a chain whose times run backwards makes its own ordering unreadable as
+    // history -- which is exactly why the effective order is the chain, not the clock.
+    let fixture = admitted_mission("startup-time-backwards");
+    let proposal_digest = fixture.submit("Add a regression test.");
+    let head = fixture
+        .rulings
+        .rule(
+            &proposal_digest,
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap();
+    let mut earlier = record_for(
+        &proposal_digest,
+        "Recorded before the link it supersedes.",
+        1,
+    );
+    earlier.decision_tag = 0x02;
+    earlier.supersedes = Some(head.digest().value.clone());
+    assert!(earlier.ruled_at_ms < head.payload().ruled_at_ms);
+    fixture.plant(&earlier);
+    fixture.link(&earlier);
+
+    // Again, internally perfect: the chain resolves, one head, every Ruling on it.
+    assert_eq!(
+        fixture
+            .rulings
+            .get(&earlier.digest())
+            .unwrap()
+            .digest()
+            .value,
+        earlier.digest()
+    );
+    assert_refuses_startup(&fixture, "ruling time goes backwards");
+}
+
+#[test]
+fn startup_refuses_a_ruling_whose_owner_account_is_gone() {
+    // `decider_basis = 'owner'` is only truthful while that account exists. The Proposal this
+    // Ruling binds makes the identical claim and is reconciled first, so this asserts that the
+    // store refuses rather than which module noticed -- the Ruling's own check is what keeps its
+    // reconciliation complete if that call order ever changes.
+    let (fixture, _, _, _) = chained("startup-no-owner");
+    fixture
+        .store
+        .connect()
+        .execute("DELETE FROM operator_accounts", [])
+        .unwrap();
+
+    let error = fixture.restart().unwrap_err();
+    assert!(
+        matches!(
+            error,
+            SupervisorError::RulingStateMismatch | SupervisorError::ProposalStateMismatch
+        ),
+        "{error:?} / {error}"
+    );
+}
+
+#[test]
+fn the_store_refuses_a_second_predecessor_and_a_second_supersession() {
+    // The two structural halves of "no forks", each removable independently, so each gets its own
+    // wrong answer. Neither needs the immutability triggers dropped: both are INSERTs.
+    let (fixture, proposal_digest, first, second) = chained("relation-constraints");
+    let connection = fixture.store.connect();
+
+    // Three links, so each refusal below can name two DIFFERENT Rulings -- the schema's
+    // `ruling_digest <> supersedes_ruling_digest` CHECK already refuses a self-citation, and a
+    // test that tripped that would prove the wrong constraint.
+    let third = fixture
+        .rulings
+        .rule(
+            &proposal_digest,
+            RulingDecision::Approve,
+            "Approved again once the targets were narrowed.",
+            RulingSupersedes::Ruling(second.clone()),
+        )
+        .unwrap()
+        .digest()
+        .value
+        .clone();
+    assert_eq!(
+        fixture.count("SELECT count(*) FROM ruling_supersessions"),
+        2
+    );
+
+    // The second Ruling already cites the first. Giving it a second predecessor is refused by the
+    // primary key, so no Ruling can reverse two decisions at once.
+    let error = connection
+        .execute(
+            "INSERT INTO ruling_supersessions (
+                 workspace_id, proposal_digest, ruling_digest, supersedes_ruling_digest
+             ) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                fixture.workspace_id.to_string(),
+                proposal_digest,
+                second,
+                third
+            ],
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("UNIQUE"), "{error}");
+
+    // The second Ruling is already superseded by the third. Superseding it again is refused by the
+    // unique index, so "the effective Ruling is the last link" always has one answer.
+    let error = connection
+        .execute(
+            "INSERT INTO ruling_supersessions (
+                 workspace_id, proposal_digest, ruling_digest, supersedes_ruling_digest
+             ) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                fixture.workspace_id.to_string(),
+                proposal_digest,
+                first,
+                second
+            ],
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("UNIQUE"), "{error}");
+    assert_eq!(
+        fixture.count("SELECT count(*) FROM ruling_supersessions"),
+        2
     );
 }

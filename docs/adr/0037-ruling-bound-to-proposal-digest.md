@@ -109,8 +109,8 @@ ruling_digest)` with both foreign keys scoped over
 `(workspace_id, proposal_digest)`. "This Ruling has no predecessor" is the absence
 of a row, which carries no meaning a reader must interpret — unlike a NULL, which
 would be a meaningful null of exactly the kind this repository forbids. The
-canonical bytes say `supersedes = none`, the relation holds no row, and startup
-reconciliation checks that the two agree. Scope is therefore structural: a link
+canonical bytes say `supersedes = none` and the relation holds no row; every read
+checks that the two agree, and startup re-checks it across the whole table. Scope is therefore structural: a link
 across Workspaces or across Proposals cannot be stored, rather than being refused
 by a Command that something might bypass.
 
@@ -131,9 +131,12 @@ link — which is only an answer if the graph cannot fork, so:
   Ruling is refused as `NotTheCurrentTail`. The service reads the tail, compares,
   and inserts inside one immediate transaction, so two concurrent rulings cannot
   both believe they extend it;
-- the store makes forks impossible independently: each Ruling cites at most one
-  predecessor (primary key) and is superseded at most once (unique index);
-- startup reconciliation re-derives the chain and refuses a fork or a cycle.
+- the store forbids two shapes of a fork independently: each Ruling cites at most
+  one predecessor (primary key) and is superseded at most once (unique index).
+  Neither forbids two independent chains under one Proposal, which is why the
+  chain is re-derived rather than assumed;
+- every read and startup reconciliation re-derive the chain: one first link, one
+  path, every Ruling on it.
 
 **Any decision may follow any decision.** An `approve` after an `approve` with a
 new reason is a legal re-ruling, not a contradiction; `reason` is mandatory and
@@ -207,13 +210,24 @@ would collide with the first. A deliberate reversal differs by its `supersedes`
 link and therefore by its digest.
 
 Startup recomputes each digest from stored bytes, strictly decodes and re-encodes
-them, compares every indexed column to the parsed value, re-verifies that the
-bound Proposal exists and that the copied revisions equal what that Proposal
-recorded, requires exactly one Event per Ruling whose decoded byte field exactly
-equals the stored bytes with no orphan Event, verifies the Owner account still
-exists for every `owner` decider, and verifies that every `supersedes` chain
-resolves, stays within one Proposal, is acyclic, and supersedes each Ruling at
-most once. Force is derived afterwards and never refuses startup.
+them, compares every indexed column and the supersession relation to the parsed
+value, re-verifies that the bound Proposal exists and that the copied revisions
+equal what that Proposal recorded, requires exactly one Event per Ruling whose
+decoded byte field exactly equals the stored bytes with no orphan Event, verifies
+the Owner account still exists for every `owner` decider, and re-derives every
+chain: one first link, one path, every Ruling on it, and ruling times that do not
+run backwards along it. Force is derived as part of that read and never refuses
+startup by itself — drift fills a list, it does not raise an error.
+
+Two of those are re-derived here even though the store already forbids them,
+because reconciliation must be complete on its own terms rather than on the order
+`inspect_store` happens to run its checks in. A fork and a cycle are not among
+them: nothing in SQL forbids two independent chains under one Proposal, and a
+cycle whose bytes agree with the relation is infeasible only because each
+Ruling's bytes carry its predecessor's digest — a cycle of them would be a cycle
+of SHA-256 preimages. What a store can actually hold is a cycle in the relation
+that its Rulings' bytes contradict, and that is refused as the disagreement it
+is.
 
 Migration 0019 follows the existing closed-Event-table rebuild pattern. It
 preserves every v18 Event sequence, payload byte, and timestamp, adds only
@@ -236,7 +250,10 @@ from 18.
   Ruling is the last in the chain;
 - a `supersedes` naming no Ruling, or one bound to a different Proposal, is
   refused;
-- a supersession cycle, or a Ruling superseded twice, refuses startup;
+- a Ruling that cites two predecessors, or one superseded twice, is refused by
+  the store; a chain that forks, or a relation that cycles, refuses startup;
+- a ruling time earlier than the link it supersedes is refused when recorded and
+  again at startup;
 - update and delete against a recorded Ruling are refused by the store;
 - an unauthenticated caller receives only the authentication refusal, whatever
   else is wrong with the request;
@@ -247,9 +264,6 @@ from 18.
 - `reason` is mandatory: empty, whitespace-only, or over-long is refused;
 - `decision` and `decider` are closed: any tag this ADR does not assign is
   refused;
-- a Ruling cited as superseded twice is refused, by the store and again at
-  startup;
-- update and delete against a recorded Ruling are refused by the store;
 - a Ruling row with no Event, a duplicate Event, an orphan Event, an altered
   row, and a differently encoded Event payload each refuse startup;
 - no accessor reports force as a boolean; and

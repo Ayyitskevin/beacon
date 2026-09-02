@@ -34,6 +34,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::operator_account::owner_account_exists;
 use crate::project_policy::policy_revision_facts;
 use crate::project_repository::latest_repository_for_preflight;
 use crate::proposal::{
@@ -1254,13 +1255,112 @@ fn columns_match(stored: &StoredRuling, payload: &RulingV1) -> bool {
         && stored.ruled_at_ms == payload.ruled_at_ms
 }
 
+// ---------------------------------------------------------------------------------------------
+// Startup reconciliation
+// ---------------------------------------------------------------------------------------------
+
+/// Recomputes every Ruling from its stored bytes, re-verifies what it is bound to, re-derives
+/// every supersession chain, and requires exactly one Event per Ruling with no orphan.
+///
+/// Force is derived along the way and never fails startup by itself: drift populates a list, it
+/// does not raise an error, so a historical Ruling does not become corrupt because the world moved.
+/// Everything that *does* refuse here is a store disagreeing with its own bytes.
+pub(crate) fn verify_ruling_state(connection: &Connection) -> Result<(), RulingError> {
+    let mut statement = connection.prepare(
+        "SELECT workspace_id, digest_value, proposal_digest FROM rulings
+         ORDER BY workspace_id, digest_value",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+
+    // A record naming `owner` as its decider basis is only truthful while that account exists.
+    if !rows.is_empty() && !owner_account_exists(connection)? {
+        return Err(RulingError::InvalidStore);
+    }
+
+    let mut chains: Vec<(Uuid, String)> = Vec::new();
+    for (workspace_id, digest_value, proposal_digest) in &rows {
+        let workspace_id = parse_uuid(workspace_id)?;
+        let stored = load_stored(connection, workspace_id, digest_value)?
+            .ok_or(RulingError::InvalidStore)?;
+        // Digest recomputed from the bytes, bytes decoded and re-encoded, every indexed column and
+        // the supersession relation compared to the parsed value: `verified_ruling` is the same
+        // proof every read performs, run here over the whole table.
+        let ruling = verified_ruling(connection, stored)?;
+
+        // What the Ruling copied must still be what the Proposal recorded. This is the one check a
+        // read does not perform, and it is the whole point of copying: a Ruling whose copies
+        // disagree with its Proposal would report drift against the wrong baseline, and would make
+        // "ruled under this policy version" a claim nothing supports.
+        let facts = proposal_binding_facts(connection, workspace_id, proposal_digest)
+            .map_err(map_proposal_error)?
+            .ok_or(RulingError::InvalidStore)?;
+        if facts.bindings != ruling.payload().bindings {
+            return Err(RulingError::InvalidStore);
+        }
+
+        let event_count: i64 = connection.query_row(
+            "SELECT count(*) FROM events
+             WHERE workspace_id = ?1 AND kind = 'ruling.recorded'
+               AND json_extract(payload_json, '$.ruling.digest.value') = ?2",
+            params![workspace_id.to_string(), digest_value.as_str()],
+            |row| row.get(0),
+        )?;
+        if event_count != 1 {
+            return Err(RulingError::InvalidStore);
+        }
+
+        let chain_key = (workspace_id, proposal_digest.clone());
+        if !chains.contains(&chain_key) {
+            chains.push(chain_key);
+        }
+    }
+
+    let total_events: i64 = connection.query_row(
+        "SELECT count(*) FROM events WHERE kind = 'ruling.recorded'",
+        [],
+        |row| row.get(0),
+    )?;
+    if usize::try_from(total_events) != Ok(rows.len()) {
+        return Err(RulingError::InvalidStore);
+    }
+
+    // Every chain re-derived rather than trusted: one head, one path, every Ruling on it. The
+    // store forbids citing two predecessors and being superseded twice, but nothing in SQL forbids
+    // two independent chains under one Proposal or a cycle whose every link satisfies both.
+    for (workspace_id, proposal_digest) in &chains {
+        let chain = ruling_chain(connection, *workspace_id, proposal_digest)?;
+        let mut previous = 0_u64;
+        for digest in &chain {
+            let ruled_at_ms = ruled_at_ms_of(connection, digest)?;
+            // Non-decreasing, equal allowed: two rulings can land in the same millisecond, and
+            // refusing that would invent a constraint the clock does not support. The service
+            // refuses a backwards step at write time; nothing else would notice a store that
+            // holds one, so it is re-derived here.
+            if ruled_at_ms < previous {
+                return Err(RulingError::InvalidStore);
+            }
+            previous = ruled_at_ms;
+        }
+    }
+    Ok(())
+}
+
 /// Requires one Event per Ruling whose decoded byte field exactly equals the stored Ruling bytes,
 /// and whose encoding is the canonical padded base64 of them -- a differently encoded payload
 /// carrying the same bytes is different evidence, not the same evidence reformatted.
 ///
-/// The whole-table reconciliation this feeds -- one Event per Ruling, no orphan, the chain
-/// re-derived, the Owner account still present -- lands with the startup slice; this is the
-/// per-Event half, and it lands here because the writer landed here.
+/// This is the per-Event half of reconciliation; `verify_ruling_state` is the whole-table half.
+/// An orphan Event is refused here rather than there, because an Event naming a digest no row
+/// carries cannot be matched against a row at all.
 pub(crate) fn verify_ruling_event(
     connection: &Connection,
     workspace_id: Uuid,
@@ -1295,6 +1395,10 @@ pub(crate) fn verify_ruling_event(
 // ---------------------------------------------------------------------------------------------
 // Error mapping
 // ---------------------------------------------------------------------------------------------
+
+fn parse_uuid(value: &str) -> Result<Uuid, RulingError> {
+    Uuid::parse_str(value).map_err(|_| RulingError::InvalidStore)
+}
 
 fn positive_u32(value: i64) -> Result<u32, RulingError> {
     let value = u32::try_from(value).map_err(|_| RulingError::InvalidStore)?;
