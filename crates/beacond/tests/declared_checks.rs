@@ -168,9 +168,11 @@ fn enrolled_v15(
 
 /// Hand-unwinds the store to v15 so a real v15 store can be migrated forward again.
 ///
-/// Every schema version added since v15 has to be undone here, newest first: v18's `proposals`
-/// table and the four unique indexes it added to other tables so composite foreign keys could
-/// state Proposal scope, then v17's Sample Project state, then v16's Run and Receipt rebuild.
+/// Every schema version added since v15 has to be undone here, newest first: v19's supersession
+/// relation and `rulings` table (the relation first, since it keys into `rulings`) and the index
+/// 0019 added to `proposals`, then v18's `proposals` table and the four unique
+/// indexes it added to other tables so composite foreign keys could state Proposal scope, then
+/// v17's Sample Project state, then v16's Run and Receipt rebuild.
 /// A version that forgets to unwind leaves objects behind and the schema comparison below fails.
 fn downgrade_execution_schema_to_v15(store_path: &Path) {
     let expected = Connection::open_in_memory().unwrap();
@@ -243,6 +245,9 @@ fn downgrade_execution_schema_to_v15(store_path: &Path) {
     connection
         .execute_batch(
             "BEGIN IMMEDIATE;
+             DROP TABLE ruling_supersessions;
+             DROP TABLE rulings;
+             DROP INDEX proposals_workspace_digest;
              DROP TABLE proposals;
              DROP INDEX project_repository_revisions_charter_base;
              DROP INDEX project_policy_revisions_charter;
@@ -1963,7 +1968,7 @@ fn migration_preserves_real_v1_bytes_through_rollback_and_forward_startup() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 18);
+    assert_eq!(report.diagnostics.schema_version, 19);
     let connection = Connection::open(&store.path).unwrap();
     assert_v1_bytes(&connection, run_id, &v1_payload);
 }
