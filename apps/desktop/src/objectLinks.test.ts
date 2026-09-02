@@ -47,7 +47,7 @@ const context = (overrides: Partial<LinkContext> = {}): LinkContext => ({
   phase: "unlocked",
   workspaceId: WORKSPACE,
   projects: [project],
-  missions: [mission],
+  missions: { projectId: PROJECT, items: [mission] },
   ...overrides,
 });
 
@@ -163,11 +163,6 @@ describe("routing an object link", () => {
       outcome: "otherWorkspace",
       workspaceId: MISSION,
     });
-    // Also before this Installation's own Workspace is known.
-    expect(routeObjectLink(link(projectLink), context({ workspaceId: null }))).toEqual({
-      outcome: "otherWorkspace",
-      workspaceId: WORKSPACE,
-    });
   });
 
   it("names the object that is missing, and does not land on Briefing", () => {
@@ -183,18 +178,47 @@ describe("routing an object link", () => {
       missing: "project",
       id: PROJECT,
     });
-    expect(routeObjectLink(link(missionLink), context({ missions: [] }))).toEqual({
+    expect(
+      routeObjectLink(link(missionLink), context({ missions: { projectId: PROJECT, items: [] } })),
+    ).toEqual({
       outcome: "absent",
       missing: "mission",
       id: MISSION,
     });
-    // Not-yet-loaded is not emptiness, and both are honestly "absent" rather
-    // than silently opening something else.
-    expect(routeObjectLink(link(projectLink), context({ projects: null }))).toEqual({
-      outcome: "absent",
-      missing: "project",
-      id: PROJECT,
+  });
+
+  it("never reports what it has not looked at as missing, or as elsewhere", () => {
+    // The fifth state. A null collection is not an empty one: it is the shell
+    // before it loaded. Folding it into `absent` claims the object does not
+    // exist, and folding a null Workspace into `otherWorkspace` claims the link
+    // belongs to a different Installation -- two definite claims from no
+    // evidence at all.
+    expect(routeObjectLink(link(projectLink), context({ workspaceId: null }))).toEqual({
+      outcome: "notLoaded",
+      awaiting: "workspace",
     });
+    expect(routeObjectLink(link(projectLink), context({ projects: null }))).toEqual({
+      outcome: "notLoaded",
+      awaiting: "projects",
+    });
+    expect(routeObjectLink(link(missionLink), context({ missions: null }))).toEqual({
+      outcome: "notLoaded",
+      awaiting: "missions",
+    });
+  });
+
+  it("treats another Project's loaded Missions as no evidence about this one", () => {
+    // `loadMissions(projectId)` is Project-scoped, so the Missions the shell
+    // holds are evidence about exactly one Project. Searching them for a
+    // Mission under a different Project and reporting `absent` would be reading
+    // one Project's rows as the answer for another's.
+    const otherProject = "77777777-7777-4777-8777-777777777777";
+    expect(
+      routeObjectLink(
+        link(missionLink),
+        context({ missions: { projectId: otherProject, items: [] } }),
+      ),
+    ).toEqual({ outcome: "notLoaded", awaiting: "missions" });
   });
 
   it("opens what it can, and only that", () => {
