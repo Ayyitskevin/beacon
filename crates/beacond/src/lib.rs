@@ -15,6 +15,8 @@ mod candidate;
 mod check_preflight;
 mod declared_checks;
 mod dispatch;
+#[cfg(unix)]
+mod disk_encryption;
 mod git_object_store;
 mod local_model_activation;
 mod mission;
@@ -46,6 +48,11 @@ pub use check_preflight::{
 #[cfg(unix)]
 pub use declared_checks::{
     DeclaredCheckError, DeclaredCheckService, ExecutionReceipt, ExecutionSummary,
+};
+#[cfg(unix)]
+pub use disk_encryption::{
+    DiskEncryptionService, EncryptionEvidence, LiveDataEncryption, LiveDataEncryptionReport,
+    SystemView, live_data_encryption_for_test,
 };
 pub use local_transport::{
     LocalErrorCode, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
