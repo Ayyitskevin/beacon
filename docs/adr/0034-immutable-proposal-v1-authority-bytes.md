@@ -641,9 +641,10 @@ limits is an open question for the Product Steward, not a fact this amendment ma
 record.
 
 
-## Amendment (proposed 2026-09-02): the readable-context comparison, as built
+## Amendment (accepted 2026-09-02): the readable-context comparison, as built
 
-**Status: DRAFT. Proposed, not accepted.** The decision above remains `accepted`
+**Status: accepted 2026-09-02** — the Product Steward's ruling at the merge of
+#45 (`020ea85`), recorded as Janus gate `gb40af242989`. The decision above remains `accepted`
 as written; nothing here changes its bytes, its identity, or its authority
 boundary. This section records what the readable-context comparison now does, so
 the readiness vocabulary a consumer sees is described where the vocabulary is
