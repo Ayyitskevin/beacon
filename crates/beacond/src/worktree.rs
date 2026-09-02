@@ -29,10 +29,11 @@
 //! - **It does not execute a Declared Check.** The only programs it runs are
 //!   `git worktree add`, `git status`, and `git worktree remove`.
 //!   Bounded execution of repository-declared commands is a separate slice.
-//! - **It applies no sandbox.** No Landlock ruleset, no resource limit, no
-//!   environment scrubbing beyond the two Git variables that would redirect
-//!   Git's own view of the repository. A worktree is a containment boundary for
-//!   *where* work happens, never for *what* it may do.
+//! - **It applies no sandbox.** No Landlock ruleset or resource limit applies.
+//!   Git runs with a closed environment and explicit configuration that disables
+//!   repository hooks, filesystem monitors, protocols, and ambient config. A
+//!   worktree is a containment boundary for *where* work happens, never for
+//!   *what* it may do.
 //! - **Ignored content is not a keep reason.** A disposable worktree is expected
 //!   to accumulate build output, and discarding it is the intent. Only tracked
 //!   modifications and untracked-but-not-ignored files hold the tree.
@@ -56,6 +57,10 @@ use crate::git_object_store::ObjectStore;
 
 /// The Git executable, resolved through `PATH`.
 const GIT: &str = "git";
+/// The only executable search path inherited by a Git subprocess.
+const GIT_PATH: &str = "/usr/bin:/bin";
+/// A hooks directory that cannot exist because `/dev/null` is not a directory.
+const DISABLED_HOOKS_PATH: &str = "/dev/null/beacon-disabled-hooks";
 /// A pinned revision is a full commit id; anything shorter is ambiguous, and
 /// anything else could be read by Git as an option rather than a revision.
 const BASE_REVISION_CHARS: usize = 40;
@@ -222,7 +227,7 @@ impl Worktree {
         }
 
         let path = scratch_root.join("tree");
-        let mut command = Command::new(GIT);
+        let mut command = hardened_git_command(Path::new(GIT));
         command
             .arg("-C")
             .arg(&repository)
@@ -286,7 +291,7 @@ impl Worktree {
             return CleanupOutcome::Kept { reasons };
         }
 
-        let mut command = Command::new(git);
+        let mut command = hardened_git_command(git);
         command
             .arg("-C")
             .arg(&self.repository)
@@ -366,7 +371,7 @@ fn abandon_scratch(scratch_root: &Path) {
 /// `status.showUntrackedFiles` setting cannot turn untracked work invisible,
 /// and `--ignore-submodules=none` so a dirty submodule still counts.
 fn status_holds(git: &Path, tree: &Path, budget: Duration) -> Vec<KeepReason> {
-    let mut command = Command::new(git);
+    let mut command = hardened_git_command(git);
     command
         .arg("status")
         .arg("--porcelain")
@@ -406,6 +411,30 @@ enum Bounded {
     Failed,
 }
 
+/// Construct the one production Git command shape used for untrusted trees.
+///
+/// The repository's local configuration still exists because Git needs it to
+/// understand linked worktrees. Disabling known program-valued configuration
+/// here therefore does not protect against clean/smudge filters or another
+/// executable configured by an actor that can write inside `.git`; that local
+/// write capability remains the explicit residual boundary.
+fn hardened_git_command(git: &Path) -> Command {
+    let mut command = Command::new(git);
+    command
+        .env_clear()
+        .env("PATH", GIT_PATH)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .arg("-c")
+        .arg(format!("core.hooksPath={DISABLED_HOOKS_PATH}"))
+        .arg("-c")
+        .arg("core.fsmonitor=false")
+        .arg("-c")
+        .arg("protocol.allow=never");
+    command
+}
+
 /// Run one Git invocation with a deadline.
 ///
 /// Standard output is a pipe that is read only after the child exits. A child
@@ -420,12 +449,7 @@ fn run_git_bounded(mut command: Command, budget: Duration) -> Bounded {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        // Beacon names the repository and the working directory explicitly, so
-        // an inherited GIT_DIR or GIT_WORK_TREE could only redirect Git away
-        // from the tree this gate is deciding about.
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE");
+        .stderr(Stdio::null());
     let Ok(mut child) = command.spawn() else {
         return Bounded::Failed;
     };

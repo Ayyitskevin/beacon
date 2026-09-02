@@ -10,6 +10,7 @@
 //! reach states only Git can produce.
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -81,6 +82,42 @@ fn reasons(outcome: &CleanupOutcome) -> &[KeepReason] {
             panic!("expected the worktree to be kept, and it was removed")
         }
     }
+}
+
+fn hostile_program(path: &Path, sentinel: &Path) {
+    fs::write(
+        path,
+        format!("#!/bin/sh\n: > '{}'\nexit 0\n", sentinel.display()),
+    )
+    .unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn repository_programs_do_not_run_during_worktree_creation_or_cleanup() {
+    let (repository, revision) = fixture_repository("hostile-git-configuration");
+    let hook_sentinel = repository.path.join("hook-ran");
+    let fsmonitor_sentinel = repository.path.join("fsmonitor-ran");
+    let hook = repository.path.join(".git/hooks/post-checkout");
+    let fsmonitor = repository.path.join(".git/hostile-fsmonitor");
+    hostile_program(&hook, &hook_sentinel);
+    hostile_program(&fsmonitor, &fsmonitor_sentinel);
+    git(
+        &repository.path,
+        &["config", "core.fsmonitor", &fsmonitor.to_string_lossy()],
+    );
+
+    let worktree = Worktree::create(&repository.path, &revision).unwrap();
+    assert_eq!(worktree.close(), CleanupOutcome::Removed {});
+
+    assert!(
+        !hook_sentinel.exists(),
+        "repository-controlled post-checkout hook ran"
+    );
+    assert!(
+        !fsmonitor_sentinel.exists(),
+        "repository-controlled fsmonitor ran"
+    );
 }
 
 #[test]
