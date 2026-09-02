@@ -2,14 +2,14 @@ use std::collections::BTreeSet;
 use std::ffi::{CString, OsString};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::Arc;
 
-use flate2::read::ZlibDecoder;
+use flate2::{Decompress, FlushDecompress, Status};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
@@ -918,14 +918,15 @@ fn verify_loose_object(
         .join(&object_id[..2])
         .join(&object_id[2..]);
     let compressed = read_small_regular(&path, 1_048_576)?;
-    let mut decoder = ZlibDecoder::new(compressed.as_slice());
-    let mut object = Vec::new();
-    decoder
-        .by_ref()
-        .take(1_048_577)
-        .read_to_end(&mut object)
+    let mut decoder = Decompress::new(true);
+    let mut object = Vec::with_capacity(1_048_577);
+    let status = decoder
+        .decompress_vec(&compressed, &mut object, FlushDecompress::Finish)
         .map_err(|_| SampleProjectError::TamperedInstallation)?;
-    if object.len() > 1_048_576 {
+    if status != Status::StreamEnd
+        || decoder.total_in() != compressed.len() as u64
+        || object.len() > 1_048_576
+    {
         return Err(SampleProjectError::TamperedInstallation);
     }
     let header_end = object
@@ -1635,6 +1636,54 @@ mod tests {
         permissions.set_mode(0o600);
         fs::set_permissions(&object, permissions).unwrap();
         fs::write(object, b"not the expected commit object").unwrap();
+
+        assert!(matches!(
+            service.install(),
+            Err(SampleProjectError::TamperedInstallation)
+        ));
+        assert_eq!(store.count("sample_project_installations"), 0);
+    }
+
+    #[test]
+    fn orphan_with_trailing_bytes_after_expected_object_is_refused() {
+        let store = TestStore::new("orphan-trailing-object-bytes");
+        let service = store.isolated_service();
+        let destination = service.repository_path();
+        service.materialize_repository(&destination).unwrap();
+        let object = destination
+            .join(".git/objects")
+            .join(&EXPECTED_BASE_REVISION[..2])
+            .join(&EXPECTED_BASE_REVISION[2..]);
+        let mut permissions = fs::metadata(&object).unwrap().permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(&object, permissions).unwrap();
+        let mut bytes = fs::read(&object).unwrap();
+        bytes.extend_from_slice(b"trailing-garbage");
+        fs::write(object, bytes).unwrap();
+
+        assert!(matches!(
+            service.install(),
+            Err(SampleProjectError::TamperedInstallation)
+        ));
+        assert_eq!(store.count("sample_project_installations"), 0);
+    }
+
+    #[test]
+    fn orphan_with_truncated_expected_object_is_refused() {
+        let store = TestStore::new("orphan-truncated-object");
+        let service = store.isolated_service();
+        let destination = service.repository_path();
+        service.materialize_repository(&destination).unwrap();
+        let object = destination
+            .join(".git/objects")
+            .join(&EXPECTED_BASE_REVISION[..2])
+            .join(&EXPECTED_BASE_REVISION[2..]);
+        let mut permissions = fs::metadata(&object).unwrap().permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(&object, permissions).unwrap();
+        let mut bytes = fs::read(&object).unwrap();
+        bytes.pop().unwrap();
+        fs::write(object, bytes).unwrap();
 
         assert!(matches!(
             service.install(),
