@@ -13,15 +13,15 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use beacond::{
-    AutonomyProfile, BeaconCapability, ContextComparison, DeclaredCheck, InconsistentProposal,
-    LocalModelActivationService, LocalModelEndpoint, MalformedProposal, MissionDraft,
-    MissionMemberDraft, MissionService, OperatorAccountError, OperatorAccountService,
-    OperatorSessionPhase, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft,
-    ProjectPolicyService, ProjectRepositoryService, ProjectService, ProposalActor, ProposalError,
-    ProposalService, ProviderFeature, ReadableContext, RepositoryDraft, RepositorySourceKind,
-    ResidentConfigurationService, ResidentLifecycleService, SecretString,
-    StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig, Supervisor,
-    SupervisorError, TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
+    AutonomyProfile, BeaconCapability, ContextComparison, ContextMismatch, ContextMismatchReason,
+    DeclaredCheck, InconsistentProposal, LocalModelActivationService, LocalModelEndpoint,
+    MalformedProposal, MissionDraft, MissionMemberDraft, MissionService, OperatorAccountError,
+    OperatorAccountService, OperatorSessionPhase, ProjectCharterDraft, ProjectDraft,
+    ProjectPolicyDraft, ProjectPolicyService, ProjectRepositoryService, ProjectService,
+    ProposalActor, ProposalError, ProposalService, ProviderFeature, ReadableContext,
+    RepositoryDraft, RepositorySourceKind, ResidentConfigurationService, ResidentLifecycleService,
+    SecretString, StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig,
+    Supervisor, SupervisorError, TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
     TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft, TeamService,
     TrackRecordEvidenceKind, TrackRecordRequirement, UnmetPrecondition,
 };
@@ -712,6 +712,28 @@ impl TempRepository {
             .status()
             .expect("git is available in the test environment");
         assert!(status.success(), "git {arguments:?} failed");
+    }
+
+    /// One commit whose `link.rs` is a symlink, so a declared entry can name a path the walk
+    /// resolves to something that is not a regular file.
+    fn with_symlink(label: &str) -> (Self, String) {
+        let repository = Self::new(label);
+        repository.git(&["init", "--quiet"]);
+        fs::create_dir_all(repository.path.join("src")).unwrap();
+        fs::write(repository.path.join("src/lib.rs"), "fn main() {}\n").unwrap();
+        // Sorts before `link.rs`, so a declaration can put a real mismatch ahead of the entry the
+        // walk cannot read.
+        fs::write(repository.path.join("a.txt"), "first\n").unwrap();
+        std::os::unix::fs::symlink("src/lib.rs", repository.path.join("link.rs")).unwrap();
+        repository.git(&["add", "-A"]);
+        repository.git(&["commit", "--quiet", "-m", "one"]);
+        let output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repository.path)
+            .output()
+            .unwrap();
+        let revision = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+        (repository, revision)
     }
 
     /// Initialise the repository with one commit containing `src/lib.rs`, and return its revision.
@@ -1505,16 +1527,18 @@ fn a_pinned_revision_absent_from_a_real_object_store_is_reported_as_absent_not_u
 }
 
 #[test]
-fn a_present_pinned_revision_still_reports_that_content_could_not_be_read() {
-    // Everything the comparison needs is here: a real object store that opens, holding the exact
-    // pinned commit. The comparison still cannot run, because reading a path's blob at a revision
-    // means decompressing commit and tree objects and `beacond` has no decompressor.
+fn a_declared_entry_that_does_not_hold_at_the_pinned_revision_is_a_mismatch_naming_it() {
+    // This test used to assert the opposite: that a present pinned revision still reported the
+    // content as unreadable, because `beacond` had no decompressor. That was true and is not any
+    // more, and the assertion is replaced rather than deleted -- it is the guard that says this
+    // slice built the thing the last one promised it would not.
     //
-    // The wrong answer this kills is the dangerous one: reporting nothing -- i.e. treating "the
-    // repository is right there and the revision is present" as though the entries had been
-    // checked. That is precisely "labelling the context verified from the manifest's
-    // self-consistency alone", which ADR 0034 forbids.
-    let fixture = admitted_mission("context-content-unreadable");
+    // The record declares `src/lib.rs` with a fabricated digest, and the repository really holds
+    // that path at the pinned commit with different bytes. So the comparison runs, and the wrong
+    // answers it kills are both of the ones that matter: silence, which would label the context
+    // verified from the manifest's self-consistency alone, and a bare "mismatch" that does not say
+    // which entry.
+    let fixture = admitted_mission("context-mismatch");
     let (repository, real_revision) = TempRepository::with_one_commit("present");
     let revision = fixture.rebind_repository(
         1,
@@ -1532,10 +1556,245 @@ fn a_present_pinned_revision_still_reports_that_content_could_not_be_read() {
         proposal
             .readiness()
             .unmet()
-            .contains(&UnmetPrecondition::ReadableContextNotVerified {
-                reason: ContextComparison::ContentUnreadableAtRevision
+            .contains(&UnmetPrecondition::ReadableContextMismatch {
+                entries: vec![ContextMismatch {
+                    path: "src/lib.rs".to_owned(),
+                    reason: ContextMismatchReason::DigestDiffers,
+                }],
             }),
         "{:?}",
+        proposal.readiness().unmet()
+    );
+    // And it is a mismatch, not a not-verified: the difference between a fact about the
+    // Repository and a fact about Beacon's reach is the whole point of the two items.
+    assert!(
+        !proposal
+            .readiness()
+            .unmet()
+            .iter()
+            .any(|item| matches!(item, UnmetPrecondition::ReadableContextNotVerified { .. })),
+        "{:?}",
+        proposal.readiness().unmet()
+    );
+}
+
+#[test]
+fn a_declared_entry_that_holds_at_the_pinned_revision_adds_no_readiness_item() {
+    // The control, and the one outcome that makes the whole slice worth shipping: when the
+    // declared digest is the real SHA-256 of the file's bytes at the pinned revision, the
+    // comparison agrees and says nothing. Without this, a comparison that reported every entry as
+    // mismatched or unverified would pass every other test in this file.
+    let fixture = admitted_mission("context-agrees");
+    let (repository, real_revision) = TempRepository::with_one_commit("agreeing");
+    let revision = fixture.rebind_repository(
+        1,
+        RepositorySourceKind::LocalPath,
+        repository.path.to_str().unwrap(),
+        &real_revision,
+    );
+
+    let mut record = fixture.record();
+    record.repository_revision = revision;
+    record.base_revision = real_revision;
+    // `with_one_commit` writes exactly these bytes to `src/lib.rs`.
+    record.context = Context::Declared {
+        entries: vec![("src/lib.rs".to_owned(), sha256(b"fn main() {}\n"))],
+        manifest: None,
+    };
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+
+    assert!(
+        !proposal.readiness().unmet().iter().any(|item| matches!(
+            item,
+            UnmetPrecondition::ReadableContextMismatch { .. }
+                | UnmetPrecondition::ReadableContextNotVerified { .. }
+        )),
+        "a comparison that agreed still reported an item: {:?}",
+        proposal.readiness().unmet()
+    );
+}
+
+#[test]
+fn a_declared_path_absent_at_the_pinned_revision_is_a_mismatch_not_an_inspection_failure() {
+    // The entry claims a file that was not there. Beacon read every tree on the way and proved it,
+    // so this is a fact about the Repository -- reporting it as a Beacon-side failure would hide a
+    // false declaration behind an excuse.
+    let fixture = admitted_mission("context-absent");
+    let (repository, real_revision) = TempRepository::with_one_commit("absent");
+    let revision = fixture.rebind_repository(
+        1,
+        RepositorySourceKind::LocalPath,
+        repository.path.to_str().unwrap(),
+        &real_revision,
+    );
+
+    let mut record = fixture.record();
+    record.repository_revision = revision;
+    record.base_revision = real_revision;
+    record.context = Context::Declared {
+        entries: vec![("docs/never-existed.md".to_owned(), [0x77; 32])],
+        manifest: None,
+    };
+    record.targets = vec!["docs/never-existed.md".to_owned()];
+    record.mutations = vec![(0x01, "docs/never-existed.md".to_owned())];
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+
+    assert!(
+        proposal
+            .readiness()
+            .unmet()
+            .contains(&UnmetPrecondition::ReadableContextMismatch {
+                entries: vec![ContextMismatch {
+                    path: "docs/never-existed.md".to_owned(),
+                    reason: ContextMismatchReason::PathAbsent,
+                }],
+            }),
+        "{:?}",
+        proposal.readiness().unmet()
+    );
+}
+
+#[test]
+fn a_packed_repository_is_not_verified_rather_than_mismatched() {
+    // After a repack every object on the path is packed, and this reader reads only loose objects.
+    // The wrong answer is reporting the declared entry as false because Beacon could not read the
+    // object that would have judged it -- the exact shape of defect this whole taxonomy exists to
+    // prevent. It is also proof that `PackedObjectUnreadable` is earned rather than assumed: the
+    // authenticated pack lookup found the object, so "packed" is a measurement.
+    let fixture = admitted_mission("context-packed");
+    let (repository, real_revision) = TempRepository::with_one_commit("packed");
+    repository.git(&["gc", "--quiet", "--prune=now"]);
+    let revision = fixture.rebind_repository(
+        1,
+        RepositorySourceKind::LocalPath,
+        repository.path.to_str().unwrap(),
+        &real_revision,
+    );
+
+    let mut record = fixture.record();
+    record.repository_revision = revision;
+    record.base_revision = real_revision;
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+
+    assert!(
+        proposal
+            .readiness()
+            .unmet()
+            .contains(&UnmetPrecondition::ReadableContextNotVerified {
+                reason: ContextComparison::PackedObjectUnreadable
+            }),
+        "{:?}",
+        proposal.readiness().unmet()
+    );
+}
+
+#[test]
+fn an_object_in_no_storage_at_all_is_an_inspection_failure_not_a_packed_object() {
+    // gpt1's S1: "packed" may be claimed only after the authenticated pack lookup says the object
+    // is present. Here the blob is referenced by an authenticated tree and lives in neither loose
+    // nor pack storage, so the store is broken -- and reporting that as "packed" would excuse a
+    // defect as a limitation of Beacon.
+    //
+    // Without this test the pack lookup can be deleted entirely and every other test still passes,
+    // because in all of them the object really is packed.
+    let fixture = admitted_mission("context-missing-object");
+    let (repository, real_revision) = TempRepository::with_one_commit("missing-object");
+    let blob = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD:src/lib.rs"])
+            .current_dir(&repository.path)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    fs::remove_file(
+        repository
+            .path
+            .join(".git/objects")
+            .join(&blob[..2])
+            .join(&blob[2..]),
+    )
+    .unwrap();
+    let revision = fixture.rebind_repository(
+        1,
+        RepositorySourceKind::LocalPath,
+        repository.path.to_str().unwrap(),
+        &real_revision,
+    );
+
+    let mut record = fixture.record();
+    record.repository_revision = revision;
+    record.base_revision = real_revision;
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+
+    assert!(
+        proposal
+            .readiness()
+            .unmet()
+            .contains(&UnmetPrecondition::ReadableContextNotVerified {
+                reason: ContextComparison::InspectionFailed
+            }),
+        "{:?}",
+        proposal.readiness().unmet()
+    );
+}
+
+#[test]
+fn a_mismatch_found_before_an_unreadable_entry_is_discarded_rather_than_published() {
+    // gpt1's F3, and the rule that costs the most to get wrong. Entry one genuinely disagrees;
+    // entry two cannot be read, because its path is a symlink. The buffered mismatch must be
+    // DISCARDED and the whole comparison reported not-verified.
+    //
+    // The wrong answer is publishing the mismatch anyway. A mismatch is an accusation about the
+    // Operator's declaration, and a walk that did not finish has not earned one -- the entry it
+    // could not reach might have been the one that explained the other. A not-verified says less
+    // and is always true.
+    let fixture = admitted_mission("context-buffered");
+    let (repository, real_revision) = TempRepository::with_symlink("buffered");
+    let revision = fixture.rebind_repository(
+        1,
+        RepositorySourceKind::LocalPath,
+        repository.path.to_str().unwrap(),
+        &real_revision,
+    );
+
+    let mut record = fixture.record();
+    record.repository_revision = revision;
+    record.base_revision = real_revision;
+    // Ascending byte order, which the grammar requires: `a.txt` then `link.rs`. The mismatching
+    // entry is FIRST, so a real disagreement is buffered before the walk reaches the entry it
+    // cannot read. An earlier version of this test put the unreadable entry first, which meant the
+    // buffer was empty when the walk stopped -- and a mutant that published buffered mismatches
+    // early passed it. The order is the test.
+    record.context = Context::Declared {
+        entries: vec![
+            ("a.txt".to_owned(), [0x66; 32]),
+            ("link.rs".to_owned(), [0x66; 32]),
+        ],
+        manifest: None,
+    };
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+
+    assert!(
+        proposal
+            .readiness()
+            .unmet()
+            .contains(&UnmetPrecondition::ReadableContextNotVerified {
+                reason: ContextComparison::EntryIsNotARegularFile
+            }),
+        "{:?}",
+        proposal.readiness().unmet()
+    );
+    assert!(
+        !proposal
+            .readiness()
+            .unmet()
+            .iter()
+            .any(|item| matches!(item, UnmetPrecondition::ReadableContextMismatch { .. })),
+        "a buffered mismatch was published from an unfinished walk: {:?}",
         proposal.readiness().unmet()
     );
 }
