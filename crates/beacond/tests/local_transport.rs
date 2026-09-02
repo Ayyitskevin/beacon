@@ -16,13 +16,14 @@ use beacond::{
     AccessOrigin, AutonomyProfile, BeaconCapability, BudgetBoundary, DeclaredCheck,
     DiscoveryStatus, LocalErrorCode, LocalModelActivationState, LocalModelEndpoint,
     LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer, LocalTransportError,
-    MissionAdmissionActor, MissionDraft, MissionLifecycle, MissionMemberDraft, ModelActivation,
-    OperatorSessionPhase, PlatformMonitorState, PolicyAuthor, ProjectCharterDraft, ProjectDraft,
-    ProjectPolicyDraft, ProviderFeature, RepositoryAuthor, RepositoryDraft, RepositorySourceKind,
-    ResidentConfigurationState, ResidentLifecycle, SecretString, StarterOrganizationDecision,
-    StarterResidentDraft, StarterRole, TeamDraft, TeamFormationActor, TeamIneligibilityReason,
-    TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy,
-    TeamMemberDraft, TrackRecordEvidenceKind, TrackRecordRequirement, initialize_local_auth_token,
+    MAX_RECENT_RUN_WINDOW, MissionAdmissionActor, MissionDraft, MissionLifecycle,
+    MissionMemberDraft, ModelActivation, OperatorSessionPhase, PlatformMonitorState, PolicyAuthor,
+    ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProviderFeature, RepositoryAuthor,
+    RepositoryDraft, RepositorySourceKind, ResidentConfigurationState, ResidentLifecycle,
+    SecretString, StarterOrganizationDecision, StarterResidentDraft, StarterRole, TeamDraft,
+    TeamFormationActor, TeamIneligibilityReason, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
+    TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft, TrackRecordEvidenceKind,
+    TrackRecordRequirement, initialize_local_auth_token,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -1176,4 +1177,60 @@ fn an_incomplete_unauthenticated_request_cannot_stall_the_supervisor() {
         completed_promptly,
         "the valid request completed only after the slow client disconnected"
     );
+}
+
+#[test]
+fn recent_receipts_are_workspace_scoped_bounded_and_authenticated_over_the_local_transport() {
+    // The Query crosses the socket with the bound the daemon applied, not the
+    // one the caller asked for, and it refuses a closed session like every
+    // other read. An empty Workspace answers with an empty reading rather than
+    // a failure: nothing has run yet is not a broken store.
+    let runtime = TestRuntime::new("recent-receipts");
+    let server = runtime.server();
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+
+    assert!(matches!(
+        client.recent_receipts(50),
+        Err(LocalTransportError::Remote {
+            code: LocalErrorCode::NotAuthenticated,
+            ..
+        })
+    ));
+    client
+        .begin_password_setup(
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+    client.complete_operator_setup(true).unwrap();
+
+    let page = client.recent_receipts(50).unwrap();
+    assert!(page.receipts.is_empty());
+    assert_eq!(page.runs_in_flight_in_window, 0);
+    assert_eq!(page.runs_unconfirmed_in_window, 0);
+    assert_eq!(page.run_window_applied, 50);
+    assert!(!page.more_runs_exist);
+
+    // The daemon owns the bound, and says which one it applied.
+    let clamped = client.recent_receipts(100_000).unwrap();
+    assert_eq!(clamped.run_window_applied, MAX_RECENT_RUN_WINDOW);
+
+    // No payload body crosses the wire, whatever the reading found.
+    let rendered = serde_json::to_string(&page).unwrap();
+    assert!(!rendered.contains("receiptJson"));
+
+    client.lock().unwrap();
+    assert!(matches!(
+        client.recent_receipts(50),
+        Err(LocalTransportError::Remote {
+            code: LocalErrorCode::NotAuthenticated,
+            ..
+        })
+    ));
+
+    running.store(false, Ordering::Release);
+    thread.join().unwrap().unwrap();
 }
