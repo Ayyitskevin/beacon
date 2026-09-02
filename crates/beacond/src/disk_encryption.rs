@@ -1024,7 +1024,7 @@ impl Walker<'_> {
         evidence: &mut Vec<EncryptionEvidence>,
     ) -> Result<Mapping, String> {
         let uuid_path = node.join("dm/uuid");
-        let uuid = read_sysfs(&uuid_path)?;
+        let uuid = read_required(&uuid_path)?;
         // A mapping with a uuid always has a name beside it. Substituting a
         // placeholder for a failed read would let a read failure reach a
         // confident state, which is the one thing this reader must never do.
