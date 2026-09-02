@@ -6,9 +6,10 @@ import {
   parseObjectLink,
   routeObjectLink,
   type LinkContext,
+  type LoadedProjects,
   type ObjectLink,
 } from "./objectLinks";
-import type { MissionView, ProjectSummary } from "./session";
+import type { MissionView, ProjectSummary, ProjectView } from "./session";
 
 const WORKSPACE = "1a2b3c4d-5e6f-4a8b-9c0d-1e2f3a4b5c6d";
 const PROJECT = "44444444-4444-4444-8444-444444444444";
@@ -46,7 +47,7 @@ const mission: MissionView = {
 const context = (overrides: Partial<LinkContext> = {}): LinkContext => ({
   phase: "unlocked",
   workspaceId: WORKSPACE,
-  projects: [project],
+  projects: { workspaceId: WORKSPACE, items: [project] },
   missions: { projectId: PROJECT, items: [mission] },
   ...overrides,
 });
@@ -213,7 +214,7 @@ describe("routing an object link", () => {
     const otherProject: ProjectSummary = { ...project, id: otherId };
     const otherMission: MissionView = { ...mission, id: otherId };
 
-    expect(routeObjectLink(link(projectLink), context({ projects: [otherProject] }))).toEqual({
+    expect(routeObjectLink(link(projectLink), context({ projects: { workspaceId: WORKSPACE, items: [otherProject] } }))).toEqual({
       outcome: "absent",
       missing: "project",
       id: PROJECT,
@@ -227,14 +228,14 @@ describe("routing an object link", () => {
   });
 
   it("names the object that is missing, and does not land on Briefing", () => {
-    expect(routeObjectLink(link(projectLink), context({ projects: [] }))).toEqual({
+    expect(routeObjectLink(link(projectLink), context({ projects: { workspaceId: WORKSPACE, items: [] } }))).toEqual({
       outcome: "absent",
       missing: "project",
       id: PROJECT,
     });
     // A Mission link whose Project is absent names the PROJECT: the Mission is
     // not the thing that is missing.
-    expect(routeObjectLink(link(missionLink), context({ projects: [] }))).toEqual({
+    expect(routeObjectLink(link(missionLink), context({ projects: { workspaceId: WORKSPACE, items: [] } }))).toEqual({
       outcome: "absent",
       missing: "project",
       id: PROJECT,
@@ -266,6 +267,49 @@ describe("routing an object link", () => {
       outcome: "notLoaded",
       awaiting: "missions",
     });
+  });
+
+  it("refuses a Project row that states a Workspace at all", () => {
+    // The reading IS the scope, so a Project row has no parent to state -- and a
+    // type that ACCEPTED one while ignoring it would be the guard-keyed-on-
+    // something-adjacent defect in its purest form. `ProjectView` states a
+    // Workspace, so it cannot enter the reading; this is a compile error, not a
+    // runtime branch, and `@ts-expect-error` fails the BUILD if the guard is
+    // ever removed. `ProjectSummary`, which states no parent, still assigns.
+    const stated: ProjectView = {
+      id: PROJECT,
+      workspaceId: WORKSPACE,
+      name: "Wayfinding",
+      charter: {
+        purpose: "Chart the approach",
+        desiredOutcomes: [],
+        constraints: [],
+        prohibitions: [],
+        autonomyProfile: "supervised",
+        revision: 1,
+        budgetBoundary: "no_spend",
+        externalEffects: "prohibited",
+        authoredAtMs: 1_756_000_000_000,
+      },
+      createdAtMs: 1_756_000_000_000,
+    };
+    // @ts-expect-error a row that states its Workspace cannot enter the reading
+    const reading: LoadedProjects = { workspaceId: WORKSPACE, items: [stated] };
+    expect(reading.items).toHaveLength(1);
+  });
+
+  it("treats another Workspace's loaded Projects as no evidence about this one", () => {
+    // The provenance half. "The list is the current Workspace's" was a
+    // precondition written in prose, and prose does not refuse a reading
+    // carried over from another Workspace -- which is how a foreign Project
+    // would have been found and opened.
+    const otherWorkspaceId = "88888888-8888-4888-8888-888888888888";
+    expect(
+      routeObjectLink(
+        link(projectLink),
+        context({ projects: { workspaceId: otherWorkspaceId, items: [project] } }),
+      ),
+    ).toEqual({ outcome: "notLoaded", awaiting: "projects" });
   });
 
   it("treats another Project's loaded Missions as no evidence about this one", () => {
