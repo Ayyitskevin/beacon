@@ -47,6 +47,11 @@ const MAX_STACK_NODES: usize = 64;
 const MAX_EVIDENCE_ENTRIES: usize = 32;
 const MAX_OBSERVATION_CHARS: usize = 200;
 const MAX_CRYPT_TYPE_CHARS: usize = 16;
+/// Path components walked upward when deciding absence from brokenness.
+const MAX_PATH_ANCESTORS: usize = 32;
+/// A path inside a one-sentence conclusion keeps its tail, which is the part
+/// that says which device it is.
+const MAX_PATH_IN_REASON: usize = 96;
 /// A hexadecimal run at least this long is treated as an identifier, not text.
 const MAX_IDENTIFIER_RUN_CHARS: usize = 12;
 
@@ -292,7 +297,10 @@ fn inspect_linux(
     } else {
         // btrfs and ZFS report an anonymous device number, so the block device
         // has to come from the mount source instead.
-        match block_device_of_source(&mount.source) {
+        match match block_device_of_source(&mount.source) {
+            Ok(found) => found,
+            Err(reason) => return unknown_owned(evidence, mount_point, reason, observed_at_ms),
+        } {
             Some(device) => {
                 record(
                     &mut evidence,
@@ -520,7 +528,7 @@ fn resolve_target(store_path: &Path) -> Result<PathBuf, String> {
                     fs::canonicalize(parent)
                         .map_err(|error| unresolved(&format!("{:?}", error.kind())))
                 }
-                Ok(_) => Err("the live store path is a link that resolves to nothing".to_owned()),
+                Ok(_) => Err(dangling(store_path)),
                 Err(error) => Err(unresolved(&format!("{:?}", error.kind()))),
             }
         }
@@ -536,16 +544,25 @@ fn device_of(path: &Path) -> Option<DeviceNumber> {
     Some(DeviceNumber::from_raw(fs::metadata(path).ok()?.dev()))
 }
 
-fn block_device_of_source(source: &str) -> Option<DeviceNumber> {
+/// The block device behind a mount source, for filesystems whose own device
+/// number is anonymous. Routed through `presence` like every other link the
+/// walk follows: a `/dev/mapper/...` entry pointing at nothing is broken, not
+/// a filesystem that exposes no block device.
+fn block_device_of_source(source: &str) -> Result<Option<DeviceNumber>, String> {
     let path = Path::new(source);
     if !path.is_absolute() {
-        return None;
+        return Ok(None);
     }
-    let metadata = fs::metadata(path).ok()?;
-    if !metadata.file_type().is_block_device() {
-        return None;
+    match presence(path)? {
+        Presence::Missing => Ok(None),
+        Presence::Present => match fs::metadata(path) {
+            Ok(metadata) if metadata.file_type().is_block_device() => {
+                Ok(Some(DeviceNumber::from_raw(metadata.rdev())))
+            }
+            Ok(_) => Ok(None),
+            Err(error) => Err(unreadable_reason(path, error.kind())),
+        },
     }
-    Some(DeviceNumber::from_raw(metadata.rdev()))
 }
 
 /// Filesystems whose encryption is not decided by a block device under this
@@ -868,7 +885,7 @@ impl Walker<'_> {
                     }
                 };
                 let dev_file = child.path().join("dev");
-                match read_sysfs(&dev_file) {
+                match read_required(&dev_file) {
                     Ok(value) => match DeviceNumber::parse(&value) {
                         Some(parent) => parents.push(parent),
                         None => {
@@ -923,7 +940,7 @@ impl Walker<'_> {
         // A mapping with a uuid always has a name beside it. Substituting a
         // placeholder for a failed read would let a read failure reach a
         // confident state, which is the one thing this reader must never do.
-        let name = bounded(read_sysfs(&node.join("dm/name"))?);
+        let name = bounded(read_required(&node.join("dm/name"))?);
         match crypt_type(&uuid) {
             Some(kind) => {
                 // The type prefix only. The remainder of a crypt UUID is a
@@ -1024,18 +1041,64 @@ enum Presence {
     Missing,
 }
 
+/// The one place this module asks the filesystem whether something is there.
+///
+/// Every step of the walk follows links -- the store path, `slaves/*`, the
+/// `dev` file behind each slave entry, `dm/*`, `loop/backing_file` -- and a
+/// link that resolves to nothing answers `NotFound`, exactly as a name that was
+/// never created does. Believing that answer is how an unread stack becomes a
+/// proven negative, so `NotFound` is only absence once every component of the
+/// path is known to resolve.
 fn presence(path: &Path) -> Result<Presence, String> {
     match fs::symlink_metadata(path) {
-        Ok(_) => Ok(Presence::Present),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Presence::Missing),
+        // The name is there. Following it is a separate question: a dangling
+        // link has metadata of its own and none at its target.
+        Ok(_) => match fs::metadata(path) {
+            Ok(_) => Ok(Presence::Present),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(dangling(path)),
+            Err(error) => Err(unreadable_reason(path, error.kind())),
+        },
+        // Not there -- or a parent component is a link to nothing, which is a
+        // different fact and reaches this arm with the same error.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            for ancestor in path.ancestors().skip(1).take(MAX_PATH_ANCESTORS) {
+                if ancestor.as_os_str().is_empty() {
+                    break;
+                }
+                match fs::symlink_metadata(ancestor) {
+                    Ok(_) => match fs::metadata(ancestor) {
+                        // This component resolves, so the leaf really is absent.
+                        Ok(_) => return Ok(Presence::Missing),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            return Err(dangling(ancestor));
+                        }
+                        Err(error) => return Err(unreadable_reason(ancestor, error.kind())),
+                    },
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(unreadable_reason(ancestor, error.kind())),
+                }
+            }
+            Ok(Presence::Missing)
+        }
         Err(error) => Err(unreadable_reason(path, error.kind())),
     }
 }
 
-/// The same question for a directory. `fs::metadata` follows, deliberately:
+fn dangling(path: &Path) -> String {
+    format!("{} is a link that resolves to nothing", shorten_path(path))
+}
+
+/// Reads a value the walk requires. Absence is a broken stack, not a value.
+fn read_required(path: &Path) -> Result<String, String> {
+    match presence(path)? {
+        Presence::Present => read_sysfs(path),
+        Presence::Missing => Err(unreadable_reason(path, std::io::ErrorKind::NotFound)),
+    }
+}
+
+/// The same question for a directory. Presence already followed the link --
 /// every entry under /sys/dev/block is a symlink to the device's real
-/// directory, so a non-following check would call every live device a
-/// non-directory. A link that resolves to nothing is an error, not an absence.
+/// directory -- so this only adds "and it is a directory".
 fn directory_presence(path: &Path) -> Result<Presence, String> {
     match presence(path)? {
         Presence::Missing => Ok(Presence::Missing),
@@ -1050,8 +1113,24 @@ fn directory_presence(path: &Path) -> Result<Presence, String> {
 fn unreadable_reason(path: &Path, kind: std::io::ErrorKind) -> String {
     format!(
         "a device in the volume's stack could not be read: {} ({kind:?})",
-        path.display()
+        shorten_path(path)
     )
+}
+
+/// Shortens a path for a one-sentence conclusion without losing which path it
+/// is. A bound belongs on the components a sentence is built from, never on the
+/// sentence: truncating the assembled text is how a conclusion turns into a
+/// fragment of a device name.
+fn shorten_path(path: &Path) -> String {
+    let text = path.display().to_string();
+    if text.chars().count() <= MAX_PATH_IN_REASON {
+        return text;
+    }
+    let tail: String = text
+        .chars()
+        .skip(text.chars().count() - (MAX_PATH_IN_REASON - 1))
+        .collect();
+    format!("\u{2026}{tail}")
 }
 
 fn over_budget(path: &Path) -> String {
