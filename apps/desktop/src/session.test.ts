@@ -1056,6 +1056,34 @@ describe("desktop session transport", () => {
     await expect(loadPreflightReceipts(receipt.projectId)).rejects.toThrow(
       "invalid preflight Receipt list",
     );
+
+    // A number the renderer cannot turn into a Date. `typeof === "number"`
+    // accepts it, `new Date(...).toISOString()` throws RangeError, and the
+    // designed failed-read state never runs.
+    invokeMock.mockResolvedValue([{ ...receipt, startedAtMs: Number.MAX_VALUE }]);
+    await expect(loadPreflightReceipts(receipt.projectId)).rejects.toThrow(
+      "invalid preflight Receipt list",
+    );
+    invokeMock.mockResolvedValue([{ ...receipt, endedAtMs: Number.NaN }]);
+    await expect(loadPreflightReceipts(receipt.projectId)).rejects.toThrow(
+      "invalid preflight Receipt list",
+    );
+    invokeMock.mockResolvedValue([{ ...receipt, startedAtMs: 10.5 }]);
+    await expect(loadPreflightReceipts(receipt.projectId)).rejects.toThrow(
+      "invalid preflight Receipt list",
+    );
+    // A Run cannot end before it started.
+    invokeMock.mockResolvedValue([{ ...receipt, startedAtMs: 30, endedAtMs: 20 }]);
+    await expect(loadPreflightReceipts(receipt.projectId)).rejects.toThrow(
+      "invalid preflight Receipt list",
+    );
+
+    // The closed outcome set, which the accepted design named as a
+    // wrong-answer test and the first version of this suite did not carry.
+    invokeMock.mockResolvedValue([{ ...receipt, outcome: "unconfirmed" }]);
+    await expect(loadPreflightReceipts(receipt.projectId)).rejects.toThrow(
+      "invalid preflight Receipt list",
+    );
   });
 
   it("accepts an exact preflight Receipt and rejects one that hides what it skipped", async () => {
