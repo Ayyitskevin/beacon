@@ -274,9 +274,18 @@ impl StoredRun {
             // No Receipt. Both writers insert the Run's terminal state and its
             // Receipt in one transaction, and only lease reconciliation sets
             // `unconfirmed`, so any other state here is an inconsistent store.
-            return match self.state.as_str() {
-                "preflighting" => Ok(Classified::InFlight),
-                "unconfirmed" => Ok(Classified::Unconfirmed),
+            //
+            // The END TIME is part of that tuple, not decoration. A
+            // `preflighting` Run is holding its lease and has not finished; one
+            // carrying an end time says both, and the table's CHECK only
+            // requires `ended >= started`, so the store admits it. Lease
+            // reconciliation sets `unconfirmed` and `ended_at_ms` in one
+            // statement, so an unconfirmed Run without an end is the same
+            // contradiction from the other side. Either is refused rather than
+            // counted: a contradiction must not become a presence.
+            return match (self.state.as_str(), self.ended_at_ms) {
+                ("preflighting", None) => Ok(Classified::InFlight),
+                ("unconfirmed", Some(_)) => Ok(Classified::Unconfirmed),
                 _ => Err(RecentReceiptError::InvalidStore),
             };
         };

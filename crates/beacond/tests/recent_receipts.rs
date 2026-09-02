@@ -569,3 +569,66 @@ fn an_inconsistent_run_outside_the_window_does_not_fail_the_reading() {
     assert_eq!(page.receipts.len(), 5);
     assert!(page.more_runs_exist);
 }
+
+#[test]
+fn a_live_run_that_already_ended_is_an_inconsistent_store() {
+    // gpt1's P1: a receiptless `preflighting` Run carrying an end time says two
+    // things that cannot both be true -- it is still holding its lease, and it
+    // finished. The table's CHECK only requires `ended >= started`, so the store
+    // admits the row; the tuple validation this module promises is what refuses
+    // it. Counting it as in flight turns a contradiction into a presence.
+    let fixture = enrolled("live-run-with-end");
+    let project = fixture.project("Beacon Alpha");
+    let run_id = Uuid::new_v4();
+    fixture
+        .store
+        .connection()
+        .execute(
+            "INSERT INTO runs (
+                 workspace_id, id, project_id, kind, repository_revision, charter_revision,
+                 state, lease_expires_at_ms, started_at_ms, ended_at_ms
+             ) VALUES (?1, ?2, ?3, 'check_preflight', 1, 1, 'preflighting', 0, 10, 11)",
+            params![
+                fixture.workspace_id.to_string(),
+                run_id.to_string(),
+                project.to_string()
+            ],
+        )
+        .unwrap();
+
+    assert!(matches!(
+        fixture.recent.recent(50),
+        Err(RecentReceiptError::InvalidStore)
+    ));
+}
+
+#[test]
+fn an_unconfirmed_run_without_an_end_is_an_inconsistent_store() {
+    // The other half of the same tuple. Lease reconciliation sets `unconfirmed`
+    // and `ended_at_ms` in one statement (`check_preflight.rs`), so an
+    // unconfirmed Run that never ended is not a row this reader can have
+    // written -- and counting it would report an expired lease that has no end.
+    let fixture = enrolled("unconfirmed-without-end");
+    let project = fixture.project("Beacon Alpha");
+    let run_id = Uuid::new_v4();
+    fixture
+        .store
+        .connection()
+        .execute(
+            "INSERT INTO runs (
+                 workspace_id, id, project_id, kind, repository_revision, charter_revision,
+                 state, lease_expires_at_ms, started_at_ms, ended_at_ms
+             ) VALUES (?1, ?2, ?3, 'declared_checks', 1, 1, 'unconfirmed', 0, 10, NULL)",
+            params![
+                fixture.workspace_id.to_string(),
+                run_id.to_string(),
+                project.to_string()
+            ],
+        )
+        .unwrap();
+
+    assert!(matches!(
+        fixture.recent.recent(50),
+        Err(RecentReceiptError::InvalidStore)
+    ));
+}
