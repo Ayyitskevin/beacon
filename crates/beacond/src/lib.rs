@@ -1241,13 +1241,14 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        AutonomyProfile, CheckPreflightService, DeclaredCheck, DiagnosticStatus, MIGRATION_V2,
-        MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6, MIGRATION_V7, MIGRATION_V8,
-        MIGRATION_V9, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12, MIGRATION_V13, MIGRATION_V14,
-        MIGRATION_V15, MIGRATION_V16_ONLY, MIGRATION_V17, OperatorAccountService, PreflightOutcome,
-        PreflightReceipt, ProjectCharterDraft, ProjectDraft, ProjectRepositoryService,
-        ProjectService, RepositoryDraft, RepositorySourceKind, SCHEMA_V1, SecretString,
-        StartupConfig, Supervisor, SupervisorError,
+        AutonomyProfile, BudgetBoundary, CheckPreflightService, DeclaredCheck, DiagnosticStatus,
+        ExternalEffects, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6,
+        MIGRATION_V7, MIGRATION_V8, MIGRATION_V9, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12,
+        MIGRATION_V13, MIGRATION_V14, MIGRATION_V15, MIGRATION_V16_ONLY, MIGRATION_V17,
+        OperatorAccountService, PreflightOutcome, PreflightReceipt, ProjectCharter,
+        ProjectCharterDraft, ProjectDraft, ProjectRepositoryService, ProjectService, ProjectView,
+        Recorded, RepositoryDraft, RepositorySourceKind, ResolvedCheck, SCHEMA_V1, SecretString,
+        StartupConfig, Supervisor, SupervisorError, UnavailableEvidence,
     };
 
     struct TestStore {
@@ -2424,6 +2425,286 @@ mod tests {
             assert!(!trigger_sql.contains("events_v12"));
             assert!(!trigger_sql.contains("events_v13"));
         }
+        assert_eq!(
+            connection
+                .query_row("PRAGMA foreign_key_check", [], |row| row
+                    .get::<_, String>(0))
+                .optional()
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn populated_version_fourteen_store_preserves_run_and_receipt_bytes() {
+        let store = TestStore::new("version-fourteen-populated-run-migration");
+        let workspace_id = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
+        let run_id = Uuid::new_v4();
+        let base_revision = "0123456789abcdef0123456789abcdef01234567";
+        let declared_checks = vec![DeclaredCheck {
+            name: "test".to_owned(),
+            argv: vec!["cargo".to_owned(), "test".to_owned()],
+            working_directory: ".".to_owned(),
+        }];
+        let project_event_json = serde_json::json!({
+            "project": ProjectView {
+                id: project_id,
+                workspace_id,
+                name: "Migrated project".to_owned(),
+                charter: ProjectCharter {
+                    revision: 1,
+                    purpose: "Preserve migration evidence".to_owned(),
+                    desired_outcomes: vec!["survives".to_owned()],
+                    constraints: Vec::new(),
+                    prohibitions: Vec::new(),
+                    autonomy_profile: AutonomyProfile::Observe,
+                    budget_boundary: BudgetBoundary::NoSpend,
+                    external_effects: ExternalEffects::Prohibited,
+                    authored_at_ms: 11,
+                },
+                created_at_ms: 11,
+            }
+        })
+        .to_string();
+        let repository_event_json = serde_json::json!({
+            "project": { "id": project_id },
+            "repository": {
+                "revision": 1,
+                "charterRevision": 1,
+                "sourceKind": "local_path",
+                "source": "/tmp/existing",
+                "baseRevision": base_revision,
+                "declaredChecks": declared_checks,
+                "authorKind": "operator",
+                "authoredAtMs": 13
+            }
+        })
+        .to_string();
+        let receipt = PreflightReceipt {
+            version: 1,
+            run_id,
+            workspace_id,
+            project_id,
+            repository_revision: 1,
+            charter_revision: 1,
+            outcome: PreflightOutcome::Verified,
+            source_kind: RepositorySourceKind::LocalPath,
+            source: "/tmp/existing".to_owned(),
+            base_revision: base_revision.to_owned(),
+            resolved_checks: vec![ResolvedCheck {
+                name: "test".to_owned(),
+                argv: vec!["cargo".to_owned(), "test".to_owned()],
+                declared_working_directory: ".".to_owned(),
+                resolved_working_directory: Recorded::Present {
+                    value: "/tmp/existing".to_owned(),
+                },
+            }],
+            sandbox_version: "fixture-v1".to_owned(),
+            policy_charter_revision: 1,
+            policy_repository_revision: 1,
+            started_at_ms: 17,
+            ended_at_ms: 19,
+            not_verified: vec!["fixture gap".to_owned()],
+            unavailable: UnavailableEvidence {
+                proposal_digest: Recorded::Absent {
+                    reason: "fixture gap".to_owned(),
+                },
+                ruling_digest: Recorded::Absent {
+                    reason: "fixture gap".to_owned(),
+                },
+                resulting_revision: Recorded::Absent {
+                    reason: "fixture gap".to_owned(),
+                },
+                filesystem_effects: Recorded::Absent {
+                    reason: "fixture gap".to_owned(),
+                },
+                diff_digest: Recorded::Absent {
+                    reason: "fixture gap".to_owned(),
+                },
+                model_invocations: Recorded::Absent {
+                    reason: "fixture gap".to_owned(),
+                },
+                cost_usd_micros: Recorded::Absent {
+                    reason: "fixture gap".to_owned(),
+                },
+            },
+        };
+        let receipt_json = serde_json::to_string_pretty(&receipt).unwrap();
+        let connection = Connection::open(&store.path).unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .unwrap();
+        connection.execute_batch(SCHEMA_V1).unwrap();
+        for migration in [
+            MIGRATION_V2,
+            MIGRATION_V3,
+            MIGRATION_V4,
+            MIGRATION_V5,
+            MIGRATION_V6,
+            MIGRATION_V7,
+            MIGRATION_V8,
+            MIGRATION_V9,
+            MIGRATION_V10,
+            MIGRATION_V11,
+            MIGRATION_V12,
+            MIGRATION_V13,
+            MIGRATION_V14,
+        ] {
+            connection.execute_batch(migration).unwrap();
+        }
+        assert_eq!(
+            connection
+                .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        connection
+            .execute(
+                "INSERT INTO workspaces (id, name, created_at_ms) VALUES (?1, 'Existing', 7)",
+                [workspace_id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO projects (
+                     id, workspace_id, name, current_charter_revision, created_at_ms, updated_at_ms
+                 ) VALUES (?1, ?2, 'Migrated project', 1, 11, 11)",
+                rusqlite::params![project_id.to_string(), workspace_id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO project_charter_revisions (
+                     workspace_id, project_id, revision, purpose, desired_outcomes_json,
+                     constraints_json, prohibitions_json, autonomy_profile, budget_boundary,
+                     external_effects, author_kind, authored_at_ms
+                 ) VALUES (?1, ?2, 1, 'Preserve migration evidence', '[\"survives\"]',
+                           '[]', '[]', 'observe', 'no_spend', 'prohibited', 'owner', 11)",
+                rusqlite::params![workspace_id.to_string(), project_id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO project_creation_snapshots (
+                     project_id, workspace_id, initial_name, initial_charter_revision, created_at_ms
+                 ) VALUES (?1, ?2, 'Migrated project', 1, 11)",
+                rusqlite::params![project_id.to_string(), workspace_id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+                 VALUES (?1, 'project.created', ?2, 11)",
+                rusqlite::params![workspace_id.to_string(), project_event_json],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO project_repository_revisions (
+                     workspace_id, project_id, revision, charter_revision, source_kind, source,
+                     base_revision, declared_checks_json, author_kind, authored_at_ms
+                 ) VALUES (?1, ?2, 1, 1, 'local_path', '/tmp/existing', ?3,
+                           ?4, 'operator', 13)",
+                rusqlite::params![
+                    workspace_id.to_string(),
+                    project_id.to_string(),
+                    base_revision,
+                    serde_json::to_string(&declared_checks).unwrap()
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+                 VALUES (?1, 'project.repository_bound', ?2, 13)",
+                rusqlite::params![workspace_id.to_string(), repository_event_json],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO runs (
+                     workspace_id, id, project_id, kind, repository_revision, charter_revision,
+                     state, lease_expires_at_ms, started_at_ms, ended_at_ms
+                 ) VALUES (?1, ?2, ?3, 'check_preflight', 1, 1, 'verified', 23, 17, 19)",
+                rusqlite::params![
+                    workspace_id.to_string(),
+                    run_id.to_string(),
+                    project_id.to_string()
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO receipts (
+                     workspace_id, run_id, version, outcome, receipt_json, recorded_at_ms
+                 ) VALUES (?1, ?2, 1, 'verified', ?3, 19)",
+                rusqlite::params![workspace_id.to_string(), run_id.to_string(), receipt_json],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+                 VALUES (?1, 'run.preflighted', ?2, 19)",
+                rusqlite::params![workspace_id.to_string(), receipt_json],
+            )
+            .unwrap();
+
+        let read_run = |connection: &Connection| {
+            connection
+                .query_row(
+                    "SELECT workspace_id, id, project_id, kind, repository_revision,
+                            charter_revision, state, lease_expires_at_ms, started_at_ms,
+                            ended_at_ms
+                     FROM runs",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, i64>(4)?,
+                            row.get::<_, i64>(5)?,
+                            row.get::<_, String>(6)?,
+                            row.get::<_, i64>(7)?,
+                            row.get::<_, i64>(8)?,
+                            row.get::<_, Option<i64>>(9)?,
+                        ))
+                    },
+                )
+                .unwrap()
+        };
+        let read_receipt = |connection: &Connection| {
+            connection
+                .query_row(
+                    "SELECT workspace_id, run_id, version, outcome, receipt_json, recorded_at_ms
+                     FROM receipts",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, i64>(5)?,
+                        ))
+                    },
+                )
+                .unwrap()
+        };
+        let run_before = read_run(&connection);
+        let receipt_before = read_receipt(&connection);
+        assert_eq!(receipt_before.4.as_bytes(), receipt_json.as_bytes());
+        drop(connection);
+
+        let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
+
+        assert_eq!(report.diagnostics.schema_version, 17);
+        let connection = Connection::open(&store.path).unwrap();
+        assert_eq!(read_run(&connection), run_before);
+        assert_eq!(read_receipt(&connection), receipt_before);
         assert_eq!(
             connection
                 .query_row("PRAGMA foreign_key_check", [], |row| row
