@@ -615,7 +615,7 @@ also grants each declared-context Proposal its own budget rather than sharing on
 Those residuals are recorded in `docs/implementation/phase-2-proposal-v1.md`; the
 ADR should not be read as promising a bound that is not enforced.
 
-**A stated limit, superseded by the amendment below.** The "when the bound Repository is locally available …
+**A stated limit.** The "when the bound Repository is locally available …
 compares every entry with that revision" branch of this ADR's readable-context
 section is **not implemented**, and `ContentUnreadableAtRevision` is the terminal
 state today. Resolving a path to its bytes at a revision requires decompressing
@@ -649,14 +649,21 @@ the readiness vocabulary a consumer sees is described where the vocabulary is
 defined. Kevin's merge is the acceptance; until then this is a proposal from the
 implementing seat.
 
-### What changed
+### What this proposes to change
 
-The "A stated limit" section above is superseded. It said the comparison branch
-of this ADR was not implemented because `beacond` had no decompressor and
-`git_object_store.rs` was presence-only. Both stopped being true: `flate2` landed
-with the Git-hardening work, and the object store gained a loose-object reader and
-a commit → tree → blob path walk. `ContentUnreadableAtRevision` is no longer the
-terminal state for a local repository whose objects are loose.
+**If the Steward accepts this at merge, it supersedes the "A stated limit"
+section above.** That section is left exactly as accepted until then: an
+implementing seat cannot pre-apply a decision it is asking for, and editing
+accepted text while the amendment says "nothing here changes it" would make both
+claims false at once. A non-author review caught that this draft had done exactly
+that, and it is right — this is a public authority contract under GOVERNANCE.
+
+What that section says is now out of date rather than wrong-when-written: it said
+the comparison branch was not implemented because `beacond` had no decompressor
+and `git_object_store.rs` was presence-only. `flate2` landed with the
+Git-hardening work, and the object store gained a loose-object reader and a
+commit → tree → blob path walk, so for a local repository whose objects are loose
+the comparison now runs.
 
 The comparison resolves each declared entry's path at the pinned base revision,
 reads the blob, and compares **SHA-256 of the file's bytes** with the entry's
