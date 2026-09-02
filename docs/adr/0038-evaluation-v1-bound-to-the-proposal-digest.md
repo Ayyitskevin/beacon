@@ -164,6 +164,15 @@ invisible to both.
 
 ## What v1 does not do
 
+**It does not satisfy alpha criterion 26.** Criterion 26 requires that Material
+Artifacts be evaluated by an Agent other than their author. Evaluation v1 makes
+that requirement *checkable for Proposals* — it gives the verdict a shape, an
+identity, a store, and a non-author invariant the store enforces — and a
+Proposal is not a Material Artifact. There is no Artifact entity, no
+Artifact-subject arm on `subject`, and no dispatch that would produce a Material
+Artifact to evaluate. Closing criterion 26 needs all three. A later reader must
+not mistake this evidence primitive for the criterion it serves.
+
 Slices 2 and 3 add structural non-authorship and supersession. Slice 4 — the
 Ruling citation — is deferred, per the decision above. Until then no surface
 consumes an Evaluation, which is deliberate: a panel showing `meets` with no
