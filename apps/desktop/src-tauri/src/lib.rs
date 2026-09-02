@@ -8,8 +8,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use beacond::{
-    AccessOrigin, BeaconCapability, BeaconCapabilityDescriptor, LocalErrorCode,
-    LocalModelActivation, LocalModelActivationReview, LocalModelDiscoveryReport,
+    AccessOrigin, BeaconCapability, BeaconCapabilityDescriptor, LiveDataEncryptionReport,
+    LocalErrorCode, LocalModelActivation, LocalModelActivationReview, LocalModelDiscoveryReport,
     LocalSupervisorClient, LocalTransportError, MissionDraft, MissionView, OperatorSessionPolicy,
     OperatorSessionStatus, PlatformSessionMonitorStatus, PreflightReceipt, ProjectCharter,
     ProjectCharterDraft, ProjectDraft, ProjectPolicy, ProjectPolicyDraft, ProjectRepository,
@@ -929,6 +929,15 @@ fn discover_local_models_value(
     state.supervisor.discover_local_models().map_err(Into::into)
 }
 
+fn live_data_encryption_status_value(
+    state: &DesktopState,
+) -> Result<LiveDataEncryptionReport, CommandError> {
+    state
+        .supervisor
+        .live_data_encryption_status()
+        .map_err(Into::into)
+}
+
 fn inspect_local_model_value(
     state: &DesktopState,
     model_name: String,
@@ -1358,6 +1367,13 @@ fn discover_local_models(
 }
 
 #[tauri::command]
+fn live_data_encryption_status(
+    state: State<'_, DesktopState>,
+) -> Result<LiveDataEncryptionReport, CommandError> {
+    live_data_encryption_status_value(&state)
+}
+
+#[tauri::command]
 fn inspect_local_model(
     state: State<'_, DesktopState>,
     model_name: String,
@@ -1642,6 +1658,7 @@ pub fn run() {
             mission,
             admit_mission,
             discover_local_models,
+            live_data_encryption_status,
             inspect_local_model,
             activate_local_model,
             local_model_activations,
@@ -1981,6 +1998,7 @@ mod tests {
                 "allow-mission",
                 "allow-admit-mission",
                 "allow-discover-local-models",
+                "allow-live-data-encryption-status",
                 "allow-inspect-local-model",
                 "allow-activate-local-model",
                 "allow-local-model-activations",
