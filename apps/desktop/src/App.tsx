@@ -35,7 +35,7 @@ import {
   discoverLocalModels,
   describeLocalAccountError,
   isPreflightUnavailable,
-  verbatimFailure,
+  failedReadReport,
   discardStarterOrganization,
   loadAuthenticationCapabilities,
   inspectLocalModel,
@@ -341,7 +341,6 @@ export function App() {
   const [liveDataEncryption, setLiveDataEncryption] =
     useState<LiveDataEncryptionReport | null>(null);
   const [recheckingLiveDataEncryption, setRecheckingLiveDataEncryption] = useState(false);
-  const [liveDataEncryptionFailure, setLiveDataEncryptionFailure] = useState("");
   const liveDataEncryptionEpoch = useRef(0);
   const [residentCapabilityCatalog, setResidentCapabilityCatalog] =
     useState<BeaconCapabilityDescriptor[] | null>(null);
@@ -631,7 +630,6 @@ export function App() {
       (report) => {
         if (requestEpoch === liveDataEncryptionEpoch.current) {
           setLiveDataEncryption(report);
-          setLiveDataEncryptionFailure("");
         }
       },
       // A swallowed failure left no status, no warning, no error and no
@@ -640,12 +638,10 @@ export function App() {
       // cannot stay visible if the first read decides silence.
       (error) => {
         if (requestEpoch === liveDataEncryptionEpoch.current) {
-          // The original text, not a generic account message: a fallback that
-          // replaces the failure it fell back from has discarded the only
-          // thing that says what went wrong.
-          setLiveDataEncryptionFailure(
-            `initial read failed: ${verbatimFailure(error)}; showing fallback`,
-          );
+          // A REPORT, not a free-text line beside a missing one: the reason is
+          // in the closed vocabulary and the original failure text is bounded,
+          // flagged evidence. One rendering path, one shape, one bound.
+          setLiveDataEncryption(failedReadReport(error, Date.now()));
         }
       },
     );
@@ -664,7 +660,6 @@ export function App() {
     setDiscoveringLocalModels(false);
     liveDataEncryptionEpoch.current += 1;
     setLiveDataEncryption(null);
-    setLiveDataEncryptionFailure("");
     setRecheckingLiveDataEncryption(false);
     setResidentCapabilityCatalog(null);
     setResidentConfigurations(null);
@@ -1019,15 +1014,12 @@ export function App() {
       const report = await liveDataEncryptionStatus();
       if (requestEpoch === liveDataEncryptionEpoch.current) {
         setLiveDataEncryption(report);
-        setLiveDataEncryptionFailure("");
       }
     } catch (error) {
       if (requestEpoch === liveDataEncryptionEpoch.current) {
         // Both surfaces: the action error for the operator's current gesture,
-        // and the panel's own line so the failure outlives the click.
-        setLiveDataEncryptionFailure(
-          `recheck failed: ${verbatimFailure(error)}; showing fallback`,
-        );
+        // and the panel's own report so the failure outlives the click.
+        setLiveDataEncryption(failedReadReport(error, Date.now()));
         setActionError(describeLocalAccountError(error));
       }
     } finally {
@@ -1756,7 +1748,6 @@ export function App() {
                 )}
               <LiveDataEncryptionStatus
                 report={liveDataEncryption}
-                failure={liveDataEncryptionFailure}
                 busy={recheckingLiveDataEncryption}
                 onRecheck={recheckLiveDataEncryption}
               />

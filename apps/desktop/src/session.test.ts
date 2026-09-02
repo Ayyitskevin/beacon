@@ -16,6 +16,8 @@ import {
   deactivateLocalModel,
   discoverLocalModels,
   liveDataEncryptionStatus,
+  failedReadReport,
+  verbatimFailure,
   completeLocalOperatorSetup,
   describeLocalAccountError,
   discardStarterOrganization,
@@ -1242,6 +1244,7 @@ describe("desktop session transport", () => {
       evidence: [
         { source: "stat(live store)", observation: "st_dev = 259:2", truncated: false },
       ],
+      omittedEvidence: 0,
       notVerified: ["filesystem-level encryption such as fscrypt or ext4 encryption"],
       observedAtMs: 1_756_000_000_000,
     };
@@ -1303,6 +1306,102 @@ describe("desktop session transport", () => {
       evidence: [{ source: "s", observation: "o" }],
     });
 
+    // Four shapes the Rust reader cannot produce, all of which the round-six
+    // adapter resolved successfully. Checking generic lengths is not checking
+    // the wire shape.
+    //
+    // One over `u32::MAX`, which is the type the omission count crosses on.
+    await refused({
+      conclusion: { ...report.conclusion, omittedSubjects: 4_294_967_296 },
+    });
+    await refused({ omittedEvidence: 4_294_967_296 });
+    // A device role whose value is not a device number.
+    await refused({
+      conclusion: {
+        ...report.conclusion,
+        subjects: [{ role: "device", value: "not-a-device", shortened: false }],
+      },
+    });
+    // A short value claiming a cut: no constructor shortens a device number,
+    // which is at most 21 characters against a bound of 24.
+    await refused({
+      conclusion: {
+        ...report.conclusion,
+        subjects: [{ role: "device", value: "8:1", shortened: true }],
+      },
+    });
+    // A volume named by a device rather than by where it is mounted.
+    await refused({
+      mountPoint: { role: "device", value: "8:1", shortened: false },
+    });
+    // A reason whose sentence names a role no subject carries: the panel would
+    // render "an unnamed subject", which is a sentence that says nothing.
+    await refused({ conclusion: { ...report.conclusion, subjects: [] } });
+    await refused({
+      conclusion: {
+        state: "unknown",
+        reason: "some_paths_uncovered",
+        subjects: [{ role: "mapping", value: "vg0", shortened: false }],
+        omittedSubjects: 0,
+      },
+    });
+
+    // The largest report the shape allows is accepted, and the entry past it
+    // is not: the evidence cap is part of the interface, like the subject cap.
+    const widest = {
+      source: "s".repeat(200),
+      observation: "o".repeat(200),
+      truncated: true,
+    };
+    invokeMock.mockResolvedValue({
+      ...report,
+      evidence: Array.from({ length: 32 }, () => widest),
+      omittedEvidence: 4_294_967_295,
+    });
+    await expect(liveDataEncryptionStatus()).resolves.toBeTruthy();
+    await refused({ evidence: Array.from({ length: 33 }, () => widest) });
+    await refused({
+      evidence: [{ ...widest, observation: "o".repeat(201) }],
+    });
+
     await refused({ surprise: true });
+  });
+
+  it("turns a failed reading into a report the adapter accepts", async () => {
+    // The failure used to reach the panel as an unbounded free-text prop
+    // beside a MISSING report: outside the closed vocabulary, rendered by a
+    // second code path, and bounded by nothing. Round-tripping it through the
+    // real adapter is the proof that the client-built report is the same shape
+    // a read one is.
+    const built = failedReadReport(new Error("x".repeat(500)), 1_756_000_000_000);
+    invokeMock.mockResolvedValue(built);
+    await expect(liveDataEncryptionStatus()).resolves.toEqual(built);
+
+    expect(built.conclusion.reason).toBe("initial_read_failed");
+    expect(built.conclusion.state).toBe("unknown");
+    // Fidelity where it fits, and the flag where it does not.
+    expect(built.evidence[0].observation).toHaveLength(200);
+    expect(built.evidence[0].truncated).toBe(true);
+    expect(built.conclusion.subjects[0].shortened).toBe(true);
+
+    const short = failedReadReport(new Error("transport closed"), 1);
+    invokeMock.mockResolvedValue(short);
+    await expect(liveDataEncryptionStatus()).resolves.toEqual(short);
+    expect(short.evidence[0].observation).toBe("transport closed");
+    expect(short.evidence[0].truncated).toBe(false);
+  });
+
+  it("keeps a structured failure's own message rather than its code", () => {
+    // `code` is a label for the class; `message` is the only text that says
+    // what failed. Preferring the label discarded it -- the same substitution
+    // this diagnostic exists to avoid, one level up.
+    expect(verbatimFailure({ code: "diagnostic_failed", message: "sysfs read denied" })).toBe(
+      "sysfs read denied",
+    );
+    expect(verbatimFailure({ code: "diagnostic_failed" })).toBe("diagnostic_failed");
+    expect(verbatimFailure(new Error("original diagnostic failure"))).toBe(
+      "original diagnostic failure",
+    );
+    expect(verbatimFailure({})).toBe("no reason was reported");
   });
 });

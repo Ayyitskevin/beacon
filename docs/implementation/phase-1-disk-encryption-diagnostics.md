@@ -140,14 +140,46 @@ on the way in, closing every door at once rather than one per source.
 ## Interfaces and presentation
 
 One closed report crosses the Rust service, the authenticated Unix socket, the Tauri command, and
-the strict TypeScript adapter, which re-checks the three states, the bounded text, the evidence
-count, and that only `enabled` names a mechanism. Both rendered fields — `mountPoint` and
-`mechanism` — are bounded at 200 characters on both sides, so a reason carrying a long sysfs path
-cannot make a whole valid report unreadable at the boundary. The mount point is bounded but not
-redacted: it is how the operator recognises the volume, and it is a directory they chose rather
-than an identifier read out of the kernel. No new `LocalErrorCode` and no new
-`LocalTransportError` variant were needed: detection failures are a truthful `unknown` result, not
-an error, and the only way the Query fails is a closed session.
+the strict TypeScript adapter. **No free text crosses that boundary.** The report carries a
+`conclusion` — a closed `state`, a closed `reason`, at most three `Subject`s (a role, a value of at
+most 24 characters, and a `shortened` flag), and `omittedSubjects` — and the sentence an operator
+reads is RENDERED from those fields by a total function, once in Rust for logs and once in
+TypeScript for the panel. It cannot overflow because its inputs cannot.
+
+The bound is by construction only because construction is the only door. Every field of `Subject`,
+`LiveDataEncryptionConclusion`, `EncryptionEvidence`, and `LiveDataEncryptionReport` is private, and
+`Deserialize` is implemented by hand so a value arriving from anywhere is re-checked against the
+same list the constructors enforce. A public `value: String` plus a derived deserializer is not a
+smaller version of this: round six built a 482-character rendering out of the public type without
+touching a single string in the implementation.
+
+The adapter re-checks the SHAPE, not lengths: the closed state and reason (the state is read off the
+reason, one direction, so the two cannot drift), the closed roles, the subject cap and character
+bound, `device` values as `major:minor` and never shortened, counts inside `u32`, a `mountPoint`
+whose role is `location`, the evidence cap and its flag, and that a reason's sentence has a subject
+for every role it names. A report this reader could not have produced is a refused read — the
+designed failed-read state — rather than a rendered surprise.
+
+Two lists are capped, and each says so with a count rather than by going quiet: `omittedSubjects`
+and `omittedEvidence`. A capped list that does not say it was capped is a partial answer wearing a
+complete one. Subjects arrive at the conclusion in groups, one per role, and are drawn from in turn:
+no group can spend every slot and leave another role unnamed, and nothing is trimmed before the
+count sees it.
+
+What a reader can expect: the reason is one of a closed set; every value inside it is bounded and
+says whether it was cut; the counts are truthful about what did not fit. What a reader cannot
+expect: the rendered sentence is UI text, not wire data — anything that needs the answer reads
+`reason` and `subjects`. The mount point is bounded but not redacted: it is how the operator
+recognises the volume, and it is a directory they chose rather than an identifier read out of the
+kernel.
+
+A Query that does not answer at all is a report too. The desktop builds one with reason
+`initial_read_failed`, a bounded `detail` subject, and the original failure text as flagged
+evidence, so the failure is visible and retryable through the same shape and the same renderer as
+every other answer. `initial_read_failed` is the one reason with no production site in the reader:
+it cannot report that it was never reached. No new `LocalErrorCode` and no new `LocalTransportError`
+variant were needed: detection failures are a truthful `unknown` result, not an error, and the only
+way the Query fails is a closed session.
 
 The Installation inspector hosts the status line. This is a **Diagnostic of the Installation**, not
 an **Attention Item**: `CONTEXT.md` reserves Attention Items for conditions where the Operator or a
