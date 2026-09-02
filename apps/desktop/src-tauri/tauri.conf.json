@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "dev.beacon.phase0",
   "build": {
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "cargo build --release -p beacond && mkdir -p ../../target/sidecar && cp ../../target/release/beacond \"../../target/sidecar/beacond-$(rustc -vV | awk '/^host:/ {print $2}')\" && npm run dev",
+    "beforeBuildCommand": "cargo build --release -p beacond && mkdir -p ../../target/sidecar && cp ../../target/release/beacond \"../../target/sidecar/beacond-$(rustc -vV | awk '/^host:/ {print $2}')\" && npm run build",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../dist"
   },
@@ -22,7 +22,9 @@
       }
     ],
     "security": {
-      "capabilities": ["main-window"],
+      "capabilities": [
+        "main-window"
+      ],
       "csp": {
         "default-src": "'self'",
         "connect-src": "ipc: http://ipc.localhost",
@@ -34,7 +36,14 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["appimage"],
-    "icon": ["icons/icon.png"]
+    "targets": [
+      "appimage"
+    ],
+    "icon": [
+      "icons/icon.png"
+    ],
+    "externalBin": [
+      "../../../target/sidecar/beacond"
+    ]
   }
 }
