@@ -61,7 +61,13 @@ jobs:
     if: >-
       github.event_name == 'pull_request' ||
       (github.event_name == 'push' && github.ref == 'refs/heads/main')
-    runs-on: ubuntu-latest
+    # Pinned to 22.04, not ubuntu-latest. linuxdeploy bundles the host's GTK and
+    # WebKit libraries, so the build base sets the AppImage's glibc floor: built
+    # on 24.04 it needs GLIBC_2.39 and will not load on Debian 12, Ubuntu 22.04,
+    # or Mint 21. Built here it needs 2.35 and was observed launching on all
+    # three. The product job stays on ubuntu-latest -- this is a packaging
+    # constraint, not a toolchain one.
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
       # Sources: https://github.com/actions/checkout/releases/tag/v7.0.1
