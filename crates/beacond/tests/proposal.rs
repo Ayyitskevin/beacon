@@ -1513,6 +1513,41 @@ fn startup_and_get_refuse_a_stored_bound_constraint() {
 }
 
 #[test]
+fn startup_refuses_a_missing_event_on_one_proposal_balanced_by_a_duplicate_on_another() {
+    // T1 (gpt2 non-author review). The per-Proposal event_count check and the total-count check
+    // are redundant with only one Proposal in the store -- either alone catches a missing or
+    // duplicate Event. With TWO Proposals, deleting A's Event and duplicating B's leaves the
+    // total count unchanged (1 removed, 1 added) while A has zero matching Events and B has two.
+    // Only the per-Proposal check can tell those two states apart from a healthy store.
+    let fixture = admitted_mission("balanced-missing-and-duplicate");
+    let a = fixture.record();
+    let mut b = fixture.record();
+    b.resident_id = fixture.other_resident_id;
+    b.configuration_id = fixture.other_configuration_id;
+    fixture.proposals.submit(&a.bytes()).unwrap();
+    fixture.proposals.submit(&b.bytes()).unwrap();
+    assert_eq!(fixture.proposal_rows(), 2);
+    assert_eq!(fixture.proposal_events(), 2);
+
+    fixture.tamper(&format!(
+        "DELETE FROM events WHERE kind = 'proposal.submitted'
+           AND json_extract(payload_json, '$.proposal.digest.value') = '{}';
+         INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+         SELECT workspace_id, kind, payload_json, occurred_at_ms
+         FROM events
+         WHERE kind = 'proposal.submitted'
+           AND json_extract(payload_json, '$.proposal.digest.value') = '{}';",
+        a.digest(),
+        b.digest()
+    ));
+    // The corruption is balanced: still 2 rows, still 2 Events in total.
+    assert_eq!(fixture.proposal_rows(), 2);
+    assert_eq!(fixture.proposal_events(), 2);
+
+    assert_refuses_startup(&fixture, "balanced missing-and-duplicate Events");
+}
+
+#[test]
 fn startup_refuses_when_the_owner_account_is_gone() {
     let (fixture, _) = submitted("startup-no-owner");
     // A record whose authorization basis is `owner` is only truthful while that Owner exists.
