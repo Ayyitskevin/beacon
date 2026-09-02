@@ -275,7 +275,12 @@ The authenticated Owner can opt in to install the bundled
 and repository state and runs nothing. The installation creates no Run, Receipt, Proposal, Ruling,
 model request, network request, or Declared Check execution, and grants no authority.
 
-Resident-issued Team formation, Conversations, Proposals, Rulings, Evaluations, model Invocations,
+An Owner can also submit an immutable Proposal, bound to the exact canonical bytes Beacon stores and
+identified by their digest: it records intended effects, inputs, bounds, checks, and budget for
+review, is backend-only and inert, and creates no Gate, Ruling, worktree, process, Invocation, or
+dispatch of any kind.
+
+Resident-issued Team formation, Conversations, Rulings, Evaluations, model Invocations,
 Cloud Link, passkeys, active agent work, and a downloadable installer do not exist yet. Nothing an
 Agent authored has ever been executed: the only commands Beacon runs are the Declared Checks an
 Owner bound by hand. Do not describe this checkpoint as a usable Alpha.
