@@ -98,3 +98,65 @@ for artifact, root in artifacts:
 raise SystemExit(1 if invalid else 0)
 PY
 }
+
+first_run_begin_step() {
+    first_run_active_step="$1"
+    first_run_active_transition="$2"
+}
+
+first_run_finish_step() {
+    local step="$1"
+    if [ "${first_run_active_step:-}" = "$step" ]; then
+        first_run_active_step=""
+        first_run_active_transition=""
+    fi
+}
+
+first_run_mark_interrupted() {
+    local signal="$1"
+    if [ -z "${first_run_active_step:-}" ]; then
+        return 0
+    fi
+    python3 - \
+        "$first_run_result" \
+        "$first_run_active_step" \
+        "$first_run_active_transition" \
+        "$signal" <<'PY'
+import json
+import sys
+
+path, step, transition, signal = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    document = json.load(handle)
+if step not in document["steps"]:
+    raise SystemExit(f"active step is absent from result vocabulary: {step}")
+document["steps"][step] = {
+    "status": "broken",
+    "detail": f"{transition} was interrupted by {signal}",
+    "artifacts": [],
+}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(document, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+}
+
+first_run_handle_signal() {
+    local signal="$1"
+    local exit_status
+    case "$signal" in
+        INT) exit_status=130 ;;
+        TERM) exit_status=143 ;;
+        *) exit_status=1 ;;
+    esac
+    trap - INT TERM
+    if ! first_run_mark_interrupted "$signal"; then
+        echo "drive-first-run: could not record interrupted active step" >&2
+    fi
+    exit "$exit_status"
+}
+
+first_run_install_signal_traps() {
+    trap 'first_run_handle_signal INT' INT
+    trap 'first_run_handle_signal TERM' TERM
+}
