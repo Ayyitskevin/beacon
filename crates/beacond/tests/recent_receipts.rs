@@ -12,8 +12,8 @@ use std::sync::Arc;
 use beacond::{
     AutonomyProfile, ExecutionReceipt, MAX_RECENT_RUN_WINDOW, OperatorAccountService,
     OperatorSessionPhase, PreflightReceipt, ProjectCharterDraft, ProjectDraft, ProjectService,
-    RecentReceiptError, RecentReceiptOutcome, RecentReceiptService, SecretString, StartupConfig,
-    Supervisor,
+    RecentReceipt, RecentReceiptError, RecentReceiptOutcome, RecentReceiptService, SecretString,
+    StartupConfig, Supervisor,
 };
 use rusqlite::{Connection, params};
 use uuid::Uuid;
@@ -115,6 +115,51 @@ impl Fixture {
         project.id
     }
 
+    /// One `check_preflight` Run and a valid Receipt whose body is sized by the
+    /// caller. Returns how many bytes were stored, so a test can own its own
+    /// threshold instead of trusting a constant elsewhere in the file.
+    fn run_with_body(&self, project_id: Uuid, started_at_ms: i64, padding: usize) -> usize {
+        let run_id = Uuid::new_v4();
+        let connection = self.store.connection();
+        connection
+            .execute(
+                "INSERT INTO runs (
+                     workspace_id, id, project_id, kind, repository_revision, charter_revision,
+                     state, lease_expires_at_ms, started_at_ms, ended_at_ms
+                 ) VALUES (?1, ?2, ?3, 'check_preflight', 1, 1, 'verified', 0, ?4, ?5)",
+                params![
+                    self.workspace_id.to_string(),
+                    run_id.to_string(),
+                    project_id.to_string(),
+                    started_at_ms,
+                    started_at_ms + 1
+                ],
+            )
+            .unwrap();
+        let body = receipt_body(
+            self.workspace_id,
+            project_id,
+            run_id,
+            1,
+            started_at_ms,
+            padding,
+        );
+        connection
+            .execute(
+                "INSERT INTO receipts (
+                     workspace_id, run_id, version, outcome, receipt_json, recorded_at_ms
+                 ) VALUES (?1, ?2, 1, 'verified', ?3, ?4)",
+                params![
+                    self.workspace_id.to_string(),
+                    run_id.to_string(),
+                    body,
+                    started_at_ms + 1
+                ],
+            )
+            .unwrap();
+        body.len()
+    }
+
     /// One Run, and optionally its Receipt, written straight to the store.
     #[allow(clippy::too_many_arguments)]
     fn run(
@@ -203,7 +248,28 @@ fn large_receipt_body(
     started_at_ms: i64,
 ) -> String {
     // ~600 entries of ~100 bytes: a real Receipt field, many times over.
-    let padding: Vec<String> = (0..600)
+    receipt_body(
+        workspace_id,
+        project_id,
+        run_id,
+        version,
+        started_at_ms,
+        600,
+    )
+}
+
+/// The same body at a caller-chosen size, so the invariance the Revised design
+/// requires can be MEASURED rather than stated: the returned row must not
+/// change as this grows.
+fn receipt_body(
+    workspace_id: Uuid,
+    project_id: Uuid,
+    run_id: Uuid,
+    version: i64,
+    started_at_ms: i64,
+    padding_entries: usize,
+) -> String {
+    let padding: Vec<String> = (0..padding_entries)
         .map(|index| {
             format!(
                 "step {index} was not performed, and this Receipt says so rather than implying it"
@@ -660,4 +726,46 @@ fn an_unconfirmed_run_without_an_end_is_an_inconsistent_store() {
         fixture.recent.recent(50),
         Err(RecentReceiptError::InvalidStore)
     ));
+}
+
+#[test]
+fn the_returned_row_does_not_change_as_the_receipt_body_grows() {
+    // Revised D-9's invariance, made executable. The previous fixture built one
+    // fixed 600-entry payload and nothing observed its size, so shrinking it to
+    // a single entry left all 16 tests green: the property was stated and never
+    // measured. gpt1 proved that with the exact mutant.
+    //
+    // Two Runs identical in every field the Query returns except the identity
+    // that has to differ for them to be two rows, and Receipt bodies two orders
+    // of magnitude apart.
+    let fixture = enrolled("payload-growth");
+    let project = fixture.project("Beacon Alpha");
+    let small = fixture.run_with_body(project, 100, 1);
+    let large = fixture.run_with_body(project, 100, 600);
+
+    // The thresholds belong to this test. A shrunk padding fails HERE, loudly,
+    // rather than passing quietly somewhere downstream.
+    assert!(small < 4 * 1024, "the small body is {small} bytes");
+    assert!(large > 32 * 1024, "the large body is only {large} bytes");
+    assert!(
+        large > small * 8,
+        "the two bodies are not materially different: {small} vs {large}"
+    );
+
+    let page = fixture.recent.recent(50).unwrap();
+    assert_eq!(page.receipts.len(), 2);
+
+    // Everything the Query returns is equal across a 100x payload difference.
+    // Comparing whole rows rather than a chosen field is the point: a future
+    // column that did vary with the body would fail this without anyone having
+    // to predict it.
+    let anonymised: Vec<_> = page
+        .receipts
+        .iter()
+        .map(|receipt| RecentReceipt {
+            run_id: Uuid::nil(),
+            ..receipt.clone()
+        })
+        .collect();
+    assert_eq!(anonymised[0], anonymised[1]);
 }
