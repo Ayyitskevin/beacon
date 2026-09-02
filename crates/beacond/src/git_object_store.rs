@@ -1,26 +1,36 @@
-//! Dependency-free presence checks against a Git repository's object store.
+//! Authenticated reads against a Git repository's object store, with no Git binary and no network.
 //!
 //! # What this module answers, and what it deliberately does not
 //!
-//! It answers one question: **is this object present in this repository's object
-//! store?** It does not answer whether the object is reachable from any ref.
-//! Reachability requires decompressing commit objects and walking their parents,
-//! which needs a zlib dependency this crate does not have and a Product Steward
-//! decision it has not been given. ADR 0027 also forbids spawning a process, so
-//! shelling out to `git` is not an option either.
+//! Two capabilities, and neither of them is "what does this ref point at":
 //!
-//! Presence and reachability are different facts on real repositories: a commit
-//! left behind by a rebase is present and unreachable. Every caller must record
-//! the difference rather than let a presence check read as a reachability claim.
+//! 1. **Authenticated presence.** [`ObjectStore::contains`] answers *is this object present in
+//!    this repository's object store?*, over loose objects and then every pack index.
+//! 2. **Bounded loose-object traversal.** [`ObjectStore::read_loose_object`] inflates one named
+//!    loose object, proves it is the object its own name hashes to, and hands back the body, under
+//!    a size bound its caller owns. [`ObjectStore::resolve_path_at`] walks commit -> tree -> entry
+//!    to resolve one path at one revision, validating every object as the kind it claims to be and
+//!    charging every body it reads against an aggregate budget the caller owns.
 //!
-//! It also reads one loose object at a time, on request: [`ObjectStore::read_loose_object`]
-//! inflates a loose file, proves it is the object its own name hashes to, and hands back the body.
-//! That is a bounded read of one named object, not the reachability walk above -- it still cannot
-//! say what a ref points at, and it still reads nothing that is packed.
+//! What it does not answer:
 //!
-//! Until #33 this module decompressed nothing, and its doc said so. The reader arrived because the
-//! readable-context comparison needs object CONTENT, not presence, and a second inflate-and-verify
-//! path beside `sample_project`'s would have been two chances to get the self-authentication wrong.
+//! - **Reachability.** Whether an object is reachable from any ref is a different fact, and this
+//!   module never claims it. Presence and reachability differ on real repositories: a commit left
+//!   behind by a rebase is present and unreachable. A caller must record the difference rather
+//!   than let a presence check read as a reachability claim.
+//! - **Packed content.** A packed object can be *found* (that is capability 1) and never *read*:
+//!   the traversal reports `NotLoose` and stops, because reading one would mean a pack and delta
+//!   reader, which is its own slice with its own format risks and caps. After a `git gc` every
+//!   object on a path is packed and the walk answers nothing about it.
+//! - **Refs.** No ref file, packed-refs, or HEAD is read; a revision is a 40-character object name
+//!   the caller already holds.
+//!
+//! ADR 0027 forbids spawning a process, so shelling out to `git` is not an option for any of this.
+//!
+//! Until #33 this module decompressed nothing and answered only presence, and its doc said so.
+//! `flate2` and the reader arrived with the readable-context comparison, which needs object
+//! CONTENT: a second inflate-and-verify path beside `sample_project`'s would have been two chances
+//! to get the self-authentication wrong.
 //!
 //! Nothing here reads outside the repository's `.git` directory. Files are opened relative to
 //! retained directory descriptors with `O_NOFOLLOW`; names are never accepted as file identity.
