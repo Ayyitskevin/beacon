@@ -12,16 +12,23 @@
 //! and it uses the same identity -- SHA-256 over the exact file bytes, deliberately not the Git
 //! object name, which is a SHA-1 over a header and the same body.
 //!
-//! Two structural rules make it authority-bearing rather than decorative, and both live in the
-//! store rather than in a Command that could be bypassed:
+//! **A Candidate selects bytes. It does not authorize them.** Recording one, and recording it
+//! before a decision, proves that a determinate set of digests existed for that Proposal -- never
+//! that the Operator was shown them. Authority comes from `beacon.ruling.v2`, which binds this
+//! record's digest envelope after its exact diff has been presented (ADR 0039). A non-author review
+//! produced the counterexample this warning exists for: record the Candidate, show the Operator
+//! only the Proposal's intent, rule, dispatch -- every ordering rule holds and nobody saw the bytes.
 //!
-//! - **One per Proposal.** A second set of post-image digests for one decision would make "the
-//!   bytes the Operator ruled on" ambiguous, and dispatch would have to choose which. It does not
-//!   choose: `candidates_one_per_proposal` refuses the second record, and a revised change is a new
-//!   Proposal -- which is what ADR 0034 already says about anything that changes.
-//! - **Recorded before the Ruling.** Dispatch compares `events.sequence`, the store's own ordering
-//!   primitive, so the rule needs no clock and cannot be defeated by two records landing in one
-//!   millisecond.
+//! Two rules make the selection determinate rather than merely present:
+//!
+//! - **One per Proposal**, enforced structurally by `candidates_one_per_proposal`. A second set of
+//!   post-image digests would leave "which bytes" ambiguous and force dispatch to choose. It does
+//!   not choose: the second record is refused, and a revised change is a new Proposal -- which is
+//!   what ADR 0034 already says about anything that changes.
+//! - **Recorded before the Ruling**, compared against `events.sequence` -- the store's own ordering
+//!   primitive, so the rule needs no clock. That comparison is a **dispatch-time gate**, not an
+//!   invariant this module's store enforces: nothing here refuses a Candidate recorded later, and
+//!   the Ruling that binds it is what makes the order matter.
 //!
 //! **Recording a Candidate creates no authority and dispatches nothing.** It opens no Gate,
 //! prepares no worktree, starts no process, and touches no repository. It is a statement of what a
@@ -76,6 +83,9 @@ const DIGEST_HEX_CHARS: usize = 64;
 /// A declared count is multiplied by this and compared with the remaining input before the loop
 /// runs, so a hostile count cannot choose an allocation.
 const MIN_ENTRY_BYTES: usize = 1 + 8 + 1 + 1;
+/// The same envelope as it appears in an audit Event: RFC 4648 padded base64 is four characters
+/// per three bytes, rounded up.
+const MAX_BASE64_ENVELOPE_BYTES: usize = 4 * MAX_CANONICAL_BYTES.div_ceil(3);
 
 // One-byte tags. Assigned explicitly and never renumbered. They are numbered to match
 // `beacon.proposal.v1`'s mutation tags because the two records describe the same three effects;
@@ -602,10 +612,24 @@ fn encode(payload: &CandidateV1) -> Result<Vec<u8>, MalformedCandidate> {
 
     // 11.
     encoder.u64(payload.recorded_at_ms);
+
+    // The envelope is this function's, not the store's. ADR 0039 says a Candidate stays inside the
+    // 64 KiB a Proposal does, and until this line the only total-length limit was SQLite's CHECK --
+    // which is a constraint on what may be persisted, not on what may be built, and it reports a
+    // refusal the caller cannot act on. A per-field limit does not bound a record: 900 legal paths
+    // in a legal Proposal expand into an over-envelope Candidate (gpt1's service probe).
+    if encoder.out.len() > MAX_CANONICAL_BYTES {
+        return Err(MalformedCandidate::OverLimitLength);
+    }
     Ok(encoder.out)
 }
 
 fn decode(input: &[u8]) -> Result<CandidateV1, MalformedCandidate> {
+    // Refused before a single field is read, so an over-envelope input cannot reach the entry loop
+    // and choose an allocation there. The count bound below is the second gate, not the first.
+    if input.len() > MAX_CANONICAL_BYTES {
+        return Err(MalformedCandidate::OverLimitLength);
+    }
     let mut decoder = Decoder::new(input);
     decoder.magic()?;
 
@@ -749,9 +773,15 @@ impl CandidateService {
             // Proposal collides with `candidates_one_per_proposal` rather than passing a check
             // that a later caller could bypass. The collision is translated here so a caller reads
             // the rule rather than a SQLite constraint name.
+            // ONLY a uniqueness violation is the one-per-Proposal rule. Translating every
+            // constraint failure hid a different refusal behind it: an over-envelope record was
+            // reported as "already recorded" against a Workspace with no Candidates at all
+            // (gpt1's P0). The envelope is now refused by the codec above, and this mapping is
+            // narrow so the next constraint to fire cannot borrow this refusal either.
             insert_candidate(&transaction, &stored).map_err(|error| match error {
                 CandidateError::Store(rusqlite::Error::SqliteFailure(failure, _))
-                    if failure.code == rusqlite::ErrorCode::ConstraintViolation =>
+                    if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+                        || failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY =>
                 {
                     CandidateError::Inconsistent(InconsistentCandidate::AlreadyRecorded)
                 }
@@ -1107,6 +1137,13 @@ pub(crate) fn verify_candidate_state(connection: &Connection) -> Result<(), Cand
         require_one_event(connection, workspace_id, digest_value)?;
     }
 
+    // The whole-table count, kept as defence in depth with its limit stated: an Event naming a
+    // digest no row carries is refused BEFORE this by `verify_candidate_event`, which the startup
+    // replay runs over every event row, so no test can reach this line today
+    // (`an_event_whose_digest_names_no_candidate_is_refused_by_the_replay` proves which guard
+    // actually fires). It stays because it is the only check that compares the two populations
+    // rather than one record at a time -- the day a kind is added to the SQL vocabulary and not to
+    // the replay's enum, this is what notices.
     let total_events: i64 = connection.query_row(
         "SELECT count(*) FROM events WHERE kind = 'proposal.candidate_recorded'",
         [],
@@ -1133,6 +1170,12 @@ pub(crate) fn verify_candidate_event(
         || recorded.digest.canonicalizer != CANONICALIZER
         || recorded.recorded_at_ms != occurred_at_ms
     {
+        return Err(CandidateError::InvalidStore);
+    }
+    // Bounded before it is decoded: `events.payload_json` carries no length constraint, so an
+    // Event is an unbounded string until something says otherwise, and base64 of a record that
+    // cannot exist is not worth allocating (gpt1's P0).
+    if recorded.canonical_bytes_base64.len() > MAX_BASE64_ENVELOPE_BYTES {
         return Err(CandidateError::InvalidStore);
     }
     let stored = load_stored_by_digest(connection, workspace_id, &recorded.digest.value)?
