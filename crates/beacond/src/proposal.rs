@@ -1579,18 +1579,20 @@ fn derive_readiness(
 /// Repository -- the source kind, whether the object store opens, whether the pinned revision is
 /// present -- and any of them can end the walk with its own reason. When they all succeed, the
 /// comparison still cannot run: resolving `path` to its blob at a revision means decompressing the
-/// commit object, walking its tree, and reading the blob, and `beacond` has no decompressor
-/// (`git_object_store` is deliberately presence-only) while ADR 0027 forbids spawning `git`. So the
-/// walk ends at `ContentUnreadableAtRevision`, which is the honest answer and satisfies the ADR's
-/// actual requirement: "No surface may label the context verified from the manifest's
-/// self-consistency alone."
+/// commit object, walking its tree, and reading the blob. `beacond` gained a decompressor with
+/// #33 and `git_object_store` gained a loose-object reader and a path walk, so the capability now
+/// exists -- but nothing here calls it yet, and until the comparison is wired this walk still ends
+/// at `ContentUnreadableAtRevision`. That remains the honest answer for an unwired path and
+/// satisfies the ADR's actual requirement: "No surface may label the context verified from the
+/// manifest's self-consistency alone." What has changed is the reason: it is now a slice that has
+/// not landed, not a capability the crate lacks.
 ///
 /// The alternative -- reading the entries out of the working tree at `source` -- is refused on
 /// purpose. That compares against whatever is checked out now, not against the pinned revision, so
 /// it would manufacture both false agreement and false disagreement from the wrong evidence.
 ///
-/// When a decompressor arrives, the comparison replaces the final step and gains its own outcome
-/// for entries that disagree; every step before it stays exactly as it is.
+/// The comparison replaces the final step and gains its own outcome for entries that disagree;
+/// every step before it stays exactly as it is.
 fn compare_readable_context(
     connection: &Connection,
     workspace_id: Uuid,

@@ -135,12 +135,17 @@ Bounding the first three means changing that module's I/O, which this slice does
 fourth would need one budget threaded through startup reconciliation rather than per read. Both are
 follow-ups; what is claimed here is only what is enforced.
 
-**`ContentUnreadableAtRevision` is the terminal state today, and that is a capability limit, not a
-policy choice.** Resolving `path` to its bytes at a revision means decompressing the commit object,
-walking its tree, and reading the blob. `crates/beacond/src/git_object_store.rs` is deliberately
-presence-only ("Nothing here decompresses data"), `beacond` declares no decompression dependency,
-and ADR 0027 forbids spawning `git`. So no code path can currently conclude that a declared entry
-*agrees* with the pinned revision, and none claims to.
+**`ContentUnreadableAtRevision` is the terminal state today.** Resolving `path` to its bytes at a
+revision means decompressing the commit object, walking its tree, and reading the blob. When this
+note was written that was a capability limit: `beacond` declared no decompression dependency and
+`git_object_store.rs` was presence-only. It is no longer. #33 added `flate2`, and the
+readable-context comparison slice added `ObjectStore::read_loose_object` and
+`ObjectStore::resolve_path_at`, which do exactly that walk for loose objects.
+
+What remains is the wiring: no code path in this module calls them yet, so no path can currently
+conclude that a declared entry *agrees* with the pinned revision, and none claims to. The
+distinction matters to a reader deciding what is possible here — this is now a slice that has not
+landed rather than a thing Beacon cannot do.
 
 There is deliberately no "mismatch" outcome. A variant nothing can produce is worse than an honest
 absence: it would look like a check that runs. Reading the entries out of the working tree at
