@@ -185,7 +185,7 @@ The proposed ADR 0034 amendment says this mapping lives here, so here it is. **[
 | a mismatch found before an unreadable entry is discarded | `a_mismatch_found_before_an_unreadable_entry_is_discarded_rather_than_published` [i] · `a_buffered_mismatch_is_discarded_by_every_way_the_walk_can_stop` [u] |
 | a symlink is not-verified rather than mismatched | `a_symlink_is_not_followed_and_is_not_reported_as_a_file` [u] · the buffering test above [i] |
 | an object that does not hash to its own name is refused | `an_object_that_does_not_hash_to_its_own_name_is_refused` [u] · `a_tampered_tree_on_the_path_is_refused_by_its_own_name` [u] |
-| a commit that does not parse as a commit is refused | `a_commit_is_validated_as_a_commit_and_not_merely_authenticated` [u] |
+| a commit that does not parse as a commit is refused | `a_commit_is_validated_as_a_commit_and_not_merely_authenticated` [u] · `a_commits_headers_must_end_at_a_blank_line_and_not_merely_run_out` [u] |
 | a tree naming one path twice is refused | `a_tree_naming_one_path_twice_is_refused_whatever_the_modes` [u], including the nonadjacent case |
 | the comparison stops at its deadline rather than answering | `a_deadline_that_expires_mid_read_is_not_published_as_an_outcome` [u] · `a_walk_whose_deadline_expires_mid_traversal_publishes_nothing` [u] · `an_io_failure_after_the_budget_expires_is_elapsed_not_a_broken_repository` [u] |
 | every bound the comparison owns is its own | `the_aggregate_budget_is_charged_by_every_object_and_is_its_own_refusal` [u] · `an_exhausted_aggregate_budget_is_the_reason_an_operator_reads` [u] · the per-object rows below |
@@ -233,7 +233,10 @@ drawn from them.
 - A **commit** must begin `tree <40 lowercase hex>\n`, and its headers must parse: each
   `<name> SP <value> LF` until the blank line, `parent` values are object names, exactly one
   `author` and one `committer`. Searching the body for a `tree` line instead would let a commit
-  *message* choose which tree Beacon walks.
+  *message* choose which tree Beacon walks. The blank line is **required**, and the end of the
+  body is not a second terminator: headers that run out instead of ending never reached the
+  terminator this grammar names, and `git` writes the blank line even when the message is empty,
+  so requiring it refuses nothing a real repository holds.
 - A **tree** is parsed whole before any entry is used: a known mode, a non-empty name free of `/`,
   `.` and `..`, a full 20-byte id with no truncated trailing entry, strictly increasing order, and
   no repeated raw name. Ordering uses Git's real rule, where a directory sorts as though its name

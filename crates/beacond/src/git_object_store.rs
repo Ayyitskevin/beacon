@@ -707,8 +707,15 @@ fn commit_tree_id(body: &[u8]) -> Option<String> {
     let mut authors = 0_usize;
     let mut committers = 0_usize;
     loop {
-        if header.first() == Some(&b'\n') || header.is_empty() {
-            // The blank line ends the headers; a commit with no message has none at all.
+        if header.first() == Some(&b'\n') {
+            // The blank line ends the headers, and it is REQUIRED: the grammar runs
+            // `<name> SP <value> LF` *until the blank line*, so a body whose last header runs
+            // straight into the end of the object never reached the terminator it names. Treating
+            // the end of the body as a second terminator accepted bytes that authenticate under
+            // their own name, are not the commit that name is supposed to hold, and still drive
+            // the walk to a definite answer about the Operator's declaration (gpt2).
+            //
+            // It refuses nothing real: `git` writes the blank line even when the message is empty.
             break;
         }
         let line_end = header.iter().position(|byte| *byte == b'\n')?;
@@ -2303,6 +2310,59 @@ mod tests {
         assert_eq!(
             resolve(&store, &id, "src/lib.rs"),
             PathResolution::Malformed
+        );
+    }
+
+    #[test]
+    fn a_commits_headers_must_end_at_a_blank_line_and_not_merely_run_out() {
+        // gpt2's final review, P1. The doc above and the implementation note both say the headers
+        // run `<name> SP <value> LF` UNTIL THE BLANK LINE, and the parser accepted a second
+        // terminator the grammar never named: the end of the body. Such bytes can be stored under
+        // their own SHA-1, authenticate, and drive the walk to a Blob, an Absent, and finally to
+        // agreement or to a mismatch -- a definite answer about the Operator's declaration drawn
+        // from an object that is not the object its name is supposed to hold.
+        //
+        // Requiring the terminator costs nothing real: `git commit --allow-empty-message` writes
+        // `committer ... LF LF`, so even a commit with no message carries the blank line. The
+        // ordinary commit read from a real repository at the end of this test is the control that
+        // keeps that claim honest rather than assumed.
+        let headers = concat!(
+            "tree 0123456789abcdef0123456789abcdef01234567\n",
+            "author A <a@example.invalid> 1 +0000\n",
+            "committer C <c@example.invalid> 1 +0000\n",
+        );
+
+        // The negative control: valid tree, exactly one author, exactly one committer, and the
+        // body ends at the committer's LF. Everything else about it is a commit.
+        assert_eq!(
+            commit_tree_id(headers.as_bytes()),
+            None,
+            "headers that ran out instead of ending at a blank line were accepted"
+        );
+
+        // Both positive controls, so the rule above cannot be satisfied by refusing everything:
+        // the blank line with a message after it, and the blank line with nothing after it.
+        for accepted in [format!("{headers}\nmessage\n"), format!("{headers}\n")] {
+            assert_eq!(
+                commit_tree_id(accepted.as_bytes()),
+                Some("0123456789abcdef0123456789abcdef01234567".to_owned()),
+                "a commit terminated by a blank line was refused: {accepted:?}"
+            );
+        }
+
+        // And the one that matters most: a commit `git` itself wrote is still accepted. A grammar
+        // rule that refuses real repositories is a worse defect than the one it closes.
+        let (repository, revision) = walk_repository("commit-terminator");
+        let store = ObjectStore::open(&repository.path).unwrap();
+        let LooseRead::Read { body, .. } = store
+            .read_loose_object(&revision, 1_048_576, &mut never_elapsed())
+            .unwrap()
+        else {
+            panic!("the commit is loose");
+        };
+        assert!(
+            commit_tree_id(&body).is_some(),
+            "a commit written by git was refused by the terminator rule"
         );
     }
 
