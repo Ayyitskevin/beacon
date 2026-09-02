@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   admitMission,
+  MAX_EVIDENCE_ENTRIES,
   bindProjectRepository,
   preflightProjectChecks,
   recentReceipts,
@@ -1233,6 +1234,7 @@ describe("desktop session transport", () => {
   });
 
   it("refuses a live-data encryption report whose shape it does not recognise", async () => {
+    expect(MAX_EVIDENCE_ENTRIES).toBe(32);
     const report = {
       conclusion: {
         state: "disabled",
