@@ -71,6 +71,58 @@ with open(path, "w", encoding="utf-8") as handle:
 PY
 }
 
+validate_inner_evidence() {
+    python3 - "$1" <<'PY'
+import json
+import pathlib
+import sys
+
+evidence = pathlib.Path(sys.argv[1])
+result = evidence / "result.json"
+expected_steps = {
+    "operator_setup_form",
+    "recovery_key_confirmation",
+    "account_and_workspace",
+    "starter_organization",
+    "authenticated_briefing",
+}
+
+def reject(message):
+    print(message)
+    raise SystemExit(1)
+
+if not result.is_file() or result.is_symlink():
+    reject("result.json is absent")
+try:
+    with result.open(encoding="utf-8") as handle:
+        document = json.load(handle)
+except (OSError, UnicodeError, json.JSONDecodeError):
+    reject("result.json is unreadable")
+if not isinstance(document, dict) or set(document) != {"steps"}:
+    reject("result.json does not have the closed top-level schema")
+steps = document["steps"]
+if not isinstance(steps, dict) or set(steps) != expected_steps:
+    reject("result.json does not name the five required transitions")
+for step in sorted(expected_steps):
+    row = steps[step]
+    if not isinstance(row, dict) or set(row) != {"status", "detail", "artifacts"}:
+        reject(f"{step} does not have the closed step schema")
+    if row["status"] != "observed":
+        reject(f"{step} is {row['status']!r}, not observed")
+    if not isinstance(row["detail"], str) or not row["detail"].strip():
+        reject(f"{step} has no observed detail")
+    artifacts = row["artifacts"]
+    if not isinstance(artifacts, list) or not artifacts:
+        reject(f"{step} has no evidence artifacts")
+    for name in artifacts:
+        if not isinstance(name, str) or pathlib.PurePath(name).name != name or name in {"", ".", ".."}:
+            reject(f"{step} names an invalid evidence artifact")
+        artifact = evidence / name
+        if not artifact.is_file() or artifact.is_symlink():
+            reject(f"{step} evidence artifact is absent: {name}")
+PY
+}
+
 if [ ! -f "$appimage" ]; then
     set_matrix_field input status absent
     echo "clean-host-first-run: AppImage is absent: $appimage" >&2
@@ -132,8 +184,17 @@ for index in "${!labels[@]}"; do
     elapsed="$(( $(date +%s) - started ))"
     set_matrix_field "$label" elapsed_seconds "$elapsed"
     if [ "$result" -eq 0 ]; then
-        set_matrix_field "$label" status observed
-        printf 'clean-host-first-run: observed %s in %ss\n' "$label" "$elapsed"
+        evidence_error=""
+        if evidence_error="$(validate_inner_evidence "$output")"; then
+            set_matrix_field "$label" status observed
+            printf 'clean-host-first-run: observed %s in %ss\n' "$label" "$elapsed"
+        else
+            set_matrix_field "$label" status broken
+            set_matrix_field "$label" evidence_error "$evidence_error"
+            printf 'clean-host-first-run: BROKEN %s: inner evidence is broken: %s\n' \
+                "$label" "$evidence_error" >&2
+            failed=1
+        fi
     else
         set_matrix_field "$label" status broken
         set_matrix_field "$label" exit_code "$result"
