@@ -1,5 +1,3 @@
-import type { MissionView, ProjectView } from "./session";
-
 /** The one scheme Beacon answers to, in one place.
  *
  *  Slice 1 registers nothing with the operating system: this parses a string
@@ -36,12 +34,34 @@ export type ObjectLink =
  *  apart because the operator's next action differs. */
 export type LinkPhase = "operator_setup_required" | "locked" | "unlocked";
 
+/** What the router needs of a Project, and of a Mission -- nothing more.
+ *
+ *  These are declared structurally rather than imported from `session.ts`
+ *  because the shell holds two different Project types: `App.tsx:286` keeps
+ *  `ProjectSummary[]` from `loadProjects()`, while a selection produces a
+ *  `ProjectView`. Naming either one would force the other through a cast at the
+ *  wiring, and a cast is how a router ends up routing a shape nothing produces.
+ *  `ProjectSummary`, `ProjectView` and `MissionView` all satisfy these, which
+ *  the compile-checked fixture in the test file pins.
+ *
+ *  `LinkProject` carries no `workspaceId` because `ProjectSummary` has none:
+ *  the Projects list is loaded for the current Workspace and IS the Workspace's
+ *  scope, so Workspace membership is settled once, above, and never asked of a
+ *  row. `LinkMission` carries both, because `MissionView` states both and an
+ *  object that states its parents can be checked against them. */
+export type LinkProject = { readonly id: string };
+export type LinkMission = {
+  readonly id: string;
+  readonly workspaceId: string;
+  readonly projectId: string;
+};
+
 export type LinkContext = {
   phase: LinkPhase;
   /** This Installation's Workspace, or null before it is known. */
   workspaceId: string | null;
-  projects: readonly ProjectView[] | null;
-  missions: readonly MissionView[] | null;
+  projects: readonly LinkProject[] | null;
+  missions: readonly LinkMission[] | null;
 };
 
 /** What should happen to a link, as six distinct facts.
