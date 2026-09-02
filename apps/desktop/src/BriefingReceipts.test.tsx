@@ -52,7 +52,7 @@ function row(
   return { receipt: receipt(runId, outcome, startedAtMs), projectName };
 }
 
-it("lists recent Receipts newest first, not in the order they arrived", async () => {
+it("lists recent preflight Receipts newest first, not in the order they arrived", async () => {
   const rows = [
     row("aaaaaaaa-1111-4111-8111-111111111111", "verified", 100),
     row("cccccccc-3333-4333-8333-333333333333", "preflight_failed", 300),

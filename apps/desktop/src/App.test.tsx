@@ -224,7 +224,7 @@ function mockInitialState(phase: Phase) {
     if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
     if (command === "residents") return Promise.resolve(residentRoster);
     if (command === "record_operator_activity") return Promise.resolve(null);
-    // Briefing reads its recent Receipts by fanning out over the Project list.
+    // Briefing reads its recent preflight Receipts by fanning out over the Projects.
     if (command === "projects") return Promise.resolve([]);
     if (command === "preflight_receipts") return Promise.resolve([]);
     if (command === "set_session_timeout") {
@@ -387,7 +387,7 @@ describe("Beacon desktop shell", () => {
     expect(within(suiteNavigation).getByRole("button", { name: "Software" })).toBeDisabled();
   });
 
-  it("shows Briefing's recent Receipts merged across Projects, newest first", async () => {
+  it("shows Briefing's recent preflight Receipts merged across Projects, newest first", async () => {
     mockInitialState("unlocked");
     const base = invokeMock.getMockImplementation()!;
     invokeMock.mockImplementation((command, args) => {
