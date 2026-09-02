@@ -1234,3 +1234,78 @@ fn recent_receipts_are_workspace_scoped_bounded_and_authenticated_over_the_local
     running.store(false, Ordering::Release);
     thread.join().unwrap().unwrap();
 }
+
+#[test]
+fn a_store_that_disagrees_with_itself_reaches_the_wire_as_preflight_unavailable() {
+    // gpt1's P2: `wire_error_from_recent_receipt` mapped `InvalidStore` to
+    // `PreflightUnavailable`, and nothing preserved that. Changing only this
+    // mapping to any other code left the whole local-transport target green,
+    // because every permanent case was an authenticated, happy, clamped or
+    // locked read -- none of them a refusal from the Query itself.
+    //
+    // Reusing `preflight_unavailable` rather than inventing a code is the
+    // decision under guard here, not an implementation detail: a cross-kind
+    // read fails for the same two reasons a preflight read does, and the
+    // desktop translates the sentence at its own seam.
+    let runtime = TestRuntime::new("recent-receipts-invalid-store");
+    let server = runtime.server();
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+    client
+        .begin_password_setup(
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+    client.complete_operator_setup(true).unwrap();
+    let project = client
+        .create_project(project_draft("Beacon Alpha", AutonomyProfile::Supervised))
+        .unwrap();
+
+    // A terminal Run with no Receipt: both writers insert the state and the
+    // Receipt in one transaction, so this row cannot have been written by this
+    // reader. Seeded directly, because no Command can produce it.
+    let connection = rusqlite::Connection::open(&runtime.store).unwrap();
+    connection.busy_timeout(Duration::from_secs(5)).unwrap();
+    let workspace_id: String = connection
+        .query_row("SELECT id FROM workspaces LIMIT 1", [], |row| row.get(0))
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO project_repository_revisions (
+                 workspace_id, project_id, revision, charter_revision, source_kind, source,
+                 base_revision, declared_checks_json, author_kind, authored_at_ms
+             ) VALUES (?1, ?2, 1, 1, 'local_path', '/private/beacon/repo',
+                       '0123456789012345678901234567890123456789',
+                       '[{\"name\":\"unit\"}]', 'operator', 0)",
+            rusqlite::params![workspace_id, project.id.to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO runs (
+                 workspace_id, id, project_id, kind, repository_revision, charter_revision,
+                 state, lease_expires_at_ms, started_at_ms, ended_at_ms
+             ) VALUES (?1, ?2, ?3, 'check_preflight', 1, 1, 'refused', 0, 10, 11)",
+            rusqlite::params![
+                workspace_id,
+                Uuid::new_v4().to_string(),
+                project.id.to_string()
+            ],
+        )
+        .unwrap();
+    drop(connection);
+
+    assert!(matches!(
+        client.recent_receipts(50),
+        Err(LocalTransportError::Remote {
+            code: LocalErrorCode::PreflightUnavailable,
+            ..
+        })
+    ));
+
+    running.store(false, Ordering::Release);
+    thread.join().unwrap().unwrap();
+}
