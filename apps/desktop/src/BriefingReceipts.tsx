@@ -154,8 +154,8 @@ export function BriefingReceipts({
           </ul>
           {hidden > 0 ? (
             <p className={styles.truncation}>
-              Showing the {shown.length} most recent of {total}. Open a Project to see its full
-              preflight history.
+              Showing the {shown.length} most recent of {total}. Beacon has no full preflight
+              history view yet, so the rest are recorded but not readable here.
             </p>
           ) : null}
         </>

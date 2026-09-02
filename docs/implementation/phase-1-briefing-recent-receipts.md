@@ -52,8 +52,10 @@ truncation line exists to prevent.
   history cap; the panel then draws five.
 - **Newest first**, by `startedAtMs` then `runId` — the same key the daemon orders each Project's
   Receipts on, extended across the merge so the order is stable.
-- **Truncation is stated:** "Showing the 5 most recent of N. Open a Project to see its full
-  preflight history." A list that silently drops rows is a claim of completeness nobody made.
+- **Truncation is stated, and so is the dead end:** "Showing the 5 most recent of N. Beacon has no
+  full preflight history view yet, so the rest are recorded but not readable here." A list that
+  silently drops rows is a claim of completeness nobody made — and pointing at a Project history
+  view that does not exist is a second claim on top of it. No Project-open path reads this Query.
 - **Loading, empty and failed are three states.** A read that failed is not a Workspace with no
   Receipts, and the failure is retryable rather than terminal.
 

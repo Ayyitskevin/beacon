@@ -130,6 +130,10 @@ it("says a truncated list is truncated instead of implying completeness", () => 
     within(screen.getByRole("list", { name: "Recent preflight Receipts" })).getAllByRole("listitem"),
   ).toHaveLength(5);
   expect(screen.getByText(/Showing the 5 most recent of 9/)).toBeVisible();
+  // No Project-open path reads this Query, so pointing there is a promise the
+  // interface cannot keep. State the scope instead of inventing a destination.
+  expect(screen.queryByText(/Open a Project/)).toBeNull();
+  expect(screen.getByText(/Beacon has no full preflight history view yet/)).toBeVisible();
 });
 
 it("keeps empty, loading and failed apart", async () => {
