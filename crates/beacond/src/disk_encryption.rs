@@ -454,11 +454,21 @@ impl std::fmt::Display for DeviceNumber {
 fn resolve_target(store_path: &Path) -> Result<PathBuf, String> {
     match fs::canonicalize(store_path) {
         Ok(resolved) => Ok(resolved),
+        // NotFound from canonicalize does not prove the store is absent: a link
+        // whose target is gone answers the same way, and its parent is a
+        // different subject. Ask whether the entry itself is there.
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let parent = store_path
-                .parent()
-                .ok_or_else(|| unresolved("the live store path has no parent directory"))?;
-            fs::canonicalize(parent).map_err(|error| unresolved(&format!("{:?}", error.kind())))
+            match fs::symlink_metadata(store_path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let parent = store_path
+                        .parent()
+                        .ok_or_else(|| unresolved("the live store path has no parent directory"))?;
+                    fs::canonicalize(parent)
+                        .map_err(|error| unresolved(&format!("{:?}", error.kind())))
+                }
+                Ok(_) => Err("the live store path is a link that resolves to nothing".to_owned()),
+                Err(error) => Err(unresolved(&format!("{:?}", error.kind()))),
+            }
         }
         Err(error) => Err(unresolved(&format!("{:?}", error.kind()))),
     }
@@ -731,12 +741,18 @@ fn walk_block_stack(
         }
         let crypt_on_path = crypt_above || crypt_here;
 
-        // read_dir is the presence check: a missing slaves directory means this
-        // device has no parents, and any other error means Beacon could not ask.
+        // A missing slaves directory means this device has no parents. A
+        // DANGLING one answers NotFound from read_dir too, so presence is asked
+        // first: symlink_metadata sees the link, and a link to nothing is an
+        // error rather than a device with no parents.
         let slaves = node.join("slaves");
+        let slaves_present = match presence(&slaves) {
+            Ok(found) => found == Presence::Present,
+            Err(reason) => return Walk::Undetermined { reason },
+        };
         let children = match fs::read_dir(&slaves) {
             Ok(children) => children,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !slaves_present => {
                 leaves += 1;
                 if !crypt_on_path {
                     plain_leaves.push(device);
