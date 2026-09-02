@@ -68,6 +68,16 @@ run_in_desktop() {
     )
 }
 
+# The desktop crate declares beacond as a Tauri sidecar, so tauri-build refuses to
+# compile it until the staged binary exists -- including under --no-bundle. The
+# desktop stage gets that for free from `tauri build`, which runs beforeBuildCommand;
+# a cargo-only stage does not, and would fail before compiling anything.
+stage_sidecar() {
+    cargo build --release -p beacond
+    mkdir -p target/sidecar
+    cp target/release/beacond "target/sidecar/beacond-$(rustc -vV | awk '/^host:/ {print $2}')"
+}
+
 echo "gate: $(git rev-parse --abbrev-ref HEAD) @ $(git rev-parse --short HEAD)"
 
 # `run` must not abort the script on a failure, so the remaining checks still report.
@@ -83,6 +93,7 @@ case "$stage" in
         run "Tauri build"      run_in_desktop npm run tauri build -- --no-bundle
         ;;
     rust)
+        run "stage sidecar" stage_sidecar
         run "cargo fmt"    cargo fmt --all --check
         run "cargo clippy" cargo clippy --workspace --all-targets --all-features -- -D warnings
         run "cargo test"   cargo test --workspace --all-targets
@@ -96,6 +107,7 @@ case "$stage" in
         run "desktop tests"    run_in_desktop npm test
         run "desktop build"    run_in_desktop npm run build
         run "Tauri build"      run_in_desktop npm run tauri build -- --no-bundle
+        run "stage sidecar" stage_sidecar
         run "cargo fmt"    cargo fmt --all --check
         run "cargo clippy" cargo clippy --workspace --all-targets --all-features -- -D warnings
         run "cargo test"   cargo test --workspace --all-targets
