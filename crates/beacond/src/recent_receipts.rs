@@ -384,3 +384,88 @@ fn parse_uuid(value: &str) -> Result<Uuid, RecentReceiptError> {
 fn nonnegative(value: i64) -> Result<u64, RecentReceiptError> {
     u64::try_from(value).map_err(|_| RecentReceiptError::InvalidStore)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    /// A store at the current schema, in memory, so the plan below is measured
+    /// against the indexes migrations actually create.
+    fn migrated() -> Connection {
+        let connection = Connection::open_in_memory().expect("an in-memory store");
+        crate::apply_every_migration(&connection).expect("the migration ladder applies");
+        connection
+    }
+
+    /// gpt1's P1: the previous guards read a serialized `RecentReceiptPage` and
+    /// a COPY of the SQL kept in the test file. Adding `receipts.receipt_json`
+    /// to the production projection left all 14 tests green, because neither
+    /// assertion could see the production statement. Both now read the constant
+    /// itself, so the mutant has nowhere to hide.
+    #[test]
+    fn the_production_statement_selects_no_receipt_payload() {
+        assert!(
+            !RECENT_RUNS_SQL.contains("receipt_json"),
+            "the projection grew a payload column:\n{RECENT_RUNS_SQL}"
+        );
+        // The whole projection, named: a new column has to be added here on
+        // purpose, and a payload column cannot arrive as a silent widening.
+        let selected = RECENT_RUNS_SQL
+            .split_once("SELECT ")
+            .and_then(|(_, rest)| rest.split_once("FROM "))
+            .map(|(columns, _)| {
+                columns
+                    .split(',')
+                    .map(|column| column.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .collect::<Vec<_>>()
+            })
+            .expect("the statement is a SELECT ... FROM");
+        assert_eq!(
+            selected,
+            vec![
+                "runs.id",
+                "runs.project_id",
+                "projects.name",
+                "runs.kind",
+                "runs.state",
+                "runs.started_at_ms",
+                "runs.ended_at_ms",
+                "receipts.version",
+                "receipts.outcome",
+                "receipts.recorded_at_ms",
+            ]
+        );
+    }
+
+    /// The wrong answer no row assertion can see: the same rows, in the same
+    /// order, produced by sorting every Run in the Workspace. Without
+    /// `runs_workspace_started` SQLite plans `USE TEMP B-TREE FOR ORDER BY` and
+    /// the cost grows with the Workspace rather than with the window.
+    ///
+    /// Measured against `RECENT_RUNS_SQL` itself, not a copy of it.
+    #[test]
+    fn the_production_statement_walks_the_workspace_index_and_sorts_nothing() {
+        let connection = migrated();
+        let mut statement = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {RECENT_RUNS_SQL}"))
+            .expect("the production statement prepares");
+        let plan = statement
+            .query_map(params!["00000000-0000-4000-8000-000000000000", 51], |row| {
+                row.get::<_, String>(3)
+            })
+            .expect("the plan is readable")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("every plan row reads")
+            .join("\n");
+
+        assert!(
+            plan.contains("runs_workspace_started"),
+            "the ordering index is not used:\n{plan}"
+        );
+        assert!(
+            !plan.contains("TEMP B-TREE"),
+            "the plan sorts the Workspace before the window:\n{plan}"
+        );
+    }
+}
