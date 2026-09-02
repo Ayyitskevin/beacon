@@ -36,27 +36,28 @@ export type LinkPhase = "operator_setup_required" | "locked" | "unlocked";
 
 /** What the router needs of a Project, and of a Mission -- nothing more.
  *
- *  These are declared structurally rather than imported from `session.ts`
- *  because the shell holds two different Project types: `App.tsx:286` keeps
- *  `ProjectSummary[]` from `loadProjects()`, while a selection produces a
- *  `ProjectView`. Naming either one would force the other through a cast at the
- *  wiring, and a cast is how a router ends up routing a shape nothing produces.
- *  `ProjectSummary`, `ProjectView` and `MissionView` all satisfy these, which
- *  the compile-checked fixture in the test file pins.
+ *  One rule decides both: **a type either states a parent and is checked on it,
+ *  or cannot state one.** A type that accepts a parent it does not check is the
+ *  guard keyed on something next to the property, and it is what let a
+ *  foreign-Workspace Project route to `open` for one review round.
  *
- *  `LinkProject` REFUSES a `workspaceId` rather than merely omitting one. The
- *  reading is the scope -- `loadProjects()` returns the current Workspace's
- *  Projects -- so a row has no parent to state, and a type that silently
- *  ACCEPTED one would be ignoring a value it can see. That is the shape of
- *  guard this codebase has been bitten by three times: a check keyed on
- *  something next to the property. `workspaceId?: never` makes the erasure a
- *  compile error instead of a comment, so a `ProjectView` carrying a foreign
- *  Workspace cannot enter the reading at all. `ProjectSummary`, which states no
- *  parent, still assigns with no cast.
+ *  `LinkProject` therefore REFUSES a `workspaceId` rather than merely omitting
+ *  one. The reading is the scope -- `loadProjects()` returns the current
+ *  Workspace's Projects and `LoadedProjects` records which Workspace that was --
+ *  so a Project row has no parent to state. `workspaceId?: never` makes that a
+ *  compile error rather than a comment: **no `ProjectView` can enter the
+ *  reading**, whatever Workspace it names, because stating one at all is the
+ *  thing refused. `ProjectSummary` (`App.tsx:286`, from `loadProjects()`) states
+ *  no parent and assigns with no cast, which is what the shell actually holds.
  *
- *  `LinkMission` is the opposite case and takes the opposite rule: `MissionView`
- *  states both parents, so both are checked. A type either states a parent and
- *  is checked on it, or cannot state one. */
+ *  `LinkMission` is the opposite case and takes the same rule the other way:
+ *  `MissionView` states both parents, so both are checked, and a match that
+ *  disagrees is `wrongScope`.
+ *
+ *  Both are declared structurally rather than imported from `session.ts` so the
+ *  router names what it reads instead of a view type it does not; the
+ *  compile-checked fixture in the test file pins which real types satisfy them,
+ *  and the `@ts-expect-error` beside it pins which one must not. */
 export type LinkProject = { readonly id: string; readonly workspaceId?: never };
 export type LinkMission = {
   readonly id: string;
@@ -96,7 +97,7 @@ export type LinkContext = {
   missions: LoadedMissions | null;
 };
 
-/** What should happen to a link, as six distinct facts.
+/** What should happen to a link, as eight distinct facts.
  *
  *  `absent` and `otherWorkspace` are separate because one says the object does
  *  not exist and the other says nothing at all about whether it exists.
