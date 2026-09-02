@@ -280,7 +280,14 @@ identified by their digest: it records intended effects, inputs, bounds, checks,
 review, is backend-only and inert, and creates no Gate, Ruling, worktree, process, Invocation, or
 dispatch of any kind.
 
-Resident-issued Team formation, Conversations, Rulings, Evaluations, model Invocations,
+The Owner can then record a Ruling against one exact Proposal digest, copying the Charter, Policy,
+and Repository revisions and the pinned base revision it was decided under, append-only and with a
+reversal recorded as a new Ruling citing the prior one rather than as an edit; it is backend-only,
+it reports drift and supersession as facts rather than as a verdict, and it creates no execution
+authority, because a Ruling is evidence that a person decided and there is no dispatch to consume
+it.
+
+Resident-issued Team formation, Conversations, Gates, Evaluations, model Invocations,
 Cloud Link, passkeys, active agent work, and a downloadable installer do not exist yet. Nothing an
 Agent authored has ever been executed: the only commands Beacon runs are the Declared Checks an
 Owner bound by hand. Do not describe this checkpoint as a usable Alpha.
