@@ -1592,8 +1592,12 @@ export function isPreflightReceipt(value: unknown): value is PreflightReceipt {
   );
 }
 
+/** The daemon applies no LIMIT to this Query -- `check_preflight.rs` returns
+ *  every Receipt a Project has -- so the only bound is here. Matches the cap on
+ *  repository history: an unbounded array is a Workspace-sized allocation
+ *  crossing the boundary before anything decides how many rows to draw. */
 function isPreflightReceiptList(value: unknown): value is PreflightReceipt[] {
-  return Array.isArray(value) && value.every(isPreflightReceipt);
+  return Array.isArray(value) && value.length <= 512 && value.every(isPreflightReceipt);
 }
 
 function isProjectRepositoryOrNull(value: unknown): value is ProjectRepository | null {
