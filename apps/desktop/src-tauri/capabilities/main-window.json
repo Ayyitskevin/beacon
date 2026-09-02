@@ -48,6 +48,7 @@
     "allow-mission",
     "allow-admit-mission",
     "allow-discover-local-models",
+    "allow-live-data-encryption-status",
     "allow-inspect-local-model",
     "allow-activate-local-model",
     "allow-local-model-activations",

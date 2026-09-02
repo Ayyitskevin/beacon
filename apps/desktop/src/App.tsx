@@ -10,6 +10,8 @@ import {
 } from "@fluentui/react-components";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 
+import { LiveDataEncryptionStatus } from "./LiveDataEncryption";
+
 import {
   acceptStarterOrganization,
   activateLocalModel,
@@ -31,6 +33,8 @@ import {
   discardStarterOrganization,
   loadAuthenticationCapabilities,
   inspectLocalModel,
+  type LiveDataEncryptionReport,
+  liveDataEncryptionStatus,
   loadLocalModelActivations,
   loadMissions,
   loadPlatformSessionMonitorStatus,
@@ -303,6 +307,10 @@ export function App() {
     useState<LocalModelActivationReview | null>(null);
   const [discoveringLocalModels, setDiscoveringLocalModels] = useState(false);
   const localModelDiscoveryEpoch = useRef(0);
+  const [liveDataEncryption, setLiveDataEncryption] =
+    useState<LiveDataEncryptionReport | null>(null);
+  const [recheckingLiveDataEncryption, setRecheckingLiveDataEncryption] = useState(false);
+  const liveDataEncryptionEpoch = useRef(0);
   const [residentCapabilityCatalog, setResidentCapabilityCatalog] =
     useState<BeaconCapabilityDescriptor[] | null>(null);
   const [residentConfigurations, setResidentConfigurations] =
@@ -439,6 +447,20 @@ export function App() {
     };
   }, [unlocked]);
 
+  // The Installation's live-data encryption diagnostic. Read once the
+  // Workspace opens and re-read only on an explicit recheck, so the warning
+  // stays visible until the condition itself changes.
+  useEffect(() => {
+    if (!unlocked) return;
+    const requestEpoch = ++liveDataEncryptionEpoch.current;
+    void liveDataEncryptionStatus().then(
+      (report) => {
+        if (requestEpoch === liveDataEncryptionEpoch.current) setLiveDataEncryption(report);
+      },
+      () => {},
+    );
+  }, [unlocked]);
+
   useEffect(() => {
     if (unlocked) return;
     localModelDiscoveryEpoch.current += 1;
@@ -446,6 +468,9 @@ export function App() {
     setLocalModelActivations(null);
     setLocalModelReview(null);
     setDiscoveringLocalModels(false);
+    liveDataEncryptionEpoch.current += 1;
+    setLiveDataEncryption(null);
+    setRecheckingLiveDataEncryption(false);
     setResidentCapabilityCatalog(null);
     setResidentConfigurations(null);
     setLoadingResidentConfigurations(false);
@@ -788,6 +813,23 @@ export function App() {
     } finally {
       if (requestEpoch === localModelDiscoveryEpoch.current) {
         setDiscoveringLocalModels(false);
+      }
+    }
+  }
+
+  async function recheckLiveDataEncryption() {
+    const requestEpoch = ++liveDataEncryptionEpoch.current;
+    setRecheckingLiveDataEncryption(true);
+    try {
+      const report = await liveDataEncryptionStatus();
+      if (requestEpoch === liveDataEncryptionEpoch.current) setLiveDataEncryption(report);
+    } catch (error) {
+      if (requestEpoch === liveDataEncryptionEpoch.current) {
+        setActionError(describeLocalAccountError(error));
+      }
+    } finally {
+      if (requestEpoch === liveDataEncryptionEpoch.current) {
+        setRecheckingLiveDataEncryption(false);
       }
     }
   }
@@ -1464,6 +1506,11 @@ export function App() {
                       : "starting"}
                   </p>
                 )}
+              <LiveDataEncryptionStatus
+                report={liveDataEncryption}
+                busy={recheckingLiveDataEncryption}
+                onRecheck={recheckLiveDataEncryption}
+              />
             </>
           )}
           <h3 className={classes.themeHeading}>Appearance</h3>

@@ -14,6 +14,7 @@ import {
   createProject,
   deactivateLocalModel,
   discoverLocalModels,
+  liveDataEncryptionStatus,
   completeLocalOperatorSetup,
   describeLocalAccountError,
   discardStarterOrganization,
@@ -1081,6 +1082,47 @@ describe("desktop session transport", () => {
     });
     await expect(preflightProjectChecks(receipt.projectId)).rejects.toThrow(
       "invalid preflight Receipt",
+    );
+  });
+
+  it("refuses a live-data encryption report that claims more than three states or a mechanism it did not prove", async () => {
+    const report = {
+      state: "disabled",
+      mountPoint: { kind: "present", value: "/" },
+      mechanism: {
+        kind: "absent",
+        reason: "Beacon found no device-mapper crypt layer in this volume's block stack",
+      },
+      evidence: [{ source: "stat(live store)", observation: "st_dev = 259:2" }],
+      notVerified: ["filesystem-level encryption such as fscrypt or ext4 encryption"],
+      observedAtMs: 1_756_000_000_000,
+    };
+    invokeMock.mockResolvedValue(report);
+    await expect(liveDataEncryptionStatus()).resolves.toEqual(report);
+    expect(invokeMock).toHaveBeenCalledWith("live_data_encryption_status");
+
+    // A fourth state is a widened vocabulary, not a richer answer.
+    invokeMock.mockResolvedValue({ ...report, state: "partial" });
+    await expect(liveDataEncryptionStatus()).rejects.toThrow(
+      "invalid live-data encryption report",
+    );
+
+    // Only `enabled` may name a mechanism, and `enabled` must name one.
+    invokeMock.mockResolvedValue({
+      ...report,
+      mechanism: { kind: "present", value: "dm-crypt (LUKS2)" },
+    });
+    await expect(liveDataEncryptionStatus()).rejects.toThrow(
+      "invalid live-data encryption report",
+    );
+    invokeMock.mockResolvedValue({ ...report, state: "enabled" });
+    await expect(liveDataEncryptionStatus()).rejects.toThrow(
+      "invalid live-data encryption report",
+    );
+
+    invokeMock.mockResolvedValue({ ...report, surprise: true });
+    await expect(liveDataEncryptionStatus()).rejects.toThrow(
+      "invalid live-data encryption report",
     );
   });
 });
