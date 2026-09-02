@@ -311,6 +311,22 @@ export type LocalModelDiscoveryReport = {
   observedAtMs: number;
 };
 
+/** Three states, closed. `disabled` is a proven negative; absence of proof is
+ *  `unknown`, and `mechanism` carries its reason. */
+export type LiveDataEncryption = "enabled" | "disabled" | "unknown";
+export type EncryptionEvidence = {
+  source: string;
+  observation: string;
+};
+export type LiveDataEncryptionReport = {
+  state: LiveDataEncryption;
+  mountPoint: Recorded<string>;
+  mechanism: Recorded<string>;
+  evidence: EncryptionEvidence[];
+  notVerified: string[];
+  observedAtMs: number;
+};
+
 export type ProviderFeature = "completion" | "embedding" | "thinking" | "tools" | "vision";
 export type LocalModelBinding = {
   provider: "ollama";
@@ -814,6 +830,15 @@ export async function discoverLocalModels(): Promise<LocalModelDiscoveryReport> 
     undefined,
     isLocalModelDiscoveryReport,
     "local-model discovery report",
+  );
+}
+
+export async function liveDataEncryptionStatus(): Promise<LiveDataEncryptionReport> {
+  return invokeAndValidate(
+    "live_data_encryption_status",
+    undefined,
+    isLiveDataEncryptionReport,
+    "live-data encryption report",
   );
 }
 
@@ -1927,6 +1952,49 @@ function isMissionList(value: unknown): value is MissionView[] {
     return prior.admittedAtMs < mission.admittedAtMs ||
       (prior.admittedAtMs === mission.admittedAtMs && prior.id < mission.id);
   });
+}
+
+function isLiveDataEncryptionReport(value: unknown): value is LiveDataEncryptionReport {
+  if (
+    !hasExactKeys(value, [
+      "evidence",
+      "mechanism",
+      "mountPoint",
+      "notVerified",
+      "observedAtMs",
+      "state",
+    ])
+  ) {
+    return false;
+  }
+  const { evidence, notVerified } = value;
+  if (
+    !["enabled", "disabled", "unknown"].includes(String(value.state)) ||
+    !isNonnegativeInteger(value.observedAtMs) ||
+    !isRecorded(value.mountPoint, isString) ||
+    !isRecorded(value.mechanism, isString) ||
+    !Array.isArray(evidence) ||
+    evidence.length > 32 ||
+    !evidence.every(isEncryptionEvidence) ||
+    !Array.isArray(notVerified) ||
+    notVerified.length > 8 ||
+    !notVerified.every((entry) => isTrimmedTextWithoutControls(entry, 200))
+  ) {
+    return false;
+  }
+  // Only `enabled` may name a mechanism. Any other state carrying one would be
+  // a claim Beacon did not prove.
+  return (value.mechanism as Recorded<string>).kind === "present"
+    ? value.state === "enabled"
+    : value.state !== "enabled";
+}
+
+function isEncryptionEvidence(value: unknown): value is EncryptionEvidence {
+  return (
+    hasExactKeys(value, ["observation", "source"]) &&
+    isTrimmedTextWithoutControls(value.source, 200) &&
+    isTrimmedTextWithoutControls(value.observation, 200)
+  );
 }
 
 function isLocalModelDiscoveryReport(value: unknown): value is LocalModelDiscoveryReport {
