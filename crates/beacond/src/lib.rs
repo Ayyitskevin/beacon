@@ -17,6 +17,7 @@ mod declared_checks;
 #[cfg(unix)]
 mod disk_encryption;
 mod dispatch;
+mod evaluation;
 mod git_object_store;
 mod local_model_activation;
 mod mission;
@@ -82,6 +83,11 @@ pub use dispatch::{
     DispatchActor, DispatchError, DispatchOutcome, DispatchReceipt, DispatchService, GitStep,
     GitStepName, GitStepResult, MutationEffect, MutationRecord, NotVerified, PauseService,
     RepositoryEffect, SourceIdentity, SuppliedContent, UnresolvedRuns,
+};
+pub use evaluation::{
+    Conflicts, Evaluation, EvaluationDigest, EvaluationDraft, EvaluationError, EvaluationService,
+    EvaluationSupersedes, EvaluationV1, Evaluator, Finding, FindingSeverity,
+    InconsistentEvaluation, MalformedEvaluation, RubricDeclaration, Verdict,
 };
 pub use local_model_activation::{
     LocalModelActivation, LocalModelActivationError, LocalModelActivationReview,
@@ -165,7 +171,7 @@ pub use team::{
 pub use worktree::set_pinned_spawn_hook;
 pub use worktree::{CleanupOutcome, KeepReason, Worktree, WorktreeError};
 
-const SCHEMA_VERSION: i64 = 22;
+const SCHEMA_VERSION: i64 = 23;
 const MAX_WORKSPACE_NAME_CHARS: usize = 120;
 
 const SCHEMA_V1: &str = include_str!("../migrations/0001_initial.sql");
@@ -195,10 +201,11 @@ const MIGRATION_V17: &str = include_str!("../migrations/0017_sample_project.sql"
 const MIGRATION_V18: &str = include_str!("../migrations/0018_proposals.sql");
 const MIGRATION_V19: &str = include_str!("../migrations/0019_rulings.sql");
 const MIGRATION_V20: &str = include_str!("../migrations/0020_recent_receipts_index.sql");
-// Migration 0021 belongs to Evaluation v1, built in a parallel lane. Dispatch owns 0022
-// (FABLE-RULINGS-2026-09-02 R5), so on this branch the ladder steps 20 -> 22, and whichever of
-// the two lands second renumbers at its final rebase.
+// Dispatch owns 0022 (FABLE-RULINGS-2026-09-02 R5) and landed first, so Evaluation --
+// which held 0021 while the two lanes ran in parallel -- renumbers to 0023 at its final
+// rebase, exactly as the note on this line said whichever landed second would.
 const MIGRATION_V22: &str = include_str!("../migrations/0022_candidates.sql");
+const MIGRATION_V23: &str = include_str!("../migrations/0023_evaluations.sql");
 
 #[derive(Debug, Clone)]
 pub struct StartupConfig {
@@ -282,11 +289,13 @@ pub enum SupervisorError {
     ProposalEventMismatch(i64),
     ProposalStateMismatch,
     RulingEventMismatch(i64),
+    EvaluationEventMismatch(i64),
     RulingStateMismatch,
     CandidateEventMismatch(i64),
     CandidateStateMismatch,
     DispatchEventMismatch(i64),
     DispatchStateMismatch,
+    EvaluationStateMismatch,
     PauseEventMismatch(i64),
     SchemaMismatch,
     UnsupportedSchemaVersion(i64),
@@ -436,6 +445,17 @@ impl fmt::Display for SupervisorError {
                 formatter,
                 "Event sequence {sequence} does not match its stored Ruling bytes"
             ),
+            Self::EvaluationEventMismatch(sequence) => write!(
+                formatter,
+                "Event sequence {sequence} does not match its stored Evaluation bytes"
+            ),
+            Self::EvaluationStateMismatch => {
+                write!(
+                    formatter,
+                    "Evaluation state does not agree with its bytes, the Proposal it binds, its \
+                     findings and cited Runs, or its audit Event"
+                )
+            }
             Self::RulingStateMismatch => {
                 write!(
                     formatter,
@@ -547,6 +567,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V19)?;
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
+                    transaction.execute_batch(MIGRATION_V23)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 2 => {
@@ -569,6 +590,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V19)?;
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
+                    transaction.execute_batch(MIGRATION_V23)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 3 => {
@@ -590,6 +612,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V19)?;
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
+                    transaction.execute_batch(MIGRATION_V23)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 4 => {
@@ -610,6 +633,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V19)?;
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
+                    transaction.execute_batch(MIGRATION_V23)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 5 => {
@@ -629,6 +653,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V19)?;
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
+                    transaction.execute_batch(MIGRATION_V23)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 6 => {
@@ -647,6 +672,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V19)?;
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
+                    transaction.execute_batch(MIGRATION_V23)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 7 => {
@@ -664,6 +690,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V19)?;
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
+                    transaction.execute_batch(MIGRATION_V23)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 8 => {
@@ -680,6 +707,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V19)?;
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
+                    transaction.execute_batch(MIGRATION_V23)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 9 => {
@@ -695,6 +723,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V19)?;
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
+                    transaction.execute_batch(MIGRATION_V23)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 10 => {
@@ -709,6 +738,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V19)?;
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
+                    transaction.execute_batch(MIGRATION_V23)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 11 => {
@@ -722,6 +752,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V19)?;
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
+                    transaction.execute_batch(MIGRATION_V23)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 12 => {
@@ -734,6 +765,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V19)?;
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
+                    transaction.execute_batch(MIGRATION_V23)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 13 => {
@@ -745,6 +777,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V19)?;
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
+                    transaction.execute_batch(MIGRATION_V23)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 14 => {
@@ -755,6 +788,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V19)?;
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
+                    transaction.execute_batch(MIGRATION_V23)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 15 => {
@@ -764,6 +798,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V19)?;
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
+                    transaction.execute_batch(MIGRATION_V23)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 16 => {
@@ -773,6 +808,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V19)?;
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
+                    transaction.execute_batch(MIGRATION_V23)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 17 => {
@@ -781,6 +817,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V19)?;
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
+                    transaction.execute_batch(MIGRATION_V23)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 18 => {
@@ -788,17 +825,20 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V19)?;
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
+                    transaction.execute_batch(MIGRATION_V23)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 19 => {
                     verify_schema(&transaction, 19)?;
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
+                    transaction.execute_batch(MIGRATION_V23)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 20 => {
                     verify_schema(&transaction, 20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
+                    transaction.execute_batch(MIGRATION_V23)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 SCHEMA_VERSION => verify_schema(&transaction, SCHEMA_VERSION)?,
@@ -825,6 +865,7 @@ impl Supervisor {
             transaction.execute_batch(MIGRATION_V19)?;
             transaction.execute_batch(MIGRATION_V20)?;
             transaction.execute_batch(MIGRATION_V22)?;
+            transaction.execute_batch(MIGRATION_V23)?;
             verify_schema(&transaction, SCHEMA_VERSION)?;
         }
 
@@ -1025,6 +1066,7 @@ pub(crate) fn apply_every_migration(connection: &Connection) -> Result<(), Super
         MIGRATION_V19,
         MIGRATION_V20,
         MIGRATION_V22,
+        MIGRATION_V23,
     ] {
         connection.execute_batch(migration)?;
     }
@@ -1093,6 +1135,9 @@ fn verify_schema(connection: &Connection, version: i64) -> Result<(), Supervisor
     }
     if version >= 22 {
         expected_connection.execute_batch(MIGRATION_V22)?;
+    }
+    if version >= 23 {
+        expected_connection.execute_batch(MIGRATION_V23)?;
     }
     if !(1..=SCHEMA_VERSION).contains(&version) {
         return Err(SupervisorError::UnsupportedSchemaVersion(version));
@@ -1174,6 +1219,7 @@ enum PersistedEventKind {
     ProposalDispatched,
     InstallationPaused,
     InstallationResumed,
+    EvaluationRecorded,
 }
 
 impl PersistedEventKind {
@@ -1205,6 +1251,7 @@ impl PersistedEventKind {
             Self::ProposalDispatched => "proposal.dispatched",
             Self::InstallationPaused => "installation.paused",
             Self::InstallationResumed => "installation.resumed",
+            Self::EvaluationRecorded => "evaluation.recorded",
         }
     }
 
@@ -1236,6 +1283,7 @@ impl PersistedEventKind {
             "proposal.dispatched" => Ok(Self::ProposalDispatched),
             "installation.paused" => Ok(Self::InstallationPaused),
             "installation.resumed" => Ok(Self::InstallationResumed),
+            "evaluation.recorded" => Ok(Self::EvaluationRecorded),
             _ => Err(SupervisorError::InvalidEventKind(value)),
         }
     }
@@ -1293,6 +1341,8 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     // became of it is finished here, from its durable preparation and the repository's own ref.
     dispatch::finish_prepared_dispatches(connection)
         .map_err(|_| SupervisorError::DispatchStateMismatch)?;
+    evaluation::verify_evaluation_state(connection)
+        .map_err(|_| SupervisorError::EvaluationStateMismatch)?;
     // A Run whose lease expired without a terminal Receipt becomes unconfirmed
     // here. Lease expiry is what proves that state; the Run is never removed.
     check_preflight::verify_run_state(connection).map_err(|_| SupervisorError::RunStateMismatch)?;
@@ -1441,6 +1491,15 @@ fn verify_persisted_events(connection: &Connection) -> Result<u64, SupervisorErr
                 )
                 .map_err(|_| SupervisorError::ProposalEventMismatch(sequence))?;
             }
+            PersistedEventKind::EvaluationRecorded => {
+                evaluation::verify_evaluation_event(
+                    connection,
+                    workspace_id,
+                    occurred_at_ms,
+                    &payload_json,
+                )
+                .map_err(|_| SupervisorError::EvaluationEventMismatch(sequence))?;
+            }
             PersistedEventKind::RulingRecorded => {
                 ruling::verify_ruling_event(
                     connection,
@@ -1578,11 +1637,11 @@ mod tests {
         ExternalEffects, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6,
         MIGRATION_V7, MIGRATION_V8, MIGRATION_V9, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12,
         MIGRATION_V13, MIGRATION_V14, MIGRATION_V15, MIGRATION_V16_ONLY, MIGRATION_V17,
-        MIGRATION_V18, MIGRATION_V19, MIGRATION_V20, OperatorAccountService, PreflightOutcome,
-        PreflightReceipt, ProjectCharter, ProjectCharterDraft, ProjectDraft,
-        ProjectRepositoryService, ProjectService, ProjectView, Recorded, RepositoryDraft,
-        RepositorySourceKind, ResolvedCheck, SCHEMA_V1, SecretString, StartupConfig, Supervisor,
-        SupervisorError, UnavailableEvidence,
+        MIGRATION_V18, MIGRATION_V19, MIGRATION_V20, MIGRATION_V22, MIGRATION_V23,
+        OperatorAccountService, PreflightOutcome, PreflightReceipt, ProjectCharter,
+        ProjectCharterDraft, ProjectDraft, ProjectRepositoryService, ProjectService, ProjectView,
+        Recorded, RepositoryDraft, RepositorySourceKind, ResolvedCheck, SCHEMA_V1, SecretString,
+        StartupConfig, Supervisor, SupervisorError, UnavailableEvidence,
     };
 
     struct TestStore {
@@ -3964,6 +4023,8 @@ mod tests {
             MIGRATION_V18,
             MIGRATION_V19,
             MIGRATION_V20,
+            MIGRATION_V22,
+            MIGRATION_V23,
         ] {
             connection.execute_batch(migration).unwrap();
         }

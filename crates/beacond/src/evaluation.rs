@@ -1,0 +1,1662 @@
+//! Evaluation v1: one non-author Resident's recorded verdict about one exact Proposal digest
+//! (ADR 0038).
+//!
+//! **An Evaluation confers no authority.** It is a record that somebody judged, and a judgment is
+//! not a permission (`docs/BLUEPRINT.md:445-447`). Nothing here opens a Gate, admits a dispatch,
+//! prepares a worktree, starts a process, invokes a model, or makes a network request, and no
+//! accessor answers a question with a boolean. `meets` is not approval -- approval is a Ruling
+//! word, and this vocabulary deliberately does not contain it.
+//!
+//! **A Ruling does not cite an Evaluation in v1.** The citation relation is deferred until
+//! `beacon.ruling.v2` can cover the cited set with the Ruling's own digest, because a relation
+//! attached after the fact is indistinguishable from one made at ruling time.
+//!
+//! The rubric fields are a **self-report**. Nothing in Beacon resolves a rubric: there is no rubric
+//! table, no owning module and no foreign key. They record what the evaluator declared they
+//! applied, exactly as ADR 0034 treats a declared readable context, and **no surface may present a
+//! rubric as applied or verified on their strength alone.**
+//!
+//! The canonical grammar reuses `beacon.proposal.v1`'s primitives, and this module carries its own
+//! copy of them rather than sharing one implementation -- the same decision Ruling v1 made and for
+//! the same reason: an identity grammar's whole value is that it cannot move, and a shared codec
+//! would couple two frozen grammars' futures.
+
+use std::collections::HashSet;
+use std::fmt;
+use std::sync::Arc;
+
+use data_encoding::HEXLOWER;
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use uuid::Uuid;
+
+use crate::proposal::{ProposalDigest, is_human_text, proposal_binding_facts, sha256};
+use crate::{OperatorAccountError, OperatorAccountService, ProposalError};
+
+/// The canonicalizer identity. Any future grammar is a new canonicalizer; existing v1 bytes are
+/// never reinterpreted under v2 rules.
+const CANONICALIZER: &str = "beacon.evaluation.v1";
+const DIGEST_ALGORITHM: &str = "sha256";
+
+/// The exact envelope a v1 Evaluation may name as the Proposal it evaluated. Both are copied from
+/// the Proposal and both are checked here, so bytes naming a canonicalizer this grammar cannot have
+/// evaluated under are refused by the codec rather than only by a column constraint.
+const PROPOSAL_DIGEST_ALGORITHM: &str = "sha256";
+const PROPOSAL_CANONICALIZER: &str = "beacon.proposal.v1";
+
+/// The literal ASCII magic that starts every record, including its terminating NUL: 21 bytes.
+const MAGIC: &[u8] = b"beacon.evaluation.v1\0";
+
+const MAX_RATIONALE_SCALARS: usize = 2_000;
+const MAX_RATIONALE_BYTES: usize = MAX_RATIONALE_SCALARS * 4;
+const MAX_CONFLICTS_SCALARS: usize = 2_000;
+const MAX_CONFLICTS_BYTES: usize = MAX_CONFLICTS_SCALARS * 4;
+const MAX_SUMMARY_SCALARS: usize = 500;
+const MAX_SUMMARY_BYTES: usize = MAX_SUMMARY_SCALARS * 4;
+const MAX_DESCRIPTOR_TOKEN_BYTES: usize = 64;
+const MAX_CITED_RUNS: usize = 64;
+const MAX_FINDINGS: usize = 64;
+const DIGEST_HEX_CHARS: usize = 64;
+
+// One-byte tags. Assigned explicitly and never renumbered. `conflicts` and `supersedes` are the two
+// positions where 0x00 is assigned, because absence is a value in both and must encode as one.
+const TAG_SUBJECT_PROPOSAL: u8 = 0x01;
+const TAG_VERDICT_MEETS: u8 = 0x01;
+const TAG_VERDICT_REVISION_REQUESTED: u8 = 0x02;
+const TAG_VERDICT_DOES_NOT_MEET: u8 = 0x03;
+const TAG_VERDICT_UNCERTAIN: u8 = 0x04;
+const TAG_SEVERITY_BLOCKING: u8 = 0x01;
+const TAG_SEVERITY_CONCERN: u8 = 0x02;
+const TAG_SEVERITY_NOTE: u8 = 0x03;
+const TAG_CONFLICTS_NONE: u8 = 0x00;
+const TAG_CONFLICTS_DECLARED: u8 = 0x01;
+const TAG_SUPERSEDES_NONE: u8 = 0x00;
+const TAG_SUPERSEDES_EVALUATION: u8 = 0x01;
+
+const VERDICT_MEETS: &str = "meets";
+const VERDICT_REVISION_REQUESTED: &str = "revision_requested";
+const VERDICT_DOES_NOT_MEET: &str = "does_not_meet";
+const VERDICT_UNCERTAIN: &str = "uncertain";
+
+const SEVERITY_BLOCKING: &str = "blocking";
+const SEVERITY_CONCERN: &str = "concern";
+const SEVERITY_NOTE: &str = "note";
+
+// ---------------------------------------------------------------------------------------------
+// The immutable v1 payload
+// ---------------------------------------------------------------------------------------------
+
+/// The closed v1 verdict vocabulary, taken from `BLUEPRINT:630-631` rather than invented.
+///
+/// None of the four is `approved`. `uncertain` is a first-class outcome and not a soft rejection,
+/// for the same reason the disk-encryption reader has `Unknown`: an unproved answer that presents
+/// as a negative is a different lie from an unproved answer that says so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Meets,
+    RevisionRequested,
+    DoesNotMeet,
+    Uncertain,
+}
+
+impl Verdict {
+    fn tag(self) -> u8 {
+        match self {
+            Self::Meets => TAG_VERDICT_MEETS,
+            Self::RevisionRequested => TAG_VERDICT_REVISION_REQUESTED,
+            Self::DoesNotMeet => TAG_VERDICT_DOES_NOT_MEET,
+            Self::Uncertain => TAG_VERDICT_UNCERTAIN,
+        }
+    }
+
+    fn from_tag(tag: u8) -> Option<Self> {
+        Some(match tag {
+            TAG_VERDICT_MEETS => Self::Meets,
+            TAG_VERDICT_REVISION_REQUESTED => Self::RevisionRequested,
+            TAG_VERDICT_DOES_NOT_MEET => Self::DoesNotMeet,
+            TAG_VERDICT_UNCERTAIN => Self::Uncertain,
+            _ => return None,
+        })
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Meets => VERDICT_MEETS,
+            Self::RevisionRequested => VERDICT_REVISION_REQUESTED,
+            Self::DoesNotMeet => VERDICT_DOES_NOT_MEET,
+            Self::Uncertain => VERDICT_UNCERTAIN,
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        Some(match value {
+            VERDICT_MEETS => Self::Meets,
+            VERDICT_REVISION_REQUESTED => Self::RevisionRequested,
+            VERDICT_DOES_NOT_MEET => Self::DoesNotMeet,
+            VERDICT_UNCERTAIN => Self::Uncertain,
+            _ => return None,
+        })
+    }
+}
+
+/// Three arms. A finding list with no severity forces every consumer to re-read prose to learn
+/// whether anything mattered; two arms would make "worth saying, not worth blocking" unsayable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindingSeverity {
+    Blocking,
+    Concern,
+    Note,
+}
+
+impl FindingSeverity {
+    fn tag(self) -> u8 {
+        match self {
+            Self::Blocking => TAG_SEVERITY_BLOCKING,
+            Self::Concern => TAG_SEVERITY_CONCERN,
+            Self::Note => TAG_SEVERITY_NOTE,
+        }
+    }
+
+    fn from_tag(tag: u8) -> Option<Self> {
+        Some(match tag {
+            TAG_SEVERITY_BLOCKING => Self::Blocking,
+            TAG_SEVERITY_CONCERN => Self::Concern,
+            TAG_SEVERITY_NOTE => Self::Note,
+            _ => return None,
+        })
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Blocking => SEVERITY_BLOCKING,
+            Self::Concern => SEVERITY_CONCERN,
+            Self::Note => SEVERITY_NOTE,
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        Some(match value {
+            SEVERITY_BLOCKING => Self::Blocking,
+            SEVERITY_CONCERN => Self::Concern,
+            SEVERITY_NOTE => Self::Note,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Finding {
+    pub severity: FindingSeverity,
+    pub summary: String,
+}
+
+/// Absence is a value: `BLUEPRINT:630` requires conflicts to be *recorded*, so "no conflict
+/// declared" encodes as a statement rather than as a missing field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Conflicts {
+    None,
+    Declared(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvaluationSupersedes {
+    None,
+    Evaluation(String),
+}
+
+/// What the evaluator says they applied. Beacon resolves none of it -- see the module note.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RubricDeclaration {
+    pub id: String,
+    pub version: u32,
+    pub canonicalizer: String,
+    pub sha256: String,
+}
+
+/// The evaluator, as a Resident under one exact configuration.
+///
+/// Two configurations of one Resident are two evaluators for configuration purposes and **one
+/// author** for non-authorship purposes; slice 2 makes that structural.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Evaluator {
+    pub resident_id: Uuid,
+    pub configuration_id: Uuid,
+}
+
+/// The immutable v1 payload, in canonical field order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvaluationV1 {
+    pub proposal: ProposalDigest,
+    pub evaluator: Evaluator,
+    pub rubric: RubricDeclaration,
+    pub cited_runs: Vec<Uuid>,
+    pub verdict: Verdict,
+    pub findings: Vec<Finding>,
+    pub conflicts: Conflicts,
+    pub rationale: String,
+    pub supersedes: EvaluationSupersedes,
+    pub evaluated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvaluationDigest {
+    pub algorithm: String,
+    pub canonicalizer: String,
+    pub value: String,
+}
+
+/// One stored Evaluation, re-verified on every read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Evaluation {
+    digest: EvaluationDigest,
+    canonical_bytes: Vec<u8>,
+    payload: EvaluationV1,
+}
+
+impl Evaluation {
+    pub fn digest(&self) -> &EvaluationDigest {
+        &self.digest
+    }
+
+    pub fn canonical_bytes(&self) -> &[u8] {
+        &self.canonical_bytes
+    }
+
+    pub fn payload(&self) -> &EvaluationV1 {
+        &self.payload
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Refusals
+// ---------------------------------------------------------------------------------------------
+
+/// Why bytes are not a v1 Evaluation. Every arm is a fact about the bytes, never about the store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MalformedEvaluation {
+    Magic,
+    Truncated,
+    TrailingBytes,
+    InvalidUtf8,
+    OverLimitLength,
+    Subject,
+    ProposalDigestValue,
+    ProposalDigestEnvelope,
+    RubricId,
+    RubricVersion,
+    RubricCanonicalizer,
+    RubricDigest,
+    CitedRunCount,
+    CitedRunOrder,
+    Verdict,
+    FindingCount,
+    FindingSeverity,
+    FindingSummary,
+    Conflicts,
+    ConflictsText,
+    Rationale,
+    Supersedes,
+    SupersedesDigest,
+}
+
+impl fmt::Display for MalformedEvaluation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::Magic => "the bytes do not start with the beacon.evaluation.v1 magic",
+            Self::Truncated => "the bytes end inside a field",
+            Self::TrailingBytes => "bytes follow the record",
+            Self::InvalidUtf8 => "a string is not valid UTF-8",
+            Self::OverLimitLength => "a declared length exceeds its field's limit",
+            Self::Subject => "the subject tag is not an assigned value",
+            Self::ProposalDigestValue => "the Proposal digest is not 64 lowercase hex characters",
+            Self::ProposalDigestEnvelope => {
+                "the Proposal digest algorithm or canonicalizer is not the one v1 evaluates"
+            }
+            Self::RubricId => "the rubric id is empty or over its limit",
+            Self::RubricVersion => "the rubric version is below one",
+            Self::RubricCanonicalizer => "the rubric canonicalizer is empty or over its limit",
+            Self::RubricDigest => "the rubric digest is not 64 lowercase hex characters",
+            Self::CitedRunCount => "more cited Runs than the bound admits",
+            Self::CitedRunOrder => "cited Runs are not in ascending order, or repeat",
+            Self::Verdict => "the verdict tag is not an assigned value",
+            Self::FindingCount => "more findings than the bound admits",
+            Self::FindingSeverity => "a finding severity tag is not an assigned value",
+            Self::FindingSummary => "a finding summary is empty or over its limit",
+            Self::Conflicts => "the conflicts tag is not an assigned value",
+            Self::ConflictsText => "the declared conflict text is empty or over its limit",
+            Self::Rationale => "the rationale is empty or over its limit",
+            Self::Supersedes => "the supersedes tag is not an assigned value",
+            Self::SupersedesDigest => {
+                "the superseded Evaluation digest is not 64 lowercase hex characters"
+            }
+        };
+        formatter.write_str(message)
+    }
+}
+
+/// Why a request cannot be recorded, or a stored row cannot be believed. Distinct from
+/// `MalformedEvaluation`: these are facts about the store, not about bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InconsistentEvaluation {
+    ProposalNotFound,
+    DigestMismatch,
+    BytesNotCanonical,
+    ColumnDisagreesWithBytes,
+    ProposalEnvelopeDisagrees,
+    MissionDisagreesWithProposal,
+    FindingsDisagreeWithBytes,
+    CitedRunsDisagreeWithBytes,
+}
+
+impl fmt::Display for InconsistentEvaluation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::ProposalNotFound => "no stored Proposal has that digest in this Workspace",
+            Self::DigestMismatch => "the stored digest is not the hash of the stored bytes",
+            Self::BytesNotCanonical => "the stored bytes are not what re-encoding produces",
+            Self::ColumnDisagreesWithBytes => "an indexed column disagrees with the stored bytes",
+            Self::ProposalEnvelopeDisagrees => {
+                "the copied Proposal envelope is not what that Proposal recorded"
+            }
+            Self::MissionDisagreesWithProposal => {
+                "the derived Mission is not the bound Proposal's Mission"
+            }
+            Self::FindingsDisagreeWithBytes => "the stored findings are not the ones in the bytes",
+            Self::CitedRunsDisagreeWithBytes => {
+                "the stored cited Runs are not the ones in the bytes"
+            }
+        };
+        formatter.write_str(message)
+    }
+}
+
+#[derive(Debug)]
+pub enum EvaluationError {
+    Account(OperatorAccountError),
+    Malformed(MalformedEvaluation),
+    Inconsistent(InconsistentEvaluation),
+    NotFound,
+    InvalidStore,
+    Store(rusqlite::Error),
+}
+
+impl fmt::Display for EvaluationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Account(error) => write!(formatter, "{error}"),
+            Self::Malformed(reason) => write!(formatter, "the Evaluation is malformed: {reason}"),
+            Self::Inconsistent(reason) => {
+                write!(formatter, "the Evaluation cannot be recorded: {reason}")
+            }
+            Self::NotFound => formatter.write_str("no Evaluation has that digest"),
+            Self::InvalidStore => formatter.write_str("the store holds a value Beacon cannot read"),
+            Self::Store(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for EvaluationError {}
+
+impl From<rusqlite::Error> for EvaluationError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Store(error)
+    }
+}
+
+impl From<OperatorAccountError> for EvaluationError {
+    fn from(error: OperatorAccountError) -> Self {
+        Self::Account(error)
+    }
+}
+
+fn map_proposal_error(error: ProposalError) -> EvaluationError {
+    match error {
+        ProposalError::Account(account) => EvaluationError::Account(account),
+        ProposalError::Store(store) => EvaluationError::Store(store),
+        _ => EvaluationError::InvalidStore,
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Canonical bytes
+// ---------------------------------------------------------------------------------------------
+
+struct Encoder {
+    out: Vec<u8>,
+}
+
+impl Encoder {
+    fn new() -> Self {
+        let mut out = Vec::new();
+        out.extend_from_slice(MAGIC);
+        Self { out }
+    }
+
+    fn tag(&mut self, tag: u8) {
+        self.out.push(tag);
+    }
+
+    fn u32(&mut self, value: u32) {
+        self.out.extend_from_slice(&value.to_be_bytes());
+    }
+
+    fn u64(&mut self, value: u64) {
+        self.out.extend_from_slice(&value.to_be_bytes());
+    }
+
+    fn sha256(&mut self, value: &[u8; 32]) {
+        self.out.extend_from_slice(value);
+    }
+
+    fn uuid(&mut self, value: &Uuid) {
+        self.out.extend_from_slice(value.as_bytes());
+    }
+
+    fn string(&mut self, value: &str, limit: usize) -> Result<(), MalformedEvaluation> {
+        if value.len() > limit {
+            return Err(MalformedEvaluation::OverLimitLength);
+        }
+        let length =
+            u64::try_from(value.len()).map_err(|_| MalformedEvaluation::OverLimitLength)?;
+        self.u64(length);
+        self.out.extend_from_slice(value.as_bytes());
+        Ok(())
+    }
+}
+
+/// Reads canonical bytes. Self-delimiting: every field proves it fits within the remaining input
+/// and its own limit before any of it is consumed, and **no declared count ever sizes an
+/// allocation** -- a decoder that trusts a length prefix to reserve capacity is the oldest defect
+/// in this class.
+struct Decoder<'a> {
+    input: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> Decoder<'a> {
+    fn new(input: &'a [u8]) -> Self {
+        Self { input, offset: 0 }
+    }
+
+    fn remaining(&self) -> usize {
+        self.input.len() - self.offset
+    }
+
+    fn take(&mut self, count: usize) -> Result<&'a [u8], MalformedEvaluation> {
+        if count > self.remaining() {
+            return Err(MalformedEvaluation::Truncated);
+        }
+        let slice = &self.input[self.offset..self.offset + count];
+        self.offset += count;
+        Ok(slice)
+    }
+
+    fn magic(&mut self) -> Result<(), MalformedEvaluation> {
+        if self
+            .take(MAGIC.len())
+            .map_err(|_| MalformedEvaluation::Magic)?
+            == MAGIC
+        {
+            Ok(())
+        } else {
+            Err(MalformedEvaluation::Magic)
+        }
+    }
+
+    fn tag(&mut self) -> Result<u8, MalformedEvaluation> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u32(&mut self) -> Result<u32, MalformedEvaluation> {
+        let mut value = [0_u8; 4];
+        value.copy_from_slice(self.take(4)?);
+        Ok(u32::from_be_bytes(value))
+    }
+
+    fn u64(&mut self) -> Result<u64, MalformedEvaluation> {
+        let mut value = [0_u8; 8];
+        value.copy_from_slice(self.take(8)?);
+        Ok(u64::from_be_bytes(value))
+    }
+
+    fn sha256(&mut self) -> Result<[u8; 32], MalformedEvaluation> {
+        let mut value = [0_u8; 32];
+        value.copy_from_slice(self.take(32)?);
+        Ok(value)
+    }
+
+    fn uuid(&mut self) -> Result<Uuid, MalformedEvaluation> {
+        let mut value = [0_u8; 16];
+        value.copy_from_slice(self.take(16)?);
+        Ok(Uuid::from_bytes(value))
+    }
+
+    fn string(&mut self, limit: usize) -> Result<String, MalformedEvaluation> {
+        let length = self.u64()?;
+        let limit = u64::try_from(limit).map_err(|_| MalformedEvaluation::OverLimitLength)?;
+        if length > limit {
+            return Err(MalformedEvaluation::OverLimitLength);
+        }
+        let length = usize::try_from(length).map_err(|_| MalformedEvaluation::Truncated)?;
+        let bytes = self.take(length)?;
+        std::str::from_utf8(bytes)
+            .map(str::to_owned)
+            .map_err(|_| MalformedEvaluation::InvalidUtf8)
+    }
+
+    /// A list count, proved against the remaining input before a single entry is read.
+    ///
+    /// `minimum_entry_bytes` is the smallest an entry can be, so a count that could not fit is
+    /// refused before the loop rather than by running out of bytes partway through it.
+    fn count(
+        &self,
+        declared: u32,
+        limit: usize,
+        minimum_entry_bytes: usize,
+        refusal: MalformedEvaluation,
+    ) -> Result<usize, MalformedEvaluation> {
+        let declared = usize::try_from(declared).map_err(|_| refusal)?;
+        if declared > limit {
+            return Err(refusal);
+        }
+        let needed = declared
+            .checked_mul(minimum_entry_bytes)
+            .ok_or(MalformedEvaluation::Truncated)?;
+        if needed > self.remaining() {
+            return Err(MalformedEvaluation::Truncated);
+        }
+        Ok(declared)
+    }
+
+    fn finish(self) -> Result<(), MalformedEvaluation> {
+        if self.remaining() == 0 {
+            Ok(())
+        } else {
+            Err(MalformedEvaluation::TrailingBytes)
+        }
+    }
+}
+
+/// A lowercase 64-character hexadecimal digest, as its thirty-two raw bytes.
+///
+/// Uppercase input is refused rather than folded: `HEXLOWER` accepts only the canonical form, so
+/// two spellings of one digest can never both encode.
+fn digest_bytes(
+    value: &str,
+    refusal: MalformedEvaluation,
+) -> Result<[u8; 32], MalformedEvaluation> {
+    if value.len() != DIGEST_HEX_CHARS {
+        return Err(refusal);
+    }
+    let decoded = HEXLOWER.decode(value.as_bytes()).map_err(|_| refusal)?;
+    let mut bytes = [0_u8; 32];
+    if decoded.len() != bytes.len() {
+        return Err(refusal);
+    }
+    bytes.copy_from_slice(&decoded);
+    Ok(bytes)
+}
+
+/// The one canonical encoding of a payload. Every accepted byte difference changes the Evaluation
+/// identity, so alternate encodings of one parsed value do not exist.
+///
+/// The field order, widths and tag values are ADR 0038's table, and this function is the
+/// executable form of it. The published identity vector is what proves the two agree.
+fn encode(payload: &EvaluationV1) -> Result<Vec<u8>, MalformedEvaluation> {
+    let mut encoder = Encoder::new();
+
+    // 2-5: the subject, and the bound Proposal's identity copied whole.
+    encoder.tag(TAG_SUBJECT_PROPOSAL);
+    if payload.proposal.algorithm != PROPOSAL_DIGEST_ALGORITHM
+        || payload.proposal.canonicalizer != PROPOSAL_CANONICALIZER
+    {
+        return Err(MalformedEvaluation::ProposalDigestEnvelope);
+    }
+    encoder.sha256(&digest_bytes(
+        &payload.proposal.value,
+        MalformedEvaluation::ProposalDigestValue,
+    )?);
+    encoder.string(&payload.proposal.algorithm, MAX_DESCRIPTOR_TOKEN_BYTES)?;
+    encoder.string(&payload.proposal.canonicalizer, MAX_DESCRIPTOR_TOKEN_BYTES)?;
+
+    // 6-7: the evaluator, as a Resident under one exact configuration.
+    encoder.uuid(&payload.evaluator.resident_id);
+    encoder.uuid(&payload.evaluator.configuration_id);
+
+    // 8-11: the rubric, as declared. Beacon resolves none of it.
+    if payload.rubric.id.is_empty() {
+        return Err(MalformedEvaluation::RubricId);
+    }
+    encoder.string(&payload.rubric.id, MAX_DESCRIPTOR_TOKEN_BYTES)?;
+    if payload.rubric.version < 1 {
+        return Err(MalformedEvaluation::RubricVersion);
+    }
+    encoder.u32(payload.rubric.version);
+    if payload.rubric.canonicalizer.is_empty() {
+        return Err(MalformedEvaluation::RubricCanonicalizer);
+    }
+    encoder.string(&payload.rubric.canonicalizer, MAX_DESCRIPTOR_TOKEN_BYTES)?;
+    encoder.sha256(&digest_bytes(
+        &payload.rubric.sha256,
+        MalformedEvaluation::RubricDigest,
+    )?);
+
+    // 12: a SET -- ascending raw-UUID order, duplicates refused -- so a permutation of the same
+    // inputs cannot produce a different identity for the same evaluation.
+    if payload.cited_runs.len() > MAX_CITED_RUNS {
+        return Err(MalformedEvaluation::CitedRunCount);
+    }
+    if payload
+        .cited_runs
+        .windows(2)
+        .any(|pair| pair[0].as_bytes() >= pair[1].as_bytes())
+    {
+        return Err(MalformedEvaluation::CitedRunOrder);
+    }
+    encoder.u32(
+        u32::try_from(payload.cited_runs.len()).map_err(|_| MalformedEvaluation::CitedRunCount)?,
+    );
+    for run in &payload.cited_runs {
+        encoder.uuid(run);
+    }
+
+    // 13.
+    encoder.tag(payload.verdict.tag());
+
+    // 14-16: a SEQUENCE -- the evaluator wrote them in an order and re-sorting them would be the
+    // interface deciding what mattered.
+    if payload.findings.len() > MAX_FINDINGS {
+        return Err(MalformedEvaluation::FindingCount);
+    }
+    encoder
+        .u32(u32::try_from(payload.findings.len()).map_err(|_| MalformedEvaluation::FindingCount)?);
+    for finding in &payload.findings {
+        encoder.tag(finding.severity.tag());
+        if !is_human_text(&finding.summary, MAX_SUMMARY_SCALARS) {
+            return Err(MalformedEvaluation::FindingSummary);
+        }
+        encoder.string(&finding.summary, MAX_SUMMARY_BYTES)?;
+    }
+
+    // 17: absence is a value here, so it encodes as one.
+    match &payload.conflicts {
+        Conflicts::None => encoder.tag(TAG_CONFLICTS_NONE),
+        Conflicts::Declared(text) => {
+            encoder.tag(TAG_CONFLICTS_DECLARED);
+            if !is_human_text(text, MAX_CONFLICTS_SCALARS) {
+                return Err(MalformedEvaluation::ConflictsText);
+            }
+            encoder.string(text, MAX_CONFLICTS_BYTES)?;
+        }
+    }
+
+    // 18.
+    if !is_human_text(&payload.rationale, MAX_RATIONALE_SCALARS) {
+        return Err(MalformedEvaluation::Rationale);
+    }
+    encoder.string(&payload.rationale, MAX_RATIONALE_BYTES)?;
+
+    // 19: absence is a value here too.
+    match &payload.supersedes {
+        EvaluationSupersedes::None => encoder.tag(TAG_SUPERSEDES_NONE),
+        EvaluationSupersedes::Evaluation(digest) => {
+            encoder.tag(TAG_SUPERSEDES_EVALUATION);
+            encoder.sha256(&digest_bytes(
+                digest,
+                MalformedEvaluation::SupersedesDigest,
+            )?);
+        }
+    }
+
+    // 20.
+    encoder.u64(payload.evaluated_at_ms);
+    Ok(encoder.out)
+}
+
+/// Strict: every field is checked against its own vocabulary and bound, and bytes that decode to a
+/// value this grammar would not have produced are refused rather than normalised.
+fn decode(input: &[u8]) -> Result<EvaluationV1, MalformedEvaluation> {
+    let mut decoder = Decoder::new(input);
+    decoder.magic()?;
+
+    if decoder.tag()? != TAG_SUBJECT_PROPOSAL {
+        return Err(MalformedEvaluation::Subject);
+    }
+    let proposal_value = HEXLOWER.encode(&decoder.sha256()?);
+    let algorithm = decoder.string(MAX_DESCRIPTOR_TOKEN_BYTES)?;
+    let canonicalizer = decoder.string(MAX_DESCRIPTOR_TOKEN_BYTES)?;
+    if algorithm != PROPOSAL_DIGEST_ALGORITHM || canonicalizer != PROPOSAL_CANONICALIZER {
+        return Err(MalformedEvaluation::ProposalDigestEnvelope);
+    }
+
+    let evaluator = Evaluator {
+        resident_id: decoder.uuid()?,
+        configuration_id: decoder.uuid()?,
+    };
+
+    let rubric_id = decoder.string(MAX_DESCRIPTOR_TOKEN_BYTES)?;
+    if rubric_id.is_empty() {
+        return Err(MalformedEvaluation::RubricId);
+    }
+    let rubric_version = decoder.u32()?;
+    if rubric_version < 1 {
+        return Err(MalformedEvaluation::RubricVersion);
+    }
+    let rubric_canonicalizer = decoder.string(MAX_DESCRIPTOR_TOKEN_BYTES)?;
+    if rubric_canonicalizer.is_empty() {
+        return Err(MalformedEvaluation::RubricCanonicalizer);
+    }
+    let rubric_sha256 = HEXLOWER.encode(&decoder.sha256()?);
+
+    let declared = decoder.u32()?;
+    let cited_count = decoder.count(
+        declared,
+        MAX_CITED_RUNS,
+        16,
+        MalformedEvaluation::CitedRunCount,
+    )?;
+    let mut cited_runs = Vec::new();
+    for _ in 0..cited_count {
+        let run = decoder.uuid()?;
+        if let Some(previous) = cited_runs.last() {
+            let previous: &Uuid = previous;
+            if previous.as_bytes() >= run.as_bytes() {
+                return Err(MalformedEvaluation::CitedRunOrder);
+            }
+        }
+        cited_runs.push(run);
+    }
+
+    let verdict = Verdict::from_tag(decoder.tag()?).ok_or(MalformedEvaluation::Verdict)?;
+
+    let declared = decoder.u32()?;
+    let finding_count =
+        decoder.count(declared, MAX_FINDINGS, 9, MalformedEvaluation::FindingCount)?;
+    let mut findings = Vec::new();
+    for _ in 0..finding_count {
+        let severity = FindingSeverity::from_tag(decoder.tag()?)
+            .ok_or(MalformedEvaluation::FindingSeverity)?;
+        let summary = decoder.string(MAX_SUMMARY_BYTES)?;
+        if !is_human_text(&summary, MAX_SUMMARY_SCALARS) {
+            return Err(MalformedEvaluation::FindingSummary);
+        }
+        findings.push(Finding { severity, summary });
+    }
+
+    let conflicts = match decoder.tag()? {
+        TAG_CONFLICTS_NONE => Conflicts::None,
+        TAG_CONFLICTS_DECLARED => {
+            let text = decoder.string(MAX_CONFLICTS_BYTES)?;
+            if !is_human_text(&text, MAX_CONFLICTS_SCALARS) {
+                return Err(MalformedEvaluation::ConflictsText);
+            }
+            Conflicts::Declared(text)
+        }
+        _ => return Err(MalformedEvaluation::Conflicts),
+    };
+
+    let rationale = decoder.string(MAX_RATIONALE_BYTES)?;
+    if !is_human_text(&rationale, MAX_RATIONALE_SCALARS) {
+        return Err(MalformedEvaluation::Rationale);
+    }
+
+    let supersedes = match decoder.tag()? {
+        TAG_SUPERSEDES_NONE => EvaluationSupersedes::None,
+        TAG_SUPERSEDES_EVALUATION => {
+            EvaluationSupersedes::Evaluation(HEXLOWER.encode(&decoder.sha256()?))
+        }
+        _ => return Err(MalformedEvaluation::Supersedes),
+    };
+
+    let evaluated_at_ms = decoder.u64()?;
+    decoder.finish()?;
+
+    Ok(EvaluationV1 {
+        proposal: ProposalDigest {
+            algorithm,
+            canonicalizer,
+            value: proposal_value,
+        },
+        evaluator,
+        rubric: RubricDeclaration {
+            id: rubric_id,
+            version: rubric_version,
+            canonicalizer: rubric_canonicalizer,
+            sha256: rubric_sha256,
+        },
+        cited_runs,
+        verdict,
+        findings,
+        conflicts,
+        rationale,
+        supersedes,
+        evaluated_at_ms,
+    })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Storage
+// ---------------------------------------------------------------------------------------------
+
+struct StoredEvaluation {
+    workspace_id: Uuid,
+    digest_value: String,
+    canonical_bytes: Vec<u8>,
+    mission_id: Uuid,
+    payload: EvaluationV1,
+}
+
+fn insert_evaluation(
+    connection: &Connection,
+    stored: &StoredEvaluation,
+) -> Result<(), EvaluationError> {
+    let (conflicts_declared, conflicts_text) = match &stored.payload.conflicts {
+        Conflicts::None => (0_i64, None),
+        Conflicts::Declared(text) => (1_i64, Some(text.clone())),
+    };
+    connection.execute(
+        "INSERT INTO evaluations (
+             workspace_id, digest_algorithm, digest_canonicalizer, digest_value, canonical_bytes,
+             proposal_digest, proposal_digest_algorithm, proposal_digest_canonicalizer,
+             mission_id, evaluator_resident_id, evaluator_configuration_id,
+             rubric_id, rubric_version, rubric_canonicalizer, rubric_sha256,
+             verdict, conflicts_declared, conflicts_text, rationale, evaluated_at_ms
+         ) VALUES (
+             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
+             ?19, ?20
+         )",
+        params![
+            stored.workspace_id.to_string(),
+            DIGEST_ALGORITHM,
+            CANONICALIZER,
+            stored.digest_value,
+            stored.canonical_bytes,
+            stored.payload.proposal.value,
+            stored.payload.proposal.algorithm,
+            stored.payload.proposal.canonicalizer,
+            stored.mission_id.to_string(),
+            stored.payload.evaluator.resident_id.to_string(),
+            stored.payload.evaluator.configuration_id.to_string(),
+            stored.payload.rubric.id,
+            stored.payload.rubric.version,
+            stored.payload.rubric.canonicalizer,
+            stored.payload.rubric.sha256,
+            stored.payload.verdict.as_str(),
+            conflicts_declared,
+            conflicts_text,
+            stored.payload.rationale,
+            i64::try_from(stored.payload.evaluated_at_ms)
+                .map_err(|_| EvaluationError::InvalidStore)?,
+        ],
+    )?;
+    for (ordinal, finding) in stored.payload.findings.iter().enumerate() {
+        connection.execute(
+            "INSERT INTO evaluation_findings (
+                 workspace_id, evaluation_digest, ordinal, severity, summary
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                stored.workspace_id.to_string(),
+                stored.digest_value,
+                i64::try_from(ordinal).map_err(|_| EvaluationError::InvalidStore)?,
+                finding.severity.as_str(),
+                finding.summary,
+            ],
+        )?;
+    }
+    for run in &stored.payload.cited_runs {
+        connection.execute(
+            "INSERT INTO evaluation_cited_runs (workspace_id, evaluation_digest, run_id)
+             VALUES (?1, ?2, ?3)",
+            params![
+                stored.workspace_id.to_string(),
+                stored.digest_value,
+                run.to_string(),
+            ],
+        )?;
+    }
+    let event = serde_json::json!({
+        "evaluation": {
+            "digest": {
+                "algorithm": DIGEST_ALGORITHM,
+                "canonicalizer": CANONICALIZER,
+                "value": stored.digest_value,
+            },
+            "proposal_digest": stored.payload.proposal.value,
+            "verdict": stored.payload.verdict.as_str(),
+        }
+    })
+    .to_string();
+    connection.execute(
+        "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+         VALUES (?1, 'evaluation.recorded', ?2, ?3)",
+        params![
+            stored.workspace_id.to_string(),
+            event,
+            i64::try_from(stored.payload.evaluated_at_ms)
+                .map_err(|_| EvaluationError::InvalidStore)?,
+        ],
+    )?;
+    Ok(())
+}
+
+/// One stored row, as columns. Nothing here is believed until `verified_evaluation` proves it
+/// against the bytes.
+struct StoredRow {
+    digest_value: String,
+    canonical_bytes: Vec<u8>,
+    proposal_digest: String,
+    proposal_digest_algorithm: String,
+    proposal_digest_canonicalizer: String,
+    mission_id: String,
+    evaluator_resident_id: String,
+    evaluator_configuration_id: String,
+    rubric_id: String,
+    rubric_version: u32,
+    rubric_canonicalizer: String,
+    rubric_sha256: String,
+    verdict: String,
+    conflicts_declared: i64,
+    conflicts_text: Option<String>,
+    rationale: String,
+    evaluated_at_ms: i64,
+}
+
+const SELECT_COLUMNS: &str = "digest_value, canonical_bytes, proposal_digest,
+     proposal_digest_algorithm, proposal_digest_canonicalizer, mission_id, evaluator_resident_id,
+     evaluator_configuration_id, rubric_id, rubric_version, rubric_canonicalizer, rubric_sha256,
+     verdict, conflicts_declared, conflicts_text, rationale, evaluated_at_ms";
+
+fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
+    Ok(StoredRow {
+        digest_value: row.get(0)?,
+        canonical_bytes: row.get(1)?,
+        proposal_digest: row.get(2)?,
+        proposal_digest_algorithm: row.get(3)?,
+        proposal_digest_canonicalizer: row.get(4)?,
+        mission_id: row.get(5)?,
+        evaluator_resident_id: row.get(6)?,
+        evaluator_configuration_id: row.get(7)?,
+        rubric_id: row.get(8)?,
+        rubric_version: row.get(9)?,
+        rubric_canonicalizer: row.get(10)?,
+        rubric_sha256: row.get(11)?,
+        verdict: row.get(12)?,
+        conflicts_declared: row.get(13)?,
+        conflicts_text: row.get(14)?,
+        rationale: row.get(15)?,
+        evaluated_at_ms: row.get(16)?,
+    })
+}
+
+fn load_row(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+) -> Result<Option<StoredRow>, EvaluationError> {
+    Ok(connection
+        .query_row(
+            &format!(
+                "SELECT {SELECT_COLUMNS} FROM evaluations
+                 WHERE workspace_id = ?1 AND digest_value = ?2"
+            ),
+            params![workspace_id.to_string(), digest_value],
+            read_row,
+        )
+        .optional()?)
+}
+
+/// Every read re-derives the identity from the stored bytes, re-encodes the parsed value and
+/// requires byte equality, and compares every indexed column to what the bytes say.
+///
+/// The Mission is the one column with no counterpart in the bytes, so it is compared against the
+/// bound **Proposal** instead -- at every read and at startup. Without that a wrong Mission would
+/// be invisible to both.
+fn verified_evaluation(
+    connection: &Connection,
+    workspace_id: Uuid,
+    row: StoredRow,
+) -> Result<Evaluation, EvaluationError> {
+    if HEXLOWER.encode(&sha256(&row.canonical_bytes)) != row.digest_value {
+        return Err(EvaluationError::Inconsistent(
+            InconsistentEvaluation::DigestMismatch,
+        ));
+    }
+    let payload = decode(&row.canonical_bytes).map_err(EvaluationError::Malformed)?;
+    if encode(&payload).map_err(EvaluationError::Malformed)? != row.canonical_bytes {
+        return Err(EvaluationError::Inconsistent(
+            InconsistentEvaluation::BytesNotCanonical,
+        ));
+    }
+    if !columns_match(&row, &payload) {
+        return Err(EvaluationError::Inconsistent(
+            InconsistentEvaluation::ColumnDisagreesWithBytes,
+        ));
+    }
+    let Some(facts) = proposal_binding_facts(connection, workspace_id, &payload.proposal.value)
+        .map_err(map_proposal_error)?
+    else {
+        return Err(EvaluationError::Inconsistent(
+            InconsistentEvaluation::ProposalNotFound,
+        ));
+    };
+    if facts.digest != payload.proposal {
+        return Err(EvaluationError::Inconsistent(
+            InconsistentEvaluation::ProposalEnvelopeDisagrees,
+        ));
+    }
+    if row.mission_id != facts.mission_id.to_string() {
+        return Err(EvaluationError::Inconsistent(
+            InconsistentEvaluation::MissionDisagreesWithProposal,
+        ));
+    }
+    verify_children(connection, workspace_id, &row.digest_value, &payload)?;
+    Ok(Evaluation {
+        digest: EvaluationDigest {
+            algorithm: DIGEST_ALGORITHM.to_owned(),
+            canonicalizer: CANONICALIZER.to_owned(),
+            value: row.digest_value,
+        },
+        canonical_bytes: row.canonical_bytes,
+        payload,
+    })
+}
+
+fn columns_match(row: &StoredRow, payload: &EvaluationV1) -> bool {
+    let (declared, text) = match &payload.conflicts {
+        Conflicts::None => (0_i64, None),
+        Conflicts::Declared(value) => (1_i64, Some(value.as_str())),
+    };
+    row.proposal_digest == payload.proposal.value
+        && row.proposal_digest_algorithm == payload.proposal.algorithm
+        && row.proposal_digest_canonicalizer == payload.proposal.canonicalizer
+        && row.evaluator_resident_id == payload.evaluator.resident_id.to_string()
+        && row.evaluator_configuration_id == payload.evaluator.configuration_id.to_string()
+        && row.rubric_id == payload.rubric.id
+        && row.rubric_version == payload.rubric.version
+        && row.rubric_canonicalizer == payload.rubric.canonicalizer
+        && row.rubric_sha256 == payload.rubric.sha256
+        && Verdict::from_str(&row.verdict) == Some(payload.verdict)
+        && row.conflicts_declared == declared
+        && row.conflicts_text.as_deref() == text
+        && row.rationale == payload.rationale
+        && u64::try_from(row.evaluated_at_ms).ok() == Some(payload.evaluated_at_ms)
+}
+
+/// The findings and cited Runs stored relationally must be exactly the ones in the bytes -- same
+/// entries, same order for findings, same set for Runs, and no extra rows.
+fn verify_children(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+    payload: &EvaluationV1,
+) -> Result<(), EvaluationError> {
+    let mut statement = connection.prepare(
+        "SELECT ordinal, severity, summary FROM evaluation_findings
+         WHERE workspace_id = ?1 AND evaluation_digest = ?2
+         ORDER BY ordinal",
+    )?;
+    let stored: Vec<(i64, String, String)> = statement
+        .query_map(params![workspace_id.to_string(), digest_value], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?
+        .collect::<Result<_, _>>()?;
+    if stored.len() != payload.findings.len() {
+        return Err(EvaluationError::Inconsistent(
+            InconsistentEvaluation::FindingsDisagreeWithBytes,
+        ));
+    }
+    for (index, (ordinal, severity, summary)) in stored.iter().enumerate() {
+        let expected = &payload.findings[index];
+        if usize::try_from(*ordinal).ok() != Some(index)
+            || FindingSeverity::from_str(severity) != Some(expected.severity)
+            || summary != &expected.summary
+        {
+            return Err(EvaluationError::Inconsistent(
+                InconsistentEvaluation::FindingsDisagreeWithBytes,
+            ));
+        }
+    }
+
+    let mut statement = connection.prepare(
+        "SELECT run_id FROM evaluation_cited_runs
+         WHERE workspace_id = ?1 AND evaluation_digest = ?2",
+    )?;
+    let stored: HashSet<String> = statement
+        .query_map(params![workspace_id.to_string(), digest_value], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<Result<_, _>>()?;
+    let expected: HashSet<String> = payload
+        .cited_runs
+        .iter()
+        .map(|run| run.to_string())
+        .collect();
+    if stored != expected {
+        return Err(EvaluationError::Inconsistent(
+            InconsistentEvaluation::CitedRunsDisagreeWithBytes,
+        ));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------
+// The command
+// ---------------------------------------------------------------------------------------------
+
+/// Recording an Evaluation records that somebody judged. It grants nothing, and a read of what it
+/// recorded is not a permission check.
+pub struct EvaluationService {
+    accounts: Arc<OperatorAccountService>,
+    workspace_id: Uuid,
+}
+
+/// What a caller supplies. `evaluated_at_ms` is deliberately absent: the service clock owns it,
+/// because a caller-supplied time would let an Evaluation recorded after a Ruling be backdated
+/// through the ordinary Command.
+///
+/// `supersedes` is absent in slice 1 for a different reason: the supersession relation is slice 3,
+/// and a digest accepted here before that relation exists would name something nothing checks.
+/// The grammar carries both arms and the published vector exercises the digest arm.
+#[derive(Debug, Clone)]
+pub struct EvaluationDraft {
+    pub proposal_digest: String,
+    pub evaluator: Evaluator,
+    pub rubric: RubricDeclaration,
+    pub cited_runs: Vec<Uuid>,
+    pub verdict: Verdict,
+    pub findings: Vec<Finding>,
+    pub conflicts: Conflicts,
+    pub rationale: String,
+}
+
+impl EvaluationService {
+    pub fn new(accounts: Arc<OperatorAccountService>, workspace_id: Uuid) -> Self {
+        Self {
+            accounts,
+            workspace_id,
+        }
+    }
+
+    /// Records one immutable Evaluation of the exact bytes `proposal_digest` names.
+    ///
+    /// The Owner is authenticated before anything else happens, so an unauthenticated caller
+    /// receives only the account refusal whatever else is wrong with the request. The caller's own
+    /// values are then checked with the predicates the encoder uses, so a malformed argument never
+    /// reaches the store, and because both call the same predicate they cannot disagree.
+    pub fn record(&self, draft: EvaluationDraft) -> Result<Evaluation, EvaluationError> {
+        self.accounts.with_authenticated_store(|connection, now| {
+            digest_bytes(
+                &draft.proposal_digest,
+                MalformedEvaluation::ProposalDigestValue,
+            )
+            .map_err(EvaluationError::Malformed)?;
+            let evaluated_at_ms = u64::try_from(now).map_err(|_| EvaluationError::InvalidStore)?;
+
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+            // The Proposal must exist in this Workspace and still agree with its own bytes. Its
+            // envelope and Mission are read out of those bytes, never off the row.
+            let Some(facts) =
+                proposal_binding_facts(&transaction, self.workspace_id, &draft.proposal_digest)
+                    .map_err(map_proposal_error)?
+            else {
+                return Err(EvaluationError::Inconsistent(
+                    InconsistentEvaluation::ProposalNotFound,
+                ));
+            };
+
+            // Cited Runs are a set in the bytes: sorted here so a caller's order cannot change the
+            // identity, and duplicates refused rather than silently folded.
+            let mut cited_runs = draft.cited_runs.clone();
+            cited_runs.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+            let unique: HashSet<&Uuid> = cited_runs.iter().collect();
+            if unique.len() != cited_runs.len() {
+                return Err(EvaluationError::Malformed(
+                    MalformedEvaluation::CitedRunOrder,
+                ));
+            }
+
+            let payload = EvaluationV1 {
+                // COPIED from the verified Proposal, never rebuilt from this module's constants:
+                // equality is not provenance.
+                proposal: facts.digest,
+                evaluator: draft.evaluator,
+                rubric: draft.rubric,
+                cited_runs,
+                verdict: draft.verdict,
+                findings: draft.findings,
+                conflicts: draft.conflicts,
+                rationale: draft.rationale,
+                supersedes: EvaluationSupersedes::None,
+                evaluated_at_ms,
+            };
+            let canonical_bytes = encode(&payload).map_err(EvaluationError::Malformed)?;
+            let digest_value = HEXLOWER.encode(&sha256(&canonical_bytes));
+
+            let stored = StoredEvaluation {
+                workspace_id: self.workspace_id,
+                digest_value: digest_value.clone(),
+                canonical_bytes,
+                mission_id: facts.mission_id,
+                payload,
+            };
+            insert_evaluation(&transaction, &stored)?;
+            let row = load_row(&transaction, self.workspace_id, &digest_value)?
+                .ok_or(EvaluationError::InvalidStore)?;
+            let evaluation = verified_evaluation(&transaction, self.workspace_id, row)?;
+            transaction.commit()?;
+            Ok(evaluation)
+        })
+    }
+
+    pub fn get(&self, digest: &str) -> Result<Evaluation, EvaluationError> {
+        self.accounts.with_authenticated_store(|connection, _now| {
+            let row = load_row(connection, self.workspace_id, digest)?
+                .ok_or(EvaluationError::NotFound)?;
+            verified_evaluation(connection, self.workspace_id, row)
+        })
+    }
+}
+
+/// Startup reconciliation: every stored Evaluation is re-verified against its own bytes, its bound
+/// Proposal, and its children, and every row must have exactly one `evaluation.recorded` Event.
+pub(crate) fn verify_evaluation_state(connection: &Connection) -> Result<(), EvaluationError> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT workspace_id, {SELECT_COLUMNS} FROM evaluations ORDER BY digest_value"
+    ))?;
+    let rows: Vec<(String, StoredRow)> = statement
+        .query_map([], |row| {
+            let workspace: String = row.get(0)?;
+            Ok((
+                workspace,
+                StoredRow {
+                    digest_value: row.get(1)?,
+                    canonical_bytes: row.get(2)?,
+                    proposal_digest: row.get(3)?,
+                    proposal_digest_algorithm: row.get(4)?,
+                    proposal_digest_canonicalizer: row.get(5)?,
+                    mission_id: row.get(6)?,
+                    evaluator_resident_id: row.get(7)?,
+                    evaluator_configuration_id: row.get(8)?,
+                    rubric_id: row.get(9)?,
+                    rubric_version: row.get(10)?,
+                    rubric_canonicalizer: row.get(11)?,
+                    rubric_sha256: row.get(12)?,
+                    verdict: row.get(13)?,
+                    conflicts_declared: row.get(14)?,
+                    conflicts_text: row.get(15)?,
+                    rationale: row.get(16)?,
+                    evaluated_at_ms: row.get(17)?,
+                },
+            ))
+        })?
+        .collect::<Result<_, _>>()?;
+
+    for (workspace, row) in rows {
+        let workspace_id =
+            Uuid::parse_str(&workspace).map_err(|_| EvaluationError::InvalidStore)?;
+        let digest_value = row.digest_value.clone();
+        verified_evaluation(connection, workspace_id, row)?;
+        let event_count: i64 = connection.query_row(
+            "SELECT count(*) FROM events
+             WHERE workspace_id = ?1 AND kind = 'evaluation.recorded'
+               AND json_extract(payload_json, '$.evaluation.digest.value') = ?2",
+            params![workspace, digest_value.as_str()],
+            |row| row.get(0),
+        )?;
+        if event_count != 1 {
+            return Err(EvaluationError::InvalidStore);
+        }
+    }
+
+    // No Event may name an Evaluation that is not stored.
+    let orphan: i64 = connection.query_row(
+        "SELECT count(*) FROM events
+         WHERE kind = 'evaluation.recorded'
+           AND json_extract(payload_json, '$.evaluation.digest.value') NOT IN (
+               SELECT digest_value FROM evaluations
+           )",
+        [],
+        |row| row.get(0),
+    )?;
+    if orphan != 0 {
+        return Err(EvaluationError::InvalidStore);
+    }
+    Ok(())
+}
+
+/// One `evaluation.recorded` Event, checked against the Evaluation it names.
+///
+/// The Event is not a second source of truth: it must name a stored Evaluation in this Workspace,
+/// and the time it claims must be the time those bytes carry. An Event that says something the
+/// record does not is a mismatch, never a correction.
+pub(crate) fn verify_evaluation_event(
+    connection: &Connection,
+    workspace_id: Uuid,
+    occurred_at_ms: u64,
+    payload_json: &str,
+) -> Result<(), EvaluationError> {
+    let payload: serde_json::Value =
+        serde_json::from_str(payload_json).map_err(|_| EvaluationError::InvalidStore)?;
+    let digest_value = payload
+        .pointer("/evaluation/digest/value")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(EvaluationError::InvalidStore)?;
+    let row = load_row(connection, workspace_id, digest_value)?.ok_or(EvaluationError::NotFound)?;
+    let evaluation = verified_evaluation(connection, workspace_id, row)?;
+    if evaluation.payload.evaluated_at_ms != occurred_at_ms {
+        return Err(EvaluationError::InvalidStore);
+    }
+    let named_proposal = payload
+        .pointer("/evaluation/proposal_digest")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(EvaluationError::InvalidStore)?;
+    if named_proposal != evaluation.payload.proposal.value {
+        return Err(EvaluationError::InvalidStore);
+    }
+    let named_verdict = payload
+        .pointer("/evaluation/verdict")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(EvaluationError::InvalidStore)?;
+    if named_verdict != evaluation.payload.verdict.as_str() {
+        return Err(EvaluationError::InvalidStore);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use data_encoding::BASE64;
+
+    /// gpt2 built these values, and the bytes below, from ADR 0038's field table alone -- no
+    /// Beacon encoder, decoder, fixture or constant took part -- and cross-checked the result
+    /// through coreutils. That is the only order in which a vector proves anything: the grammar
+    /// was written down, an independent reader encoded it, and this encoder is measured against
+    /// what they produced.
+    fn published_vector_payload() -> EvaluationV1 {
+        EvaluationV1 {
+            proposal: ProposalDigest {
+                algorithm: DIGEST_ALGORITHM.to_owned(),
+                canonicalizer: PROPOSAL_CANONICALIZER.to_owned(),
+                value: HEXLOWER.encode(&core::array::from_fn::<u8, 32, _>(|index| index as u8)),
+            },
+            evaluator: Evaluator {
+                resident_id: Uuid::parse_str("10213243-5465-7687-98a9-bacbdcedfe0f").unwrap(),
+                configuration_id: Uuid::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").unwrap(),
+            },
+            rubric: RubricDeclaration {
+                id: "security-review-v1".to_owned(),
+                version: 7,
+                canonicalizer: "beacon.rubric.v1".to_owned(),
+                sha256: HEXLOWER.encode(&core::array::from_fn::<u8, 32, _>(|index| {
+                    0x20 + index as u8
+                })),
+            },
+            cited_runs: vec![
+                Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").unwrap(),
+                Uuid::parse_str("fedcba98-7654-3210-0123-456789abcdef").unwrap(),
+            ],
+            verdict: Verdict::Uncertain,
+            findings: vec![
+                Finding {
+                    severity: FindingSeverity::Blocking,
+                    summary: "Authorship conflict".to_owned(),
+                },
+                Finding {
+                    severity: FindingSeverity::Note,
+                    summary: "Checks passed".to_owned(),
+                },
+            ],
+            conflicts: Conflicts::Declared("Same lab lineage disclosed".to_owned()),
+            rationale: "Independent evaluator reviewed exact proposal bytes.".to_owned(),
+            supersedes: EvaluationSupersedes::Evaluation(HEXLOWER.encode(&core::array::from_fn::<
+                u8,
+                32,
+                _,
+            >(|index| {
+                0x40 + index as u8
+            }))),
+            evaluated_at_ms: 0x0102_0304_0506_0708,
+        }
+    }
+
+    const PUBLISHED_VECTOR_BYTES: usize = 439;
+    const PUBLISHED_VECTOR_DIGEST: &str =
+        "dab418e0866b19f6536615a9fe8374b88034107ccbbdb769cf07515fbb516683";
+    const PUBLISHED_VECTOR_BASE64: &str = "YmVhY29uLmV2YWx1YXRpb24udjEAAQABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fAAAAAAAAAAZzaGEyNTYAAAAAAAAAEmJlYWNvbi5wcm9wb3NhbC52MRAhMkNUZXaHmKm6y9zt/g//7t3Mu6qZiHdmVUQzIhEAAAAAAAAAABJzZWN1cml0eS1yZXZpZXctdjEAAAAHAAAAAAAAABBiZWFjb24ucnVicmljLnYxICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8AAAACABEiM0RVZneImaq7zN3u//7cuph2VDIQASNFZ4mrze8EAAAAAgEAAAAAAAAAE0F1dGhvcnNoaXAgY29uZmxpY3QDAAAAAAAAAA1DaGVja3MgcGFzc2VkAQAAAAAAAAAaU2FtZSBsYWIgbGluZWFnZSBkaXNjbG9zZWQAAAAAAAAANEluZGVwZW5kZW50IGV2YWx1YXRvciByZXZpZXdlZCBleGFjdCBwcm9wb3NhbCBieXRlcy4BQEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8BAgMEBQYHCA==";
+
+    #[test]
+    fn a_known_evaluation_fixture_reproduces_its_published_digest() {
+        let bytes = encode(&published_vector_payload()).expect("the vector encodes");
+        assert_eq!(bytes.len(), PUBLISHED_VECTOR_BYTES, "byte count moved");
+        assert_eq!(
+            BASE64.encode(&bytes),
+            PUBLISHED_VECTOR_BASE64,
+            "the encoder no longer reproduces the published vector"
+        );
+        assert_eq!(HEXLOWER.encode(&sha256(&bytes)), PUBLISHED_VECTOR_DIGEST);
+        // And it round-trips: the decoder reads back exactly what was encoded.
+        assert_eq!(
+            decode(&bytes).expect("the vector decodes"),
+            published_vector_payload()
+        );
+    }
+
+    /// Every field is positional and every byte is covered by the digest, so changing any one of
+    /// them changes the identity. This is what the grammar offers INSTEAD of detecting a
+    /// same-width transposition, which is not detectable by construction -- see ADR 0038.
+    #[test]
+    fn every_identity_bearing_field_changes_the_digest() {
+        let base = published_vector_payload();
+        let baseline = HEXLOWER.encode(&sha256(&encode(&base).unwrap()));
+
+        let mut variants: Vec<(&str, EvaluationV1)> = Vec::new();
+        let mut v = base.clone();
+        v.proposal.value = HEXLOWER.encode(&[0x11_u8; 32]);
+        variants.push(("proposal digest", v));
+        let mut v = base.clone();
+        v.evaluator.resident_id = Uuid::nil();
+        variants.push(("evaluator resident", v));
+        let mut v = base.clone();
+        v.evaluator.configuration_id = Uuid::nil();
+        variants.push(("evaluator configuration", v));
+        let mut v = base.clone();
+        v.rubric.id = "other-rubric".to_owned();
+        variants.push(("rubric id", v));
+        let mut v = base.clone();
+        v.rubric.version = 8;
+        variants.push(("rubric version", v));
+        let mut v = base.clone();
+        v.rubric.canonicalizer = "beacon.rubric.v2".to_owned();
+        variants.push(("rubric canonicalizer", v));
+        let mut v = base.clone();
+        v.rubric.sha256 = HEXLOWER.encode(&[0x99_u8; 32]);
+        variants.push(("rubric digest", v));
+        let mut v = base.clone();
+        v.cited_runs.pop();
+        variants.push(("cited runs", v));
+        let mut v = base.clone();
+        v.verdict = Verdict::Meets;
+        variants.push(("verdict", v));
+        let mut v = base.clone();
+        v.findings[0].severity = FindingSeverity::Concern;
+        variants.push(("finding severity", v));
+        let mut v = base.clone();
+        v.findings[0].summary = "Something else".to_owned();
+        variants.push(("finding summary", v));
+        let mut v = base.clone();
+        v.findings.swap(0, 1);
+        variants.push(("finding ORDER -- a sequence, not a set", v));
+        let mut v = base.clone();
+        v.conflicts = Conflicts::None;
+        variants.push(("conflicts", v));
+        let mut v = base.clone();
+        v.rationale = "A different rationale entirely.".to_owned();
+        variants.push(("rationale", v));
+        let mut v = base.clone();
+        v.supersedes = EvaluationSupersedes::None;
+        variants.push(("supersedes", v));
+        let mut v = base.clone();
+        v.evaluated_at_ms += 1;
+        variants.push(("evaluated_at_ms", v));
+
+        for (name, variant) in variants {
+            let digest = HEXLOWER.encode(&sha256(&encode(&variant).unwrap()));
+            assert_ne!(digest, baseline, "{name} did not change the identity");
+        }
+    }
+
+    #[test]
+    fn a_trailing_byte_an_unknown_tag_or_invalid_utf8_is_refused() {
+        let bytes = encode(&published_vector_payload()).unwrap();
+
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert_eq!(decode(&trailing), Err(MalformedEvaluation::TrailingBytes));
+
+        let mut truncated = bytes.clone();
+        truncated.pop();
+        assert_eq!(decode(&truncated), Err(MalformedEvaluation::Truncated));
+
+        let mut wrong_magic = bytes.clone();
+        wrong_magic[0] = b'B';
+        assert_eq!(decode(&wrong_magic), Err(MalformedEvaluation::Magic));
+
+        // The subject tag sits immediately after the magic.
+        let mut subject = bytes.clone();
+        subject[MAGIC.len()] = 0x02;
+        assert_eq!(decode(&subject), Err(MalformedEvaluation::Subject));
+
+        // An unassigned verdict, severity, conflicts or supersedes tag is refused rather than
+        // treated as a default: a closed vocabulary has no fallthrough.
+        //
+        // The offsets are computed from the field table rather than found by searching for a byte
+        // value -- a search finds the first byte that happens to match, which in this vector is
+        // inside the proposal digest, and the test then measures nothing.
+        for (label, offset, expected) in [
+            ("verdict", VERDICT_TAG_OFFSET, MalformedEvaluation::Verdict),
+            (
+                "severity",
+                FIRST_SEVERITY_TAG_OFFSET,
+                MalformedEvaluation::FindingSeverity,
+            ),
+            (
+                "conflicts",
+                CONFLICTS_TAG_OFFSET,
+                MalformedEvaluation::Conflicts,
+            ),
+            (
+                "supersedes",
+                SUPERSEDES_TAG_OFFSET,
+                MalformedEvaluation::Supersedes,
+            ),
+        ] {
+            let mut unassigned = bytes.clone();
+            assert_ne!(unassigned[offset], 0x7f, "{label} already holds the probe");
+            unassigned[offset] = 0x7f;
+            assert_eq!(decode(&unassigned), Err(expected), "{label}");
+        }
+
+        // Invalid UTF-8 inside the rationale string.
+        let mut invalid = bytes.clone();
+        let needle = b"Independent evaluator";
+        let at = invalid
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .expect("the rationale is present");
+        invalid[at] = 0xff;
+        assert_eq!(decode(&invalid), Err(MalformedEvaluation::InvalidUtf8));
+    }
+
+    // Offsets into the published vector, derived from ADR 0038's field table. They are constants
+    // rather than searches so that a layout change fails these tests instead of silently moving
+    // what they measure.
+    const VERDICT_TAG_OFFSET: usize = 248;
+    const FIRST_SEVERITY_TAG_OFFSET: usize = 253;
+    const CONFLICTS_TAG_OFFSET: usize = 303;
+    const SUPERSEDES_TAG_OFFSET: usize = 398;
+
+    /// The offsets above are only meaningful if they land where the table says. This proves each
+    /// one holds the tag it is named for in the published vector.
+    #[test]
+    fn the_published_vector_holds_each_tag_where_the_field_table_puts_it() {
+        let bytes = encode(&published_vector_payload()).unwrap();
+        assert_eq!(bytes[VERDICT_TAG_OFFSET], TAG_VERDICT_UNCERTAIN);
+        assert_eq!(bytes[FIRST_SEVERITY_TAG_OFFSET], TAG_SEVERITY_BLOCKING);
+        assert_eq!(bytes[CONFLICTS_TAG_OFFSET], TAG_CONFLICTS_DECLARED);
+        assert_eq!(bytes[SUPERSEDES_TAG_OFFSET], TAG_SUPERSEDES_EVALUATION);
+    }
+
+    #[test]
+    fn a_decoder_bound_refuses_an_over_long_rationale_finding_or_conflict() {
+        // The encoder refuses first, so a caller cannot produce these bytes...
+        let mut payload = published_vector_payload();
+        payload.rationale = "r".repeat(MAX_RATIONALE_SCALARS + 1);
+        assert_eq!(encode(&payload), Err(MalformedEvaluation::Rationale));
+
+        let mut payload = published_vector_payload();
+        payload.findings[0].summary = "s".repeat(MAX_SUMMARY_SCALARS + 1);
+        assert_eq!(encode(&payload), Err(MalformedEvaluation::FindingSummary));
+
+        let mut payload = published_vector_payload();
+        payload.conflicts = Conflicts::Declared("c".repeat(MAX_CONFLICTS_SCALARS + 1));
+        assert_eq!(encode(&payload), Err(MalformedEvaluation::ConflictsText));
+
+        let mut payload = published_vector_payload();
+        payload.cited_runs = (0..=MAX_CITED_RUNS)
+            .map(|index| Uuid::from_u128(index as u128))
+            .collect();
+        assert_eq!(encode(&payload), Err(MalformedEvaluation::CitedRunCount));
+
+        let mut payload = published_vector_payload();
+        payload.findings = (0..=MAX_FINDINGS)
+            .map(|_| Finding {
+                severity: FindingSeverity::Note,
+                summary: "n".to_owned(),
+            })
+            .collect();
+        assert_eq!(encode(&payload), Err(MalformedEvaluation::FindingCount));
+
+        // ...and the DECODER refuses them independently, because bytes can arrive from a store
+        // rather than from this encoder. A declared count is proved against the remaining input
+        // before a single entry is read, so a hostile count cannot size an allocation.
+        let mut hostile = encode(&published_vector_payload()).unwrap();
+        let at = MAGIC.len() + 1 + 32 + 8 + 6 + 8 + 18 + 16 + 16 + 8 + 18 + 4 + 8 + 16 + 32;
+        hostile[at..at + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert_eq!(decode(&hostile), Err(MalformedEvaluation::CitedRunCount));
+    }
+
+    /// Cited Runs are a SET in the bytes: a permutation of the same inputs must not be able to
+    /// produce a second identity for one evaluation, and a repeat must not encode at all.
+    #[test]
+    fn cited_runs_are_a_set_in_ascending_order() {
+        let mut payload = published_vector_payload();
+        payload.cited_runs.swap(0, 1);
+        assert_eq!(encode(&payload), Err(MalformedEvaluation::CitedRunOrder));
+
+        let mut payload = published_vector_payload();
+        payload.cited_runs = vec![payload.cited_runs[0], payload.cited_runs[0]];
+        assert_eq!(encode(&payload), Err(MalformedEvaluation::CitedRunOrder));
+    }
+
+    /// The envelope the bytes may name is closed. A digest produced by another canonicalizer is
+    /// refused by the CODEC, not only by a column constraint, so bytes that could never have been
+    /// an evaluation of a v1 Proposal do not exist.
+    #[test]
+    fn the_copied_proposal_envelope_is_closed_in_the_bytes() {
+        let mut payload = published_vector_payload();
+        payload.proposal.canonicalizer = "beacon.proposal.v2".to_owned();
+        assert_eq!(
+            encode(&payload),
+            Err(MalformedEvaluation::ProposalDigestEnvelope)
+        );
+
+        let mut payload = published_vector_payload();
+        payload.proposal.algorithm = "sha512".to_owned();
+        assert_eq!(
+            encode(&payload),
+            Err(MalformedEvaluation::ProposalDigestEnvelope)
+        );
+    }
+}

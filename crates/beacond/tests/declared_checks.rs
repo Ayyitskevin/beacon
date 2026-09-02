@@ -245,8 +245,12 @@ fn downgrade_execution_schema_to_v15(store_path: &Path) {
     connection
         .execute_batch(
             "BEGIN IMMEDIATE;
-             -- Migration 0022's records come off innermost first: the Ruling/Candidate binding
-             -- references both rulings and candidates, and candidates references proposals.
+             -- Records come off innermost first, newest migration first. Migration 0023's
+             -- Evaluation tables reference proposals, and 0022's Ruling/Candidate binding
+             -- references both rulings and candidates, which reference proposals in turn.
+             DROP TABLE evaluation_cited_runs;
+             DROP TABLE evaluation_findings;
+             DROP TABLE evaluations;
              DROP TRIGGER beacon_repositories_no_update;
              DROP TABLE beacon_repositories;
              DROP TRIGGER dispatch_preparations_no_update;
@@ -1986,7 +1990,7 @@ fn migration_preserves_real_v1_bytes_through_rollback_and_forward_startup() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 22);
+    assert_eq!(report.diagnostics.schema_version, 23);
     let connection = Connection::open(&store.path).unwrap();
     assert_v1_bytes(&connection, run_id, &v1_payload);
 }
