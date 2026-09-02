@@ -25,6 +25,7 @@ mod proposal;
 mod resident_configuration;
 mod resident_lifecycle;
 mod resource_discovery;
+mod ruling;
 mod sample_project;
 mod sandbox;
 mod starter_organization;
@@ -100,6 +101,10 @@ pub use resource_discovery::{
     DiscoveredLocalModel, DiscoveryStatus, LocalModelDetails, LocalModelDiscoveryReport,
     LocalModelEndpoint, ModelActivation, ModelProvider, ResourceDiscoveryError,
     ResourceDiscoveryService,
+};
+pub use ruling::{
+    InconsistentRuling, MalformedRuling, Ruling, RulingDecider, RulingDecision, RulingDigest,
+    RulingError, RulingForce, RulingService, RulingSupersedes, RulingV1,
 };
 pub use sample_project::{
     SAMPLE_PROJECT_BUNDLE_VERSION, SampleProjectDigest, SampleProjectError,
@@ -228,6 +233,7 @@ pub enum SupervisorError {
     RunStateMismatch,
     ProposalEventMismatch(i64),
     ProposalStateMismatch,
+    RulingEventMismatch(i64),
     SchemaMismatch,
     UnsupportedSchemaVersion(i64),
     IntegrityCheckFailed(String),
@@ -372,6 +378,10 @@ impl fmt::Display for SupervisorError {
                     "Proposal state does not agree with its bytes, references, or audit Event"
                 )
             }
+            Self::RulingEventMismatch(sequence) => write!(
+                formatter,
+                "Event sequence {sequence} does not match its stored Ruling bytes"
+            ),
             Self::SchemaMismatch => {
                 write!(
                     formatter,
@@ -986,6 +996,7 @@ enum PersistedEventKind {
     RunExecuted,
     SampleProjectInstalled,
     ProposalSubmitted,
+    RulingRecorded,
 }
 
 impl PersistedEventKind {
@@ -1012,6 +1023,7 @@ impl PersistedEventKind {
             Self::RunExecuted => "run.executed",
             Self::SampleProjectInstalled => "sample_project.installed",
             Self::ProposalSubmitted => "proposal.submitted",
+            Self::RulingRecorded => "ruling.recorded",
         }
     }
 
@@ -1038,6 +1050,7 @@ impl PersistedEventKind {
             "run.executed" => Ok(Self::RunExecuted),
             "sample_project.installed" => Ok(Self::SampleProjectInstalled),
             "proposal.submitted" => Ok(Self::ProposalSubmitted),
+            "ruling.recorded" => Ok(Self::RulingRecorded),
             _ => Err(SupervisorError::InvalidEventKind(value)),
         }
     }
@@ -1230,6 +1243,15 @@ fn verify_persisted_events(connection: &Connection) -> Result<u64, SupervisorErr
                     &payload_json,
                 )
                 .map_err(|_| SupervisorError::ProposalEventMismatch(sequence))?;
+            }
+            PersistedEventKind::RulingRecorded => {
+                ruling::verify_ruling_event(
+                    connection,
+                    workspace_id,
+                    occurred_at_ms,
+                    &payload_json,
+                )
+                .map_err(|_| SupervisorError::RulingEventMismatch(sequence))?;
             }
             PersistedEventKind::LocalModelActivated => {
                 local_model_activation::verify_activation_event(
