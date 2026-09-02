@@ -691,21 +691,40 @@ contents of a file the Operator may not have meant to surface in a diagnostic.
 could reach**. The two are never collapsed, and no failure path produces silence,
 because silence is the only outcome that reads as agreement.
 
-### Three new not-verified reasons
+### Five new not-verified reasons
+
+These five replace `ContentUnreadableAtRevision`, the single terminal state the
+accepted "A stated limit" section named, and the list is closed: every way the
+comparison declines to answer a declared entry is one of them. Naming three of the
+five would leave a consumer to discover the other two from a diagnostic.
 
 | reason | state |
 |---|---|
 | `PackedObjectUnreadable` | an object on the path is packed, and this reader reads only loose objects |
-| `ObjectTooLargeToInspect` | an object on the path exceeds the comparison's own byte bound |
+| `ObjectTooLargeToInspect` | one object on the path exceeds the comparison's own per-object byte bound |
 | `PathTooDeepToInspect` | the declared path is deeper than the comparison's walk descends |
+| `ContextBudgetExhausted` | the comparison's aggregate byte allowance was spent before every declared entry resolved |
+| `EntryIsNotARegularFile` | the declared path resolves to a symlink, a gitlink, or a directory |
 
 `PackedObjectUnreadable` is claimed **only after an authenticated pack lookup says
 the object is present**. An object that an authenticated commit or tree names and
 that lives in neither loose nor authenticated pack storage is `InspectionFailed`:
 that store is broken, and calling it "packed" would excuse a defect as a
-limitation of Beacon. The other two are resource refusals and are named
-separately from each other, because they are different limits and a reader
-deciding what to change needs to know which one was hit.
+limitation of Beacon.
+
+The three resource refusals — one object too large, the path too deep, and the
+whole reading out of budget — are named separately from each other, because they
+are different limits and a reader deciding what to change needs to know which one
+was hit. Reporting an exhausted aggregate as `ObjectTooLargeToInspect` told an
+Operator their six-byte file was too large, which sends them to shrink the wrong
+thing.
+
+`EntryIsNotARegularFile` is neither a resource refusal nor a mismatch. It is the
+state this amendment deliberately leaves undecided below: Git stores a `120000`
+symlink as a blob holding the link text, so the mode alone does not establish which
+bytes the submitter presented, and calling that a false declaration would invent
+contract. It is listed here because it is a reason an Operator can be shown, and a
+closed vocabulary that omits one is not closed.
 
 ### Mismatches are published only from a completed comparison
 
