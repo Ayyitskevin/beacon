@@ -2,13 +2,25 @@
 
 BLUEPRINT §3 designs Briefing to show "the Project portfolio, active Missions, Team health, spend,
 blocked work, recent receipts, and Attention Items". Before this slice Briefing rendered one of the
-seven — Team health, as the Resident roster. This adds recent Receipts.
+seven — Team health, as the Resident roster.
+
+**This slice does not complete that item.** It adds recent **preflight** Receipts, and says so in
+its heading, its description and its list label. The Query it reads filters
+`runs.kind = 'check_preflight'` (`check_preflight.rs`), and Beacon already writes a second kind:
+`ExecutionReceipt` for declared-check Runs, stored in the same `receipts` table and recorded as
+`run.executed` (`declared_checks.rs`). A general, bounded, cross-kind recent-Receipts list needs a
+Query behind the interface that the daemon does not yet have; that is a separate slice, sketched at
+the end of this note.
 
 The Query, the transport and the TypeScript adapter already existed and were exercised by
 `preflight_project_checks`; nothing rendered the list, and a cleanup pass nearly removed
 `preflight_receipts` as dead registration. **No wire code and no daemon code changed here.**
 
 ## What a row says, and what it refuses to say
+
+The heading is "Recent preflight Receipts" rather than "Recent Receipts", and the description says
+the list excludes execution Receipts. A kind-filtered subset presented under the general name is a
+claim of completeness in the one place BLUEPRINT asks for completeness.
 
 A Receipt is "an immutable account of a Run's inputs, effects, checks, usage, result, and content
 identities" (`CONTEXT.md`). Each row shows the kind of Run, the outcome exactly as recorded, the Run
@@ -72,9 +84,10 @@ their observed failures are recorded in the build report for this slice.
 
 ## Evidence limits
 
-- No Receipt has ever been produced by anything but a preflight, because preflight is the only Run
-  kind that writes one today. "Recent Receipts" is therefore recent *preflight* Receipts, and the
-  row says so rather than implying a general Run history.
+- **Execution Receipts exist and are not shown.** `ExecutionReceipt` is written for declared-check
+  Runs and stored in the same `receipts` table; this Query filters to `check_preflight` only. The
+  earlier version of this note claimed preflight was the only Run kind that writes a Receipt. That
+  was wrong, and the surface was named on the strength of it.
 - The `unconfirmed` Run state (`BLUEPRINT.md`) has no surface yet and no `PreflightOutcome` member;
   this slice cannot render one. The rule it stands for — a row states the recorded outcome and never
   upgrades it — is what the copy and its test enforce.
@@ -82,3 +95,13 @@ their observed failures are recorded in the build report for this slice.
   list are unproven, exactly as `docs/evals/2026-08-30-desktop-accessibility-baseline.md` records for
   the rest of the interface.
 - The fan-out has not been measured against a Workspace with many Projects.
+
+## The slice this is not
+
+A general recent-Receipts surface needs a **daemon Query**, not a wider fan-out in the interface: one
+Workspace-scoped, kind-agnostic, server-bounded read that returns the N most recent Receipts across
+every Run kind, already ordered, with a total so truncation stays disclosable. It belongs behind the
+interface because the ordering, the bound and the join across kinds are domain work, and because the
+desktop cannot bound what it does not select. The row shape generalises with one addition — the Run
+kind, which today is a constant — and the closed outcome vocabulary becomes per-kind. Until that
+Query exists, Briefing's list is preflight-only and says so.
