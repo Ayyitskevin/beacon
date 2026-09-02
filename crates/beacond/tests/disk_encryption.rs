@@ -395,6 +395,38 @@ fn plain_partition_with_no_dm_layer_reports_disabled_and_names_what_it_cannot_se
 }
 
 #[test]
+fn review_dangling_store_symlink_is_broken_not_absent() {
+    let fixture = Fixture::new("dangling-store");
+    let device = fixture.mounted_on_host_device();
+    fixture.node(&device);
+    // canonicalize returns NotFound for a link whose target is gone, exactly as
+    // it does for a store that was never created. The entry IS there, so the
+    // parent is a different subject and answering about it is a wrong answer.
+    fs::remove_file(&fixture.store).unwrap();
+    std::os::unix::fs::symlink(fixture.root.join("gone.sqlite3"), &fixture.store).unwrap();
+
+    let report = fixture.read();
+
+    assert_eq!(report.state, LiveDataEncryption::Unknown);
+    assert!(reason(&report).contains("resolves to nothing"));
+}
+
+#[test]
+fn review_dangling_slaves_symlink_is_broken_not_a_leaf() {
+    let fixture = Fixture::new("dangling-slaves");
+    let device = fixture.mounted_on_host_device();
+    let node = fixture.node(&device);
+    // read_dir also answers NotFound for a dangling link, which would make this
+    // device look like a disk with no parents.
+    std::os::unix::fs::symlink(node.join("gone"), node.join("slaves")).unwrap();
+
+    let report = fixture.read();
+
+    assert_eq!(report.state, LiveDataEncryption::Unknown);
+    assert!(reason(&report).contains("could not be read"));
+}
+
+#[test]
 fn an_existing_unresolvable_store_does_not_fall_back_to_its_parent() {
     let fixture = Fixture::new("unresolvable-store");
     let device = fixture.mounted_on_host_device();
