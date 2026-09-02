@@ -632,6 +632,42 @@ fn commit_tree_id(body: &[u8]) -> Option<String> {
     if rest.get(40) != Some(&b'\n') || !id.iter().all(|byte| hex_value(*byte).is_some()) {
         return None;
     }
+    // Authentication is not grammar validation (gpt1's S3, and gpt2's slice-2 P1 for the case that
+    // slipped through): bytes that hash to their own name can still be a commit this walk has no
+    // business trusting. A commit's headers run until the first blank line, each is
+    // `<name> SP <value> LF`, `parent` values are object names, and `author` and `committer` are
+    // required -- so a body carrying an unparsable header or missing an identity is refused before
+    // its tree is walked, rather than after.
+    let mut header = rest.get(41..)?;
+    let mut authors = 0_usize;
+    let mut committers = 0_usize;
+    loop {
+        if header.first() == Some(&b'\n') || header.is_empty() {
+            // The blank line ends the headers; a commit with no message has none at all.
+            break;
+        }
+        let line_end = header.iter().position(|byte| *byte == b'\n')?;
+        let line = header.get(..line_end)?;
+        let name_end = line.iter().position(|byte| *byte == b' ')?;
+        let (name, value) = (line.get(..name_end)?, line.get(name_end + 1..)?);
+        match name {
+            b"parent" => {
+                if value.len() != 40 || !value.iter().all(|byte| hex_value(*byte).is_some()) {
+                    return None;
+                }
+            }
+            b"author" => authors += 1,
+            b"committer" => committers += 1,
+            // A header this walk does not know is not a reason to refuse a commit -- `gpgsig` and
+            // `encoding` are ordinary -- but it must still be shaped like one.
+            _ if value.is_empty() => return None,
+            _ => {}
+        }
+        header = header.get(line_end + 1..)?;
+    }
+    if authors != 1 || committers != 1 {
+        return None;
+    }
     // Lowercase only: the object name this becomes is used to open a file, and `.git/objects`
     // holds lowercase names. An uppercase spelling would be a different path for the same object.
     if id.iter().any(|byte| byte.is_ascii_uppercase()) {
@@ -663,8 +699,15 @@ fn parse_tree(body: &[u8]) -> Option<Vec<TreeEntry<'_>>> {
         let id: [u8; 20] = after_name.get(..20)?.try_into().ok()?;
         // Git orders tree entries by name, with a directory sorting as though its name ended in
         // `/`. Strictly increasing, so an equal neighbour is a duplicate rather than a tie.
+        //
+        // The RAW name is checked separately, because the sort key does not catch every duplicate:
+        // a file `a` has key `a` and a directory `a` has key `a/`, so the two sort as distinct and
+        // a tree holding both passes an ordering check while naming one path twice. `resolve_path_at`
+        // then matches on the raw name and takes whichever came first, which is a definite answer
+        // read out of an ambiguous tree (gpt2's slice-2 P1).
         if let Some(previous) = entries.last()
-            && tree_sort_key(previous.name, previous.mode) >= tree_sort_key(name, mode)
+            && (tree_sort_key(previous.name, previous.mode) >= tree_sort_key(name, mode)
+                || previous.name == name)
         {
             return None;
         }
@@ -1950,15 +1993,51 @@ mod tests {
     }
 
     #[test]
-    fn a_commit_whose_tree_line_is_not_first_is_refused() {
-        // Self-authentication proves the bytes match the name, not that they are a commit. A body
-        // searched for a `tree` line anywhere would let a commit MESSAGE choose the tree walked.
+    fn a_commit_is_validated_as_a_commit_and_not_merely_authenticated() {
+        // gpt2's slice-2 P1. Self-authentication proves the bytes match the name; it does not prove
+        // they are a commit. The earlier version of this test asserted that `tree <id>\nparent x`
+        // was ACCEPTED -- and gpt2 stored exactly that body under its correct SHA-1, pointed it at
+        // a real tree, and got a file `Blob` back. A body with a `parent` that is not an object
+        // name and no author or committer is not a commit, and walking its tree is trusting bytes
+        // nobody validated.
+        // Built by joining, not by a multi-line literal: `cargo fmt` collapses a `\`
+        // continuation and turns its indentation into real spaces, which silently made every
+        // header line start with a space and this fixture stop being a commit.
+        let valid = |extra: &str| {
+            let mut lines = vec![
+                "tree 0123456789abcdef0123456789abcdef01234567".to_owned(),
+                "author A <a@example.invalid> 1 +0000".to_owned(),
+                "committer C <c@example.invalid> 1 +0000".to_owned(),
+            ];
+            if !extra.is_empty() {
+                lines.push(extra.to_owned());
+            }
+            format!("{}\n\nmessage\n", lines.join("\n")).into_bytes()
+        };
         assert_eq!(
-            commit_tree_id(b"tree 0123456789abcdef0123456789abcdef01234567\nparent x"),
+            commit_tree_id(&valid("")),
             Some("0123456789abcdef0123456789abcdef01234567".to_owned())
         );
+        // A real parent and an unknown-but-well-formed header are both ordinary.
+        assert!(
+            commit_tree_id(&valid("parent 89abcdef0123456789abcdef0123456789abcdef")).is_some()
+        );
+        assert!(commit_tree_id(&valid("gpgsig -----BEGIN-----")).is_some());
+        // A malformed parent, with both identities present, so the parent check is the ONLY thing
+        // that can refuse it. Without this the check can be deleted and the suite stays green: the
+        // body gpt2 probed with is refused for its missing identities instead.
+        for bad_parent in ["parent x", &format!("parent {}", "z".repeat(40)), "parent "] {
+            assert!(
+                commit_tree_id(&valid(bad_parent)).is_none(),
+                "{bad_parent:?} was accepted as a parent"
+            );
+        }
+
         for refused in [
-            &b"parent x\ntree 0123456789abcdef0123456789abcdef01234567\n"[..],
+            // gpt2's exact probe body: a parent that is not an object name, no identities.
+            &b"tree 0123456789abcdef0123456789abcdef01234567\nparent x\n\nm\n"[..],
+            b"tree 0123456789abcdef0123456789abcdef01234567\n\nm\n",
+            b"parent x\ntree 0123456789abcdef0123456789abcdef01234567\n",
             b"tree 0123456789abcdef0123456789abcdef01234567",
             b"tree 0123456789abcdef0123456789abcdef0123456\n",
             b"tree 0123456789ABCDEF0123456789abcdef01234567\n",
@@ -1967,6 +2046,88 @@ mod tests {
         ] {
             assert_eq!(commit_tree_id(refused), None, "{refused:?} was accepted");
         }
+        // Missing either identity, and a duplicated one, are refused too.
+        let doubled = valid("author A <a@example.invalid> 1 +0000");
+        assert!(
+            commit_tree_id(&doubled).is_none(),
+            "a second author was accepted"
+        );
+        assert!(
+            commit_tree_id(
+                b"tree 0123456789abcdef0123456789abcdef01234567\nauthor A <a> 1 +0000\n\nm\n"
+            )
+            .is_none(),
+            "a commit with no committer was accepted"
+        );
+
+        // And the end-to-end shape: a self-authenticated body that is not a commit must not yield
+        // a file. This is the probe gpt2 ran, as a committed control.
+        let (repository, revision) = walk_repository("commit-grammar");
+        let store = ObjectStore::open(&repository.path).unwrap();
+        let LooseRead::Read { body, .. } = store
+            .read_loose_object(&revision, 1_048_576, &mut never_elapsed())
+            .unwrap()
+        else {
+            panic!("the commit is loose");
+        };
+        let tree_id = commit_tree_id(&body).expect("git wrote a valid commit");
+        let inner = format!("tree {tree_id}\nparent x\n\nm\n");
+        let mut object = format!("commit {}\0", inner.len()).into_bytes();
+        object.extend_from_slice(inner.as_bytes());
+        let id = HEXLOWER.encode(&Sha1::digest(&object));
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(&object).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let path = loose_path(&repository.path, &id);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, &compressed).unwrap();
+        // It authenticates -- the reader hands it back as a Commit -- and the walk still refuses it.
+        assert!(matches!(
+            store
+                .read_loose_object(&id, 1_048_576, &mut never_elapsed())
+                .unwrap(),
+            LooseRead::Read {
+                kind: ObjectKind::Commit,
+                ..
+            }
+        ));
+        assert_eq!(
+            resolve(&store, &id, "src/lib.rs"),
+            PathResolution::Malformed
+        );
+    }
+
+    #[test]
+    fn a_tree_naming_one_path_twice_is_refused_whatever_the_modes() {
+        // gpt2's slice-2 P1. The ordering check compares SORT KEYS, and a file `a` has key `a`
+        // while a directory `a` has key `a/` -- so the two sort as distinct and a tree naming one
+        // path twice passed. `resolve_path_at` then matches on the raw name and takes whichever
+        // came first: a definite answer read out of an ambiguous tree.
+        let entry = |mode: &[u8], name: &[u8]| {
+            let mut out = mode.to_vec();
+            out.push(b' ');
+            out.extend_from_slice(name);
+            out.push(0);
+            out.extend_from_slice(&[0x33; 20]);
+            out
+        };
+        let mut cross_mode = entry(b"100644", b"a");
+        cross_mode.extend_from_slice(&entry(b"40000", b"a"));
+        assert!(
+            parse_tree(&cross_mode).is_none(),
+            "a tree naming `a` as both a file and a directory was accepted"
+        );
+        // The reverse order sorts the other way and must also be refused.
+        let mut reversed = entry(b"40000", b"a");
+        reversed.extend_from_slice(&entry(b"100644", b"a"));
+        assert!(
+            parse_tree(&reversed).is_none(),
+            "the reversed pair was accepted"
+        );
+        // And a real neighbouring pair is still accepted, so this is not refusing everything.
+        let mut ordinary = entry(b"100644", b"a");
+        ordinary.extend_from_slice(&entry(b"40000", b"b"));
+        assert_eq!(parse_tree(&ordinary).unwrap().len(), 2);
     }
 
     #[test]
