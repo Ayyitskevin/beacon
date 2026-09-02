@@ -417,6 +417,46 @@ describe("Beacon desktop shell", () => {
     expect(results.violations).toEqual([]);
   });
 
+  it("bounds the Receipt fan-out and says the reading is partial", async () => {
+    mockInitialState("unlocked");
+    const base = invokeMock.getMockImplementation()!;
+    const many = Array.from({ length: 513 }, (_, index) => ({
+      id: `${index.toString(16).padStart(8, "0")}-4444-4444-8444-444444444444`,
+      name: `Project ${index}`,
+      charterRevision: 1,
+      autonomyProfile: "observe" as const,
+      createdAtMs: index,
+    }));
+    let reads = 0;
+    let concurrent = 0;
+    let peak = 0;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "projects") return Promise.resolve(many);
+      if (command === "preflight_receipts") {
+        reads += 1;
+        concurrent += 1;
+        peak = Math.max(peak, concurrent);
+        return new Promise((resolve) => {
+          setTimeout(() => {
+            concurrent -= 1;
+            resolve([]);
+          }, 0);
+        });
+      }
+      return base(command, args);
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    // A Workspace with 513 Projects used to start 513 concurrent IPC calls and
+    // hold up to N x 512 Receipts before sorting to five.
+    expect(
+      await screen.findByText(/showing preflight Receipts for the 8 most recent Projects of 513/),
+    ).toBeVisible();
+    expect(reads).toBe(8);
+    expect(peak).toBeLessThanOrEqual(4);
+  });
+
   it("never presents a Receipt as work that succeeded", async () => {
     mockInitialState("unlocked");
     const base = invokeMock.getMockImplementation()!;
