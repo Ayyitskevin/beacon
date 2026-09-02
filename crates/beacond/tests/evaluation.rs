@@ -1239,3 +1239,56 @@ fn a_cited_run_without_a_receipt_is_refused() {
         .expect("a receipted Run is citable");
     assert_eq!(evaluation.payload().cited_runs, vec![run_id]);
 }
+
+/// gpt2's E3: the total-bound test proved the codec's bound and never the store's, so lowering the
+/// SQL ceiling to 32,768 left it green. This exercises the migrated column itself, at both sides of
+/// the exact number the encoder owns.
+#[test]
+fn the_migrated_column_repeats_the_codecs_owned_byte_bound() {
+    const MAX_CANONICAL_BYTES: usize = 65_536;
+    let fixture = admitted_mission("evaluation-store-bound");
+    let connection = fixture.store.connect();
+
+    let attempt = |length: usize, digest: &str| {
+        connection.execute(
+            "INSERT INTO evaluations (
+                 workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+                 canonical_bytes, proposal_digest, proposal_digest_algorithm,
+                 proposal_digest_canonicalizer, mission_id, evaluator_resident_id,
+                 evaluator_configuration_id, rubric_id, rubric_version, rubric_canonicalizer,
+                 rubric_sha256, verdict, conflicts_declared, conflicts_text, rationale,
+                 evaluated_at_ms
+             ) VALUES (
+                 ?1, 'sha256', 'beacon.evaluation.v1', ?2, ?3, ?4, 'sha256', 'beacon.proposal.v1',
+                 ?5, ?6, ?7, 'r', 1, 'beacon.rubric.v1', ?8, 'uncertain', 0, NULL, 'why', 7
+             )",
+            rusqlite::params![
+                fixture.workspace_id.to_string(),
+                digest,
+                vec![0_u8; length],
+                HEXLOWER.encode(&[0x60_u8; 32]),
+                fixture.mission_id.to_string(),
+                fixture.other_resident_id.to_string(),
+                fixture.other_configuration_id.to_string(),
+                HEXLOWER.encode(&[0x20_u8; 32]),
+            ],
+        )
+    };
+
+    // One byte over the codec's bound must be refused by the COLUMN, so the two numbers are the
+    // same number. The foreign key to `proposals` is not satisfied here, so a row that passes the
+    // length CHECK still fails -- the two failures are told apart by their SQLite error code.
+    let over = attempt(MAX_CANONICAL_BYTES + 1, &HEXLOWER.encode(&[0x61_u8; 32]));
+    let at_bound = attempt(MAX_CANONICAL_BYTES, &HEXLOWER.encode(&[0x62_u8; 32]));
+    let code = |result: &rusqlite::Result<usize>| match result {
+        Err(rusqlite::Error::SqliteFailure(error, _)) => error.extended_code,
+        other => panic!("expected a constraint failure, got {other:?}"),
+    };
+    // 275 is SQLITE_CONSTRAINT_CHECK; 787 is SQLITE_CONSTRAINT_FOREIGNKEY.
+    assert_eq!(code(&over), 275, "the column accepted one byte over the bound");
+    assert_eq!(
+        code(&at_bound),
+        787,
+        "the column refused a blob AT the bound, so its limit is not the codec's"
+    );
+}
