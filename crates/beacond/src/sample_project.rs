@@ -194,6 +194,8 @@ pub struct SampleProjectService {
     expected_bundle_digest: String,
     sync_repository_tree: fn(&Path) -> std::io::Result<()>,
     #[cfg(test)]
+    before_workspace_open: fn(&Path) -> std::io::Result<()>,
+    #[cfg(test)]
     test_store_path: Option<PathBuf>,
 }
 
@@ -219,6 +221,8 @@ impl SampleProjectService {
             git_program: OsString::from("git"),
             expected_bundle_digest: EXPECTED_BUNDLE_DIGEST.to_owned(),
             sync_repository_tree: sync_directory_tree,
+            #[cfg(test)]
+            before_workspace_open: no_op_path_hook,
             #[cfg(test)]
             test_store_path: None,
         })
@@ -348,6 +352,8 @@ impl SampleProjectService {
         ensure_private_directory(&self.managed_root)?;
         let workspace_root = self.managed_root.join(self.workspace_id.to_string());
         ensure_private_directory(&workspace_root)?;
+        #[cfg(test)]
+        (self.before_workspace_open)(&workspace_root)?;
         let workspace_directory = open_private_directory(&workspace_root)?;
 
         match fs::symlink_metadata(destination) {
@@ -535,10 +541,21 @@ impl SampleProjectService {
     }
 
     #[cfg(test)]
+    fn with_before_workspace_open(mut self, value: fn(&Path) -> std::io::Result<()>) -> Self {
+        self.before_workspace_open = value;
+        self
+    }
+
+    #[cfg(test)]
     fn with_test_authenticated_store(mut self, store_path: impl AsRef<Path>) -> Self {
         self.test_store_path = Some(store_path.as_ref().to_owned());
         self
     }
+}
+
+#[cfg(test)]
+fn no_op_path_hook(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn bind_command_to_directory(
@@ -1769,6 +1786,24 @@ mod tests {
         Ok(())
     }
 
+    fn replace_workspace_with_private_symlink(path: &std::path::Path) -> std::io::Result<()> {
+        let managed_root = path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("workspace has no managed parent"))?;
+        let test_root = managed_root
+            .parent()
+            .ok_or_else(|| std::io::Error::other("managed root has no test parent"))?;
+        let original_workspace = test_root.join("workspace-before-open");
+        let operator_workspace = test_root.join("operator-workspace");
+
+        fs::rename(path, original_workspace)?;
+        fs::create_dir(&operator_workspace)?;
+        fs::set_permissions(&operator_workspace, fs::Permissions::from_mode(0o700))?;
+        fs::write(operator_workspace.join("keep"), b"operator data")?;
+        symlink(&operator_workspace, path)?;
+        Ok(())
+    }
+
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     fn seccomp_statement(code: u16, value: u32) -> libc::sock_filter {
         libc::sock_filter {
@@ -2261,18 +2296,21 @@ mod tests {
     }
 
     #[test]
-    fn workspace_anchor_open_refuses_a_symlink_to_a_private_directory() {
-        let store = TestStore::new("workspace-anchor-symlink");
-        let target = store.root.join("operator-owned");
-        fs::create_dir(&target).unwrap();
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
-        let sentinel = target.join("keep");
-        fs::write(&sentinel, b"operator data").unwrap();
-        let workspace_alias = store.root.join("workspace-alias");
-        symlink(&target, &workspace_alias).unwrap();
+    fn install_refuses_a_workspace_root_swapped_for_a_private_symlink() {
+        let store = TestStore::new("workspace-open-symlink");
+        let service = store
+            .isolated_service()
+            .with_before_workspace_open(replace_workspace_with_private_symlink);
 
-        assert!(super::open_private_directory(&workspace_alias).is_err());
-        assert_eq!(fs::read(&sentinel).unwrap(), b"operator data");
+        assert!(service.install().is_err());
+        let operator_workspace = store.root.join("operator-workspace");
+        assert_eq!(
+            fs::read(operator_workspace.join("keep")).unwrap(),
+            b"operator data"
+        );
+        assert_eq!(fs::read_dir(operator_workspace).unwrap().count(), 1);
+        assert_eq!(store.count("projects"), 0);
+        assert_eq!(store.count("sample_project_installations"), 0);
     }
 
     #[test]
