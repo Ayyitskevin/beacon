@@ -188,6 +188,41 @@ CREATE TABLE evaluation_cited_runs (
 CREATE UNIQUE INDEX evaluations_workspace_digest
 ON evaluations (workspace_id, digest_value);
 
+-- Supersession is a relation, not a nullable column. "This Evaluation has no predecessor" is the
+-- ABSENCE OF A ROW, which carries no meaning a NULL would have to be interpreted to supply: the
+-- canonical bytes say `supersedes = none` and reconciliation checks the two agree. Both foreign
+-- keys are scoped by (workspace_id, proposal_digest), so a link across Workspaces or across
+-- Proposals is structurally impossible rather than merely refused by a Command that could be
+-- bypassed. The `ruling_supersessions` shape exactly -- one relation, two records, one meaning.
+CREATE TABLE evaluation_supersessions (
+    workspace_id TEXT NOT NULL,
+    proposal_digest TEXT NOT NULL,
+    evaluation_digest TEXT NOT NULL,
+    supersedes_evaluation_digest TEXT NOT NULL,
+    -- Each Evaluation cites at most one predecessor...
+    PRIMARY KEY (workspace_id, proposal_digest, evaluation_digest),
+    -- ...and each Evaluation is superseded at most once. Together these make the graph a set of
+    -- disjoint paths: no forks, so "the effective Evaluation is the last link" always has an answer.
+    UNIQUE (workspace_id, proposal_digest, supersedes_evaluation_digest),
+    CHECK (evaluation_digest <> supersedes_evaluation_digest),
+    FOREIGN KEY (workspace_id, proposal_digest, evaluation_digest)
+        REFERENCES evaluations(workspace_id, proposal_digest, digest_value) ON DELETE RESTRICT,
+    FOREIGN KEY (workspace_id, proposal_digest, supersedes_evaluation_digest)
+        REFERENCES evaluations(workspace_id, proposal_digest, digest_value) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TRIGGER evaluation_supersessions_no_update
+BEFORE UPDATE ON evaluation_supersessions
+BEGIN
+    SELECT RAISE(ABORT, 'Evaluation supersessions are immutable');
+END;
+
+CREATE TRIGGER evaluation_supersessions_no_delete
+BEFORE DELETE ON evaluation_supersessions
+BEGIN
+    SELECT RAISE(ABORT, 'Evaluation supersessions are immutable');
+END;
+
 -- Non-authorship, made structural. An Agent cannot approve its own Proposal through a model
 -- judgment (`BLUEPRINT:445-447`), and a rule that lives only in a Command is a rule anything
 -- reaching the store can walk past.

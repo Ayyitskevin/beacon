@@ -248,6 +248,7 @@ fn downgrade_execution_schema_to_v15(store_path: &Path) {
              -- Records come off innermost first, newest migration first. Migration 0023's
              -- Evaluation tables reference proposals, and 0022's Ruling/Candidate binding
              -- references both rulings and candidates, which reference proposals in turn.
+             DROP TABLE evaluation_supersessions;
              DROP TABLE evaluation_cited_runs;
              DROP TABLE evaluation_findings;
              DROP TABLE evaluations;

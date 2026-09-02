@@ -85,8 +85,8 @@ pub use dispatch::{
     RepositoryEffect, SourceIdentity, SuppliedContent, UnresolvedRuns,
 };
 pub use evaluation::{
-    Conflicts, Evaluation, EvaluationDigest, EvaluationDraft, EvaluationError, EvaluationService,
-    EvaluationSupersedes, EvaluationV1, Evaluator, Finding, FindingSeverity,
+    Conflicts, Evaluation, EvaluationDigest, EvaluationDraft, EvaluationError, EvaluationForce,
+    EvaluationService, EvaluationSupersedes, EvaluationV1, Evaluator, Finding, FindingSeverity,
     InconsistentEvaluation, MalformedEvaluation, RubricDeclaration, Verdict,
 };
 pub use local_model_activation::{

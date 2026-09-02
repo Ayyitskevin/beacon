@@ -28,7 +28,7 @@
 //! the same reason: an identity grammar's whole value is that it cannot move, and a shared codec
 //! would couple two frozen grammars' futures.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -36,7 +36,9 @@ use data_encoding::{BASE64, HEXLOWER};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use uuid::Uuid;
 
-use crate::proposal::{ProposalDigest, is_human_text, proposal_binding_facts, sha256};
+use crate::proposal::{
+    ProposalDigest, UnmetPrecondition, is_human_text, proposal_binding_facts, sha256,
+};
 use crate::{OperatorAccountError, OperatorAccountService, ProposalError};
 
 /// The canonicalizer identity. Any future grammar is a new canonicalizer; existing v1 bytes are
@@ -259,12 +261,40 @@ pub struct EvaluationDigest {
     pub value: String,
 }
 
+/// What is true of a stored Evaluation NOW, as facts rather than as a verdict.
+///
+/// Derived at read time and never stored: a stored answer would be a second thing to keep true.
+/// There is deliberately no `is_in_force` and no boolean anywhere on this type. An Evaluation that
+/// has been superseded, or whose bound Proposal's revisions have moved, is still a true account of
+/// what an evaluator judged about those exact bytes; whether that matters is the reader's question,
+/// and collapsing "superseded" and "drifted" into one bit would answer it for them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvaluationForce {
+    superseded_by: Option<EvaluationDigest>,
+    drift: Vec<UnmetPrecondition>,
+}
+
+impl EvaluationForce {
+    /// The Evaluation that supersedes this one, if any. `None` is the absence of a relation row,
+    /// not a null column.
+    pub fn superseded_by(&self) -> Option<&EvaluationDigest> {
+        self.superseded_by.as_ref()
+    }
+
+    /// Which of the bound Proposal's revisions have moved since. Empty means none have moved --
+    /// it does not mean the Evaluation is current, because supersession is the other fact.
+    pub fn drift(&self) -> &[UnmetPrecondition] {
+        &self.drift
+    }
+}
+
 /// One stored Evaluation, re-verified on every read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Evaluation {
     digest: EvaluationDigest,
     canonical_bytes: Vec<u8>,
     payload: EvaluationV1,
+    force: EvaluationForce,
 }
 
 impl Evaluation {
@@ -278,6 +308,11 @@ impl Evaluation {
 
     pub fn payload(&self) -> &EvaluationV1 {
         &self.payload
+    }
+
+    /// Supersession and drift, as two separate facts. Never a boolean.
+    pub fn force(&self) -> &EvaluationForce {
+        &self.force
     }
 }
 
@@ -361,6 +396,11 @@ pub enum InconsistentEvaluation {
     ProposalEnvelopeDisagrees,
     MissionDisagreesWithProposal,
     EvaluatorAuthoredTheProposal,
+    SupersedesNotRecorded,
+    SupersedesOtherProposal,
+    NotTheCurrentTail,
+    EvaluatedBeforeTail,
+    SupersessionDisagreesWithBytes,
     FindingsDisagreeWithBytes,
     CitedRunsDisagreeWithBytes,
 }
@@ -380,6 +420,17 @@ impl fmt::Display for InconsistentEvaluation {
             }
             Self::EvaluatorAuthoredTheProposal => {
                 "the evaluator authored the Proposal being evaluated"
+            }
+            Self::SupersedesNotRecorded => "the superseded digest names no stored Evaluation",
+            Self::SupersedesOtherProposal => {
+                "the superseded Evaluation belongs to another Proposal"
+            }
+            Self::NotTheCurrentTail => {
+                "the superseded Evaluation is not the current end of the chain"
+            }
+            Self::EvaluatedBeforeTail => "the Evaluation predates the one it supersedes",
+            Self::SupersessionDisagreesWithBytes => {
+                "the supersession relation disagrees with the canonical bytes"
             }
             Self::FindingsDisagreeWithBytes => "the stored findings are not the ones in the bytes",
             Self::CitedRunsDisagreeWithBytes => {
@@ -1125,6 +1176,32 @@ fn verified_evaluation(
         ));
     }
     verify_children(connection, workspace_id, &row.digest_value, &payload)?;
+
+    // The relation and the byte tag must agree. Checked on every read rather than only at startup,
+    // so a row and its relation cannot disagree even between two restarts.
+    let recorded_predecessor: Option<String> = connection
+        .query_row(
+            "SELECT supersedes_evaluation_digest FROM evaluation_supersessions
+             WHERE workspace_id = ?1 AND proposal_digest = ?2 AND evaluation_digest = ?3",
+            params![
+                workspace_id.to_string(),
+                row.proposal_digest.as_str(),
+                row.digest_value.as_str()
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let declared = match &payload.supersedes {
+        EvaluationSupersedes::None => None,
+        EvaluationSupersedes::Evaluation(digest) => Some(digest.clone()),
+    };
+    if recorded_predecessor != declared {
+        return Err(EvaluationError::Inconsistent(
+            InconsistentEvaluation::SupersessionDisagreesWithBytes,
+        ));
+    }
+
+    let force = derive_force(connection, workspace_id, &row, &facts)?;
     Ok(Evaluation {
         digest: EvaluationDigest {
             algorithm: DIGEST_ALGORITHM.to_owned(),
@@ -1133,7 +1210,162 @@ fn verified_evaluation(
         },
         canonical_bytes: row.canonical_bytes,
         payload,
+        force,
     })
+}
+
+/// Supersession and drift, derived at read time.
+///
+/// Drift is about the bound PROPOSAL's revisions, because an Evaluation's own grammar carries no
+/// bindings -- it judged the exact bytes a Proposal digest names, and those bytes name the
+/// revisions. A Repository rebind that keeps the same pinned commit reports only the revision as
+/// moved, one drift and not two; that distinction is the same one Ruling v1 draws, repeated here
+/// rather than shared because the two records answer different questions about the same columns.
+fn derive_force(
+    connection: &Connection,
+    workspace_id: Uuid,
+    row: &StoredRow,
+    facts: &crate::proposal::ProposalBindingFacts,
+) -> Result<EvaluationForce, EvaluationError> {
+    let superseded_by = connection
+        .query_row(
+            "SELECT evaluation_digest FROM evaluation_supersessions
+             WHERE workspace_id = ?1 AND proposal_digest = ?2
+               AND supersedes_evaluation_digest = ?3",
+            params![
+                workspace_id.to_string(),
+                row.proposal_digest.as_str(),
+                row.digest_value.as_str()
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|value| EvaluationDigest {
+            algorithm: DIGEST_ALGORITHM.to_owned(),
+            canonicalizer: CANONICALIZER.to_owned(),
+            value,
+        });
+
+    let mut drift = Vec::new();
+    let (current_charter, latest_repository) =
+        crate::project_repository::latest_repository_for_preflight(
+            connection,
+            workspace_id,
+            facts.project_id,
+        )
+        .map_err(|_| EvaluationError::InvalidStore)?;
+    if current_charter != facts.bindings.charter_revision {
+        drift.push(UnmetPrecondition::CharterRevisionMoved);
+    }
+    let policy = crate::project_policy::policy_revision_facts(
+        connection,
+        workspace_id,
+        facts.project_id,
+        facts.bindings.project_policy_revision,
+    )
+    .map_err(|_| EvaluationError::InvalidStore)?;
+    if !policy.is_some_and(|facts| facts.is_current) {
+        drift.push(UnmetPrecondition::ProjectPolicyRevisionMoved);
+    }
+    match latest_repository {
+        Some(binding) if binding.revision == facts.bindings.repository_revision => {
+            if binding.base_revision != facts.bindings.pinned_base_revision {
+                drift.push(UnmetPrecondition::BaseRevisionMoved);
+            }
+        }
+        Some(binding) => {
+            drift.push(UnmetPrecondition::RepositoryRevisionMoved);
+            if binding.base_revision != facts.bindings.pinned_base_revision {
+                drift.push(UnmetPrecondition::BaseRevisionMoved);
+            }
+        }
+        None => {
+            drift.push(UnmetPrecondition::RepositoryRevisionMoved);
+            drift.push(UnmetPrecondition::BaseRevisionMoved);
+        }
+    }
+    Ok(EvaluationForce {
+        superseded_by,
+        drift,
+    })
+}
+
+/// Every Evaluation recorded against one Proposal, in **chain order, oldest first**.
+///
+/// Chain order, never timestamp order: a timestamp is evidence about when, and the chain is what
+/// the records say about each other. Two Evaluations can land in the same millisecond; only one of
+/// them supersedes the other.
+fn evaluation_chain(
+    connection: &Connection,
+    workspace_id: Uuid,
+    proposal_digest: &str,
+) -> Result<Vec<String>, EvaluationError> {
+    let mut statement = connection.prepare(
+        "SELECT digest_value FROM evaluations
+         WHERE workspace_id = ?1 AND proposal_digest = ?2",
+    )?;
+    let all = statement
+        .query_map(params![workspace_id.to_string(), proposal_digest], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<Result<HashSet<_>, _>>()?;
+    drop(statement);
+    if all.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut statement = connection.prepare(
+        "SELECT supersedes_evaluation_digest, evaluation_digest FROM evaluation_supersessions
+         WHERE workspace_id = ?1 AND proposal_digest = ?2",
+    )?;
+    let links = statement
+        .query_map(params![workspace_id.to_string(), proposal_digest], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+
+    // Three shapes the store already forbids, refused again here rather than relied upon, because
+    // this walk has to be correct on its own terms: a predecessor cited twice (the relation's
+    // unique index), an Evaluation citing two predecessors (its primary key), and a predecessor
+    // outside this Proposal's set (the scoped composite foreign keys). No store state reaches
+    // them, so no test here can either.
+    let mut successor: HashMap<String, String> = HashMap::new();
+    let mut cited: HashSet<String> = HashSet::new();
+    for (superseded, successor_digest) in links {
+        if successor
+            .insert(superseded.clone(), successor_digest.clone())
+            .is_some()
+            || !cited.insert(successor_digest)
+            || !all.contains(&superseded)
+        {
+            return Err(EvaluationError::InvalidStore);
+        }
+    }
+
+    let Some(head) = all.iter().find(|digest| !cited.contains(*digest)).cloned() else {
+        // Every Evaluation cites a predecessor, so the links form a cycle and there is no first.
+        return Err(EvaluationError::InvalidStore);
+    };
+
+    let mut chain = Vec::with_capacity(all.len());
+    let mut cursor = Some(head);
+    while let Some(digest) = cursor {
+        cursor = successor.get(&digest).cloned();
+        chain.push(digest);
+        // A bound on the walk, not a check on the store: in-edges are unique and the head has
+        // none, so this is a simple path and cannot revisit. If a store ever violated that, this
+        // returns rather than hanging.
+        if chain.len() > all.len() {
+            return Err(EvaluationError::InvalidStore);
+        }
+    }
+    // The one comparison that refuses a FORK. A second head means at least one Evaluation is
+    // unreachable from the first, so the walk always comes up short.
+    if chain.len() != all.len() {
+        return Err(EvaluationError::InvalidStore);
+    }
+    Ok(chain)
 }
 
 fn columns_match(row: &StoredRow, payload: &EvaluationV1) -> bool {
@@ -1229,9 +1461,9 @@ pub struct EvaluationService {
 /// because a caller-supplied time would let an Evaluation recorded after a Ruling be backdated
 /// through the ordinary Command.
 ///
-/// `supersedes` is absent in slice 1 for a different reason: the supersession relation is slice 3,
-/// and a digest accepted here before that relation exists would name something nothing checks.
-/// The grammar carries both arms and the published vector exercises the digest arm.
+/// `supersedes` names the Evaluation this one replaces, and must be the CURRENT END of that
+/// Proposal's chain: superseding a link that has already been superseded would fork it, and a fork
+/// has no last link, so "the effective Evaluation" would stop having an answer.
 #[derive(Debug, Clone)]
 pub struct EvaluationDraft {
     pub proposal_digest: String,
@@ -1242,6 +1474,7 @@ pub struct EvaluationDraft {
     pub findings: Vec<Finding>,
     pub conflicts: Conflicts,
     pub rationale: String,
+    pub supersedes: EvaluationSupersedes,
 }
 
 impl EvaluationService {
@@ -1302,6 +1535,44 @@ impl EvaluationService {
                 ));
             }
 
+            // The chain is read and extended inside this one immediate transaction, so two
+            // concurrent Evaluations cannot both believe they extend it.
+            let chain = evaluation_chain(&transaction, self.workspace_id, &draft.proposal_digest)?;
+            let tail = chain.last();
+            match (tail, &draft.supersedes) {
+                (None, EvaluationSupersedes::None) => {}
+                (Some(tail), EvaluationSupersedes::Evaluation(cited)) if tail == cited => {}
+                (_, EvaluationSupersedes::Evaluation(cited)) => {
+                    // Three different mistakes, three different corrections: a digest naming
+                    // nothing, one naming another Proposal's Evaluation, and one naming an
+                    // already-superseded link of this chain.
+                    return Err(EvaluationError::Inconsistent(
+                        match recorded_proposal_of(&transaction, cited)? {
+                            None => InconsistentEvaluation::SupersedesNotRecorded,
+                            Some(other) if other != draft.proposal_digest => {
+                                InconsistentEvaluation::SupersedesOtherProposal
+                            }
+                            Some(_) => InconsistentEvaluation::NotTheCurrentTail,
+                        },
+                    ));
+                }
+                (Some(_), EvaluationSupersedes::None) => {
+                    return Err(EvaluationError::Inconsistent(
+                        InconsistentEvaluation::NotTheCurrentTail,
+                    ));
+                }
+            }
+            if let Some(tail) = tail {
+                // Equal times are allowed: two records can land in the same millisecond, and
+                // refusing that would invent a precision the clock does not have. Chain order, not
+                // timestamp order, is what says which superseded which.
+                if evaluated_at_ms < evaluated_at_ms_of(&transaction, tail)? {
+                    return Err(EvaluationError::Inconsistent(
+                        InconsistentEvaluation::EvaluatedBeforeTail,
+                    ));
+                }
+            }
+
             let payload = EvaluationV1 {
                 // COPIED from the verified Proposal, never rebuilt from this module's constants:
                 // equality is not provenance.
@@ -1313,7 +1584,7 @@ impl EvaluationService {
                 findings: draft.findings,
                 conflicts: draft.conflicts,
                 rationale: draft.rationale,
-                supersedes: EvaluationSupersedes::None,
+                supersedes: draft.supersedes.clone(),
                 evaluated_at_ms,
             };
             let canonical_bytes = encode(&payload).map_err(EvaluationError::Malformed)?;
@@ -1327,6 +1598,20 @@ impl EvaluationService {
                 payload,
             };
             insert_evaluation(&transaction, &stored)?;
+            if let EvaluationSupersedes::Evaluation(superseded) = &stored.payload.supersedes {
+                transaction.execute(
+                    "INSERT INTO evaluation_supersessions (
+                         workspace_id, proposal_digest, evaluation_digest,
+                         supersedes_evaluation_digest
+                     ) VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        self.workspace_id.to_string(),
+                        draft.proposal_digest,
+                        digest_value,
+                        superseded,
+                    ],
+                )?;
+            }
             let row = load_row(&transaction, self.workspace_id, &digest_value)?
                 .ok_or(EvaluationError::InvalidStore)?;
             let evaluation = verified_evaluation(&transaction, self.workspace_id, row)?;
@@ -1342,6 +1627,28 @@ impl EvaluationService {
             verified_evaluation(connection, self.workspace_id, row)
         })
     }
+}
+
+fn recorded_proposal_of(
+    connection: &Connection,
+    digest_value: &str,
+) -> Result<Option<String>, EvaluationError> {
+    Ok(connection
+        .query_row(
+            "SELECT proposal_digest FROM evaluations WHERE digest_value = ?1",
+            params![digest_value],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+fn evaluated_at_ms_of(connection: &Connection, digest_value: &str) -> Result<u64, EvaluationError> {
+    let value: i64 = connection.query_row(
+        "SELECT evaluated_at_ms FROM evaluations WHERE digest_value = ?1",
+        params![digest_value],
+        |row| row.get(0),
+    )?;
+    u64::try_from(value).map_err(|_| EvaluationError::InvalidStore)
 }
 
 /// Startup reconciliation: every stored Evaluation is re-verified against its own bytes, its bound
@@ -1400,6 +1707,29 @@ pub(crate) fn verify_evaluation_state(connection: &Connection) -> Result<(), Eva
         let occurred_at_ms =
             u64::try_from(*occurred_at_ms).map_err(|_| EvaluationError::InvalidStore)?;
         verify_evaluation_event(connection, workspace_id, occurred_at_ms, payload_json)?;
+    }
+
+    // Every supersession chain: one first link, one path, every Evaluation on it, and
+    // `evaluated_at_ms` non-decreasing ALONG THE CHAIN -- chain order, never timestamp order.
+    let mut statement = connection.prepare(
+        "SELECT DISTINCT workspace_id, proposal_digest FROM evaluations ORDER BY proposal_digest",
+    )?;
+    let chains: Vec<(String, String)> = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    drop(statement);
+    for (workspace, proposal_digest) in chains {
+        let workspace_id =
+            Uuid::parse_str(&workspace).map_err(|_| EvaluationError::InvalidStore)?;
+        let chain = evaluation_chain(connection, workspace_id, &proposal_digest)?;
+        let mut previous: Option<u64> = None;
+        for digest in &chain {
+            let at = evaluated_at_ms_of(connection, digest)?;
+            if previous.is_some_and(|earlier| at < earlier) {
+                return Err(EvaluationError::InvalidStore);
+            }
+            previous = Some(at);
+        }
     }
 
     // No Event may name an Evaluation that is not stored.

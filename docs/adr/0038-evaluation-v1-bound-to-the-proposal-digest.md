@@ -189,6 +189,35 @@ and it is therefore re-derived against the **Proposal** at every read and at
 startup rather than against the bytes. Without that, a wrong Mission would be
 invisible to both.
 
+## Supersession and force
+
+An evaluator may change their mind, and the record of the earlier judgment stays
+true: it is a true account of what somebody judged about exact bytes, and no
+later record makes it untrue. Supersession is therefore a **relation**, not an
+edit and not a nullable column — "this Evaluation has no predecessor" is the
+absence of a row, and the canonical bytes say `supersedes = none` so
+reconciliation can check the two agree.
+
+Each Evaluation cites at most one predecessor and is superseded at most once, so
+the graph is a set of disjoint paths: no forks, and "the effective Evaluation is
+the last link" always has an answer. A new Evaluation must supersede the
+**current end** of its Proposal's chain; superseding an already-superseded link
+would fork it. `evaluated_at_ms` is non-decreasing along the chain, and **equal
+times are allowed** — two records can land in the same millisecond, and refusing
+that would invent a precision the clock does not have.
+
+**Chain order, never timestamp order.** A timestamp is evidence about when; the
+chain is what the records say about each other.
+
+`force` is derived at read time and never stored, as two separate facts:
+`superseded_by` and `drift`. **There is deliberately no boolean anywhere on it**
+— no `is_in_force`, no `is_acceptable`. Drift is about the bound *Proposal's*
+revisions, because an Evaluation's own grammar carries no bindings: it judged the
+exact bytes a Proposal digest names, and those bytes name the revisions. A
+Repository rebind that keeps the same pinned commit reports only the revision as
+moved, one drift and not two. Drift is never a startup failure: the world moving
+is not a defect in the record.
+
 ## What v1 does not do
 
 **It does not satisfy alpha criterion 26.** Criterion 26 requires that Material
@@ -200,7 +229,7 @@ Artifact-subject arm on `subject`, and no dispatch that would produce a Material
 Artifact to evaluate. Closing criterion 26 needs all three. A later reader must
 not mistake this evidence primitive for the criterion it serves.
 
-Slice 3 adds supersession. Slice 4 — the
+v1 is complete at slices 1-3. Slice 4 — the
 Ruling citation — is deferred, per the decision above. Until then no surface
 consumes an Evaluation, which is deliberate: a panel showing `meets` with no
 dispatch behind it would be `BLUEPRINT:446` in an interface.
