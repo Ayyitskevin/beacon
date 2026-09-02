@@ -245,16 +245,18 @@ Three independent equalities, all required:
 A kernel review measured two ways this was wrong as first written, and both
 corrections are part of this decision:
 
-- **Staging is literal or it is not staging.** `git add -- <path>` still applies
-  pathspec magic; a valid Proposal path `:(glob)*.txt` staged a second, undeclared
-  file. Every Git invocation passes `--literal-pathspecs`, and every path list is
-  consumed NUL-delimited, because a Proposal path may contain a newline.
-- **Compare the blob, not the file.** Git's built-in `text eol=lf` conversion — no
-  external filter, so the filter-driver hardening never sees it — turned CRLF
-  Candidate bytes into an LF blob with a different SHA-256 while
-  `diff --name-status` still reported the declared `M`. Post-image digests are
-  therefore verified against **the blob bytes in the prepared commit's tree**, which
-  is the artifact that will be published, not against the worktree file.
+- **Content never passes through a checkout or an index.** Git's built-in
+  `text eol=lf` conversion — no external filter, so the filter-driver hardening never
+  sees it — turned CRLF Candidate bytes into an LF blob with a different SHA-256
+  while `diff --name-status` still reported the declared `M`. Blobs are therefore
+  written with `hash-object --no-filters` and the tree and commit constructed from
+  them, so the declared bytes *are* the object bytes. Post-image digests are verified
+  against the blobs in the prepared commit's tree, which is the artifact that gets
+  published.
+- **No pathspec is passed at all**, which is also how `git add -- ':(glob)*.txt'`
+  staging a second, undeclared file stops being reachable. Where a path list is read
+  back — `diff --name-status` — it is consumed NUL-delimited with
+  `--literal-pathspecs`, because a Proposal path may contain a newline.
 
 ## What a kernel review measured, and what it changed
 
@@ -295,13 +297,27 @@ control proves that one changed byte of `.git/index`, of a loose object, or of w
 changes the snapshot. It establishes **final byte identity** and is never described as proof that no
 transient file existed.
 
-**Exactly once is reserved before the act, not indexed after it.** Two dispatchers each running the
-landing both exit 0 — the second reports the branch already current — so a unique `Applied` row
-cannot make application exactly once. Inside the serialized transaction below, dispatch **spends**
-the authorizing Ruling digest and persists `{run, source identity, branch, pinned base, prepared
-commit}` before the irreversible step. An attempt whose result was never established stays spent
-until the Operator resolves it, and that record is also what lets startup name the exact commit to
-inspect.
+**Exactly once is the compare-and-swap, not a row written afterwards.** Two dispatchers each
+running a fast-forward merge both exit 0 — the second reports the branch already current. The CAS
+closes that by itself: the second attempt finds the ref no longer at the pinned base and refuses.
+The `Applied` row is written in the same serialized step as the swap, not as the thing that makes
+application unique. What is still persisted **before** the act is `{run, source identity, branch,
+pinned base, prepared commit}`, for one narrower purpose: an attempt whose result was never observed
+must be able to name the exact commit to inspect, and neither a worktree nor an in-memory Candidate
+is recovery state.
+
+**Objects are written as declared, without attribute processing.** Git's built-in `text eol=lf`
+conversion has no path into the object store if content never passes through the index or a
+checkout: blobs are written with `hash-object --no-filters`, and the tree and commit are constructed
+from them. The post-condition "`base..commit` touches exactly the declared set, byte for byte" is
+then a fact about **objects**, which is what gets published, and pathspec magic never arises because
+no pathspec is passed.
+
+**The checkout is Beacon's, in v1 only.** Inside the disposable-copy scope Beacon owns the working
+tree and updates it after the CAS. A compare-and-swap into a repository the Operator also has
+checked out would leave their working tree showing the inverse of the applied change; that is a real
+problem, it belongs to the first slice that touches an Operator's own repository, and this ADR
+records it rather than claiming v1 solved it.
 
 ## Conditions on the landing slices
 
