@@ -15,7 +15,9 @@ use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use beacond::{
     AutonomyProfile, BeaconCapability, DeclaredCheck, InconsistentRuling,
@@ -1574,19 +1576,7 @@ fn assert_refuses_startup(fixture: &Fixture, case: &str) {
 impl Fixture {
     /// The `ruling.recorded` Event payload for one record, exactly as the service writes it.
     fn event_payload(&self, record: &RulingRecord) -> String {
-        serde_json::json!({
-            "ruling": {
-                "digest": {
-                    "algorithm": "sha256",
-                    "canonicalizer": "beacon.ruling.v1",
-                    "value": record.digest(),
-                },
-                "canonicalBytesBase64": BASE64.encode(&record.bytes()),
-                "actor": "owner",
-                "ruledAtMs": record.ruled_at_ms,
-            }
-        })
-        .to_string()
+        event_payload(record)
     }
 
     /// Plant one Ruling row and its audit Event by hand. `link` inserts the supersession row
@@ -1597,10 +1587,32 @@ impl Fixture {
     /// what reconciliation re-derives ACROSS records can refuse such a fixture, which is what makes
     /// these tests about reconciliation rather than about `verified_ruling` again.
     fn plant(&self, record: &RulingRecord) {
-        let connection = self.store.connect();
-        connection
-            .execute(
-                "INSERT INTO rulings (
+        plant_on(&self.store.connect(), self.workspace_id, record);
+    }
+}
+
+fn event_payload(record: &RulingRecord) -> String {
+    serde_json::json!({
+            "ruling": {
+                "digest": {
+                    "algorithm": "sha256",
+                    "canonicalizer": "beacon.ruling.v1",
+                    "value": record.digest(),
+                },
+                "canonicalBytesBase64": BASE64.encode(&record.bytes()),
+                "actor": "owner",
+            "ruledAtMs": record.ruled_at_ms,
+        }
+    })
+    .to_string()
+}
+
+/// Insert one Ruling row and its audit Event on a caller-supplied connection, so a competing
+/// writer can plant inside its own transaction.
+fn plant_on(connection: &Connection, workspace_id: Uuid, record: &RulingRecord) {
+    connection
+        .execute(
+            "INSERT INTO rulings (
                      workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
                      canonical_bytes, proposal_digest, proposal_digest_algorithm,
                      proposal_digest_canonicalizer, charter_revision, project_policy_revision,
@@ -1608,37 +1620,36 @@ impl Fixture {
                      ruled_at_ms
                  ) VALUES (?1, 'sha256', 'beacon.ruling.v1', ?2, ?3, ?4, 'sha256',
                            'beacon.proposal.v1', ?5, ?6, ?7, ?8, ?9, ?10, 'owner', ?11)",
-                rusqlite::params![
-                    self.workspace_id.to_string(),
-                    record.digest(),
-                    record.bytes(),
-                    record.proposal_digest,
-                    i64::from(record.charter_revision),
-                    i64::from(record.policy_revision),
-                    i64::from(record.repository_revision),
-                    record.base_revision,
-                    if record.decision_tag == 0x01 {
-                        "approve"
-                    } else {
-                        "refuse"
-                    },
-                    record.reason,
-                    i64::try_from(record.ruled_at_ms).unwrap(),
-                ],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+            rusqlite::params![
+                workspace_id.to_string(),
+                record.digest(),
+                record.bytes(),
+                record.proposal_digest,
+                i64::from(record.charter_revision),
+                i64::from(record.policy_revision),
+                i64::from(record.repository_revision),
+                record.base_revision,
+                if record.decision_tag == 0x01 {
+                    "approve"
+                } else {
+                    "refuse"
+                },
+                record.reason,
+                i64::try_from(record.ruled_at_ms).unwrap(),
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
                  VALUES (?1, 'ruling.recorded', ?2, ?3)",
-                rusqlite::params![
-                    self.workspace_id.to_string(),
-                    self.event_payload(record),
-                    i64::try_from(record.ruled_at_ms).unwrap(),
-                ],
-            )
-            .unwrap();
-    }
+            rusqlite::params![
+                workspace_id.to_string(),
+                event_payload(record),
+                i64::try_from(record.ruled_at_ms).unwrap(),
+            ],
+        )
+        .unwrap();
 }
 
 impl Fixture {
@@ -2080,6 +2091,93 @@ fn startup_refuses_a_ruling_whose_owner_account_is_gone() {
         ),
         "{error:?} / {error}"
     );
+}
+
+#[test]
+fn a_competing_writer_cannot_hand_the_tail_read_a_stale_answer() {
+    // gpt2's surviving mutant: moving the tail read and its comparison OUTSIDE
+    // `transaction_with_behavior(Immediate)` left every test green, because no committed test ever
+    // overlapped two writers at the read/insert seam. The production ordering was right and its
+    // guard was missing, which is the same thing as being right by accident.
+    //
+    // The wrong answer is a lost update wearing a valid shape: two Owners each read the same tail,
+    // each believe they extend it, and the chain forks -- after which "the effective Ruling is the
+    // last link" has two answers.
+    let (fixture, proposal_digest, first) = ruled("tail-race");
+    let head = fixture.rulings.get(&first).unwrap();
+    let mut competitor = record_for(
+        &proposal_digest,
+        "Recorded by a competing writer holding the store's write lock.",
+        head.payload().ruled_at_ms + 1,
+    );
+    competitor.decision_tag = 0x02;
+    competitor.supersedes = Some(first.clone());
+
+    let (locked, lock_taken) = mpsc::channel();
+    let path = fixture.store.path.clone();
+    let workspace_id = fixture.workspace_id;
+    let planted = competitor.clone();
+    let writer = thread::spawn(move || {
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .unwrap();
+        connection.busy_timeout(Duration::from_secs(5)).unwrap();
+        connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        locked.send(()).unwrap();
+        // Hold the write lock while the call under test runs. Correct code cannot begin its own
+        // immediate transaction -- and therefore cannot read the tail -- until this commits.
+        thread::sleep(Duration::from_millis(500));
+        plant_on(&connection, workspace_id, &planted);
+        connection
+            .execute(
+                "INSERT INTO ruling_supersessions (
+                     workspace_id, proposal_digest, ruling_digest, supersedes_ruling_digest
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    workspace_id.to_string(),
+                    planted.proposal_digest,
+                    planted.digest(),
+                    planted.supersedes.as_ref().unwrap(),
+                ],
+            )
+            .unwrap();
+        connection.execute_batch("COMMIT").unwrap();
+    });
+    lock_taken.recv().unwrap();
+
+    let started = Instant::now();
+    let error = fixture
+        .rulings
+        .rule(
+            &proposal_digest,
+            RulingDecision::Approve,
+            "Recorded against a tail that moved while this call was waiting.",
+            RulingSupersedes::Ruling(first.clone()),
+        )
+        .unwrap_err();
+    let waited = started.elapsed();
+    writer.join().unwrap();
+
+    // The call actually overlapped the competing writer's lock. Without this the test could pass
+    // vacuously on a machine slow enough to start after the commit, and a vacuous pass is the
+    // failure mode a race test is most likely to have. It fails loudly instead.
+    assert!(
+        waited >= Duration::from_millis(300),
+        "the call did not overlap the competing writer's lock ({waited:?}); this run proves nothing"
+    );
+    // And having waited, it read the tail as it is NOW, not as it was when the call began.
+    assert_eq!(
+        inconsistent(&error),
+        Some(InconsistentRuling::NotTheCurrentTail),
+        "{error:?}"
+    );
+    assert_eq!(fixture.ruling_rows(), 2);
+    assert_eq!(
+        fixture.count("SELECT count(*) FROM ruling_supersessions"),
+        1
+    );
+    fixture.restart().unwrap();
 }
 
 #[test]
