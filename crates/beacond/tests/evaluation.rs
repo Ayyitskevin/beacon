@@ -867,3 +867,318 @@ fn an_event_naming_no_stored_evaluation_refuses_startup() {
         "an orphan Event started"
     );
 }
+
+/// Raw SQL, the real migration ladder, and the truthful forbidden case gpt2 recorded as passing:
+/// bytes and row both naming Proposal A and evaluator A, where A authored A. This is the write the
+/// trigger exists for, and the decoy-projection control cannot substitute for it, because nothing
+/// about this row disagrees with anything.
+#[test]
+fn an_evaluator_who_authored_the_bound_proposal_is_refused_by_the_store() {
+    let fixture = admitted_mission("evaluation-self-store");
+    let record = fixture.record();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    let connection = fixture.store.connect();
+
+    let insert = |resident: Uuid, configuration: Uuid, digest: &str| {
+        connection.execute(
+            "INSERT INTO evaluations (
+                 workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+                 canonical_bytes, proposal_digest, proposal_digest_algorithm,
+                 proposal_digest_canonicalizer, mission_id, evaluator_resident_id,
+                 evaluator_configuration_id, rubric_id, rubric_version, rubric_canonicalizer,
+                 rubric_sha256, verdict, conflicts_declared, conflicts_text, rationale,
+                 evaluated_at_ms
+             ) VALUES (
+                 ?1, 'sha256', 'beacon.evaluation.v1', ?2, ?3, ?4, 'sha256', 'beacon.proposal.v1',
+                 ?5, ?6, ?7, 'r', 1, 'beacon.rubric.v1', ?8, 'uncertain', 0, NULL, 'why', 7
+             )",
+            rusqlite::params![
+                fixture.workspace_id.to_string(),
+                digest,
+                vec![0_u8; 32],
+                proposal.digest().value,
+                fixture.mission_id.to_string(),
+                resident.to_string(),
+                configuration.to_string(),
+                HEXLOWER.encode(&[0x20_u8; 32]),
+            ],
+        )
+    };
+
+    // The author, under the configuration they authored with.
+    let refused = insert(
+        fixture.resident_id,
+        fixture.configuration_id,
+        &HEXLOWER.encode(&[0x01_u8; 32]),
+    );
+    assert!(
+        refused.is_err(),
+        "raw SQL recorded a self-evaluation: {refused:?}"
+    );
+
+    // The positive control. Without it the trigger and a blanket refusal are indistinguishable.
+    let permitted = insert(
+        fixture.other_resident_id,
+        fixture.other_configuration_id,
+        &HEXLOWER.encode(&[0x02_u8; 32]),
+    );
+    assert!(
+        permitted.is_ok(),
+        "the trigger refuses a non-author too: {permitted:?}"
+    );
+}
+
+/// Two configurations of one Resident are two evaluators for configuration purposes and ONE author
+/// for this one. Keying the refusal on the pair would let an author re-evaluate by reconfiguring.
+#[test]
+fn a_second_configuration_of_the_author_is_still_the_author() {
+    let fixture = admitted_mission("evaluation-self-reconfigured");
+    let record = fixture.record();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+
+    let mut draft = evaluation_draft(&fixture, &proposal.digest().value);
+    draft.evaluator = Evaluator {
+        resident_id: fixture.resident_id,
+        // NOT the configuration the Proposal was authored under.
+        configuration_id: fixture.other_configuration_id,
+    };
+    let error = evaluations
+        .record(draft)
+        .expect_err("the author under another configuration must be refused");
+    assert!(
+        matches!(
+            error,
+            EvaluationError::Inconsistent(InconsistentEvaluation::EvaluatorAuthoredTheProposal)
+        ),
+        "{error:?}"
+    );
+}
+
+/// The Command refuses before writing, and says WHY -- a caller gets the relation that is wrong
+/// rather than a database abort.
+#[test]
+fn the_command_refuses_a_self_evaluation_before_it_writes_anything() {
+    let fixture = admitted_mission("evaluation-self-command");
+    let record = fixture.record();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+    let before = counts(&fixture);
+
+    let mut draft = evaluation_draft(&fixture, &proposal.digest().value);
+    draft.evaluator = Evaluator {
+        resident_id: fixture.resident_id,
+        configuration_id: fixture.configuration_id,
+    };
+    let error = evaluations
+        .record(draft)
+        .expect_err("a self-evaluation must be refused");
+    assert!(
+        matches!(
+            error,
+            EvaluationError::Inconsistent(InconsistentEvaluation::EvaluatorAuthoredTheProposal)
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        fixture.count("SELECT count(*) FROM evaluations"),
+        0,
+        "a refused self-evaluation left a row"
+    );
+    assert_eq!(
+        counts(&fixture),
+        before,
+        "a refused self-evaluation left an Event"
+    );
+}
+
+/// The verified read and startup re-derive non-authorship from the canonical BYTES, so a row that
+/// reached the store some other way -- an older binary, a manual repair, a future migration bug --
+/// is refused on the way out as well as on the way in.
+///
+/// Reaching that layer takes work, and the work is the point. Every ordinary path is already
+/// closed: the Command refuses, the trigger refuses a truthful projection, a decoy projection is
+/// refused earlier as `ColumnDisagreesWithBytes`, and Proposals are immutable so the author cannot
+/// be changed underneath a valid Evaluation. So the trigger is dropped, a TRUTHFUL self-evaluation
+/// is written -- bytes and projection agreeing, digest recomputed over the spliced bytes -- and the
+/// trigger is restored, leaving the schema signature intact and the store holding a row nothing
+/// should have been able to write.
+#[test]
+fn a_self_evaluation_written_past_the_command_refuses_startup() {
+    let fixture = admitted_mission("evaluation-self-startup");
+    let record = fixture.record();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+    let evaluation = evaluations
+        .record(evaluation_draft(&fixture, &proposal.digest().value))
+        .unwrap();
+
+    // ADR 0038's field table puts the evaluator Resident at 94: magic 21, subject tag 1, Proposal
+    // digest 32, then the two length-framed envelope strings (8+6 and 8+18).
+    const EVALUATOR_RESIDENT_OFFSET: usize = 94;
+    let mut bytes = evaluation.canonical_bytes().to_vec();
+    assert_eq!(
+        &bytes[EVALUATOR_RESIDENT_OFFSET..EVALUATOR_RESIDENT_OFFSET + 16],
+        fixture.other_resident_id.as_bytes(),
+        "the published offset is not where the evaluator Resident lives"
+    );
+    bytes[EVALUATOR_RESIDENT_OFFSET..EVALUATOR_RESIDENT_OFFSET + 16]
+        .copy_from_slice(fixture.resident_id.as_bytes());
+    // The configuration follows it, and must be one the author was admitted under, or the
+    // membership foreign key refuses the row before the re-derivation is reached.
+    bytes[EVALUATOR_RESIDENT_OFFSET + 16..EVALUATOR_RESIDENT_OFFSET + 32]
+        .copy_from_slice(fixture.configuration_id.as_bytes());
+    let digest = HEXLOWER.encode(&sha256(&bytes));
+
+    let connection = fixture.store.connect();
+    connection
+        .execute_batch("DROP TRIGGER evaluations_no_self_evaluation;")
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO evaluations (
+                 workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+                 canonical_bytes, proposal_digest, proposal_digest_algorithm,
+                 proposal_digest_canonicalizer, mission_id, evaluator_resident_id,
+                 evaluator_configuration_id, rubric_id, rubric_version, rubric_canonicalizer,
+                 rubric_sha256, verdict, conflicts_declared, conflicts_text, rationale,
+                 evaluated_at_ms
+             )
+             SELECT workspace_id, digest_algorithm, digest_canonicalizer, ?1, ?2, proposal_digest,
+                    proposal_digest_algorithm, proposal_digest_canonicalizer, mission_id, ?3,
+                    ?4, rubric_id, rubric_version, rubric_canonicalizer,
+                    rubric_sha256, verdict, conflicts_declared, conflicts_text, rationale,
+                    evaluated_at_ms
+             FROM evaluations WHERE digest_value = ?5",
+            rusqlite::params![
+                digest,
+                bytes,
+                fixture.resident_id.to_string(),
+                fixture.configuration_id.to_string(),
+                evaluation.digest().value,
+            ],
+        )
+        .unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER evaluations_no_self_evaluation
+             BEFORE INSERT ON evaluations
+             WHEN EXISTS (
+                 SELECT 1 FROM proposals
+                 WHERE workspace_id = NEW.workspace_id
+                   AND digest_value = NEW.proposal_digest
+                   AND requester_resident_id = NEW.evaluator_resident_id
+             )
+             BEGIN
+                 SELECT RAISE(ABORT, 'An Evaluation may not name the author of the Proposal it evaluates');
+             END;",
+        )
+        .unwrap();
+    // Its findings, cited Runs and Event, so nothing else refuses it first.
+    connection
+        .execute(
+            "INSERT INTO evaluation_findings (workspace_id, evaluation_digest, ordinal, severity, summary)
+             SELECT workspace_id, ?1, ordinal, severity, summary FROM evaluation_findings
+             WHERE evaluation_digest = ?2",
+            rusqlite::params![digest, evaluation.digest().value],
+        )
+        .unwrap();
+    let event: String = connection
+        .query_row(
+            "SELECT payload_json FROM events WHERE kind = 'evaluation.recorded'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let event = event
+        .replace(evaluation.digest().value.as_str(), &digest)
+        .replace(
+            &BASE64.encode(evaluation.canonical_bytes()),
+            &BASE64.encode(&bytes),
+        );
+    connection
+        .execute(
+            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+             SELECT workspace_id, kind, ?1, occurred_at_ms FROM events
+             WHERE kind = 'evaluation.recorded' LIMIT 1",
+            [event],
+        )
+        .unwrap();
+    drop(connection);
+
+    // The row is truthful: bytes and projection agree, and the digest is the hash of those bytes.
+    // Only a re-derivation against the Proposal can see what is wrong with it.
+    let error = evaluations
+        .get(&digest)
+        .expect_err("the verified read must refuse it");
+    assert!(
+        matches!(
+            error,
+            EvaluationError::Inconsistent(InconsistentEvaluation::EvaluatorAuthoredTheProposal)
+        ),
+        "refused for the wrong reason: {error:?}"
+    );
+    assert!(
+        Supervisor::bootstrap(StartupConfig {
+            store_path: fixture.store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        })
+        .is_err(),
+        "startup accepted a self-evaluation"
+    );
+}
+
+/// Membership is structural: an evaluator who is not an admitted member of the bound Proposal's
+/// Mission under the exact configuration named has no parent row to point at.
+#[test]
+fn an_evaluator_not_admitted_to_the_bound_proposals_mission_is_unstorable() {
+    let fixture = admitted_mission("evaluation-not-admitted");
+    let record = fixture.record();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+
+    let mut draft = evaluation_draft(&fixture, &proposal.digest().value);
+    draft.evaluator = Evaluator {
+        resident_id: Uuid::new_v4(),
+        configuration_id: Uuid::new_v4(),
+    };
+    assert!(
+        evaluations.record(draft).is_err(),
+        "an unadmitted evaluator recorded"
+    );
+
+    // And the same Resident under a configuration they were not admitted with.
+    let mut draft = evaluation_draft(&fixture, &proposal.digest().value);
+    draft.evaluator = Evaluator {
+        resident_id: fixture.other_resident_id,
+        configuration_id: Uuid::new_v4(),
+    };
+    assert!(
+        evaluations.record(draft).is_err(),
+        "an unadmitted configuration recorded"
+    );
+    assert_eq!(fixture.count("SELECT count(*) FROM evaluations"), 0);
+}
+
+/// A cited Run must have recorded a Receipt. `evaluation_cited_runs` foreign-keys to `receipts`
+/// rather than to `runs`, so this is refused by the shape of the store rather than by a check the
+/// Command could forget.
+#[test]
+fn a_cited_run_without_a_receipt_is_refused() {
+    let fixture = admitted_mission("evaluation-cited-run");
+    let record = fixture.record();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+
+    let mut draft = evaluation_draft(&fixture, &proposal.digest().value);
+    draft.cited_runs = vec![Uuid::new_v4()];
+    assert!(
+        evaluations.record(draft).is_err(),
+        "a Run with no Receipt was cited"
+    );
+    assert_eq!(
+        fixture.count("SELECT count(*) FROM evaluations"),
+        0,
+        "a refused citation left the Evaluation behind"
+    );
+}

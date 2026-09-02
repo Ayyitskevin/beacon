@@ -2148,6 +2148,9 @@ pub(crate) struct ProposalBindingFacts {
     /// from the row. `columns_match` has already proved the two agree, so either would do today --
     /// but a consumer that copies a derived column should copy it from the bytes that own it.
     pub(crate) mission_id: Uuid,
+    /// The Resident who authored the Proposal, from the verified payload. An Evaluation may not
+    /// name this Resident as its evaluator under ANY configuration.
+    pub(crate) author_resident_id: Uuid,
     /// The verified Proposal's own digest envelope, for a consumer that must record which exact
     /// bytes it acted on. Returned rather than left to the caller to rebuild from constants: the
     /// caller would then be asserting an algorithm and a canonicalizer it never read, and equality
@@ -2266,6 +2269,7 @@ pub(crate) fn proposal_binding_facts(
     Ok(Some(ProposalBindingFacts {
         project_id: payload.scope.project_id,
         mission_id: payload.scope.mission_id,
+        author_resident_id: payload.requester.resident_id,
         // `load_stored` already refused a row whose algorithm or canonicalizer columns are not
         // this module's, so this envelope is what the store holds, verified, and not a guess.
         digest: digest_envelope(&stored.digest_value),
