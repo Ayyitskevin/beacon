@@ -56,18 +56,36 @@ export type LinkMission = {
   readonly projectId: string;
 };
 
+/** The Missions the shell holds, and the Project they were loaded for.
+ *
+ *  `loadMissions(projectId)` is Project-scoped (`session.ts:744`), so a Mission
+ *  array is evidence about exactly one Project. Carrying the array alone would
+ *  let a lookup for Project B be answered out of Project A's rows -- and answer
+ *  "absent" with a straight face. */
+export type LoadedMissions = {
+  readonly projectId: string;
+  readonly items: readonly LinkMission[];
+};
+
 export type LinkContext = {
   phase: LinkPhase;
   /** This Installation's Workspace, or null before it is known. */
   workspaceId: string | null;
+  /** The current Workspace's Projects, or null before they are loaded. */
   projects: readonly LinkProject[] | null;
-  missions: readonly LinkMission[] | null;
+  /** One Project's Missions, or null before any are loaded. */
+  missions: LoadedMissions | null;
 };
 
 /** What should happen to a link, as six distinct facts.
  *
  *  `absent` and `otherWorkspace` are separate because one says the object does
  *  not exist and the other says nothing at all about whether it exists.
+ *  `notLoaded` is separate from BOTH because it is not a finding: the shell has
+ *  not loaded that state yet, so there is no evidence to report. A null
+ *  collection folded into `absent` claims an object does not exist, and a null
+ *  Workspace folded into `otherWorkspace` claims the link belongs to another
+ *  Installation -- definite claims drawn from nothing having been looked at.
  *  `malformed` is separate from `absent` because a mistyped identifier and a
  *  deleted Project are different facts, and collapsing absent, broken and
  *  not-checked is a defect this codebase has repaired more than once. */
@@ -77,6 +95,7 @@ export type LinkOutcome =
   | { outcome: "awaitUnlock"; retained: ObjectLink }
   | { outcome: "otherWorkspace"; workspaceId: string }
   | { outcome: "absent"; missing: "project" | "mission"; id: string }
+  | { outcome: "notLoaded"; awaiting: "workspace" | "projects" | "missions" }
   | { outcome: "malformed"; reason: MalformedReason };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -127,18 +146,27 @@ export function routeObjectLink(link: ObjectLink, context: LinkContext): LinkOut
   }
   if (context.phase === "locked") return { outcome: "awaitUnlock", retained: link };
 
+  // Before this Installation's own Workspace is known there is nothing to
+  // compare against -- which is not the same as having compared and differed.
+  if (context.workspaceId === null) return { outcome: "notLoaded", awaiting: "workspace" };
+
   // Not this Installation's Workspace. NOT absence: the object may well exist,
   // in the Installation that owns it.
-  if (context.workspaceId === null || context.workspaceId !== link.workspaceId) {
+  if (context.workspaceId !== link.workspaceId) {
     return { outcome: "otherWorkspace", workspaceId: link.workspaceId };
   }
   if (link.kind === "briefing") return { outcome: "open", link };
 
-  const project = context.projects?.find((candidate) => candidate.id === link.projectId);
+  if (context.projects === null) return { outcome: "notLoaded", awaiting: "projects" };
+  const project = context.projects.find((candidate) => candidate.id === link.projectId);
   if (!project) return { outcome: "absent", missing: "project", id: link.projectId };
   if (link.kind === "project") return { outcome: "open", link };
 
-  const mission = context.missions?.find((candidate) => candidate.id === link.missionId);
+  // Missions loaded for a different Project say nothing about this one.
+  if (context.missions === null || context.missions.projectId !== link.projectId) {
+    return { outcome: "notLoaded", awaiting: "missions" };
+  }
+  const mission = context.missions.items.find((candidate) => candidate.id === link.missionId);
   if (!mission) return { outcome: "absent", missing: "mission", id: link.missionId };
   return { outcome: "open", link };
 }
