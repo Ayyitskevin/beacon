@@ -12,9 +12,6 @@ import { type FormEvent, useEffect, useRef, useState } from "react";
 
 import {
   BriefingReceipts,
-  RECEIPT_PROJECT_BUDGET,
-  collectRecentReceipts,
-  type ReceiptRow,
 } from "./BriefingReceipts";
 
 import {
@@ -35,6 +32,7 @@ import {
   deactivateLocalModel,
   discoverLocalModels,
   describeLocalAccountError,
+  isPreflightUnavailable,
   discardStarterOrganization,
   loadAuthenticationCapabilities,
   inspectLocalModel,
@@ -46,7 +44,8 @@ import {
   loadProjectPolicy,
   loadProjectPolicyHistory,
   loadProjectRepository,
-  loadPreflightReceipts,
+  recentReceipts as readRecentReceipts,
+  type RecentReceiptPage,
   preflightProjectChecks,
   loadProjectRepositoryHistory,
   loadProjects,
@@ -258,6 +257,10 @@ const useStyles = makeStyles({
   },
 });
 
+/** What Briefing asks the daemon to walk. The daemon clamps and reports what
+ *  it applied; this is a request, not a bound. */
+const RECENT_RECEIPT_RUN_WINDOW = 50;
+
 export function App() {
   const classes = useStyles();
   const mainContentRef = useRef<HTMLElement>(null);
@@ -311,11 +314,9 @@ export function App() {
     useState<LocalModelActivationReview | null>(null);
   const [discoveringLocalModels, setDiscoveringLocalModels] = useState(false);
   const localModelDiscoveryEpoch = useRef(0);
-  const [recentReceipts, setRecentReceipts] = useState<ReceiptRow[] | null>(null);
-  const [recentReceiptTotal, setRecentReceiptTotal] = useState(0);
+  const [recentReceiptPage, setRecentReceiptPage] = useState<RecentReceiptPage | null>(null);
   const [loadingRecentReceipts, setLoadingRecentReceipts] = useState(false);
   const [recentReceiptFailure, setRecentReceiptFailure] = useState("");
-  const [recentReceiptScope, setRecentReceiptScope] = useState("");
   const recentReceiptEpoch = useRef(0);
   const [residentCapabilityCatalog, setResidentCapabilityCatalog] =
     useState<BeaconCapabilityDescriptor[] | null>(null);
@@ -461,7 +462,7 @@ export function App() {
       activeApplication !== "Briefing" ||
       !starterOrganization ||
       starterOrganization.decision === "proposed" ||
-      recentReceipts !== null ||
+      recentReceiptPage !== null ||
       loadingRecentReceipts ||
       recentReceiptFailure !== ""
     ) {
@@ -474,7 +475,7 @@ export function App() {
     activeApplication,
     loadingRecentReceipts,
     recentReceiptFailure,
-    recentReceipts,
+    recentReceiptPage,
     starterOrganization,
     unlocked,
   ]);
@@ -482,11 +483,9 @@ export function App() {
   useEffect(() => {
     if (unlocked) return;
     recentReceiptEpoch.current += 1;
-    setRecentReceipts(null);
-    setRecentReceiptTotal(0);
+    setRecentReceiptPage(null);
     setLoadingRecentReceipts(false);
     setRecentReceiptFailure("");
-    setRecentReceiptScope("");
     localModelDiscoveryEpoch.current += 1;
     setLocalModelDiscovery(null);
     setLocalModelActivations(null);
@@ -925,62 +924,36 @@ export function App() {
     });
   }
 
-  /** Briefing's preflight Receipts, gathered from the Projects this Workspace
-   *  has -- under a budget, and saying so when the budget bites.
+  /** Briefing's recent Receipts: one Workspace-scoped read, bounded by the
+   *  daemon.
    *
-   *  The Query is Project-scoped, so Briefing has to fan out. An unbounded
-   *  fan-out is not a design, it is an assumption about the Workspace: 513
-   *  Projects meant 513 concurrent IPC calls and up to N x 512 Receipts held
-   *  before sorting to five. The budget below is small, named, and disclosed.
-   *  It is a stopgap for the Query that should exist -- one Workspace-scoped,
-   *  server-bounded read behind the interface.
+   *  This used to fan out over `projects` and merge Project-scoped pages, which
+   *  put a domain join, a bound and an ordering policy in the interface --
+   *  the three things AGENTS.md:173 keeps out of a UI app. The panel now
+   *  renders what one Query answered and adds nothing to it.
    */
   async function loadRecentReceipts() {
     const requestEpoch = ++recentReceiptEpoch.current;
     setLoadingRecentReceipts(true);
     setRecentReceiptFailure("");
     try {
-      const openProjects = await loadProjects();
-      // Newest first, so the bound keeps the Projects most likely to carry a
-      // recent Receipt rather than whichever the store returned first.
-      const ordered = [...openProjects].sort((left, right) => {
-        if (left.createdAtMs !== right.createdAtMs) return right.createdAtMs - left.createdAtMs;
-        return right.id.localeCompare(left.id);
-      });
-      const readable = ordered.slice(0, RECEIPT_PROJECT_BUDGET);
-      // The cap applies WHILE collecting, one Project at a time. Slicing at the
-      // end retained every row first -- eight Projects at the per-Project cap
-      // held 4,096 -- and then reported the capped count as the total, so 3,840
-      // rows the reading had actually seen disappeared from the disclosure.
-      const { rows: kept, found } = await collectRecentReceipts(readable, loadPreflightReceipts);
+      const page = await readRecentReceipts(RECENT_RECEIPT_RUN_WINDOW);
       if (requestEpoch !== recentReceiptEpoch.current) return;
-      setRecentReceipts(kept);
-      // The true number found, not the number kept: the panel's "of N" is a
-      // count of what exists, and a capped count there is a quiet completeness
-      // claim.
-      setRecentReceiptTotal(found);
-      const projectsCapped = readable.length < ordered.length;
-      const rowsCapped = found > kept.length;
-      // What the READING did, never what the panel displays. "showing 256"
-      // described retained rows as displayed ones and contradicted the five-row
-      // list a line above it: both numbers were real and the sentence between
-      // them was not. The panel owns one display claim ("Showing the 5 most
-      // recent of N"); this owns the scope that claim was drawn from.
-      setRecentReceiptScope(
-        rowsCapped
-          ? `this reading covered ${readable.length} of ${ordered.length} Projects and kept the ${kept.length} most recent Receipts of the ${found} it found`
-          : projectsCapped
-            ? `this reading covered the ${readable.length} most recent Projects of ${ordered.length}`
-            : "",
-      );
+      setRecentReceiptPage(page);
     } catch (error) {
       if (requestEpoch !== recentReceiptEpoch.current) return;
       // Kept where the panel can show it, so a failed read is never mistaken
       // for a Workspace with no Receipts.
-      setRecentReceipts(null);
-      setRecentReceiptTotal(0);
-      setRecentReceiptScope("");
-      setRecentReceiptFailure(describeLocalAccountError(error));
+      setRecentReceiptPage(null);
+      // `preflight_unavailable` is reused by the daemon for this read, and its
+      // shared copy says "Beacon could not record the preflight" -- false for a
+      // Query that records nothing. Translated at this seam rather than
+      // reworded globally, so the preflight command keeps its own sentence.
+      setRecentReceiptFailure(
+        isPreflightUnavailable(error)
+          ? "Beacon could not read recent Run and Receipt state."
+          : describeLocalAccountError(error),
+      );
     } finally {
       if (requestEpoch === recentReceiptEpoch.current) setLoadingRecentReceipts(false);
     }
@@ -1522,11 +1495,9 @@ export function App() {
               onReactivateResident={(resident) => changeResident(reactivateResident, resident)}
               onRetireResident={(resident) => changeResident(retireResident, resident)}
               onRefreshResidents={refreshResidents}
-              recentReceipts={recentReceipts}
-              recentReceiptTotal={recentReceiptTotal}
+              recentReceiptPage={recentReceiptPage}
               loadingRecentReceipts={loadingRecentReceipts}
               recentReceiptFailure={recentReceiptFailure}
-              recentReceiptScope={recentReceiptScope}
               onRefreshReceipts={loadRecentReceipts}
               onLock={lockSession}
             />
@@ -1795,11 +1766,9 @@ function Briefing({
   onReactivateResident,
   onRetireResident,
   onRefreshResidents,
-  recentReceipts,
-  recentReceiptTotal,
+  recentReceiptPage,
   loadingRecentReceipts,
   recentReceiptFailure,
-  recentReceiptScope,
   onRefreshReceipts,
   onLock,
 }: {
@@ -1840,11 +1809,9 @@ function Briefing({
   onReactivateResident: (resident: ResidentAgentView) => void;
   onRetireResident: (resident: ResidentAgentView) => void;
   onRefreshResidents: () => void;
-  recentReceipts: ReceiptRow[] | null;
-  recentReceiptTotal: number;
+  recentReceiptPage: RecentReceiptPage | null;
   loadingRecentReceipts: boolean;
   recentReceiptFailure: string;
-  recentReceiptScope: string;
   onRefreshReceipts: () => void;
   onLock: () => void;
 }) {
@@ -1925,10 +1892,8 @@ function Briefing({
         Refresh Residents
       </Button>
       <BriefingReceipts
-        rows={recentReceipts}
-        total={recentReceiptTotal}
+        page={recentReceiptPage}
         failure={recentReceiptFailure}
-        scope={recentReceiptScope}
         loading={loadingRecentReceipts}
         disabled={busy}
         onRefresh={onRefreshReceipts}

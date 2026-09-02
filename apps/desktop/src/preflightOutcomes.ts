@@ -1,4 +1,4 @@
-import type { PreflightOutcome } from "./session";
+import type { ExecutionSummary, PreflightOutcome } from "./session";
 
 /** What each outcome means to the operator. Preflight never runs a check, so
  *  none of these is a check result.
@@ -68,5 +68,32 @@ export const preflightOutcomeCopy: Record<
     summary: "Refused — a step did not finish",
     title: "Refused — a step did not finish",
     detail: "A verification step ran out of budget, so its answer is unknown rather than negative.",
+  },
+};
+
+/** What each execution summary means to the operator.
+ *
+ *  Same rule as the preflight map above: one definition, so a Briefing row and
+ *  any later surface describe one recorded fact with one vocabulary. None of
+ *  these says a check PASSED -- ADR 0031 is explicit that `completed` records
+ *  that every Declared Check ran, and nothing about what it concluded.
+ *
+ *  `not_admissible` is written from the landed pin-at-open meaning: the
+ *  execution Run opens first and pins its Repository, Charter and policy
+ *  revisions, and the embedded preflight reads those PINNED revisions. It is
+ *  not a statement about the Project's current binding.
+ */
+export const executionSummaryCopy: Record<ExecutionSummary, { summary: string }> = {
+  not_admissible: {
+    summary: "refused: the preflight that opened this Run did not admit it",
+  },
+  worktree_unavailable: {
+    summary: "refused: no disposable worktree could be created",
+  },
+  completed: {
+    summary: "every Declared Check ran — this does not say they passed",
+  },
+  incomplete: {
+    summary: "dispatched, but at least one check has no established outcome",
   },
 };
