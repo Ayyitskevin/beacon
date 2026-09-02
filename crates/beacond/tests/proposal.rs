@@ -552,6 +552,71 @@ impl Fixture {
         self.count("SELECT count(*) FROM events WHERE kind = 'proposal.submitted'")
     }
 
+    /// A second Project in this SAME Workspace and store, with its own Charter, Policy,
+    /// Repository, Team and admitted Mission, and the same Resident on its roster.
+    ///
+    /// Building it here rather than through `admitted_mission` is the whole point: that helper
+    /// creates an independent store, so a Mission id taken from it is merely unknown to this one
+    /// and never reaches the Mission-to-Project comparison. Sharing the Resident means every
+    /// other referent check passes, leaving that comparison as the only thing that can refuse a
+    /// Proposal naming this Project's Mission under the other Project's scope.
+    fn second_project_mission(&self) -> (Uuid, Uuid) {
+        let project = ProjectService::new(Arc::clone(&self.accounts), self.workspace_id)
+            .create(ProjectDraft {
+                name: "Beacon Alpha II".to_owned(),
+                charter: ProjectCharterDraft {
+                    purpose: "Hold a second Mission in the same Workspace.".to_owned(),
+                    desired_outcomes: vec!["Be a distinct Project".to_owned()],
+                    constraints: vec!["Keep authority explicit".to_owned()],
+                    prohibitions: vec!["Do not deploy".to_owned()],
+                    autonomy_profile: AutonomyProfile::Supervised,
+                },
+            })
+            .unwrap();
+        ProjectPolicyService::new(Arc::clone(&self.accounts), self.workspace_id)
+            .publish(project.id, project.charter.revision, None, policy_draft())
+            .unwrap();
+        ProjectRepositoryService::new(Arc::clone(&self.accounts), self.workspace_id)
+            .bind(
+                project.id,
+                project.charter.revision,
+                None,
+                RepositoryDraft {
+                    source_kind: RepositorySourceKind::LocalPath,
+                    source: REPOSITORY_SOURCE.to_owned(),
+                    base_revision: BASE_REVISION.to_owned(),
+                    declared_checks: declared_checks(),
+                },
+            )
+            .unwrap();
+        let team = TeamService::new(Arc::clone(&self.accounts), self.workspace_id)
+            .form(TeamDraft {
+                project_id: project.id,
+                name: "Second Mission Team".to_owned(),
+                members: vec![TeamMemberDraft {
+                    resident_id: self.resident_id,
+                    expected_configuration_id: self.configuration_id,
+                }],
+            })
+            .unwrap();
+        let mission = MissionService::new(Arc::clone(&self.accounts), self.workspace_id)
+            .admit(MissionDraft {
+                project_id: project.id,
+                expected_charter_revision: project.charter.revision,
+                team_id: team.id,
+                desired_outcome: "Ship a second reviewed Beacon feature.".to_owned(),
+                success_conditions: vec!["Relevant gates pass".to_owned()],
+                constraints: vec!["Keep the change reversible".to_owned()],
+                prohibitions: vec!["Do not deploy".to_owned()],
+                members: vec![MissionMemberDraft {
+                    resident_id: self.resident_id,
+                    expected_configuration_id: self.configuration_id,
+                }],
+            })
+            .unwrap();
+        (project.id, mission.id)
+    }
+
     /// Reopens the store through the real startup path, which is where reconciliation runs.
     fn restart(&self) -> Result<(), SupervisorError> {
         Supervisor::bootstrap(StartupConfig {
@@ -1022,13 +1087,21 @@ fn structurally_inconsistent_references_write_neither_row_nor_event() {
 }
 
 #[test]
-fn a_mission_from_another_project_is_refused() {
+fn a_mission_from_another_project_in_the_same_workspace_is_refused() {
+    // ADR 0034 carries Project and Mission redundantly so "a cross-Workspace or cross-Project
+    // substitution is independently detectable". Detecting it needs a Mission that genuinely
+    // EXISTS in this Workspace and belongs to a DIFFERENT Project -- a Mission id from a separate
+    // store is merely unknown, and takes the absent-Mission branch without ever comparing the two
+    // Projects.
     let fixture = admitted_mission("cross-project");
-    // A second Project in the same Workspace, with its own Policy, Repository, and Mission.
-    let other = admitted_mission("cross-project-other");
+    let (second_project, second_mission) = fixture.second_project_mission();
+    assert_ne!(second_project, fixture.project_id);
 
+    // Scope names Project A; the Mission belongs to Project B. Everything else resolves: the
+    // Mission exists, the requesting Resident is on its admission roster at that exact
+    // Configuration, and Project A's own Policy and Repository bindings are the ones named.
     let mut record = fixture.record();
-    record.mission_id = other.mission_id;
+    record.mission_id = second_mission;
     let error = fixture.proposals.submit(&record.bytes()).unwrap_err();
 
     assert_eq!(
@@ -1038,6 +1111,14 @@ fn a_mission_from_another_project_is_refused() {
     );
     assert_eq!(fixture.proposal_rows(), 0);
     assert_eq!(fixture.proposal_events(), 0);
+
+    // The mirror case: naming Project B's scope with Project B's Mission is consistent, so the
+    // refusal above is the Project comparison and not something incidental to the second Project.
+    let mut consistent = fixture.record();
+    consistent.project_id = second_project;
+    consistent.mission_id = second_mission;
+    fixture.proposals.submit(&consistent.bytes()).unwrap();
+    assert_eq!(fixture.proposal_rows(), 1);
 }
 
 #[test]
