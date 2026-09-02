@@ -41,14 +41,16 @@ if [ -n "${CARGO_BUILD_TARGET:-}" ] && [ "$CARGO_BUILD_TARGET" != "$triple" ]; t
 fi
 
 # Cargo reports the path of every artifact it produced. Take beacond's from
-# there rather than assuming where it landed.
-executable="$(
+# there rather than assuming where it landed -- and require exactly one, because
+# nothing in that stream makes a later message more authoritative than an
+# earlier one. Choosing by order would decide artifact identity by luck.
+executables="$(
     cargo build --release -p beacond --message-format=json-render-diagnostics |
         python3 -c '
 import json
 import sys
 
-executable = ""
+found = []
 for line in sys.stdin:
     try:
         message = json.loads(line)
@@ -61,16 +63,33 @@ for line in sys.stdin:
         continue
     if "bin" not in (target.get("kind") or []):
         continue
-    if message.get("executable"):
-        executable = message["executable"]
-print(executable)
+    executable = message.get("executable")
+    # The same path reported twice is one artifact; two paths are two.
+    if executable and executable not in found:
+        found.append(executable)
+for executable in found:
+    print(executable)
 '
 )"
 
-if [ -z "$executable" ]; then
+if [ -z "$executables" ]; then
+    count=0
+else
+    count="$(printf '%s\n' "$executables" | wc -l)"
+fi
+
+if [ "$count" -eq 0 ]; then
     echo "stage-sidecar: cargo produced no beacond executable" >&2
     exit 1
 fi
+
+if [ "$count" -gt 1 ]; then
+    echo "stage-sidecar: cargo reported $count different beacond executables; refusing to choose" >&2
+    printf '%s\n' "$executables" >&2
+    exit 1
+fi
+
+executable="$executables"
 
 mkdir -p target/sidecar
 cp "$executable" "target/sidecar/beacond-$triple"

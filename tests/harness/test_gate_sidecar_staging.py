@@ -47,8 +47,8 @@ RELOCATED_CARGO = """#!/bin/sh
 mkdir -p "$CARGO_TARGET_DIR/release"
 printf '%s' "$RELOCATED_BYTES" > "$CARGO_TARGET_DIR/release/beacond"
 chmod +x "$CARGO_TARGET_DIR/release/beacond"
-printf '%s\\n' \\
-  '{"reason":"compiler-artifact","target":{"name":"beacond","kind":["bin"]},"executable":"'"$CARGO_TARGET_DIR"'/release/beacond"}'
+head='{"reason":"compiler-artifact","target":{"name":"beacond","kind":["bin"]}'
+printf '%s,"executable":"%s"}\\n' "$head" "$CARGO_TARGET_DIR/release/beacond"
 exit 0
 """
 
@@ -56,6 +56,31 @@ exit 0
 # fixed path would have quietly supplied one.
 SILENT_CARGO = """#!/bin/sh
 echo '{"reason":"build-finished","success":true}'
+exit 0
+"""
+
+# Succeeds and reports TWO matching beacond bins at different paths. Nothing in
+# the stream makes either authoritative, so choosing by order decides artifact
+# identity by luck.
+AMBIGUOUS_CARGO = """#!/bin/sh
+mkdir -p "$CARGO_TARGET_DIR/one" "$CARGO_TARGET_DIR/two"
+printf 'first' > "$CARGO_TARGET_DIR/one/beacond"
+printf 'second' > "$CARGO_TARGET_DIR/two/beacond"
+chmod +x "$CARGO_TARGET_DIR/one/beacond" "$CARGO_TARGET_DIR/two/beacond"
+head='{"reason":"compiler-artifact","target":{"name":"beacond","kind":["bin"]}'
+printf '%s,"executable":"%s"}\\n' "$head" "$CARGO_TARGET_DIR/one/beacond"
+printf '%s,"executable":"%s"}\\n' "$head" "$CARGO_TARGET_DIR/two/beacond"
+exit 0
+"""
+
+# The same path reported twice is one artifact, not two, and must still stage.
+REPEATED_CARGO = """#!/bin/sh
+mkdir -p "$CARGO_TARGET_DIR/release"
+printf '%s' "$RELOCATED_BYTES" > "$CARGO_TARGET_DIR/release/beacond"
+chmod +x "$CARGO_TARGET_DIR/release/beacond"
+head='{"reason":"compiler-artifact","target":{"name":"beacond","kind":["bin"]}'
+printf '%s,"executable":"%s"}\\n' "$head" "$CARGO_TARGET_DIR/release/beacond"
+printf '%s,"executable":"%s"}\\n' "$head" "$CARGO_TARGET_DIR/release/beacond"
 exit 0
 """
 
@@ -171,3 +196,42 @@ def test_a_build_that_reports_no_executable_refuses_to_stage(tmp_path: Path) -> 
     assert "cargo produced no beacond executable" in result.stderr
     # No fallback: nothing was staged from the binary at the default path.
     assert not (root / "target" / "sidecar").exists()
+
+
+def test_two_matching_executables_refuse_rather_than_pick_one(tmp_path: Path) -> None:
+    """Ambiguity is not a default. Selecting the last message would make the
+    packaged supervisor depend on Cargo's emission order, which proves
+    nothing about which build produced it."""
+    root = _isolated_checkout(tmp_path)
+    _write_cargo(tmp_path, AMBIGUOUS_CARGO)
+
+    result = _run_staging(root, tmp_path, {"CARGO_TARGET_DIR": str(tmp_path / "ambiguous-target")})
+
+    assert result.returncode != 0
+    assert "cargo reported 2 different beacond executables" in result.stderr
+    assert "refusing to choose" in result.stderr
+    # Both candidates are named, so the operator can see what was ambiguous.
+    assert "/one/beacond" in result.stderr
+    assert "/two/beacond" in result.stderr
+    assert not (root / "target" / "sidecar").exists()
+
+
+def test_the_same_executable_reported_twice_is_one_artifact(tmp_path: Path) -> None:
+    root = _isolated_checkout(tmp_path)
+    _write_cargo(tmp_path, REPEATED_CARGO)
+    fresh = "the supervisor this build produced\n"
+
+    result = _run_staging(
+        root,
+        tmp_path,
+        {
+            "CARGO_TARGET_DIR": str(tmp_path / "repeated-target"),
+            "RELOCATED_BYTES": fresh,
+        },
+    )
+
+    # Refusing here would make the guard above satisfiable by refusing
+    # everything, which is not the property being asked for.
+    assert result.returncode == 0, result.stderr
+    staged = next((root / "target" / "sidecar").iterdir())
+    assert staged.read_bytes() == fresh.encode()
