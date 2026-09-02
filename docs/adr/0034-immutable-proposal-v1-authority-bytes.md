@@ -351,7 +351,7 @@ identity semantics, authority boundary, or implementation fence requires a new
 Product Steward ruling before merge. Applying migration 0018 to live data and
 opening any production transport or execution surface remain separately gated.
 
-## Amendment (proposed 2026-09-02): the byte layout, recorded
+## Amendment (accepted 2026-09-02): the byte layout, recorded
 
 **Status: DRAFT. Proposed, not accepted.** The decision above remains `accepted`
 as written; nothing here changes it. This section records what
