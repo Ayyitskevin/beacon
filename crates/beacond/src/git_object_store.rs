@@ -25,6 +25,7 @@
 //! Nothing here reads outside the repository's `.git` directory. Files are opened relative to
 //! retained directory descriptors with `O_NOFOLLOW`; names are never accepted as file identity.
 
+use std::collections::HashSet;
 use std::ffi::{CStr, CString, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
@@ -648,6 +649,10 @@ fn commit_tree_id(body: &[u8]) -> Option<String> {
                     return None;
                 }
             }
+            // A commit names ONE tree. A second `tree` header fell through to the
+            // unknown-header arm and the first id was returned, so a body carrying two could pick
+            // which tree Beacon walked while every other check passed (gpt1).
+            b"tree" => return None,
             b"author" => authors += 1,
             b"committer" => committers += 1,
             // A header this walk does not know is not a reason to refuse a commit -- `gpgsig` and
@@ -677,6 +682,7 @@ fn commit_tree_id(body: &[u8]) -> Option<String> {
 /// that name is supposed to hold.
 fn parse_tree(body: &[u8]) -> Option<Vec<TreeEntry<'_>>> {
     let mut entries: Vec<TreeEntry<'_>> = Vec::new();
+    let mut names: HashSet<&[u8]> = HashSet::new();
     let mut rest = body;
     while !rest.is_empty() {
         let mode_end = rest.iter().position(|byte| *byte == b' ')?;
@@ -697,12 +703,20 @@ fn parse_tree(body: &[u8]) -> Option<Vec<TreeEntry<'_>>> {
         // a tree holding both passes an ordering check while naming one path twice. `resolve_path_at`
         // then matches on the raw name and takes whichever came first, which is a definite answer
         // read out of an ambiguous tree (gpt2's slice-2 P1).
+        //
+        // Against EVERY earlier name, not just the predecessor. `a`, `a.`, `a` sorts as `a`, `a.`,
+        // `a/` -- strictly increasing at every step -- so the duplicate pair is never adjacent and a
+        // neighbour-only check never compares it (gpt1). The ordering rule bounds how far apart a
+        // duplicate can be only for identical keys; raw names have no such bound.
         if let Some(previous) = entries.last()
-            && (tree_sort_key(previous.name, previous.mode) >= tree_sort_key(name, mode)
-                || previous.name == name)
+            && tree_sort_key(previous.name, previous.mode) >= tree_sort_key(name, mode)
         {
             return None;
         }
+        if names.contains(name) {
+            return None;
+        }
+        names.insert(name);
         entries.push(TreeEntry { mode, name, id });
         rest = after_name.get(20..)?;
     }
@@ -2032,6 +2046,13 @@ mod tests {
         // A malformed parent, with both identities present, so the parent check is the ONLY thing
         // that can refuse it. Without this the check can be deleted and the suite stays green: the
         // body gpt2 probed with is refused for its missing identities instead.
+        // A commit names ONE tree. A second `tree` header used to fall through to the
+        // unknown-header arm, and the first id was returned -- so a body carrying two could choose
+        // which tree Beacon walked while passing every other check (gpt1).
+        assert!(
+            commit_tree_id(&valid("tree 89abcdef0123456789abcdef0123456789abcdef")).is_none(),
+            "a second tree header was accepted"
+        );
         for bad_parent in ["parent x", &format!("parent {}", "z".repeat(40)), "parent "] {
             assert!(
                 commit_tree_id(&valid(bad_parent)).is_none(),
@@ -2123,6 +2144,18 @@ mod tests {
             parse_tree(&cross_mode).is_none(),
             "a tree naming `a` as both a file and a directory was accepted"
         );
+        // A NONADJACENT duplicate. `a`, `a.`, `a` sorts as `a`, `a.`, `a/` -- strictly increasing
+        // at every step -- so the duplicate pair is never neighbours and a predecessor-only check
+        // never compares them (gpt1). The ordering rule bounds how far apart a duplicate KEY can
+        // be; it bounds nothing about raw names.
+        let mut nonadjacent = entry(b"100644", b"a");
+        nonadjacent.extend_from_slice(&entry(b"100644", b"a."));
+        nonadjacent.extend_from_slice(&entry(b"40000", b"a"));
+        assert!(
+            parse_tree(&nonadjacent).is_none(),
+            "a nonadjacent duplicate raw name was accepted"
+        );
+
         // The reverse order sorts the other way and must also be refused.
         let mut reversed = entry(b"40000", b"a");
         reversed.extend_from_slice(&entry(b"100644", b"a"));
