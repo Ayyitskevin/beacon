@@ -206,7 +206,7 @@ raise an error, so a historical Ruling does not become corrupt because the world
 ADR 0037 states that each of its required-evidence bullets maps to one named test and that the
 mapping is recorded here, "so that 'maps to a test' is a fact a reviewer can check rather than a
 claim the author makes". This is that mapping. Bullets are numbered in the order the ADR lists them.
-Three of them do not map cleanly, and those are stated as such rather than papered over.
+Four of them do not map cleanly, and those are stated as such rather than papered over.
 
 Test locations: **[u]** = `crates/beacond/src/ruling.rs` unit tests, **[i]** =
 `crates/beacond/tests/ruling.rs`, **[m]** = `crates/beacond/src/lib.rs` migration tests.
@@ -231,14 +231,12 @@ Test locations: **[u]** = `crates/beacond/src/ruling.rs` unit tests, **[i]** =
 | 16 | `reason` is mandatory: empty, whitespace-only, or over-long is refused | `the_reason_must_be_trimmed_bounded_and_free_of_control_characters` [u] · `a_malformed_reason_or_digest_writes_neither_row_nor_event` [i] |
 | 17 | `decision` and `decider` are closed: any unassigned tag is refused | `an_unassigned_tag_is_refused_in_every_closed_position` [u] · `the_store_refuses_a_ruling_row_whose_digest_envelopes_are_not_this_versions` [i] · `startup_refuses_an_event_naming_an_actor_this_version_has_no_arm_for` [i] |
 | 18 | a Ruling row with no Event, a duplicate Event, an orphan Event, an altered row, and a differently encoded Event payload each refuse startup | **duplicates bullet 14 — Residual 2 below.** Same tests. |
-| 19 | no accessor reports force as a boolean | **structural, not test-mappable — see below.** Nearest evidence: `a_ruling_can_be_both_superseded_and_drifted_and_says_so` [i] |
+| 19 | no accessor reports force as a boolean | **no test guards this — Residual 4 below.** Nearest behavioural evidence, which does *not* guard it: `a_ruling_can_be_both_superseded_and_drifted_and_says_so` [i] |
 | 20 | recording leaves Run, Receipt, worktree, process, Invocation, network, capability, and external-effect counts unchanged | `recording_a_ruling_creates_no_run_receipt_worktree_or_external_effect` [i] |
 
-Bullet 19 is an **absence**: `RulingForce` has no `is_in_force` and no public accessor in the module
-returns a `bool`. A test cannot assert that a function does not exist, and one that tried would be
-theatre. The property is enforced by the type and checked by reading it; the cited test is the
-nearest behavioural evidence, showing both facts reported together where a boolean would have had to
-choose between them.
+Bullet 19 is an **absence**, and the note previously called it "structural, not
+test-mappable" while still citing a test beside it. That was an overclaim; Residual 4 below says what
+is actually true.
 
 Also verified but not required by any bullet: the codec's own round trip
 (`decode_then_encode_is_the_identity`, `the_record_starts_with_the_seventeen_byte_canonicalizer_magic`,
@@ -270,21 +268,6 @@ goes red when the guard is removed, and it asserts that the refusal is `RuledBef
 `NotTheCurrentTail` — the call cites the correct tail, so the time rule and the chain rule are
 separate refusals, and a test that could not tell them apart would prove neither.
 
-### Residual 3 — bullet 5 asks for something the revision model cannot produce
-
-Bullet 5 wants each of the four bound revisions, moved alone, to name "that revision and only that
-one". Three of them can. The pinned base **cannot move alone**: it is a field of a Repository
-revision and Repository Bindings are append-only, so changing the pinned commit necessarily
-publishes a new revision, and both `RepositoryRevisionMoved` and `BaseRevisionMoved` become true
-together. `a_rebind_that_moves_the_pinned_commit_names_both_facts` asserts exactly that, and it is
-right to: reporting one fact when two are true would be the same defect in the opposite direction as
-the round-two bug that reported two when one was.
-
-So the bullet is unachievable as written for one of its four cases, and the note previously claimed
-it clean. Found by gpt2's slice-4 review. Proposed wording: *"each bound revision that can move
-independently — Charter, Project Policy, and Repository — names that revision and only that one; a
-moved pinned base necessarily moves its Repository revision too, and both are named."*
-
 ### Residual 1 — bullet 15 contradicts the amended ruling on reordering
 
 Bullet 15 says a reordered field "is refused rather than tolerated". Bullet 2 already carries the
@@ -300,8 +283,46 @@ Bullet 18 restates bullet 14 in longer form; both arrived from separate amendmen
 map one-to-one onto tests cannot carry two spellings of one claim. Proposed change: delete bullet
 18, whose specifics bullet 14 already covers.
 
-Both residuals are edits to ADR 0037, which is under non-author review at the time of writing. They
-are recorded here rather than applied, so the reviewer is not reading a moving document.
+### Residual 3 — bullet 5 asks for something the revision model cannot produce
+
+Bullet 5 wants each of the four bound revisions, moved alone, to name "that revision and only that
+one". Three of them can. The pinned base **cannot move alone**: it is a field of a Repository
+revision and Repository Bindings are append-only, so changing the pinned commit necessarily
+publishes a new revision, and both `RepositoryRevisionMoved` and `BaseRevisionMoved` become true
+together. `a_rebind_that_moves_the_pinned_commit_names_both_facts` asserts exactly that, and it is
+right to: reporting one fact when two are true would be the same defect in the opposite direction as
+the round-two bug that reported two when one was.
+
+So the bullet is unachievable as written for one of its four cases, and the note previously claimed
+it clean. Found by gpt2's slice-4 review. Proposed wording: *"each bound revision that can move
+independently — Charter, Project Policy, and Repository — names that revision and only that one; a
+moved pinned base necessarily moves its Repository revision too, and both are named."*
+
+### Residual 4 — bullet 19 has no guard, and the cited test is not one
+
+Bullet 19 is an **absence**: `RulingForce` has no `is_in_force`, and no public accessor in the
+module returns a `bool`. A test cannot assert that a function does not exist, so the note originally
+called the row "structural, not test-mappable" and cited the compound-state test as nearest
+evidence.
+
+That was still an overclaim, and gpt2 demonstrated it: adding a public `is_in_force() -> bool` to
+`RulingForce` leaves `a_ruling_can_be_both_superseded_and_drifted_and_says_so` **passing**. The
+cited test shows both facts reported together; it does not, and cannot, notice a third accessor
+appearing beside them. Citing it as evidence implied a guard that is not there.
+
+So the honest statement is that **this bullet is unguarded**. The property holds today — verified by
+reading the module's public surface, where the only accessors are `superseded_by`, `drift`,
+`digest`, `canonical_bytes`, `payload`, and `force` — and nothing would turn red if a later change
+broke it. Closing it needs a compile-time check, which is a `trybuild`-style dependency this
+workspace does not carry and should not gain for one assertion. The alternative is that this stays a
+review obligation and ADR 0037 says so, rather than a required-evidence bullet promising a test that
+cannot exist. Proposed wording: *"no accessor reports force as a boolean — enforced by review of the
+public surface, not by a test."*
+
+All four residuals are edits to ADR 0037, which is under non-author review at the time of writing.
+They are recorded here rather than applied, so the reviewer is not reading a moving document.
+Residuals 1 and 2 were found by writing this mapping; residuals 3 and 4 were found by gpt2 reviewing
+it, which is the argument for having written it down at all.
 
 ## Knowingly unreachable checks
 
