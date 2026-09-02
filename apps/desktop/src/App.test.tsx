@@ -133,6 +133,81 @@ const residentCapabilityCatalog = [
   },
 ] as const;
 
+const briefingProjects = [
+  {
+    id: "44444444-4444-4444-8444-444444444444",
+    name: "Task tracker",
+    charterRevision: 1,
+    autonomyProfile: "observe",
+    createdAtMs: 10,
+  },
+  {
+    id: "55555555-5555-4555-8555-555555555555",
+    name: "Ledger",
+    charterRevision: 1,
+    autonomyProfile: "observe",
+    createdAtMs: 20,
+  },
+] as const;
+
+const receiptAbsent = (reason: string) => ({ kind: "absent", reason }) as const;
+
+function briefingReceipt(
+  runId: string,
+  projectId: string,
+  outcome: string,
+  startedAtMs: number,
+) {
+  return {
+    version: 1,
+    runId,
+    workspaceId: acceptedOrganization.workspaceId,
+    projectId,
+    repositoryRevision: 1,
+    charterRevision: 1,
+    outcome,
+    sourceKind: "local_path",
+    source: "/private/beacon/repo",
+    baseRevision: "0123456789012345678901234567890123456789",
+    resolvedChecks: [],
+    sandboxVersion: "landlock-v1",
+    policyCharterRevision: 1,
+    policyRepositoryRevision: 1,
+    startedAtMs,
+    endedAtMs: startedAtMs + 1,
+    notVerified: ["preflight refuses to execute, so nothing ran"],
+    unavailable: {
+      proposalDigest: receiptAbsent("no Proposal surface exists"),
+      rulingDigest: receiptAbsent("no Proposal surface exists"),
+      resultingRevision: receiptAbsent("preflight refuses to execute, so nothing ran"),
+      filesystemEffects: receiptAbsent("preflight refuses to execute, so nothing ran"),
+      diffDigest: receiptAbsent("preflight refuses to execute, so nothing ran"),
+      modelInvocations: receiptAbsent("preflight performs no model inference"),
+      costUsdMicros: receiptAbsent("preflight performs no model inference"),
+    },
+  };
+}
+
+const receiptsByProject: Record<string, ReturnType<typeof briefingReceipt>[]> = {
+  [briefingProjects[0].id]: [
+    briefingReceipt("aaaaaaaa-1111-4111-8111-111111111111", briefingProjects[0].id, "verified", 100),
+    briefingReceipt(
+      "cccccccc-3333-4333-8333-333333333333",
+      briefingProjects[0].id,
+      "sandbox_unavailable",
+      300,
+    ),
+  ],
+  [briefingProjects[1].id]: [
+    briefingReceipt(
+      "bbbbbbbb-2222-4222-8222-222222222222",
+      briefingProjects[1].id,
+      "preflight_timed_out",
+      200,
+    ),
+  ],
+};
+
 type Phase = "operator_setup_required" | "locked" | "unlocked";
 
 function status(phase: Phase) {
@@ -310,6 +385,86 @@ describe("Beacon desktop shell", () => {
     expect(within(suiteNavigation).getByRole("button", { name: "Conversations" })).toBeDisabled();
     expect(within(suiteNavigation).getByRole("button", { name: "Knowledge" })).toBeDisabled();
     expect(within(suiteNavigation).getByRole("button", { name: "Software" })).toBeDisabled();
+  });
+
+  it("shows Briefing's recent Receipts merged across Projects, newest first", async () => {
+    mockInitialState("unlocked");
+    const base = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "projects") return Promise.resolve(briefingProjects);
+      if (command === "preflight_receipts") {
+        const { projectId } = args as { projectId: string };
+        return Promise.resolve(receiptsByProject[projectId] ?? []);
+      }
+      return base(command, args);
+    });
+
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+
+    const list = await screen.findByRole("list", { name: "Recent Receipts" });
+    const rows = within(list).getAllByRole("listitem");
+    // Two Projects, merged. Per-Project order would put the tracker's older
+    // Receipt above the ledger's newer one.
+    expect(rows.map((row) => row.textContent)).toEqual([
+      expect.stringContaining("Run cccccccc"),
+      expect.stringContaining("Run bbbbbbbb"),
+      expect.stringContaining("Run aaaaaaaa"),
+    ]);
+    expect(rows[1].textContent).toContain("Ledger");
+
+    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
+    expect(results.violations).toEqual([]);
+  });
+
+  it("never presents a Receipt as work that succeeded", async () => {
+    mockInitialState("unlocked");
+    const base = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "projects") return Promise.resolve(briefingProjects);
+      if (command === "preflight_receipts") {
+        const { projectId } = args as { projectId: string };
+        return Promise.resolve(receiptsByProject[projectId] ?? []);
+      }
+      return base(command, args);
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    const list = await screen.findByRole("list", { name: "Recent Receipts" });
+
+    // A Receipt records what a Run did. Preflight runs no check, so nothing
+    // here may read as a completed or passing one.
+    expect(list.textContent).not.toMatch(/passed|succeeded|completed|✓/i);
+    expect(within(list).getByText(/not a passing check/)).toBeVisible();
+  });
+
+  it("keeps a failed Receipt read apart from a Workspace with no Receipts", async () => {
+    const user = userEvent.setup();
+    mockInitialState("unlocked");
+    const base = invokeMock.getMockImplementation()!;
+    let attempts = 0;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "projects") return Promise.resolve(briefingProjects);
+      if (command === "preflight_receipts") {
+        attempts += 1;
+        if (attempts === 1) return Promise.reject({ code: "preflight_unavailable" });
+        return Promise.resolve([]);
+      }
+      return base(command, args);
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+
+    expect(await screen.findByText(/Recent Receipts could not be read/)).toBeVisible();
+    expect(screen.queryByText("No preflight Receipts yet.")).toBeNull();
+
+    // The failure is retryable rather than terminal, and the retry can reach
+    // the genuinely-empty state.
+    await user.click(screen.getByRole("button", { name: "Refresh Receipts" }));
+    expect(await screen.findByText("No preflight Receipts yet.")).toBeVisible();
+    expect(screen.queryByText(/Recent Receipts could not be read/)).toBeNull();
   });
 
   it("discovers installed local models as inactive resources from Briefing", async () => {
