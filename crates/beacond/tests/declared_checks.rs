@@ -1156,11 +1156,30 @@ fn execution_refuses_if_the_binding_moves_between_preflight_and_run_open() {
     assert_eq!(receipt.summary, ExecutionSummary::NotAdmissible);
     assert_eq!(
         receipt.admitted_by.outcome,
-        PreflightOutcome::DeclaredChecksChanged
+        PreflightOutcome::Verified,
+        "the embedded preflight remains unchanged historical evidence"
     );
+    assert!(receipt.not_verified.iter().any(|gap| {
+        gap == "Repository Binding stability and current Declared Check definitions"
+    }));
     assert!(receipt.checks.is_empty(), "a refused Run ran no check");
     assert_eq!(receipt.worktree, None, "no worktree was created");
     assert_eq!(runs_of_kind(&store, "declared_checks")[0].1, "refused");
+    let connection = Connection::open(&store.path).unwrap();
+    let stored_preflight: String = connection
+        .query_row(
+            "SELECT receipt_json FROM receipts WHERE run_id = ?1",
+            [receipt.admitted_by.run_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::to_string(&receipt.admitted_by)
+            .unwrap()
+            .as_bytes(),
+        stored_preflight.as_bytes(),
+        "post-preflight refusal rewrote its historical admission evidence"
+    );
 }
 
 #[test]
@@ -1247,6 +1266,63 @@ fn the_execution_event_replays_against_its_stored_receipt() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
+}
+
+#[test]
+fn startup_rejects_execution_when_its_nested_preflight_differs_from_stored_evidence() {
+    let (store, projects, repositories, checks) = enrolled("nested-preflight-provenance");
+    let project = projects.create(project_draft()).unwrap();
+    repositories
+        .bind(
+            project.id,
+            project.charter.revision,
+            None,
+            RepositoryDraft {
+                source_kind: RepositorySourceKind::GitUrl,
+                source: "https://example.invalid/original.git".to_owned(),
+                base_revision: "a".repeat(40),
+                declared_checks: vec![check("never", &["/bin/true"], ".")],
+            },
+        )
+        .unwrap();
+    let receipt = checks.execute(project.id, bounds()).unwrap();
+    assert_eq!(receipt.summary, ExecutionSummary::NotAdmissible);
+
+    let connection = Connection::open(&store.path).unwrap();
+    let original: String = connection
+        .query_row(
+            "SELECT receipt_json FROM receipts WHERE run_id = ?1",
+            [receipt.run_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let substituted = original.replacen("\"admittedBy\":{", "\"admittedBy\":{ ", 1);
+    assert_ne!(substituted, original, "fixture did not locate admittedBy");
+    replace_receipt_update_trigger(&connection, |connection| {
+        connection.execute(
+            "UPDATE receipts SET receipt_json = ?1 WHERE run_id = ?2",
+            rusqlite::params![substituted, receipt.run_id.to_string()],
+        )
+    });
+    connection
+        .execute(
+            "UPDATE events SET payload_json = ?1
+             WHERE kind = 'run.executed'
+               AND json_extract(payload_json, '$.runId') = ?2",
+            rusqlite::params![substituted, receipt.run_id.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+
+    let error = Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .unwrap_err();
+    assert!(
+        matches!(error, SupervisorError::RunEventMismatch(_)),
+        "nested preflight substitution failed through the wrong guard: {error:?}"
+    );
 }
 
 #[test]
@@ -1568,6 +1644,8 @@ fn migration_preserves_real_v1_bytes_through_rollback_and_forward_startup() {
     let run_id = Uuid::new_v4();
     let started_at_ms = admitted_by.ended_at_ms + 1;
     let ended_at_ms = started_at_ms + record.elapsed_ms.max(1);
+    let exact_preflight_json = serde_json::to_string(&admitted_by).unwrap();
+    let normalized_preflight_json = serde_json::to_value(&admitted_by).unwrap().to_string();
     let v1_payload = serde_json::json!({
         "version": 1,
         "runId": run_id,
@@ -1587,6 +1665,13 @@ fn migration_preserves_real_v1_bytes_through_rollback_and_forward_startup() {
         ]
     })
     .to_string();
+    let normalized_nested = format!("\"admittedBy\":{normalized_preflight_json}");
+    let exact_nested = format!("\"admittedBy\":{exact_preflight_json}");
+    let v1_payload = v1_payload.replacen(&normalized_nested, &exact_nested, 1);
+    assert!(
+        v1_payload.contains(&exact_nested),
+        "fixture did not preserve the original preflight Receipt bytes"
+    );
     let connection = Connection::open(&store.path).unwrap();
     connection
         .pragma_update(None, "foreign_keys", "ON")

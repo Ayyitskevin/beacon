@@ -28,6 +28,7 @@ use uuid::Uuid;
 
 use crate::check_preflight::{
     CheckPreflightError, CheckPreflightService, PreflightOutcome, PreflightReceipt,
+    RunEventReplayError, verify_run_event,
 };
 use crate::operator_account::{OperatorAccountError, OperatorAccountService};
 use crate::sandbox::{self, ExecutionBounds, ExecutionOutcome, ExecutionRecord};
@@ -173,14 +174,19 @@ impl DeclaredCheckService {
         // Admissibility is re-established, never inherited from a previous
         // answer: the binding, the repository, and the sandbox can all have
         // changed since anyone last looked.
-        let mut admitted_by = self.preflights.preflight(project_id)?;
+        let admitted_by = self.preflights.preflight(project_id)?;
 
         let opened = self.open_run(project_id, &admitted_by)?;
         if !opened.binding_unchanged {
-            admitted_by.outcome = PreflightOutcome::DeclaredChecksChanged;
-            admitted_by.not_verified.push(
-                "every step: the Repository Binding changed between preflight and execution Run open"
-                    .to_owned(),
+            let not_verified = binding_changed_after_preflight_not_verified(&admitted_by);
+            return self.close(
+                opened,
+                ExecutionSummary::NotAdmissible,
+                admitted_by,
+                Vec::new(),
+                None,
+                not_verified,
+                bounds,
             );
         }
 
@@ -505,6 +511,12 @@ fn early_refusal_not_verified(
     gaps.push(WORKTREE_NOT_ATTEMPTED_GAP.to_owned());
     gaps.push(PREFLIGHT_NO_CHECKS_GAP.to_owned());
     gaps
+}
+
+fn binding_changed_after_preflight_not_verified(admitted_by: &PreflightReceipt) -> Vec<String> {
+    let mut changed = admitted_by.clone();
+    changed.outcome = PreflightOutcome::DeclaredChecksChanged;
+    early_refusal_not_verified(&changed, false)
 }
 
 fn execution_not_verified(
@@ -986,11 +998,14 @@ fn validate_v2_receipt(receipt: &ExecutionReceipt) -> Result<(), DeclaredCheckEr
     }
     match receipt.summary {
         ExecutionSummary::NotAdmissible
-            if receipt.admitted_by.outcome != PreflightOutcome::Verified
-                && receipt.checks.is_empty()
-                && receipt.worktree.is_none() =>
+            if receipt.checks.is_empty() && receipt.worktree.is_none() =>
         {
-            if receipt.not_verified != early_refusal_not_verified(&receipt.admitted_by, false) {
+            let expected = if receipt.admitted_by.outcome == PreflightOutcome::Verified {
+                binding_changed_after_preflight_not_verified(&receipt.admitted_by)
+            } else {
+                early_refusal_not_verified(&receipt.admitted_by, false)
+            };
+            if receipt.not_verified != expected {
                 return Err(DeclaredCheckError::InvalidStore);
             }
         }
@@ -1100,7 +1115,154 @@ pub(crate) fn verify_execution_event(
     {
         return Err(DeclaredCheckError::InvalidStore);
     }
+    verify_nested_preflight(connection, payload_json)?;
     Ok(())
+}
+
+fn verify_nested_preflight(
+    connection: &Connection,
+    execution_json: &str,
+) -> Result<(), DeclaredCheckError> {
+    let nested_json = top_level_json_value(execution_json, b"\"admittedBy\"")
+        .ok_or(DeclaredCheckError::InvalidStore)?;
+    let nested: PreflightReceipt = serde_json::from_str(nested_json)?;
+    let mut statement = connection.prepare(
+        "SELECT payload_json, occurred_at_ms
+         FROM events
+         WHERE workspace_id = ?1
+           AND kind = 'run.preflighted'
+           AND json_extract(payload_json, '$.runId') = ?2",
+    )?;
+    let events = statement
+        .query_map(
+            params![nested.workspace_id.to_string(), nested.run_id.to_string()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    let [(event_json, event_occurred_at_ms)] = events.as_slice() else {
+        return Err(DeclaredCheckError::InvalidStore);
+    };
+    if event_json.as_bytes() != nested_json.as_bytes()
+        || u64::try_from(*event_occurred_at_ms).map_err(|_| DeclaredCheckError::InvalidStore)?
+            != nested.ended_at_ms
+    {
+        return Err(DeclaredCheckError::InvalidStore);
+    }
+    match verify_run_event(
+        connection,
+        nested.workspace_id,
+        nested.ended_at_ms,
+        nested_json,
+    ) {
+        Ok(()) => Ok(()),
+        Err(RunEventReplayError::Store(error)) => Err(DeclaredCheckError::Store(error)),
+        Err(RunEventReplayError::EvidenceMismatch | RunEventReplayError::RunStateMismatch) => {
+            Err(DeclaredCheckError::InvalidStore)
+        }
+    }
+}
+
+/// Return one top-level object's value without normalizing a byte. Replay uses
+/// this rather than a `serde_json::Value`: decoding and re-encoding would erase
+/// whitespace and member-order substitutions that byte-exact evidence must
+/// reject. The caller has already strictly decoded the complete document.
+fn top_level_json_value<'a>(document: &'a str, wanted_key: &[u8]) -> Option<&'a str> {
+    let bytes = document.as_bytes();
+    let mut cursor = skip_json_whitespace(bytes, 0);
+    if bytes.get(cursor) != Some(&b'{') {
+        return None;
+    }
+    cursor += 1;
+    loop {
+        cursor = skip_json_whitespace(bytes, cursor);
+        if bytes.get(cursor) == Some(&b'}') {
+            return None;
+        }
+        let key_start = cursor;
+        let key_end = json_string_end(bytes, cursor)?;
+        cursor = skip_json_whitespace(bytes, key_end);
+        if bytes.get(cursor) != Some(&b':') {
+            return None;
+        }
+        cursor = skip_json_whitespace(bytes, cursor + 1);
+        let value_start = cursor;
+        let value_end = json_value_end(bytes, value_start)?;
+        if &bytes[key_start..key_end] == wanted_key {
+            return document.get(value_start..value_end);
+        }
+        cursor = skip_json_whitespace(bytes, value_end);
+        match bytes.get(cursor) {
+            Some(b',') => cursor += 1,
+            Some(b'}') => return None,
+            _ => return None,
+        }
+    }
+}
+
+fn skip_json_whitespace(bytes: &[u8], mut cursor: usize) -> usize {
+    while bytes
+        .get(cursor)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\n' | b'\r' | b'\t'))
+    {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn json_string_end(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start) != Some(&b'"') {
+        return None;
+    }
+    let mut cursor = start + 1;
+    while let Some(byte) = bytes.get(cursor) {
+        match byte {
+            b'"' => return Some(cursor + 1),
+            b'\\' => cursor = cursor.checked_add(2)?,
+            _ => cursor += 1,
+        }
+    }
+    None
+}
+
+fn json_value_end(bytes: &[u8], start: usize) -> Option<usize> {
+    match bytes.get(start)? {
+        b'"' => json_string_end(bytes, start),
+        b'{' | b'[' => {
+            let mut stack = vec![if bytes[start] == b'{' { b'}' } else { b']' }];
+            let mut cursor = start + 1;
+            while let Some(byte) = bytes.get(cursor) {
+                match byte {
+                    b'"' => cursor = json_string_end(bytes, cursor)?,
+                    b'{' => {
+                        stack.push(b'}');
+                        cursor += 1;
+                    }
+                    b'[' => {
+                        stack.push(b']');
+                        cursor += 1;
+                    }
+                    b'}' | b']' if stack.pop() == Some(*byte) => {
+                        cursor += 1;
+                        if stack.is_empty() {
+                            return Some(cursor);
+                        }
+                    }
+                    b'}' | b']' => return None,
+                    _ => cursor += 1,
+                }
+            }
+            None
+        }
+        _ => {
+            let mut cursor = start;
+            while bytes.get(cursor).is_some_and(|byte| {
+                !matches!(byte, b',' | b'}' | b']' | b' ' | b'\n' | b'\r' | b'\t')
+            }) {
+                cursor += 1;
+            }
+            (cursor > start).then_some(cursor)
+        }
+    }
 }
 
 struct StoredExecutionMetadata {
@@ -1122,6 +1284,20 @@ mod tests {
     use super::*;
     use crate::sandbox::ExecutionOutcome;
     use serde_json::json;
+
+    #[test]
+    fn top_level_value_extraction_preserves_exact_nested_bytes() {
+        let document = r#"{"decoy":"admittedBy", "nested":{"admittedBy":false}, "admittedBy":{ "array":[1,{"quoted":"}"}] }, "after":true}"#;
+        assert_eq!(
+            top_level_json_value(document, b"\"admittedBy\""),
+            Some(r#"{ "array":[1,{"quoted":"}"}] }"#)
+        );
+        assert_eq!(
+            top_level_json_value(r#"{"admitted\u0042y":{"valid":true}}"#, b"\"admittedBy\""),
+            None,
+            "an escaped key is semantically equal but not canonical evidence bytes"
+        );
+    }
 
     #[test]
     fn every_preflight_outcome_retains_each_unestablished_execution_stage() {
