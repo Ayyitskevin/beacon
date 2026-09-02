@@ -1,10 +1,12 @@
 use std::collections::BTreeSet;
-use std::ffi::{CString, OsString};
+use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::os::unix::ffi::OsStrExt;
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::Arc;
@@ -346,6 +348,7 @@ impl SampleProjectService {
         ensure_private_directory(&self.managed_root)?;
         let workspace_root = self.managed_root.join(self.workspace_id.to_string());
         ensure_private_directory(&workspace_root)?;
+        let workspace_directory = open_private_directory(&workspace_root)?;
 
         match fs::symlink_metadata(destination) {
             Ok(_) => return self.verify_materialized_repository(destination),
@@ -353,27 +356,24 @@ impl SampleProjectService {
             Err(error) => return Err(error.into()),
         }
 
-        let staging = workspace_root.join(format!(".staging-{}", Uuid::new_v4()));
-        create_private_directory(&staging)?;
+        let staging_name = OsString::from(format!(".staging-{}", Uuid::new_v4()));
+        let staging = workspace_root.join(&staging_name);
+        let staging_directory = create_private_directory_at(&workspace_directory, &staging_name)?;
         let materialized = (|| {
-            for bundled in BUNDLE_FILES {
-                let path = staging.join(bundled.path);
-                if let Some(parent) = path.parent()
-                    && parent != staging
-                {
-                    ensure_private_directory(parent)?;
-                }
-                write_private_file(&path, bundled.bytes)?;
-            }
-            self.initialize_repository(&staging)?;
+            write_bundle_at(&staging_directory)?;
+            self.initialize_repository(&staging_directory)?;
             let revision = self.verify_materialized_repository(&staging)?;
             (self.sync_repository_tree)(&staging)?;
-            publish_directory(&staging, destination)?;
-            File::open(&workspace_root)?.sync_all()?;
+            publish_directory(
+                &workspace_directory,
+                &staging_name,
+                OsStr::new(SAMPLE_REPOSITORY_DIRECTORY),
+            )?;
+            workspace_directory.sync_all()?;
             Ok(revision)
         })();
         if materialized.is_err() {
-            let _ = fs::remove_dir_all(&staging);
+            let _ = remove_directory_at(&workspace_directory, &staging_name, &staging_directory);
         }
         match materialized {
             Err(SampleProjectError::Io(error))
@@ -385,7 +385,7 @@ impl SampleProjectService {
         }
     }
 
-    fn initialize_repository(&self, repository: &Path) -> Result<(), SampleProjectError> {
+    fn initialize_repository(&self, repository: &File) -> Result<(), SampleProjectError> {
         self.git_success(
             repository,
             &["init", "--quiet", "--initial-branch=main", "--template="],
@@ -393,7 +393,7 @@ impl SampleProjectService {
         self.git_success(repository, &["add", "--all"])?;
         let tree = output_text(self.git_output(repository, &["write-tree"])?)
             .map_err(|_| SampleProjectError::MaterializationFailed)?;
-        let mut command = self.git_command(repository);
+        let mut command = self.git_command(repository)?;
         command
             .args(["commit-tree", tree.as_str()])
             .env("GIT_AUTHOR_NAME", "Beacon")
@@ -445,30 +445,52 @@ impl SampleProjectService {
         Ok(EXPECTED_BASE_REVISION.to_owned())
     }
 
-    fn git_command(&self, repository: &Path) -> Command {
+    fn git_command(&self, repository: &File) -> Result<Command, SampleProjectError> {
         let mut command = Command::new(&self.git_program);
         configure_git_environment(&mut command);
-        command.arg("-C").arg(repository).args([
+        command.args([
             "-c",
             "core.fsmonitor=false",
             "-c",
             "core.untrackedCache=false",
         ]);
-        command
+        let repository = repository.try_clone()?;
+        // SAFETY: `pre_exec` runs after `fork` and before `exec`. `fstat` and
+        // `fchdir` are async-signal-safe, allocate nothing, and operate on the
+        // cloned descriptor retained by this command. CLOEXEC closes it at
+        // successful exec rather than leaking it to Git.
+        unsafe {
+            command.pre_exec(move || {
+                let descriptor = repository.as_raw_fd();
+                let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+                if libc::fstat(descriptor, metadata.as_mut_ptr()) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let metadata = metadata.assume_init();
+                if metadata.st_nlink == 0 || metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
+                    return Err(std::io::Error::from_raw_os_error(libc::ESTALE));
+                }
+                if libc::fchdir(descriptor) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        Ok(command)
     }
 
     fn git_output(
         &self,
-        repository: &Path,
+        repository: &File,
         arguments: &[&str],
     ) -> Result<Output, SampleProjectError> {
-        self.git_command(repository)
+        self.git_command(repository)?
             .args(arguments)
             .output()
             .map_err(|_| SampleProjectError::MaterializationFailed)
     }
 
-    fn git_success(&self, repository: &Path, arguments: &[&str]) -> Result<(), SampleProjectError> {
+    fn git_success(&self, repository: &File, arguments: &[&str]) -> Result<(), SampleProjectError> {
         let output = self.git_output(repository, arguments)?;
         if output.status.success() {
             Ok(())
@@ -1253,29 +1275,214 @@ fn create_private_directory(path: &Path) -> Result<(), SampleProjectError> {
     Ok(())
 }
 
-fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), SampleProjectError> {
+fn open_private_directory(path: &Path) -> Result<File, SampleProjectError> {
     let mut options = OpenOptions::new();
     options
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW);
-    let mut file = options.open(path)?;
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let directory = options.open(path)?;
+    let metadata = directory.metadata()?;
+    if !metadata.is_dir() || metadata.permissions().mode() & 0o077 != 0 {
+        return Err(SampleProjectError::UnsafeDestination);
+    }
+    Ok(directory)
+}
+
+fn directory_component(name: &OsStr) -> std::io::Result<CString> {
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || bytes == b"." || bytes == b".." || bytes.contains(&b'/') {
+        return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+    }
+    CString::new(bytes).map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))
+}
+
+fn create_private_directory_at(parent: &File, name: &OsStr) -> Result<File, SampleProjectError> {
+    let name = directory_component(name)?;
+    // SAFETY: `parent` and `name` remain live for the syscall and `name` is a
+    // single NUL-terminated component. Mode 0700 is never broadened by umask.
+    if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // Keep the exact no-symlink chmod rule explicit even though mkdirat's mode
+    // already makes a newly created directory private.
+    if unsafe {
+        libc::fchmodat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            0o700,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        let error = std::io::Error::last_os_error();
+        unsafe {
+            libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR);
+        }
+        return Err(error.into());
+    }
+    let directory = open_directory_at(parent, name.as_c_str())?;
+    let metadata = directory.metadata()?;
+    if !metadata.is_dir() || metadata.permissions().mode() & 0o077 != 0 {
+        return Err(SampleProjectError::UnsafeDestination);
+    }
+    Ok(directory)
+}
+
+fn open_directory_at(parent: &File, name: &CStr) -> std::io::Result<File> {
+    // SAFETY: `parent` and `name` remain live and the returned descriptor is
+    // uniquely owned below.
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { File::from_raw_fd(descriptor) })
+}
+
+fn write_bundle_at(staging: &File) -> Result<(), SampleProjectError> {
+    let source_directory = create_private_directory_at(staging, OsStr::new("src"))?;
+    for bundled in BUNDLE_FILES {
+        let path = Path::new(bundled.path);
+        let parent = match path.parent() {
+            Some(parent) if parent.as_os_str().is_empty() => staging,
+            Some(parent) if parent == Path::new("src") => &source_directory,
+            _ => return Err(SampleProjectError::BundleMismatch),
+        };
+        let name = path.file_name().ok_or(SampleProjectError::BundleMismatch)?;
+        write_private_file_at(parent, name, bundled.bytes)?;
+    }
+    Ok(())
+}
+
+fn write_private_file_at(
+    parent: &File,
+    name: &OsStr,
+    bytes: &[u8],
+) -> Result<(), SampleProjectError> {
+    let name = directory_component(name)?;
+    // SAFETY: the held parent fixes ancestor identity; O_EXCL and O_NOFOLLOW
+    // bind creation to one absent final component.
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let mut file = unsafe { File::from_raw_fd(descriptor) };
     file.write_all(bytes)?;
     file.sync_all()?;
     Ok(())
 }
 
-fn publish_directory(staging: &Path, destination: &Path) -> Result<(), SampleProjectError> {
-    let staging = CString::new(staging.as_os_str().as_bytes())
-        .map_err(|_| SampleProjectError::UnsafeDestination)?;
-    let destination = CString::new(destination.as_os_str().as_bytes())
-        .map_err(|_| SampleProjectError::UnsafeDestination)?;
+struct DirectoryStream(*mut libc::DIR);
+
+impl Drop for DirectoryStream {
+    fn drop(&mut self) {
+        unsafe {
+            libc::closedir(self.0);
+        }
+    }
+}
+
+fn directory_entries(directory: &File) -> std::io::Result<Vec<OsString>> {
+    let duplicate = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if duplicate < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let raw_stream = unsafe { libc::fdopendir(duplicate) };
+    if raw_stream.is_null() {
+        let error = std::io::Error::last_os_error();
+        unsafe {
+            libc::close(duplicate);
+        }
+        return Err(error);
+    }
+    let stream = DirectoryStream(raw_stream);
+    let mut entries = Vec::new();
+    loop {
+        unsafe {
+            *libc::__errno_location() = 0;
+        }
+        let entry = unsafe { libc::readdir(stream.0) };
+        if entry.is_null() {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(0) {
+                break;
+            }
+            return Err(error);
+        }
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if name != b"." && name != b".." {
+            entries.push(OsString::from_vec(name.to_vec()));
+        }
+    }
+    entries.sort();
+    Ok(entries)
+}
+
+fn remove_directory_at(parent: &File, name: &OsStr, directory: &File) -> std::io::Result<()> {
+    remove_directory_contents(directory)?;
+    unlink_at(parent, name, libc::AT_REMOVEDIR)
+}
+
+fn remove_directory_contents(directory: &File) -> std::io::Result<()> {
+    for name in directory_entries(directory)? {
+        let name_c = directory_component(&name)?;
+        let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe {
+            libc::fstatat(
+                directory.as_raw_fd(),
+                name_c.as_ptr(),
+                metadata.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        let metadata = unsafe { metadata.assume_init() };
+        if metadata.st_mode & libc::S_IFMT == libc::S_IFDIR {
+            let child = open_directory_at(directory, name_c.as_c_str())?;
+            remove_directory_contents(&child)?;
+            unlink_at(directory, &name, libc::AT_REMOVEDIR)?;
+        } else {
+            unlink_at(directory, &name, 0)?;
+        }
+    }
+    Ok(())
+}
+
+fn unlink_at(parent: &File, name: &OsStr, flags: libc::c_int) -> std::io::Result<()> {
+    let name = directory_component(name)?;
+    if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), flags) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+fn publish_directory(
+    parent: &File,
+    staging: &OsStr,
+    destination: &OsStr,
+) -> Result<(), SampleProjectError> {
+    let staging = directory_component(staging)?;
+    let destination = directory_component(destination)?;
     let result = unsafe {
         libc::renameat2(
-            libc::AT_FDCWD,
+            parent.as_raw_fd(),
             staging.as_ptr(),
-            libc::AT_FDCWD,
+            parent.as_raw_fd(),
             destination.as_ptr(),
             libc::RENAME_NOREPLACE,
         )
@@ -1412,6 +1619,55 @@ mod tests {
         fs::write(
             path,
             format!("#!/bin/sh\n: > '{}'\nexit 97\n", sentinel.display()),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
+    fn ancestor_swapping_git_program(
+        path: &std::path::Path,
+        workspace_root: &std::path::Path,
+        moved_workspace: &std::path::Path,
+        attacker_workspace: &std::path::Path,
+        hostile_filter: &std::path::Path,
+        swap_marker: &std::path::Path,
+    ) {
+        fs::write(
+            path,
+            format!(
+                "#!/bin/sh\n\
+                 set -eu\n\
+                 if [ ! -e '{}' ]; then\n\
+                   if [ \"$1\" = -C ]; then staging_path=$2; else staging_path=$PWD; fi\n\
+                   staging_name=$(/usr/bin/basename \"$staging_path\")\n\
+                   /usr/bin/mv '{}' '{}'\n\
+                   /usr/bin/mkdir -p '{}/'\"$staging_name\"\n\
+                   /usr/bin/cp -R '{}/'\"$staging_name\"/. '{}/'\"$staging_name\"/\n\
+                   /usr/bin/git -C '{}/'\"$staging_name\" init --quiet --initial-branch=main --template=\n\
+                   /usr/bin/printf '* filter=beacon-attack\\n' > '{}/'\"$staging_name\"/.gitattributes\n\
+                   /usr/bin/git -C '{}/'\"$staging_name\" config filter.beacon-attack.clean '{}'\n\
+                   /usr/bin/git -C '{}/'\"$staging_name\" config filter.beacon-attack.required true\n\
+                   /usr/bin/ln -s '{}' '{}'\n\
+                   : > '{}'\n\
+                 fi\n\
+                 exec /usr/bin/git \"$@\"\n",
+                swap_marker.display(),
+                workspace_root.display(),
+                moved_workspace.display(),
+                attacker_workspace.display(),
+                moved_workspace.display(),
+                attacker_workspace.display(),
+                attacker_workspace.display(),
+                attacker_workspace.display(),
+                attacker_workspace.display(),
+                hostile_filter.display(),
+                attacker_workspace.display(),
+                attacker_workspace.display(),
+                workspace_root.display(),
+                swap_marker.display(),
+            ),
         )
         .unwrap();
         let mut permissions = fs::metadata(path).unwrap().permissions();
@@ -1811,6 +2067,64 @@ mod tests {
             .join("sample-projects")
             .join(store.workspace_id.to_string());
         assert_eq!(fs::read_dir(workspace_root).unwrap().count(), 0);
+        assert_eq!(store.count("projects"), 0);
+        assert_eq!(store.count("sample_project_installations"), 0);
+        assert_eq!(store.count("sample_project_events"), 0);
+        assert_eq!(store.count("runs"), 0);
+        assert_eq!(store.count("receipts"), 0);
+    }
+
+    #[test]
+    fn ancestor_swap_before_git_cannot_execute_attacker_filter_or_redirect_cleanup() {
+        let store = TestStore::new("git-ancestor-swap");
+        let workspace_root = store
+            .root
+            .join("sample-projects")
+            .join(store.workspace_id.to_string());
+        let moved_workspace = store.root.join("moved-workspace");
+        let attacker_workspace = store.root.join("operator-owned");
+        fs::create_dir(&attacker_workspace).unwrap();
+        let operator_data = attacker_workspace.join("keep");
+        fs::write(&operator_data, b"operator data").unwrap();
+        let filter_sentinel = store.root.join("attacker-filter-ran");
+        let hostile_filter = store.root.join("hostile-filter");
+        sentinel_program(&hostile_filter, &filter_sentinel);
+        let swap_marker = store.root.join("ancestor-was-swapped");
+        let hostile_git = store.root.join("ancestor-swapping-git");
+        ancestor_swapping_git_program(
+            &hostile_git,
+            &workspace_root,
+            &moved_workspace,
+            &attacker_workspace,
+            &hostile_filter,
+            &swap_marker,
+        );
+        let service = store.isolated_service().with_git_program(&hostile_git);
+
+        let result = service.install();
+        assert!(matches!(
+            result,
+            Err(SampleProjectError::TamperedInstallation)
+        ));
+        assert!(swap_marker.exists(), "the exact race hook did not run");
+        assert!(
+            !filter_sentinel.exists(),
+            "Git followed the replaced ancestor into an attacker repository"
+        );
+        assert_eq!(fs::read(&operator_data).unwrap(), b"operator data");
+        assert_eq!(
+            fs::read_dir(&attacker_workspace)
+                .unwrap()
+                .filter(|entry| entry.as_ref().unwrap().file_type().unwrap().is_dir())
+                .count(),
+            1,
+            "cleanup followed the replaced ancestor into the attacker repository"
+        );
+        assert_eq!(
+            fs::read_dir(&moved_workspace).unwrap().count(),
+            0,
+            "cleanup did not remove the descriptor-bound staging directory"
+        );
         assert_eq!(store.count("projects"), 0);
         assert_eq!(store.count("sample_project_installations"), 0);
         assert_eq!(store.count("sample_project_events"), 0);
