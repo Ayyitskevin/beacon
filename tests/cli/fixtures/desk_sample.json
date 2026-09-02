@@ -21,7 +21,7 @@
       "timestamp": "2026-08-24T20:15:00Z",
       "schema_version": "athena.issue.v1",
       "ref": "ATH-412",
-      "link": "http://192.0.2.10:18300/aegis/issues/412",
+      "link": "http://192.0.2.91:18300/aegis/issues/412",
       "authority": null
     },
     {
@@ -158,7 +158,7 @@
       "timestamp": "2026-08-22T10:00:00Z",
       "schema_version": "athena.approval.v1",
       "ref": "ATH-AR-9",
-      "link": "http://192.0.2.10:18300/aegis/approvals/9",
+      "link": "http://192.0.2.91:18300/aegis/approvals/9",
       "authority": {
         "decider": "human",
         "attachment": "intent",

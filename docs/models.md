@@ -176,7 +176,7 @@ the kernel down through amdgpu, not an OOM kill
 (`private-evidence/2026-08-18_session-wrap-node-a-crash-hardening.md`, "The one-paragraph
 version"). The fix class: `inference-preflight --need <GiB> --assert` gates
 every large load against a memory floor in `~/.config/inference-limits.env` (present on this box,
-`/home/example/.local/bin/inference-preflight`). Four defects that session were "a check that
+`~/.local/bin/inference-preflight`). Four defects that session were "a check that
 reported fine while being weaker than it looked" — the durable fix was to make the unknown/failed
 state louder than the healthy one. Beacon's Worker health for activated local inference must model
 free memory and resident models *before* a Route may dispatch a load, and Pause Work must reach
