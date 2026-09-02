@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+#
+# Drive the downloaded AppImage through first-run setup on the three clean
+# Debian-family hosts for which the package is supported. The container-side
+# driver owns the UI actions and writes a screenshot or read-only socket
+# transcript for every successful observation.
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
+    echo "usage: scripts/clean-host-first-run APPIMAGE EVIDENCE_DIR [all|ubuntu-22.04|debian-12|ubuntu-24.04]" >&2
+    exit 2
+fi
+
+appimage="$1"
+evidence_dir="$2"
+selection="${3:-all}"
+
+case "$selection" in
+    all|ubuntu-22.04|debian-12|ubuntu-24.04) ;;
+    *)
+        echo "clean-host-first-run: unknown environment '$selection'" >&2
+        exit 2
+        ;;
+esac
+
+if [ -e "$evidence_dir" ]; then
+    echo "clean-host-first-run: evidence directory already exists: $evidence_dir" >&2
+    exit 2
+fi
+mkdir -p "$evidence_dir"
+evidence_dir="$(cd "$evidence_dir" && pwd)"
+
+matrix="$evidence_dir/matrix.json"
+python3 - "$matrix" "$appimage" <<'PY'
+import json
+import sys
+
+path, appimage = sys.argv[1:]
+document = {
+    "appimage": appimage,
+    "input": "not_evaluated",
+    "environments": {
+        "ubuntu-22.04": {"image": "ubuntu:22.04", "status": "not_evaluated"},
+        "debian-12": {"image": "debian:12", "status": "not_evaluated"},
+        "ubuntu-24.04": {"image": "ubuntu:24.04", "status": "not_evaluated"},
+    },
+}
+with open(path, "x", encoding="utf-8") as handle:
+    json.dump(document, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+
+set_matrix_field() {
+    python3 - "$matrix" "$@" <<'PY'
+import json
+import sys
+
+path, section, key, value = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    document = json.load(handle)
+if section == "input":
+    document["input"] = value
+else:
+    document["environments"][section][key] = value
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(document, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+}
+
+if [ ! -f "$appimage" ]; then
+    set_matrix_field input status absent
+    echo "clean-host-first-run: AppImage is absent: $appimage" >&2
+    exit 1
+fi
+appimage="$(cd "$(dirname "$appimage")" && pwd)/$(basename "$appimage")"
+set_matrix_field input status observed
+sha256sum "$appimage" > "$evidence_dir/appimage.sha256"
+
+if ! command -v docker >/dev/null 2>&1; then
+    set_matrix_field input status absent
+    echo "clean-host-first-run: docker is absent" >&2
+    exit 1
+fi
+
+driver="$(pwd)/scripts/clean-host-first-run-container"
+if [ ! -x "$driver" ]; then
+    set_matrix_field input status absent
+    echo "clean-host-first-run: container driver is absent or not executable: $driver" >&2
+    exit 1
+fi
+
+labels=(ubuntu-22.04 debian-12 ubuntu-24.04)
+images=(ubuntu:22.04 debian:12 ubuntu:24.04)
+failed=0
+
+for index in "${!labels[@]}"; do
+    label="${labels[$index]}"
+    image="${images[$index]}"
+    if [ "$selection" != all ] && [ "$selection" != "$label" ]; then
+        continue
+    fi
+
+    output="$evidence_dir/$label"
+    mkdir -p "$output"
+    started="$(date +%s)"
+    set +e
+    docker run --rm \
+        --tmpfs /work:exec,size=1g \
+        --tmpfs /scratch-home:exec,size=512m \
+        --volume "$appimage:/opt/beacon/Beacon.AppImage:ro" \
+        --volume "$driver:/opt/beacon/drive-first-run:ro" \
+        --volume "$output:/evidence" \
+        --env "BEACON_EVIDENCE_UID=$(id -u)" \
+        --env "BEACON_EVIDENCE_GID=$(id -g)" \
+        "$image" \
+        bash -c '
+            set -e
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y --no-install-recommends \
+                ca-certificates imagemagick libegl1 libfribidi0 libgles2 \
+                libharfbuzz0b procps python3 tesseract-ocr x11-utils xauth \
+                xdotool xvfb
+            /opt/beacon/drive-first-run
+        ' > "$output/driver.log" 2>&1
+    result=$?
+    set -e
+    elapsed="$(( $(date +%s) - started ))"
+    set_matrix_field "$label" elapsed_seconds "$elapsed"
+    if [ "$result" -eq 0 ]; then
+        set_matrix_field "$label" status observed
+        printf 'clean-host-first-run: observed %s in %ss\n' "$label" "$elapsed"
+    else
+        set_matrix_field "$label" status broken
+        set_matrix_field "$label" exit_code "$result"
+        printf 'clean-host-first-run: BROKEN %s (exit %s, %ss; %s)\n' \
+            "$label" "$result" "$elapsed" "$output/driver.log" >&2
+        failed=1
+    fi
+done
+
+if [ "$failed" -ne 0 ]; then
+    echo "clean-host-first-run: one or more environments are broken; unrun rows remain not_evaluated" >&2
+    exit 1
+fi
+
+if [ "$selection" = all ]; then
+    python3 - "$matrix" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    document = json.load(handle)
+states = {name: row["status"] for name, row in document["environments"].items()}
+if set(states.values()) != {"observed"}:
+    raise SystemExit(f"clean-host-first-run: matrix incomplete: {states}")
+PY
+fi
+
+echo "clean-host-first-run: evidence: $evidence_dir"

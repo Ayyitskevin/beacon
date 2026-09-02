@@ -129,6 +129,15 @@ jobs:
       - name: Write AppImage checksum
         working-directory: target/release/bundle/appimage
         run: sha256sum ./*.AppImage > Beacon.AppImage.sha256
+      - name: Drive first-run setup on clean hosts
+        run: |
+          set -eu
+          set -- target/release/bundle/appimage/*.AppImage
+          if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+            echo "expected exactly one AppImage, found $#" >&2
+            exit 1
+          fi
+          scripts/clean-host-first-run "$1" target/clean-host-first-run
       # Source: https://github.com/actions/upload-artifact/blob/v4.6.2/README.md#usage
       - name: Upload AppImage
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -138,6 +147,16 @@ jobs:
             target/release/bundle/appimage/*.AppImage
             target/release/bundle/appimage/*.sha256
           if-no-files-found: error
+          retention-days: 14
+      - name: Upload clean-host first-run evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: beacon-linux-appimage-first-run-evidence
+          path: target/clean-host-first-run
+          # A build failure can precede the harness. A harness failure still
+          # uploads its partial matrix without replacing the job's red result.
+          if-no-files-found: warn
           retention-days: 14
 
   quality:

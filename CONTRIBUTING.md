@@ -74,16 +74,30 @@ chmod +x ./*.AppImage
 ./Beacon_*.AppImage
 ```
 
-The package job proves that the AppImage builds, that its downloaded bytes can be checked, and that
-the bundle contains both `beacon-desktop` and the `beacond` supervisor it spawns. See the official
-upload action's [permission-loss
+The package job proves that the AppImage builds, that its downloaded bytes can be checked, that the
+bundle contains both `beacon-desktop` and the `beacond` supervisor it spawns, and that the real UI
+completes first-run setup on the three supported clean-host images below. See the official upload
+action's [permission-loss
 note](https://github.com/actions/upload-artifact/blob/v4.6.2/README.md#permission-loss).
 
-First launch has been observed on clean containers with no development packages installed —
-`ubuntu:24.04` through both AppImage entry paths, and `ubuntu:22.04` and `debian:12` for the
-bundle the pinned package job produces. It has not been observed on a real desktop session, on
-Wayland, or outside the Debian family, and nothing past the first screen was exercised. Treat the
-criterion as met for those container shapes and open everywhere else.
+First-run setup has been driven through the real UI on clean containers with no development
+packages installed — `ubuntu:22.04`, `debian:12`, and `ubuntu:24.04`. The harness enters the
+password, confirms the one-time Recovery Key, creates the Account and Workspace, accepts the
+starter organization, and observes authenticated Briefing. It has not been observed on a real
+desktop session, on Wayland, or outside the Debian family. Treat the criterion as met for those
+container shapes and open everywhere else.
+
+Run the same check against an extracted CI artifact, writing fresh evidence to a new directory:
+
+```sh
+scripts/clean-host-first-run ./Beacon_0.1.0_amd64.AppImage ./first-run-evidence
+```
+
+The evidence contains a screenshot or a read-only daemon-socket response for every asserted state.
+The one-time Recovery Key stays in the container's tmpfs: its entire image band is covered before
+the screenshot is written, and the socket client writes responses only, never its capability token. A failed or
+interrupted run leaves `absent`, `broken`, and `not_evaluated` distinct in `result.json` and
+`matrix.json` rather than treating an unobserved step as a pass.
 
 ### What the AppImage requires of the host
 

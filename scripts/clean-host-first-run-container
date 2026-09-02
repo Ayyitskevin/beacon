@@ -1,0 +1,385 @@
+#!/usr/bin/env bash
+# Runs as root inside a disposable container. Secrets and unredacted Recovery
+# Key pixels remain only in tmpfs; the mounted evidence directory receives
+# screenshots with the one-time key excluded and read-only socket responses.
+
+set -euo pipefail
+
+export HOME=/scratch-home
+export DISPLAY=:99
+mkdir -p "$HOME" /work /evidence
+chmod 700 "$HOME"
+
+result=/evidence/result.json
+python3 - "$result" <<'PY'
+import json
+import sys
+
+document = {
+    "steps": {
+        "operator_setup_form": {"status": "not_evaluated", "artifacts": []},
+        "recovery_key_confirmation": {"status": "not_evaluated", "artifacts": []},
+        "account_and_workspace": {"status": "not_evaluated", "artifacts": []},
+        "starter_organization": {"status": "not_evaluated", "artifacts": []},
+        "authenticated_briefing": {"status": "not_evaluated", "artifacts": []},
+    }
+}
+with open(sys.argv[1], "x", encoding="utf-8") as handle:
+    json.dump(document, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+
+set_step() {
+    local step="$1"
+    local status="$2"
+    local detail="$3"
+    shift 3
+    python3 - "$result" "$step" "$status" "$detail" "$@" <<'PY'
+import json
+import sys
+
+path, step, status, detail, *artifacts = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    document = json.load(handle)
+document["steps"][step] = {
+    "status": status,
+    "detail": detail,
+    "artifacts": artifacts,
+}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(document, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+}
+
+fail_step() {
+    local step="$1"
+    local status="$2"
+    local detail="$3"
+    shift 3
+    set_step "$step" "$status" "$detail" "$@"
+    echo "drive-first-run: $step is $status: $detail" >&2
+    exit 1
+}
+
+app_pid=""
+xvfb_pid=""
+cleanup() {
+    local status=$?
+    if [ -n "$app_pid" ]; then
+        kill "$app_pid" 2>/dev/null || true
+        wait "$app_pid" 2>/dev/null || true
+    fi
+    if [ -n "$xvfb_pid" ]; then
+        kill "$xvfb_pid" 2>/dev/null || true
+        wait "$xvfb_pid" 2>/dev/null || true
+    fi
+    rm -f /work/*.png /work/*.tsv
+    if [ -n "${BEACON_EVIDENCE_UID:-}" ] && [ -n "${BEACON_EVIDENCE_GID:-}" ]; then
+        chown -R "$BEACON_EVIDENCE_UID:$BEACON_EVIDENCE_GID" /evidence
+    fi
+    exit "$status"
+}
+trap cleanup EXIT INT TERM
+
+cp /opt/beacon/Beacon.AppImage /work/Beacon.AppImage
+chmod 700 /work/Beacon.AppImage
+
+Xvfb "$DISPLAY" -screen 0 1280x800x24 -nolisten tcp > /evidence/xvfb.log 2>&1 &
+xvfb_pid=$!
+
+for _ in $(seq 1 50); do
+    xdpyinfo -display "$DISPLAY" >/dev/null 2>&1 && break
+    kill -0 "$xvfb_pid" 2>/dev/null || fail_step operator_setup_form broken "Xvfb exited"
+    sleep 0.1
+done
+xdpyinfo -display "$DISPLAY" >/dev/null 2>&1 || \
+    fail_step operator_setup_form absent "X display never became observable"
+
+cd /work
+./Beacon.AppImage --appimage-extract-and-run \
+    > /evidence/app.stdout 2> /evidence/app.stderr &
+app_pid=$!
+
+window=""
+for _ in $(seq 1 200); do
+    kill -0 "$app_pid" 2>/dev/null || \
+        fail_step operator_setup_form broken "AppImage exited before mapping a window"
+    windows="$(xdotool search --onlyvisible --name '^Beacon$' 2>/dev/null || true)"
+    if [ -n "$windows" ]; then
+        window="${windows%%$'\n'*}"
+        break
+    fi
+    sleep 0.1
+done
+[ -n "$window" ] || fail_step operator_setup_form absent "Beacon window was not mapped"
+
+capture_window() {
+    local target="$1"
+    import -display "$DISPLAY" -window "$window" "$target"
+}
+
+redact_recovery_key() {
+    local raw="$1"
+    local target="$2"
+    local tsv=/work/recovery.tsv
+    tesseract "$raw" stdout --psm 6 tsv 2>/dev/null > "$tsv"
+    band="$(python3 - "$tsv" <<'PY'
+import csv
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    rows = list(csv.DictReader(handle, delimiter="\t"))
+
+def matching(word):
+    return [row for row in rows if row.get("text", "").strip(".,").casefold() == word]
+
+again = matching("again")
+saved = matching("saved")
+if len(again) != 1 or len(saved) != 1:
+    raise SystemExit("could not bound the Recovery Key between its instruction and checkbox")
+top = int(again[0]["top"]) + int(again[0]["height"]) + 4
+bottom = int(saved[0]["top"]) - 4
+if top >= bottom:
+    raise SystemExit("Recovery Key redaction band is empty")
+print(top, bottom)
+PY
+)" || return 1
+    top="${band%% *}"
+    bottom="${band##* }"
+    # The Recovery Key block spans the 640px main column. Cover that whole
+    # horizontal band rather than trusting OCR to find every credential glyph.
+    convert "$raw" -fill '#1f2937' -draw "rectangle 245,$top 990,$bottom" "$target"
+}
+
+wait_for_text() {
+    local needle="$1"
+    local target="$2"
+    local recovery_crop="${3:-no}"
+    local raw=/work/current.png
+    for _ in $(seq 1 100); do
+        kill -0 "$app_pid" 2>/dev/null || return 2
+        capture_window "$raw"
+        if tesseract "$raw" stdout 2>/dev/null | grep -Fq "$needle"; then
+            if [ "$recovery_crop" = yes ]; then
+                # Bound the credential between two independently observed UI
+                # labels, then cover its entire horizontal band.
+                redact_recovery_key "$raw" "$target" || return 3
+            else
+                cp "$raw" "$target"
+            fi
+            return 0
+        fi
+        sleep 0.1
+    done
+    if [ "$recovery_crop" = yes ]; then
+        # On a timeout, retain only a top crop that cannot include the key.
+        convert "$raw" -crop 1280x300+0+0 +repage "$target"
+    else
+        cp "$raw" "$target"
+    fi
+    return 1
+}
+
+click_word() {
+    local needle="$1"
+    local raw=/work/click.png
+    local tsv=/work/click.tsv
+    capture_window "$raw"
+    tesseract "$raw" stdout --psm 6 tsv 2>/dev/null > "$tsv"
+    coordinates="$(python3 - "$tsv" "$needle" <<'PY'
+import csv
+import sys
+
+path, needle = sys.argv[1:]
+matches = []
+with open(path, encoding="utf-8") as handle:
+    for row in csv.DictReader(handle, delimiter="\t"):
+        if row.get("text", "").strip().casefold() == needle.casefold():
+            matches.append(row)
+if len(matches) != 1:
+    raise SystemExit(f"expected one OCR word {needle!r}, found {len(matches)}")
+row = matches[0]
+print(int(row["left"]) + int(row["width"]) // 2, int(row["top"]) + int(row["height"]) // 2)
+PY
+)" || return 1
+    x="${coordinates%% *}"
+    y="${coordinates##* }"
+    xdotool mousemove --sync "$x" "$y" click 1
+}
+
+socket_response() {
+    local command="$1"
+    local target="$2"
+    runtime="$(find "$HOME/.local/share" -type s -name beacond.sock -printf '%h\n')"
+    [ -n "$runtime" ] || return 1
+    [ "$(printf '%s\n' "$runtime" | wc -l)" -eq 1 ] || return 1
+    python3 - "$runtime/beacond.sock" "$runtime/client.token" "$command" "$target" <<'PY'
+import json
+import socket
+import sys
+
+socket_path, token_path, command, output_path = sys.argv[1:]
+with open(token_path, encoding="ascii") as handle:
+    token = handle.read()
+request = {
+    "protocol": 1,
+    "token": token,
+    "command": {"name": command},
+}
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.settimeout(7)
+client.connect(socket_path)
+client.sendall(json.dumps(request, separators=(",", ":")).encode())
+client.shutdown(socket.SHUT_WR)
+chunks = []
+while True:
+    chunk = client.recv(65536)
+    if not chunk:
+        break
+    chunks.append(chunk)
+response = json.loads(b"".join(chunks))
+# Only the response is evidence. The client capability token is never written.
+with open(output_path, "x", encoding="utf-8") as handle:
+    json.dump(response, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+}
+
+assert_session() {
+    local path="$1"
+    local phase="$2"
+    local access="$3"
+    python3 - "$path" "$phase" "$access" <<'PY'
+import json
+import sys
+
+path, expected_phase, expected_access = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    response = json.load(handle)
+status = ((response.get("result") or {}).get("status") or {})
+actual = (status.get("phase"), status.get("workspaceAccess"))
+expected = (expected_phase, expected_access == "true")
+if actual != expected:
+    raise SystemExit(f"session mismatch: expected {expected}, got {actual}")
+PY
+}
+
+initial_screen=/evidence/01-operator-setup.png
+if ! wait_for_text "Set up your operator account" "$initial_screen"; then
+    fail_step operator_setup_form absent "operator setup form was not visible" \
+        01-operator-setup.png
+fi
+if ! socket_response status /evidence/01-session-before.json; then
+    fail_step operator_setup_form broken "supervisor status socket was unavailable" \
+        01-operator-setup.png
+fi
+if ! assert_session /evidence/01-session-before.json operator_setup_required false; then
+    fail_step operator_setup_form broken "initial socket status was not setup-required and locked" \
+        01-operator-setup.png 01-session-before.json
+fi
+set_step operator_setup_form observed "setup-required form and locked socket status" \
+    01-operator-setup.png 01-session-before.json
+
+password='beacon-clean-host-passphrase-2026'
+xdotool mousemove --sync 490 451 click 1
+xdotool key --clearmodifiers ctrl+a
+xdotool type --clearmodifiers --delay 25 -- "$password"
+xdotool mousemove --sync 490 539 click 1
+xdotool key --clearmodifiers ctrl+a
+xdotool type --clearmodifiers --delay 25 -- "$password"
+# Submit from the focused confirmation field. This follows the form's native
+# keyboard path and avoids treating a blue-but-disabled-looking pixel as a
+# clickable control.
+xdotool key --clearmodifiers Return
+
+recovery_screen=/evidence/02-recovery-confirmation-redacted.png
+if ! wait_for_text "Save this one-time Recovery Key" "$recovery_screen" yes; then
+    fail_step recovery_key_confirmation broken "UI did not advance to Recovery Key confirmation" \
+        02-recovery-confirmation-redacted.png
+fi
+set_step recovery_key_confirmation observed "one-time Recovery Key confirmation rendered; credential pixels excluded" \
+    02-recovery-confirmation-redacted.png
+
+if ! click_word saved; then
+    fail_step account_and_workspace absent "Recovery Key saved confirmation was not uniquely observable" \
+        02-recovery-confirmation-redacted.png
+fi
+# Clicking the label leaves its checkbox focused. The only next control is the
+# now-enabled Finish setup button, so use the form's keyboard order and let the
+# resulting unlocked socket state prove that the action was accepted.
+sleep 0.2
+xdotool key --clearmodifiers Tab
+xdotool key --clearmodifiers Return
+
+starter_screen=/evidence/03-starter-organization.png
+if ! wait_for_text "Build your starter organization" "$starter_screen"; then
+    fail_step account_and_workspace broken "UI did not advance to Workspace starter organization" \
+        03-starter-organization.png
+fi
+if ! socket_response status /evidence/03-session-unlocked.json; then
+    fail_step account_and_workspace broken "unlocked session could not be observed over the socket" \
+        03-starter-organization.png
+fi
+if ! assert_session /evidence/03-session-unlocked.json unlocked true; then
+    fail_step account_and_workspace broken "account did not unlock Workspace access" \
+        03-starter-organization.png 03-session-unlocked.json
+fi
+set_step account_and_workspace observed "operator account unlocked its newly created Workspace" \
+    03-starter-organization.png 03-session-unlocked.json
+
+# This window is fixed at 1280x800 by tauri.conf.json and the proposal action
+# is visible at its lower-left. Tesseract 4 on Ubuntu 22.04 missed the rendered
+# word even though the control was present; click the stable UI coordinate and
+# require the accepted socket state plus Briefing below to prove the action.
+xdotool mousemove --sync 360 727 click 1
+
+briefing_screen=/evidence/05-authenticated-briefing.png
+if ! wait_for_text "Residents in this Workspace" "$briefing_screen"; then
+    fail_step authenticated_briefing broken "authenticated Briefing did not render" \
+        05-authenticated-briefing.png
+fi
+if ! socket_response starter_organization /evidence/04-starter-organization.json; then
+    fail_step starter_organization broken "starter organization decision was unavailable" \
+        05-authenticated-briefing.png
+fi
+if ! socket_response residents /evidence/05-residents.json; then
+    fail_step authenticated_briefing broken "authenticated Residents were unavailable" \
+        05-authenticated-briefing.png 04-starter-organization.json
+fi
+if ! python3 - /evidence/04-starter-organization.json /evidence/05-residents.json <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    organization = json.load(handle)
+with open(sys.argv[2], encoding="utf-8") as handle:
+    residents = json.load(handle)
+organization = ((organization.get("result") or {}).get("organization") or {})
+residents = ((residents.get("result") or {}).get("residents") or [])
+if organization.get("decision") != "accepted":
+    raise SystemExit(f"starter organization was not accepted: {organization.get('decision')!r}")
+if len(residents) == 0:
+    raise SystemExit("Briefing had no authenticated Residents")
+PY
+then
+    fail_step starter_organization broken "UI action did not commit the expected starter organization" \
+        04-starter-organization.json 05-authenticated-briefing.png 05-residents.json
+fi
+set_step starter_organization observed "default starter Resident proposal accepted through the UI" \
+    04-starter-organization.json 05-authenticated-briefing.png
+set_step authenticated_briefing observed "authenticated Briefing rendered and exposed Residents over the read-only socket" \
+    05-authenticated-briefing.png 05-residents.json
+
+python3 - "$result" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    document = json.load(handle)
+states = {name: row["status"] for name, row in document["steps"].items()}
+if set(states.values()) != {"observed"}:
+    raise SystemExit(f"drive-first-run: incomplete observation set: {states}")
+PY
+
+echo "drive-first-run: all first-run observations are materialized in /evidence"
