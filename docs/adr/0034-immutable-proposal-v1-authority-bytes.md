@@ -583,14 +583,31 @@ closed vocabulary: `ExecutionPolicyNotDeclared`, `SandboxNotDeclared`,
 `CharterRevisionMoved`, `ProjectPolicyRevisionMoved`, `RepositoryRevisionMoved`,
 `BaseRevisionMoved`, `ResidentLifecycleChanged`, `ConfigurationChanged`.
 
-`ReadableContextNotVerified` carries one of four reasons, each decided by
-inspecting the Repository revision the Proposal *names*: `RepositorySourceNotLocal`
-(a Git URL — nothing local, and no fetch is performed), `RepositoryUnavailable`
-(the path did not open as an object store, or the inspection budget elapsed —
-both mean *not known*), `PinnedRevisionAbsent` (the store opened; the revision
-that would be the comparison basis is missing), and
-`ContentUnreadableAtRevision` (the store opened and holds the pinned revision,
-and content still cannot be read).
+`ReadableContextNotVerified` carries one of five reasons, each decided by
+inspecting the Repository revision the Proposal *names*, and each keeping a
+different state apart as AGENTS.md requires — "Terminal, absent, broken, and not
+evaluated are distinct states". They mirror the vocabulary Check Preflight
+already uses rather than introducing a second framing for the same facts:
+
+| reason | state | Check Preflight's equivalent |
+|---|---|---|
+| `RepositorySourceNotLocal` | a Git URL: nothing local, and no fetch is performed | `SourceKindUnsupported` |
+| `RepositoryUnreadable` | broken: the path did not open as an object store | `RepositoryUnreadable` |
+| `InspectionFailed` | broken: the store opened and a step errored | `PreflightFailed` |
+| `InspectionTimedOut` | not evaluated: the inspection did not finish inside its budget | `PreflightTimedOut` |
+| `PinnedRevisionAbsent` | a negative answer: the store opened, the revision is not in it | `BaseRevisionUnreachable` |
+
+`ContentUnreadableAtRevision` is the sixth and terminal reason: the store opened,
+it holds the pinned revision, and content still cannot be read.
+
+The budget behind `InspectionTimedOut` is **best-effort, not a hard bound**. It
+is consulted on entry and between every object-store step, and is the same
+deadline `ObjectStore::contains` consults, but a single call into that module can
+still overrun it — `open` takes no deadline and reads a `.git` file whole, and a
+pack index is read whole before that module's own first deadline check. Startup
+also grants each declared-context Proposal its own budget rather than sharing one.
+Those residuals are recorded in `docs/implementation/phase-2-proposal-v1.md`; the
+ADR should not be read as promising a bound that is not enforced.
 
 **A stated limit.** The "when the bound Repository is locally available …
 compares every entry with that revision" branch of this ADR's readable-context
