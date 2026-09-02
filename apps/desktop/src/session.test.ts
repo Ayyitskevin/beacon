@@ -5,6 +5,7 @@ import {
   admitMission,
   bindProjectRepository,
   preflightProjectChecks,
+  recentReceipts,
   activateLocalModel,
   activateResident,
   clearResidentConfiguration,
@@ -1082,5 +1083,149 @@ describe("desktop session transport", () => {
     await expect(preflightProjectChecks(receipt.projectId)).rejects.toThrow(
       "invalid preflight Receipt",
     );
+  });
+
+  // opus's P1-2. The adapter carries the whole boundary contract -- order, the
+  // window bound, the closed per-kind outcome, timestamp representability --
+  // and none of it was tested; three of four mutants survived the suite. The
+  // panel tests cannot cover this and correctly do not try: `BriefingReceipts`
+  // takes an already-validated page.
+  //
+  // C26's lesson applies here, and it is why every case below drives
+  // `recentReceipts()` rather than a helper: the property is "a page the daemon
+  // could not have produced is a refused read", and the thing that decides that
+  // is the exported Query, not a predicate sitting next to it.
+  describe("the recent-Receipt adapter", () => {
+    const row = (
+      runId: string,
+      startedAtMs: number,
+      outcome: Record<string, unknown>,
+    ) => ({
+      runId,
+      projectId: "2b3c4d5e-6f7a-4b8c-9d0e-2f3a4b5c6d7e",
+      projectName: "Task tracker",
+      version: outcome.kind === "check_preflight" ? 1 : 2,
+      outcome,
+      startedAtMs,
+      endedAtMs: startedAtMs + 1,
+      recordedAtMs: startedAtMs + 1,
+    });
+    const newest = row("cccccccc-3333-4333-8333-333333333333", 300, {
+      kind: "declared_checks",
+      summary: "completed",
+    });
+    const oldest = row("aaaaaaaa-1111-4111-8111-111111111111", 100, {
+      kind: "check_preflight",
+      outcome: "verified",
+    });
+    const page = (overrides: Record<string, unknown> = {}) => ({
+      receipts: [newest, oldest],
+      runsInFlightInWindow: 0,
+      runsUnconfirmedInWindow: 0,
+      runWindowApplied: 50,
+      moreRunsExist: false,
+      ...overrides,
+    });
+    const refused = async (patch: Record<string, unknown>) => {
+      invokeMock.mockResolvedValue({ ...page(), ...patch });
+      await expect(recentReceipts(50)).rejects.toThrow("invalid recent Receipt page");
+    };
+
+    it("accepts the exact page the daemon produces", async () => {
+      const exact = page();
+      invokeMock.mockResolvedValue(exact);
+      await expect(recentReceipts(50)).resolves.toEqual(exact);
+      expect(invokeMock).toHaveBeenCalledWith("recent_receipts", { window: 50 });
+    });
+
+    it("refuses a page the daemon did not order", async () => {
+      // The daemon orders by started_at_ms DESC then run id DESC. Re-sorting
+      // here would put the ordering policy back in the interface; refusing is
+      // what makes the comment that says so true.
+      await refused({ receipts: [oldest, newest] });
+      // Ties break on the run id, descending, by code point.
+      const tie = [
+        row("bbbbbbbb-2222-4222-8222-222222222222", 200, {
+          kind: "check_preflight",
+          outcome: "verified",
+        }),
+        row("cccccccc-3333-4333-8333-333333333333", 200, {
+          kind: "check_preflight",
+          outcome: "verified",
+        }),
+      ];
+      await refused({ receipts: tie });
+    });
+
+    it("refuses more rows than the window the daemon says it walked", async () => {
+      await refused({ receipts: [newest, oldest], runWindowApplied: 1 });
+    });
+
+    it("refuses an outcome that is not closed for its kind", async () => {
+      // The stored `outcome` column is one CHECK shared by both kinds, so a
+      // flat union would let these through. Each is a page the reader cannot
+      // have produced.
+      await refused({
+        receipts: [row("cccccccc-3333-4333-8333-333333333333", 300, { kind: "nonsense" })],
+      });
+      await refused({
+        receipts: [
+          row("cccccccc-3333-4333-8333-333333333333", 300, {
+            kind: "check_preflight",
+            summary: "completed",
+          }),
+        ],
+      });
+      await refused({
+        receipts: [
+          row("cccccccc-3333-4333-8333-333333333333", 300, {
+            kind: "declared_checks",
+            outcome: "verified",
+          }),
+        ],
+      });
+      await refused({
+        receipts: [
+          row("cccccccc-3333-4333-8333-333333333333", 300, {
+            kind: "check_preflight",
+            outcome: "completed",
+          }),
+        ],
+      });
+      // Both arms at once is a widened vocabulary wearing a closed one.
+      await refused({
+        receipts: [
+          row("cccccccc-3333-4333-8333-333333333333", 300, {
+            kind: "check_preflight",
+            outcome: "verified",
+            summary: "completed",
+          }),
+        ],
+      });
+    });
+
+    it("refuses a timestamp the interface cannot render", async () => {
+      // The gap `4e1ff8b` named: a safe non-negative integer that is not a
+      // representable instant. `toISOString` raises on it, and an uncaught
+      // throw inside render removes the panel.
+      await refused({
+        receipts: [
+          row("cccccccc-3333-4333-8333-333333333333", 9e15, {
+            kind: "check_preflight",
+            outcome: "verified",
+          }),
+        ],
+      });
+    });
+
+    it("refuses counts outside the u32 the daemon counts in", async () => {
+      await refused({ runsUnconfirmedInWindow: 4_294_967_296 });
+      await refused({ runWindowApplied: 4_294_967_296 });
+      await refused({ moreRunsExist: "yes" });
+    });
+
+    it("refuses a page with a key the daemon does not send", async () => {
+      await refused({ surprise: true });
+    });
   });
 });
