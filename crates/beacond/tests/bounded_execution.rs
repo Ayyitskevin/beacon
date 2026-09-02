@@ -75,13 +75,21 @@ fn the_environment_is_cleared_so_a_run_inherits_no_credential() {
     unsafe { std::env::set_var("BEACON_SECRET_PROBE", "must-not-leak") };
     let scratch = std::env::temp_dir().join(format!("beacon-exec-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&scratch).unwrap();
-    let record = run_bounded_for_test(&["/usr/bin/env".to_owned()], &scratch, tiny_bounds(), None);
-    unsafe { std::env::remove_var("BEACON_SECRET_PROBE") };
-    assert!(
-        !record.stdout.contains("must-not-leak"),
-        "the supervisor's environment reached the Run: {}",
-        record.stdout
+    let record = run_bounded_for_test(
+        &[
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "test -z \"${BEACON_SECRET_PROBE+x}\"".to_owned(),
+        ],
+        &scratch,
+        tiny_bounds(),
+        None,
     );
+    unsafe { std::env::remove_var("BEACON_SECRET_PROBE") };
+    assert_eq!(record.outcome, ExecutionOutcome::Exited { code: 0 });
+    assert!(record.stdout.is_empty());
+    assert!(record.stderr.is_empty());
+    assert!(!record.output_truncated);
     std::fs::remove_dir_all(&scratch).ok();
 }
 
