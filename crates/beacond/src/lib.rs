@@ -234,6 +234,7 @@ pub enum SupervisorError {
     ProposalEventMismatch(i64),
     ProposalStateMismatch,
     RulingEventMismatch(i64),
+    RulingStateMismatch,
     SchemaMismatch,
     UnsupportedSchemaVersion(i64),
     IntegrityCheckFailed(String),
@@ -382,6 +383,13 @@ impl fmt::Display for SupervisorError {
                 formatter,
                 "Event sequence {sequence} does not match its stored Ruling bytes"
             ),
+            Self::RulingStateMismatch => {
+                write!(
+                    formatter,
+                    "Ruling state does not agree with its bytes, the Proposal it binds, its \
+                     supersession chain, or its audit Event"
+                )
+            }
             Self::SchemaMismatch => {
                 write!(
                     formatter,
@@ -1096,6 +1104,9 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
         .map_err(|_| SupervisorError::SampleProjectStateMismatch)?;
     proposal::verify_proposal_state(connection)
         .map_err(|_| SupervisorError::ProposalStateMismatch)?;
+    // After Proposal state, because every Ruling binds one and re-verifies what it copied against
+    // that Proposal's own bytes.
+    ruling::verify_ruling_state(connection).map_err(|_| SupervisorError::RulingStateMismatch)?;
     // A Run whose lease expired without a terminal Receipt becomes unconfirmed
     // here. Lease expiry is what proves that state; the Run is never removed.
     check_preflight::verify_run_state(connection).map_err(|_| SupervisorError::RunStateMismatch)?;
