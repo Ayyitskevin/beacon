@@ -904,6 +904,37 @@ fn declared_schema_version(connection: &Connection) -> Result<i64, SupervisorErr
         .map_err(SupervisorError::Store)
 }
 
+/// Applies every migration in order, for tests that need a store at the current
+/// schema without a file. One list, so a new migration is added in one place
+/// rather than in each test that needs one.
+#[cfg(test)]
+pub(crate) fn apply_every_migration(connection: &Connection) -> Result<(), SupervisorError> {
+    for migration in [
+        SCHEMA_V1,
+        MIGRATION_V2,
+        MIGRATION_V3,
+        MIGRATION_V4,
+        MIGRATION_V5,
+        MIGRATION_V6,
+        MIGRATION_V7,
+        MIGRATION_V8,
+        MIGRATION_V9,
+        MIGRATION_V10,
+        MIGRATION_V11,
+        MIGRATION_V12,
+        MIGRATION_V13,
+        MIGRATION_V14,
+        MIGRATION_V15,
+        MIGRATION_V16_ONLY,
+        MIGRATION_V17,
+        MIGRATION_V18,
+        MIGRATION_V19,
+    ] {
+        connection.execute_batch(migration)?;
+    }
+    Ok(())
+}
+
 fn verify_schema(connection: &Connection, version: i64) -> Result<(), SupervisorError> {
     let expected_connection = Connection::open_in_memory()?;
     expected_connection.execute_batch(SCHEMA_V1)?;

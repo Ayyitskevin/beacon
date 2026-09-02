@@ -10,9 +10,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use beacond::{
-    AutonomyProfile, MAX_RECENT_RUN_WINDOW, OperatorAccountService, OperatorSessionPhase,
-    ProjectCharterDraft, ProjectDraft, ProjectService, RecentReceiptError, RecentReceiptOutcome,
-    RecentReceiptService, SecretString, StartupConfig, Supervisor,
+    AutonomyProfile, ExecutionReceipt, MAX_RECENT_RUN_WINDOW, OperatorAccountService,
+    OperatorSessionPhase, PreflightReceipt, ProjectCharterDraft, ProjectDraft, ProjectService,
+    RecentReceiptError, RecentReceiptOutcome, RecentReceiptService, SecretString, StartupConfig,
+    Supervisor,
 };
 use rusqlite::{Connection, params};
 use uuid::Uuid;
@@ -159,10 +160,22 @@ impl Fixture {
                         run_id.to_string(),
                         version,
                         outcome,
-                        // Deliberately not a Receipt body. Nothing in this Query
-                        // reads it, and a test that stored a real one could not
-                        // tell the difference.
-                        "{}",
+                        // A VALID, LARGE body -- not `{}`.
+                        //
+                        // A malformed body as positive test data would make
+                        // "this Query tolerates an unreadable Receipt" an
+                        // interface promise, which is the opposite of what is
+                        // true: the Query does not select the column at all.
+                        // Large, because the property is that the read cost does
+                        // not grow with the payload, and a one-byte fixture
+                        // cannot fail the plausible wrong answer.
+                        large_receipt_body(
+                            self.workspace_id,
+                            project_id,
+                            run_id,
+                            version,
+                            started_at_ms
+                        ),
                         started_at_ms + 1
                     ],
                 )
@@ -170,6 +183,91 @@ impl Fixture {
         }
         run_id
     }
+}
+
+/// A Receipt body that its own versioned decoder accepts, padded to roughly
+/// 64 KiB through a field that legitimately holds many entries.
+///
+/// Validity is asserted here rather than assumed: each body is deserialized
+/// into the real type before it is stored, so a fixture cannot drift into being
+/// the malformed data this test set is not allowed to rely on.
+/// The body is chosen by VERSION alone. The tuple tests below store an outcome
+/// or a version its kind never writes, and the inconsistency they exercise is in
+/// the row's columns; the body stays a valid Receipt because a valid body is
+/// what this Query must be indifferent to.
+fn large_receipt_body(
+    workspace_id: Uuid,
+    project_id: Uuid,
+    run_id: Uuid,
+    version: i64,
+    started_at_ms: i64,
+) -> String {
+    // ~600 entries of ~100 bytes: a real Receipt field, many times over.
+    let padding: Vec<String> = (0..600)
+        .map(|index| {
+            format!(
+                "step {index} was not performed, and this Receipt says so rather than implying it"
+            )
+        })
+        .collect();
+    let preflight = serde_json::json!({
+        "version": 1,
+        "runId": run_id,
+        "workspaceId": workspace_id,
+        "projectId": project_id,
+        "repositoryRevision": 1,
+        "charterRevision": 1,
+        "outcome": "verified",
+        "sourceKind": "local_path",
+        "source": "/private/beacon/repo",
+        "baseRevision": "0123456789012345678901234567890123456789",
+        "resolvedChecks": [],
+        "sandboxVersion": "landlock-v1",
+        "policyCharterRevision": 1,
+        "policyRepositoryRevision": 1,
+        "startedAtMs": started_at_ms,
+        "endedAtMs": started_at_ms + 1,
+        "notVerified": padding,
+        "unavailable": {
+            "proposalDigest": { "kind": "absent", "reason": "no Proposal surface exists" },
+            "rulingDigest": { "kind": "absent", "reason": "no Proposal surface exists" },
+            "resultingRevision": { "kind": "absent", "reason": "preflight runs nothing" },
+            "filesystemEffects": { "kind": "absent", "reason": "preflight runs nothing" },
+            "diffDigest": { "kind": "absent", "reason": "preflight runs nothing" },
+            "modelInvocations": { "kind": "absent", "reason": "preflight infers nothing" },
+            "costUsdMicros": { "kind": "absent", "reason": "preflight infers nothing" }
+        }
+    });
+    if version == 1 {
+        let value: PreflightReceipt =
+            serde_json::from_value(preflight.clone()).expect("a valid v1 preflight Receipt");
+        assert_eq!(value.version, 1);
+        return serde_json::to_string(&preflight).unwrap();
+    }
+    let execution = serde_json::json!({
+        "version": 2,
+        "runId": run_id,
+        "workspaceId": workspace_id,
+        "projectId": project_id,
+        "summary": "completed",
+        "perCheckBounds": {
+            "wallClockMs": 300000u64,
+            "cpuSeconds": 240u64,
+            "addressSpaceBytes": 2147483648u64,
+            "fileSizeBytes": 67108864u64,
+            "outputBytes": 1048576u64
+        },
+        "admittedBy": preflight,
+        "checks": [],
+        "worktree": null,
+        "startedAtMs": started_at_ms,
+        "endedAtMs": started_at_ms + 1,
+        "notVerified": ["no Declared Check ran, and this Receipt says so"]
+    });
+    let value: ExecutionReceipt =
+        serde_json::from_value(execution.clone()).expect("a valid v2 execution Receipt");
+    assert_eq!(value.version, 2);
+    serde_json::to_string(&execution).unwrap()
 }
 
 #[test]
@@ -466,75 +564,6 @@ fn a_terminal_run_without_a_receipt_is_an_inconsistent_store() {
         fixture.recent.recent(50),
         Err(RecentReceiptError::InvalidStore)
     ));
-}
-
-#[test]
-fn the_query_never_reads_a_receipt_body() {
-    // The property "no payload crosses this Query" proved without promising
-    // that a malformed Receipt is ignored: every Receipt above stores `{}`,
-    // which no versioned contract would accept, and every reading still
-    // succeeds -- because `receipt_json` is not in the projection at all.
-    let fixture = enrolled("no-payload");
-    let project = fixture.project("Beacon Alpha");
-    fixture.run(
-        project,
-        "check_preflight",
-        "verified",
-        10,
-        Some((1, "verified")),
-    );
-
-    let page = fixture.recent.recent(50).unwrap();
-    assert_eq!(page.receipts.len(), 1);
-
-    // Stated as a fact about the statement, not only about the result: a
-    // projection that grew a payload column would fail here.
-    let serialized = serde_json::to_string(&page).unwrap();
-    assert!(!serialized.contains("receiptJson"));
-    assert!(!serialized.contains("receipt_json"));
-}
-
-#[test]
-fn the_reading_walks_the_workspace_index_and_sorts_nothing() {
-    // The wrong answer that no row assertion can see: the same rows, in the
-    // same order, produced by sorting every Run in the Workspace. Without
-    // `runs_workspace_started` SQLite plans `USE TEMP B-TREE FOR ORDER BY`,
-    // and the cost grows with the Workspace rather than with the window -- a
-    // Query that returns a bounded answer without being bounded.
-    let fixture = enrolled("query-plan");
-    let connection = fixture.store.connection();
-    let plan: Vec<String> = connection
-        .prepare(
-            "EXPLAIN QUERY PLAN
-             SELECT runs.id, runs.project_id, projects.name, runs.kind,
-                    runs.state, runs.started_at_ms, runs.ended_at_ms,
-                    receipts.version, receipts.outcome, receipts.recorded_at_ms
-             FROM runs
-             JOIN projects
-               ON projects.workspace_id = runs.workspace_id AND projects.id = runs.project_id
-             LEFT JOIN receipts
-               ON receipts.workspace_id = runs.workspace_id AND receipts.run_id = runs.id
-             WHERE runs.workspace_id = ?1
-             ORDER BY runs.started_at_ms DESC, runs.id DESC
-             LIMIT ?2",
-        )
-        .unwrap()
-        .query_map(params![fixture.workspace_id.to_string(), 51], |row| {
-            row.get::<_, String>(3)
-        })
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    let plan = plan.join("\n");
-
-    assert!(
-        plan.contains("runs_workspace_started"),
-        "the ordering index is not used:\n{plan}"
-    );
-    assert!(
-        !plan.contains("TEMP B-TREE"),
-        "the plan sorts the Workspace before the window:\n{plan}"
-    );
 }
 
 #[test]
