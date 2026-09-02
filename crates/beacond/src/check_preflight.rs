@@ -754,13 +754,19 @@ pub(crate) fn verify_run_event(
     payload_json: &str,
 ) -> Result<(), RunEventReplayError> {
     let receipt: PreflightReceipt = serde_json::from_str(payload_json)?;
-    if receipt.version != 1 || receipt.ended_at_ms != occurred_at_ms {
+    if receipt.version != 1
+        || receipt.workspace_id != workspace_id
+        || receipt.started_at_ms > receipt.ended_at_ms
+        || receipt.ended_at_ms != occurred_at_ms
+    {
         return Err(RunEventReplayError::EvidenceMismatch);
     }
-    let stored: Option<(i64, String, String, String, String)> = connection
+    let stored: Option<StoredPreflightMetadata> = connection
         .query_row(
             "SELECT receipts.version, receipts.outcome, receipts.receipt_json,
-                    runs.kind, runs.state
+                    receipts.recorded_at_ms, runs.id, runs.project_id,
+                    runs.repository_revision, runs.charter_revision, runs.kind, runs.state,
+                    runs.started_at_ms, runs.ended_at_ms
              FROM receipts
              JOIN runs
                ON runs.workspace_id = receipts.workspace_id
@@ -768,30 +774,69 @@ pub(crate) fn verify_run_event(
              WHERE receipts.workspace_id = ?1 AND receipts.run_id = ?2",
             params![workspace_id.to_string(), receipt.run_id.to_string()],
             |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
+                Ok(StoredPreflightMetadata {
+                    version: row.get(0)?,
+                    outcome: row.get(1)?,
+                    receipt_json: row.get(2)?,
+                    recorded_at_ms: row.get(3)?,
+                    run_id: row.get(4)?,
+                    project_id: row.get(5)?,
+                    repository_revision: row.get(6)?,
+                    charter_revision: row.get(7)?,
+                    kind: row.get(8)?,
+                    state: row.get(9)?,
+                    started_at_ms: row.get(10)?,
+                    ended_at_ms: row.get(11)?,
+                })
             },
         )
         .optional()?;
-    let (stored_version, stored_outcome, stored_json, run_kind, run_state) =
-        stored.ok_or(RunEventReplayError::EvidenceMismatch)?;
-    let stored: PreflightReceipt = serde_json::from_str(&stored_json)?;
-    if stored_version != i64::from(receipt.version)
-        || stored_outcome != receipt.outcome.as_str()
-        || stored_json != payload_json
-        || stored != receipt
+    let metadata = stored.ok_or(RunEventReplayError::EvidenceMismatch)?;
+    let stored_receipt: PreflightReceipt = serde_json::from_str(&metadata.receipt_json)?;
+    let stored_run_id =
+        Uuid::parse_str(&metadata.run_id).map_err(|_| RunEventReplayError::EvidenceMismatch)?;
+    let stored_project_id =
+        Uuid::parse_str(&metadata.project_id).map_err(|_| RunEventReplayError::EvidenceMismatch)?;
+    if metadata.version != i64::from(receipt.version)
+        || metadata.outcome != receipt.outcome.as_str()
+        || metadata.receipt_json.as_bytes() != payload_json.as_bytes()
+        || stored_receipt != receipt
+        || stored_run_id != receipt.run_id
+        || stored_project_id != receipt.project_id
+        || metadata.repository_revision != i64::from(receipt.repository_revision)
+        || metadata.repository_revision != i64::from(receipt.policy_repository_revision)
+        || metadata.charter_revision != i64::from(receipt.charter_revision)
+        || metadata.charter_revision != i64::from(receipt.policy_charter_revision)
+        || u64::try_from(metadata.started_at_ms)
+            .map_err(|_| RunEventReplayError::EvidenceMismatch)?
+            != receipt.started_at_ms
+        || u64::try_from(metadata.ended_at_ms).map_err(|_| RunEventReplayError::EvidenceMismatch)?
+            != receipt.ended_at_ms
+        || u64::try_from(metadata.recorded_at_ms)
+            .map_err(|_| RunEventReplayError::EvidenceMismatch)?
+            != receipt.ended_at_ms
     {
         return Err(RunEventReplayError::EvidenceMismatch);
     }
-    if run_kind != "check_preflight" || run_state != receipt.outcome.run_state() {
+    if metadata.kind != "check_preflight" || metadata.state != receipt.outcome.run_state() {
         return Err(RunEventReplayError::RunStateMismatch);
     }
     Ok(())
+}
+
+struct StoredPreflightMetadata {
+    version: i64,
+    outcome: String,
+    receipt_json: String,
+    recorded_at_ms: i64,
+    run_id: String,
+    project_id: String,
+    repository_revision: i64,
+    charter_revision: i64,
+    kind: String,
+    state: String,
+    started_at_ms: i64,
+    ended_at_ms: i64,
 }
 
 #[cfg(test)]
