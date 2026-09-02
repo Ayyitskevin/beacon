@@ -166,6 +166,12 @@ fn enrolled_v15(
     )
 }
 
+/// Hand-unwinds the store to v15 so a real v15 store can be migrated forward again.
+///
+/// Every schema version added since v15 has to be undone here, newest first: v18's `proposals`
+/// table and the four unique indexes it added to other tables so composite foreign keys could
+/// state Proposal scope, then v17's Sample Project state, then v16's Run and Receipt rebuild.
+/// A version that forgets to unwind leaves objects behind and the schema comparison below fails.
 fn downgrade_execution_schema_to_v15(store_path: &Path) {
     let expected = Connection::open_in_memory().unwrap();
     for migration in [
@@ -237,6 +243,11 @@ fn downgrade_execution_schema_to_v15(store_path: &Path) {
     connection
         .execute_batch(
             "BEGIN IMMEDIATE;
+             DROP TABLE proposals;
+             DROP INDEX project_repository_revisions_charter_base;
+             DROP INDEX project_policy_revisions_charter;
+             DROP INDEX mission_admission_members_configuration;
+             DROP INDEX missions_workspace_project_id;
              DROP TRIGGER sample_project_installations_no_update;
              DROP TRIGGER sample_project_installations_no_delete;
              DROP TABLE sample_project_installations;
