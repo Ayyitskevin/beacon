@@ -867,6 +867,23 @@ fn ruling_chain(
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
 
+    // Three shapes the store already forbids, refused again while the map is built rather than
+    // relied upon. No store state can reach any of them, so no test here can either; each is kept
+    // because this walk must be correct on its own terms, and each names the test that proves the
+    // constraint actually doing the work:
+    //
+    // - a predecessor cited twice (`successor.insert` returning `Some`) is forbidden by
+    //   `ruling_supersessions`' unique index over (workspace, proposal, supersedes_ruling_digest)
+    //   -- `the_store_refuses_a_second_predecessor_and_a_second_supersession`, second half;
+    // - a Ruling citing two predecessors (`cited.insert` returning false) is forbidden by that
+    //   table's primary key -- the same test, first half;
+    // - a predecessor outside this Proposal's Ruling set (`!all.contains`) is forbidden by the
+    //   relation's scoped composite foreign keys --
+    //   `each_composite_foreign_key_independently_refuses_a_cross_proposal_relation`, which
+    //   exercises both ends independently with foreign keys enabled.
+    //
+    // What the store does NOT forbid is the topology: two independent chains, or a cycle. That is
+    // what the head and length checks below refuse, and those are the ones with reachable tests.
     let mut successor: HashMap<String, String> = HashMap::new();
     let mut cited: HashSet<String> = HashSet::new();
     for (superseded, successor_digest) in links {
@@ -1226,6 +1243,12 @@ fn verified_ruling(connection: &Connection, stored: StoredRuling) -> Result<Ruli
     // length-prefixed, so there is no second spelling of one value and no test can reach this
     // refusal. It stays because the day a field becomes optional or a list appears, this is the
     // line that refuses the second spelling before it becomes a permanent second identity.
+    //
+    // The property this leans on is proved directly by `decode_then_encode_is_the_identity`, over
+    // both decisions and both supersession states, with `every_single_byte_of_the_fixture_is_load_bearing`,
+    // `an_unassigned_tag_is_refused_in_every_closed_position`, and
+    // `hostile_stored_bytes_carrying_an_uppercase_base_revision_are_refused_by_the_decoder` closing
+    // the ways a decoded value could differ from the bytes it came from.
     if encode(&payload).map_err(|_| RulingError::InvalidStore)? != stored.canonical_bytes {
         return Err(RulingError::InvalidStore);
     }
