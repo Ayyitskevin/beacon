@@ -1022,6 +1022,20 @@ fn a_wide_slaves_directory_stops_at_the_budget_before_reading_it_all() {
         .collect();
     fixture.slaves(&device, &borrowed);
 
+    // Poison the entry the walk must never reach, in the order read_dir will
+    // actually return -- captured here rather than assumed. Its `dev` becomes a
+    // directory, so reading it fails with a reason no budget stop produces. An
+    // implementation that enumerated past the ceiling and reported the budget
+    // afterwards would still touch this and cannot pass.
+    let slaves = fixture.node(&device).join("slaves");
+    let order: Vec<_> = fs::read_dir(&slaves)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    let poison = order.last().expect("the fan-out has entries").join("dev");
+    fs::remove_file(&poison).unwrap();
+    fs::create_dir(&poison).unwrap();
+
     let report = fixture.read();
 
     assert_eq!(report.state, LiveDataEncryption::Unknown);
