@@ -59,12 +59,10 @@ const useStyles = makeStyles({
  */
 export function LiveDataEncryptionStatus({
   report,
-  failure,
   busy,
   onRecheck,
 }: {
   report: LiveDataEncryptionReport | null;
-  failure: string;
   busy: boolean;
   onRecheck: () => void;
 }) {
@@ -72,32 +70,11 @@ export function LiveDataEncryptionStatus({
   const [showGuide, setShowGuide] = useState(false);
   const [showEvidence, setShowEvidence] = useState(false);
 
-  // A diagnostic that could not run is not a diagnostic that said "encrypted".
-  // Rendering nothing here would hide the failure AND remove the only control
-  // that could retry it.
-  if (!report) {
-    if (!failure) return null;
-    return (
-      <section className={styles.section} aria-labelledby="live-data-encryption-heading">
-        <div className={styles.warning}>
-          <h3 id="live-data-encryption-heading" className={styles.warningHeading}>
-            Live data
-          </h3>
-          <div role="status">
-            <p className={styles.body}>
-              <strong>Disk-encryption status could not be read.</strong> {failure} Beacon does not
-              claim this Installation's live data is encrypted.
-            </p>
-          </div>
-          <div className={styles.actions}>
-            <Button size="small" appearance="secondary" disabled={busy} onClick={onRecheck}>
-              {busy ? "Rechecking…" : "Recheck"}
-            </Button>
-          </div>
-        </div>
-      </section>
-    );
-  }
+  // A reading that has not happened yet renders nothing. A reading that FAILED
+  // arrives as a report whose reason is `initial_read_failed`, so the failure
+  // and the retry go through the same shape and the same renderer as every
+  // other answer -- there is no second surface to keep honest.
+  if (!report) return null;
 
   const guide = encryptionGuide(detectGuidePlatform(navigator.userAgent));
   // Rendered from the closed conclusion, never read as text off the wire.
@@ -107,6 +84,7 @@ export function LiveDataEncryptionStatus({
     ? `${report.mountPoint.value}${report.mountPoint.shortened ? "…" : ""}`
     : null;
   const warned = report.conclusion.state !== "enabled";
+  const failedRead = report.conclusion.reason === "initial_read_failed";
 
   return (
     <section className={styles.section} aria-labelledby="live-data-encryption-heading">
@@ -134,6 +112,14 @@ export function LiveDataEncryptionStatus({
               path to the disk holding this Installation's live data has no operating-system disk
               encryption: {reason}. Beacon does not encrypt the open live store itself. Turn on
               your operating system's disk encryption to protect this data at rest.
+            </p>
+          ) : failedRead ? (
+            // The diagnostic itself did not run. Named apart from an inconclusive
+            // reading, because "Beacon could not determine" reads as an answer
+            // about the volume and this is an answer about the reading.
+            <p className={styles.body}>
+              <strong>Disk-encryption status could not be read.</strong> {reason}. Beacon does not
+              claim this Installation's live data is encrypted.
             </p>
           ) : (
             <p className={styles.body}>
@@ -195,6 +181,12 @@ export function LiveDataEncryptionStatus({
                   {entry.truncated ? " …(shortened)" : ""}
                 </li>
               ))}
+              {report.omittedEvidence > 0 ? (
+                <li className={styles.evidence}>
+                  …and {report.omittedEvidence} further reading
+                  {report.omittedEvidence === 1 ? "" : "s"} this report did not carry
+                </li>
+              ) : null}
             </ul>
             <p className={styles.meta}>Not verified</p>
             <ul className={styles.list}>

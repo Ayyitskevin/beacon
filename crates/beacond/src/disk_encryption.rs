@@ -45,6 +45,9 @@ const MAX_SYSFS_FILE_BYTES: u64 = 4 * 1024;
 const MAX_STACK_DEPTH: usize = 8;
 const MAX_STACK_NODES: usize = 64;
 const MAX_EVIDENCE_ENTRIES: usize = 32;
+/// The fixed caveats a report carries. Bounded here so the adapter can bound
+/// them too, rather than trusting that they stay constants.
+const MAX_NOT_VERIFIED_ENTRIES: usize = 8;
 const MAX_OBSERVATION_CHARS: usize = 200;
 const MAX_CRYPT_TYPE_CHARS: usize = 16;
 /// Path components walked upward when deciding absence from brokenness.
@@ -83,7 +86,7 @@ const NOT_VERIFIED_KEY: &str = "the strength, custody, or current lock state of 
 /// absence of proof.
 ///
 /// `Unknown`: anything unproved — a read that failed, a branch that terminated
-/// at no physical device, a budget spent. `mechanism` carries the reason.
+/// at no physical device, a budget spent. The conclusion's `reason` says which.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LiveDataEncryption {
@@ -95,30 +98,164 @@ pub enum LiveDataEncryption {
 /// One thing Beacon read, and what was there. A later reader re-runs `source`
 /// and compares. Observations are bounded and carry no key material: a crypt
 /// UUID contributes its type prefix only, never the full identifier.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+///
+/// Fields are private and `Deserialize` is checked. Public fields let a caller
+/// -- or the derived deserializer -- build the very value the constructor
+/// exists to prevent, which is how round six broke a type documented as
+/// "bounded by construction" without touching a single string.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EncryptionEvidence {
-    pub source: String,
-    pub observation: String,
+    source: String,
+    observation: String,
+    truncated: bool,
+}
+
+impl EncryptionEvidence {
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub fn observation(&self) -> &str {
+        &self.observation
+    }
+
     /// True when either field was cut. The interface says "(shortened)" from
     /// this flag, never by looking for an ellipsis -- a redaction marker in one
     /// field made a silent truncation in the other look guarded.
-    pub truncated: bool,
+    pub fn truncated(&self) -> bool {
+        self.truncated
+    }
+
+    fn checked(source: String, observation: String, truncated: bool) -> Option<Self> {
+        (is_bounded_text(&source, MAX_OBSERVATION_CHARS)
+            && is_bounded_text(&observation, MAX_OBSERVATION_CHARS))
+        .then_some(Self {
+            source,
+            observation,
+            truncated,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for EncryptionEvidence {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Wire {
+            source: String,
+            observation: String,
+            truncated: bool,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        Self::checked(wire.source, wire.observation, wire.truncated)
+            .ok_or_else(|| serde::de::Error::custom("evidence outside its bound"))
+    }
 }
 
 /// The result of one live reading. Never stored, so every field describes the
 /// host at `observed_at_ms` and nothing else.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LiveDataEncryptionReport {
+    conclusion: LiveDataEncryptionConclusion,
+    mount_point: Option<Subject>,
+    evidence: Vec<EncryptionEvidence>,
+    /// How many readings did not fit. The evidence list is capped like the
+    /// subject list, and a capped list that does not say it was capped is a
+    /// partial answer wearing a complete one.
+    omitted_evidence: u32,
+    not_verified: Vec<String>,
+    observed_at_ms: u64,
+}
+
+impl LiveDataEncryptionReport {
     /// The answer. The sentence an operator reads is rendered from this, never
     /// carried as free text something later has to cut.
-    pub conclusion: LiveDataEncryptionConclusion,
+    pub fn conclusion(&self) -> &LiveDataEncryptionConclusion {
+        &self.conclusion
+    }
+
     /// The volume this report is about, or absent when none was identified.
-    pub mount_point: Option<Subject>,
-    pub evidence: Vec<EncryptionEvidence>,
-    pub not_verified: Vec<String>,
-    pub observed_at_ms: u64,
+    pub fn mount_point(&self) -> Option<&Subject> {
+        self.mount_point.as_ref()
+    }
+
+    pub fn evidence(&self) -> &[EncryptionEvidence] {
+        &self.evidence
+    }
+
+    pub fn omitted_evidence(&self) -> u32 {
+        self.omitted_evidence
+    }
+
+    pub fn not_verified(&self) -> &[String] {
+        &self.not_verified
+    }
+
+    pub fn observed_at_ms(&self) -> u64 {
+        self.observed_at_ms
+    }
+
+    fn checked(
+        conclusion: LiveDataEncryptionConclusion,
+        mount_point: Option<Subject>,
+        evidence: Vec<EncryptionEvidence>,
+        omitted_evidence: u32,
+        not_verified: Vec<String>,
+        observed_at_ms: u64,
+    ) -> Option<Self> {
+        if evidence.len() > MAX_EVIDENCE_ENTRIES || not_verified.len() > MAX_NOT_VERIFIED_ENTRIES {
+            return None;
+        }
+        if !not_verified
+            .iter()
+            .all(|entry| is_bounded_text(entry, MAX_OBSERVATION_CHARS))
+        {
+            return None;
+        }
+        // A volume is named by where it is mounted; any other role here would
+        // be a report this reader could not have produced.
+        if mount_point
+            .as_ref()
+            .is_some_and(|subject| subject.role != SubjectRole::Location)
+        {
+            return None;
+        }
+        Some(Self {
+            conclusion,
+            mount_point,
+            evidence,
+            omitted_evidence,
+            not_verified,
+            observed_at_ms,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for LiveDataEncryptionReport {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Wire {
+            conclusion: LiveDataEncryptionConclusion,
+            mount_point: Option<Subject>,
+            evidence: Vec<EncryptionEvidence>,
+            omitted_evidence: u32,
+            not_verified: Vec<String>,
+            observed_at_ms: u64,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        Self::checked(
+            wire.conclusion,
+            wire.mount_point,
+            wire.evidence,
+            wire.omitted_evidence,
+            wire.not_verified,
+            wire.observed_at_ms,
+        )
+        .ok_or_else(|| serde::de::Error::custom("report outside its bound"))
+    }
 }
 
 /// A value that appears inside a rendered conclusion: a device number, a
@@ -129,14 +266,17 @@ pub struct LiveDataEncryptionReport {
 /// from unbounded parts and then cut -- because every fix bounded the strings
 /// that had overflowed rather than the type that let them in. A conclusion now
 /// holds no strings of its own, so there is nothing left to overflow.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+///
+/// Fields are private and `Deserialize` is checked, because the bound is only
+/// "by construction" if construction is the only door. A public `value: String`
+/// plus a derived deserializer let round six render 482 characters against a
+/// 200-character bound without touching the implementation at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Subject {
-    pub role: SubjectRole,
-    pub value: String,
-    /// True when the value was cut. The interface says so from this flag, never
-    /// by looking for an ellipsis in the text.
-    pub shortened: bool,
+    role: SubjectRole,
+    value: String,
+    shortened: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -155,29 +295,22 @@ pub enum SubjectRole {
 }
 
 impl Subject {
+    pub fn role(&self) -> SubjectRole {
+        self.role
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    /// True when the value was cut. The interface says so from this flag, never
+    /// by looking for an ellipsis in the text.
+    pub fn shortened(&self) -> bool {
+        self.shortened
+    }
+
     fn new(role: SubjectRole, value: &str) -> Self {
-        let cleaned: String = redact_identifiers(value)
-            .chars()
-            .map(|character| {
-                if character.is_control() {
-                    ' '
-                } else {
-                    character
-                }
-            })
-            .collect();
-        let cleaned = cleaned.trim();
-        let shortened = cleaned.chars().count() > MAX_SUBJECT_CHARS;
-        let value = if shortened {
-            cleaned.chars().take(MAX_SUBJECT_CHARS).collect()
-        } else {
-            cleaned.to_owned()
-        };
-        Self {
-            role,
-            value,
-            shortened,
-        }
+        Self::cut(role, &clean(value), Keep::Head)
     }
 
     fn device(device: DeviceNumber) -> Self {
@@ -186,16 +319,73 @@ impl Subject {
 
     /// A path keeps its TAIL, which is the part that says which device it is.
     fn path(path: &Path) -> Self {
-        let text = redact_identifiers(&path.display().to_string());
-        let count = text.chars().count();
+        Self::cut(
+            SubjectRole::Location,
+            &clean(&path.display().to_string()),
+            Keep::Tail,
+        )
+    }
+
+    fn cut(role: SubjectRole, cleaned: &str, keep: Keep) -> Self {
+        let count = cleaned.chars().count();
         if count <= MAX_SUBJECT_CHARS {
-            return Self::new(SubjectRole::Location, &text);
+            return Self {
+                role,
+                value: cleaned.to_owned(),
+                shortened: false,
+            };
         }
+        let window: String = match keep {
+            Keep::Head => cleaned.chars().take(MAX_SUBJECT_CHARS).collect(),
+            Keep::Tail => cleaned.chars().skip(count - MAX_SUBJECT_CHARS).collect(),
+        };
         Self {
-            role: SubjectRole::Location,
-            value: text.chars().skip(count - MAX_SUBJECT_CHARS).collect(),
+            role,
+            // The window is trimmed again: a cut can land on a space, and an
+            // untrimmed value is one the adapter would refuse.
+            value: nonempty(window.trim().to_owned()),
             shortened: true,
         }
+    }
+
+    /// Rebuilds a subject from the wire, refusing anything this module could
+    /// not have produced.
+    fn checked(role: SubjectRole, value: String, shortened: bool) -> Option<Self> {
+        if !is_bounded_text(&value, MAX_SUBJECT_CHARS) {
+            return None;
+        }
+        // A device number is a shape, not free text, and it is short enough
+        // that no constructor ever cuts one: `4294967295:4294967295` is 21
+        // characters against a bound of 24.
+        if role == SubjectRole::Device && (shortened || !is_device_number(&value)) {
+            return None;
+        }
+        Some(Self {
+            role,
+            value,
+            shortened,
+        })
+    }
+}
+
+/// Which end of an over-long value survives the cut.
+enum Keep {
+    Head,
+    Tail,
+}
+
+impl<'de> Deserialize<'de> for Subject {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Wire {
+            role: SubjectRole,
+            value: String,
+            shortened: bool,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        Self::checked(wire.role, wire.value, wire.shortened)
+            .ok_or_else(|| serde::de::Error::custom("subject outside its bound"))
     }
 }
 
@@ -228,34 +418,218 @@ pub enum ReasonCode {
     MappingWithoutBackingDevice,
     LoopbackImage,
     PlatformNotSupported,
+    /// The Query itself did not answer. This module never produces it -- it
+    /// cannot report that it was not reached -- so its one production site is
+    /// the desktop, which builds a report for a rejected `live_data_encryption_
+    /// status` rather than carrying the failure as free text beside a missing
+    /// report. It is declared here because the wire vocabulary is this enum:
+    /// a reason the panel can render and the adapter cannot receive would be
+    /// two vocabularies pretending to be one.
+    InitialReadFailed,
 }
 
 /// The answer, and only the answer: a closed state, a closed reason, and a
 /// bounded list of what the reason is about. No free text.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+///
+/// Private fields and checked deserialization, for the reason `Subject` has
+/// them: a conclusion assembled around the constructor is a conclusion outside
+/// its bound.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LiveDataEncryptionConclusion {
-    pub state: LiveDataEncryption,
-    pub reason: ReasonCode,
-    pub subjects: Vec<Subject>,
+    state: LiveDataEncryption,
+    reason: ReasonCode,
+    subjects: Vec<Subject>,
+    omitted_subjects: u32,
+}
+
+impl LiveDataEncryptionConclusion {
+    pub fn state(&self) -> LiveDataEncryption {
+        self.state
+    }
+
+    pub fn reason(&self) -> ReasonCode {
+        self.reason
+    }
+
+    pub fn subjects(&self) -> &[Subject] {
+        &self.subjects
+    }
+
     /// How many subjects did not fit. A capped list that does not say it was
     /// capped is a partial answer wearing a complete one -- and a count is
     /// bounded by construction where "and N more" spliced into a sentence was
     /// not.
-    pub omitted_subjects: u32,
-}
+    pub fn omitted_subjects(&self) -> u32 {
+        self.omitted_subjects
+    }
 
-impl LiveDataEncryptionConclusion {
-    fn new(state: LiveDataEncryption, reason: ReasonCode, mut subjects: Vec<Subject>) -> Self {
-        let omitted_subjects =
-            u32::try_from(subjects.len().saturating_sub(MAX_SUBJECTS)).unwrap_or(u32::MAX);
-        subjects.truncate(MAX_SUBJECTS);
+    /// Builds a conclusion from every subject the reason is about, keeping at
+    /// least one of each role its sentence names and counting everything that
+    /// did not fit.
+    ///
+    /// Subjects arrive in GROUPS, one per role the caller cares about, and the
+    /// groups are drawn from in turn. Two things follow, and both were defects
+    /// before: no group can spend every slot and leave another role unnamed,
+    /// and nothing is trimmed before the count sees it. `crypt_seen.iter()
+    /// .take(1)` was the second defect exactly -- five subjects became three
+    /// with `omitted_subjects = 0`, which is a capped list claiming it is
+    /// whole.
+    fn new(state: LiveDataEncryption, reason: ReasonCode, groups: Vec<Vec<Subject>>) -> Self {
+        let total: usize = groups.iter().map(Vec::len).sum();
+        let mut queues: Vec<_> = groups.into_iter().map(Vec::into_iter).collect();
+        let mut subjects: Vec<Subject> = Vec::new();
+        loop {
+            let before = subjects.len();
+            for queue in &mut queues {
+                if subjects.len() >= MAX_SUBJECTS {
+                    break;
+                }
+                if let Some(subject) = queue.next() {
+                    subjects.push(subject);
+                }
+            }
+            if subjects.len() == before || subjects.len() >= MAX_SUBJECTS {
+                break;
+            }
+        }
+        debug_assert_eq!(
+            state,
+            state_for(reason),
+            "a state and a reason that disagree are not a conclusion"
+        );
+        debug_assert!(
+            required_roles(reason)
+                .iter()
+                .all(|role| subjects.iter().any(|subject| subject.role == *role)),
+            "{reason:?} renders a role no subject carries"
+        );
         Self {
+            state,
+            reason,
+            omitted_subjects: u32::try_from(total - subjects.len()).unwrap_or(u32::MAX),
+            subjects,
+        }
+    }
+
+    fn checked(
+        state: LiveDataEncryption,
+        reason: ReasonCode,
+        subjects: Vec<Subject>,
+        omitted_subjects: u32,
+    ) -> Option<Self> {
+        if subjects.len() > MAX_SUBJECTS || state != state_for(reason) {
+            return None;
+        }
+        // A conclusion missing a role its own sentence names renders "an
+        // unnamed subject" -- a sentence that says nothing. The renderer keeps
+        // that fallback because it must be total; the wire does not get to use
+        // it.
+        if !required_roles(reason)
+            .iter()
+            .all(|role| subjects.iter().any(|subject| subject.role == *role))
+        {
+            return None;
+        }
+        Some(Self {
             state,
             reason,
             subjects,
             omitted_subjects,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for LiveDataEncryptionConclusion {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Wire {
+            state: LiveDataEncryption,
+            reason: ReasonCode,
+            subjects: Vec<Subject>,
+            omitted_subjects: u32,
         }
+        let wire = Wire::deserialize(deserializer)?;
+        Self::checked(
+            wire.state,
+            wire.reason,
+            wire.subjects,
+            wire.omitted_subjects,
+        )
+        .ok_or_else(|| serde::de::Error::custom("conclusion outside its bound"))
+    }
+}
+
+/// The state a reason means. One direction, so the two can never drift: a
+/// reason IS the answer's shape, and the state is read off it.
+fn state_for(reason: ReasonCode) -> LiveDataEncryption {
+    match reason {
+        ReasonCode::CryptCoversEveryPath => LiveDataEncryption::Enabled,
+        ReasonCode::NoCryptOnAnyPath | ReasonCode::SomePathsUncovered => {
+            LiveDataEncryption::Disabled
+        }
+        _ => LiveDataEncryption::Unknown,
+    }
+}
+
+/// The roles a reason's sentence names, and therefore the roles a conclusion
+/// carrying that reason must have a subject for.
+fn required_roles(reason: ReasonCode) -> &'static [SubjectRole] {
+    match reason {
+        ReasonCode::CryptCoversEveryPath => &[SubjectRole::Mechanism],
+        ReasonCode::NoCryptOnAnyPath => &[SubjectRole::Device],
+        ReasonCode::SomePathsUncovered => &[SubjectRole::Mapping, SubjectRole::Device],
+        ReasonCode::StorePathUnresolved | ReasonCode::InitialReadFailed => &[SubjectRole::Detail],
+        ReasonCode::NoBlockDeviceForFilesystem
+        | ReasonCode::LinkResolvesToNothing
+        | ReasonCode::DeviceUnreadable
+        | ReasonCode::ReadOverBudget
+        | ReasonCode::LoopbackImage => &[SubjectRole::Location],
+        ReasonCode::MappingWithoutBackingDevice => &[SubjectRole::Mapping],
+        _ => &[],
+    }
+}
+
+/// The one definition of "text this module could have produced": non-empty,
+/// trimmed, no control characters, inside its bound. Both halves of the wire
+/// check the same list.
+fn is_bounded_text(value: &str, max: usize) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
+        && value.chars().count() <= max
+}
+
+fn is_device_number(value: &str) -> bool {
+    match value.split_once(':') {
+        Some((major, minor)) => major.parse::<u32>().is_ok() && minor.parse::<u32>().is_ok(),
+        None => false,
+    }
+}
+
+/// Redacted, control-stripped, trimmed -- and never empty. An empty value is a
+/// real observation (the kernel handed back a blank `dm/name`), but an empty
+/// string is one the adapter must refuse, so it is named rather than dropped.
+fn clean(value: &str) -> String {
+    let cleaned: String = redact_identifiers(value)
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    nonempty(cleaned.trim().to_owned())
+}
+
+fn nonempty(value: String) -> String {
+    if value.is_empty() {
+        "(empty)".to_owned()
+    } else {
+        value
     }
 }
 
@@ -266,7 +640,7 @@ impl LiveDataEncryptionConclusion {
 /// desktop renders the same sentence from the same fields; this one is for logs
 /// and for anything that reads a report without an interface.
 pub fn render_conclusion(conclusion: &LiveDataEncryptionConclusion) -> String {
-    let of = |role: SubjectRole| -> String {
+    let subjects_for_role = |role: SubjectRole| -> String {
         let named: Vec<String> = conclusion
             .subjects
             .iter()
@@ -293,20 +667,20 @@ pub fn render_conclusion(conclusion: &LiveDataEncryptionConclusion) -> String {
     let sentence = match conclusion.reason {
         ReasonCode::CryptCoversEveryPath => format!(
             "every path to disk passes through {}",
-            of(SubjectRole::Mechanism)
+            subjects_for_role(SubjectRole::Mechanism)
         ),
         ReasonCode::NoCryptOnAnyPath => format!(
             "at least one path to disk has no crypt layer: {}",
-            of(SubjectRole::Device)
+            subjects_for_role(SubjectRole::Device)
         ),
         ReasonCode::SomePathsUncovered => format!(
             "{} is encrypted; {} is not",
-            of(SubjectRole::Mapping),
-            of(SubjectRole::Device)
+            subjects_for_role(SubjectRole::Mapping),
+            subjects_for_role(SubjectRole::Device)
         ),
         ReasonCode::StorePathUnresolved => format!(
             "the live store path could not be resolved: {}",
-            of(SubjectRole::Detail)
+            subjects_for_role(SubjectRole::Detail)
         ),
         ReasonCode::StoreNotInspectable => "the live store could not be inspected".to_owned(),
         ReasonCode::MountTableUnreadable => "the mount table could not be read".to_owned(),
@@ -330,19 +704,19 @@ pub fn render_conclusion(conclusion: &LiveDataEncryptionConclusion) -> String {
         }
         ReasonCode::NoBlockDeviceForFilesystem => format!(
             "this filesystem ({}) exposes no block device Beacon can inspect",
-            of(SubjectRole::Location)
+            subjects_for_role(SubjectRole::Location)
         ),
         ReasonCode::LinkResolvesToNothing => format!(
             "{} is a link that resolves to nothing",
-            of(SubjectRole::Location)
+            subjects_for_role(SubjectRole::Location)
         ),
         ReasonCode::DeviceUnreadable => format!(
             "a device in the volume's stack could not be read: {}",
-            of(SubjectRole::Location)
+            subjects_for_role(SubjectRole::Location)
         ),
         ReasonCode::ReadOverBudget => format!(
             "{} exceeded Beacon's read budget",
-            of(SubjectRole::Location)
+            subjects_for_role(SubjectRole::Location)
         ),
         ReasonCode::StackOverBudget => {
             "the volume's device stack exceeded Beacon's read budget".to_owned()
@@ -350,13 +724,17 @@ pub fn render_conclusion(conclusion: &LiveDataEncryptionConclusion) -> String {
         ReasonCode::NoPhysicalLeaf => "no physical device terminated the volume's stack".to_owned(),
         ReasonCode::MappingWithoutBackingDevice => format!(
             "mapping {} has no readable backing device",
-            of(SubjectRole::Mapping)
+            subjects_for_role(SubjectRole::Mapping)
         ),
         ReasonCode::LoopbackImage => format!(
             "the volume is a loopback image backed by {}; Beacon does not follow the backing file",
-            of(SubjectRole::Location)
+            subjects_for_role(SubjectRole::Location)
         ),
         ReasonCode::PlatformNotSupported => "not detectable on this platform".to_owned(),
+        ReasonCode::InitialReadFailed => format!(
+            "the disk-encryption reading did not complete: {}",
+            subjects_for_role(SubjectRole::Detail)
+        ),
     };
     format!("{sentence}{more}")
 }
@@ -472,7 +850,7 @@ fn inspect(
 ) -> LiveDataEncryptionReport {
     if !cfg!(target_os = "linux") {
         return unknown(
-            Vec::new(),
+            Readings::default(),
             None,
             Verdict::bare(ReasonCode::PlatformNotSupported),
             observed_at_ms,
@@ -486,7 +864,7 @@ fn inspect_linux(
     system: &SystemView,
     observed_at_ms: u64,
 ) -> LiveDataEncryptionReport {
-    let mut evidence = Vec::new();
+    let mut evidence = Readings::default();
 
     let target = match resolve_target(store_path) {
         Ok(target) => target,
@@ -579,32 +957,30 @@ fn inspect_linux(
     };
 
     match walk_block_stack(system, root, &mut evidence) {
-        Walk::Encrypted { mechanisms } => LiveDataEncryptionReport {
-            conclusion: LiveDataEncryptionConclusion::new(
+        Walk::Encrypted { mechanisms } => report(
+            LiveDataEncryptionConclusion::new(
                 LiveDataEncryption::Enabled,
                 ReasonCode::CryptCoversEveryPath,
-                mechanisms
-                    .iter()
-                    .map(|kind| Subject::new(SubjectRole::Mechanism, kind))
-                    .collect(),
+                vec![
+                    mechanisms
+                        .iter()
+                        .map(|kind| Subject::new(SubjectRole::Mechanism, kind))
+                        .collect(),
+                ],
             ),
             mount_point,
             evidence,
-            not_verified: vec![NOT_VERIFIED_KEY.to_owned()],
+            vec![NOT_VERIFIED_KEY.to_owned()],
             observed_at_ms,
-        },
+        ),
         Walk::UncoveredPath {
             uncovered,
             crypt_seen,
         } => {
-            let mut subjects: Vec<Subject> = crypt_seen
-                .iter()
-                .take(1)
-                .map(|name| Subject::new(SubjectRole::Mapping, name))
-                .collect();
-            // Every uncovered device, not a pre-trimmed few: the conclusion
-            // caps the list and counts what it dropped, so the count is real.
-            subjects.extend(uncovered.iter().map(|device| Subject::device(*device)));
+            // Both lists whole, as two groups. Trimming either one before the
+            // conclusion sees it is how `omitted_subjects` learns to say 0
+            // about a list that lost two entries, and how the mapping the
+            // sentence names can be crowded out by the devices beside it.
             let conclusion = LiveDataEncryptionConclusion::new(
                 LiveDataEncryption::Disabled,
                 if crypt_seen.is_empty() {
@@ -612,7 +988,16 @@ fn inspect_linux(
                 } else {
                     ReasonCode::SomePathsUncovered
                 },
-                subjects,
+                vec![
+                    crypt_seen
+                        .iter()
+                        .map(|name| Subject::new(SubjectRole::Mapping, name))
+                        .collect(),
+                    uncovered
+                        .iter()
+                        .map(|device| Subject::device(*device))
+                        .collect(),
+                ],
             );
             // Name the branches that are not covered in evidence too; a
             // negative nobody can locate is not much better than no answer.
@@ -621,78 +1006,120 @@ fn inspect_linux(
                 system.sys_dev_block.display().to_string(),
                 render_conclusion(&conclusion),
             );
-            LiveDataEncryptionReport {
+            report(
                 conclusion,
                 mount_point,
                 evidence,
-                not_verified: vec![
+                vec![
                     NOT_VERIFIED_OPAL.to_owned(),
                     NOT_VERIFIED_FSCRYPT.to_owned(),
                     NOT_VERIFIED_BELOW_HOST.to_owned(),
                 ],
                 observed_at_ms,
-            }
+            )
         }
         Walk::Undetermined { verdict } => unknown(evidence, mount_point, verdict, observed_at_ms),
     }
 }
 
 fn unknown(
-    evidence: Vec<EncryptionEvidence>,
+    evidence: Readings,
     mount_point: Option<Subject>,
     verdict: Verdict,
     observed_at_ms: u64,
 ) -> LiveDataEncryptionReport {
-    LiveDataEncryptionReport {
-        conclusion: LiveDataEncryptionConclusion::new(
+    report(
+        LiveDataEncryptionConclusion::new(
             LiveDataEncryption::Unknown,
             verdict.reason,
-            verdict.subjects,
+            vec![verdict.subjects],
         ),
         mount_point,
         evidence,
-        not_verified: vec![
+        vec![
             NOT_VERIFIED_OPAL.to_owned(),
             NOT_VERIFIED_FSCRYPT.to_owned(),
             NOT_VERIFIED_BELOW_HOST.to_owned(),
             NOT_VERIFIED_KEY.to_owned(),
         ],
         observed_at_ms,
-    }
+    )
 }
 
-fn record(evidence: &mut Vec<EncryptionEvidence>, source: String, observation: String) {
-    if evidence.len() >= MAX_EVIDENCE_ENTRIES {
+/// The one place a report is assembled. `checked` refuses anything outside the
+/// shape; this module builds only inside it, so a `None` here is a bug in this
+/// module rather than a state an operator can reach -- and it is reported as
+/// one, without a claim about encryption.
+fn report(
+    conclusion: LiveDataEncryptionConclusion,
+    mount_point: Option<Subject>,
+    evidence: Readings,
+    not_verified: Vec<String>,
+    observed_at_ms: u64,
+) -> LiveDataEncryptionReport {
+    let omitted = evidence.omitted;
+    let entries = evidence.entries;
+    LiveDataEncryptionReport::checked(
+        conclusion,
+        mount_point,
+        entries,
+        omitted,
+        not_verified,
+        observed_at_ms,
+    )
+    .unwrap_or_else(|| {
+        debug_assert!(false, "this module built a report outside its own shape");
+        LiveDataEncryptionReport::checked(
+            LiveDataEncryptionConclusion::new(
+                LiveDataEncryption::Unknown,
+                ReasonCode::StoreNotInspectable,
+                Vec::new(),
+            ),
+            None,
+            Vec::new(),
+            0,
+            Vec::new(),
+            observed_at_ms,
+        )
+        .expect("the empty report is inside every bound")
+    })
+}
+
+/// The evidence list and its omission count, kept together so the cap can
+/// never drop a reading silently -- the same rule the conclusion's subjects
+/// follow, in the one other place this module caps a list.
+#[derive(Default)]
+struct Readings {
+    entries: Vec<EncryptionEvidence>,
+    omitted: u32,
+}
+
+fn record(evidence: &mut Readings, source: String, observation: String) {
+    if evidence.entries.len() >= MAX_EVIDENCE_ENTRIES {
+        evidence.omitted = evidence.omitted.saturating_add(1);
         return;
     }
     let (source, source_cut) = bounded(source);
     let (observation, observation_cut) = bounded(observation);
-    evidence.push(EncryptionEvidence {
-        source,
-        observation,
-        truncated: source_cut || observation_cut,
-    });
+    match EncryptionEvidence::checked(source, observation, source_cut || observation_cut) {
+        Some(entry) => evidence.entries.push(entry),
+        // Unreachable: `bounded` produces exactly what `checked` accepts. A
+        // reading that somehow did not is counted rather than dropped, because
+        // a missing line nobody counted is the defect this pair exists to stop.
+        None => evidence.omitted = evidence.omitted.saturating_add(1),
+    }
 }
 
 /// Evidence: redacted, control-stripped, and shortened WITH a marker. A
 /// silently truncated observation reads as the whole value it is a prefix of,
 /// which is the same lie in a smaller place than a truncated conclusion.
 fn bounded(value: String) -> (String, bool) {
-    let cleaned: String = redact_identifiers(&value)
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect();
-    let cleaned = cleaned.trim();
+    let cleaned = clean(&value);
     if cleaned.chars().count() <= MAX_OBSERVATION_CHARS {
-        return (cleaned.to_owned(), false);
+        return (cleaned, false);
     }
-    (cleaned.chars().take(MAX_OBSERVATION_CHARS).collect(), true)
+    let window: String = cleaned.chars().take(MAX_OBSERVATION_CHARS).collect();
+    (nonempty(window.trim().to_owned()), true)
 }
 
 /// Replaces any long hexadecimal run with an ellipsis before it is recorded.
@@ -777,7 +1204,7 @@ fn resolve_target(store_path: &Path) -> Result<PathBuf, Verdict> {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     let parent = store_path
                         .parent()
-                        .ok_or_else(|| Verdict::bare(ReasonCode::StorePathUnresolved))?;
+                        .ok_or_else(|| unresolved("the path has no parent"))?;
                     fs::canonicalize(parent)
                         .map_err(|error| unresolved(&format!("{:?}", error.kind())))
                 }
@@ -988,11 +1415,7 @@ struct Walker<'a> {
     on_path: HashSet<(DeviceNumber, bool)>,
 }
 
-fn walk_block_stack(
-    system: &SystemView,
-    root: DeviceNumber,
-    evidence: &mut Vec<EncryptionEvidence>,
-) -> Walk {
+fn walk_block_stack(system: &SystemView, root: DeviceNumber, evidence: &mut Readings) -> Walk {
     let mut walker = Walker {
         system,
         nodes: 0,
@@ -1028,7 +1451,7 @@ impl Walker<'_> {
         device: DeviceNumber,
         depth: usize,
         crypt_above: bool,
-        evidence: &mut Vec<EncryptionEvidence>,
+        evidence: &mut Readings,
     ) -> Branch {
         let key = (device, crypt_above);
         // Already proved terminated through a readable path: a diamond, not a
@@ -1064,7 +1487,7 @@ impl Walker<'_> {
         device: DeviceNumber,
         depth: usize,
         crypt_above: bool,
-        evidence: &mut Vec<EncryptionEvidence>,
+        evidence: &mut Readings,
     ) -> Branch {
         let node = self.system.sys_dev_block.join(device.to_string());
         match directory_presence(&node) {
@@ -1131,7 +1554,7 @@ impl Walker<'_> {
             // enumerating costs no open, so there is nothing to poison. Bounding
             // the iterator makes the property structural instead.
             let remaining = MAX_STACK_NODES.saturating_sub(self.nodes) + 1;
-            for child in children.take(remaining) {
+            for child in within_budget(children, remaining) {
                 // The budget bounds the work, so it is spent before the work:
                 // one more child means one more device to read and explore, and
                 // asking after the fan-out is enumerated lets a single wide node
@@ -1198,11 +1621,7 @@ impl Walker<'_> {
         Branch::Terminated { uncovered }
     }
 
-    fn read_mapping(
-        &mut self,
-        node: &Path,
-        evidence: &mut Vec<EncryptionEvidence>,
-    ) -> Result<Mapping, Verdict> {
+    fn read_mapping(&mut self, node: &Path, evidence: &mut Readings) -> Result<Mapping, Verdict> {
         let uuid_path = node.join("dm/uuid");
         let uuid = read_required(&uuid_path)?;
         // A mapping with a uuid always has a name beside it. Substituting a
@@ -1350,6 +1769,20 @@ fn presence(path: &Path) -> Result<Presence, Verdict> {
         }
         Err(error) => Err(unreadable_reason(path, error.kind())),
     }
+}
+
+/// Bounds an iterator BEFORE it is consumed.
+///
+/// The distinction this makes is not visible from outside: whether the loop
+/// stops at the ceiling or the iterator does, the same entries are read and the
+/// same verdict comes back. What it forbids is the shape in between -- collect
+/// every `DirEntry`, then check the budget -- which walks a directory of any
+/// size before the ceiling is reported. No fixture can see that, because
+/// enumerating opens nothing, so the proof is a counting test over this
+/// function (`a_bounded_iterator_is_never_pulled_past_its_bound`) plus a return
+/// type that cannot hold a collected `Vec`.
+fn within_budget<I: Iterator>(items: I, remaining: usize) -> std::iter::Take<I> {
+    items.take(remaining)
 }
 
 fn over_stack_budget() -> Verdict {
@@ -1533,32 +1966,258 @@ mod tests {
         );
     }
 
+    /// Every value the PUBLIC type can hold renders inside the bound.
+    ///
+    /// Round six broke the previous version of this property without touching
+    /// the implementation: it exercised the private constructor, which caps
+    /// what it is given, so it could not reach the 400-character subject a
+    /// caller could put in a public field. The fields are private now and
+    /// deserialization is the only public door, so the property goes through
+    /// that door -- at the maximum the shape allows, for every reason, over
+    /// every combination of roles rather than one fixed order.
     #[test]
     fn a_conclusion_cannot_outgrow_its_bound() {
-        // The property the type exists for. Compose the largest conclusion the
-        // shape allows -- every reason, the most subjects, each at its maximum
-        // length -- and every rendered sentence must still fit.
-        let long = "m".repeat(400);
+        let widest = "m".repeat(MAX_SUBJECT_CHARS);
+        let mut checked = 0;
         for reason in EVERY_REASON {
-            let conclusion = LiveDataEncryptionConclusion::new(
-                LiveDataEncryption::Unknown,
-                reason,
-                vec![
-                    Subject::new(SubjectRole::Mechanism, &long),
-                    Subject::new(SubjectRole::Mapping, &long),
-                    Subject::new(SubjectRole::Device, &long),
-                    Subject::new(SubjectRole::Location, &long),
-                    Subject::new(SubjectRole::Detail, &long),
-                ],
-            );
-            assert!(conclusion.subjects.len() <= MAX_SUBJECTS);
-            let rendered = render_conclusion(&conclusion);
+            for combination in 0..EVERY_ROLE.len().pow(MAX_SUBJECTS as u32) {
+                let mut roles = Vec::new();
+                let mut index = combination;
+                for _ in 0..MAX_SUBJECTS {
+                    roles.push(EVERY_ROLE[index % EVERY_ROLE.len()]);
+                    index /= EVERY_ROLE.len();
+                }
+                let subjects: Vec<serde_json::Value> = roles
+                    .iter()
+                    .map(|role| {
+                        // A device is a shape, so its widest legal value is the
+                        // widest device number rather than 24 filler characters.
+                        let value = if *role == SubjectRole::Device {
+                            format!("{}:{}", u32::MAX, u32::MAX)
+                        } else {
+                            widest.clone()
+                        };
+                        serde_json::json!({
+                            "role": serde_json::to_value(role).unwrap(),
+                            "value": value,
+                            "shortened": *role != SubjectRole::Device,
+                        })
+                    })
+                    .collect();
+                let wire = serde_json::json!({
+                    "state": serde_json::to_value(state_for(reason)).unwrap(),
+                    "reason": serde_json::to_value(reason).unwrap(),
+                    "subjects": subjects,
+                    "omittedSubjects": u32::MAX,
+                });
+                let Ok(conclusion) =
+                    serde_json::from_value::<LiveDataEncryptionConclusion>(wire.clone())
+                else {
+                    // Refusing a combination is the other half of the bound:
+                    // a conclusion missing a role its sentence names never
+                    // becomes a rendered "an unnamed subject".
+                    continue;
+                };
+                checked += 1;
+                let rendered = render_conclusion(&conclusion);
+                assert!(
+                    rendered.chars().count() <= MAX_RENDERED_CONCLUSION_CHARS,
+                    "{reason:?} with {roles:?} rendered {} chars: {rendered}",
+                    rendered.chars().count()
+                );
+                assert!(!rendered.is_empty(), "{reason:?} rendered nothing");
+                assert!(
+                    !rendered.contains("an unnamed subject"),
+                    "{reason:?} accepted a conclusion missing a role it names"
+                );
+            }
+        }
+        // A property that silently exercised nothing is not a property.
+        assert!(checked > EVERY_REASON.len(), "only {checked} combinations");
+    }
+
+    /// The public door refuses what the constructors cannot make.
+    #[test]
+    fn the_public_type_refuses_a_conclusion_this_module_could_not_produce() {
+        let ok = serde_json::json!({
+            "state": "unknown",
+            "reason": "loopback_image",
+            "subjects": [{ "role": "location", "value": "/srv/img.raw", "shortened": false }],
+            "omittedSubjects": 0,
+        });
+        assert!(serde_json::from_value::<LiveDataEncryptionConclusion>(ok.clone()).is_ok());
+
+        let refused = |patch: serde_json::Value| {
+            let mut wire = ok.clone();
+            for (key, value) in patch.as_object().unwrap() {
+                wire[key] = value.clone();
+            }
             assert!(
-                rendered.chars().count() <= MAX_RENDERED_CONCLUSION_CHARS,
-                "{reason:?} rendered {} chars",
-                rendered.chars().count()
+                serde_json::from_value::<LiveDataEncryptionConclusion>(wire.clone()).is_err(),
+                "accepted {wire}"
             );
-            assert!(!rendered.is_empty(), "{reason:?} rendered nothing");
+        };
+
+        // The counterexample round six built: one 400-character subject.
+        refused(serde_json::json!({
+            "subjects": [{ "role": "location", "value": "l".repeat(400), "shortened": false }],
+        }));
+        // A state that does not follow from its reason.
+        refused(serde_json::json!({ "state": "enabled" }));
+        // More subjects than the shape allows.
+        refused(serde_json::json!({
+            "subjects": (0..MAX_SUBJECTS + 1)
+                .map(|_| serde_json::json!({ "role": "location", "value": "/x", "shortened": false }))
+                .collect::<Vec<_>>(),
+        }));
+        // A reason whose sentence names a role no subject carries.
+        refused(serde_json::json!({ "subjects": [] }));
+        // A device that is not a device number, and one that claims a cut no
+        // constructor makes.
+        refused(serde_json::json!({
+            "reason": "no_crypt_on_any_path",
+            "state": "disabled",
+            "subjects": [{ "role": "device", "value": "not-a-device", "shortened": false }],
+        }));
+        refused(serde_json::json!({
+            "reason": "no_crypt_on_any_path",
+            "state": "disabled",
+            "subjects": [{ "role": "device", "value": "8:1", "shortened": true }],
+        }));
+        // Untrimmed and control-bearing text.
+        refused(serde_json::json!({
+            "subjects": [{ "role": "location", "value": " /x", "shortened": false }],
+        }));
+        refused(serde_json::json!({
+            "subjects": [{ "role": "location", "value": "/x\u{7}", "shortened": false }],
+        }));
+    }
+
+    /// A report is bounded through the same door.
+    #[test]
+    fn the_public_report_refuses_more_than_it_can_hold() {
+        let entry = serde_json::json!({
+            "source": "stat(live store)",
+            "observation": "st_dev = 259:2",
+            "truncated": false,
+        });
+        let ok = serde_json::json!({
+            "conclusion": {
+                "state": "unknown",
+                "reason": "mount_table_empty",
+                "subjects": [],
+                "omittedSubjects": 0,
+            },
+            "mountPoint": { "role": "location", "value": "/", "shortened": false },
+            "evidence": [entry.clone()],
+            "omittedEvidence": 0,
+            "notVerified": [NOT_VERIFIED_KEY],
+            "observedAtMs": 1_756_000_000_000u64,
+        });
+        assert!(serde_json::from_value::<LiveDataEncryptionReport>(ok.clone()).is_ok());
+
+        // The maximum report the shape allows is ACCEPTED: every evidence slot
+        // filled, both fields at their bound, every caveat present.
+        let widest = serde_json::json!({
+            "source": "s".repeat(MAX_OBSERVATION_CHARS),
+            "observation": "o".repeat(MAX_OBSERVATION_CHARS),
+            "truncated": true,
+        });
+        let mut largest = ok.clone();
+        largest["evidence"] = serde_json::json!(
+            (0..MAX_EVIDENCE_ENTRIES)
+                .map(|_| widest.clone())
+                .collect::<Vec<_>>()
+        );
+        largest["omittedEvidence"] = serde_json::json!(u32::MAX);
+        largest["notVerified"] = serde_json::json!(
+            (0..MAX_NOT_VERIFIED_ENTRIES)
+                .map(|_| NOT_VERIFIED_KEY)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            serde_json::from_value::<LiveDataEncryptionReport>(largest).is_ok(),
+            "the largest report inside the shape must be readable"
+        );
+
+        let refused = |patch: serde_json::Value| {
+            let mut wire = ok.clone();
+            for (key, value) in patch.as_object().unwrap() {
+                wire[key] = value.clone();
+            }
+            assert!(
+                serde_json::from_value::<LiveDataEncryptionReport>(wire.clone()).is_err(),
+                "accepted a report with {patch}"
+            );
+        };
+        refused(serde_json::json!({
+            "evidence": (0..MAX_EVIDENCE_ENTRIES + 1).map(|_| entry.clone()).collect::<Vec<_>>(),
+        }));
+        refused(serde_json::json!({
+            "evidence": [{ "source": "s", "observation": "o".repeat(201), "truncated": true }],
+        }));
+        refused(serde_json::json!({
+            "notVerified": (0..MAX_NOT_VERIFIED_ENTRIES + 1).map(|_| NOT_VERIFIED_KEY).collect::<Vec<_>>(),
+        }));
+        // A volume is named by where it is mounted, never by a device.
+        refused(serde_json::json!({
+            "mountPoint": { "role": "device", "value": "8:1", "shortened": false },
+        }));
+    }
+
+    /// Every reason a walk can reach carries the roles its own sentence names.
+    #[test]
+    fn every_reason_declares_the_roles_it_renders() {
+        for reason in EVERY_REASON {
+            let named: Vec<SubjectRole> = EVERY_ROLE
+                .into_iter()
+                .filter(|role| {
+                    let with = LiveDataEncryptionConclusion {
+                        state: state_for(reason),
+                        reason,
+                        subjects: vec![Subject::new(*role, "sentinel-value")],
+                        omitted_subjects: 0,
+                    };
+                    render_conclusion(&with).contains("sentinel-value")
+                })
+                .collect();
+            let declared = required_roles(reason);
+            assert!(
+                named.len() == declared.len() && declared.iter().all(|role| named.contains(role)),
+                "{reason:?} renders {named:?} but declares {declared:?}"
+            );
+        }
+    }
+
+    /// The bound is on CONSUMPTION, not on the loop that happens to stop first.
+    #[test]
+    fn a_bounded_iterator_is_never_pulled_past_its_bound() {
+        for remaining in [0usize, 1, 7, 64] {
+            let mut pulls = 0;
+            let counted = (0..1_000).inspect(|_| pulls += 1);
+            let taken: Vec<i32> = within_budget(counted, remaining).collect();
+            assert_eq!(taken.len(), remaining);
+            assert_eq!(
+                pulls, remaining,
+                "a bound of {remaining} pulled {pulls} entries"
+            );
+        }
+    }
+
+    /// The fallback in `report` is unreachable only while the fixed caveats fit
+    /// the bound the report checks them against. Checked, not assumed.
+    #[test]
+    fn every_fixed_caveat_is_inside_the_bound_the_report_checks() {
+        for caveat in [
+            NOT_VERIFIED_OPAL,
+            NOT_VERIFIED_FSCRYPT,
+            NOT_VERIFIED_BELOW_HOST,
+            NOT_VERIFIED_KEY,
+        ] {
+            assert!(
+                is_bounded_text(caveat, MAX_OBSERVATION_CHARS),
+                "{caveat:?} is outside the bound a report checks its caveats against"
+            );
         }
     }
 
@@ -1572,7 +2231,15 @@ mod tests {
         assert_eq!(long.value.chars().count(), MAX_SUBJECT_CHARS);
     }
 
-    const EVERY_REASON: [ReasonCode; 23] = [
+    const EVERY_ROLE: [SubjectRole; 5] = [
+        SubjectRole::Device,
+        SubjectRole::Mapping,
+        SubjectRole::Mechanism,
+        SubjectRole::Location,
+        SubjectRole::Detail,
+    ];
+
+    const EVERY_REASON: [ReasonCode; 24] = [
         ReasonCode::CryptCoversEveryPath,
         ReasonCode::NoCryptOnAnyPath,
         ReasonCode::SomePathsUncovered,
@@ -1596,5 +2263,6 @@ mod tests {
         ReasonCode::MappingWithoutBackingDevice,
         ReasonCode::LoopbackImage,
         ReasonCode::PlatformNotSupported,
+        ReasonCode::InitialReadFailed,
     ];
 }
