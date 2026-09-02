@@ -473,9 +473,8 @@ fn bounded_text(value: String) -> String {
                 character
             }
         })
-        .take(MAX_OBSERVATION_CHARS)
         .collect();
-    cleaned.trim().to_owned()
+    shorten(cleaned.trim(), MAX_OBSERVATION_CHARS)
 }
 
 /// A conclusion: redacted and stripped of control characters like evidence, but
@@ -496,6 +495,9 @@ fn conclusion(value: String) -> String {
         .to_owned()
 }
 
+/// Evidence: redacted, control-stripped, and shortened WITH a marker. A
+/// silently truncated observation reads as the whole value it is a prefix of,
+/// which is the same lie in a smaller place than a truncated conclusion.
 fn bounded(value: String) -> String {
     let cleaned: String = redact_identifiers(&value)
         .chars()
@@ -822,11 +824,12 @@ fn walk_block_stack(
     match walker.explore(root, 0, false, evidence) {
         Branch::Undetermined { reason } => Walk::Undetermined { reason },
         Branch::Terminated { uncovered } if uncovered.is_empty() => Walk::Encrypted {
-            mechanism: walker
-                .crypt_kinds
-                .into_iter()
-                .collect::<Vec<_>>()
-                .join(", "),
+            // Every component of a conclusion is bounded, including this one:
+            // a stack can carry more crypt types than a sentence can name.
+            mechanism: summarize(
+                &walker.crypt_kinds.into_iter().collect::<Vec<_>>(),
+                MAX_MAPPINGS_IN_REASON,
+            ),
         },
         Branch::Terminated { uncovered } => Walk::UncoveredPath {
             uncovered,
@@ -988,7 +991,10 @@ impl Walker<'_> {
             return match mapping {
                 // A mapping with no backing device is an unread stack.
                 Some(found) => Branch::Undetermined {
-                    reason: format!("mapping {} has no readable backing device", found.name),
+                    reason: format!(
+                        "mapping {} has no readable backing device",
+                        shorten(&found.name, MAX_NAME_IN_REASON)
+                    ),
                 },
                 // A real disk or partition: the only thing that terminates a branch.
                 None => Branch::Terminated {
@@ -1220,7 +1226,7 @@ fn shorten_path(path: &Path) -> String {
 }
 
 fn over_budget(path: &Path) -> String {
-    format!("{} exceeded Beacon's read budget", path.display())
+    format!("{} exceeded Beacon's read budget", shorten_path(path))
 }
 
 /// Reads one bounded value, and can tell a complete read from a truncated one.
