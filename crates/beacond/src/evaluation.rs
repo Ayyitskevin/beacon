@@ -25,7 +25,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 
-use data_encoding::HEXLOWER;
+use data_encoding::{BASE64, HEXLOWER};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use uuid::Uuid;
 
@@ -859,6 +859,37 @@ fn decode(input: &[u8]) -> Result<EvaluationV1, MalformedEvaluation> {
 // Storage
 // ---------------------------------------------------------------------------------------------
 
+/// The audit Event's payload, as a CLOSED type rather than an open `serde_json::Value`.
+///
+/// `deny_unknown_fields` is the point: an Event carrying an extra field is refused rather than
+/// ignored, so a payload nobody wrote cannot ride alongside one Beacon did. It carries the exact
+/// canonical bytes, because an Event that names a digest can only be checked against the row it
+/// names -- and then the Event proves nothing the row does not already say.
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct RecordedEvaluation {
+    digest: EvaluationDigestPayload,
+    /// The exact canonical bytes, as canonical RFC 4648 padded base64.
+    canonical_bytes_base64: String,
+    proposal_digest: String,
+    verdict: String,
+    evaluated_at_ms: u64,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct EvaluationDigestPayload {
+    algorithm: String,
+    canonicalizer: String,
+    value: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct EvaluationRecordedPayload {
+    evaluation: RecordedEvaluation,
+}
+
 struct StoredEvaluation {
     workspace_id: Uuid,
     digest_value: String,
@@ -935,18 +966,20 @@ fn insert_evaluation(
             ],
         )?;
     }
-    let event = serde_json::json!({
-        "evaluation": {
-            "digest": {
-                "algorithm": DIGEST_ALGORITHM,
-                "canonicalizer": CANONICALIZER,
-                "value": stored.digest_value,
+    let event = serde_json::to_string(&EvaluationRecordedPayload {
+        evaluation: RecordedEvaluation {
+            digest: EvaluationDigestPayload {
+                algorithm: DIGEST_ALGORITHM.to_owned(),
+                canonicalizer: CANONICALIZER.to_owned(),
+                value: stored.digest_value.clone(),
             },
-            "proposal_digest": stored.payload.proposal.value,
-            "verdict": stored.payload.verdict.as_str(),
-        }
+            canonical_bytes_base64: BASE64.encode(&stored.canonical_bytes),
+            proposal_digest: stored.payload.proposal.value.clone(),
+            verdict: stored.payload.verdict.as_str().to_owned(),
+            evaluated_at_ms: stored.payload.evaluated_at_ms,
+        },
     })
-    .to_string();
+    .map_err(|_| EvaluationError::InvalidStore)?;
     connection.execute(
         "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
          VALUES (?1, 'evaluation.recorded', ?2, ?3)",
@@ -1319,16 +1352,23 @@ pub(crate) fn verify_evaluation_state(connection: &Connection) -> Result<(), Eva
             Uuid::parse_str(&workspace).map_err(|_| EvaluationError::InvalidStore)?;
         let digest_value = row.digest_value.clone();
         verified_evaluation(connection, workspace_id, row)?;
-        let event_count: i64 = connection.query_row(
-            "SELECT count(*) FROM events
-             WHERE workspace_id = ?1 AND kind = 'evaluation.recorded'
-               AND json_extract(payload_json, '$.evaluation.digest.value') = ?2",
-            params![workspace, digest_value.as_str()],
-            |row| row.get(0),
-        )?;
-        if event_count != 1 {
+        let events: Vec<(String, i64)> = connection
+            .prepare(
+                "SELECT payload_json, occurred_at_ms FROM events
+                 WHERE workspace_id = ?1 AND kind = 'evaluation.recorded'
+                   AND json_extract(payload_json, '$.evaluation.digest.value') = ?2",
+            )?
+            .query_map(params![workspace, digest_value.as_str()], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
+            .collect::<Result<_, _>>()?;
+        // Exactly one, and it must bind the exact bytes -- not merely quote the digest.
+        let [(payload_json, occurred_at_ms)] = events.as_slice() else {
             return Err(EvaluationError::InvalidStore);
-        }
+        };
+        let occurred_at_ms =
+            u64::try_from(*occurred_at_ms).map_err(|_| EvaluationError::InvalidStore)?;
+        verify_evaluation_event(connection, workspace_id, occurred_at_ms, payload_json)?;
     }
 
     // No Event may name an Evaluation that is not stored.
@@ -1358,29 +1398,42 @@ pub(crate) fn verify_evaluation_event(
     occurred_at_ms: u64,
     payload_json: &str,
 ) -> Result<(), EvaluationError> {
-    let payload: serde_json::Value =
+    // Strictly typed and closed: an extra or renamed field is refused here, not ignored.
+    let payload: EvaluationRecordedPayload =
         serde_json::from_str(payload_json).map_err(|_| EvaluationError::InvalidStore)?;
-    let digest_value = payload
-        .pointer("/evaluation/digest/value")
-        .and_then(serde_json::Value::as_str)
+    let recorded = payload.evaluation;
+    if recorded.digest.algorithm != DIGEST_ALGORITHM
+        || recorded.digest.canonicalizer != CANONICALIZER
+        || recorded.evaluated_at_ms != occurred_at_ms
+    {
+        return Err(EvaluationError::InvalidStore);
+    }
+    let canonical_bytes = BASE64
+        .decode(recorded.canonical_bytes_base64.as_bytes())
+        .map_err(|_| EvaluationError::InvalidStore)?;
+    // Canonical base64: a second spelling of the same bytes is refused rather than folded.
+    if BASE64.encode(&canonical_bytes) != recorded.canonical_bytes_base64 {
+        return Err(EvaluationError::InvalidStore);
+    }
+    if HEXLOWER.encode(&sha256(&canonical_bytes)) != recorded.digest.value {
+        return Err(EvaluationError::InvalidStore);
+    }
+    let row = load_row(connection, workspace_id, &recorded.digest.value)?
         .ok_or(EvaluationError::InvalidStore)?;
-    let row = load_row(connection, workspace_id, digest_value)?.ok_or(EvaluationError::NotFound)?;
+    // Byte-for-byte against the row. Stated honestly: with both sides independently proved to
+    // hash to the same digest above and in `verified_evaluation`, this cannot currently fail
+    // short of a SHA-256 collision -- removing it leaves every test green, and I checked. It is
+    // kept because it is the invariant, not the detector: what makes the Event evidence rather
+    // than a pointer is that it CARRIES the bytes, and the day a digest field becomes optional or
+    // a second canonicalizer appears, this is the line that still holds.
+    if row.canonical_bytes != canonical_bytes {
+        return Err(EvaluationError::InvalidStore);
+    }
     let evaluation = verified_evaluation(connection, workspace_id, row)?;
-    if evaluation.payload.evaluated_at_ms != occurred_at_ms {
-        return Err(EvaluationError::InvalidStore);
-    }
-    let named_proposal = payload
-        .pointer("/evaluation/proposal_digest")
-        .and_then(serde_json::Value::as_str)
-        .ok_or(EvaluationError::InvalidStore)?;
-    if named_proposal != evaluation.payload.proposal.value {
-        return Err(EvaluationError::InvalidStore);
-    }
-    let named_verdict = payload
-        .pointer("/evaluation/verdict")
-        .and_then(serde_json::Value::as_str)
-        .ok_or(EvaluationError::InvalidStore)?;
-    if named_verdict != evaluation.payload.verdict.as_str() {
+    if evaluation.payload.evaluated_at_ms != occurred_at_ms
+        || recorded.proposal_digest != evaluation.payload.proposal.value
+        || recorded.verdict != evaluation.payload.verdict.as_str()
+    {
         return Err(EvaluationError::InvalidStore);
     }
     Ok(())
