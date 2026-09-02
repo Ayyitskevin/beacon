@@ -733,8 +733,9 @@ fn the_entries_follow_the_proposals_mutation_order_and_not_its_sorted_paths() {
 
 #[test]
 fn a_second_candidate_for_one_proposal_is_refused_by_the_store() {
-    // The uniqueness rule is the whole reason a Candidate is authority-bearing: two sets of
-    // post-image digests for one decision would make "the bytes the Operator ruled on" ambiguous.
+    // Uniqueness is what makes the byte selection determinate: two sets of post-image digests for
+    // one Proposal would leave "which bytes" with no answer. It is not what makes it authorized --
+    // that is Ruling v2, which binds this record's digest.
     let fixture = admitted_mission("unique");
     let proposal_digest = fixture.submit("Add a regression test for the invariant checker.");
     let first = fixture
@@ -1185,5 +1186,164 @@ fn a_candidate_read_for_use_proves_the_copy_rule_too() {
     assert!(
         matches!(outcome, Err(CandidateError::InvalidStore)),
         "entries that no longer match their Proposal were handed out for use: {outcome:?}"
+    );
+}
+
+#[test]
+fn a_candidate_larger_than_the_envelope_is_refused_by_the_codec_not_by_the_store() {
+    // gpt1's P0. Per-field limits do not bound a record: a legal sub-64-KiB Proposal with enough
+    // declared mutations expands into a Candidate that exceeds the envelope ADR 0039 promises,
+    // because every entry adds a path plus 66 bytes of images. The refusal must be the codec's and
+    // must name the envelope -- reporting a length failure as "already recorded" sent a caller to
+    // look for a Candidate that does not exist.
+    let fixture = admitted_mission("over-envelope");
+    let mut record = fixture.proposal("Rewrite every module header in one pass.");
+    // Short paths on purpose: the Proposal spends 2*len + 17 bytes per target and the Candidate
+    // spends len + 75, so the two envelopes are crossed at different counts. 800 nine-byte paths
+    // is ~28 KiB of Proposal and just over 64 KiB of Candidate.
+    record.mutations = (0..800)
+        .map(|index| (MUTATION_MODIFY, format!("s/f{index:03}.rs")))
+        .collect();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    let images = vec![
+        CandidateImages {
+            pre_image_sha256: Some([0x11; 32]),
+            post_image_sha256: Some([0x22; 32]),
+        };
+        800
+    ];
+
+    let refusal = fixture
+        .candidates
+        .record(&proposal.digest().value, &images)
+        .unwrap_err();
+
+    assert_eq!(
+        malformed(&refusal),
+        Some(MalformedCandidate::OverLimitLength),
+        "an over-envelope Candidate was not refused by the codec: {refusal:?}"
+    );
+    assert_eq!(fixture.candidate_rows(), 0);
+    assert_eq!(fixture.candidate_events(), 0);
+
+    // The positive control: the same Proposal shape, small enough to fit, records normally. Without
+    // it, a codec that refused everything would pass the assertion above.
+    let fixture = admitted_mission("under-envelope");
+    let mut record = fixture.proposal("Rewrite a few module headers.");
+    record.mutations = (0..200)
+        .map(|index| (MUTATION_MODIFY, format!("s/f{index:03}.rs")))
+        .collect();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    let images = vec![
+        CandidateImages {
+            pre_image_sha256: Some([0x11; 32]),
+            post_image_sha256: Some([0x22; 32]),
+        };
+        200
+    ];
+    let candidate = fixture
+        .candidates
+        .record(&proposal.digest().value, &images)
+        .unwrap();
+    assert!(candidate.canonical_bytes().len() <= 65_536);
+    assert_eq!(fixture.candidate_rows(), 1);
+}
+
+#[test]
+fn a_row_whose_bytes_were_swapped_for_another_valid_candidate_fails_startup() {
+    // gpt1's P1: removing the stored-byte SHA-256 comparison left every test green, because the
+    // one tampering test that changed bytes also changed `digest_value` to match. This is the
+    // shape that needs the hash: the row keeps its digest and its columns stay self-consistent,
+    // and only the bytes are another well-formed Candidate's.
+    let fixture = admitted_mission("swapped-bytes");
+    let proposal_digest = fixture.submit("Add a regression test for the invariant checker.");
+    let candidate = fixture
+        .candidates
+        .record(&proposal_digest, &default_images())
+        .unwrap();
+
+    // A different, entirely valid record for the same Proposal: same entries, different images.
+    let mut other = expected_record(&proposal_digest, candidate.payload().recorded_at_ms);
+    other.entries[0].3 = Some([0x99; 32]);
+    let other_bytes = other.bytes();
+    assert_ne!(other_bytes, candidate.canonical_bytes());
+    assert_ne!(other.digest(), candidate.digest().value);
+
+    // The bytes move in the row AND in its Event, so the two still agree with each other and every
+    // indexed column still describes them: entry count, base revision, Proposal digest and recorded
+    // time are identical between the two records. The ONLY thing left that can notice is that the
+    // digest no longer names these bytes.
+    let event_payload = serde_json::json!({
+        "candidate": {
+            "digest": {
+                "algorithm": "sha256",
+                "canonicalizer": "beacon.candidate.v1",
+                "value": candidate.digest().value,
+            },
+            "canonicalBytesBase64": BASE64.encode(&other_bytes),
+            "actor": "owner",
+            "recordedAtMs": candidate.payload().recorded_at_ms,
+        }
+    })
+    .to_string();
+    fixture.tamper(&format!(
+        "UPDATE candidates SET canonical_bytes = X'{}' WHERE digest_value = '{}';
+         UPDATE events SET payload_json = '{}' WHERE kind = 'proposal.candidate_recorded';",
+        HEXLOWER.encode(&other_bytes),
+        candidate.digest().value,
+        event_payload.replace('\'', "''")
+    ));
+
+    let outcome = fixture.restart();
+    assert!(
+        matches!(
+            outcome,
+            Err(SupervisorError::CandidateStateMismatch
+                | SupervisorError::CandidateEventMismatch(_))
+        ),
+        "bytes swapped for another valid Candidate started: {outcome:?}"
+    );
+}
+
+#[test]
+fn an_event_whose_digest_names_no_candidate_is_refused_by_the_replay() {
+    // gpt1's P1: the test that claimed this actually duplicated an Event for an existing
+    // Candidate, which the per-Candidate count rule catches on its own. This is a TRUE orphan --
+    // an Event naming a digest no row carries -- and running it settles which guard fires: the
+    // startup replay reaches every event row and `verify_candidate_event` cannot load a record for
+    // this one. The whole-table count in `verify_candidate_state` is therefore unreachable today,
+    // and says so in its own comment rather than being claimed as this test's subject.
+    let fixture = admitted_mission("true-orphan");
+    let proposal_digest = fixture.submit("Add a regression test for the invariant checker.");
+    let candidate = fixture
+        .candidates
+        .record(&proposal_digest, &default_images())
+        .unwrap();
+
+    let orphan = serde_json::json!({
+        "candidate": {
+            "digest": {
+                "algorithm": "sha256",
+                "canonicalizer": "beacon.candidate.v1",
+                "value": "f".repeat(64),
+            },
+            "canonicalBytesBase64": BASE64.encode(candidate.canonical_bytes()),
+            "actor": "owner",
+            "recordedAtMs": candidate.payload().recorded_at_ms,
+        }
+    })
+    .to_string();
+    fixture.tamper(&format!(
+        "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+         VALUES ('{}', 'proposal.candidate_recorded', '{}', {})",
+        fixture.workspace_id,
+        orphan.replace('\'', "''"),
+        candidate.payload().recorded_at_ms
+    ));
+
+    let outcome = fixture.restart();
+    assert!(
+        matches!(outcome, Err(SupervisorError::CandidateEventMismatch(_))),
+        "an Event naming no Candidate started: {outcome:?}"
     );
 }
