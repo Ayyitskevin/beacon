@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Bind a Ruling to one Proposal digest and the policy version it was ruled under
