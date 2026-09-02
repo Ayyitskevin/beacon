@@ -784,7 +784,6 @@ export async function recentReceipts(window: number): Promise<RecentReceiptPage>
   );
 }
 
-
 export async function loadTeams(projectId: string): Promise<TeamView[]> {
   return invokeAndValidate("teams", { projectId }, isTeamList, "Team list");
 }
@@ -1777,7 +1776,6 @@ function isRenderableInstant(value: unknown): value is number {
     value <= MAX_TIME_VALUE
   );
 }
-
 
 function isProjectRepositoryOrNull(value: unknown): value is ProjectRepository | null {
   return value === null || isProjectRepository(value);
