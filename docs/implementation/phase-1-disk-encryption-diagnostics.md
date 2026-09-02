@@ -19,18 +19,36 @@ to 200 characters, stripped of control characters, and capped at 32 entries.
 
 ## The rule
 
-`enabled` means the walk completed, every node was readable, and **every** leaf — every physical
-device the volume rests on — was reached through a `CRYPT-` layer. `disabled` means the walk
-completed, every node was readable, and at least one leaf path had no crypt layer; the report names
-those devices. Any read, metadata, or budget failure anywhere is `unknown`, with the path in the
-reason. No read failure can produce `enabled` or `disabled`.
+A **physical leaf** is a node with no `dm/` directory and no parents: a real disk or partition. A
+device-mapper node with no parents is *not* a leaf — it is a mapping whose backing device Beacon
+never saw, which is an unread stack rather than an encrypted one, and real LUKS never looks like
+that.
+
+`enabled` means every branch terminated at a physical leaf, every node was readable, and **every**
+one of those paths passed through a `CRYPT-` layer. `disabled` means every branch terminated at a
+physical leaf, every node was readable, and at least one of those paths had no crypt layer; the
+report names those devices. Any read, metadata, or budget failure anywhere is `unknown`, with the
+path in the reason. No read failure can produce `enabled` or `disabled`.
 
 A crypt layer is a fact about one path, never a verdict about the volume. A crypt layer **above** a
 plain leaf covers that leaf; one on a **sibling** branch does not. A logical volume over one LUKS
 member and one plain member has half its extents in the clear and reports `disabled`.
 
-If nothing terminates the stack, "every leaf is covered" is true of no leaves. That vacuous truth is
-`unknown`, not `enabled`.
+Termination is proved **per branch**, not counted globally. A branch that ends in a cycle, a budget
+stop, an unreadable node, or a mapping with no backing device makes the whole answer `unknown` — a
+sibling that finished, encrypted, proves nothing about the branch that did not. If nothing
+terminates the stack, "every leaf is covered" is true of no leaves, and that vacuous truth is
+`unknown` too.
+
+**Broken is not absent, anywhere.** `NotFound` is believed only when it is corroborated: a store
+whose `canonicalize` says `NotFound` is absent only if `symlink_metadata` agrees, and a `slaves`
+directory is absent only if `symlink_metadata` never saw the link. A link that resolves to nothing
+is an error at both.
+
+The `disabled` reason says what was found rather than denying it: "at least one path to disk has no
+crypt layer: 259:2", or "pv0 is encrypted; 8:17 is not" when a crypt layer was observed on another
+branch. An operator who can see `CRYPT-LUKS2` in the same report's evidence and reads "found no
+encryption" does not conclude the report is subtle.
 
 `disabled` ships with a `notVerified` list naming what the reading could not see: drive-firmware
 (OPAL/SED) encryption, filesystem-level encryption such as fscrypt or ext4 encryption, and
@@ -39,8 +57,9 @@ encryption applied beneath this host.
 ## What is read, in order
 
 1. `canonicalize` the store path, falling back to its parent directory **only** when that fails
-   with `NotFound` — the store does not exist before first open. Any other error describes a store
-   that is there and could not be resolved; substituting its parent would answer about a different
+   with `NotFound` **and** `symlink_metadata` agrees the entry is not there — the store does not
+   exist before first open. Any other error, and a link whose target is gone, describes a store that
+   is there and could not be resolved; substituting its parent would answer about a different
    subject, so it is reported instead.
 2. `stat` it for `st_dev`, decoded with `libc::major`/`libc::minor` rather than an open-coded shift.
 3. `/proc/self/mountinfo`, parsed per `proc_pid_mountinfo(5)`: six fixed fields, a variable run of
@@ -50,13 +69,15 @@ encryption applied beneath this host.
    shadows an earlier one at the same point.
 4. Corroboration: when `st_dev` names a real block device, it must equal the selected entry's
    device. A disagreement is `unknown`, not a confident answer about the wrong volume.
-5. `/sys/dev/block/<major>:<minor>/`, walking `slaves/` breadth-first to every leaf, reading
+5. `/sys/dev/block/<major>:<minor>/`, walking `slaves/` depth-first to every physical leaf, reading
    `dm/uuid`, `dm/name`, and `loop/backing_file`. Each branch carries whether a crypt layer has
-   been seen on the path to it, and the visited set is keyed on the device **and** that flag: the
-   same disk can be reached by a covered and an uncovered path, and pruning the second visit is how
-   a plain branch would disappear.
+   been seen on the path to it. The memo of settled branches is keyed on the device **and** that
+   flag — the same disk can be reached by a covered and an uncovered path, and pruning the second
+   visit is how a plain branch would disappear — and it holds only branches already *proved
+   terminated*, so a diamond is reused while a device found on the current path is a cycle and
+   terminates nothing.
 
-Presence is a three-way answer everywhere, never a boolean: `NotFound` is absence, any other
+Presence is a three-way answer everywhere, never a boolean: corroborated `NotFound` is absence, any other
 metadata error is a reason. Directory checks follow symlinks deliberately — every entry under
 `/sys/dev/block` is a symlink to the real device directory — so a link that resolves to nothing is
 an error, not an absence. `slaves` uses `read_dir` itself as the presence check. Both budgeted reads
@@ -94,7 +115,11 @@ on the way in, closing every door at once rather than one per source.
 
 One closed report crosses the Rust service, the authenticated Unix socket, the Tauri command, and
 the strict TypeScript adapter, which re-checks the three states, the bounded text, the evidence
-count, and that only `enabled` names a mechanism. No new `LocalErrorCode` and no new
+count, and that only `enabled` names a mechanism. Both rendered fields — `mountPoint` and
+`mechanism` — are bounded at 200 characters on both sides, so a reason carrying a long sysfs path
+cannot make a whole valid report unreadable at the boundary. The mount point is bounded but not
+redacted: it is how the operator recognises the volume, and it is a directory they chose rather
+than an identifier read out of the kernel. No new `LocalErrorCode` and no new
 `LocalTransportError` variant were needed: detection failures are a truthful `unknown` result, not
 an error, and the only way the Query fails is a closed session.
 
