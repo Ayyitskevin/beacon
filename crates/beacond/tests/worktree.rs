@@ -175,6 +175,114 @@ fn repository_smudge_filters_do_not_run_during_worktree_creation() {
 }
 
 #[test]
+fn included_repository_smudge_filters_do_not_run_during_worktree_creation() {
+    let (repository, _) = fixture_repository("included-hostile-smudge-filter");
+    let sentinel = repository.path.join("included-smudge-ran");
+    let filter = repository.path.join(".git/included-hostile-smudge");
+    fs::write(
+        &filter,
+        format!("#!/bin/sh\n: > '{}'\ncat\n", sentinel.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&filter, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(
+        repository.path.join(".gitattributes"),
+        "tracked.txt filter=beacon-included\n",
+    )
+    .unwrap();
+    git(&repository.path, &["add", ".gitattributes"]);
+    git(
+        &repository.path,
+        &[
+            "commit",
+            "--quiet",
+            "-m",
+            "activate included hostile smudge",
+        ],
+    );
+    fs::write(
+        repository.path.join(".git/beacon-included-config"),
+        format!(
+            "[filter \"beacon-included\"]\n\tsmudge = {}\n\trequired = true\n",
+            filter.display()
+        ),
+    )
+    .unwrap();
+    git(
+        &repository.path,
+        &["config", "include.path", "beacon-included-config"],
+    );
+    let revision = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repository.path)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+
+    let worktree = Worktree::create(&repository.path, &revision).unwrap();
+
+    assert!(
+        !sentinel.exists(),
+        "smudge filter from an included repository config ran on the host"
+    );
+    assert_eq!(worktree.close(), CleanupOutcome::Removed {});
+}
+
+#[test]
+fn repository_process_filters_do_not_run_during_worktree_creation() {
+    let (repository, _) = fixture_repository("hostile-process-filter");
+    let sentinel = repository.path.join("process-filter-ran");
+    let filter = repository.path.join(".git/hostile-process-filter");
+    hostile_program(&filter, &sentinel);
+    fs::write(
+        repository.path.join(".gitattributes"),
+        "tracked.txt filter=beacon-process\n",
+    )
+    .unwrap();
+    git(&repository.path, &["add", ".gitattributes"]);
+    git(
+        &repository.path,
+        &["commit", "--quiet", "-m", "activate hostile process filter"],
+    );
+    git(
+        &repository.path,
+        &[
+            "config",
+            "filter.beacon-process.process",
+            &filter.to_string_lossy(),
+        ],
+    );
+    git(
+        &repository.path,
+        &["config", "filter.beacon-process.required", "true"],
+    );
+    let revision = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repository.path)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+
+    let worktree = Worktree::create(&repository.path, &revision).unwrap();
+
+    assert!(
+        !sentinel.exists(),
+        "repository-controlled process filter ran on the host"
+    );
+    assert_eq!(worktree.close(), CleanupOutcome::Removed {});
+}
+
+#[test]
 fn linked_worktree_clean_filters_do_not_run_during_cleanup() {
     let (repository, _) = fixture_repository("hostile-worktree-clean-filter");
     fs::write(
