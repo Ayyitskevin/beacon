@@ -1,7 +1,7 @@
 # Contributing to Beacon
 
 Beacon is one local-first office suite for AI agent teams supervised by one human operator. It is
-**pre-Alpha**: there is no downloadable build, and [AGENTS.md](AGENTS.md) is explicit that this
+**pre-Alpha**: there is no published release, and [AGENTS.md](AGENTS.md) is explicit that this
 checkpoint must not be described as a usable Alpha. See its *Current state* section for what exists
 — and treat that section as the answer rather than this page, which would go stale naming features.
 `Beacon` is a working title, not a cleared name.
@@ -52,6 +52,24 @@ scripts/gate all > gate.log 2>&1; echo "exit=$?" >> gate.log; grep '^exit=' gate
 
 `cargo clippy` runs with `-D warnings`, so speculative helpers written for a future change will fail
 the build. Write what this change uses.
+
+## Downloading the CI AppImage
+
+After the product job passes for a pull request or a push to `main`, the `package` job attaches a
+`beacon-linux-appimage` artifact to the CI workflow run for 14 days. Download it from the run's
+**Artifacts** section and extract the ZIP archive. GitHub's artifact service does not retain the
+executable bit, so verify the bundled checksum and restore that bit before trying the application:
+
+```sh
+sha256sum --check Beacon.AppImage.sha256
+chmod +x ./*.AppImage
+./Beacon_*.AppImage
+```
+
+The package job proves that the AppImage builds and its downloaded bytes can be checked. First run
+on a clean Linux host is still unverified, so the downloaded-AppImage launch criterion is partial,
+not met. See the official upload action's [permission-loss
+note](https://github.com/actions/upload-artifact/blob/v4.6.2/README.md#permission-loss).
 
 ## What good looks like here
 

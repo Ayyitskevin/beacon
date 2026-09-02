@@ -33,6 +33,8 @@
     }
   },
   "bundle": {
-    "active": false
+    "active": true,
+    "targets": ["appimage"],
+    "icon": ["icons/icon.png"]
   }
 }
