@@ -519,6 +519,51 @@ fn review_dangling_store_symlink_is_broken_not_absent() {
 }
 
 #[test]
+fn review_r3_dangling_loop_symlink_is_broken_not_absent() {
+    let fixture = Fixture::new("dangling-loop");
+    let device = fixture.mounted_on_host_device();
+    let node = fixture.node(&device);
+    // `loop` is a link to nothing, so asking about `loop/backing_file` answers
+    // NotFound -- the same answer a device with no loop backing gives.
+    std::os::unix::fs::symlink(node.join("gone"), node.join("loop")).unwrap();
+
+    let report = fixture.read();
+
+    assert_eq!(report.state, LiveDataEncryption::Unknown);
+    assert!(reason(&report).contains("resolves to nothing"));
+}
+
+#[test]
+fn a_dangling_dm_link_is_broken_not_a_plain_disk() {
+    let fixture = Fixture::new("dangling-dm");
+    let device = fixture.mounted_on_host_device();
+    let node = fixture.node(&device);
+    // The same class one directory over: a dangling `dm` link would make a
+    // mapping look like a disk with no mapping at all.
+    std::os::unix::fs::symlink(node.join("gone"), node.join("dm")).unwrap();
+
+    let report = fixture.read();
+
+    assert_eq!(report.state, LiveDataEncryption::Unknown);
+    assert!(reason(&report).contains("resolves to nothing"));
+}
+
+#[test]
+fn a_dangling_slave_device_link_is_broken_not_a_leaf() {
+    let fixture = Fixture::new("dangling-slave-dev");
+    let device = fixture.mounted_on_host_device();
+    let entry = fixture.node(&device).join("slaves").join("sda2");
+    fs::create_dir_all(&entry).unwrap();
+    // And one hop further out: the `dev` file behind a slave entry.
+    std::os::unix::fs::symlink(entry.join("gone"), entry.join("dev")).unwrap();
+
+    let report = fixture.read();
+
+    assert_eq!(report.state, LiveDataEncryption::Unknown);
+    assert!(reason(&report).contains("resolves to nothing"));
+}
+
+#[test]
 fn review_dangling_slaves_symlink_is_broken_not_a_leaf() {
     let fixture = Fixture::new("dangling-slaves");
     let device = fixture.mounted_on_host_device();
@@ -530,7 +575,9 @@ fn review_dangling_slaves_symlink_is_broken_not_a_leaf() {
     let report = fixture.read();
 
     assert_eq!(report.state, LiveDataEncryption::Unknown);
-    assert!(reason(&report).contains("could not be read"));
+    // One helper answers this for every link the walk follows, so the wording
+    // is the same here as for a dangling store, dm, loop, or dev entry.
+    assert!(reason(&report).contains("resolves to nothing"));
 }
 
 #[test]
