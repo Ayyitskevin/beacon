@@ -13,10 +13,16 @@
 //! left behind by a rebase is present and unreachable. Every caller must record
 //! the difference rather than let a presence check read as a reachability claim.
 //!
-//! Nothing here decompresses data, opens a `.pack` file, or reads outside the
-//! repository's `.git` directory.
+//! Nothing here decompresses object data or reads outside the repository's
+//! `.git` directory. Files are opened relative to retained directory
+//! descriptors with `O_NOFOLLOW`; names are never accepted as file identity.
 
-use std::fs;
+use std::ffi::{CStr, CString, OsString};
+use std::fs::{self, File, OpenOptions};
+use std::io::Read;
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 /// Why a repository could not be inspected.
@@ -36,10 +42,10 @@ pub(crate) enum ObjectStoreError {
 }
 
 /// A repository resolved to its object directory.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct ObjectStore {
     root: PathBuf,
-    objects: PathBuf,
+    objects: File,
 }
 
 impl ObjectStore {
@@ -50,16 +56,32 @@ impl ObjectStore {
     /// repository (`<source>/objects/`) is accepted too. Anything else is
     /// [`ObjectStoreError::NotARepository`].
     pub(crate) fn open(source: &Path) -> Result<Self, ObjectStoreError> {
-        let metadata = fs::metadata(source).map_err(|_| ObjectStoreError::NotARepository)?;
-        if !metadata.is_dir() {
+        let metadata =
+            fs::symlink_metadata(source).map_err(|_| ObjectStoreError::NotARepository)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(ObjectStoreError::NotARepository);
         }
-        let dot_git = source.join(".git");
-        let git_dir = match fs::metadata(&dot_git) {
-            Ok(metadata) if metadata.is_dir() => dot_git,
-            Ok(metadata) if metadata.is_file() => {
-                let contents =
-                    fs::read_to_string(&dot_git).map_err(|_| ObjectStoreError::NotARepository)?;
+        let source_directory =
+            open_directory_path(source).map_err(|_| ObjectStoreError::NotARepository)?;
+        let git_directory = match fs::symlink_metadata(source.join(".git")) {
+            Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_dir() => {
+                open_directory_at(&source_directory, b".git")
+                    .map_err(|_| ObjectStoreError::NotARepository)?
+                    .ok_or(ObjectStoreError::NotARepository)?
+            }
+            Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => {
+                let mut marker = open_regular_at(&source_directory, b".git")
+                    .map_err(|_| ObjectStoreError::NotARepository)?
+                    .ok_or(ObjectStoreError::NotARepository)?;
+                let mut contents = String::new();
+                marker
+                    .by_ref()
+                    .take(4097)
+                    .read_to_string(&mut contents)
+                    .map_err(|_| ObjectStoreError::NotARepository)?;
+                if contents.len() > 4096 {
+                    return Err(ObjectStoreError::NotARepository);
+                }
                 let target = contents
                     .lines()
                     .find_map(|line| line.strip_prefix("gitdir:"))
@@ -75,27 +97,18 @@ impl ObjectStore {
                 };
                 // One level only. A `gitdir:` whose target is itself a `.git`
                 // file is refused rather than followed.
-                if fs::metadata(target.join(".git")).is_ok() {
+                if fs::symlink_metadata(target.join(".git")).is_ok() {
                     return Err(ObjectStoreError::IndirectionTooDeep);
                 }
-                if !fs::metadata(&target).map(|m| m.is_dir()).unwrap_or(false) {
-                    return Err(ObjectStoreError::NotARepository);
-                }
-                target
+                open_directory_path(&target).map_err(|_| ObjectStoreError::NotARepository)?
             }
             // A bare repository keeps `objects/` at its root.
-            _ if fs::metadata(source.join("objects"))
-                .map(|m| m.is_dir())
-                .unwrap_or(false) =>
-            {
-                source.to_path_buf()
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => source_directory,
             _ => return Err(ObjectStoreError::NotARepository),
         };
-        let objects = git_dir.join("objects");
-        if !fs::metadata(&objects).map(|m| m.is_dir()).unwrap_or(false) {
-            return Err(ObjectStoreError::NotARepository);
-        }
+        let objects = open_directory_at(&git_directory, b"objects")
+            .map_err(|_| ObjectStoreError::NotARepository)?
+            .ok_or(ObjectStoreError::NotARepository)?;
         Ok(Self {
             root: source.to_path_buf(),
             objects,
@@ -124,8 +137,15 @@ impl ObjectStore {
         if deadline() {
             return Err(ObjectStoreError::Elapsed);
         }
-        let loose = self.objects.join(&revision[..2]).join(&revision[2..]);
-        let loose_present = fs::metadata(&loose).map(|m| m.is_file()).unwrap_or(false);
+        let loose_present = match open_directory_at(&self.objects, &revision.as_bytes()[..2]) {
+            Ok(Some(prefix)) => match open_regular_at(&prefix, &revision.as_bytes()[2..]) {
+                Ok(Some(_object)) => true,
+                Ok(None) => false,
+                Err(_) => return Err(ObjectStoreError::NotARepository),
+            },
+            Ok(None) => false,
+            Err(_) => return Err(ObjectStoreError::NotARepository),
+        };
         // Every definite answer below follows a blocking filesystem call, so the budget is
         // re-checked after each one. A read that finished late describes a store as it was before
         // the answer was due; reporting it as presence or absence turns Beacon's own slowness into
@@ -136,30 +156,46 @@ impl ObjectStore {
         if loose_present {
             return Ok(true);
         }
-        let pack_dir = self.objects.join("pack");
-        let entries = fs::read_dir(&pack_dir);
+        let pack_directory = match open_directory_at(&self.objects, b"pack") {
+            Ok(Some(directory)) => directory,
+            // No pack directory is normal for a young repository.
+            Ok(None) => {
+                if deadline() {
+                    return Err(ObjectStoreError::Elapsed);
+                }
+                return Ok(false);
+            }
+            Err(_) => return Err(ObjectStoreError::UnreadableIndex),
+        };
         if deadline() {
             return Err(ObjectStoreError::Elapsed);
         }
-        let entries = match entries {
-            Ok(entries) => entries,
-            // No pack directory is normal for a young repository.
-            Err(_) => return Ok(false),
-        };
-        let mut indexes: Vec<PathBuf> = entries
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|ext| ext == "idx"))
+        let mut indexes: Vec<OsString> = directory_entries(&pack_directory)
+            .map_err(|_| ObjectStoreError::UnreadableIndex)?
+            .into_iter()
+            .filter(|name| {
+                Path::new(name)
+                    .extension()
+                    .is_some_and(|extension| extension == "idx")
+            })
             .collect();
         indexes.sort();
         if deadline() {
             return Err(ObjectStoreError::Elapsed);
         }
-        for index in indexes {
+        for index_name in indexes {
             if deadline() {
                 return Err(ObjectStoreError::Elapsed);
             }
-            if index_contains(&index, &raw, deadline)? {
+            let mut index = open_regular_at(&pack_directory, index_name.as_bytes())
+                .map_err(|_| ObjectStoreError::UnreadableIndex)?
+                .ok_or(ObjectStoreError::UnreadableIndex)?;
+            let pack_name =
+                matching_pack_name(&index_name).ok_or(ObjectStoreError::UnreadableIndex)?;
+            let pack = open_regular_at(&pack_directory, pack_name.as_bytes())
+                .map_err(|_| ObjectStoreError::UnreadableIndex)?
+                .ok_or(ObjectStoreError::UnreadableIndex)?;
+            if index_contains(&mut index, &pack, &raw, deadline)? {
                 return Ok(true);
             }
         }
@@ -168,6 +204,111 @@ impl ObjectStore {
         }
         Ok(false)
     }
+}
+
+fn open_directory_path(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let directory = options.open(path)?;
+    if !directory.metadata()?.is_dir() {
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
+    }
+    Ok(directory)
+}
+
+fn open_directory_at(parent: &File, name: &[u8]) -> std::io::Result<Option<File>> {
+    open_at(
+        parent.as_raw_fd(),
+        name,
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+    )
+}
+
+fn open_regular_at(parent: &File, name: &[u8]) -> std::io::Result<Option<File>> {
+    let Some(file) = open_at(
+        parent.as_raw_fd(),
+        name,
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+    )?
+    else {
+        return Ok(None);
+    };
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
+    }
+    Ok(Some(file))
+}
+
+fn open_at(parent: RawFd, name: &[u8], flags: libc::c_int) -> std::io::Result<Option<File>> {
+    let name =
+        CString::new(name).map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let descriptor = unsafe { libc::openat(parent, name.as_ptr(), flags) };
+    if descriptor >= 0 {
+        return Ok(Some(unsafe { File::from_raw_fd(descriptor) }));
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ENOENT) {
+        Ok(None)
+    } else {
+        Err(error)
+    }
+}
+
+struct DirectoryStream(*mut libc::DIR);
+
+impl Drop for DirectoryStream {
+    fn drop(&mut self) {
+        unsafe {
+            libc::closedir(self.0);
+        }
+    }
+}
+
+fn directory_entries(directory: &File) -> std::io::Result<Vec<OsString>> {
+    let duplicate = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if duplicate < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let raw_stream = unsafe { libc::fdopendir(duplicate) };
+    if raw_stream.is_null() {
+        let error = std::io::Error::last_os_error();
+        unsafe {
+            libc::close(duplicate);
+        }
+        return Err(error);
+    }
+    let stream = DirectoryStream(raw_stream);
+    let mut entries = Vec::new();
+    loop {
+        unsafe {
+            *libc::__errno_location() = 0;
+        }
+        let entry = unsafe { libc::readdir(stream.0) };
+        if entry.is_null() {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(0) {
+                break;
+            }
+            return Err(error);
+        }
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if name != b"." && name != b".." {
+            entries.push(OsString::from_vec(name.to_vec()));
+        }
+    }
+    Ok(entries)
+}
+
+fn matching_pack_name(index_name: &std::ffi::OsStr) -> Option<OsString> {
+    let stem = index_name.as_bytes().strip_suffix(b".idx")?;
+    if stem.is_empty() {
+        return None;
+    }
+    let mut pack_name = stem.to_vec();
+    pack_name.extend_from_slice(b".pack");
+    Some(OsString::from_vec(pack_name))
 }
 
 /// Decode 40 lowercase hex characters into 20 bytes.
@@ -193,18 +334,17 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-/// Binary-search one version 2 pack index for `target`.
-///
-/// Layout: a 4-byte magic `\xfftOc`, a 4-byte version, a 256-entry fanout table
-/// of big-endian u32 cumulative counts, then that many sorted 20-byte object
-/// names. The fanout narrows the search to names sharing the first byte; only
-/// the name table is read, never the pack itself.
+/// Validate and binary-search one complete version 2 pack index for `target`.
 fn index_contains(
-    path: &Path,
+    index: &mut File,
+    pack: &File,
     target: &[u8; 20],
     deadline: &mut impl FnMut() -> bool,
 ) -> Result<bool, ObjectStoreError> {
-    let data = fs::read(path).map_err(|_| ObjectStoreError::UnreadableIndex)?;
+    let mut data = Vec::new();
+    index
+        .read_to_end(&mut data)
+        .map_err(|_| ObjectStoreError::UnreadableIndex)?;
     // The read above blocks for as long as the filesystem takes, and an index whose target bucket
     // is empty reaches `Ok(false)` below without entering the search loop -- so without this check
     // a read that completed after the budget became an absence claim.
@@ -213,30 +353,131 @@ fn index_contains(
     }
     const HEADER: usize = 8;
     const FANOUT: usize = 256 * 4;
-    if data.len() < HEADER + FANOUT {
+    const TRAILER: usize = 40;
+    if data.len() < HEADER + FANOUT + TRAILER {
         return Err(ObjectStoreError::UnreadableIndex);
     }
-    if &data[..4] != b"\xfftOc" || u32::from_be_bytes([data[4], data[5], data[6], data[7]]) != 2 {
+    if data.get(..4) != Some(b"\xfftOc") || read_u32(&data, 4) != Some(2) {
         // Version 1 indexes have no magic and a different layout. Refusing is
         // honest; silently reading one as version 2 would invent an answer.
         return Err(ObjectStoreError::UnreadableIndex);
     }
-    let fanout_at = |bucket: usize| -> u32 {
-        let at = HEADER + bucket * 4;
-        u32::from_be_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]])
-    };
-    let total = fanout_at(255) as usize;
+    let fanout_at = |bucket: usize| read_u32(&data, HEADER + bucket * 4);
+    let mut prior = 0_u32;
+    for bucket in 0..256 {
+        let value = fanout_at(bucket).ok_or(ObjectStoreError::UnreadableIndex)?;
+        if value < prior {
+            return Err(ObjectStoreError::UnreadableIndex);
+        }
+        prior = value;
+    }
+    let total = usize::try_from(prior).map_err(|_| ObjectStoreError::UnreadableIndex)?;
     let names_at = HEADER + FANOUT;
-    if data.len() < names_at + total * 20 {
+    let names_end = checked_table_end(names_at, total, 20)?;
+    let crc_end = checked_table_end(names_end, total, 4)?;
+    let offsets_end = checked_table_end(crc_end, total, 4)?;
+    if offsets_end > data.len().saturating_sub(TRAILER) {
         return Err(ObjectStoreError::UnreadableIndex);
     }
+
+    let mut fanout_count = 0_usize;
+    for bucket in 0..256 {
+        while fanout_count < total
+            && data[names_at + fanout_count * 20] <= u8::try_from(bucket).unwrap_or(u8::MAX)
+        {
+            fanout_count += 1;
+        }
+        if fanout_at(bucket).and_then(|value| usize::try_from(value).ok()) != Some(fanout_count) {
+            return Err(ObjectStoreError::UnreadableIndex);
+        }
+    }
+    for index in 1..total {
+        if index % 1024 == 0 && deadline() {
+            return Err(ObjectStoreError::Elapsed);
+        }
+        let previous = &data[names_at + (index - 1) * 20..names_at + index * 20];
+        let current = &data[names_at + index * 20..names_at + (index + 1) * 20];
+        if previous >= current {
+            return Err(ObjectStoreError::UnreadableIndex);
+        }
+    }
+
+    let pack_length = pack
+        .metadata()
+        .map_err(|_| ObjectStoreError::UnreadableIndex)?
+        .len();
+    if pack_length < 32 {
+        return Err(ObjectStoreError::UnreadableIndex);
+    }
+    let pack_data_end = pack_length - 20;
+    let mut large_indexes = Vec::new();
+    for object in 0..total {
+        let offset =
+            read_u32(&data, crc_end + object * 4).ok_or(ObjectStoreError::UnreadableIndex)?;
+        if offset & 0x8000_0000 == 0 {
+            if !(12..pack_data_end).contains(&u64::from(offset)) {
+                return Err(ObjectStoreError::UnreadableIndex);
+            }
+        } else {
+            large_indexes.push(
+                usize::try_from(offset & 0x7fff_ffff)
+                    .map_err(|_| ObjectStoreError::UnreadableIndex)?,
+            );
+        }
+    }
+    let large_offsets_end = checked_table_end(offsets_end, large_indexes.len(), 8)?;
+    let trailer_end = large_offsets_end
+        .checked_add(TRAILER)
+        .ok_or(ObjectStoreError::UnreadableIndex)?;
+    if trailer_end != data.len() {
+        return Err(ObjectStoreError::UnreadableIndex);
+    }
+    let mut used_large_offsets = vec![false; large_indexes.len()];
+    for large_index in large_indexes {
+        let Some(used) = used_large_offsets.get_mut(large_index) else {
+            return Err(ObjectStoreError::UnreadableIndex);
+        };
+        if *used {
+            return Err(ObjectStoreError::UnreadableIndex);
+        }
+        *used = true;
+        let offset = read_u64(&data, offsets_end + large_index * 8)
+            .ok_or(ObjectStoreError::UnreadableIndex)?;
+        if !(12..pack_data_end).contains(&offset) {
+            return Err(ObjectStoreError::UnreadableIndex);
+        }
+    }
+    if used_large_offsets.iter().any(|used| !used) {
+        return Err(ObjectStoreError::UnreadableIndex);
+    }
+
+    let mut pack_header = [0_u8; 12];
+    pack.read_exact_at(&mut pack_header, 0)
+        .map_err(|_| ObjectStoreError::UnreadableIndex)?;
+    let pack_version = u32::from_be_bytes(pack_header[4..8].try_into().unwrap());
+    let pack_objects = u32::from_be_bytes(pack_header[8..12].try_into().unwrap());
+    if &pack_header[..4] != b"PACK"
+        || !matches!(pack_version, 2 | 3)
+        || usize::try_from(pack_objects).ok() != Some(total)
+    {
+        return Err(ObjectStoreError::UnreadableIndex);
+    }
+    let mut pack_checksum = [0_u8; 20];
+    pack.read_exact_at(&mut pack_checksum, pack_data_end)
+        .map_err(|_| ObjectStoreError::UnreadableIndex)?;
+    if data.get(large_offsets_end..large_offsets_end + 20) != Some(pack_checksum.as_slice()) {
+        return Err(ObjectStoreError::UnreadableIndex);
+    }
+
     let first = target[0] as usize;
     let mut low = if first == 0 {
         0
     } else {
-        fanout_at(first - 1) as usize
+        usize::try_from(fanout_at(first - 1).ok_or(ObjectStoreError::UnreadableIndex)?)
+            .map_err(|_| ObjectStoreError::UnreadableIndex)?
     };
-    let mut high = fanout_at(first) as usize;
+    let mut high = usize::try_from(fanout_at(first).ok_or(ObjectStoreError::UnreadableIndex)?)
+        .map_err(|_| ObjectStoreError::UnreadableIndex)?;
     if high > total || low > high {
         return Err(ObjectStoreError::UnreadableIndex);
     }
@@ -259,10 +500,24 @@ fn index_contains(
     Ok(false)
 }
 
+fn checked_table_end(start: usize, rows: usize, width: usize) -> Result<usize, ObjectStoreError> {
+    rows.checked_mul(width)
+        .and_then(|length| start.checked_add(length))
+        .ok_or(ObjectStoreError::UnreadableIndex)
+}
+
+fn read_u32(data: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(data.get(at..at + 4)?.try_into().ok()?))
+}
+
+fn read_u64(data: &[u8], at: usize) -> Option<u64> {
+    Some(u64::from_be_bytes(data.get(at..at + 8)?.try_into().ok()?))
+}
+
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::os::unix::fs::PermissionsExt;
+    use std::fs::{self, OpenOptions};
+    use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::PathBuf;
     use std::process::Command;
 
@@ -439,6 +694,25 @@ mod tests {
     }
 
     #[test]
+    fn a_symlink_cannot_impersonate_a_loose_object() {
+        let (repository, revision) = commit_repository("loose-symlink");
+        let loose = repository
+            .path
+            .join(".git/objects")
+            .join(&revision[..2])
+            .join(&revision[2..]);
+        let held = repository.path.join("held-object");
+        fs::rename(&loose, &held).unwrap();
+        symlink(&held, &loose).unwrap();
+
+        let store = ObjectStore::open(&repository.path).unwrap();
+        assert_eq!(
+            store.contains(&revision, &mut never_elapsed()).unwrap_err(),
+            ObjectStoreError::NotARepository
+        );
+    }
+
+    #[test]
     fn an_object_only_in_a_pack_is_present() {
         let (repository, revision) = commit_repository("packed");
         // `gc --prune=now` moves every loose object into a pack, so this asserts
@@ -574,6 +848,76 @@ mod tests {
         let store = ObjectStore::open(&repository.path).unwrap();
         assert_eq!(
             store.contains(&revision, &mut never_elapsed()).unwrap_err(),
+            ObjectStoreError::UnreadableIndex
+        );
+    }
+
+    #[test]
+    fn a_pack_index_missing_crc_offsets_and_trailer_is_refused() {
+        let (repository, revision) = commit_repository("truncated-index-layout");
+        git(&repository.path, &["gc", "--quiet", "--prune=now"]);
+        let pack = repository.path.join(".git/objects/pack");
+        let index = fs::read_dir(&pack)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.extension().is_some_and(|extension| extension == "idx"))
+            .unwrap();
+        let bytes = fs::read(&index).unwrap();
+        let total = u32::from_be_bytes(bytes[1028..1032].try_into().unwrap()) as usize;
+        let names_end = 8 + 256 * 4 + total * 20;
+        let mut permissions = fs::metadata(&index).unwrap().permissions();
+        permissions.set_mode(0o644);
+        fs::set_permissions(&index, permissions).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(&index)
+            .unwrap()
+            .set_len(u64::try_from(names_end).unwrap())
+            .unwrap();
+
+        let store = ObjectStore::open(&repository.path).unwrap();
+        assert_eq!(
+            store.contains(&revision, &mut never_elapsed()).unwrap_err(),
+            ObjectStoreError::UnreadableIndex
+        );
+    }
+
+    #[test]
+    fn a_pack_index_without_its_matching_pack_is_refused() {
+        let (repository, revision) = commit_repository("missing-matching-pack");
+        git(&repository.path, &["gc", "--quiet", "--prune=now"]);
+        let pack_dir = repository.path.join(".git/objects/pack");
+        let pack = fs::read_dir(&pack_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "pack")
+            })
+            .unwrap();
+        fs::rename(&pack, pack.with_extension("pack-held")).unwrap();
+
+        let store = ObjectStore::open(&repository.path).unwrap();
+        assert_eq!(
+            store.contains(&revision, &mut never_elapsed()).unwrap_err(),
+            ObjectStoreError::UnreadableIndex
+        );
+    }
+
+    #[test]
+    fn an_unreadable_pack_directory_is_an_error_not_absence() {
+        let (repository, _) = commit_repository("unreadable-pack-directory");
+        let pack = repository.path.join(".git/objects/pack");
+        fs::rename(&pack, repository.path.join(".git/objects/held-pack")).unwrap();
+        fs::write(&pack, "not a directory").unwrap();
+        let store = ObjectStore::open(&repository.path).unwrap();
+
+        assert_eq!(
+            store
+                .contains(&"0".repeat(40), &mut never_elapsed())
+                .unwrap_err(),
             ObjectStoreError::UnreadableIndex
         );
     }
