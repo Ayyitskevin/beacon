@@ -531,6 +531,7 @@ impl From<LocalTransportError> for CommandError {
             | LocalTransportError::Team(_)
             | LocalTransportError::Mission(_)
             | LocalTransportError::CheckPreflight(_)
+            | LocalTransportError::RecentReceipt(_)
             | LocalTransportError::SampleProject(_)
             | LocalTransportError::ResourceDiscovery(_)
             | LocalTransportError::LocalModelActivation(_) => (
