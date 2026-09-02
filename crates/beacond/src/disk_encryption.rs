@@ -27,7 +27,7 @@
 //! which is why the match is on the generic `CRYPT-` prefix with the type token
 //! derived from the UUID, not on an allowlist of known types.
 
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::Read;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -56,8 +56,23 @@ const NOT_VERIFIED_BELOW_HOST: &str =
     "encryption applied beneath this host, such as by a hypervisor or a storage array";
 const NOT_VERIFIED_KEY: &str = "the strength, custody, or current lock state of any key";
 
-const NO_CRYPT_LAYER: &str =
-    "Beacon found no device-mapper crypt layer in this volume's block stack";
+/// Why a volume is reported `disabled`, in terms of what was actually seen.
+///
+/// A mixed stack really does contain a crypt layer, so a flat "found no
+/// encryption" is false there and the operator would rightly disbelieve the
+/// warning. Name the covered mapping and the path that is not covered.
+fn uncovered_reason(uncovered: &[DeviceNumber], crypt_seen: &[String]) -> String {
+    let leaves = uncovered
+        .iter()
+        .map(DeviceNumber::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if crypt_seen.is_empty() {
+        format!("at least one path to disk has no crypt layer: {leaves}")
+    } else {
+        format!("{} is encrypted; {leaves} is not", crypt_seen.join(", "))
+    }
+}
 
 /// What Beacon proved about operating-system disk encryption for the volume
 /// holding this Installation's live data.
@@ -305,20 +320,31 @@ fn inspect_linux(
             not_verified: vec![NOT_VERIFIED_KEY.to_owned()],
             observed_at_ms,
         },
-        Walk::NoCryptProven => LiveDataEncryptionReport {
-            state: LiveDataEncryption::Disabled,
-            mount_point,
-            mechanism: Recorded::Absent {
-                reason: NO_CRYPT_LAYER.to_owned(),
-            },
-            evidence,
-            not_verified: vec![
-                NOT_VERIFIED_OPAL.to_owned(),
-                NOT_VERIFIED_FSCRYPT.to_owned(),
-                NOT_VERIFIED_BELOW_HOST.to_owned(),
-            ],
-            observed_at_ms,
-        },
+        Walk::UncoveredPath {
+            uncovered,
+            crypt_seen,
+        } => {
+            let reason = bounded(uncovered_reason(&uncovered, &crypt_seen));
+            // Name the branches that are not covered in evidence too; a
+            // negative nobody can locate is not much better than no answer.
+            record(
+                &mut evidence,
+                system.sys_dev_block.display().to_string(),
+                reason.clone(),
+            );
+            LiveDataEncryptionReport {
+                state: LiveDataEncryption::Disabled,
+                mount_point,
+                mechanism: Recorded::Absent { reason },
+                evidence,
+                not_verified: vec![
+                    NOT_VERIFIED_OPAL.to_owned(),
+                    NOT_VERIFIED_FSCRYPT.to_owned(),
+                    NOT_VERIFIED_BELOW_HOST.to_owned(),
+                ],
+                observed_at_ms,
+            }
+        }
         Walk::Undetermined { reason } => {
             unknown_owned(evidence, mount_point, reason, observed_at_ms)
         }
@@ -628,56 +654,140 @@ fn select_mount<'a>(entries: &'a [MountEntry], target: &Path) -> Option<&'a Moun
 }
 
 /// What the walk proved about the whole stack, not about one branch of it.
+/// What the walk proved about the whole stack, not about one branch of it.
 enum Walk {
-    /// Every leaf was reached and every path to it passed through a crypt layer.
+    /// Every branch terminated at a physical leaf and every one of those paths
+    /// passed through a crypt layer.
     Encrypted {
         mechanism: String,
     },
-    /// Every leaf was reached and at least one path to one had no crypt layer.
-    NoCryptProven,
+    /// Every branch terminated at a physical leaf and at least one of those
+    /// paths had no crypt layer. `uncovered` names them; `crypt_seen` names the
+    /// mappings that WERE encrypted, so the report can say both.
+    UncoveredPath {
+        uncovered: Vec<DeviceNumber>,
+        crypt_seen: Vec<String>,
+    },
     Undetermined {
         reason: String,
     },
 }
 
-/// Walks every branch of the block stack to its physical leaves.
-///
-/// A crypt layer is a fact about one path, never a verdict about the volume. A
-/// logical volume over one LUKS member and one plain member has half its
-/// extents in the clear, so the walk carries "crypt seen on this path" down
-/// each branch and only calls the volume encrypted when every leaf is covered.
-/// A crypt layer ABOVE a plain leaf covers it; one on a sibling branch does not.
-///
-/// The visited set is keyed on the device AND that flag, because the same
-/// physical disk can be reached by a covered and an uncovered path, and pruning
-/// the second visit is how a plain branch would disappear.
+/// What one branch proved. `Terminated` means every path below this node
+/// reached a physical leaf; nothing else counts as an answer.
+enum Branch {
+    Terminated { uncovered: Vec<DeviceNumber> },
+    Undetermined { reason: String },
+}
+
+/// A physical leaf: a real disk or partition. It has no `dm/` directory and no
+/// parents. A device-mapper node with no parents is not a leaf — it is a
+/// mapping whose backing device Beacon never saw, which is an unread stack
+/// rather than an encrypted one.
+struct Walker<'a> {
+    system: &'a SystemView,
+    nodes: usize,
+    crypt_kinds: BTreeSet<String>,
+    crypt_mappings: Vec<String>,
+    /// Branches proved terminated, keyed on the device AND whether a crypt
+    /// layer covered the path that reached it: the same disk can be reached by
+    /// a covered and an uncovered path, and they are different answers.
+    settled: HashMap<(DeviceNumber, bool), Vec<DeviceNumber>>,
+    /// Devices on the path currently being explored. A device reached again
+    /// from below itself is a cycle, and a cycle terminates nothing.
+    on_path: HashSet<(DeviceNumber, bool)>,
+}
+
 fn walk_block_stack(
     system: &SystemView,
     root: DeviceNumber,
     evidence: &mut Vec<EncryptionEvidence>,
 ) -> Walk {
-    let mut queue = VecDeque::from([(root, 0usize, false)]);
-    let mut seen: HashSet<(DeviceNumber, bool)> = HashSet::new();
-    let mut nodes = 0usize;
-    let mut crypt_kinds: BTreeSet<String> = BTreeSet::new();
-    let mut plain_leaves: Vec<DeviceNumber> = Vec::new();
-    let mut leaves = 0usize;
+    let mut walker = Walker {
+        system,
+        nodes: 0,
+        crypt_kinds: BTreeSet::new(),
+        crypt_mappings: Vec::new(),
+        settled: HashMap::new(),
+        on_path: HashSet::new(),
+    };
+    match walker.explore(root, 0, false, evidence) {
+        Branch::Undetermined { reason } => Walk::Undetermined { reason },
+        Branch::Terminated { uncovered } if uncovered.is_empty() => Walk::Encrypted {
+            mechanism: walker
+                .crypt_kinds
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(", "),
+        },
+        Branch::Terminated { uncovered } => Walk::UncoveredPath {
+            uncovered,
+            crypt_seen: walker.crypt_mappings,
+        },
+    }
+}
 
-    while let Some((device, depth, crypt_above)) = queue.pop_front() {
-        if !seen.insert((device, crypt_above)) {
-            continue;
+impl Walker<'_> {
+    /// Explores one branch to its physical leaves.
+    ///
+    /// Returns `Terminated` only when every path below `device` reached a
+    /// physical leaf. Any branch that ends in a cycle, a budget stop, an
+    /// unreadable node, or a mapping with no backing device returns
+    /// `Undetermined`, and one such branch is the whole answer: a sibling that
+    /// finished, encrypted, proves nothing about the branch that did not.
+    fn explore(
+        &mut self,
+        device: DeviceNumber,
+        depth: usize,
+        crypt_above: bool,
+        evidence: &mut Vec<EncryptionEvidence>,
+    ) -> Branch {
+        let key = (device, crypt_above);
+        // Already proved terminated through a readable path: a diamond, not a
+        // cycle. Its answer is reusable exactly because it was fully explored.
+        if let Some(uncovered) = self.settled.get(&key) {
+            return Branch::Terminated {
+                uncovered: uncovered.clone(),
+            };
         }
-        nodes += 1;
-        if nodes > MAX_STACK_NODES || depth > MAX_STACK_DEPTH {
-            return Walk::Undetermined {
+        if self.on_path.contains(&key) {
+            return Branch::Undetermined {
+                reason: format!(
+                    "device {device} is reached from below itself, so this branch terminates at no physical device"
+                ),
+            };
+        }
+        self.nodes += 1;
+        if self.nodes > MAX_STACK_NODES || depth > MAX_STACK_DEPTH {
+            return Branch::Undetermined {
                 reason: "the volume's device stack exceeded Beacon's read budget".to_owned(),
             };
         }
-        let node = system.sys_dev_block.join(device.to_string());
+        self.on_path.insert(key);
+        let outcome = self.explore_node(device, depth, crypt_above, evidence);
+        self.on_path.remove(&key);
+        if let Branch::Terminated { uncovered } = &outcome {
+            self.settled.insert(key, uncovered.clone());
+        }
+        outcome
+    }
+
+    fn explore_node(
+        &mut self,
+        device: DeviceNumber,
+        depth: usize,
+        crypt_above: bool,
+        evidence: &mut Vec<EncryptionEvidence>,
+    ) -> Branch {
+        let node = self.system.sys_dev_block.join(device.to_string());
         match directory_presence(&node) {
             Ok(Presence::Present) => {}
-            Ok(Presence::Missing) => return unreadable(&node),
-            Err(reason) => return Walk::Undetermined { reason },
+            Ok(Presence::Missing) => {
+                return Branch::Undetermined {
+                    reason: unreadable_reason(&node, std::io::ErrorKind::NotFound),
+                };
+            }
+            Err(reason) => return Branch::Undetermined { reason },
         }
 
         let backing = node.join("loop/backing_file");
@@ -685,150 +795,153 @@ fn walk_block_stack(
             Ok(Presence::Present) => {
                 let path = match read_sysfs(&backing) {
                     Ok(path) => path,
-                    Err(reason) => return Walk::Undetermined { reason },
+                    Err(reason) => return Branch::Undetermined { reason },
                 };
-                return Walk::Undetermined {
+                return Branch::Undetermined {
                     reason: format!(
                         "the volume is a loopback image backed by {path}; Beacon does not follow the backing file"
                     ),
                 };
             }
             Ok(Presence::Missing) => {}
-            Err(reason) => return Walk::Undetermined { reason },
+            Err(reason) => return Branch::Undetermined { reason },
         }
 
-        let uuid_path = node.join("dm/uuid");
-        let uuid = match presence(&uuid_path) {
-            Ok(Presence::Present) => match read_sysfs(&uuid_path) {
-                Ok(uuid) => Some(uuid),
-                Err(reason) => return Walk::Undetermined { reason },
+        // A `dm/` directory is what makes this a mapping rather than a disk.
+        let mapping = match directory_presence(&node.join("dm")) {
+            Ok(Presence::Present) => match self.read_mapping(&node, evidence) {
+                Ok(mapping) => Some(mapping),
+                Err(reason) => return Branch::Undetermined { reason },
             },
             Ok(Presence::Missing) => None,
-            Err(reason) => return Walk::Undetermined { reason },
+            Err(reason) => return Branch::Undetermined { reason },
         };
-        let mut crypt_here = false;
-        if let Some(uuid) = uuid {
-            // A mapping with a uuid always has a name beside it. Substituting a
-            // placeholder for a failed read would let a read failure reach a
-            // confident state, which is the one thing this reader must never do.
-            let name_path = node.join("dm/name");
-            let name = match read_sysfs(&name_path) {
-                Ok(name) => name,
-                Err(reason) => return Walk::Undetermined { reason },
-            };
-            match crypt_type(&uuid) {
-                Some(kind) => {
-                    // The type prefix only. The remainder of a crypt UUID is a
-                    // stable identifier for this host's volume and has no place
-                    // in a report an operator may export.
-                    record(
-                        evidence,
-                        uuid_path.display().to_string(),
-                        format!("device-mapper uuid prefix {}, mapping {name}", label(&kind)),
-                    );
-                    crypt_kinds.insert(mechanism_label(&kind));
-                    crypt_here = true;
+        let crypt_on_path = crypt_above || mapping.as_ref().is_some_and(|found| found.is_crypt);
+
+        // A missing slaves directory means this device has no parents. A
+        // DANGLING one answers NotFound from read_dir too, so presence is asked
+        // first: a link to nothing is an error, not a device with no parents.
+        let slaves = node.join("slaves");
+        let slaves_present = match presence(&slaves) {
+            Ok(found) => found == Presence::Present,
+            Err(reason) => return Branch::Undetermined { reason },
+        };
+        let mut parents = Vec::new();
+        if slaves_present {
+            let children = match fs::read_dir(&slaves) {
+                Ok(children) => children,
+                Err(error) => {
+                    return Branch::Undetermined {
+                        reason: unreadable_reason(&slaves, error.kind()),
+                    };
                 }
-                None => record(
+            };
+            for child in children {
+                let child = match child {
+                    Ok(child) => child,
+                    Err(error) => {
+                        return Branch::Undetermined {
+                            reason: unreadable_reason(&slaves, error.kind()),
+                        };
+                    }
+                };
+                let dev_file = child.path().join("dev");
+                match read_sysfs(&dev_file) {
+                    Ok(value) => match DeviceNumber::parse(&value) {
+                        Some(parent) => parents.push(parent),
+                        None => {
+                            return Branch::Undetermined {
+                                reason: unreadable_reason(
+                                    &dev_file,
+                                    std::io::ErrorKind::InvalidData,
+                                ),
+                            };
+                        }
+                    },
+                    Err(reason) => return Branch::Undetermined { reason },
+                }
+            }
+        }
+
+        if parents.is_empty() {
+            return match mapping {
+                // A mapping with no backing device is an unread stack.
+                Some(found) => Branch::Undetermined {
+                    reason: format!("mapping {} has no readable backing device", found.name),
+                },
+                // A real disk or partition: the only thing that terminates a branch.
+                None => Branch::Terminated {
+                    uncovered: if crypt_on_path {
+                        Vec::new()
+                    } else {
+                        vec![device]
+                    },
+                },
+            };
+        }
+
+        let mut uncovered = Vec::new();
+        for parent in parents {
+            match self.explore(parent, depth + 1, crypt_on_path, evidence) {
+                Branch::Terminated { uncovered: below } => uncovered.extend(below),
+                // One unterminated branch settles the whole answer.
+                undetermined => return undetermined,
+            }
+        }
+        Branch::Terminated { uncovered }
+    }
+
+    fn read_mapping(
+        &mut self,
+        node: &Path,
+        evidence: &mut Vec<EncryptionEvidence>,
+    ) -> Result<Mapping, String> {
+        let uuid_path = node.join("dm/uuid");
+        let uuid = read_sysfs(&uuid_path)?;
+        // A mapping with a uuid always has a name beside it. Substituting a
+        // placeholder for a failed read would let a read failure reach a
+        // confident state, which is the one thing this reader must never do.
+        let name = bounded(read_sysfs(&node.join("dm/name"))?);
+        match crypt_type(&uuid) {
+            Some(kind) => {
+                // The type prefix only. The remainder of a crypt UUID is a
+                // stable identifier for this host's volume and has no place in
+                // a report an operator may export.
+                record(
+                    evidence,
+                    uuid_path.display().to_string(),
+                    format!("device-mapper uuid prefix {}, mapping {name}", label(&kind)),
+                );
+                self.crypt_kinds.insert(mechanism_label(&kind));
+                if !self.crypt_mappings.contains(&name) {
+                    self.crypt_mappings.push(name.clone());
+                }
+                Ok(Mapping {
+                    name,
+                    is_crypt: true,
+                })
+            }
+            None => {
+                record(
                     evidence,
                     uuid_path.display().to_string(),
                     format!(
                         "device-mapper uuid prefix {}, mapping {name}; not a crypt target",
                         subsystem_prefix(&uuid)
                     ),
-                ),
-            }
-        }
-        let crypt_on_path = crypt_above || crypt_here;
-
-        // A missing slaves directory means this device has no parents. A
-        // DANGLING one answers NotFound from read_dir too, so presence is asked
-        // first: symlink_metadata sees the link, and a link to nothing is an
-        // error rather than a device with no parents.
-        let slaves = node.join("slaves");
-        let slaves_present = match presence(&slaves) {
-            Ok(found) => found == Presence::Present,
-            Err(reason) => return Walk::Undetermined { reason },
-        };
-        let children = match fs::read_dir(&slaves) {
-            Ok(children) => children,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !slaves_present => {
-                leaves += 1;
-                if !crypt_on_path {
-                    plain_leaves.push(device);
-                }
-                continue;
-            }
-            Err(error) => {
-                return Walk::Undetermined {
-                    reason: unreadable_reason(&slaves, error.kind()),
-                };
-            }
-        };
-        let mut parents = 0usize;
-        for child in children {
-            let child = match child {
-                Ok(child) => child,
-                Err(error) => {
-                    return Walk::Undetermined {
-                        reason: unreadable_reason(&slaves, error.kind()),
-                    };
-                }
-            };
-            let dev_file = child.path().join("dev");
-            let parent = match read_sysfs(&dev_file) {
-                Ok(value) => match DeviceNumber::parse(&value) {
-                    Some(parent) => parent,
-                    None => return unreadable(&dev_file),
-                },
-                Err(reason) => return Walk::Undetermined { reason },
-            };
-            parents += 1;
-            queue.push_back((parent, depth + 1, crypt_on_path));
-        }
-        // An empty slaves directory is a whole disk: a leaf like a partition.
-        if parents == 0 {
-            leaves += 1;
-            if !crypt_on_path {
-                plain_leaves.push(device);
+                );
+                Ok(Mapping {
+                    name,
+                    is_crypt: false,
+                })
             }
         }
     }
-
-    // Nothing terminated the stack, so "every leaf is covered" would be true of
-    // no leaves at all. A vacuous truth is not proof of encryption.
-    if leaves == 0 {
-        return Walk::Undetermined {
-            reason: "no physical device terminated the volume's stack".to_owned(),
-        };
-    }
-    if plain_leaves.is_empty() {
-        return Walk::Encrypted {
-            mechanism: crypt_kinds.into_iter().collect::<Vec<_>>().join(", "),
-        };
-    }
-    // Name the branches that are not covered; a negative nobody can locate is
-    // not much better than no answer.
-    let named = plain_leaves
-        .iter()
-        .map(DeviceNumber::to_string)
-        .collect::<Vec<_>>()
-        .join(", ");
-    record(
-        evidence,
-        system.sys_dev_block.display().to_string(),
-        format!("no crypt layer covers block device(s) {named}"),
-    );
-    Walk::NoCryptProven
 }
 
-fn unreadable(path: &Path) -> Walk {
-    Walk::Undetermined {
-        reason: format!(
-            "a device in the volume's stack could not be read: {}",
-            path.display()
-        ),
-    }
+struct Mapping {
+    name: String,
+    is_crypt: bool,
 }
 
 /// The type token of a device-mapper crypt UUID, or `None` when the UUID does
