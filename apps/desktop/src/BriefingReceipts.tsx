@@ -8,6 +8,18 @@ import type { PreflightReceipt } from "./session";
  *  is a decision made here and stated to the operator when it bites. */
 export const RECENT_RECEIPT_LIMIT = 5;
 
+/** How many Projects one reading may open, how many at a time, and how many
+ *  rows it may hold before sorting.
+ *
+ *  The Query is Project-scoped, so Briefing must fan out; an unbounded fan-out
+ *  is not a design but an assumption about the Workspace. These are small,
+ *  named, and disclosed when they bite -- a stopgap until a Workspace-scoped,
+ *  server-bounded Query exists behind the interface.
+ */
+export const RECEIPT_PROJECT_BUDGET = 8;
+export const RECEIPT_READ_CONCURRENCY = 4;
+export const RECEIPT_AGGREGATE_LIMIT = 256;
+
 const useStyles = makeStyles({
   section: { marginTop: tokens.spacingVerticalXL },
   heading: {
@@ -83,14 +95,19 @@ export function BriefingReceipts({
   total,
   loading,
   failure,
-  busy,
+  scope,
+  disabled,
   onRefresh,
 }: {
   rows: readonly ReceiptRow[] | null;
   total: number;
   loading: boolean;
   failure: string;
-  busy: boolean;
+  /** Empty when the reading covered every Project; otherwise what it covered. */
+  scope: string;
+  /** Unrelated work in flight. Kept apart from `loading` so retiring a Resident
+   *  does not label this button "Refreshing…" while no Receipt read is running. */
+  disabled: boolean;
   onRefresh: () => void;
 }) {
   const styles = useStyles();
@@ -146,9 +163,11 @@ export function BriefingReceipts({
         </>
       )}
 
+      {scope ? <p className={styles.truncation}>{scope}.</p> : null}
+
       <div className={styles.actions}>
-        <Button size="small" disabled={busy} onClick={onRefresh}>
-          {busy ? "Refreshing…" : "Refresh Receipts"}
+        <Button size="small" disabled={disabled || loading} onClick={onRefresh}>
+          {loading ? "Refreshing…" : "Refresh Receipts"}
         </Button>
       </div>
     </section>
