@@ -1778,6 +1778,35 @@ mod tests {
     }
 
     #[test]
+    fn hostile_stored_bytes_carrying_an_uppercase_base_revision_are_refused_by_the_decoder() {
+        // The test below exercises `encode`, which is the caller's side. This one is the store's:
+        // bytes that already exist, handed to `decode`. gpt2's surviving mutant lowercased the
+        // decoded value before validating it, and every committed test stayed green because none
+        // of them ever fed hostile bytes IN.
+        //
+        // The wrong answer matters because case-folding a Binding invents agreement: `A1B2...` and
+        // `a1b2...` would name one pinned commit under one identity, and the Ruling's own digest
+        // would then cover a value the record does not actually spell.
+        let bytes = encode(&fixture()).unwrap();
+        let offset = MAGIC.len() + 32 + 8 + 6 + 8 + 18 + 4 + 4 + 4 + 8;
+        assert_eq!(
+            &bytes[offset..offset + BASE_REVISION_CHARS],
+            BASE.as_bytes()
+        );
+        let mut uppercase = bytes.clone();
+        uppercase[offset..offset + BASE_REVISION_CHARS]
+            .copy_from_slice(BASE.to_uppercase().as_bytes());
+        assert_ne!(uppercase, bytes);
+
+        assert_eq!(decode(&uppercase), Err(MalformedRuling::PinnedBaseRevision));
+        // A mixed-case spelling of the same commit is refused too, and it is a DIFFERENT byte
+        // string, so a decoder that folded would hand two records one meaning.
+        let mut mixed = bytes.clone();
+        mixed[offset] = BASE.as_bytes()[0].to_ascii_uppercase();
+        assert_eq!(decode(&mixed), Err(MalformedRuling::PinnedBaseRevision));
+    }
+
+    #[test]
     fn digests_and_the_base_revision_are_refused_rather_than_case_folded() {
         // Folding would let `A1B2...` and `a1b2...` name one Ruling, which is the silent
         // normalization of a Binding this grammar exists to refuse.
