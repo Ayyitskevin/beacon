@@ -144,6 +144,12 @@ if [ ! -x "$driver" ]; then
     echo "clean-host-first-run: container driver is absent or not executable: $driver" >&2
     exit 1
 fi
+state_helper="$(pwd)/scripts/clean-host-first-run-state"
+if [ ! -r "$state_helper" ]; then
+    set_matrix_field input status absent
+    echo "clean-host-first-run: state helper is absent or unreadable: $state_helper" >&2
+    exit 1
+fi
 
 labels=(ubuntu-22.04 debian-12 ubuntu-24.04)
 images=(ubuntu:22.04 debian:12 ubuntu:24.04)
@@ -165,6 +171,7 @@ for index in "${!labels[@]}"; do
         --tmpfs /scratch-home:exec,size=512m \
         --volume "$appimage:/opt/beacon/Beacon.AppImage:ro" \
         --volume "$driver:/opt/beacon/drive-first-run:ro" \
+        --volume "$state_helper:/opt/beacon/first-run-state:ro" \
         --volume "$output:/evidence" \
         --env "BEACON_EVIDENCE_UID=$(id -u)" \
         --env "BEACON_EVIDENCE_GID=$(id -g)" \

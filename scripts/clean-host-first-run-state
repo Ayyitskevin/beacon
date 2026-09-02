@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Shared closed vocabulary for the container driver's observable step states.
+# This file is sourced; it performs no work on its own.
+
+first_run_wait_failure() {
+    local wait_status="$1"
+    local transition="$2"
+
+    case "$wait_status" in
+        1)
+            printf 'absent\t%s was not observed before timeout\n' "$transition"
+            ;;
+        2)
+            printf 'broken\t%s could not complete because the AppImage exited\n' "$transition"
+            ;;
+        3)
+            printf 'broken\t%s was observed, but its redacted evidence could not be produced\n' \
+                "$transition"
+            ;;
+        *)
+            printf 'broken\t%s returned an unknown wait status (%s)\n' \
+                "$transition" "$wait_status"
+            ;;
+    esac
+}

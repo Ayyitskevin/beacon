@@ -82,7 +82,11 @@ def _isolated_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     root = tmp_path / "checkout"
     scripts = root / "scripts"
     scripts.mkdir(parents=True)
-    for name in ("clean-host-first-run", "clean-host-first-run-container"):
+    for name in (
+        "clean-host-first-run",
+        "clean-host-first-run-container",
+        "clean-host-first-run-state",
+    ):
         destination = scripts / name
         shutil.copy2(REPO / "scripts" / name, destination)
         destination.chmod(0o755)
@@ -196,3 +200,35 @@ def test_an_absent_appimage_is_not_reported_as_a_broken_host(tmp_path: Path) -> 
     assert matrix["input"] == "absent"
     assert {row["status"] for row in matrix["environments"].values()} == {"not_evaluated"}
     assert "AppImage is absent" in result.stderr
+
+
+def test_each_wait_failure_preserves_its_cause_and_transition() -> None:
+    state_helper = REPO / "scripts" / "clean-host-first-run-state"
+    transition = "Recovery Key confirmation"
+    expected = {
+        "1": ("absent", "was not observed before timeout"),
+        "2": ("broken", "AppImage exited"),
+        "3": ("broken", "redacted evidence could not be produced"),
+    }
+
+    for wait_status, (state, cause) in expected.items():
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1"; first_run_wait_failure "$2" "$3"',
+                "first-run-wait-probe",
+                str(state_helper),
+                wait_status,
+                transition,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        actual_state, detail = result.stdout.rstrip("\n").split("\t", 1)
+        assert actual_state == state
+        assert transition in detail
+        assert cause in detail
