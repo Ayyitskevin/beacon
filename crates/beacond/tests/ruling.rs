@@ -875,6 +875,44 @@ fn a_proposal_outside_this_services_workspace_is_not_found() {
 }
 
 #[test]
+fn the_bound_proposal_envelope_is_copied_from_the_proposal_not_rebuilt_from_constants() {
+    // The ruling says the digest, algorithm, and canonicalizer are copied and "nothing is
+    // inferred". Rebuilding two of the three from this module's own v1 constants produced equal
+    // values, and equality is not provenance -- it is the same silent inference the ruling
+    // prohibits, surviving only because the store's CHECK constraints happen to force agreement.
+    let fixture = admitted_mission("copied-envelope");
+    let proposal_digest = fixture.submit("Add a regression test.");
+    let proposal = fixture.proposals.get(&proposal_digest).unwrap();
+
+    let ruling = fixture
+        .rulings
+        .rule(
+            &proposal_digest,
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap();
+
+    // Compared against what the Proposal surface itself reports, never against string literals: a
+    // test pinned to v1 constants would keep passing on the day the two diverged, which is the
+    // only day it would matter.
+    assert_eq!(&ruling.payload().proposal, proposal.digest());
+    assert_eq!(ruling.payload().proposal.value, proposal_digest);
+    // And the envelope survives the round trip through the stored bytes, so what a later reader
+    // sees is what was copied rather than what its own constants would have said.
+    assert_eq!(
+        fixture
+            .rulings
+            .get(&ruling.digest().value)
+            .unwrap()
+            .payload()
+            .proposal,
+        *proposal.digest()
+    );
+}
+
+#[test]
 fn the_copied_revisions_are_the_proposals_not_the_current_ones() {
     // The wrong answer this kills: copying whatever is current at ruling time, which would make a
     // Ruling silently agree with a policy version its Proposal was never written against -- and
