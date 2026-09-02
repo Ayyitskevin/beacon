@@ -248,6 +248,116 @@ fn review_r3_long_mixed_mapping_names_preserve_the_disabled_conclusion() {
 }
 
 #[test]
+fn every_conclusion_survives_its_components_and_fits_the_adapter() {
+    // The composition edges gpt1 named, each asserted on both halves of the
+    // ruling: the sentence stays complete, and the adapter's 200-character
+    // bound is met without the sentence being what got cut.
+    fn conclusion(fixture: &Fixture) -> String {
+        let report = fixture.read();
+        let text = match &report.mechanism {
+            beacond::Recorded::Absent { reason } => reason.clone(),
+            beacond::Recorded::Present { value } => value.clone(),
+        };
+        assert!(
+            text.chars().count() <= 200,
+            "{} chars: {text}",
+            text.chars().count()
+        );
+        for entry in &report.evidence {
+            assert!(entry.source.chars().count() <= 200);
+            assert!(entry.observation.chars().count() <= 200);
+        }
+        text
+    }
+
+    // A 300-character mapping with no backing device.
+    let unbacked = Fixture::new("unbacked-long-name");
+    let device = unbacked.mounted_on_host_device();
+    unbacked.dm(
+        &device,
+        "CRYPT-LUKS2-a1b2c3d4e5f60718293a4b5c6d7e8f90-x",
+        &"unbacked-mapping-".repeat(20),
+    );
+    fs::create_dir_all(unbacked.node(&device).join("slaves")).unwrap();
+    let reason = conclusion(&unbacked);
+    assert!(
+        reason.contains("has no readable backing device"),
+        "{reason}"
+    );
+    assert!(reason.contains('\u{2026}'), "{reason}");
+
+    // Many uncovered leaves under one plain mapping.
+    let many = Fixture::new("many-leaves");
+    let device = many.mounted_on_host_device();
+    many.dm(&device, "LVM-9f8e7d6c5b4a39281706f5e4d3c2b1a0", "vg0");
+    let children: Vec<(String, String)> = (0..12)
+        .map(|index| (format!("sd{index}"), format!("8:{index}")))
+        .collect();
+    let borrowed: Vec<(&str, &str)> = children
+        .iter()
+        .map(|(name, dev)| (name.as_str(), dev.as_str()))
+        .collect();
+    many.slaves(&device, &borrowed);
+    for (_, dev) in &children {
+        many.node(dev);
+    }
+    let reason = conclusion(&many);
+    assert!(reason.contains("no crypt layer"), "{reason}");
+    assert!(reason.contains("more"), "{reason}");
+
+    // Many distinct crypt mechanisms on one covered stack.
+    let mechanisms = Fixture::new("many-mechanisms");
+    let device = mechanisms.mounted_on_host_device();
+    mechanisms.dm(&device, "LVM-9f8e7d6c5b4a39281706f5e4d3c2b1a0", "vg0");
+    let kinds = ["LUKS1", "LUKS2", "BITLK", "PLAIN", "TEMP", "VERITY"];
+    let names: Vec<(String, String)> = kinds
+        .iter()
+        .enumerate()
+        .map(|(index, _)| (format!("dm-{index}"), format!("253:{index}")))
+        .collect();
+    let borrowed: Vec<(&str, &str)> = names
+        .iter()
+        .map(|(name, dev)| (name.as_str(), dev.as_str()))
+        .collect();
+    mechanisms.slaves(&device, &borrowed);
+    for (index, kind) in kinds.iter().enumerate() {
+        let dev = format!("253:{index}");
+        mechanisms.dm(
+            &dev,
+            &format!("CRYPT-{kind}-0011223344556677889900aabbccdd{index:02}-m"),
+            &format!("mapping-{index}"),
+        );
+        mechanisms.slaves(&dev, &[("disk", &format!("8:{index}"))]);
+        mechanisms.node(&format!("8:{index}"));
+    }
+    let mechanism = conclusion(&mechanisms);
+    assert!(mechanism.starts_with("dm-crypt"), "{mechanism}");
+}
+
+#[test]
+fn shortened_evidence_says_that_it_was_shortened() {
+    let fixture = Fixture::new("marked-evidence");
+    let device = fixture.mounted_on_host_device();
+    // A mapping name past the evidence bound. Silent truncation makes a
+    // shortened observation read as the whole value.
+    fixture.dm(
+        &device,
+        "CRYPT-LUKS2-a1b2c3d4e5f60718293a4b5c6d7e8f90-x",
+        &"evidence-mapping-".repeat(20),
+    );
+    fixture.slaves(&device, &[("sda2", "8:2")]);
+    fixture.node("8:2");
+
+    let report = fixture.read();
+
+    let text = evidence_text(&report);
+    assert!(text.contains('\u{2026}'), "{text}");
+    for entry in &report.evidence {
+        assert!(entry.observation.chars().count() <= 200);
+    }
+}
+
+#[test]
 fn review_crypt_mapping_without_a_physical_leaf_is_unknown() {
     let fixture = Fixture::new("crypt-no-leaf");
     let device = fixture.mounted_on_host_device();
