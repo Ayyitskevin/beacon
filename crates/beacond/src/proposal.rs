@@ -1647,10 +1647,21 @@ fn compare_readable_context_within(
     match store.contains(&payload.bindings.pinned_base_revision, deadline) {
         Ok(true) => Ok(Some(ContextComparison::ContentUnreadableAtRevision)),
         Ok(false) => Ok(Some(ContextComparison::PinnedRevisionAbsent)),
-        // The lower layer keeps these apart; so does this one. An elapsed inspection was not
-        // evaluated; any other error means a step broke. Neither is a negative answer.
-        Err(ObjectStoreError::Elapsed) => Ok(Some(ContextComparison::InspectionTimedOut)),
-        Err(_) => Ok(Some(ContextComparison::InspectionFailed)),
+        Err(error) => Ok(Some(inspection_error(error))),
+    }
+}
+
+/// How an object-store failure is reported. The lower layer keeps these apart; so does this one.
+///
+/// An elapsed inspection was not evaluated. Any other error means a step broke. Neither is a
+/// negative answer, and neither may be reported as one -- that is the whole distinction
+/// AGENTS.md:152 requires, in one place so it cannot drift between call sites.
+fn inspection_error(error: ObjectStoreError) -> ContextComparison {
+    match error {
+        ObjectStoreError::Elapsed => ContextComparison::InspectionTimedOut,
+        ObjectStoreError::NotARepository
+        | ObjectStoreError::IndirectionTooDeep
+        | ObjectStoreError::UnreadableIndex => ContextComparison::InspectionFailed,
     }
 }
 
@@ -2147,6 +2158,49 @@ mod tests {
 
     fn fixture_bytes() -> Vec<u8> {
         encode(&fixture_payload()).unwrap()
+    }
+
+    #[test]
+    fn every_object_store_failure_maps_to_its_own_reported_state() {
+        // Exhaustive over the lower layer's error vocabulary, so an arm added there cannot be
+        // folded into an existing reason by a wildcard. The wrong answer is any mapping that
+        // sends an error to PinnedRevisionAbsent -- a negative answer Beacon never established.
+        assert_eq!(
+            inspection_error(ObjectStoreError::Elapsed),
+            ContextComparison::InspectionTimedOut
+        );
+        for broken in [
+            ObjectStoreError::NotARepository,
+            ObjectStoreError::IndirectionTooDeep,
+            ObjectStoreError::UnreadableIndex,
+        ] {
+            assert_eq!(
+                inspection_error(broken),
+                ContextComparison::InspectionFailed
+            );
+        }
+    }
+
+    #[test]
+    fn an_elapsed_deadline_reaches_the_object_store_and_comes_back_as_elapsed() {
+        // Proves the budget is threaded into the inspection rather than only checked around it:
+        // the deadline this function passes down is the one `contains` consults, so an elapsed
+        // budget surfaces as Elapsed from the store itself -- which `inspection_error` above then
+        // reports as not-evaluated. Without the threading it would report a negative answer.
+        let root =
+            std::env::temp_dir().join(format!("beacond-proposal-deadline-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".git/objects/pack")).unwrap();
+        let store = ObjectStore::open(&root).expect("a directory with .git/objects is a store");
+
+        let mut elapsed = || true;
+        let outcome = store.contains(&"a".repeat(40), &mut elapsed);
+
+        assert_eq!(outcome, Err(ObjectStoreError::Elapsed));
+        assert_eq!(
+            inspection_error(outcome.unwrap_err()),
+            ContextComparison::InspectionTimedOut
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
