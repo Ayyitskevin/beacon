@@ -10,6 +10,8 @@ import {
 } from "@fluentui/react-components";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 
+import { BriefingReceipts, type ReceiptRow } from "./BriefingReceipts";
+
 import {
   acceptStarterOrganization,
   activateLocalModel,
@@ -39,6 +41,7 @@ import {
   loadProjectPolicy,
   loadProjectPolicyHistory,
   loadProjectRepository,
+  loadPreflightReceipts,
   preflightProjectChecks,
   loadProjectRepositoryHistory,
   loadProjects,
@@ -303,6 +306,11 @@ export function App() {
     useState<LocalModelActivationReview | null>(null);
   const [discoveringLocalModels, setDiscoveringLocalModels] = useState(false);
   const localModelDiscoveryEpoch = useRef(0);
+  const [recentReceipts, setRecentReceipts] = useState<ReceiptRow[] | null>(null);
+  const [recentReceiptTotal, setRecentReceiptTotal] = useState(0);
+  const [loadingRecentReceipts, setLoadingRecentReceipts] = useState(false);
+  const [recentReceiptFailure, setRecentReceiptFailure] = useState("");
+  const recentReceiptEpoch = useRef(0);
   const [residentCapabilityCatalog, setResidentCapabilityCatalog] =
     useState<BeaconCapabilityDescriptor[] | null>(null);
   const [residentConfigurations, setResidentConfigurations] =
@@ -439,8 +447,39 @@ export function App() {
     };
   }, [unlocked]);
 
+  // Loaded once when the Workspace opens and re-read only on the explicit
+  // control. Nothing polls, so nothing can move focus under a keyboard user.
+  useEffect(() => {
+    if (
+      !unlocked ||
+      activeApplication !== "Briefing" ||
+      !starterOrganization ||
+      starterOrganization.decision === "proposed" ||
+      recentReceipts !== null ||
+      loadingRecentReceipts ||
+      recentReceiptFailure !== ""
+    ) {
+      return;
+    }
+    void loadRecentReceipts();
+    // Same dependency shape as the Projects loader: this fires on the state it
+    // reads, never on a timer.
+  }, [
+    activeApplication,
+    loadingRecentReceipts,
+    recentReceiptFailure,
+    recentReceipts,
+    starterOrganization,
+    unlocked,
+  ]);
+
   useEffect(() => {
     if (unlocked) return;
+    recentReceiptEpoch.current += 1;
+    setRecentReceipts(null);
+    setRecentReceiptTotal(0);
+    setLoadingRecentReceipts(false);
+    setRecentReceiptFailure("");
     localModelDiscoveryEpoch.current += 1;
     setLocalModelDiscovery(null);
     setLocalModelActivations(null);
@@ -877,6 +916,42 @@ export function App() {
         setResidentConfigurations(await loadResidentConfigurations());
       }
     });
+  }
+
+  /** Briefing's Receipts, gathered from the Projects this Workspace has.
+   *
+   *  The Query is Project-scoped -- `preflight_receipts` takes a projectId --
+   *  and Briefing has no Project, so this fans out over the Project list rather
+   *  than inventing a Workspace-scoped Query the daemon does not have. One
+   *  Project that cannot be read fails the whole reading: a partial merge shown
+   *  as "recent" would be a bounded list of an unknown subset.
+   */
+  async function loadRecentReceipts() {
+    const requestEpoch = ++recentReceiptEpoch.current;
+    setLoadingRecentReceipts(true);
+    setRecentReceiptFailure("");
+    try {
+      const openProjects = await loadProjects();
+      const gathered = await Promise.all(
+        openProjects.map(async (project) => {
+          const receipts = await loadPreflightReceipts(project.id);
+          return receipts.map((receipt) => ({ receipt, projectName: project.name }));
+        }),
+      );
+      if (requestEpoch !== recentReceiptEpoch.current) return;
+      const rows = gathered.flat();
+      setRecentReceipts(rows);
+      setRecentReceiptTotal(rows.length);
+    } catch (error) {
+      if (requestEpoch !== recentReceiptEpoch.current) return;
+      // Kept where the panel can show it, so a failed read is never mistaken
+      // for a Workspace with no Receipts.
+      setRecentReceipts(null);
+      setRecentReceiptTotal(0);
+      setRecentReceiptFailure(describeLocalAccountError(error));
+    } finally {
+      if (requestEpoch === recentReceiptEpoch.current) setLoadingRecentReceipts(false);
+    }
   }
 
   async function refreshResidents() {
@@ -1415,6 +1490,11 @@ export function App() {
               onReactivateResident={(resident) => changeResident(reactivateResident, resident)}
               onRetireResident={(resident) => changeResident(retireResident, resident)}
               onRefreshResidents={refreshResidents}
+              recentReceipts={recentReceipts}
+              recentReceiptTotal={recentReceiptTotal}
+              loadingRecentReceipts={loadingRecentReceipts}
+              recentReceiptFailure={recentReceiptFailure}
+              onRefreshReceipts={loadRecentReceipts}
               onLock={lockSession}
             />
           )}
@@ -1682,6 +1762,11 @@ function Briefing({
   onReactivateResident,
   onRetireResident,
   onRefreshResidents,
+  recentReceipts,
+  recentReceiptTotal,
+  loadingRecentReceipts,
+  recentReceiptFailure,
+  onRefreshReceipts,
   onLock,
 }: {
   classes: StyleClasses;
@@ -1721,6 +1806,11 @@ function Briefing({
   onReactivateResident: (resident: ResidentAgentView) => void;
   onRetireResident: (resident: ResidentAgentView) => void;
   onRefreshResidents: () => void;
+  recentReceipts: ReceiptRow[] | null;
+  recentReceiptTotal: number;
+  loadingRecentReceipts: boolean;
+  recentReceiptFailure: string;
+  onRefreshReceipts: () => void;
   onLock: () => void;
 }) {
   const [retirementCandidateId, setRetirementCandidateId] = useState<string | null>(null);
@@ -1799,6 +1889,14 @@ function Briefing({
       <Button size="small" disabled={busy || residents === null} onClick={onRefreshResidents}>
         Refresh Residents
       </Button>
+      <BriefingReceipts
+        rows={recentReceipts}
+        total={recentReceiptTotal}
+        loading={loadingRecentReceipts}
+        failure={recentReceiptFailure}
+        busy={busy || loadingRecentReceipts}
+        onRefresh={onRefreshReceipts}
+      />
       {retirementCandidate && (
         <section
           className={classes.retirementConfirm}

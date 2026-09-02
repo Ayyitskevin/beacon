@@ -149,6 +149,9 @@ function mockInitialState(phase: Phase) {
     if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
     if (command === "residents") return Promise.resolve(residentRoster);
     if (command === "record_operator_activity") return Promise.resolve(null);
+    // Briefing reads its recent Receipts by fanning out over the Project list.
+    if (command === "projects") return Promise.resolve([]);
+    if (command === "preflight_receipts") return Promise.resolve([]);
     if (command === "set_session_timeout") {
       return Promise.resolve({
         inactivityTimeoutMinutes: (args as { inactivityTimeoutMinutes: number })
