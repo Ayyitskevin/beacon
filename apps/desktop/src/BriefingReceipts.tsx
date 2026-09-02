@@ -83,7 +83,13 @@ function shortRunId(runId: string): string {
   return runId.slice(0, 8);
 }
 
-/** Briefing's "recent receipts" (BLUEPRINT §3).
+/** Briefing's recent PREFLIGHT Receipts.
+ *
+ *  This is not yet BLUEPRINT §3's general "recent receipts" item. The Query it
+ *  reads filters `runs.kind = 'check_preflight'`, and Beacon already writes
+ *  execution Receipts for declared-check Runs into the same store. The general,
+ *  cross-kind list needs a Workspace-scoped Query behind the interface; see
+ *  `docs/implementation/phase-1-briefing-recent-receipts.md`.
  *
  *  Every row states the kind of Run, the outcome exactly as recorded, the Run
  *  it belongs to, and when it started. It never upgrades an outcome: nothing

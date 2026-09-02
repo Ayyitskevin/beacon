@@ -1,4 +1,4 @@
-# Phase 1 Briefing recent Receipts
+# Phase 1 Briefing recent preflight Receipts
 
 BLUEPRINT §3 designs Briefing to show "the Project portfolio, active Missions, Team health, spend,
 blocked work, recent receipts, and Attention Items". Before this slice Briefing rendered one of the
@@ -54,7 +54,11 @@ truncation line exists to prevent.
 
 ## Bounds, ordering, and the three empty-ish states
 
-- **Five rows.** Briefing "optimizes for exceptions, not activity volume".
+- **Five rows drawn.** Briefing "optimizes for exceptions, not activity volume".
+- **256 rows held, applied while collecting.** Each Project's page is merged and trimmed, so what
+  the reading holds never exceeds the cap plus one page whatever the Workspace contains. Slicing at
+  the end retained everything first, and then reported the capped length as the total — which made
+  every row past the cap vanish from the disclosure. The panel reports the number actually found.
 - **The daemon applies no LIMIT.** `check_preflight.rs` returns every Receipt a Project has, so the
   bound is entirely the desktop's. The adapter now caps the list at 512, matching the repository
   history cap; the panel then draws five.
@@ -70,7 +74,7 @@ truncation line exists to prevent.
 ## Accessibility
 
 A `<section aria-labelledby>` with an `<h2>` inside Briefing's `<h1>`, and a
-`<ul aria-label="Recent Receipts">` of `<li>` — list semantics matching the Resident roster rather
+`<ul aria-label="Recent preflight Receipts">` of `<li>` — list semantics matching the Resident roster
 than a new role. Loading, empty and failed are `role="status"`, never `role="alert"`.
 
 **Nothing polls.** The list loads once when the Workspace opens and re-loads only on the explicit
@@ -85,7 +89,7 @@ From `apps/desktop`:
 
 ```sh
 npx vitest run src/BriefingReceipts.test.tsx
-npx vitest run src/App.test.tsx -t "recent Receipts"
+npx vitest run src/App.test.tsx -t "recent preflight Receipts"
 npx tsc -b && npm run build
 ```
 
@@ -109,7 +113,7 @@ their observed failures are recorded in the build report for this slice.
 ## The slice this is not
 
 A general recent-Receipts surface needs a **daemon Query**, not a wider fan-out in the interface: one
-Workspace-scoped, kind-agnostic, server-bounded read that returns the N most recent Receipts across
+Workspace-scoped, kind-agnostic, server-bounded read that returns the N most recent Receipts of ANY kind across
 every Run kind, already ordered, with a total so truncation stays disclosable. It belongs behind the
 interface because the ordering, the bound and the join across kinds are domain work, and because the
 desktop cannot bound what it does not select. The row shape generalises with one addition — the Run
