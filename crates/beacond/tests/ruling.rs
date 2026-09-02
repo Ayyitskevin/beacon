@@ -1263,6 +1263,54 @@ fn citing_a_link_that_is_no_longer_the_tail_is_refused() {
 }
 
 #[test]
+fn a_ruling_time_earlier_than_the_tail_it_cites_is_refused_when_recorded() {
+    // The recording half of ADR 0037's non-decreasing-time bullet, which the implementation note
+    // recorded as Gap 1: `InconsistentRuling::RuledBeforeTail` existed and nothing exercised it.
+    //
+    // It needs a tail the clock cannot have produced, so one is planted with a ruling time far in
+    // the future. The wrong answer is accepting the new link anyway, which would leave a chain
+    // whose times run backwards -- and a chain that cannot be read as history is exactly what the
+    // "effective order is chain order, never timestamp order" rule stops being able to explain.
+    let (fixture, proposal_digest, first) = ruled("ruled-before-tail");
+    let head = fixture.rulings.get(&first).unwrap();
+    let mut future = record_for(
+        &proposal_digest,
+        "Recorded with a clock reading no later call can match.",
+        head.payload().ruled_at_ms + 10_000_000,
+    );
+    future.decision_tag = 0x02;
+    future.supersedes = Some(first.clone());
+    fixture.plant(&future);
+    fixture.link(&future);
+    assert!(future.ruled_at_ms > head.payload().ruled_at_ms);
+
+    let error = fixture
+        .rulings
+        .rule(
+            &proposal_digest,
+            RulingDecision::Approve,
+            "Recorded after a tail dated in the future.",
+            RulingSupersedes::Ruling(future.digest()),
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        inconsistent(&error),
+        Some(InconsistentRuling::RuledBeforeTail),
+        "{error:?}"
+    );
+    // It cites the correct tail, so the refusal is the time rule and not the chain rule.
+    assert_ne!(
+        inconsistent(&error),
+        Some(InconsistentRuling::NotTheCurrentTail)
+    );
+    assert_eq!(fixture.ruling_rows(), 2);
+    assert_eq!(fixture.ruling_events(), 2);
+    // And the store it refused to extend is still a store that starts.
+    fixture.restart().unwrap();
+}
+
+#[test]
 fn a_ruling_can_be_both_superseded_and_drifted_and_says_so() {
     // Force is two facts reported together, so no caller has to learn which one wins. A design
     // that made it an enum would have to choose, and would hide the other.

@@ -206,7 +206,7 @@ raise an error, so a historical Ruling does not become corrupt because the world
 ADR 0037 states that each of its required-evidence bullets maps to one named test and that the
 mapping is recorded here, "so that 'maps to a test' is a fact a reviewer can check rather than a
 claim the author makes". This is that mapping. Bullets are numbered in the order the ADR lists them.
-Three of them do not map cleanly, and those are stated as such rather than papered over.
+Two of them do not map cleanly, and those are stated as such rather than papered over.
 
 Test locations: **[u]** = `crates/beacond/src/ruling.rs` unit tests, **[i]** =
 `crates/beacond/tests/ruling.rs`, **[m]** = `crates/beacond/src/lib.rs` migration tests.
@@ -222,7 +222,7 @@ Test locations: **[u]** = `crates/beacond/src/ruling.rs` unit tests, **[i]** =
 | 7 | a second Ruling supersedes the first, both stay readable, the effective Ruling is the last link | `a_second_ruling_supersedes_the_first_and_both_remain_readable` [i] · `any_decision_may_follow_any_decision_and_every_link_carries_its_own_reason` [i] |
 | 8 | a `supersedes` naming no Ruling, or one bound to a different Proposal, is refused | `a_first_ruling_that_cites_an_unrecorded_digest_is_refused_as_unrecorded` [i] · `citing_another_proposals_ruling_is_refused_as_that_and_not_as_unrecorded` [i] · `citing_a_link_that_is_no_longer_the_tail_is_refused` [i] · `a_later_ruling_that_cites_nothing_is_refused_as_not_the_tail` [i] |
 | 9 | two predecessors or a double supersession refused by the store; a fork or a cycle refuses startup | `the_store_refuses_a_second_predecessor_and_a_second_supersession` [i] · `each_composite_foreign_key_independently_refuses_a_cross_proposal_relation` [i] · `startup_refuses_a_forked_chain` [i] · `startup_refuses_a_supersession_cycle` [i] · `a_forked_chain_has_no_last_link_and_is_refused` [i] · `a_supersession_cycle_has_no_first_link_and_is_refused` [i] |
-| 10 | a ruling time earlier than the link it supersedes is refused when recorded **and** again at startup | startup half: `startup_refuses_a_ruling_time_that_goes_backwards_along_the_chain` [i] · **recording half: no test — Gap 1 below** |
+| 10 | a ruling time earlier than the link it supersedes is refused when recorded **and** again at startup | recording half: `a_ruling_time_earlier_than_the_tail_it_cites_is_refused_when_recorded` [i] · startup half: `startup_refuses_a_ruling_time_that_goes_backwards_along_the_chain` [i] |
 | 11 | update and delete against a recorded Ruling are refused by the store | `ruling_rows_refuse_update_and_delete` [i] · `a_recorded_ruling_refuses_update_and_delete` [m] |
 | 12 | an unauthenticated caller receives only the authentication refusal | `unauthenticated_recording_returns_only_the_account_refusal` [i] |
 | 13 | identical re-ruling is refused rather than duplicated | `a_later_ruling_that_cites_nothing_is_refused_as_not_the_tail` [i] — the same call twice, refused the second time with nothing written. The digest primary key is the deeper guard and is unreachable while the chain rule holds. |
@@ -261,13 +261,14 @@ integrity (`a_stored_ruling_that_does_not_name_its_bytes_is_refused_by_every_rea
 `migration_nineteen_rolls_back_exactly_before_forward_startup`,
 `the_version_guard_alone_refuses_a_structurally_ready_store_that_is_not_stamped_eighteen`).
 
-### Gap 1 — the recording half of bullet 10 has no test
+### Gap 1 — closed
 
-`InconsistentRuling::RuledBeforeTail` refuses a `rule` call whose clock reading is earlier than the
-tail it cites, and nothing exercises it. It is reachable: plant a Ruling whose `ruled_at_ms` is in
-the future, link it as the tail, then call `rule` citing it. Writing that test is a code change and
-this checkpoint is documentation only, so it is recorded here rather than claimed. Until it exists,
-bullet 10 is half met, and the ADR should not be read as saying otherwise.
+Bullet 10 was half met when this note was first written: `InconsistentRuling::RuledBeforeTail`
+existed and nothing exercised it. `a_ruling_time_earlier_than_the_tail_it_cites_is_refused_when_recorded`
+now does, by planting a tail whose ruling time the clock cannot have produced and then citing it. It
+goes red when the guard is removed, and it asserts that the refusal is `RuledBeforeTail` rather than
+`NotTheCurrentTail` — the call cites the correct tail, so the time rule and the chain rule are
+separate refusals, and a test that could not tell them apart would prove neither.
 
 ### Residual 1 — bullet 15 contradicts the amended ruling on reordering
 
