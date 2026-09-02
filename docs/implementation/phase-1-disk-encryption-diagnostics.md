@@ -17,19 +17,31 @@ Budgets: `/proc/self/mountinfo` at most 4 MiB and 16,384 entries, each sysfs fil
 block-stack walk at most 8 deep and 64 nodes with a visited set. Recorded observations are truncated
 to 200 characters, stripped of control characters, and capped at 32 entries.
 
-## The asymmetry
+## The rule
 
-Nothing reports `enabled` except a device-mapper `CRYPT-` UUID this module read itself. Every
-failure to read reports `unknown` with its reason. No read failure can produce `enabled` or
-`disabled`. `disabled` is a proven negative — a block stack read end to end with no crypt layer —
-and it ships with a `notVerified` list naming what the reading could not see: drive-firmware
+`enabled` means the walk completed, every node was readable, and **every** leaf — every physical
+device the volume rests on — was reached through a `CRYPT-` layer. `disabled` means the walk
+completed, every node was readable, and at least one leaf path had no crypt layer; the report names
+those devices. Any read, metadata, or budget failure anywhere is `unknown`, with the path in the
+reason. No read failure can produce `enabled` or `disabled`.
+
+A crypt layer is a fact about one path, never a verdict about the volume. A crypt layer **above** a
+plain leaf covers that leaf; one on a **sibling** branch does not. A logical volume over one LUKS
+member and one plain member has half its extents in the clear and reports `disabled`.
+
+If nothing terminates the stack, "every leaf is covered" is true of no leaves. That vacuous truth is
+`unknown`, not `enabled`.
+
+`disabled` ships with a `notVerified` list naming what the reading could not see: drive-firmware
 (OPAL/SED) encryption, filesystem-level encryption such as fscrypt or ext4 encryption, and
 encryption applied beneath this host.
 
 ## What is read, in order
 
-1. `canonicalize` the store path, falling back to its parent directory when the store file does not
-   exist yet.
+1. `canonicalize` the store path, falling back to its parent directory **only** when that fails
+   with `NotFound` — the store does not exist before first open. Any other error describes a store
+   that is there and could not be resolved; substituting its parent would answer about a different
+   subject, so it is reported instead.
 2. `stat` it for `st_dev`, decoded with `libc::major`/`libc::minor` rather than an open-coded shift.
 3. `/proc/self/mountinfo`, parsed per `proc_pid_mountinfo(5)`: six fixed fields, a variable run of
    optional fields, the `-` separator, then filesystem type, mount source, and super options. Mount
@@ -38,8 +50,18 @@ encryption applied beneath this host.
    shadows an earlier one at the same point.
 4. Corroboration: when `st_dev` names a real block device, it must equal the selected entry's
    device. A disagreement is `unknown`, not a confident answer about the wrong volume.
-5. `/sys/dev/block/<major>:<minor>/`, walking `slaves/` breadth-first, reading `dm/uuid`,
-   `dm/name`, and `loop/backing_file`.
+5. `/sys/dev/block/<major>:<minor>/`, walking `slaves/` breadth-first to every leaf, reading
+   `dm/uuid`, `dm/name`, and `loop/backing_file`. Each branch carries whether a crypt layer has
+   been seen on the path to it, and the visited set is keyed on the device **and** that flag: the
+   same disk can be reached by a covered and an uncovered path, and pruning the second visit is how
+   a plain branch would disappear.
+
+Presence is a three-way answer everywhere, never a boolean: `NotFound` is absence, any other
+metadata error is a reason. Directory checks follow symlinks deliberately — every entry under
+`/sys/dev/block` is a symlink to the real device directory — so a link that resolves to nothing is
+an error, not an absence. `slaves` uses `read_dir` itself as the presence check. Both budgeted reads
+take one byte past the budget and refuse anything larger, because `take(budget)` alone returns the
+first `budget` bytes of a larger file and looks exactly like a whole small one.
 
 Filesystems whose encryption is not decided by a block device under this host — tmpfs, ramfs,
 overlay, FUSE, and network filesystems — are `unknown`, each with its own reason. So is a loopback
