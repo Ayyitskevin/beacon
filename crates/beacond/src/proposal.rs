@@ -1702,27 +1702,20 @@ fn derive_readiness(
 
 /// Compare every declared readable-context entry against the pinned base revision.
 ///
-/// Returns `None` when the comparison was performed and every entry agreed, and `Some(reason)`
-/// when it could not be performed at all.
+/// Returns one of three things, and which of the three it is matters more than the value:
+/// [`ContextOutcome::Agreed`] and [`ContextOutcome::Mismatched`] are facts about the **Repository**
+/// at that revision, and [`ContextOutcome::NotVerified`] is a fact about **what Beacon could
+/// reach**. `Agreed` is the only silent outcome, and it is reached only after every declared entry
+/// resolved to a regular file whose bytes hash to what was declared.
 ///
-/// **Today this function never returns `None`.** Each step below is a real inspection of the bound
-/// Repository -- the source kind, whether the object store opens, whether the pinned revision is
-/// present -- and any of them can end the walk with its own reason. When they all succeed, the
-/// comparison still cannot run: resolving `path` to its blob at a revision means decompressing the
-/// commit object, walking its tree, and reading the blob. `beacond` gained a decompressor with
-/// #33 and `git_object_store` gained a loose-object reader and a path walk, so the capability now
-/// exists -- but nothing here calls it yet, and until the comparison is wired this walk still ends
-/// at `ContentUnreadableAtRevision`. That remains the honest answer for an unwired path and
-/// satisfies the ADR's actual requirement: "No surface may label the context verified from the
-/// manifest's self-consistency alone." What has changed is the reason: it is now a slice that has
-/// not landed, not a capability the crate lacks.
+/// The comparison runs for a local repository whose objects are loose: the walk resolves each
+/// declared path at the pinned revision, reads the blob, and compares SHA-256 of its bytes. An
+/// object in a pack is `PackedObjectUnreadable`, which is a limit of this reader and never a
+/// statement about the declaration.
 ///
 /// The alternative -- reading the entries out of the working tree at `source` -- is refused on
 /// purpose. That compares against whatever is checked out now, not against the pinned revision, so
 /// it would manufacture both false agreement and false disagreement from the wrong evidence.
-///
-/// The comparison replaces the final step and gains its own outcome for entries that disagree;
-/// every step before it stays exactly as it is.
 fn compare_readable_context(
     connection: &Connection,
     workspace_id: Uuid,
