@@ -1163,6 +1163,11 @@ fn an_evaluator_not_admitted_to_the_bound_proposals_mission_is_unstorable() {
 /// A cited Run must have recorded a Receipt. `evaluation_cited_runs` foreign-keys to `receipts`
 /// rather than to `runs`, so this is refused by the shape of the store rather than by a check the
 /// Command could forget.
+///
+/// gpt2's E2: citing a fresh UUID proves nothing here, because it names neither a Run nor a
+/// Receipt -- pointing the foreign key at `runs` instead left that version of this test green, so
+/// it could not tell the ruled contract from the wrong schema it warns against. The Run below is
+/// structurally real and simply has no Receipt, which is the only shape that distinguishes them.
 #[test]
 fn a_cited_run_without_a_receipt_is_refused() {
     let fixture = admitted_mission("evaluation-cited-run");
@@ -1170,15 +1175,67 @@ fn a_cited_run_without_a_receipt_is_refused() {
     let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
     let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
 
+    // A real Run row, in this Workspace and Project, that recorded no Receipt.
+    let run_id = Uuid::new_v4();
+    let connection = fixture.store.connect();
+    connection
+        .execute(
+            "INSERT INTO runs (
+                 workspace_id, id, project_id, kind, repository_revision, charter_revision,
+                 state, lease_expires_at_ms, started_at_ms, ended_at_ms
+             ) VALUES (?1, ?2, ?3, 'check_preflight', 1, 1, 'unconfirmed', 9, 5, NULL)",
+            rusqlite::params![
+                fixture.workspace_id.to_string(),
+                run_id.to_string(),
+                fixture.project_id.to_string(),
+            ],
+        )
+        .expect("the Run inserts");
+    assert_eq!(
+        fixture.count(&format!(
+            "SELECT count(*) FROM runs WHERE id = '{run_id}'"
+        )),
+        1,
+        "the fixture Run was not created"
+    );
+    assert_eq!(
+        fixture.count(&format!(
+            "SELECT count(*) FROM receipts WHERE run_id = '{run_id}'"
+        )),
+        0,
+        "the fixture Run has a Receipt"
+    );
+    drop(connection);
+
     let mut draft = evaluation_draft(&fixture, &proposal.digest().value);
-    draft.cited_runs = vec![Uuid::new_v4()];
+    draft.cited_runs = vec![run_id];
     assert!(
         evaluations.record(draft).is_err(),
-        "a Run with no Receipt was cited"
+        "a real Run with no Receipt was cited"
     );
     assert_eq!(
         fixture.count("SELECT count(*) FROM evaluations"),
         0,
         "a refused citation left the Evaluation behind"
     );
+
+    // And a Run that DID record a Receipt is citable, so the refusal above is the Receipt and not
+    // citation in general.
+    let connection = fixture.store.connect();
+    connection
+        .execute(
+            "INSERT INTO receipts (
+                 workspace_id, run_id, version, outcome, receipt_json, recorded_at_ms
+             ) VALUES (?1, ?2, 1, 'verified', '{}', 6)",
+            rusqlite::params![fixture.workspace_id.to_string(), run_id.to_string()],
+        )
+        .expect("the Receipt inserts");
+    drop(connection);
+
+    let mut draft = evaluation_draft(&fixture, &proposal.digest().value);
+    draft.cited_runs = vec![run_id];
+    let evaluation = evaluations
+        .record(draft)
+        .expect("a receipted Run is citable");
+    assert_eq!(evaluation.payload().cited_runs, vec![run_id]);
 }
