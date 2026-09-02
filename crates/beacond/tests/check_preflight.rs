@@ -17,7 +17,7 @@ use beacond::{
     DeclaredCheckService, ExecutionBounds, OperatorAccountService, OperatorSessionPhase,
     PreflightOutcome, PreflightReceipt, ProjectCharterDraft, ProjectDraft,
     ProjectRepositoryService, ProjectService, Recorded, RepositoryDraft, RepositorySourceKind,
-    SecretString, StartupConfig, Supervisor, detect_sandbox,
+    SecretString, StartupConfig, Supervisor, SupervisorError, detect_sandbox,
 };
 use rusqlite::Connection;
 use uuid::Uuid;
@@ -923,4 +923,101 @@ fn malformed_preflight_receipt_in_history_fails_closed() {
         preflight.receipts(project.id),
         Err(CheckPreflightError::Json(_))
     ));
+}
+
+#[test]
+fn startup_reconciles_every_preflight_identity_field_with_its_run_row() {
+    for field in [
+        "workspaceId",
+        "projectId",
+        "repositoryRevision",
+        "policyRepositoryRevision",
+        "charterRevision",
+        "policyCharterRevision",
+        "startedAtMs",
+        "endedAtMs",
+    ] {
+        let (store, receipt, _project) = bind_and_preflight(
+            &format!("run-row-{field}"),
+            draft(
+                RepositorySourceKind::GitUrl,
+                "https://example.invalid/replay-identity.git",
+                &"a".repeat(40),
+            ),
+        );
+        let replacement = match field {
+            "workspaceId" | "projectId" => rusqlite::types::Value::Text(Uuid::new_v4().to_string()),
+            "repositoryRevision" | "policyRepositoryRevision" => {
+                rusqlite::types::Value::Integer(i64::from(receipt.repository_revision) + 1)
+            }
+            "charterRevision" | "policyCharterRevision" => {
+                rusqlite::types::Value::Integer(i64::from(receipt.charter_revision) + 1)
+            }
+            "startedAtMs" => rusqlite::types::Value::Integer(
+                i64::try_from(receipt.started_at_ms.saturating_sub(1)).unwrap(),
+            ),
+            "endedAtMs" => rusqlite::types::Value::Integer(
+                i64::try_from(receipt.ended_at_ms.saturating_add(1)).unwrap(),
+            ),
+            _ => unreachable!(),
+        };
+        let json_path = format!("$.{field}");
+        let connection = Connection::open(&store.path).unwrap();
+        replace_receipt_update_trigger(&connection, |connection| {
+            connection.execute(
+                "UPDATE receipts
+                 SET receipt_json = json_set(receipt_json, ?1, ?2)
+                 WHERE run_id = ?3",
+                rusqlite::params![json_path, replacement, receipt.run_id.to_string()],
+            )
+        });
+        connection
+            .execute(
+                "UPDATE events
+                 SET payload_json = json_set(payload_json, ?1, ?2)
+                 WHERE kind = 'run.preflighted'
+                   AND json_extract(payload_json, '$.runId') = ?3",
+                rusqlite::params![json_path, replacement, receipt.run_id.to_string()],
+            )
+            .unwrap();
+        if field == "endedAtMs" {
+            connection
+                .execute(
+                    "UPDATE events SET occurred_at_ms = ?1
+                     WHERE kind = 'run.preflighted'
+                       AND json_extract(payload_json, '$.runId') = ?2",
+                    rusqlite::params![replacement, receipt.run_id.to_string()],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        let error = Supervisor::bootstrap(StartupConfig {
+            store_path: store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        })
+        .unwrap_err();
+        assert!(
+            matches!(error, SupervisorError::RunEventMismatch(_)),
+            "{field} disagreed with the run row but failed through the wrong guard: {error:?}"
+        );
+    }
+}
+
+fn replace_receipt_update_trigger(
+    connection: &Connection,
+    tamper: impl FnOnce(&Connection) -> rusqlite::Result<usize>,
+) {
+    let trigger_sql: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = 'receipts_no_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute_batch("DROP TRIGGER receipts_no_update;")
+        .unwrap();
+    tamper(connection).unwrap();
+    connection.execute_batch(&trigger_sql).unwrap();
 }
