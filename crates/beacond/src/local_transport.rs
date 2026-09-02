@@ -17,18 +17,19 @@ use zeroize::Zeroizing;
 
 use crate::{
     AccessOrigin, BeaconCapability, BeaconCapabilityDescriptor, CheckPreflightError,
-    CheckPreflightService, MissionDraft, MissionError, MissionService, MissionView,
-    OperatorAccountError, OperatorAccountService, OperatorSessionPolicy, OperatorSessionStatus,
-    PlatformSessionMonitor, PlatformSessionMonitorStatus, PreflightReceipt, ProjectCharter,
-    ProjectCharterDraft, ProjectDraft, ProjectError, ProjectPolicy, ProjectPolicyDraft,
-    ProjectPolicyError, ProjectPolicyService, ProjectRepository, ProjectRepositoryError,
-    ProjectRepositoryService, ProjectService, ProjectSummary, ProjectView, RecoveryKey,
-    RepositoryDraft, ResidentAgentView, ResidentConfiguration, ResidentConfigurationError,
-    ResidentConfigurationService, ResidentLifecycleError, ResidentLifecycleService,
-    ResourceDiscoveryError, ResourceDiscoveryService, SampleProjectError,
-    SampleProjectInstallResult, SampleProjectService, SampleProjectStatus, SecretString,
-    StarterOrganizationError, StarterOrganizationService, StarterOrganizationView,
-    StarterResidentDraft, StartupConfig, Supervisor, TeamDraft, TeamError, TeamService, TeamView,
+    CheckPreflightService, DiskEncryptionService, LiveDataEncryptionReport, MissionDraft,
+    MissionError, MissionService, MissionView, OperatorAccountError, OperatorAccountService,
+    OperatorSessionPolicy, OperatorSessionStatus, PlatformSessionMonitor,
+    PlatformSessionMonitorStatus, PreflightReceipt, ProjectCharter, ProjectCharterDraft,
+    ProjectDraft, ProjectError, ProjectPolicy, ProjectPolicyDraft, ProjectPolicyError,
+    ProjectPolicyService, ProjectRepository, ProjectRepositoryError, ProjectRepositoryService,
+    ProjectService, ProjectSummary, ProjectView, RecoveryKey, RepositoryDraft, ResidentAgentView,
+    ResidentConfiguration, ResidentConfigurationError, ResidentConfigurationService,
+    ResidentLifecycleError, ResidentLifecycleService, ResourceDiscoveryError,
+    ResourceDiscoveryService, SampleProjectError, SampleProjectInstallResult, SampleProjectService,
+    SampleProjectStatus, SecretString, StarterOrganizationError, StarterOrganizationService,
+    StarterOrganizationView, StarterResidentDraft, StartupConfig, Supervisor, TeamDraft, TeamError,
+    TeamService, TeamView,
 };
 
 const PROTOCOL_VERSION: u16 = 1;
@@ -559,6 +560,7 @@ enum LocalCommand {
         draft: MissionDraft,
     },
     DiscoverLocalModels,
+    LiveDataEncryptionStatus,
     InspectLocalModel {
         model_name: String,
         expected_digest: String,
@@ -662,6 +664,9 @@ enum LocalResult {
     LocalModelDiscovery {
         report: crate::LocalModelDiscoveryReport,
     },
+    LiveDataEncryption {
+        report: LiveDataEncryptionReport,
+    },
     LocalModelActivationReview {
         review: crate::LocalModelActivationReview,
     },
@@ -698,6 +703,7 @@ pub struct LocalSupervisorServer {
     teams: TeamService,
     missions: MissionService,
     resource_discovery: ResourceDiscoveryService,
+    disk_encryption: DiskEncryptionService,
     local_model_activation: crate::LocalModelActivationService,
     platform_monitor: PlatformSessionMonitor,
 }
@@ -741,6 +747,8 @@ impl LocalSupervisorServer {
         let missions = MissionService::new(Arc::clone(&accounts), report.workspace.id);
         let resource_discovery =
             ResourceDiscoveryService::new(Arc::clone(&accounts), config.local_model_endpoint);
+        let disk_encryption =
+            DiskEncryptionService::new(Arc::clone(&accounts), config.store_path.clone());
         let local_model_activation = crate::LocalModelActivationService::new(
             Arc::clone(&accounts),
             report.workspace.id,
@@ -770,6 +778,7 @@ impl LocalSupervisorServer {
             teams,
             missions,
             resource_discovery,
+            disk_encryption,
             local_model_activation,
             platform_monitor: PlatformSessionMonitor::new(),
         })
@@ -1063,6 +1072,9 @@ impl LocalSupervisorServer {
             },
             LocalCommand::DiscoverLocalModels => LocalResult::LocalModelDiscovery {
                 report: self.resource_discovery.discover_local_models()?,
+            },
+            LocalCommand::LiveDataEncryptionStatus => LocalResult::LiveDataEncryption {
+                report: self.disk_encryption.status()?,
             },
             LocalCommand::InspectLocalModel {
                 model_name,
@@ -1488,6 +1500,12 @@ impl LocalSupervisorClient {
         expect_local_model_discovery(self.send(LocalCommand::DiscoverLocalModels)?)
     }
 
+    pub fn live_data_encryption_status(
+        &self,
+    ) -> Result<LiveDataEncryptionReport, LocalTransportError> {
+        expect_live_data_encryption(self.send(LocalCommand::LiveDataEncryptionStatus)?)
+    }
+
     pub fn inspect_local_model(
         &self,
         model_name: String,
@@ -1763,6 +1781,15 @@ fn expect_local_model_discovery(
 ) -> Result<crate::LocalModelDiscoveryReport, LocalTransportError> {
     match result {
         LocalResult::LocalModelDiscovery { report } => Ok(report),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
+fn expect_live_data_encryption(
+    result: LocalResult,
+) -> Result<LiveDataEncryptionReport, LocalTransportError> {
+    match result {
+        LocalResult::LiveDataEncryption { report } => Ok(report),
         _ => Err(LocalTransportError::Protocol),
     }
 }
