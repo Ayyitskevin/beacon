@@ -576,17 +576,11 @@ struct MountEntry {
 
 fn read_mountinfo(path: &Path) -> Result<Vec<MountEntry>, String> {
     const UNREADABLE: &str = "the mount table could not be read";
-    let file = File::open(path).map_err(|_| UNREADABLE.to_owned())?;
-    let mut bytes = Vec::new();
-    // One byte past the budget, so a mount table too large to read is an
-    // overflow rather than a clean parse of whichever mounts happened to fit.
-    file.take(MAX_MOUNTINFO_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| UNREADABLE.to_owned())?;
-    if bytes.len() as u64 > MAX_MOUNTINFO_BYTES {
-        return Err(over_budget(path));
-    }
-    let text = String::from_utf8(bytes).map_err(|_| UNREADABLE.to_owned())?;
+    let text = match read_bounded(path, MAX_MOUNTINFO_BYTES) {
+        Ok(text) => text,
+        Err(BoundedRead::Failed(_)) => return Err(UNREADABLE.to_owned()),
+        Err(BoundedRead::OverBudget) => return Err(over_budget(path)),
+    };
     let mut entries = Vec::new();
     for line in text.lines() {
         if line.trim().is_empty() {
@@ -1069,18 +1063,38 @@ fn over_budget(path: &Path) -> String {
 /// `take(budget)` alone cannot: it returns the first `budget` bytes of a larger
 /// file and looks exactly like a whole small file. Reading one byte past the
 /// budget makes the overflow visible, and an overflowing read is no answer.
-fn read_sysfs(path: &Path) -> Result<String, String> {
-    let file = File::open(path).map_err(|error| unreadable_reason(path, error.kind()))?;
+/// Why a bounded read did not produce a value. One shape, two vocabularies:
+/// callers phrase it for the thing they were reading.
+enum BoundedRead {
+    Failed(std::io::ErrorKind),
+    OverBudget,
+}
+
+/// Reads at most `budget` bytes, and can tell a complete read from a truncated
+/// one.
+///
+/// `take(budget)` alone cannot: it returns the first `budget` bytes of a larger
+/// file and looks exactly like a whole small file. Reading one byte past the
+/// budget makes the overflow visible. Both call sites had that defect and both
+/// were repaired at once, which is the drift this shared helper prevents.
+fn read_bounded(path: &Path, budget: u64) -> Result<String, BoundedRead> {
+    let file = File::open(path).map_err(|error| BoundedRead::Failed(error.kind()))?;
     let mut bytes = Vec::new();
-    file.take(MAX_SYSFS_FILE_BYTES + 1)
+    file.take(budget + 1)
         .read_to_end(&mut bytes)
-        .map_err(|error| unreadable_reason(path, error.kind()))?;
-    if bytes.len() as u64 > MAX_SYSFS_FILE_BYTES {
-        return Err(over_budget(path));
+        .map_err(|error| BoundedRead::Failed(error.kind()))?;
+    if bytes.len() as u64 > budget {
+        return Err(BoundedRead::OverBudget);
     }
-    let value = String::from_utf8(bytes)
-        .map_err(|_| unreadable_reason(path, std::io::ErrorKind::InvalidData))?;
-    Ok(value.trim().to_owned())
+    String::from_utf8(bytes).map_err(|_| BoundedRead::Failed(std::io::ErrorKind::InvalidData))
+}
+
+fn read_sysfs(path: &Path) -> Result<String, String> {
+    match read_bounded(path, MAX_SYSFS_FILE_BYTES) {
+        Ok(value) => Ok(value.trim().to_owned()),
+        Err(BoundedRead::Failed(kind)) => Err(unreadable_reason(path, kind)),
+        Err(BoundedRead::OverBudget) => Err(over_budget(path)),
+    }
 }
 
 #[cfg(test)]
