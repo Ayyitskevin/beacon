@@ -245,6 +245,11 @@ fn downgrade_execution_schema_to_v15(store_path: &Path) {
     connection
         .execute_batch(
             "BEGIN IMMEDIATE;
+             -- Candidates (migration 0022) reference proposals, so they come off first.
+             DROP TRIGGER candidates_no_update;
+             DROP TRIGGER candidates_no_delete;
+             DROP INDEX candidates_one_per_proposal;
+             DROP TABLE candidates;
              DROP TABLE ruling_supersessions;
              DROP TABLE rulings;
              DROP INDEX proposals_workspace_digest;
@@ -1968,7 +1973,7 @@ fn migration_preserves_real_v1_bytes_through_rollback_and_forward_startup() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 20);
+    assert_eq!(report.diagnostics.schema_version, 22);
     let connection = Connection::open(&store.path).unwrap();
     assert_v1_bytes(&connection, run_id, &v1_payload);
 }
