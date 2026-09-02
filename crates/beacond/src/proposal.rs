@@ -1342,7 +1342,13 @@ pub(crate) fn is_human_text(value: &str, max_scalars: usize) -> bool {
 
 /// A distinct UTF-8 POSIX path relative to the Repository root. Never Unicode-normalized and never
 /// case-folded: those transformations can name a different filesystem object.
-fn is_repository_relative_path(path: &str) -> bool {
+///
+/// Shared with `candidate.rs` rather than copied, unlike the codec beside it. A Candidate copies
+/// its paths out of a verified Proposal, so a second definition could only ever disagree with this
+/// one -- and two records that disagree about what a path is would name different files with the
+/// same bytes. The codec stays copied for the opposite reason: an identity grammar's value is that
+/// it cannot move, and one shared codec would couple two frozen grammars' futures.
+pub(crate) fn is_repository_relative_path(path: &str) -> bool {
     !path.is_empty()
         && !path.starts_with('/')
         && !path.contains('\0')
@@ -2142,6 +2148,43 @@ pub(crate) struct ProposalBindingFacts {
     pub(crate) bindings: ProposalBindings,
 }
 
+/// One stored Proposal's payload, proved against its own bytes.
+///
+/// The digest names these bytes, the bytes decode, they re-encode identically, every indexed column
+/// repeats what they say, and no constraint family claims a descriptor no module can resolve. Every
+/// crate-internal reader of a Proposal goes through here, so two readers cannot come to disagree
+/// about what proving a Proposal means.
+fn verified_payload(stored: &StoredProposal) -> Result<ProposalV1, ProposalError> {
+    if HEXLOWER.encode(&sha256(&stored.canonical_bytes)) != stored.digest_value {
+        return Err(ProposalError::InvalidStore);
+    }
+    let payload = decode(&stored.canonical_bytes).map_err(|_| ProposalError::InvalidStore)?;
+    if encode(&payload).map_err(|_| ProposalError::InvalidStore)? != stored.canonical_bytes {
+        return Err(ProposalError::InvalidStore);
+    }
+    if !columns_match(stored, &payload) {
+        return Err(ProposalError::InvalidStore);
+    }
+    // The same rule `verified_proposal` applies on the way out: no owning module can resolve a
+    // bound descriptor yet, so a row presenting one is invalid state rather than a Proposal a
+    // Ruling could bind.
+    if constraints(&payload.requirements)
+        .iter()
+        .any(|constraint| constraint.is_declared())
+    {
+        return Err(ProposalError::InvalidStore);
+    }
+    Ok(payload)
+}
+
+/// What one Proposal declared it would change, for the records that bind to those effects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProposalIntentFacts {
+    pub(crate) digest: ProposalDigest,
+    pub(crate) pinned_base_revision: String,
+    pub(crate) declared_mutations: Vec<DeclaredMutation>,
+}
+
 /// The bindings of one stored Proposal, proved against its own bytes before they are returned.
 ///
 /// `Ok(None)` means no Proposal in this Workspace has that digest, which is a different fact from
@@ -2156,31 +2199,35 @@ pub(crate) fn proposal_binding_facts(
     let Some(stored) = load_stored(connection, workspace_id, digest_value)? else {
         return Ok(None);
     };
-    if HEXLOWER.encode(&sha256(&stored.canonical_bytes)) != stored.digest_value {
-        return Err(ProposalError::InvalidStore);
-    }
-    let payload = decode(&stored.canonical_bytes).map_err(|_| ProposalError::InvalidStore)?;
-    if encode(&payload).map_err(|_| ProposalError::InvalidStore)? != stored.canonical_bytes {
-        return Err(ProposalError::InvalidStore);
-    }
-    if !columns_match(&stored, &payload) {
-        return Err(ProposalError::InvalidStore);
-    }
-    // The same rule `verified_proposal` applies on the way out: no owning module can resolve a
-    // bound descriptor yet, so a row presenting one is invalid state rather than a Proposal a
-    // Ruling could bind.
-    if constraints(&payload.requirements)
-        .iter()
-        .any(|constraint| constraint.is_declared())
-    {
-        return Err(ProposalError::InvalidStore);
-    }
+    let payload = verified_payload(&stored)?;
     Ok(Some(ProposalBindingFacts {
         project_id: payload.scope.project_id,
         // `load_stored` already refused a row whose algorithm or canonicalizer columns are not
         // this module's, so this envelope is what the store holds, verified, and not a guess.
         digest: digest_envelope(&stored.digest_value),
         bindings: payload.bindings,
+    }))
+}
+
+/// What one stored Proposal INTENDS, proved against its own bytes before it is returned.
+///
+/// The same proof `proposal_binding_facts` performs, returning the declared effects instead of the
+/// revisions. A Candidate copies its entries from here rather than accepting them from a caller,
+/// for the reason a Ruling copies its bindings: a record that asserted a target it never read would
+/// be inferring exactly what copying exists to stop.
+pub(crate) fn proposal_intent_facts(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+) -> Result<Option<ProposalIntentFacts>, ProposalError> {
+    let Some(stored) = load_stored(connection, workspace_id, digest_value)? else {
+        return Ok(None);
+    };
+    let payload = verified_payload(&stored)?;
+    Ok(Some(ProposalIntentFacts {
+        digest: digest_envelope(&stored.digest_value),
+        pinned_base_revision: payload.bindings.pinned_base_revision,
+        declared_mutations: payload.intent.declared_mutations,
     }))
 }
 
