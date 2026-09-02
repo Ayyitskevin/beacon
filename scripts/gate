@@ -72,10 +72,26 @@ run_in_desktop() {
 # compile it until the staged binary exists -- including under --no-bundle. The
 # desktop stage gets that for free from `tauri build`, which runs beforeBuildCommand;
 # a cargo-only stage does not, and would fail before compiling anything.
+#
+# Every step propagates explicitly, and this file's header names why that
+# matters. `run` is called after the script enters `set +e`, so a function body
+# of independent commands reports only its LAST command: a FAILED release build
+# followed by a successful `cp` of a stale binary printed `ok stage sidecar` and
+# the gate exited 0 -- a construct whose failure mode is "quietly does nothing",
+# checking the very build it was added to protect.
+#
+# `set -e` in a subshell does NOT fix it. `run` calls this as `if "$@"; then`,
+# and -e is suppressed for a command whose status is being tested; the first
+# attempted repair here was written that way and the injected failure still
+# printed ok. `|| return` is unaffected by that rule.
+# tests/harness/test_gate_sidecar_staging.py injects the failure permanently.
 stage_sidecar() {
-    cargo build --release -p beacond
-    mkdir -p target/sidecar
-    cp target/release/beacond "target/sidecar/beacond-$(rustc -vV | awk '/^host:/ {print $2}')"
+    cargo build --release -p beacond || return
+    triple="$(rustc -vV | awk '/^host:/ {print $2}')" || return
+    # An empty triple would stage `beacond-` and satisfy nothing.
+    [ -n "$triple" ] || return 1
+    mkdir -p target/sidecar || return
+    cp target/release/beacond "target/sidecar/beacond-$triple"
 }
 
 echo "gate: $(git rev-parse --abbrev-ref HEAD) @ $(git rev-parse --short HEAD)"
