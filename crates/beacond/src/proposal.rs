@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::git_object_store::{ObjectStore, ObjectStoreError};
+use crate::git_object_store::{ObjectStore, ObjectStoreError, PathResolution};
 use crate::mission::mission_admission_facts;
 use crate::operator_account::owner_account_exists;
 use crate::project::current_charter_revision;
@@ -73,6 +73,35 @@ const MAX_CHECK_NAME_BYTES: usize = 64;
 const MAX_DESCRIPTOR_TOKEN_BYTES: usize = 64;
 /// ADR 0034: "the pinned base revision must be a lowercase 40-character hexadecimal commit id."
 const BASE_REVISION_CHARS: usize = 40;
+
+/// The largest single object the comparison will hold while resolving a declared entry.
+///
+/// The comparison's own bound, not the store's: `ObjectStore::read_loose_object` takes a maximum
+/// and invents none, precisely so the limit is chosen where something knows what the objects are
+/// for. Eight mebibytes is generous for a source file or a tree and small enough that a hostile
+/// repository cannot choose Beacon's memory. Exceeding it is not-verified, never a mismatch.
+const CONTEXT_OBJECT_BYTES: usize = 8 * 1024 * 1024;
+
+/// The total the comparison will read across every declared entry in one Proposal.
+///
+/// A per-object bound alone leaves the entry COUNT free, and a manifest with thousands of entries
+/// would read thousands of objects inside one readiness derivation. This is the bound on the whole
+/// walk, and hitting it is not-verified for the same reason a single oversized object is.
+const CONTEXT_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+
+/// What the comparison established about a declared readable context.
+///
+/// Three outcomes, and the middle one is the whole reason this slice exists. `Agreed` and
+/// `Mismatched` are facts about the Repository at the pinned revision; `NotVerified` is a fact
+/// about what Beacon could reach. Nothing collapses the two, and no failure path produces `Agreed`
+/// -- silence is the only outcome that reads as agreement, so it is the one nothing may reach by
+/// accident.
+#[derive(Debug, PartialEq, Eq)]
+enum ContextOutcome {
+    Agreed,
+    Mismatched(Vec<ContextMismatch>),
+    NotVerified(ContextComparison),
+}
 
 /// How long the readable-context comparison may spend inspecting an object store before it
 /// reports that it does not know. Mirrors Check Preflight's budget, because it is the same
@@ -372,15 +401,69 @@ pub enum ContextComparison {
     /// The object store opened, but the pinned base revision is not present in it. The revision
     /// the entries would be compared against is the thing that is missing.
     PinnedRevisionAbsent,
-    /// The object store opened and the pinned revision is present, but Beacon cannot read file
-    /// content at a revision: resolving a path to its blob means decompressing the commit and tree
-    /// objects, `beacond` carries no decompressor, and ADR 0027 forbids spawning `git`. This is the
-    /// terminal state today -- see `docs/implementation/phase-2-proposal-v1.md`.
+    /// The object store opened and the pinned revision is present, and an object on the declared
+    /// path could not be read here. Retained for a path that reaches it; the narrower reasons below
+    /// say which limit was hit, and are preferred wherever the walk can tell.
     ContentUnreadableAtRevision,
+    /// An object on the declared path is stored in a pack, and this reader reads only loose
+    /// objects. A limitation of Beacon, never a statement about the Repository.
+    ///
+    /// Claimed only after the authenticated pack lookup says the object is present. An object a
+    /// commit or tree names and that lives in neither loose nor authenticated pack storage is
+    /// `InspectionFailed` instead -- that store is broken, and calling it "packed" would excuse a
+    /// defect as a limitation (gpt1's S1).
+    PackedObjectUnreadable,
+    /// The declared path is deeper than the comparison's walk will descend.
+    ///
+    /// A refusal like `ObjectTooLargeToInspect`, and named separately because the two are different
+    /// limits and a reader deciding what to change needs to know which one was hit.
+    PathTooDeepToInspect,
+    /// An object on the declared path is larger than the comparison's own bound.
+    ///
+    /// A resource refusal, and its own reason rather than `InspectionFailed`: the object may be
+    /// perfectly well formed, and describing Beacon's limit as a broken repository is the failure
+    /// this arm exists to prevent (gpt1's S2).
+    ObjectTooLargeToInspect,
+    /// The declared path resolves to something that is not a regular file -- a symlink, a gitlink,
+    /// or a directory.
+    ///
+    /// **Not a mismatch, deliberately.** Git stores a `120000` symlink as a blob holding the link
+    /// text, so the mode does not establish which bytes the submitter presented, and ADR 0034 does
+    /// not define the case. Treating it as a false declaration would invent contract; gpt1's S4
+    /// holds it here until an ADR amendment and the Steward's sign-off say otherwise.
+    EntryIsNotARegularFile,
+}
+
+/// Which way one declared readable-context entry failed against the pinned revision.
+///
+/// Two arms, and both are things Beacon PROVED about the Repository. Everything it could not prove
+/// is a [`ContextComparison`] reason instead, so a reader never has to work out whether an item
+/// describes the Operator's history or Beacon's reach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextMismatchReason {
+    /// The path held a regular file at the pinned revision and its bytes hash to something else.
+    DigestDiffers,
+    /// Every tree on the path was read in full and authenticated, and the path is not among them.
+    PathAbsent,
+}
+
+/// One declared entry that does not hold at the pinned revision.
+///
+/// Carries the path and which way it failed, and deliberately **not** the observed digest: that is
+/// content-derived data about a file the Operator may not have meant to surface in a diagnostic,
+/// and knowing the declaration is wrong does not require publishing what is actually there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextMismatch {
+    pub path: String,
+    pub reason: ContextMismatchReason,
 }
 
 /// One precondition a Proposal has not met. Derived at read time, never stored.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// No longer `Copy`: `ReadableContextMismatch` carries the entries it names, because an item saying
+/// only that something mismatched would send every reader back to re-derive which entry, and the
+/// derivation is the expensive part.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnmetPrecondition {
     ExecutionPolicyNotDeclared,
     SandboxNotDeclared,
@@ -394,6 +477,15 @@ pub enum UnmetPrecondition {
     /// revision did not happen. Never silence, and never a claim that the entries are wrong.
     ReadableContextNotVerified {
         reason: ContextComparison,
+    },
+    /// The context is declared, the comparison RAN against the pinned base revision, and one or
+    /// more declared entries do not hold there.
+    ///
+    /// Distinct from `ReadableContextNotVerified` in the way that matters most in this module: this
+    /// is a fact about the Repository, and that one is a fact about Beacon's reach. The entries are
+    /// published only when every declared entry completed -- see `compare_readable_context_within`.
+    ReadableContextMismatch {
+        entries: Vec<ContextMismatch>,
     },
     CharterRevisionMoved,
     ProjectPolicyRevisionMoved,
@@ -1508,8 +1600,18 @@ fn derive_readiness(
             unmet.push(UnmetPrecondition::ReadableContextNotDeclared);
         }
         ReadableContext::Declared { .. } => {
-            if let Some(reason) = compare_readable_context(connection, workspace_id, payload)? {
-                unmet.push(UnmetPrecondition::ReadableContextNotVerified { reason });
+            // Three outcomes, three items, and `Agreed` is the only one that adds nothing. It is
+            // reached exactly once -- after every declared entry resolved to a regular file whose
+            // bytes hash to what was declared -- so silence here means the comparison ran and
+            // agreed, and never that it could not run.
+            match compare_readable_context(connection, workspace_id, payload)? {
+                ContextOutcome::Agreed => {}
+                ContextOutcome::Mismatched(entries) => {
+                    unmet.push(UnmetPrecondition::ReadableContextMismatch { entries });
+                }
+                ContextOutcome::NotVerified(reason) => {
+                    unmet.push(UnmetPrecondition::ReadableContextNotVerified { reason });
+                }
             }
         }
     }
@@ -1597,7 +1699,7 @@ fn compare_readable_context(
     connection: &Connection,
     workspace_id: Uuid,
     payload: &ProposalV1,
-) -> Result<Option<ContextComparison>, ProposalError> {
+) -> Result<ContextOutcome, ProposalError> {
     let started = Instant::now();
     let mut deadline = move || started.elapsed().as_millis() > CONTEXT_INSPECTION_BUDGET_MS;
     compare_readable_context_within(connection, workspace_id, payload, &mut deadline)
@@ -1622,9 +1724,11 @@ fn compare_readable_context_within(
     workspace_id: Uuid,
     payload: &ProposalV1,
     deadline: &mut impl FnMut() -> bool,
-) -> Result<Option<ContextComparison>, ProposalError> {
+) -> Result<ContextOutcome, ProposalError> {
     if deadline() {
-        return Ok(Some(ContextComparison::InspectionTimedOut));
+        return Ok(ContextOutcome::NotVerified(
+            ContextComparison::InspectionTimedOut,
+        ));
     }
     let Some(binding) = stored_repository_for_preflight(
         connection,
@@ -1637,25 +1741,142 @@ fn compare_readable_context_within(
         // The bound revision is immutable and was proved to exist at submission, so this is not
         // reachable through the store's own rules -- but a binding we cannot load is a broken
         // referent, not a missing revision.
-        return Ok(Some(ContextComparison::RepositoryUnreadable));
+        return Ok(ContextOutcome::NotVerified(
+            ContextComparison::RepositoryUnreadable,
+        ));
     };
     if binding.source_kind != RepositorySourceKind::LocalPath {
-        return Ok(Some(ContextComparison::RepositorySourceNotLocal));
+        return Ok(ContextOutcome::NotVerified(
+            ContextComparison::RepositorySourceNotLocal,
+        ));
     }
     if deadline() {
-        return Ok(Some(ContextComparison::InspectionTimedOut));
+        return Ok(ContextOutcome::NotVerified(
+            ContextComparison::InspectionTimedOut,
+        ));
     }
     let Ok(store) = ObjectStore::open(Path::new(&binding.source)) else {
-        return Ok(Some(ContextComparison::RepositoryUnreadable));
+        return Ok(ContextOutcome::NotVerified(
+            ContextComparison::RepositoryUnreadable,
+        ));
     };
     if deadline() {
-        return Ok(Some(ContextComparison::InspectionTimedOut));
+        return Ok(ContextOutcome::NotVerified(
+            ContextComparison::InspectionTimedOut,
+        ));
     }
     match store.contains(&payload.bindings.pinned_base_revision, deadline) {
-        Ok(true) => Ok(Some(ContextComparison::ContentUnreadableAtRevision)),
-        Ok(false) => Ok(Some(ContextComparison::PinnedRevisionAbsent)),
-        Err(error) => Ok(Some(inspection_error(error))),
+        Ok(true) => {}
+        Ok(false) => {
+            return Ok(ContextOutcome::NotVerified(
+                ContextComparison::PinnedRevisionAbsent,
+            ));
+        }
+        Err(error) => return Ok(ContextOutcome::NotVerified(inspection_error(error))),
     }
+
+    // The declared entries. `Declared` with no entries is a positive assertion that no Repository
+    // file is readable, and it is trivially true at any revision -- there is nothing to disagree
+    // with, so the comparison agrees rather than finding nothing to do.
+    let ReadableContext::Declared { entries, .. } = &payload.intent.readable_context else {
+        // Unreachable: the caller only compares a declared context. Not-verified rather than
+        // agreed, because agreement is the one answer nothing may reach by accident.
+        return Ok(ContextOutcome::NotVerified(
+            ContextComparison::InspectionFailed,
+        ));
+    };
+
+    // gpt1's F3: mismatches are BUFFERED and published only after every declared entry has
+    // completed from a fully read, parsed, self-authenticated object. If entry one disagrees and
+    // entry two times out, is packed, is oversized, or does not parse, the whole comparison is
+    // not-verified and this buffer is discarded.
+    //
+    // The reason is that a mismatch is an accusation about the Operator's declaration, and a
+    // partial walk has not earned one: the entries it did not reach might have explained the ones
+    // it did. A not-verified says less and is always true; a mismatch from an unfinished walk says
+    // more than Beacon knows.
+    let mut mismatches: Vec<ContextMismatch> = Vec::new();
+    let mut budget = CONTEXT_TOTAL_BYTES;
+
+    for entry in entries {
+        if deadline() {
+            return Ok(ContextOutcome::NotVerified(
+                ContextComparison::InspectionTimedOut,
+            ));
+        }
+        let object_bound = CONTEXT_OBJECT_BYTES.min(budget);
+        let resolved = match store.resolve_path_at(
+            &payload.bindings.pinned_base_revision,
+            &entry.path,
+            object_bound,
+            deadline,
+        ) {
+            Ok(resolved) => resolved,
+            Err(error) => return Ok(ContextOutcome::NotVerified(inspection_error(error))),
+        };
+        match resolved {
+            PathResolution::Blob { body } => {
+                budget = budget.saturating_sub(body.len());
+                // ADR 0034:157-158: the declared identity is the SHA-256 of the exact file bytes,
+                // which is not the object's Git name -- that is a SHA-1 over a header and the same
+                // body, and comparing names would fail every entry that is actually correct.
+                if sha256(&body) != entry.content_sha256 {
+                    mismatches.push(ContextMismatch {
+                        path: entry.path.clone(),
+                        reason: ContextMismatchReason::DigestDiffers,
+                    });
+                }
+            }
+            PathResolution::Absent => mismatches.push(ContextMismatch {
+                path: entry.path.clone(),
+                reason: ContextMismatchReason::PathAbsent,
+            }),
+            PathResolution::NotARegularFile => {
+                return Ok(ContextOutcome::NotVerified(
+                    ContextComparison::EntryIsNotARegularFile,
+                ));
+            }
+            PathResolution::NotLoose { object_id } => {
+                // gpt1's S1: "packed" is claimed only after the authenticated pack lookup says the
+                // object is present. An object an authenticated commit or tree names and that is in
+                // no storage at all is a broken store, and saying "packed" would excuse it.
+                return Ok(ContextOutcome::NotVerified(
+                    match store.contains(&object_id, deadline) {
+                        Ok(true) => ContextComparison::PackedObjectUnreadable,
+                        Ok(false) => ContextComparison::InspectionFailed,
+                        Err(error) => inspection_error(error),
+                    },
+                ));
+            }
+            PathResolution::TooLarge => {
+                return Ok(ContextOutcome::NotVerified(
+                    ContextComparison::ObjectTooLargeToInspect,
+                ));
+            }
+            PathResolution::TooDeep => {
+                return Ok(ContextOutcome::NotVerified(
+                    ContextComparison::PathTooDeepToInspect,
+                ));
+            }
+            PathResolution::Malformed => {
+                return Ok(ContextOutcome::NotVerified(
+                    ContextComparison::InspectionFailed,
+                ));
+            }
+        }
+    }
+
+    if deadline() {
+        return Ok(ContextOutcome::NotVerified(
+            ContextComparison::InspectionTimedOut,
+        ));
+    }
+    // Every entry completed. Only now may a buffered mismatch be published.
+    Ok(if mismatches.is_empty() {
+        ContextOutcome::Agreed
+    } else {
+        ContextOutcome::Mismatched(mismatches)
+    })
 }
 
 /// How an object-store failure is reported. The lower layer keeps these apart; so does this one.
@@ -2229,7 +2450,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(outcome, Some(ContextComparison::InspectionTimedOut));
+        assert_eq!(
+            outcome,
+            ContextOutcome::NotVerified(ContextComparison::InspectionTimedOut)
+        );
     }
 
     #[test]
@@ -2248,7 +2472,12 @@ mod tests {
         );
 
         assert!(
-            !matches!(outcome, Ok(Some(ContextComparison::InspectionTimedOut))),
+            !matches!(
+                outcome,
+                Ok(ContextOutcome::NotVerified(
+                    ContextComparison::InspectionTimedOut
+                ))
+            ),
             "a live budget short-circuited as a timeout: {outcome:?}"
         );
     }

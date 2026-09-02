@@ -412,14 +412,6 @@ impl ObjectStore {
     /// This function re-checks the shape it depends on -- non-empty components, no `.` or `..`, no
     /// NUL -- rather than trusting a caller's validation, because a component that reached here
     /// malformed would be compared against tree entries as if it were a name.
-    // Nothing calls this until the comparison is wired, and clippy is right to say so: a
-    // `pub(crate)` walk with no caller is dead code. `expect` rather than `allow` because it fails
-    // once the lint stops firing, so the slice that adds the caller cannot leave the suppression
-    // behind -- the compiler removes it rather than a reviewer having to notice.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the comparison that calls this is slice 3")
-    )]
     pub(crate) fn resolve_path_at(
         &self,
         revision: &str,
