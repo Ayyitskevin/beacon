@@ -384,10 +384,17 @@ mod tests {
 
     /// The same stale read, pinned at the function that performs it.
     ///
-    /// `contains` also guards its final answer, so the test above passes even if this guard is
-    /// removed. That makes it a property test, not a regression test for this line. This one calls
-    /// `index_contains` directly, so the post-read check is the only thing that can produce the
-    /// timeout — remove it and this fails while everything else stays green.
+    /// The test above goes through `contains`, which has its own guard before its final answer, so
+    /// it stays green even with both of `index_contains`'s checks removed. This one calls
+    /// `index_contains` directly, which narrows what it pins — but not to a single line.
+    ///
+    /// What it actually pins: `index_contains` honours its deadline across a late read. Two checks
+    /// inside it enforce that — the one after `fs::read` and the one before its `Ok(false)` — and
+    /// they are **mutually redundant for this fixture**: removing either alone leaves this test
+    /// green, and removing both makes it fail with `Ok(false)`. Both are kept as defence in depth
+    /// on a path whose failure mode is a false claim about someone else's repository, not because
+    /// either is separately load-bearing. Anyone deleting one as redundant should know the suite
+    /// will not object; deleting both is what this test exists to stop.
     #[test]
     fn index_contains_reports_a_late_read_as_elapsed_rather_than_returning_false() {
         let directory = TempDir::new("fifo-index-late-read");
@@ -412,8 +419,8 @@ mod tests {
 
         let started = std::time::Instant::now();
         let mut deadline = move || started.elapsed().as_millis() > 100;
-        // First byte 0x01 lands in an empty bucket: zero search iterations, so the only deadline
-        // check that can fire is the one after the read.
+        // First byte 0x01 lands in an empty bucket: zero search iterations, so neither of the
+        // in-loop checks can fire and the answer is decided by the two checks around them.
         let outcome = index_contains(&fifo, &[0x01; 20], &mut deadline);
         writer.join().unwrap();
 

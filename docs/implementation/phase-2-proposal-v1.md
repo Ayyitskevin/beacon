@@ -116,14 +116,20 @@ deadline on entry and between every object-store step, and passes that same dead
 never a negative answer. Four things it does not bound, all of them inside
 `crates/beacond/src/git_object_store.rs` or the startup loop rather than in this module:
 
-- `ObjectStore::open` takes no deadline at all, and reads a `.git` file with `read_to_string`
-  before this code regains control (`git_object_store.rs:62`);
-- `index_contains` reads an entire pack index with `fs::read` before its first deadline check
-  (`:186` versus `:217`), so one very large index can overrun;
-- the pack directory is enumerated and collected before the per-index deadline loop begins
-  (`:130-140`);
+Cited by function rather than by line: these coordinates shift with every edit to the file, and a
+residual list that has to be re-measured to be read is not evidence.
+
+- `ObjectStore::open` takes no deadline argument at all, so nothing it does — including reading a
+  `.git` file whole with `read_to_string` — is under the budget;
+- `index_contains` consults the deadline immediately after its `fs::read` of a pack index, but that
+  read cannot be interrupted once begun, so a single very large or slow index still overruns;
+- `ObjectStore::contains` likewise checks the deadline after enumerating and collecting the pack
+  directory, not during it;
 - startup grants each declared-context Proposal its own fresh budget, so N such Proposals cost up
   to N × 5s, not 5s in total.
+
+The shape of the first three is the same: the budget bounds *how much work is started*, never how
+long one filesystem call already in flight may take.
 
 Bounding the first three means changing that module's I/O, which this slice does not own. The
 fourth would need one budget threaded through startup reconciliation rather than per read. Both are
