@@ -51,8 +51,9 @@ pub use declared_checks::{
 };
 #[cfg(unix)]
 pub use disk_encryption::{
-    DiskEncryptionService, EncryptionEvidence, LiveDataEncryption, LiveDataEncryptionReport,
-    SystemView, live_data_encryption_for_test,
+    DiskEncryptionService, EncryptionEvidence, LiveDataEncryption, LiveDataEncryptionConclusion,
+    LiveDataEncryptionReport, MAX_RENDERED_CONCLUSION_CHARS, ReasonCode, Subject, SubjectRole,
+    SystemView, live_data_encryption_for_test, render_conclusion,
 };
 pub use local_transport::{
     LocalErrorCode, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
