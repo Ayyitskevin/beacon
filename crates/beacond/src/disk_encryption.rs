@@ -212,13 +212,9 @@ fn inspect_linux(
         reason: "the volume holding live data was not identified".to_owned(),
     };
 
-    let Some(target) = resolve_target(store_path) else {
-        return unknown(
-            evidence,
-            no_mount(),
-            "the live store path could not be resolved",
-            observed_at_ms,
-        );
+    let target = match resolve_target(store_path) {
+        Ok(target) => target,
+        Err(reason) => return unknown_owned(evidence, no_mount(), reason, observed_at_ms),
     };
     let Some(stat_device) = device_of(&target) else {
         return unknown(
@@ -448,13 +444,28 @@ impl std::fmt::Display for DeviceNumber {
     }
 }
 
-fn resolve_target(store_path: &Path) -> Option<PathBuf> {
-    if let Ok(resolved) = fs::canonicalize(store_path) {
-        return Some(resolved);
+/// Resolves the volume's subject: the store itself, or -- only when the store
+/// does not exist yet -- the directory that will hold it.
+///
+/// Every other error means a store that IS there and could not be resolved: a
+/// permission failure, an I/O error, a symlink loop. Swapping in the parent
+/// there would answer confidently about a different subject, so it is reported
+/// rather than papered over.
+fn resolve_target(store_path: &Path) -> Result<PathBuf, String> {
+    match fs::canonicalize(store_path) {
+        Ok(resolved) => Ok(resolved),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = store_path
+                .parent()
+                .ok_or_else(|| unresolved("the live store path has no parent directory"))?;
+            fs::canonicalize(parent).map_err(|error| unresolved(&format!("{:?}", error.kind())))
+        }
+        Err(error) => Err(unresolved(&format!("{:?}", error.kind()))),
     }
-    // The store file does not exist before first open; its directory is on the
-    // same volume and answers the same question.
-    fs::canonicalize(store_path.parent()?).ok()
+}
+
+fn unresolved(detail: &str) -> String {
+    format!("the live store path could not be resolved: {detail}")
 }
 
 fn device_of(path: &Path) -> Option<DeviceNumber> {
