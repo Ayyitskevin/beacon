@@ -10,7 +10,14 @@ import {
 } from "@fluentui/react-components";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 
-import { BriefingReceipts, type ReceiptRow } from "./BriefingReceipts";
+import {
+  BriefingReceipts,
+  RECEIPT_AGGREGATE_LIMIT,
+  RECEIPT_PROJECT_BUDGET,
+  RECEIPT_READ_CONCURRENCY,
+  orderReceipts,
+  type ReceiptRow,
+} from "./BriefingReceipts";
 
 import {
   acceptStarterOrganization,
@@ -310,6 +317,7 @@ export function App() {
   const [recentReceiptTotal, setRecentReceiptTotal] = useState(0);
   const [loadingRecentReceipts, setLoadingRecentReceipts] = useState(false);
   const [recentReceiptFailure, setRecentReceiptFailure] = useState("");
+  const [recentReceiptScope, setRecentReceiptScope] = useState("");
   const recentReceiptEpoch = useRef(0);
   const [residentCapabilityCatalog, setResidentCapabilityCatalog] =
     useState<BeaconCapabilityDescriptor[] | null>(null);
@@ -480,6 +488,7 @@ export function App() {
     setRecentReceiptTotal(0);
     setLoadingRecentReceipts(false);
     setRecentReceiptFailure("");
+    setRecentReceiptScope("");
     localModelDiscoveryEpoch.current += 1;
     setLocalModelDiscovery(null);
     setLocalModelActivations(null);
@@ -918,13 +927,15 @@ export function App() {
     });
   }
 
-  /** Briefing's Receipts, gathered from the Projects this Workspace has.
+  /** Briefing's preflight Receipts, gathered from the Projects this Workspace
+   *  has -- under a budget, and saying so when the budget bites.
    *
-   *  The Query is Project-scoped -- `preflight_receipts` takes a projectId --
-   *  and Briefing has no Project, so this fans out over the Project list rather
-   *  than inventing a Workspace-scoped Query the daemon does not have. One
-   *  Project that cannot be read fails the whole reading: a partial merge shown
-   *  as "recent" would be a bounded list of an unknown subset.
+   *  The Query is Project-scoped, so Briefing has to fan out. An unbounded
+   *  fan-out is not a design, it is an assumption about the Workspace: 513
+   *  Projects meant 513 concurrent IPC calls and up to N x 512 Receipts held
+   *  before sorting to five. The budget below is small, named, and disclosed.
+   *  It is a stopgap for the Query that should exist -- one Workspace-scoped,
+   *  server-bounded read behind the interface.
    */
   async function loadRecentReceipts() {
     const requestEpoch = ++recentReceiptEpoch.current;
@@ -932,22 +943,42 @@ export function App() {
     setRecentReceiptFailure("");
     try {
       const openProjects = await loadProjects();
-      const gathered = await Promise.all(
-        openProjects.map(async (project) => {
-          const receipts = await loadPreflightReceipts(project.id);
-          return receipts.map((receipt) => ({ receipt, projectName: project.name }));
-        }),
-      );
+      // Newest first, so the bound keeps the Projects most likely to carry a
+      // recent Receipt rather than whichever the store returned first.
+      const ordered = [...openProjects].sort((left, right) => {
+        if (left.createdAtMs !== right.createdAtMs) return right.createdAtMs - left.createdAtMs;
+        return right.id.localeCompare(left.id);
+      });
+      const readable = ordered.slice(0, RECEIPT_PROJECT_BUDGET);
+      const gathered: ReceiptRow[][] = [];
+      // A bounded window rather than Promise.all: concurrency is work in
+      // flight, and the daemon dispatch is synchronous on its accept loop.
+      for (let index = 0; index < readable.length; index += RECEIPT_READ_CONCURRENCY) {
+        const window = readable.slice(index, index + RECEIPT_READ_CONCURRENCY);
+        const batch = await Promise.all(
+          window.map(async (project) => {
+            const receipts = await loadPreflightReceipts(project.id);
+            return receipts.map((receipt) => ({ receipt, projectName: project.name }));
+          }),
+        );
+        gathered.push(...batch);
+      }
       if (requestEpoch !== recentReceiptEpoch.current) return;
-      const rows = gathered.flat();
+      const rows = orderReceipts(gathered.flat()).slice(0, RECEIPT_AGGREGATE_LIMIT);
       setRecentReceipts(rows);
       setRecentReceiptTotal(rows.length);
+      setRecentReceiptScope(
+        readable.length < ordered.length
+          ? `showing preflight Receipts for the ${readable.length} most recent Projects of ${ordered.length}`
+          : "",
+      );
     } catch (error) {
       if (requestEpoch !== recentReceiptEpoch.current) return;
       // Kept where the panel can show it, so a failed read is never mistaken
       // for a Workspace with no Receipts.
       setRecentReceipts(null);
       setRecentReceiptTotal(0);
+      setRecentReceiptScope("");
       setRecentReceiptFailure(describeLocalAccountError(error));
     } finally {
       if (requestEpoch === recentReceiptEpoch.current) setLoadingRecentReceipts(false);
@@ -1494,6 +1525,7 @@ export function App() {
               recentReceiptTotal={recentReceiptTotal}
               loadingRecentReceipts={loadingRecentReceipts}
               recentReceiptFailure={recentReceiptFailure}
+              recentReceiptScope={recentReceiptScope}
               onRefreshReceipts={loadRecentReceipts}
               onLock={lockSession}
             />
@@ -1766,6 +1798,7 @@ function Briefing({
   recentReceiptTotal,
   loadingRecentReceipts,
   recentReceiptFailure,
+  recentReceiptScope,
   onRefreshReceipts,
   onLock,
 }: {
@@ -1810,6 +1843,7 @@ function Briefing({
   recentReceiptTotal: number;
   loadingRecentReceipts: boolean;
   recentReceiptFailure: string;
+  recentReceiptScope: string;
   onRefreshReceipts: () => void;
   onLock: () => void;
 }) {
@@ -1892,9 +1926,10 @@ function Briefing({
       <BriefingReceipts
         rows={recentReceipts}
         total={recentReceiptTotal}
-        loading={loadingRecentReceipts}
         failure={recentReceiptFailure}
-        busy={busy || loadingRecentReceipts}
+        scope={recentReceiptScope}
+        loading={loadingRecentReceipts}
+        disabled={busy}
         onRefresh={onRefreshReceipts}
       />
       {retirementCandidate && (

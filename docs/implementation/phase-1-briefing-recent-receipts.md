@@ -36,9 +36,17 @@ of *passed*, *succeeded*, *completed*, or a check mark.
 ## Where the list comes from
 
 `preflight_receipts` is Project-scoped and Briefing has no Project, so Briefing fans out over the
-existing `projects` Query and merges. That is a decision with a cost — N+1 Queries per Briefing
-open — taken because the alternative was a new Workspace-scoped Query, which this slice excludes. A
-Workspace-scoped Query would make the fan-out dead code the day it exists.
+existing `projects` Query and merges. That fan-out is **bounded and disclosed**, because an
+unbounded one is not a design — it is an assumption about the Workspace, and 513 Projects meant 513
+concurrent IPC calls and up to N × 512 Receipts held before sorting to five.
+
+One reading opens at most **8 Projects**, newest first, at most **4 at a time**, and keeps at most
+**256 rows** before sorting to the five it draws. When the Workspace has more Projects than the
+budget the panel says so — "showing preflight Receipts for the 8 most recent Projects of 13" —
+because a bounded reading presented without its bound is a partial answer wearing a complete one.
+
+This is a stopgap. The right shape is a Workspace-scoped, server-bounded Query behind the interface;
+the fan-out becomes dead code the day it exists.
 
 **One Project that cannot be read fails the whole reading.** A partial merge presented as "recent"
 would be a bounded list of an unknown subset, which is the same claim-of-completeness defect the

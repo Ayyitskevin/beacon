@@ -60,7 +60,7 @@ it("lists recent Receipts newest first, not in the order they arrived", async ()
   ];
 
   const { container } = render(
-    <BriefingReceipts rows={rows} total={3} loading={false} failure="" busy={false} onRefresh={vi.fn()} />,
+    <BriefingReceipts rows={rows} total={3} loading={false} failure="" scope="" disabled={false} onRefresh={vi.fn()} />,
   );
 
   const listed = within(screen.getByRole("list", { name: "Recent preflight Receipts" })).getAllByRole(
@@ -83,7 +83,8 @@ it("does not render a verified Receipt as a passing check", () => {
       total={1}
       loading={false}
       failure=""
-      busy={false}
+      scope=""
+      disabled={false}
       onRefresh={vi.fn()}
     />,
   );
@@ -106,7 +107,8 @@ it("states each refusal as its own outcome rather than one shared failure", () =
       total={3}
       loading={false}
       failure=""
-      busy={false}
+      scope=""
+      disabled={false}
       onRefresh={vi.fn()}
     />,
   );
@@ -123,7 +125,7 @@ it("says a truncated list is truncated instead of implying completeness", () => 
   );
 
   render(
-    <BriefingReceipts rows={rows} total={9} loading={false} failure="" busy={false} onRefresh={vi.fn()} />,
+    <BriefingReceipts rows={rows} total={9} loading={false} failure="" scope="" disabled={false} onRefresh={vi.fn()} />,
   );
 
   expect(
@@ -140,13 +142,13 @@ it("keeps empty, loading and failed apart", async () => {
   const user = userEvent.setup();
   const onRefresh = vi.fn();
   const { rerender } = render(
-    <BriefingReceipts rows={null} total={0} loading failure="" busy={false} onRefresh={onRefresh} />,
+    <BriefingReceipts rows={null} total={0} loading failure="" scope="" disabled={false} onRefresh={onRefresh} />,
   );
   expect(screen.getByText("Loading Receipts")).toBeVisible();
   expect(screen.queryByText("No preflight Receipts yet.")).toBeNull();
 
   rerender(
-    <BriefingReceipts rows={[]} total={0} loading={false} failure="" busy={false} onRefresh={onRefresh} />,
+    <BriefingReceipts rows={[]} total={0} loading={false} failure="" scope="" disabled={false} onRefresh={onRefresh} />,
   );
   expect(screen.getByText("No preflight Receipts yet.")).toBeVisible();
 
@@ -156,7 +158,8 @@ it("keeps empty, loading and failed apart", async () => {
       total={0}
       loading={false}
       failure="The local account service is unavailable."
-      busy={false}
+      scope=""
+      disabled={false}
       onRefresh={onRefresh}
     />,
   );
@@ -175,7 +178,8 @@ it("says the list is preflight Receipts, not every Receipt Beacon writes", () =>
       total={1}
       loading={false}
       failure=""
-      busy={false}
+      scope=""
+      disabled={false}
       onRefresh={vi.fn()}
     />,
   );
