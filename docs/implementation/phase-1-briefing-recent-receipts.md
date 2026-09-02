@@ -45,8 +45,8 @@ rows** before sorting to the five it draws. One at a time is the bound, not a sc
 a page in flight is a page held, so a window of four concurrent reads of a 512-row page held 2,048
 rows beside the 256 kept — three times the maximum this note states. The daemon dispatches on a
 single accept loop, so the window bought little to begin with. When the Workspace has more Projects than the
-budget the panel says so — "showing preflight Receipts for the 8 most recent Projects of 13" —
-because a bounded reading presented without its bound is a partial answer wearing a complete one.
+budget the panel says so — "this reading covered the 8 most recent Projects of 13" — because a
+bounded reading presented without its bound is a partial answer wearing a complete one.
 
 This is a stopgap. The right shape is a Workspace-scoped, server-bounded Query behind the interface;
 the fan-out becomes dead code the day it exists.
@@ -85,8 +85,18 @@ truncation line exists to prevent.
   full preflight history view yet, so the rest are recorded but not readable here." A list that
   silently drops rows is a claim of completeness nobody made — and pointing at a Project history
   view that does not exist is a second claim on top of it. No Project-open path reads this Query.
-- **Loading, empty and failed are three states.** A read that failed is not a Workspace with no
-  Receipts, and the failure is retryable rather than terminal.
+- **Two sentences, two subjects.** The panel makes exactly one DISPLAY claim — "Showing the 5 most
+  recent of N" — and the scope line describes the READING that claim was drawn from: "this reading
+  covered 8 of 8 Projects and kept the 256 most recent Receipts of the 4,096 it found." The scope
+  line said "showing 256 most recent preflight Receipts" for three rounds. Every number in it was
+  true, and the sentence was false: it described retained rows as displayed ones, one line above a
+  list of five.
+- **Loading, empty and failed are three states, and empty has two.** A read that failed is not a
+  Workspace with no Receipts, and the failure is retryable rather than terminal. Nor is a BOUNDED
+  reading that found nothing a Workspace with no Receipts: "No preflight Receipts yet" is an
+  absolute claim, and only a reading that covered every Project and kept every Receipt it found has
+  earned it. A bounded one says "No preflight Receipts in this reading" — which is why an empty
+  `scope` means the reading was complete, and why the component reads it to choose.
 
 ## Accessibility
 

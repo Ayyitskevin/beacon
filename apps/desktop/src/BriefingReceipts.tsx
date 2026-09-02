@@ -170,7 +170,12 @@ export function BriefingReceipts({
   total: number;
   loading: boolean;
   failure: string;
-  /** Empty when the reading covered every Project; otherwise what it covered. */
+  /** Empty when the reading was COMPLETE -- every Project covered and every
+   *  Receipt it found kept. Otherwise, what the reading covered.
+   *
+   *  The empty-state copy below depends on this: "No preflight Receipts yet"
+   *  is an absolute claim about the Workspace, and a bounded reading has not
+   *  earned it. Receipts may sit in the Projects this reading did not open. */
   scope: string;
   /** Unrelated work in flight. Kept apart from `loading` so retiring a Resident
    *  does not label this button "Refreshing…" while no Receipt read is running. */
@@ -202,7 +207,7 @@ export function BriefingReceipts({
         </p>
       ) : shown.length === 0 ? (
         <p className={styles.body} role="status">
-          No preflight Receipts yet.
+          {scope ? "No preflight Receipts in this reading." : "No preflight Receipts yet."}
         </p>
       ) : (
         <>

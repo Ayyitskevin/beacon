@@ -451,8 +451,12 @@ describe("Beacon desktop shell", () => {
     // A Workspace with 513 Projects used to start 513 concurrent IPC calls and
     // hold up to N x 512 Receipts before sorting to five.
     expect(
-      await screen.findByText(/showing preflight Receipts for the 8 most recent Projects of 513/),
+      await screen.findByText(/this reading covered the 8 most recent Projects of 513/),
     ).toBeVisible();
+    // The scope sentence says what the READING covered. "showing ... Receipts
+    // for" made it a claim about what is on screen, which is the verb that
+    // contradicted the row list in the capped case below.
+    expect(screen.queryByText(/^showing /)).toBeNull();
     expect(reads).toBe(8);
     // ONE page in flight, because a page in flight is a page held: a window of
     // four concurrent reads of a 512-row page held 2,048 rows beside the 256
@@ -494,12 +498,21 @@ describe("Beacon desktop shell", () => {
 
     // 8 x 512 = 4,096 Receipts exist. Capping to 256 and then reporting 256 as
     // the total made 3,840 read rows vanish from the disclosure.
+    //
+    // Two sentences, two subjects, and they must not contradict each other:
+    // the panel makes ONE display claim, and the scope line describes the
+    // reading that claim was drawn from. "showing 256 most recent preflight
+    // Receipts" said 256 rows were on screen while five were, and every number
+    // in it was individually true.
     expect(await screen.findByText(/Showing the 5 most recent of 4096/)).toBeVisible();
     expect(
       screen.getByText(
-        /showing 256 most recent preflight Receipts from 8 of 8 Projects; more exist/,
+        /this reading covered 8 of 8 Projects and kept the 256 most recent Receipts of the 4096 it found/,
       ),
     ).toBeVisible();
+    expect(within(list).getAllByRole("listitem")).toHaveLength(5);
+    // No sentence claims the retained rows are the displayed ones.
+    expect(screen.queryByText(/showing 256/)).toBeNull();
     expect(within(list).getAllByRole("listitem")).toHaveLength(5);
   });
 

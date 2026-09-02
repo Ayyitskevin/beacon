@@ -157,6 +157,8 @@ it("keeps empty, loading and failed apart", async () => {
   rerender(
     <BriefingReceipts rows={[]} total={0} loading={false} failure="" scope="" disabled={false} onRefresh={onRefresh} />,
   );
+  // An empty scope means the reading was complete, so the absolute sentence is
+  // earned.
   expect(screen.getByText("No preflight Receipts yet.")).toBeVisible();
 
   rerender(
@@ -305,4 +307,52 @@ it("requires exactly the projects and the page read", async () => {
   // no rows held, not an empty answer arrived at by holding everything.
   const empty = await collectRecentReceipts([], async () => []);
   expect(empty).toEqual({ rows: [], found: 0, peakHeld: 0 });
+});
+
+it("does not call a bounded reading an empty Workspace", async () => {
+  // The Project budget bit and the Projects it opened had no Receipts. "No
+  // preflight Receipts yet" is an absolute claim about the Workspace, and it
+  // rendered directly above a sentence admitting only 8 of 513 Projects were
+  // read -- so the 505 unread Projects were denied by one sentence and
+  // disclosed by the next.
+  const onRefresh = vi.fn();
+  render(
+    <BriefingReceipts
+      rows={[]}
+      total={0}
+      loading={false}
+      failure=""
+      scope="this reading covered the 8 most recent Projects of 513"
+      disabled={false}
+      onRefresh={onRefresh}
+    />,
+  );
+
+  expect(screen.getByText("No preflight Receipts in this reading.")).toBeVisible();
+  expect(screen.queryByText("No preflight Receipts yet.")).toBeNull();
+  // And the scope that makes the qualification true is on screen beside it.
+  expect(
+    screen.getByText(/this reading covered the 8 most recent Projects of 513/),
+  ).toBeVisible();
+});
+
+it("earns the absolute empty sentence only when the reading was complete", async () => {
+  // The other half of the same rule: a reading that covered every Project and
+  // kept every Receipt it found HAS established that the Workspace has none,
+  // and qualifying that would be weaker than the facts support.
+  const onRefresh = vi.fn();
+  render(
+    <BriefingReceipts
+      rows={[]}
+      total={0}
+      loading={false}
+      failure=""
+      scope=""
+      disabled={false}
+      onRefresh={onRefresh}
+    />,
+  );
+
+  expect(screen.getByText("No preflight Receipts yet.")).toBeVisible();
+  expect(screen.queryByText("No preflight Receipts in this reading.")).toBeNull();
 });
