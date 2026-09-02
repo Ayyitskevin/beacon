@@ -1085,15 +1085,18 @@ describe("desktop session transport", () => {
     );
   });
 
-  it("refuses a live-data encryption report that claims more than three states or a mechanism it did not prove", async () => {
+  it("refuses a live-data encryption report whose shape it does not recognise", async () => {
     const report = {
-      state: "disabled",
-      mountPoint: { kind: "present", value: "/" },
-      mechanism: {
-        kind: "absent",
-        reason: "at least one path to disk has no crypt layer: 259:2",
+      conclusion: {
+        state: "disabled",
+        reason: "no_crypt_on_any_path",
+        subjects: [{ role: "device", value: "259:2", shortened: false }],
+        omittedSubjects: 0,
       },
-      evidence: [{ source: "stat(live store)", observation: "st_dev = 259:2" }],
+      mountPoint: { role: "location", value: "/", shortened: false },
+      evidence: [
+        { source: "stat(live store)", observation: "st_dev = 259:2", truncated: false },
+      ],
       notVerified: ["filesystem-level encryption such as fscrypt or ext4 encryption"],
       observedAtMs: 1_756_000_000_000,
     };
@@ -1101,45 +1104,60 @@ describe("desktop session transport", () => {
     await expect(liveDataEncryptionStatus()).resolves.toEqual(report);
     expect(invokeMock).toHaveBeenCalledWith("live_data_encryption_status");
 
-    // A fourth state is a widened vocabulary, not a richer answer.
-    invokeMock.mockResolvedValue({ ...report, state: "partial" });
-    await expect(liveDataEncryptionStatus()).rejects.toThrow(
-      "invalid live-data encryption report",
-    );
+    const refused = async (patch: Record<string, unknown>) => {
+      invokeMock.mockResolvedValue({ ...report, ...patch });
+      await expect(liveDataEncryptionStatus()).rejects.toThrow(
+        "invalid live-data encryption report",
+      );
+    };
 
-    // Only `enabled` may name a mechanism, and `enabled` must name one.
-    invokeMock.mockResolvedValue({
-      ...report,
-      mechanism: { kind: "present", value: "dm-crypt (LUKS2)" },
-    });
-    await expect(liveDataEncryptionStatus()).rejects.toThrow(
-      "invalid live-data encryption report",
-    );
-    invokeMock.mockResolvedValue({ ...report, state: "enabled" });
-    await expect(liveDataEncryptionStatus()).rejects.toThrow(
-      "invalid live-data encryption report",
-    );
+    // A fourth state, or a reason outside the closed set, is a widened
+    // vocabulary rather than a richer answer.
+    await refused({ conclusion: { ...report.conclusion, state: "partial" } });
+    await refused({ conclusion: { ...report.conclusion, reason: "something_new" } });
 
-    invokeMock.mockResolvedValue({ ...report, surprise: true });
-    await expect(liveDataEncryptionStatus()).rejects.toThrow(
-      "invalid live-data encryption report",
-    );
+    // State and reason must agree: `enabled` means crypt covers every path and
+    // nothing else does, in both directions.
+    await refused({ conclusion: { ...report.conclusion, state: "enabled" } });
+    await refused({
+      conclusion: { ...report.conclusion, reason: "crypt_covers_every_path" },
+    });
 
-    // mountPoint and mechanism are rendered, so they are bounded like the
-    // evidence beside them. isRecorded on its own accepts any string.
-    invokeMock.mockResolvedValue({
-      ...report,
-      mechanism: { kind: "absent", reason: "x".repeat(201) },
+    // The bound is structural: a subject longer than the shape allows is a
+    // report this reader cannot have produced.
+    await refused({
+      conclusion: {
+        ...report.conclusion,
+        subjects: [{ role: "device", value: "d".repeat(25), shortened: false }],
+      },
     });
-    await expect(liveDataEncryptionStatus()).rejects.toThrow(
-      "invalid live-data encryption report",
-    );
-    invokeMock.mockResolvedValue({
-      ...report,
-      mountPoint: { kind: "present", value: `/${"m".repeat(201)}` },
+    await refused({
+      conclusion: {
+        ...report.conclusion,
+        subjects: Array.from({ length: 4 }, () => ({
+          role: "device",
+          value: "8:1",
+          shortened: false,
+        })),
+      },
     });
-    await expect(liveDataEncryptionStatus()).rejects.toThrow(
-      "invalid live-data encryption report",
-    );
+    await refused({
+      conclusion: {
+        ...report.conclusion,
+        subjects: [{ role: "nonsense", value: "8:1", shortened: false }],
+      },
+    });
+    // The flag is part of the shape, not decoration.
+    await refused({
+      conclusion: {
+        ...report.conclusion,
+        subjects: [{ role: "device", value: "8:1" }],
+      },
+    });
+    await refused({
+      evidence: [{ source: "s", observation: "o" }],
+    });
+
+    await refused({ surprise: true });
   });
 });
