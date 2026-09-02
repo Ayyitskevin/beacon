@@ -88,18 +88,43 @@ Seven interpretations were made and ruled on before implementation, rather than 
    constraint families can only be `not_declared`, so every v1 Proposal is unready by construction;
    that fact is stated rather than implied.
 
-**Deferred, not silently dropped:** ADR 0034's readable-context section
-(`docs/adr/0034-immutable-proposal-v1-authority-bytes.md:166-170`) describes "a later readiness
-diagnostic" that independently compares every declared entry against the pinned base revision when
-the bound Repository is locally available, and otherwise reports that comparison as not verified.
-That diagnostic ships with the slice that first lets a Proposal's `readable_context` be
-`declared(...)` and accepted past submission — this slice's readiness intentionally reports only
-whether the context was declared at all (`ReadableContextNotDeclared`), because v1 has no local
-Repository checkout to compare a declared entry against, and no `verified` / `not_verified` /
-`mismatch` vocabulary would have anything true to say yet. Adding one now would either always read
-`not_verified` (a permanent, uninformative field) or require guessing the comparison's shape before
-the Run I/O decision that would make it meaningful. The unmet-precondition enum is additive, so this
-is a scope boundary, not a closed door.
+### The readable-context comparison
+
+ADR 0034 (`docs/adr/0034-immutable-proposal-v1-authority-bytes.md:166-170`) requires a readiness
+diagnostic that "independently compares every entry with that revision when the bound Repository is
+locally available; otherwise it reports that comparison as not verified", and forbids any surface
+from labelling the context "verified from the manifest's self-consistency alone".
+
+This slice accepts `declared(...)` contexts past submission, so that diagnostic is due here. It
+ships as `UnmetPrecondition::ReadableContextNotVerified { reason }`, whose closed `ContextComparison`
+vocabulary records why the comparison did not happen. Each reason is decided by inspecting the bound
+Repository revision the Proposal names — not the current one — using the same object store Check
+Preflight reads, under the same inspection budget:
+
+| reason | what was observed |
+|---|---|
+| `RepositorySourceNotLocal` | the binding names a Git URL; nothing local exists to compare, and this slice performs no fetch |
+| `RepositoryUnavailable` | the local path did not open as a Git object store, or the inspection budget elapsed — both mean *not known* |
+| `PinnedRevisionAbsent` | the store opened, but the pinned base revision is not in it: the basis for the comparison is what is missing |
+| `ContentUnreadableAtRevision` | the store opened and the pinned revision is present, and Beacon still cannot read a path's content at that revision |
+
+**`ContentUnreadableAtRevision` is the terminal state today, and that is a capability limit, not a
+policy choice.** Resolving `path` to its bytes at a revision means decompressing the commit object,
+walking its tree, and reading the blob. `crates/beacond/src/git_object_store.rs` is deliberately
+presence-only ("Nothing here decompresses data"), `beacond` declares no decompression dependency,
+and ADR 0027 forbids spawning `git`. So no code path can currently conclude that a declared entry
+*agrees* with the pinned revision, and none claims to.
+
+There is deliberately no "mismatch" outcome. A variant nothing can produce is worse than an honest
+absence: it would look like a check that runs. Reading the entries out of the working tree at
+`source` was also rejected — that compares against whatever is checked out now rather than against
+the pinned revision, manufacturing both false agreement and false disagreement from the wrong
+evidence, which is the ADR's prohibition in reverse.
+
+What a later slice adds is the final step only: given a decompressor, resolve each entry's path at
+the pinned revision, hash the blob, and compare it to the entry's SHA-256 — yielding "no item" when
+every entry agrees and a mismatch outcome naming the entries that do not. Every step before it
+already runs and is already tested.
 
 ### The recorded fixture
 

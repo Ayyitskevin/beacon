@@ -14,7 +14,9 @@
 
 use std::collections::HashSet;
 use std::fmt;
+use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
 use data_encoding::{BASE64, HEXLOWER};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -22,12 +24,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::git_object_store::ObjectStore;
 use crate::mission::mission_admission_facts;
 use crate::operator_account::owner_account_exists;
 use crate::project::current_charter_revision;
 use crate::project_policy::policy_revision_facts;
 use crate::project_repository::{
-    DeclaredCheck, latest_repository_for_preflight, stored_repository_for_preflight,
+    DeclaredCheck, RepositorySourceKind, latest_repository_for_preflight,
+    stored_repository_for_preflight,
 };
 use crate::resident_configuration::current_configuration;
 use crate::resident_lifecycle::{ResidentLifecycle, load_resident};
@@ -69,6 +73,11 @@ const MAX_CHECK_NAME_BYTES: usize = 64;
 const MAX_DESCRIPTOR_TOKEN_BYTES: usize = 64;
 /// ADR 0034: "the pinned base revision must be a lowercase 40-character hexadecimal commit id."
 const BASE_REVISION_CHARS: usize = 40;
+
+/// How long the readable-context comparison may spend inspecting an object store before it
+/// reports that it does not know. Mirrors Check Preflight's budget, because it is the same
+/// inspection against the same store; an elapsed budget is never a negative answer.
+const CONTEXT_INSPECTION_BUDGET_MS: u128 = 5_000;
 
 /// The smallest number of bytes one entry of a list can occupy. A declared count is proved against
 /// the remaining input using these before a single entry is decoded, and no count is ever used to
@@ -326,6 +335,36 @@ pub enum ProposalActor {
     Owner,
 }
 
+/// Why a declared readable context could not be compared against the pinned base revision.
+///
+/// ADR 0034: "Internal manifest consistency does not prove that a path/digest pair existed at the
+/// pinned base revision. A later readiness diagnostic independently compares every entry with that
+/// revision when the bound Repository is locally available; otherwise it reports that comparison as
+/// not verified. No surface may label the context verified from the manifest's self-consistency
+/// alone."
+///
+/// Every arm is a distinct reason the comparison did not happen, decided by actually inspecting
+/// the bound Repository rather than assumed. None of them says the context is wrong -- that is a
+/// different fact, and claiming it without having read the revision would be the exact error the
+/// ADR forbids in reverse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextComparison {
+    /// The bound Repository is a Git URL. There is nothing local to compare against, and reading
+    /// it would need a network fetch this slice does not perform.
+    RepositorySourceNotLocal,
+    /// The bound local path could not be opened as a Git object store, or the inspection budget
+    /// elapsed before the answer was known. Both mean the same thing here: not known.
+    RepositoryUnavailable,
+    /// The object store opened, but the pinned base revision is not present in it. The revision
+    /// the entries would be compared against is the thing that is missing.
+    PinnedRevisionAbsent,
+    /// The object store opened and the pinned revision is present, but Beacon cannot read file
+    /// content at a revision: resolving a path to its blob means decompressing the commit and tree
+    /// objects, `beacond` carries no decompressor, and ADR 0027 forbids spawning `git`. This is the
+    /// terminal state today -- see `docs/implementation/phase-2-proposal-v1.md`.
+    ContentUnreadableAtRevision,
+}
+
 /// One precondition a Proposal has not met. Derived at read time, never stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnmetPrecondition {
@@ -337,6 +376,11 @@ pub enum UnmetPrecondition {
     ToolAllowlistNotDeclared,
     EvaluationsNotDeclared,
     ReadableContextNotDeclared,
+    /// The context is declared, and the comparison ADR 0034 requires against the pinned base
+    /// revision did not happen. Never silence, and never a claim that the entries are wrong.
+    ReadableContextNotVerified {
+        reason: ContextComparison,
+    },
     CharterRevisionMoved,
     ProjectPolicyRevisionMoved,
     RepositoryRevisionMoved,
@@ -1445,11 +1489,15 @@ fn derive_readiness(
             unmet.push(precondition);
         }
     }
-    if matches!(
-        payload.intent.readable_context,
-        ReadableContext::NotDeclared
-    ) {
-        unmet.push(UnmetPrecondition::ReadableContextNotDeclared);
+    match payload.intent.readable_context {
+        ReadableContext::NotDeclared => {
+            unmet.push(UnmetPrecondition::ReadableContextNotDeclared);
+        }
+        ReadableContext::Declared { .. } => {
+            if let Some(reason) = compare_readable_context(connection, workspace_id, payload)? {
+                unmet.push(UnmetPrecondition::ReadableContextNotVerified { reason });
+            }
+        }
     }
 
     let (current_charter, latest_repository) =
@@ -1506,6 +1554,61 @@ fn derive_readiness(
         unmet.push(UnmetPrecondition::ConfigurationChanged);
     }
     Ok(ProposalReadiness { unmet })
+}
+
+/// Compare every declared readable-context entry against the pinned base revision.
+///
+/// Returns `None` when the comparison was performed and every entry agreed, and `Some(reason)`
+/// when it could not be performed at all.
+///
+/// **Today this function never returns `None`.** Each step below is a real inspection of the bound
+/// Repository -- the source kind, whether the object store opens, whether the pinned revision is
+/// present -- and any of them can end the walk with its own reason. When they all succeed, the
+/// comparison still cannot run: resolving `path` to its blob at a revision means decompressing the
+/// commit object, walking its tree, and reading the blob, and `beacond` has no decompressor
+/// (`git_object_store` is deliberately presence-only) while ADR 0027 forbids spawning `git`. So the
+/// walk ends at `ContentUnreadableAtRevision`, which is the honest answer and satisfies the ADR's
+/// actual requirement: "No surface may label the context verified from the manifest's
+/// self-consistency alone."
+///
+/// The alternative -- reading the entries out of the working tree at `source` -- is refused on
+/// purpose. That compares against whatever is checked out now, not against the pinned revision, so
+/// it would manufacture both false agreement and false disagreement from the wrong evidence.
+///
+/// When a decompressor arrives, the comparison replaces the final step and gains its own outcome
+/// for entries that disagree; every step before it stays exactly as it is.
+fn compare_readable_context(
+    connection: &Connection,
+    workspace_id: Uuid,
+    payload: &ProposalV1,
+) -> Result<Option<ContextComparison>, ProposalError> {
+    let Some(binding) = stored_repository_for_preflight(
+        connection,
+        workspace_id,
+        payload.scope.project_id,
+        payload.bindings.repository_revision,
+    )
+    .map_err(map_repository_error)?
+    else {
+        // The bound revision is immutable and was proved to exist at submission, so this is not
+        // reachable through the store's own rules -- but "the binding is gone" is a thing we do
+        // not know the answer from, not a mismatch.
+        return Ok(Some(ContextComparison::RepositoryUnavailable));
+    };
+    if binding.source_kind != RepositorySourceKind::LocalPath {
+        return Ok(Some(ContextComparison::RepositorySourceNotLocal));
+    }
+    let Ok(store) = ObjectStore::open(Path::new(&binding.source)) else {
+        return Ok(Some(ContextComparison::RepositoryUnavailable));
+    };
+    let started = Instant::now();
+    let mut deadline = move || started.elapsed().as_millis() > CONTEXT_INSPECTION_BUDGET_MS;
+    match store.contains(&payload.bindings.pinned_base_revision, &mut deadline) {
+        Ok(true) => Ok(Some(ContextComparison::ContentUnreadableAtRevision)),
+        Ok(false) => Ok(Some(ContextComparison::PinnedRevisionAbsent)),
+        // An elapsed budget and an unreadable store are the same fact to a caller: not known.
+        Err(_) => Ok(Some(ContextComparison::RepositoryUnavailable)),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

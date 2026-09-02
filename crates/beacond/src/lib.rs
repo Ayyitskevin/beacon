@@ -81,11 +81,11 @@ pub use project_repository::{
     ProjectRepositoryService, RepositoryAuthor, RepositoryDraft, RepositorySourceKind,
 };
 pub use proposal::{
-    BudgetEnvelope, ConstraintBinding, ContextEntry, DeclaredMutation, InconsistentProposal,
-    MalformedProposal, MutationKind, OwnerBootstrap, Proposal, ProposalActor, ProposalBindings,
-    ProposalBounds, ProposalDigest, ProposalError, ProposalIntent, ProposalReadiness,
-    ProposalRequester, ProposalRequirements, ProposalScope, ProposalService, ProposalV1,
-    ReadableContext, RollbackStrategy, UnmetPrecondition,
+    BudgetEnvelope, ConstraintBinding, ContextComparison, ContextEntry, DeclaredMutation,
+    InconsistentProposal, MalformedProposal, MutationKind, OwnerBootstrap, Proposal, ProposalActor,
+    ProposalBindings, ProposalBounds, ProposalDigest, ProposalError, ProposalIntent,
+    ProposalReadiness, ProposalRequester, ProposalRequirements, ProposalScope, ProposalService,
+    ProposalV1, ReadableContext, RollbackStrategy, UnmetPrecondition,
 };
 pub use resident_configuration::{
     BeaconCapability, BeaconCapabilityDescriptor, ResidentConfiguration,
