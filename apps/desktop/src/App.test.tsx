@@ -807,6 +807,7 @@ describe("Beacon desktop shell", () => {
   });
 
   it("presents the ruled v1 reading as not evaluated rather than guessing", async () => {
+    const user = userEvent.setup();
     mockInitialState("unlocked");
     const base = invokeMock.getMockImplementation()!;
     invokeMock.mockImplementation((command, args) => {
@@ -824,6 +825,10 @@ describe("Beacon desktop shell", () => {
     expect(await screen.findByText(/Disk-encryption status is unknown\./)).toBeVisible();
     expect(screen.getByText(/detection was not evaluated in this version/)).toBeVisible();
     expect(screen.getByRole("button", { name: "Recheck" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "How to turn this on" }));
+    expect(
+      screen.getByText(/records bounded Linux observations but does not evaluate LUKS coverage/),
+    ).toBeVisible();
   });
 
   it("states the window, the receiptless Runs and the overflow the daemon reported", async () => {

@@ -26,7 +26,7 @@ const guides: Record<GuidePlatform, EncryptionGuide> = {
     platform: "linux",
     title: "Turning on disk encryption on Linux",
     steps: [
-      "Linux encrypts whole volumes with LUKS, through the kernel's device-mapper crypt target. Beacon detects exactly that.",
+      "Linux encrypts whole volumes with LUKS, through the kernel's device-mapper crypt target. Beacon's unknown-only v1 records bounded Linux observations but does not evaluate LUKS coverage.",
       "The reliable path is to choose full-disk encryption while installing the operating system. Every major installer offers it as a checkbox, and it is the only path that needs no data migration.",
       "An installation that is already running can be converted in place, but conversion rewrites every block on the volume and there is no way to undo it partway through.",
       "A third path avoids both: install fresh with encryption enabled, then restore your data from a backup you have already verified.",
