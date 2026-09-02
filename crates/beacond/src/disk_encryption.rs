@@ -2223,6 +2223,8 @@ mod tests {
     /// A report is bounded through the same door.
     #[test]
     fn the_public_report_refuses_more_than_it_can_hold() {
+        const WIRE_EVIDENCE_LIMIT_V1: usize = 32;
+        assert_eq!(MAX_EVIDENCE_ENTRIES, WIRE_EVIDENCE_LIMIT_V1);
         let entry = serde_json::json!({
             "source": "stat(live store)",
             "observation": "st_dev = 259:2",
@@ -2252,7 +2254,7 @@ mod tests {
         });
         let mut largest = ok.clone();
         largest["evidence"] = serde_json::json!(
-            (0..MAX_EVIDENCE_ENTRIES)
+            (0..WIRE_EVIDENCE_LIMIT_V1)
                 .map(|_| widest.clone())
                 .collect::<Vec<_>>()
         );
@@ -2278,7 +2280,7 @@ mod tests {
             );
         };
         refused(serde_json::json!({
-            "evidence": (0..MAX_EVIDENCE_ENTRIES + 1).map(|_| entry.clone()).collect::<Vec<_>>(),
+            "evidence": (0..WIRE_EVIDENCE_LIMIT_V1 + 1).map(|_| entry.clone()).collect::<Vec<_>>(),
         }));
         refused(serde_json::json!({
             "evidence": [{ "source": "s", "observation": "o".repeat(201), "truncated": true }],
