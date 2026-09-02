@@ -45,6 +45,30 @@ Filesystem rename and SQLite commit cannot form one cross-system transaction. If
 
 The service never accepts an Operator repository locator and invokes Git only against its derived staging or installed path. Errors crossing the local transport are reduced to the stable `sample_project_unavailable` refusal; internal paths and process output are not exposed to the desktop.
 
+## Descriptor-bound staging hardening
+
+Kevin approved A-G1-03 as staged, implementation-only security work on 2026-09-02. Slice 1 closes
+the highest-impact ancestor-swap race without changing the public interfaces, persisted display
+path, bundle identity, or [ADR 0033](../adr/0033-install-the-sample-project-as-inert-managed-state.md).
+Materialization opens the private Workspace directory once with `O_DIRECTORY | O_NOFOLLOW`, creates
+and writes the staging tree relative to that descriptor, and makes every initialization Git child
+adopt the held staging directory with `fchdir` before `exec`. Failure cleanup recursively removes
+only entries reached from the held staging descriptor and unlinks its name relative to the held
+Workspace directory. Publication likewise gives `renameat2(RENAME_NOREPLACE)` two names beneath
+that same descriptor.
+
+The deterministic service guard uses the existing test-only Git-program seam. Its wrapper renames
+the Workspace ancestor immediately before real Git starts, installs an attacker repository at the
+old pathname, and proves that neither its configured filter nor redirected cleanup can receive
+daemon authority. A stress loop against the old pathname implementation could pass whenever it
+missed the narrow swap interval; the exact injected interleaving was observed failing the old code
+before the mechanism changed.
+
+This slice deliberately does not convert installed-orphan adoption, the data-only frozen Git
+verifier, or recursive tree synchronization to descriptor-relative traversal. Those are the
+remaining verification/synchronization and identity-drift slices in the approved 20–30 hour staged
+plan; this checkpoint makes no claim that they are already closed.
+
 ## Verification
 
 The focused service tests use real SQLite stores, filesystem publication, and Git. They cover authentication, deterministic provenance and revision, both real Declared Checks, repeat installation, digest mismatch, symlink refusal, Git and tree-sync cleanup, database rollback plus exact-orphan adoption, ambient Git-environment isolation, orphaned-repository revision refusal, installed-repository tamper, Event corruption, and absence of Run/Receipt rows. Unix transport, Tauri adapter/ACL, and accessible desktop tests cover the remaining public seams. The 15-case record is in `docs/evals/2026-08-30-sample-project-installation.md`.
