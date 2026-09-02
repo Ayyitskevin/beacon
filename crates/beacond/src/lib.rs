@@ -929,6 +929,7 @@ pub(crate) fn apply_every_migration(connection: &Connection) -> Result<(), Super
         MIGRATION_V17,
         MIGRATION_V18,
         MIGRATION_V19,
+        MIGRATION_V20,
     ] {
         connection.execute_batch(migration)?;
     }
@@ -1432,11 +1433,11 @@ mod tests {
         ExternalEffects, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6,
         MIGRATION_V7, MIGRATION_V8, MIGRATION_V9, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12,
         MIGRATION_V13, MIGRATION_V14, MIGRATION_V15, MIGRATION_V16_ONLY, MIGRATION_V17,
-        MIGRATION_V18, MIGRATION_V19, OperatorAccountService, PreflightOutcome, PreflightReceipt,
-        ProjectCharter, ProjectCharterDraft, ProjectDraft, ProjectRepositoryService,
-        ProjectService, ProjectView, Recorded, RepositoryDraft, RepositorySourceKind,
-        ResolvedCheck, SCHEMA_V1, SecretString, StartupConfig, Supervisor, SupervisorError,
-        UnavailableEvidence,
+        MIGRATION_V18, MIGRATION_V19, MIGRATION_V20, OperatorAccountService, PreflightOutcome,
+        PreflightReceipt, ProjectCharter, ProjectCharterDraft, ProjectDraft,
+        ProjectRepositoryService, ProjectService, ProjectView, Recorded, RepositoryDraft,
+        RepositorySourceKind, ResolvedCheck, SCHEMA_V1, SecretString, StartupConfig, Supervisor,
+        SupervisorError, UnavailableEvidence,
     };
 
     struct TestStore {
@@ -3518,7 +3519,7 @@ mod tests {
 
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
-        assert_eq!(report.diagnostics.schema_version, 19);
+        assert_eq!(report.diagnostics.schema_version, SCHEMA_VERSION);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         // The exact payload bytes, sequence, and timestamp survive the closed-Event-table rebuild.
@@ -3783,7 +3784,7 @@ mod tests {
         drop(connection);
 
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
-        assert_eq!(report.diagnostics.schema_version, 19);
+        assert_eq!(report.diagnostics.schema_version, SCHEMA_VERSION);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         connection
@@ -3817,6 +3818,7 @@ mod tests {
             MIGRATION_V17,
             MIGRATION_V18,
             MIGRATION_V19,
+            MIGRATION_V20,
         ] {
             connection.execute_batch(migration).unwrap();
         }
