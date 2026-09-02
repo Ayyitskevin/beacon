@@ -351,7 +351,7 @@ sites."*
 
 ## Knowingly unreachable checks
 
-Three checks exist that no store state can reach, kept deliberately and named here so that a
+Four checks exist that no store state can reach, kept deliberately and named here so that a
 reviewer rules on them rather than discovering them.
 
 1. **The re-encode identity check** in `verified_ruling`. No byte sequence this grammar can decode
@@ -364,7 +364,20 @@ reviewer rules on them rather than discovering them.
 3. **`ruling_chain`'s two map-construction conditions** — a predecessor cited twice, a Ruling citing
    two predecessors. The primary key and the unique index forbid both outright;
    `the_store_refuses_a_second_predecessor_and_a_second_supersession` proves those constraints
-   instead.
+   instead. Its third condition — a predecessor outside this Proposal's Ruling set — is forbidden by
+   the relation's scoped composite foreign keys, proved by
+   `each_composite_foreign_key_independently_refuses_a_cross_proposal_relation`.
+4. **The orphan-Event total** in `verify_ruling_state`. Per-Event verification runs first and already
+   refuses an Event naming a digest no row carries, by resolving it in that Event's *own* Workspace,
+   so the later whole-table total can fire only if that call ordering changes.
+   `startup_refuses_an_orphan_ruling_event` proves the store is refused;
+   `startup_refuses_an_event_recorded_under_another_workspace` needs **both** arms removed before it
+   goes red, which is what says the two cover each other rather than one covering nothing.
+
+   This entry was missing from the first version of this list, although
+   `C14-opus-build-report.md` had recorded it. gpt2's slice-4 review caught the regression: a
+   checkpoint that drops a fact its own source packet established is worse than one that never
+   knew it.
 
 The rule applied: **redundancy inside one function is removed; redundancy across modules or across
 call ordering is kept and named.** One function should have one way to fail, and a module's
