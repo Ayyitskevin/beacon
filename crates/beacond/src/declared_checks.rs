@@ -7,9 +7,10 @@
 //! # What this module is careful about
 //!
 //! **Admissibility is not assumed, it is re-established.** Every execution
-//! preflights first and refuses unless that preflight returns `Verified`. The
-//! binding may have moved, the repository may have gone, the sandbox may have
-//! stopped enforcing since the last time anyone looked.
+//! pins the current repository and Charter policy revisions when its Run opens,
+//! preflights those exact revisions, and refuses unless that preflight returns
+//! `Verified`. A later publication belongs to the next Run; repository and
+//! sandbox liveness are still established anew for this one.
 //!
 //! **A successful process exit is not a successful Mission.** `Completed` means
 //! every check has a positively established terminal outcome. Whether they
@@ -27,10 +28,11 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::check_preflight::{
-    CheckPreflightError, CheckPreflightService, PreflightOutcome, PreflightReceipt,
+    CheckPreflightError, CheckPreflightService, PreflightOutcome, PreflightPin, PreflightReceipt,
     RunEventReplayError, verify_run_event,
 };
 use crate::operator_account::{OperatorAccountError, OperatorAccountService};
+use crate::project_repository::latest_repository_for_preflight;
 use crate::sandbox::{self, ExecutionBounds, ExecutionOutcome, ExecutionRecord};
 use crate::worktree::{CleanupOutcome, KeepReason, Worktree};
 
@@ -164,31 +166,17 @@ impl DeclaredCheckService {
         }
     }
 
-    /// Preflight, then run the admitted Declared Checks in a disposable
-    /// worktree under the sandbox.
+    /// Open on the current revisions, preflight those pinned revisions, then
+    /// run the admitted Declared Checks in a disposable worktree.
     pub fn execute(
         &self,
         project_id: Uuid,
         bounds: ExecutionBounds,
     ) -> Result<ExecutionReceipt, DeclaredCheckError> {
-        // Admissibility is re-established, never inherited from a previous
-        // answer: the binding, the repository, and the sandbox can all have
-        // changed since anyone last looked.
-        let admitted_by = self.preflights.preflight(project_id)?;
-
-        let opened = self.open_run(project_id, &admitted_by)?;
-        if !opened.binding_unchanged {
-            let not_verified = binding_changed_after_preflight_not_verified(&admitted_by);
-            return self.close(
-                opened,
-                ExecutionSummary::NotAdmissible,
-                admitted_by,
-                Vec::new(),
-                None,
-                not_verified,
-                bounds,
-            );
-        }
+        // The execution Run owns the revisions for the whole attempt. A
+        // publication after this point belongs to the next Run.
+        let opened = self.open_run(project_id)?;
+        let admitted_by = self.preflights.preflight_pinned(project_id, opened.pin)?;
 
         if admitted_by.outcome != PreflightOutcome::Verified {
             let not_verified = early_refusal_not_verified(&admitted_by, false);
@@ -256,16 +244,20 @@ impl DeclaredCheckService {
             .collect()
     }
 
-    fn open_run(
-        &self,
-        project_id: Uuid,
-        admitted_by: &PreflightReceipt,
-    ) -> Result<OpenRun, DeclaredCheckError> {
+    fn open_run(&self, project_id: Uuid) -> Result<OpenRun, DeclaredCheckError> {
         self.accounts.with_authenticated_store(|connection, now| {
             let started_at_ms = u64::try_from(now).map_err(|_| DeclaredCheckError::InvalidStore)?;
             let run_id = Uuid::new_v4();
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let (charter_revision, binding) =
+                latest_repository_for_preflight(&transaction, self.workspace_id, project_id)
+                    .map_err(CheckPreflightError::from)?;
+            let binding = binding.ok_or(CheckPreflightError::RepositoryNotBound)?;
+            let pin = PreflightPin {
+                repository_revision: binding.revision,
+                charter_revision,
+            };
             transaction.execute(
                 "INSERT INTO runs (
                      workspace_id, id, project_id, kind, repository_revision, charter_revision,
@@ -275,27 +267,19 @@ impl DeclaredCheckService {
                     self.workspace_id.to_string(),
                     run_id.to_string(),
                     project_id.to_string(),
-                    i64::from(admitted_by.repository_revision),
-                    i64::from(admitted_by.charter_revision),
+                    i64::from(pin.repository_revision),
+                    i64::from(pin.charter_revision),
                     i64::try_from(started_at_ms.saturating_add(LEASE_MS))
                         .map_err(|_| DeclaredCheckError::InvalidStore)?,
                     i64::try_from(started_at_ms).map_err(|_| DeclaredCheckError::InvalidStore)?,
                 ],
             )?;
-            let latest_revision = transaction.query_row(
-                "SELECT max(revision) FROM project_repository_revisions
-                 WHERE workspace_id = ?1 AND project_id = ?2",
-                params![self.workspace_id.to_string(), project_id.to_string(),],
-                |row| row.get::<_, Option<i64>>(0),
-            )?;
-            let binding_unchanged =
-                latest_revision == Some(i64::from(admitted_by.repository_revision));
             transaction.commit()?;
             Ok(OpenRun {
                 run_id,
                 project_id,
                 started_at_ms,
-                binding_unchanged,
+                pin,
             })
         })
     }
@@ -371,7 +355,7 @@ struct OpenRun {
     run_id: Uuid,
     project_id: Uuid,
     started_at_ms: u64,
-    binding_unchanged: bool,
+    pin: PreflightPin,
 }
 
 fn execution_summary(checks: &[ExecutionRecord]) -> ExecutionSummary {
@@ -511,12 +495,6 @@ fn early_refusal_not_verified(
     gaps.push(WORKTREE_NOT_ATTEMPTED_GAP.to_owned());
     gaps.push(PREFLIGHT_NO_CHECKS_GAP.to_owned());
     gaps
-}
-
-fn binding_changed_after_preflight_not_verified(admitted_by: &PreflightReceipt) -> Vec<String> {
-    let mut changed = admitted_by.clone();
-    changed.outcome = PreflightOutcome::DeclaredChecksChanged;
-    early_refusal_not_verified(&changed, false)
 }
 
 fn execution_not_verified(
@@ -998,13 +976,11 @@ fn validate_v2_receipt(receipt: &ExecutionReceipt) -> Result<(), DeclaredCheckEr
     }
     match receipt.summary {
         ExecutionSummary::NotAdmissible
-            if receipt.checks.is_empty() && receipt.worktree.is_none() =>
+            if receipt.admitted_by.outcome != PreflightOutcome::Verified
+                && receipt.checks.is_empty()
+                && receipt.worktree.is_none() =>
         {
-            let expected = if receipt.admitted_by.outcome == PreflightOutcome::Verified {
-                binding_changed_after_preflight_not_verified(&receipt.admitted_by)
-            } else {
-                early_refusal_not_verified(&receipt.admitted_by, false)
-            };
+            let expected = early_refusal_not_verified(&receipt.admitted_by, false);
             if receipt.not_verified != expected {
                 return Err(DeclaredCheckError::InvalidStore);
             }
@@ -1531,6 +1507,25 @@ mod tests {
                 WORKTREE_NO_CHECKS_GAP,
             ]
         );
+    }
+
+    #[test]
+    fn not_admissible_requires_a_refusing_preflight() {
+        let mut value = valid_v2_json();
+        value["summary"] = json!("not_admissible");
+        value["checks"] = json!([]);
+        value["worktree"] = serde_json::Value::Null;
+        value["notVerified"] = json!([
+            REACHABILITY_GAP,
+            WORKTREE_REFUSAL_GAP,
+            WORKTREE_NO_CHECKS_GAP,
+        ]);
+        let receipt: ExecutionReceipt = serde_json::from_value(value).unwrap();
+
+        assert!(matches!(
+            validate_v2_receipt(&receipt),
+            Err(DeclaredCheckError::InvalidStore)
+        ));
     }
 
     #[test]

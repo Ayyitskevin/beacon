@@ -381,6 +381,29 @@ fn runs_of_kind(store: &TestStore, kind: &str) -> Vec<(String, String)> {
         .unwrap()
 }
 
+fn run_pin(store: &TestStore, run_id: Uuid) -> (u32, u32) {
+    let connection = Connection::open(&store.path).unwrap();
+    connection
+        .query_row(
+            "SELECT repository_revision, charter_revision FROM runs WHERE id = ?1",
+            [run_id.to_string()],
+            |row| Ok((row.get::<_, u32>(0)?, row.get::<_, u32>(1)?)),
+        )
+        .unwrap()
+}
+
+fn run_kinds_in_open_order(store: &TestStore) -> Vec<String> {
+    let connection = Connection::open(&store.path).unwrap();
+    let mut statement = connection
+        .prepare("SELECT kind FROM runs ORDER BY rowid")
+        .unwrap();
+    statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+}
+
 #[test]
 fn a_declared_check_runs_in_a_worktree_at_the_pinned_revision() {
     if !enforcing_or_skip() {
@@ -1087,6 +1110,11 @@ fn an_inadmissible_preflight_refuses_before_anything_runs() {
 
     let receipt = checks.execute(project.id, bounds()).unwrap();
     assert_eq!(receipt.summary, ExecutionSummary::NotAdmissible);
+    assert_eq!(
+        receipt.admitted_by.outcome,
+        PreflightOutcome::BaseRevisionUnreachable,
+        "NotAdmissible carries the preflight refusal, never a Verified preflight"
+    );
     assert!(receipt.checks.is_empty(), "a refused Run ran nothing");
     assert_eq!(receipt.worktree, None, "no worktree was created");
     // The refusal is still a Run with a Receipt: it happened, and it is recorded.
@@ -1108,13 +1136,91 @@ fn an_inadmissible_preflight_refuses_before_anything_runs() {
 }
 
 #[test]
-fn execution_refuses_if_the_binding_moves_between_preflight_and_run_open() {
+fn execution_uses_its_pinned_binding_and_the_next_run_pins_the_new_one() {
     if !enforcing_or_skip() {
         return;
     }
-    let (repository, revision) = fixture_repository("binding-moved-before-execution");
+    let (repository, first_revision) = fixture_repository("binding-moved-after-open");
+    fs::write(repository.path.join("marker.txt"), "next-binding\n").unwrap();
+    git(&repository.path, &["add", "marker.txt"]);
+    git(&repository.path, &["commit", "--quiet", "-m", "two"]);
+    let second_revision = revision(&repository.path);
     let source = repository.path.to_string_lossy().into_owned();
-    let (store, projects, repositories, checks) = enrolled("binding-moved-before-execution");
+    let (store, projects, repositories, checks) = enrolled("binding-moved-after-open");
+    let project = projects.create(project_draft()).unwrap();
+    repositories
+        .bind(
+            project.id,
+            project.charter.revision,
+            None,
+            RepositoryDraft {
+                source_kind: RepositorySourceKind::LocalPath,
+                source,
+                base_revision: first_revision.clone(),
+                declared_checks: vec![check("marker", &["/bin/cat", "marker.txt"], ".")],
+            },
+        )
+        .unwrap();
+    let connection = Connection::open(&store.path).unwrap();
+    connection
+        .execute_batch(&format!(
+            "CREATE TRIGGER supersede_binding_when_execution_opens
+             AFTER INSERT ON runs
+             WHEN NEW.kind = 'declared_checks'
+             BEGIN
+                 INSERT INTO project_repository_revisions (
+                     workspace_id, project_id, revision, charter_revision, source_kind,
+                     source, base_revision, declared_checks_json, author_kind, authored_at_ms
+                 )
+                 SELECT workspace_id, project_id, revision + 1, charter_revision, source_kind,
+                        source, '{second_revision}', declared_checks_json, author_kind, authored_at_ms
+                 FROM project_repository_revisions
+                 WHERE workspace_id = NEW.workspace_id
+                   AND project_id = NEW.project_id
+                   AND revision = NEW.repository_revision;
+             END;"
+        ))
+        .unwrap();
+    drop(connection);
+
+    let first = checks.execute(project.id, bounds()).unwrap();
+
+    assert_eq!(first.summary, ExecutionSummary::Completed);
+    assert_eq!(first.admitted_by.outcome, PreflightOutcome::Verified);
+    assert_eq!(first.admitted_by.repository_revision, 1);
+    assert_eq!(first.admitted_by.policy_repository_revision, 1);
+    assert_eq!(first.admitted_by.base_revision, first_revision);
+    assert_eq!(first.checks[0].stdout.trim(), "committed-content");
+    assert_eq!(run_pin(&store, first.run_id), (1, 1));
+    assert_eq!(
+        &run_kinds_in_open_order(&store)[..2],
+        ["declared_checks", "check_preflight"],
+        "execution must pin its revisions before its preflight opens"
+    );
+
+    let connection = Connection::open(&store.path).unwrap();
+    connection
+        .execute("DROP TRIGGER supersede_binding_when_execution_opens", [])
+        .unwrap();
+    drop(connection);
+
+    let second = checks.execute(project.id, bounds()).unwrap();
+    assert_eq!(second.summary, ExecutionSummary::Completed);
+    assert_eq!(second.admitted_by.repository_revision, 2);
+    assert_eq!(second.admitted_by.policy_repository_revision, 2);
+    assert_eq!(second.admitted_by.base_revision, second_revision);
+    assert_eq!(second.checks[0].stdout.trim(), "next-binding");
+    assert_eq!(run_pin(&store, second.run_id), (2, 1));
+}
+
+#[test]
+fn execution_uses_its_pinned_charter_and_the_next_run_pins_the_new_one() {
+    if !enforcing_or_skip() {
+        return;
+    }
+    let (repository, revision) = fixture_repository("charter-moved-after-open");
+    let source = repository.path.to_string_lossy().into_owned();
+    let (store, projects, repositories, checks) = enrolled("charter-moved-after-open");
     let project = projects.create(project_draft()).unwrap();
     repositories
         .bind(
@@ -1125,61 +1231,74 @@ fn execution_refuses_if_the_binding_moves_between_preflight_and_run_open() {
                 source_kind: RepositorySourceKind::LocalPath,
                 source,
                 base_revision: revision,
-                declared_checks: vec![check("must-not-run", &["/bin/true"], ".")],
+                declared_checks: vec![check("marker", &["/bin/cat", "marker.txt"], ".")],
             },
         )
         .unwrap();
     let connection = Connection::open(&store.path).unwrap();
     connection
         .execute_batch(
-            "CREATE TRIGGER supersede_binding_when_execution_opens
+            "CREATE TRIGGER revise_charter_when_execution_opens
              AFTER INSERT ON runs
              WHEN NEW.kind = 'declared_checks'
              BEGIN
-                 INSERT INTO project_repository_revisions (
-                     workspace_id, project_id, revision, charter_revision, source_kind,
-                     source, base_revision, declared_checks_json, author_kind, authored_at_ms
+                 INSERT INTO project_charter_revisions (
+                     workspace_id, project_id, revision, purpose, desired_outcomes_json,
+                     constraints_json, prohibitions_json, autonomy_profile, budget_boundary,
+                     external_effects, author_kind, authored_at_ms
                  )
-                 SELECT workspace_id, project_id, revision + 1, charter_revision, source_kind,
-                        source, base_revision, declared_checks_json, author_kind, authored_at_ms
-                 FROM project_repository_revisions
+                 SELECT workspace_id, project_id, revision + 1, purpose || ' revised',
+                        desired_outcomes_json, constraints_json, prohibitions_json,
+                        autonomy_profile, budget_boundary, external_effects, author_kind,
+                        authored_at_ms + 1
+                 FROM project_charter_revisions
                  WHERE workspace_id = NEW.workspace_id
                    AND project_id = NEW.project_id
-                   AND revision = NEW.repository_revision;
+                   AND revision = NEW.charter_revision;
+                 UPDATE projects
+                 SET current_charter_revision = NEW.charter_revision + 1,
+                     updated_at_ms = updated_at_ms + 1
+                 WHERE workspace_id = NEW.workspace_id
+                   AND id = NEW.project_id
+                   AND current_charter_revision = NEW.charter_revision;
              END;",
         )
         .unwrap();
     drop(connection);
 
-    let receipt = checks.execute(project.id, bounds()).unwrap();
+    let first = checks.execute(project.id, bounds()).unwrap();
+    assert_eq!(first.summary, ExecutionSummary::Completed);
+    assert_eq!(first.admitted_by.outcome, PreflightOutcome::Verified);
+    assert_eq!(first.admitted_by.charter_revision, 1);
+    assert_eq!(first.admitted_by.policy_charter_revision, 1);
+    assert_eq!(first.admitted_by.policy_repository_revision, 1);
+    assert_eq!(run_pin(&store, first.run_id), (1, 1));
+    assert_eq!(first.checks[0].stdout.trim(), "committed-content");
+    assert_eq!(
+        &run_kinds_in_open_order(&store)[..2],
+        ["declared_checks", "check_preflight"],
+        "execution must pin the Charter before its preflight opens"
+    );
 
-    assert_eq!(receipt.summary, ExecutionSummary::NotAdmissible);
-    assert_eq!(
-        receipt.admitted_by.outcome,
-        PreflightOutcome::Verified,
-        "the embedded preflight remains unchanged historical evidence"
-    );
-    assert!(receipt.not_verified.iter().any(|gap| {
-        gap == "Repository Binding stability and current Declared Check definitions"
-    }));
-    assert!(receipt.checks.is_empty(), "a refused Run ran no check");
-    assert_eq!(receipt.worktree, None, "no worktree was created");
-    assert_eq!(runs_of_kind(&store, "declared_checks")[0].1, "refused");
     let connection = Connection::open(&store.path).unwrap();
-    let stored_preflight: String = connection
-        .query_row(
-            "SELECT receipt_json FROM receipts WHERE run_id = ?1",
-            [receipt.admitted_by.run_id.to_string()],
-            |row| row.get(0),
-        )
+    connection
+        .execute("DROP TRIGGER revise_charter_when_execution_opens", [])
         .unwrap();
+    drop(connection);
+
+    let second = checks.execute(project.id, bounds()).unwrap();
+    assert_eq!(second.summary, ExecutionSummary::NotAdmissible);
     assert_eq!(
-        serde_json::to_string(&receipt.admitted_by)
-            .unwrap()
-            .as_bytes(),
-        stored_preflight.as_bytes(),
-        "post-preflight refusal rewrote its historical admission evidence"
+        second.admitted_by.outcome,
+        PreflightOutcome::BindingStaleForCharter,
+        "NotAdmissible embeds the refusing preflight, never a Verified one"
     );
+    assert_eq!(second.admitted_by.charter_revision, 2);
+    assert_eq!(second.admitted_by.policy_charter_revision, 2);
+    assert_eq!(second.admitted_by.policy_repository_revision, 1);
+    assert_eq!(run_pin(&store, second.run_id), (1, 2));
+    assert!(second.checks.is_empty());
+    assert_eq!(second.worktree, None);
 }
 
 #[test]

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -24,7 +24,7 @@ use crate::git_object_store::{ObjectStore, ObjectStoreError};
 use crate::operator_account::{OperatorAccountError, OperatorAccountService};
 use crate::project_repository::{
     PreflightBinding, ProjectRepositoryError, RepositorySourceKind,
-    latest_repository_for_preflight, stored_repository_for_preflight,
+    latest_repository_for_preflight, repository_for_preflight_at,
 };
 use crate::sandbox::SandboxCapability;
 
@@ -51,13 +51,14 @@ pub enum PreflightOutcome {
     /// The binding names a Git URL. Confirming a pinned revision in a remote
     /// requires a network fetch the operating envelope denies by default.
     SourceKindUnsupported,
-    /// The latest binding does not apply to the current Charter revision.
+    /// The pinned binding does not apply to the Run's pinned Charter revision.
     BindingStaleForCharter,
     /// The source path is missing, unreadable, or not a Git repository.
     RepositoryUnreadable,
     /// The pinned base revision is not present in the repository's object store.
     BaseRevisionUnreachable,
-    /// The binding changed under the Run between opening and recording.
+    /// Historical v1 outcome from before Runs pinned revisions at open.
+    /// Retained so stored Receipts remain decodable; new Runs do not emit it.
     DeclaredChecksChanged,
     /// A check's resolved working directory lies outside the repository root.
     WorkingDirectoryEscapes,
@@ -253,6 +254,15 @@ pub struct CheckPreflightService {
     workspace_id: Uuid,
 }
 
+/// The repository and Charter policy revisions an already-open Run authorizes
+/// preflight to inspect. They are also the policy revisions recorded in its
+/// preflight Receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PreflightPin {
+    pub repository_revision: u32,
+    pub charter_revision: u32,
+}
+
 impl CheckPreflightService {
     pub fn new(accounts: Arc<OperatorAccountService>, workspace_id: Uuid) -> Self {
         Self {
@@ -261,7 +271,8 @@ impl CheckPreflightService {
         }
     }
 
-    /// Preflight a Project's latest Repository Binding.
+    /// Open a preflight Run on a Project's current revisions, then inspect only
+    /// those pinned revisions.
     ///
     /// Opens a Run and commits it before any filesystem work, so that a process
     /// that dies mid-inspection leaves a Run its lease can resolve rather than
@@ -269,13 +280,50 @@ impl CheckPreflightService {
     /// transaction records the Receipt, the event, and the Run's terminal state
     /// together.
     pub fn preflight(&self, project_id: Uuid) -> Result<PreflightReceipt, CheckPreflightError> {
+        self.preflight_with_pin(project_id, None)
+    }
+
+    /// Preflight the exact revisions captured by an already-open execution Run.
+    pub(crate) fn preflight_pinned(
+        &self,
+        project_id: Uuid,
+        pin: PreflightPin,
+    ) -> Result<PreflightReceipt, CheckPreflightError> {
+        self.preflight_with_pin(project_id, Some(pin))
+    }
+
+    fn preflight_with_pin(
+        &self,
+        project_id: Uuid,
+        pin: Option<PreflightPin>,
+    ) -> Result<PreflightReceipt, CheckPreflightError> {
         let opened = self.accounts.with_authenticated_store(|connection, now| {
             let started_at_ms =
                 u64::try_from(now).map_err(|_| CheckPreflightError::InvalidStore)?;
-            let transaction = connection.transaction()?;
-            let (charter_revision, binding) =
-                latest_repository_for_preflight(&transaction, self.workspace_id, project_id)?;
-            let binding = binding.ok_or(CheckPreflightError::RepositoryNotBound)?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let (charter_revision, binding) = match pin {
+                Some(pin) => (
+                    pin.charter_revision,
+                    repository_for_preflight_at(
+                        &transaction,
+                        self.workspace_id,
+                        project_id,
+                        pin.repository_revision,
+                        pin.charter_revision,
+                    )?,
+                ),
+                None => {
+                    latest_repository_for_preflight(&transaction, self.workspace_id, project_id)?
+                }
+            };
+            let binding = binding.ok_or_else(|| {
+                if pin.is_some() {
+                    CheckPreflightError::InvalidStore
+                } else {
+                    CheckPreflightError::RepositoryNotBound
+                }
+            })?;
             let run_id = Uuid::new_v4();
             transaction.execute(
                 "INSERT INTO runs (
@@ -287,7 +335,7 @@ impl CheckPreflightService {
                     run_id.to_string(),
                     project_id.to_string(),
                     i64::from(binding.revision),
-                    i64::from(binding.charter_revision),
+                    i64::from(charter_revision),
                     i64::try_from(started_at_ms.saturating_add(LEASE_MS))
                         .map_err(|_| CheckPreflightError::InvalidStore)?,
                     i64::try_from(started_at_ms).map_err(|_| CheckPreflightError::InvalidStore)?,
@@ -309,39 +357,14 @@ impl CheckPreflightService {
                 .map_err(|_| CheckPreflightError::InvalidStore)?
                 .max(opened.started_at_ms);
             let transaction = connection.transaction()?;
-            // The binding may have moved while the filesystem was being read.
-            let (current_charter, latest) =
-                latest_repository_for_preflight(&transaction, self.workspace_id, project_id)?;
-            let stored = stored_repository_for_preflight(
-                &transaction,
-                self.workspace_id,
-                project_id,
-                opened.binding.revision,
-            )?;
-            let unchanged = latest
-                .as_ref()
-                .is_some_and(|latest| latest.revision == opened.binding.revision)
-                && current_charter == opened.charter_revision
-                && stored.as_ref() == Some(&opened.binding);
-            let outcome = if unchanged {
-                inspection.outcome
-            } else {
-                PreflightOutcome::DeclaredChecksChanged
-            };
-            let mut not_verified = inspection.not_verified.clone();
-            if !unchanged {
-                not_verified.push(
-                    "every step: the Repository Binding changed while this Run was inspecting"
-                        .to_owned(),
-                );
-            }
+            let outcome = inspection.outcome;
             let receipt = PreflightReceipt {
                 version: 1,
                 run_id: opened.run_id,
                 workspace_id: self.workspace_id,
                 project_id,
                 repository_revision: opened.binding.revision,
-                charter_revision: opened.binding.charter_revision,
+                charter_revision: opened.charter_revision,
                 outcome,
                 source_kind: opened.binding.source_kind,
                 source: opened.binding.source.clone(),
@@ -351,11 +374,11 @@ impl CheckPreflightService {
                     .sandbox
                     .as_ref()
                     .map_or_else(|| "none".to_owned(), SandboxCapability::receipt_version),
-                policy_charter_revision: opened.binding.charter_revision,
+                policy_charter_revision: opened.charter_revision,
                 policy_repository_revision: opened.binding.revision,
                 started_at_ms: opened.started_at_ms,
                 ended_at_ms,
-                not_verified,
+                not_verified: inspection.not_verified.clone(),
                 unavailable: UnavailableEvidence::for_preflight(),
             };
             let payload = serde_json::to_string(&receipt)?;
@@ -464,8 +487,8 @@ fn inspect(opened: &OpenRun) -> Inspection {
         sandbox: None,
     };
 
-    // Step 0: the binding applies to the current Charter revision.
-    if !binding.applies_to_current_charter {
+    // Step 0: the binding applies to this Run's pinned Charter revision.
+    if !binding.applies_to_charter {
         return refuse(
             PreflightOutcome::BindingStaleForCharter,
             &[
