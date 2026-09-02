@@ -901,6 +901,24 @@ export function isPreflightUnavailable(error: unknown): boolean {
   );
 }
 
+/** The failure exactly as it arrived, for a report that must show BOTH the
+ *  fallback and the failure that caused it. `describeLocalAccountError` maps
+ *  known codes to operator copy and answers "could not complete that local
+ *  account action" for everything else -- which is the right default for a
+ *  transient action error and the wrong one for a diagnostic whose whole job is
+ *  to say what it could not read. */
+export function verbatimFailure(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === "string" && error) return error;
+  if (typeof error === "object" && error !== null) {
+    const code = (error as Record<string, unknown>).code;
+    if (typeof code === "string" && code) return code;
+    const message = (error as Record<string, unknown>).message;
+    if (typeof message === "string" && message) return message;
+  }
+  return "no reason was reported";
+}
+
 export function describeLocalAccountError(error: unknown): string {
   if (typeof error !== "object" || error === null || Array.isArray(error)) {
     return "Beacon could not complete that local account action.";

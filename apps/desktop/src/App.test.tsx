@@ -934,7 +934,7 @@ describe("Beacon desktop shell", () => {
         // The first read fails. Swallowing it left no status, no warning, no
         // error and no Recheck -- the operator could not even retry.
         if (attempts === 1) {
-          return Promise.reject({ code: "account_service_unavailable" });
+          return Promise.reject(new Error("diagnostic transport failed"));
         }
         return Promise.resolve(encryptionReport("disabled"));
       }
@@ -945,7 +945,10 @@ describe("Beacon desktop shell", () => {
     await screen.findByRole("heading", { name: "Briefing" });
 
     await screen.findByRole("heading", { name: "Live data" });
-    expect(screen.getByText(/could not be read/i)).toBeVisible();
+    // The ORIGINAL failure, verbatim. Passing it through the generic account
+    // describer replaced the only text that says what actually went wrong.
+    expect(screen.getByText(/initial read failed: diagnostic transport failed/)).toBeVisible();
+    expect(screen.getByText(/showing fallback/)).toBeVisible();
     const recheck = screen.getByRole("button", { name: "Recheck" });
 
     await user.click(recheck);
