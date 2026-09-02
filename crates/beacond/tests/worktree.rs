@@ -121,6 +121,130 @@ fn repository_programs_do_not_run_during_worktree_creation_or_cleanup() {
 }
 
 #[test]
+fn repository_smudge_filters_do_not_run_during_worktree_creation() {
+    let (repository, _) = fixture_repository("hostile-smudge-filter");
+    let sentinel = repository.path.join("smudge-ran");
+    let filter = repository.path.join(".git/hostile-smudge");
+    fs::write(
+        &filter,
+        format!("#!/bin/sh\n: > '{}'\ncat\n", sentinel.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&filter, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(
+        repository.path.join(".gitattributes"),
+        "tracked.txt filter=beacon-hostile\n",
+    )
+    .unwrap();
+    git(
+        &repository.path,
+        &[
+            "config",
+            "filter.beacon-hostile.smudge",
+            &filter.to_string_lossy(),
+        ],
+    );
+    git(&repository.path, &["add", ".gitattributes"]);
+    git(
+        &repository.path,
+        &["commit", "--quiet", "-m", "activate hostile smudge"],
+    );
+    git(
+        &repository.path,
+        &["config", "filter.beacon-hostile.required", "true"],
+    );
+    let revision = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repository.path)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+
+    let worktree = Worktree::create(&repository.path, &revision).unwrap();
+
+    assert!(
+        !sentinel.exists(),
+        "repository-controlled smudge filter ran on the host"
+    );
+    assert_eq!(worktree.close(), CleanupOutcome::Removed {});
+}
+
+#[test]
+fn linked_worktree_clean_filters_do_not_run_during_cleanup() {
+    let (repository, _) = fixture_repository("hostile-worktree-clean-filter");
+    fs::write(
+        repository.path.join(".gitattributes"),
+        "tracked.txt filter=beacon-hostile\n",
+    )
+    .unwrap();
+    git(&repository.path, &["add", ".gitattributes"]);
+    git(
+        &repository.path,
+        &["commit", "--quiet", "-m", "activate hostile clean"],
+    );
+    let revision = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repository.path)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    let worktree = Worktree::create(&repository.path, &revision).unwrap();
+    let worktree_path = worktree.path().to_path_buf();
+    let sentinel = repository.path.join("worktree-clean-ran");
+    let filter = repository.path.join(".git/hostile-worktree-clean");
+    fs::write(
+        &filter,
+        format!("#!/bin/sh\n: > '{}'\ncat\n", sentinel.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&filter, fs::Permissions::from_mode(0o755)).unwrap();
+    git(
+        &repository.path,
+        &["config", "extensions.worktreeConfig", "true"],
+    );
+    git(
+        &worktree_path,
+        &[
+            "config",
+            "--worktree",
+            "filter.beacon-hostile.clean",
+            &filter.to_string_lossy(),
+        ],
+    );
+    git(
+        &worktree_path,
+        &[
+            "config",
+            "--worktree",
+            "filter.beacon-hostile.required",
+            "true",
+        ],
+    );
+    // Keep the byte length unchanged so status must content-check through the
+    // configured clean filter rather than deciding from metadata alone.
+    fs::write(worktree_path.join("tracked.txt"), "two\n").unwrap();
+
+    let outcome = worktree.close();
+
+    assert!(
+        !sentinel.exists(),
+        "linked-worktree clean filter ran on the host"
+    );
+    assert!(reasons(&outcome).contains(&KeepReason::Dirty));
+    scrub(&worktree_path);
+}
+
+#[test]
 fn a_worktree_is_created_outside_the_repository_at_the_pinned_revision() {
     let (repository, revision) = fixture_repository("create");
 

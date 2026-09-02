@@ -42,6 +42,7 @@
 //!   present, not that Git agrees the worktree is registered; Git gets the last
 //!   word when the removal itself runs.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
 use std::io::Read;
@@ -211,6 +212,8 @@ impl Worktree {
         // plain directory is refused as unreadable rather than reported as a
         // missing revision. The two are different facts.
         ObjectStore::open(&repository).map_err(|_| WorktreeError::RepositoryUnreadable)?;
+        let filter_drivers = repository_filter_drivers(&repository)
+            .map_err(|_| WorktreeError::RepositoryUnreadable)?;
 
         let scratch_root = std::env::temp_dir().join(format!("beacon-worktree-{}", Uuid::new_v4()));
         fs::create_dir(&scratch_root).map_err(|_| WorktreeError::ScratchUnusable)?;
@@ -227,7 +230,7 @@ impl Worktree {
         }
 
         let path = scratch_root.join("tree");
-        let mut command = hardened_git_command(Path::new(GIT));
+        let mut command = hardened_git_command(Path::new(GIT), &filter_drivers);
         command
             .arg("-C")
             .arg(&repository)
@@ -264,7 +267,24 @@ impl Worktree {
 
     /// Remove the worktree, or keep it and say why.
     pub fn close(self) -> CleanupOutcome {
-        self.close_with(Path::new(GIT), GATE_BUDGET)
+        let reasons = self.structural_holds();
+        if !reasons.is_empty() {
+            return CleanupOutcome::Kept { reasons };
+        }
+        let Ok(mut filter_drivers) = repository_filter_drivers(&self.repository) else {
+            return CleanupOutcome::Kept {
+                reasons: vec![KeepReason::CheckFailed],
+            };
+        };
+        let Ok(worktree_filter_drivers) = repository_filter_drivers(&self.path) else {
+            return CleanupOutcome::Kept {
+                reasons: vec![KeepReason::CheckFailed],
+            };
+        };
+        filter_drivers.extend(worktree_filter_drivers);
+        filter_drivers.sort();
+        filter_drivers.dedup();
+        self.close_with(Path::new(GIT), GATE_BUDGET, &filter_drivers)
     }
 
     /// [`Worktree::close`], with the Git program and the safety check's budget
@@ -274,10 +294,10 @@ impl Worktree {
     /// program that hangs, that errors, or that mutates the tree while it runs,
     /// because those three cases are exactly the ones a working `git status`
     /// will never produce on demand — and they are the cases the gate exists for.
-    fn close_with(self, git: &Path, budget: Duration) -> CleanupOutcome {
+    fn close_with(self, git: &Path, budget: Duration, filter_drivers: &[String]) -> CleanupOutcome {
         let mut reasons = self.structural_holds();
         if reasons.is_empty() {
-            reasons = status_holds(git, &self.path, budget);
+            reasons = status_holds(git, &self.path, budget, filter_drivers);
             // Re-check after the slow check. `git status` can take seconds, and
             // the structural facts observed before it are claims about a tree
             // that may have been moved, unlinked, or replaced since.
@@ -291,7 +311,7 @@ impl Worktree {
             return CleanupOutcome::Kept { reasons };
         }
 
-        let mut command = hardened_git_command(git);
+        let mut command = hardened_git_command(git, filter_drivers);
         command
             .arg("-C")
             .arg(&self.repository)
@@ -370,8 +390,13 @@ fn abandon_scratch(scratch_root: &Path) {
 /// `--untracked-files=all` is passed explicitly so that an operator's
 /// `status.showUntrackedFiles` setting cannot turn untracked work invisible,
 /// and `--ignore-submodules=none` so a dirty submodule still counts.
-fn status_holds(git: &Path, tree: &Path, budget: Duration) -> Vec<KeepReason> {
-    let mut command = hardened_git_command(git);
+fn status_holds(
+    git: &Path,
+    tree: &Path,
+    budget: Duration,
+    filter_drivers: &[String],
+) -> Vec<KeepReason> {
+    let mut command = hardened_git_command(git, filter_drivers);
     command
         .arg("status")
         .arg("--porcelain")
@@ -411,27 +436,126 @@ enum Bounded {
     Failed,
 }
 
-/// Construct the one production Git command shape used for untrusted trees.
+/// Read every filter driver named by repository-local configuration.
 ///
-/// The repository's local configuration still exists because Git needs it to
-/// understand linked worktrees. Disabling known program-valued configuration
-/// here therefore does not protect against clean/smudge filters or another
-/// executable configured by an actor that can write inside `.git`; that local
-/// write capability remains the explicit residual boundary.
-fn hardened_git_command(git: &Path) -> Command {
+/// `rev-parse` and `config --file` are Git's data-only builtins: neither checks
+/// out content nor invokes a repository-configured program. Explicit `--file`
+/// reads keep system and user configuration out while `--includes` ensures an
+/// included local filter cannot escape the command-line overrides.
+fn repository_filter_drivers(repository: &Path) -> Result<Vec<String>, ()> {
+    let mut locate = closed_git_command(Path::new(GIT));
+    locate.arg("-C").arg(repository).args([
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-dir",
+        "--git-common-dir",
+    ]);
+    let Bounded::Finished {
+        success: true,
+        stdout,
+    } = run_git_bounded(locate, GATE_BUDGET)
+    else {
+        return Err(());
+    };
+    let mut directories = stdout.lines();
+    let git_directory = PathBuf::from(directories.next().ok_or(())?);
+    let common_directory = PathBuf::from(directories.next().ok_or(())?);
+    if directories.next().is_some()
+        || !git_directory.is_absolute()
+        || !common_directory.is_absolute()
+    {
+        return Err(());
+    }
+
+    let mut configuration_files = vec![common_directory.join("config")];
+    let worktree_configuration = git_directory.join("config.worktree");
+    match fs::symlink_metadata(&worktree_configuration) {
+        Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => {
+            configuration_files.push(worktree_configuration);
+        }
+        Ok(_) => return Err(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(()),
+    }
+
+    let mut drivers = BTreeSet::new();
+    for configuration_file in configuration_files {
+        let mut read = closed_git_command(Path::new(GIT));
+        read.arg("-C")
+            .arg(repository)
+            .args(["config", "--file"])
+            .arg(configuration_file)
+            .args(["--includes", "--name-only", "--null", "--list"]);
+        let Bounded::Finished {
+            success: true,
+            stdout,
+        } = run_git_bounded(read, GATE_BUDGET)
+        else {
+            return Err(());
+        };
+        for key in stdout.split('\0').filter(|key| !key.is_empty()) {
+            let Some((driver, field)) = key.rsplit_once('.') else {
+                continue;
+            };
+            if driver
+                .get(.."filter.".len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("filter."))
+                && driver.len() > "filter.".len()
+                && matches!(
+                    field.to_ascii_lowercase().as_str(),
+                    "smudge" | "clean" | "process" | "required"
+                )
+            {
+                drivers.insert(driver.to_owned());
+            }
+        }
+    }
+    Ok(drivers.into_iter().collect())
+}
+
+/// Construct the one production Git command shape used for untrusted trees.
+fn hardened_git_command(git: &Path, filter_drivers: &[String]) -> Command {
+    let mut command = closed_git_command(git);
+    command
+        .arg("-c")
+        .arg(format!("core.hooksPath={DISABLED_HOOKS_PATH}"))
+        .arg("-c")
+        .arg("core.fsmonitor=false")
+        .arg("-c")
+        .arg("protocol.allow=never")
+        .arg("-c")
+        .arg("core.sshCommand=")
+        .arg("-c")
+        .arg("core.askPass=")
+        .arg("-c")
+        .arg("credential.helper=")
+        .arg("-c")
+        .arg("gpg.program=")
+        .arg("-c")
+        .arg("core.editor=")
+        .arg("-c")
+        .arg("core.pager=");
+    for driver in filter_drivers {
+        for (field, value) in [
+            ("smudge", ""),
+            ("clean", ""),
+            ("process", ""),
+            ("required", "false"),
+        ] {
+            command.arg("-c").arg(format!("{driver}.{field}={value}"));
+        }
+    }
+    command
+}
+
+fn closed_git_command(git: &Path) -> Command {
     let mut command = Command::new(git);
     command
         .env_clear()
         .env("PATH", GIT_PATH)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .arg("-c")
-        .arg(format!("core.hooksPath={DISABLED_HOOKS_PATH}"))
-        .arg("-c")
-        .arg("core.fsmonitor=false")
-        .arg("-c")
-        .arg("protocol.allow=never");
+        .env("GIT_TERMINAL_PROMPT", "0");
     command
 }
 
@@ -543,7 +667,7 @@ mod tests {
         let directory = TempDir::new("gate-timeout");
         let hanging = program(&directory.path, "sleep 30\n");
 
-        let holds = status_holds(&hanging, &directory.path, Duration::from_millis(50));
+        let holds = status_holds(&hanging, &directory.path, Duration::from_millis(50), &[]);
 
         assert_eq!(holds, vec![KeepReason::GateTimedOut]);
     }
@@ -553,7 +677,7 @@ mod tests {
         let directory = TempDir::new("gate-error");
         let failing = program(&directory.path, "exit 3\n");
 
-        let holds = status_holds(&failing, &directory.path, Duration::from_secs(5));
+        let holds = status_holds(&failing, &directory.path, Duration::from_secs(5), &[]);
 
         assert_eq!(holds, vec![KeepReason::CheckFailed]);
     }
@@ -566,6 +690,7 @@ mod tests {
             Path::new("/nonexistent/beacon/git"),
             &directory.path,
             Duration::from_secs(5),
+            &[],
         );
 
         assert_eq!(holds, vec![KeepReason::CheckFailed]);
@@ -580,7 +705,7 @@ mod tests {
         // gate that re-reads the hold afterwards can see it.
         let saboteur = program(&directory.path, "rm -f .git\nexit 0\n");
 
-        let outcome = worktree.close_with(&saboteur, Duration::from_secs(5));
+        let outcome = worktree.close_with(&saboteur, Duration::from_secs(5), &[]);
 
         assert_eq!(
             outcome,
