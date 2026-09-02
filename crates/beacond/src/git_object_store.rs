@@ -33,6 +33,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
+use data_encoding::HEXLOWER;
 use flate2::{Decompress, FlushDecompress, Status};
 use sha1::{Digest, Sha1};
 
@@ -95,6 +96,89 @@ pub(crate) enum LooseRead {
     TooLarge,
     Malformed,
 }
+
+/// The modes a Git tree entry may carry. Anything else is a malformed tree, not a new kind of
+/// entry: the set is closed in the format, so an unknown mode is a parse failure rather than
+/// something to describe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryMode {
+    Directory,
+    RegularFile,
+    ExecutableFile,
+    Symlink,
+    Gitlink,
+}
+
+impl EntryMode {
+    /// Raw tree bytes, not the pretty-printed form. `git cat-file -p` shows a directory as
+    /// `040000`; the bytes on disk are `40000`, five characters with no leading zero. A parser
+    /// written from the display refuses every directory that exists.
+    fn parse(value: &[u8]) -> Option<Self> {
+        match value {
+            b"40000" => Some(Self::Directory),
+            b"100644" => Some(Self::RegularFile),
+            b"100755" => Some(Self::ExecutableFile),
+            b"120000" => Some(Self::Symlink),
+            b"160000" => Some(Self::Gitlink),
+            _ => None,
+        }
+    }
+
+    fn is_directory(self) -> bool {
+        matches!(self, Self::Directory)
+    }
+
+    fn is_regular_file(self) -> bool {
+        matches!(self, Self::RegularFile | Self::ExecutableFile)
+    }
+}
+
+/// One parsed tree entry, borrowed from the tree body it was read out of.
+#[derive(Debug)]
+struct TreeEntry<'a> {
+    mode: EntryMode,
+    name: &'a [u8],
+    id: [u8; 20],
+}
+
+/// What resolving one repository-relative path at one revision established.
+///
+/// Six outcomes, and the distinctions between them are the whole point. `Absent` is a claim about
+/// the repository -- the containing tree was read in full, authenticated, and does not hold that
+/// name -- while `NotLoose`, `TooLarge` and `Malformed` are claims about what this reader could do,
+/// carried up from whichever object on the path produced them. A caller that collapsed the two
+/// groups would report Beacon's own limits as facts about the Operator's history.
+///
+/// `NotARegularFile` is deliberately its own arm and deliberately not a mismatch here: git stores a
+/// `120000` symlink as a blob holding the link text, so the mode alone does not establish which
+/// bytes anyone presented. What that means for readiness is the caller's decision, and ADR 0034
+/// does not yet define it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PathResolution {
+    /// The path named a regular file, whose object was read and self-authenticated. The body is
+    /// the file's exact bytes, with the object header already stripped.
+    Blob { body: Vec<u8> },
+    /// Every object on the path was read, and the path is not in the tree at that revision.
+    Absent,
+    /// The path resolved to an entry that is not a regular file: a symlink, a gitlink, or a
+    /// directory where a file was named.
+    NotARegularFile,
+    /// Some object on the path is not loose. Not an absence -- see [`LooseRead::NotLoose`].
+    NotLoose,
+    /// Some object on the path exceeded the caller's bound.
+    TooLarge,
+    /// Some object on the path did not inflate, did not authenticate, did not parse, or was not
+    /// the type its position requires.
+    Malformed,
+}
+
+/// How deep a declared path may go before this reader refuses to keep descending.
+///
+/// A bound on the walk, not a statement about repositories: paths this deep exist, and one that
+/// hits the cap is `Malformed` rather than absent, because the walk did not finish. The declared
+/// path is already validated by its own module; this is the second, independent limit that keeps a
+/// hostile tree from choosing how much work Beacon does.
+const MAX_PATH_COMPONENTS: usize = 64;
 
 /// A repository resolved to its object directory.
 #[derive(Debug)]
@@ -289,6 +373,118 @@ impl ObjectStore {
         })
     }
 
+    /// Resolve one repository-relative path to its file bytes at `revision`.
+    ///
+    /// Walks commit -> tree -> ... -> blob, reading every object through
+    /// [`ObjectStore::read_loose_object`], so every object on the path is inflated and proved to
+    /// be the object its own name hashes to before anything is concluded from it. Nothing here
+    /// reads a packed object; a path that crosses one is [`PathResolution::NotLoose`] and no
+    /// stronger claim is made about it.
+    ///
+    /// `maximum` bounds each object individually, as the reader's own bound does; the walk adds a
+    /// depth bound of its own ([`MAX_PATH_COMPONENTS`]) so a tree cannot choose how far Beacon
+    /// descends.
+    ///
+    /// The path is expected to be repository-relative and already validated by its owning module.
+    /// This function re-checks the shape it depends on -- non-empty components, no `.` or `..`, no
+    /// NUL -- rather than trusting a caller's validation, because a component that reached here
+    /// malformed would be compared against tree entries as if it were a name.
+    // Nothing calls this until the comparison is wired, and clippy is right to say so: a
+    // `pub(crate)` walk with no caller is dead code. `expect` rather than `allow` because it fails
+    // once the lint stops firing, so the slice that adds the caller cannot leave the suppression
+    // behind -- the compiler removes it rather than a reviewer having to notice.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the comparison that calls this is slice 3")
+    )]
+    pub(crate) fn resolve_path_at(
+        &self,
+        revision: &str,
+        path: &str,
+        maximum: usize,
+        deadline: &mut impl FnMut() -> bool,
+    ) -> Result<PathResolution, ObjectStoreError> {
+        let components: Vec<&str> = path.split('/').collect();
+        if components.is_empty()
+            || components.len() > MAX_PATH_COMPONENTS
+            || components.iter().any(|component| {
+                component.is_empty()
+                    || *component == "."
+                    || *component == ".."
+                    || component.contains('\0')
+            })
+        {
+            return Ok(PathResolution::Malformed);
+        }
+
+        // The commit names exactly one tree, and its own body is what says so.
+        let mut tree_id = match self.read_loose_object(revision, maximum, deadline)? {
+            LooseRead::Read {
+                kind: ObjectKind::Commit,
+                body,
+            } => match commit_tree_id(&body) {
+                Some(id) => id,
+                None => return Ok(PathResolution::Malformed),
+            },
+            LooseRead::Read { .. } => return Ok(PathResolution::Malformed),
+            LooseRead::NotLoose => return Ok(PathResolution::NotLoose),
+            LooseRead::TooLarge => return Ok(PathResolution::TooLarge),
+            LooseRead::Malformed => return Ok(PathResolution::Malformed),
+        };
+
+        for (index, component) in components.iter().enumerate() {
+            let last = index + 1 == components.len();
+            let body = match self.read_loose_object(&tree_id, maximum, deadline)? {
+                LooseRead::Read {
+                    kind: ObjectKind::Tree,
+                    body,
+                } => body,
+                LooseRead::Read { .. } => return Ok(PathResolution::Malformed),
+                LooseRead::NotLoose => return Ok(PathResolution::NotLoose),
+                LooseRead::TooLarge => return Ok(PathResolution::TooLarge),
+                LooseRead::Malformed => return Ok(PathResolution::Malformed),
+            };
+            // The whole tree is parsed before any entry is used, so a malformed tail cannot be
+            // hidden behind an early match: a tree that does not parse establishes nothing, and
+            // reporting "absent" from a half-read one would be a claim about a tree nobody read.
+            let Some(entries) = parse_tree(&body) else {
+                return Ok(PathResolution::Malformed);
+            };
+            let Some(entry) = entries
+                .iter()
+                .find(|entry| entry.name == component.as_bytes())
+            else {
+                return Ok(PathResolution::Absent);
+            };
+            if !last {
+                if !entry.mode.is_directory() {
+                    // A path continues through something that is not a directory, so the path
+                    // itself is not in this tree. That is an absence, not a wrong kind of entry:
+                    // the entry the declaration named is the LAST component, and it is not here.
+                    return Ok(PathResolution::Absent);
+                }
+                tree_id = HEXLOWER.encode(&entry.id);
+                continue;
+            }
+            if !entry.mode.is_regular_file() {
+                return Ok(PathResolution::NotARegularFile);
+            }
+            let blob_id = HEXLOWER.encode(&entry.id);
+            return Ok(match self.read_loose_object(&blob_id, maximum, deadline)? {
+                LooseRead::Read {
+                    kind: ObjectKind::Blob,
+                    body,
+                } => PathResolution::Blob { body },
+                LooseRead::Read { .. } => PathResolution::Malformed,
+                LooseRead::NotLoose => PathResolution::NotLoose,
+                LooseRead::TooLarge => PathResolution::TooLarge,
+                LooseRead::Malformed => PathResolution::Malformed,
+            });
+        }
+        // `components` is non-empty and the loop returns on its last iteration.
+        Ok(PathResolution::Malformed)
+    }
+
     /// Is `revision` (40 lowercase hex characters) present in this object store?
     ///
     /// Checks loose objects first, then every pack index. `deadline` is consulted
@@ -373,6 +569,69 @@ impl ObjectStore {
         }
         Ok(false)
     }
+}
+
+/// The tree a commit names, as 40 lowercase hex characters.
+///
+/// A commit body begins with exactly `tree <40-hex>\n` and nothing may precede it. Searching the
+/// body for a `tree` line instead would accept one appearing later -- inside a commit message, for
+/// instance -- and let the message choose which tree Beacon walks. gpt1's S3: self-authentication
+/// proves the bytes match the name, not that they are a well-formed commit.
+fn commit_tree_id(body: &[u8]) -> Option<String> {
+    let rest = body.strip_prefix(b"tree ")?;
+    let id = rest.get(..40)?;
+    if rest.get(40) != Some(&b'\n') || !id.iter().all(|byte| hex_value(*byte).is_some()) {
+        return None;
+    }
+    // Lowercase only: the object name this becomes is used to open a file, and `.git/objects`
+    // holds lowercase names. An uppercase spelling would be a different path for the same object.
+    if id.iter().any(|byte| byte.is_ascii_uppercase()) {
+        return None;
+    }
+    std::str::from_utf8(id).ok().map(str::to_owned)
+}
+
+/// Every entry of a tree, or nothing.
+///
+/// Validates what the format guarantees rather than what a happy path needs: a known mode, a
+/// non-empty name free of `/` and the two directory names, a full 20-byte id with no truncated
+/// trailing entry, and strict ordering with no duplicates. A tree that fails any of these is not a
+/// tree with one bad row -- it is bytes that authenticated against a name and are not the object
+/// that name is supposed to hold.
+fn parse_tree(body: &[u8]) -> Option<Vec<TreeEntry<'_>>> {
+    let mut entries: Vec<TreeEntry<'_>> = Vec::new();
+    let mut rest = body;
+    while !rest.is_empty() {
+        let mode_end = rest.iter().position(|byte| *byte == b' ')?;
+        let mode = EntryMode::parse(&rest[..mode_end])?;
+        let after_mode = rest.get(mode_end + 1..)?;
+        let name_end = after_mode.iter().position(|byte| *byte == 0)?;
+        let name = after_mode.get(..name_end)?;
+        if name.is_empty() || name.contains(&b'/') || name == b"." || name == b".." {
+            return None;
+        }
+        let after_name = after_mode.get(name_end + 1..)?;
+        let id: [u8; 20] = after_name.get(..20)?.try_into().ok()?;
+        // Git orders tree entries by name, with a directory sorting as though its name ended in
+        // `/`. Strictly increasing, so an equal neighbour is a duplicate rather than a tie.
+        if let Some(previous) = entries.last()
+            && tree_sort_key(previous.name, previous.mode) >= tree_sort_key(name, mode)
+        {
+            return None;
+        }
+        entries.push(TreeEntry { mode, name, id });
+        rest = after_name.get(20..)?;
+    }
+    Some(entries)
+}
+
+/// The key Git sorts a tree entry by: the name, with `/` appended for a directory.
+fn tree_sort_key(name: &[u8], mode: EntryMode) -> Vec<u8> {
+    let mut key = name.to_vec();
+    if mode.is_directory() {
+        key.push(b'/');
+    }
+    key
 }
 
 /// A Git object header's decimal size: no leading zero, no sign, no overflow.
@@ -789,7 +1048,10 @@ mod tests {
     use sha1::{Digest, Sha1};
     use uuid::Uuid;
 
-    use super::{LooseRead, ObjectKind, ObjectStore, ObjectStoreError, parse_object_size};
+    use super::{
+        EntryMode, LooseRead, MAX_PATH_COMPONENTS, ObjectKind, ObjectStore, ObjectStoreError,
+        PathResolution, commit_tree_id, parse_object_size, parse_tree,
+    };
 
     /// A temporary directory removed on drop.
     struct TempDir {
@@ -1208,6 +1470,354 @@ mod tests {
         ] {
             assert_eq!(parse_object_size(refused), None, "{refused:?} was accepted");
         }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The path walk
+    // ---------------------------------------------------------------------------------------
+
+    /// A repository with a nested file, a symlink, and an executable, committed together.
+    fn walk_repository(label: &str) -> (TempDir, String) {
+        let directory = TempDir::new(label);
+        git(&directory.path, &["init", "--quiet"]);
+        fs::create_dir_all(directory.path.join("src/deep")).unwrap();
+        fs::write(directory.path.join("src/lib.rs"), "fn main() {}\n").unwrap();
+        fs::write(directory.path.join("src/deep/inner.txt"), "nested\n").unwrap();
+        fs::write(directory.path.join("run.sh"), "#!/bin/sh\n").unwrap();
+        fs::set_permissions(
+            directory.path.join("run.sh"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        symlink("src/lib.rs", directory.path.join("link.rs")).unwrap();
+        git(&directory.path, &["add", "-A"]);
+        git(&directory.path, &["commit", "--quiet", "-m", "walk"]);
+        let output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&directory.path)
+            .output()
+            .unwrap();
+        let revision = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+        (directory, revision)
+    }
+
+    fn resolve(store: &ObjectStore, revision: &str, path: &str) -> PathResolution {
+        store
+            .resolve_path_at(revision, path, 1_048_576, &mut never_elapsed())
+            .unwrap()
+    }
+
+    #[test]
+    fn a_nested_path_resolves_to_the_exact_file_bytes() {
+        // The control. Without it, a walk that answered `Absent` for everything would satisfy every
+        // refusal test below. It also pins that the body is the FILE's bytes, header stripped --
+        // comparing against the object's bytes instead would fail every declared entry.
+        let (repository, revision) = walk_repository("walk-hit");
+        let store = ObjectStore::open(&repository.path).unwrap();
+
+        assert_eq!(
+            resolve(&store, &revision, "src/lib.rs"),
+            PathResolution::Blob {
+                body: b"fn main() {}\n".to_vec()
+            }
+        );
+        assert_eq!(
+            resolve(&store, &revision, "src/deep/inner.txt"),
+            PathResolution::Blob {
+                body: b"nested\n".to_vec()
+            }
+        );
+        // An executable is still a regular file, and refusing it would refuse a legitimate entry.
+        assert_eq!(
+            resolve(&store, &revision, "run.sh"),
+            PathResolution::Blob {
+                body: b"#!/bin/sh\n".to_vec()
+            }
+        );
+    }
+
+    #[test]
+    fn a_directory_entry_is_matched_on_its_raw_mode_not_its_printed_one() {
+        // `git cat-file -p` prints a directory as `040000`; the bytes are `40000`. A parser written
+        // from the display refuses every directory that exists, so every nested path would come
+        // back `Absent` -- a wrong answer that looks like a true one.
+        assert_eq!(EntryMode::parse(b"40000"), Some(EntryMode::Directory));
+        assert_eq!(EntryMode::parse(b"040000"), None);
+        let (repository, revision) = walk_repository("walk-mode");
+        let store = ObjectStore::open(&repository.path).unwrap();
+        assert!(matches!(
+            resolve(&store, &revision, "src/deep/inner.txt"),
+            PathResolution::Blob { .. }
+        ));
+    }
+
+    #[test]
+    fn a_path_not_in_the_tree_is_absent_and_a_path_through_a_file_is_too() {
+        // Absent is a claim about the repository, so it is only earned when every tree on the way
+        // was read in full. Both cases here are that: the trees parsed and the name is not there.
+        let (repository, revision) = walk_repository("walk-absent");
+        let store = ObjectStore::open(&repository.path).unwrap();
+
+        assert_eq!(
+            resolve(&store, &revision, "missing.txt"),
+            PathResolution::Absent
+        );
+        assert_eq!(
+            resolve(&store, &revision, "src/missing.rs"),
+            PathResolution::Absent
+        );
+        // `src/lib.rs` is a file, so nothing below it exists.
+        assert_eq!(
+            resolve(&store, &revision, "src/lib.rs/inner"),
+            PathResolution::Absent
+        );
+    }
+
+    #[test]
+    fn a_symlink_is_not_followed_and_is_not_reported_as_a_file() {
+        // The wrong answer is following the link and hashing the target's bytes, which would invent
+        // agreement with a declaration about a file the path never held. gpt1's S4: the mode does
+        // not establish which bytes anyone presented either, so this is its own outcome and not a
+        // mismatch decided here.
+        let (repository, revision) = walk_repository("walk-symlink");
+        let store = ObjectStore::open(&repository.path).unwrap();
+
+        assert_eq!(
+            resolve(&store, &revision, "link.rs"),
+            PathResolution::NotARegularFile
+        );
+        // A directory named where a file was expected is the same answer, for the same reason.
+        assert_eq!(
+            resolve(&store, &revision, "src"),
+            PathResolution::NotARegularFile
+        );
+    }
+
+    #[test]
+    fn a_packed_repository_yields_not_loose_rather_than_absent() {
+        // After a repack every object on the path is packed. The walk must carry that up as a limit
+        // of this reader, never as a statement that the file was not in the revision.
+        let (repository, revision) = walk_repository("walk-packed");
+        git(&repository.path, &["gc", "--quiet", "--prune=now"]);
+        let store = ObjectStore::open(&repository.path).unwrap();
+
+        assert_eq!(
+            resolve(&store, &revision, "src/lib.rs"),
+            PathResolution::NotLoose
+        );
+        // And the revision is still present -- so "not loose" is provably not "not there".
+        assert!(store.contains(&revision, &mut never_elapsed()).unwrap());
+    }
+
+    #[test]
+    fn an_object_missing_mid_walk_is_not_loose_rather_than_absent() {
+        // The packed test above stops at the COMMIT, so it never exercises the tree and blob arms
+        // of the walk -- a mutant that reported those as `Absent` survived it. Here the commit is
+        // loose and an object further along is not, which is the only way to reach them.
+        //
+        // The wrong answer is the one that matters most in this whole slice: reporting "the file
+        // was not in that revision" when the truth is "Beacon could not read the object that would
+        // have said". One is a claim about the Operator's history; the other is about Beacon.
+        let (repository, revision) = walk_repository("walk-missing-mid");
+        let store = ObjectStore::open(&repository.path).unwrap();
+        let LooseRead::Read { body, .. } = store
+            .read_loose_object(&revision, 1_048_576, &mut never_elapsed())
+            .unwrap()
+        else {
+            panic!("the commit is loose");
+        };
+        let tree_id = commit_tree_id(&body).unwrap();
+
+        // The blob's own object, removed: the walk reads every tree and then cannot read the file.
+        let LooseRead::Read { body: tree, .. } = store
+            .read_loose_object(&tree_id, 1_048_576, &mut never_elapsed())
+            .unwrap()
+        else {
+            panic!("the root tree is loose");
+        };
+        let entries = parse_tree(&tree).unwrap();
+        let blob_id = HEXLOWER.encode(
+            &entries
+                .iter()
+                .find(|entry| entry.name == b"run.sh")
+                .expect("run.sh is in the root tree")
+                .id,
+        );
+        fs::remove_file(loose_path(&repository.path, &blob_id)).unwrap();
+        assert_eq!(
+            resolve(&store, &revision, "run.sh"),
+            PathResolution::NotLoose
+        );
+
+        // And a TREE removed mid-walk, which is the arm the surviving mutant sat in.
+        fs::remove_file(loose_path(&repository.path, &tree_id)).unwrap();
+        assert_eq!(
+            resolve(&store, &revision, "src/lib.rs"),
+            PathResolution::NotLoose
+        );
+    }
+
+    #[test]
+    fn a_bound_that_excludes_an_object_on_the_path_is_a_refusal_not_an_absence() {
+        let (repository, revision) = walk_repository("walk-bound");
+        let store = ObjectStore::open(&repository.path).unwrap();
+
+        assert_eq!(
+            store
+                .resolve_path_at(&revision, "src/lib.rs", 8, &mut never_elapsed())
+                .unwrap(),
+            PathResolution::TooLarge
+        );
+    }
+
+    #[test]
+    fn a_commit_whose_tree_line_is_not_first_is_refused() {
+        // Self-authentication proves the bytes match the name, not that they are a commit. A body
+        // searched for a `tree` line anywhere would let a commit MESSAGE choose the tree walked.
+        assert_eq!(
+            commit_tree_id(b"tree 0123456789abcdef0123456789abcdef01234567\nparent x"),
+            Some("0123456789abcdef0123456789abcdef01234567".to_owned())
+        );
+        for refused in [
+            &b"parent x\ntree 0123456789abcdef0123456789abcdef01234567\n"[..],
+            b"tree 0123456789abcdef0123456789abcdef01234567",
+            b"tree 0123456789abcdef0123456789abcdef0123456\n",
+            b"tree 0123456789ABCDEF0123456789abcdef01234567\n",
+            b"tree zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\n",
+            b"",
+        ] {
+            assert_eq!(commit_tree_id(refused), None, "{refused:?} was accepted");
+        }
+    }
+
+    #[test]
+    fn a_tree_that_is_truncated_unordered_or_wrongly_moded_is_refused() {
+        // Each of these authenticates against some name and is still not a tree. A walk that read
+        // entries until one matched would accept every one of them.
+        let entry = |mode: &[u8], name: &[u8]| {
+            let mut out = mode.to_vec();
+            out.push(b' ');
+            out.extend_from_slice(name);
+            out.push(0);
+            out.extend_from_slice(&[0x11; 20]);
+            out
+        };
+        let mut ordered = entry(b"100644", b"a.txt");
+        ordered.extend_from_slice(&entry(b"100644", b"b.txt"));
+        assert_eq!(parse_tree(&ordered).unwrap().len(), 2);
+
+        let mut unordered = entry(b"100644", b"b.txt");
+        unordered.extend_from_slice(&entry(b"100644", b"a.txt"));
+        assert!(parse_tree(&unordered).is_none(), "unordered tree accepted");
+
+        let mut duplicated = entry(b"100644", b"a.txt");
+        duplicated.extend_from_slice(&entry(b"100644", b"a.txt"));
+        assert!(parse_tree(&duplicated).is_none(), "duplicate name accepted");
+
+        let mut truncated = entry(b"100644", b"a.txt");
+        truncated.truncate(truncated.len() - 1);
+        assert!(parse_tree(&truncated).is_none(), "truncated entry accepted");
+
+        assert!(
+            parse_tree(&entry(b"100664", b"a.txt")).is_none(),
+            "unknown mode accepted"
+        );
+        for name in [&b""[..], b".", b"..", b"a/b"] {
+            assert!(
+                parse_tree(&entry(b"100644", name)).is_none(),
+                "{name:?} accepted as a tree entry name"
+            );
+        }
+    }
+
+    #[test]
+    fn a_directory_sorts_as_though_its_name_ended_in_a_slash() {
+        // Git's ordering rule, and the reason a naive byte sort refuses real trees: `src` as a
+        // directory sorts after `src.rs`, because the key is `src/`. Refusing that would call a
+        // perfectly ordinary repository malformed.
+        let entry = |mode: &[u8], name: &[u8]| {
+            let mut out = mode.to_vec();
+            out.push(b' ');
+            out.extend_from_slice(name);
+            out.push(0);
+            out.extend_from_slice(&[0x22; 20]);
+            out
+        };
+        let mut real = entry(b"100644", b"src.rs");
+        real.extend_from_slice(&entry(b"40000", b"src"));
+        assert_eq!(
+            parse_tree(&real).unwrap().len(),
+            2,
+            "a real ordering was refused"
+        );
+
+        // And the reverse order, which git never writes, is refused.
+        let mut wrong = entry(b"40000", b"src");
+        wrong.extend_from_slice(&entry(b"100644", b"src.rs"));
+        assert!(
+            parse_tree(&wrong).is_none(),
+            "a reversed ordering was accepted"
+        );
+    }
+
+    #[test]
+    fn a_tampered_tree_on_the_path_is_refused_by_its_own_name() {
+        // The self-authentication is what stops anything that can write into `.git/objects` from
+        // choosing which blob a path resolves to.
+        let (repository, revision) = walk_repository("walk-tampered-tree");
+        let store = ObjectStore::open(&repository.path).unwrap();
+        let LooseRead::Read { body, .. } = store
+            .read_loose_object(&revision, 1_048_576, &mut never_elapsed())
+            .unwrap()
+        else {
+            panic!("the commit is loose");
+        };
+        let tree_id = commit_tree_id(&body).unwrap();
+        let mut forged = b"tree 0\0".to_vec();
+        forged.extend_from_slice(b"");
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(&forged).unwrap();
+        rewrite_loose(
+            &loose_path(&repository.path, &tree_id),
+            &encoder.finish().unwrap(),
+        );
+
+        assert_eq!(
+            resolve(&store, &revision, "src/lib.rs"),
+            PathResolution::Malformed
+        );
+    }
+
+    #[test]
+    fn a_malformed_or_over_deep_path_is_refused_before_the_walk_trusts_it() {
+        // The declared path is validated by its own module; this re-checks the shape it depends on,
+        // because a component that arrived malformed would be compared against tree entries as if
+        // it were a name.
+        let (repository, revision) = walk_repository("walk-path-shape");
+        let store = ObjectStore::open(&repository.path).unwrap();
+
+        for path in ["", "src//lib.rs", "./lib.rs", "src/../lib.rs", "a\0b"] {
+            assert_eq!(
+                resolve(&store, &revision, path),
+                PathResolution::Malformed,
+                "{path:?} was walked"
+            );
+        }
+        let deep = vec!["a"; MAX_PATH_COMPONENTS + 1].join("/");
+        assert_eq!(resolve(&store, &revision, &deep), PathResolution::Malformed);
+    }
+
+    #[test]
+    fn the_walk_stops_at_its_deadline_rather_than_answering() {
+        let (repository, revision) = walk_repository("walk-deadline");
+        let store = ObjectStore::open(&repository.path).unwrap();
+
+        assert_eq!(
+            store
+                .resolve_path_at(&revision, "src/lib.rs", 1_048_576, &mut || true)
+                .unwrap_err(),
+            ObjectStoreError::Elapsed
+        );
     }
 
     #[test]
