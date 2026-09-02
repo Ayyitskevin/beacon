@@ -401,10 +401,6 @@ pub enum ContextComparison {
     /// The object store opened, but the pinned base revision is not present in it. The revision
     /// the entries would be compared against is the thing that is missing.
     PinnedRevisionAbsent,
-    /// The object store opened and the pinned revision is present, and an object on the declared
-    /// path could not be read here. Retained for a path that reaches it; the narrower reasons below
-    /// say which limit was hit, and are preferred wherever the walk can tell.
-    ContentUnreadableAtRevision,
     /// An object on the declared path is stored in a pack, and this reader reads only loose
     /// objects. A limitation of Beacon, never a statement about the Repository.
     ///

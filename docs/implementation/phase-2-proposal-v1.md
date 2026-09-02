@@ -108,7 +108,6 @@ Preflight reads, under the same inspection budget:
 | `InspectionFailed` | the store opened and an inspection step errored — in practice a pack index that cannot be parsed as version 2 (a `.git` indirection chain is *not* an example: that fails `open`, and is reported as `RepositoryUnreadable`) |
 | `InspectionTimedOut` | the inspection did not finish inside its budget: not evaluated, distinct from both a negative answer and an error |
 | `PinnedRevisionAbsent` | the store opened, but the pinned base revision is not in it: the basis for the comparison is what is missing |
-| `ContentUnreadableAtRevision` | the store opened and the pinned revision is present, and Beacon still cannot read a path's content at that revision |
 
 **The inspection budget is best-effort, not a hard bound.** The comparison consults a 5-second
 deadline on entry and between every object-store step, and passes that same deadline into
