@@ -496,29 +496,41 @@ fn repository_filter_drivers(repository: &Path) -> Result<Vec<String>, ()> {
         else {
             return Err(());
         };
-        for key in stdout.split('\0').filter(|key| !key.is_empty()) {
-            let Some((driver, field)) = key.rsplit_once('.') else {
-                continue;
-            };
-            if driver
-                .get(.."filter.".len())
-                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("filter."))
-                && driver.len() > "filter.".len()
-                && matches!(
-                    field.to_ascii_lowercase().as_str(),
-                    "smudge" | "clean" | "process" | "required"
-                )
-            {
-                drivers.insert(driver.to_owned());
-            }
-        }
+        drivers.extend(filter_drivers_from_config_output(&stdout));
     }
     Ok(drivers.into_iter().collect())
 }
 
+pub(crate) fn filter_drivers_from_config_output(stdout: &str) -> Vec<String> {
+    let mut drivers = BTreeSet::new();
+    for key in stdout.split('\0').filter(|key| !key.is_empty()) {
+        let Some((driver, field)) = key.rsplit_once('.') else {
+            continue;
+        };
+        if driver
+            .get(.."filter.".len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("filter."))
+            && driver.len() > "filter.".len()
+            && matches!(
+                field.to_ascii_lowercase().as_str(),
+                "smudge" | "clean" | "process" | "required"
+            )
+        {
+            drivers.insert(driver.to_owned());
+        }
+    }
+    drivers.into_iter().collect()
+}
+
 /// Construct the one production Git command shape used for untrusted trees.
-fn hardened_git_command(git: &Path, filter_drivers: &[String]) -> Command {
-    let mut command = closed_git_command(git);
+pub(crate) fn hardened_git_command(git: &Path, filter_drivers: &[String]) -> Command {
+    let mut command = Command::new(git);
+    apply_git_hardening(&mut command, filter_drivers);
+    command
+}
+
+pub(crate) fn apply_git_hardening(command: &mut Command, filter_drivers: &[String]) {
+    configure_closed_git_environment(command);
     command
         .arg("-c")
         .arg(format!("core.hooksPath={DISABLED_HOOKS_PATH}"))
@@ -548,18 +560,21 @@ fn hardened_git_command(git: &Path, filter_drivers: &[String]) -> Command {
             command.arg("-c").arg(format!("{driver}.{field}={value}"));
         }
     }
-    command
 }
 
 fn closed_git_command(git: &Path) -> Command {
     let mut command = Command::new(git);
+    configure_closed_git_environment(&mut command);
+    command
+}
+
+fn configure_closed_git_environment(command: &mut Command) {
     command
         .env_clear()
         .env("PATH", GIT_PATH)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_TERMINAL_PROMPT", "0");
-    command
 }
 
 /// Run one Git invocation with a deadline.
