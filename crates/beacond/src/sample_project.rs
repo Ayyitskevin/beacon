@@ -388,12 +388,14 @@ impl SampleProjectService {
     fn initialize_repository(&self, repository: &File) -> Result<(), SampleProjectError> {
         self.git_success(
             repository,
+            &[],
             &["init", "--quiet", "--initial-branch=main", "--template="],
         )?;
-        self.git_success(repository, &["add", "--all"])?;
-        let tree = output_text(self.git_output(repository, &["write-tree"])?)
+        let filter_drivers = self.repository_filter_drivers(repository)?;
+        self.git_success(repository, &filter_drivers, &["add", "--all"])?;
+        let tree = output_text(self.git_output(repository, &filter_drivers, &["write-tree"])?)
             .map_err(|_| SampleProjectError::MaterializationFailed)?;
-        let mut command = self.git_command(repository)?;
+        let mut command = self.git_command(repository, &filter_drivers)?;
         command
             .args(["commit-tree", tree.as_str()])
             .env("GIT_AUTHOR_NAME", "Beacon")
@@ -419,7 +421,11 @@ impl SampleProjectService {
                 .map_err(|_| SampleProjectError::MaterializationFailed)?,
         )
         .map_err(|_| SampleProjectError::MaterializationFailed)?;
-        self.git_success(repository, &["update-ref", "refs/heads/main", &commit])?;
+        self.git_success(
+            repository,
+            &filter_drivers,
+            &["update-ref", "refs/heads/main", &commit],
+        )?;
         Ok(())
     }
 
@@ -445,53 +451,64 @@ impl SampleProjectService {
         Ok(EXPECTED_BASE_REVISION.to_owned())
     }
 
-    fn git_command(&self, repository: &File) -> Result<Command, SampleProjectError> {
-        let mut command = Command::new(&self.git_program);
-        configure_git_environment(&mut command);
-        command.args([
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.untrackedCache=false",
-        ]);
-        let repository = repository.try_clone()?;
-        // SAFETY: `pre_exec` runs after `fork` and before `exec`. `fstat` and
-        // `fchdir` are async-signal-safe, allocate nothing, and operate on the
-        // cloned descriptor retained by this command. CLOEXEC closes it at
-        // successful exec rather than leaking it to Git.
-        unsafe {
-            command.pre_exec(move || {
-                let descriptor = repository.as_raw_fd();
-                let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
-                if libc::fstat(descriptor, metadata.as_mut_ptr()) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                let metadata = metadata.assume_init();
-                if metadata.st_nlink == 0 || metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
-                    return Err(std::io::Error::from_raw_os_error(libc::ESTALE));
-                }
-                if libc::fchdir(descriptor) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
+    fn git_command(
+        &self,
+        repository: &File,
+        filter_drivers: &[String],
+    ) -> Result<Command, SampleProjectError> {
+        let mut command =
+            crate::worktree::hardened_git_command(Path::new(&self.git_program), filter_drivers);
+        command
+            .env("LC_ALL", "C")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .args(["-c", "core.untrackedCache=false"]);
+        bind_command_to_directory(&mut command, repository)?;
         Ok(command)
+    }
+
+    fn repository_filter_drivers(
+        &self,
+        repository: &File,
+    ) -> Result<Vec<String>, SampleProjectError> {
+        let mut command = crate::worktree::hardened_git_command(Path::new("git"), &[]);
+        command
+            .args([
+                "config",
+                "--local",
+                "--includes",
+                "--name-only",
+                "--null",
+                "--list",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        bind_command_to_directory(&mut command, repository)?;
+        let output = command
+            .output()
+            .map_err(|_| SampleProjectError::MaterializationFailed)?;
+        let stdout = output_text(output).map_err(|_| SampleProjectError::MaterializationFailed)?;
+        Ok(crate::worktree::filter_drivers_from_config_output(&stdout))
     }
 
     fn git_output(
         &self,
         repository: &File,
+        filter_drivers: &[String],
         arguments: &[&str],
     ) -> Result<Output, SampleProjectError> {
-        self.git_command(repository)?
+        self.git_command(repository, filter_drivers)?
             .args(arguments)
             .output()
             .map_err(|_| SampleProjectError::MaterializationFailed)
     }
 
-    fn git_success(&self, repository: &File, arguments: &[&str]) -> Result<(), SampleProjectError> {
-        let output = self.git_output(repository, arguments)?;
+    fn git_success(
+        &self,
+        repository: &File,
+        filter_drivers: &[String],
+        arguments: &[&str],
+    ) -> Result<(), SampleProjectError> {
+        let output = self.git_output(repository, filter_drivers, arguments)?;
         if output.status.success() {
             Ok(())
         } else {
@@ -524,15 +541,33 @@ impl SampleProjectService {
     }
 }
 
-fn configure_git_environment(command: &mut Command) {
-    command
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("LC_ALL", "C")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_TERMINAL_PROMPT", "0");
+fn bind_command_to_directory(
+    command: &mut Command,
+    directory: &File,
+) -> Result<(), SampleProjectError> {
+    let directory = directory.try_clone()?;
+    // SAFETY: `pre_exec` runs after `fork` and before `exec`. `fstat` and
+    // `fchdir` are async-signal-safe, allocate nothing, and operate on the
+    // cloned descriptor retained by this command. CLOEXEC closes it at
+    // successful exec rather than leaking it to Git.
+    unsafe {
+        command.pre_exec(move || {
+            let descriptor = directory.as_raw_fd();
+            let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+            if libc::fstat(descriptor, metadata.as_mut_ptr()) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let metadata = metadata.assume_init();
+            if metadata.st_nlink == 0 || metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
+                return Err(std::io::Error::from_raw_os_error(libc::ESTALE));
+            }
+            if libc::fchdir(descriptor) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok(())
 }
 
 fn sync_directory_tree(root: &Path) -> std::io::Result<()> {
@@ -1528,7 +1563,7 @@ mod tests {
     use super::{
         EXPECTED_BASE_REVISION, EXPECTED_BUNDLE_DIGEST, SAMPLE_PROJECT_BUNDLE_VERSION,
         SampleProjectError, SampleProjectInstallOutcome, SampleProjectService, SampleProjectStatus,
-        computed_bundle_digest, configure_git_environment,
+        computed_bundle_digest,
     };
     use crate::{
         AutonomyProfile, OperatorAccountService, ProjectRepositoryService, ProjectService,
@@ -1619,6 +1654,44 @@ mod tests {
         fs::write(
             path,
             format!("#!/bin/sh\n: > '{}'\nexit 97\n", sentinel.display()),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
+    fn hardening_probe_git_program(
+        path: &std::path::Path,
+        hook_sentinel: &std::path::Path,
+        filter_sentinel: &std::path::Path,
+        ready_sentinel: &std::path::Path,
+    ) {
+        fs::write(
+            path,
+            format!(
+                "#!/bin/sh\n\
+                 set -eu\n\
+                 is_init=0\n\
+                 for argument in \"$@\"; do\n\
+                   if [ \"$argument\" = init ]; then is_init=1; fi\n\
+                 done\n\
+                 /usr/bin/git \"$@\"\n\
+                 if [ \"$is_init\" = 1 ]; then\n\
+                   /usr/bin/mkdir -p .git/hooks\n\
+                   /usr/bin/printf '%s\\n' '#!/bin/sh' ': > \"{}\"' 'exit 0' > .git/hooks/post-checkout\n\
+                   /usr/bin/chmod 700 .git/hooks/post-checkout\n\
+                   /usr/bin/printf '%s\\n' '#!/bin/sh' ': > \"{}\"' 'cat' > .git/beacon-hostile-filter\n\
+                   /usr/bin/chmod 700 .git/beacon-hostile-filter\n\
+                   /usr/bin/printf '* filter=beacon-hostile\\n' > .gitattributes\n\
+                   /usr/bin/git config filter.beacon-hostile.clean \"$PWD/.git/beacon-hostile-filter\"\n\
+                   /usr/bin/git config filter.beacon-hostile.required true\n\
+                   : > \"{}\"\n\
+                 fi\n",
+                hook_sentinel.display(),
+                filter_sentinel.display(),
+                ready_sentinel.display(),
+            ),
         )
         .unwrap();
         let mut permissions = fs::metadata(path).unwrap().permissions();
@@ -2025,13 +2098,17 @@ mod tests {
 
     #[test]
     fn git_environment_drops_ambient_repository_redirection() {
-        let mut command = Command::new("/usr/bin/env");
+        let store = TestStore::new("git-environment");
+        let env_program = store.root.join("print-environment");
+        fs::write(&env_program, "#!/bin/sh\nexec /usr/bin/env\n").unwrap();
+        fs::set_permissions(&env_program, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut command = Command::new(env_program);
         command
             .env("GIT_DIR", "/operator/repository/.git")
             .env("GIT_WORK_TREE", "/operator/repository")
             .env("GIT_INDEX_FILE", "/operator/repository/.git/index")
             .stdout(Stdio::piped());
-        configure_git_environment(&mut command);
+        crate::worktree::apply_git_hardening(&mut command, &[]);
 
         let output = command.output().unwrap();
         assert!(output.status.success());
@@ -2039,6 +2116,38 @@ mod tests {
         assert!(!environment.contains("GIT_DIR="));
         assert!(!environment.contains("GIT_WORK_TREE="));
         assert!(!environment.contains("GIT_INDEX_FILE="));
+    }
+
+    #[test]
+    fn sample_project_git_never_runs_repository_hooks_or_filter_drivers() {
+        let store = TestStore::new("git-hardening");
+        let hook_sentinel = store.root.join("post-checkout-ran");
+        let filter_sentinel = store.root.join("filter-ran");
+        let ready_sentinel = store.root.join("probe-ready");
+        let git_program = store.root.join("hardening-probe-git");
+        hardening_probe_git_program(
+            &git_program,
+            &hook_sentinel,
+            &filter_sentinel,
+            &ready_sentinel,
+        );
+
+        let result = store
+            .isolated_service()
+            .with_git_program(&git_program)
+            .install();
+
+        assert!(result.is_err(), "the injected tree must not be installed");
+        assert!(ready_sentinel.exists(), "the hardening probe did not run");
+        assert!(
+            !hook_sentinel.exists(),
+            "repository-controlled post-checkout hook ran"
+        );
+        assert!(
+            !filter_sentinel.exists(),
+            "repository-controlled filter driver ran"
+        );
+        assert_eq!(store.count("sample_project_installations"), 0);
     }
 
     #[test]
