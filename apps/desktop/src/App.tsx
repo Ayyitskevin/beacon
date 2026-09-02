@@ -340,6 +340,7 @@ export function App() {
   const [liveDataEncryption, setLiveDataEncryption] =
     useState<LiveDataEncryptionReport | null>(null);
   const [recheckingLiveDataEncryption, setRecheckingLiveDataEncryption] = useState(false);
+  const [liveDataEncryptionFailure, setLiveDataEncryptionFailure] = useState("");
   const liveDataEncryptionEpoch = useRef(0);
   const [residentCapabilityCatalog, setResidentCapabilityCatalog] =
     useState<BeaconCapabilityDescriptor[] | null>(null);
@@ -627,9 +628,20 @@ export function App() {
     const requestEpoch = ++liveDataEncryptionEpoch.current;
     void liveDataEncryptionStatus().then(
       (report) => {
-        if (requestEpoch === liveDataEncryptionEpoch.current) setLiveDataEncryption(report);
+        if (requestEpoch === liveDataEncryptionEpoch.current) {
+          setLiveDataEncryption(report);
+          setLiveDataEncryptionFailure("");
+        }
       },
-      () => {},
+      // A swallowed failure left no status, no warning, no error and no
+      // Recheck: the operator could not see that the diagnostic had failed,
+      // and could not retry it. The warning ADR 0017 asks to stay visible
+      // cannot stay visible if the first read decides silence.
+      (error) => {
+        if (requestEpoch === liveDataEncryptionEpoch.current) {
+          setLiveDataEncryptionFailure(describeLocalAccountError(error));
+        }
+      },
     );
   }, [unlocked]);
 
@@ -646,6 +658,7 @@ export function App() {
     setDiscoveringLocalModels(false);
     liveDataEncryptionEpoch.current += 1;
     setLiveDataEncryption(null);
+    setLiveDataEncryptionFailure("");
     setRecheckingLiveDataEncryption(false);
     setResidentCapabilityCatalog(null);
     setResidentConfigurations(null);
@@ -998,9 +1011,15 @@ export function App() {
     setRecheckingLiveDataEncryption(true);
     try {
       const report = await liveDataEncryptionStatus();
-      if (requestEpoch === liveDataEncryptionEpoch.current) setLiveDataEncryption(report);
+      if (requestEpoch === liveDataEncryptionEpoch.current) {
+        setLiveDataEncryption(report);
+        setLiveDataEncryptionFailure("");
+      }
     } catch (error) {
       if (requestEpoch === liveDataEncryptionEpoch.current) {
+        // Both surfaces: the action error for the operator's current gesture,
+        // and the panel's own line so the failure outlives the click.
+        setLiveDataEncryptionFailure(describeLocalAccountError(error));
         setActionError(describeLocalAccountError(error));
       }
     } finally {
@@ -1729,6 +1748,7 @@ export function App() {
                 )}
               <LiveDataEncryptionStatus
                 report={liveDataEncryption}
+                failure={liveDataEncryptionFailure}
                 busy={recheckingLiveDataEncryption}
                 onRecheck={recheckLiveDataEncryption}
               />
