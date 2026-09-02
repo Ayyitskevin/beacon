@@ -441,11 +441,15 @@ by submission today; `0x02` decodes so that a later reviewed decision needs no
 new tag, and is then refused.
 
 "Envelope" above means the record's own 64 KiB limit, not a narrower per-field
-number. The accepted text states exactly two sizes — the 64 KiB whole-record
-envelope and the 40-character pinned base revision — and where a field must
-byte-match another module's record, its limit is that module's, never a tighter
-one invented here. Repository Binding caps a check name at 64 and places no
-limit on an argument or a working directory, so neither does this grammar.
+number. It is what governs every field the accepted text does not size
+individually. The accepted text does size four: the 64 KiB whole-record envelope,
+the 40-character pinned base revision, the 2,000- and 500-scalar limits on the
+summary and the Owner bootstrap reason (`:82-84`), and the 64-byte descriptor
+tokens (`:206-209`) — all of which the table above records. Everything else takes
+the envelope, except where a field must byte-match another module's record, where
+the limit is that module's and never a tighter one invented here: Repository
+Binding caps a check name at 64 and places no limit on an argument or a working
+directory, so neither does this grammar.
 
 ### Tag assignments
 
@@ -583,7 +587,7 @@ closed vocabulary: `ExecutionPolicyNotDeclared`, `SandboxNotDeclared`,
 `CharterRevisionMoved`, `ProjectPolicyRevisionMoved`, `RepositoryRevisionMoved`,
 `BaseRevisionMoved`, `ResidentLifecycleChanged`, `ConfigurationChanged`.
 
-`ReadableContextNotVerified` carries one of five reasons, each decided by
+`ReadableContextNotVerified` carries one of six reasons, each decided by
 inspecting the Repository revision the Proposal *names*, and each keeping a
 different state apart as AGENTS.md requires — "Terminal, absent, broken, and not
 evaluated are distinct states". They mirror the vocabulary Check Preflight
@@ -593,12 +597,14 @@ already uses rather than introducing a second framing for the same facts:
 |---|---|---|
 | `RepositorySourceNotLocal` | a Git URL: nothing local, and no fetch is performed | `SourceKindUnsupported` |
 | `RepositoryUnreadable` | broken: the path did not open as an object store | `RepositoryUnreadable` |
-| `InspectionFailed` | broken: the store opened and a step errored | `PreflightFailed` |
+| `InspectionFailed` | errored: the store opened and an inspection step failed | `PreflightFailed` |
 | `InspectionTimedOut` | not evaluated: the inspection did not finish inside its budget | `PreflightTimedOut` |
 | `PinnedRevisionAbsent` | a negative answer: the store opened, the revision is not in it | `BaseRevisionUnreachable` |
+| `ContentUnreadableAtRevision` | terminal: the store opened and holds the pinned revision, and content still cannot be read | — |
 
-`ContentUnreadableAtRevision` is the sixth and terminal reason: the store opened,
-it holds the pinned revision, and content still cannot be read.
+Broken, errored and not evaluated are three states, not two: a store that would
+not open, an inspection that failed once it had, and one that never finished are
+different facts about different things, and AGENTS.md requires them kept apart.
 
 The budget behind `InspectionTimedOut` is **best-effort, not a hard bound**. It
 is consulted on entry and between every object-store step, and is the same
