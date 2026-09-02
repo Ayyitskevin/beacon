@@ -206,7 +206,7 @@ raise an error, so a historical Ruling does not become corrupt because the world
 ADR 0037 states that each of its required-evidence bullets maps to one named test and that the
 mapping is recorded here, "so that 'maps to a test' is a fact a reviewer can check rather than a
 claim the author makes". This is that mapping. Bullets are numbered in the order the ADR lists them.
-Two of them do not map cleanly, and those are stated as such rather than papered over.
+Three of them do not map cleanly, and those are stated as such rather than papered over.
 
 Test locations: **[u]** = `crates/beacond/src/ruling.rs` unit tests, **[i]** =
 `crates/beacond/tests/ruling.rs`, **[m]** = `crates/beacond/src/lib.rs` migration tests.
@@ -217,7 +217,7 @@ Test locations: **[u]** = `crates/beacond/src/ruling.rs` unit tests, **[i]** =
 | 2 | every identity-bearing field changes the digest; a changed byte, a reordered field, or a trailing byte is refused or produces a different identity | `each_identity_bearing_field_changes_the_digest` [u] · `every_single_byte_of_the_fixture_is_load_bearing` [u] · `a_trailing_byte_is_refused` [u] · `a_truncated_record_is_refused` [u] · `a_reordering_the_grammar_can_see_is_refused` [u] · `two_same_width_values_swapped_are_a_different_record_rather_than_a_refusal` [u] |
 | 3 | ruling on a digest that names no stored Proposal writes neither row nor Event | `ruling_on_a_digest_that_names_no_proposal_writes_neither_row_nor_event` [i] · `a_proposal_outside_this_services_workspace_is_not_found` [i] · `a_ruling_for_an_unknown_proposal_is_refused_by_the_store` [m] |
 | 4 | the copied revisions equal the bound Proposal's at ruling time; copies that disagree refuse startup | `the_copied_revisions_are_the_proposals_not_the_current_ones` [i] · `the_bound_proposal_envelope_is_copied_from_the_proposal_not_rebuilt_from_constants` [i] · `startup_refuses_copies_that_disagree_with_the_bound_proposal` [i] |
-| 5 | moving any one of the four bound revisions names that revision and only that one | `a_moved_charter_is_named_alone_and_the_record_does_not_change` [i] · `a_moved_policy_revision_is_named_alone` [i] · `a_new_repository_revision_with_the_same_base_reports_only_the_revision_as_moved` [i] · `a_rebind_that_moves_the_pinned_commit_names_both_facts` [i] · control: `a_fresh_ruling_reports_neither_drift_nor_supersession` [i] |
+| 5 | moving any one of the four bound revisions names that revision and only that one | three of four: `a_moved_charter_is_named_alone_and_the_record_does_not_change` [i] · `a_moved_policy_revision_is_named_alone` [i] · `a_new_repository_revision_with_the_same_base_reports_only_the_revision_as_moved` [i] · control: `a_fresh_ruling_reports_neither_drift_nor_supersession` [i] · **the base cannot move alone: `a_rebind_that_moves_the_pinned_commit_names_both_facts` [i] asserts both facts — Residual 3 below** |
 | 6 | a drifted Ruling stays readable and attributable, and startup still succeeds | `a_moved_charter_is_named_alone_and_the_record_does_not_change` [i] · `a_drifted_chain_still_starts_and_stays_readable` [i] |
 | 7 | a second Ruling supersedes the first, both stay readable, the effective Ruling is the last link | `a_second_ruling_supersedes_the_first_and_both_remain_readable` [i] · `any_decision_may_follow_any_decision_and_every_link_carries_its_own_reason` [i] |
 | 8 | a `supersedes` naming no Ruling, or one bound to a different Proposal, is refused | `a_first_ruling_that_cites_an_unrecorded_digest_is_refused_as_unrecorded` [i] · `citing_another_proposals_ruling_is_refused_as_that_and_not_as_unrecorded` [i] · `citing_a_link_that_is_no_longer_the_tail_is_refused` [i] · `a_later_ruling_that_cites_nothing_is_refused_as_not_the_tail` [i] |
@@ -269,6 +269,21 @@ now does, by planting a tail whose ruling time the clock cannot have produced an
 goes red when the guard is removed, and it asserts that the refusal is `RuledBeforeTail` rather than
 `NotTheCurrentTail` — the call cites the correct tail, so the time rule and the chain rule are
 separate refusals, and a test that could not tell them apart would prove neither.
+
+### Residual 3 — bullet 5 asks for something the revision model cannot produce
+
+Bullet 5 wants each of the four bound revisions, moved alone, to name "that revision and only that
+one". Three of them can. The pinned base **cannot move alone**: it is a field of a Repository
+revision and Repository Bindings are append-only, so changing the pinned commit necessarily
+publishes a new revision, and both `RepositoryRevisionMoved` and `BaseRevisionMoved` become true
+together. `a_rebind_that_moves_the_pinned_commit_names_both_facts` asserts exactly that, and it is
+right to: reporting one fact when two are true would be the same defect in the opposite direction as
+the round-two bug that reported two when one was.
+
+So the bullet is unachievable as written for one of its four cases, and the note previously claimed
+it clean. Found by gpt2's slice-4 review. Proposed wording: *"each bound revision that can move
+independently — Charter, Project Policy, and Repository — names that revision and only that one; a
+moved pinned base necessarily moves its Repository revision too, and both are named."*
 
 ### Residual 1 — bullet 15 contradicts the amended ruling on reordering
 
