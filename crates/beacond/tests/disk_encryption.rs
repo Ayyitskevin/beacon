@@ -479,6 +479,21 @@ fn tmpfs_backed_store_reports_unknown_with_its_reason() {
 }
 
 #[test]
+fn overlay_mounted_store_reports_unknown() {
+    let fixture = Fixture::new("overlay");
+    let device = fixture.host_device();
+    // An overlay's layers are decided outside this mount, so the block device
+    // under it answers a different question than the one being asked.
+    fixture.mount_lines(&[fixture.mount_line(&device, "overlay", "overlay")]);
+    fixture.node(&device);
+
+    let report = fixture.read();
+
+    assert_eq!(report.state, LiveDataEncryption::Unknown);
+    assert!(reason(&report).contains("overlay filesystem"));
+}
+
+#[test]
 fn network_filesystem_reports_unknown_with_its_reason() {
     let fixture = Fixture::new("nfs");
     let device = fixture.host_device();
