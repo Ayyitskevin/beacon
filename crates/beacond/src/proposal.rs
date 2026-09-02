@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::git_object_store::ObjectStore;
+use crate::git_object_store::{ObjectStore, ObjectStoreError};
 use crate::mission::mission_admission_facts;
 use crate::operator_account::owner_account_exists;
 use crate::project::current_charter_revision;
@@ -352,9 +352,18 @@ pub enum ContextComparison {
     /// The bound Repository is a Git URL. There is nothing local to compare against, and reading
     /// it would need a network fetch this slice does not perform.
     RepositorySourceNotLocal,
-    /// The bound local path could not be opened as a Git object store, or the inspection budget
-    /// elapsed before the answer was known. Both mean the same thing here: not known.
-    RepositoryUnavailable,
+    /// The bound local path could not be opened as a Git object store: missing, unreadable, or not
+    /// a repository. The store is broken, and that is a different fact from an inspection that
+    /// errored or one that ran out of time -- Check Preflight draws exactly this distinction with
+    /// `RepositoryUnreadable`, `PreflightFailed` and `PreflightTimedOut`, and AGENTS.md requires
+    /// it: "Terminal, absent, broken, and not evaluated are distinct states."
+    RepositoryUnreadable,
+    /// The store opened and an inspection step errored -- an unparseable pack index, a `.git`
+    /// indirection chain. An error, never a negative answer. Mirrors `PreflightFailed`.
+    InspectionFailed,
+    /// The inspection did not finish inside its budget. Not evaluated: distinct from both a
+    /// negative answer and an error. Mirrors `PreflightTimedOut`.
+    InspectionTimedOut,
     /// The object store opened, but the pinned base revision is not present in it. The revision
     /// the entries would be compared against is the thing that is missing.
     PinnedRevisionAbsent,
@@ -1582,6 +1591,34 @@ fn compare_readable_context(
     workspace_id: Uuid,
     payload: &ProposalV1,
 ) -> Result<Option<ContextComparison>, ProposalError> {
+    let started = Instant::now();
+    let mut deadline = move || started.elapsed().as_millis() > CONTEXT_INSPECTION_BUDGET_MS;
+    compare_readable_context_within(connection, workspace_id, payload, &mut deadline)
+}
+
+/// The comparison, driven by a caller-supplied deadline.
+///
+/// The deadline is consulted on entry and between every object-store step, so the work this
+/// function itself schedules stops at the budget. It is passed in rather than read from a constant
+/// for the same reason `ObjectStore::contains` takes one: it is the seam that makes the elapsed
+/// outcome reachable by a test, and it lets a future caller hold one budget across many Proposals
+/// instead of granting each its own.
+///
+/// **The bound is best-effort, not hard.** Between two checks sits one call into
+/// `git_object_store`, and a single such call can overrun: `ObjectStore::open` reads a `.git` file
+/// with `read_to_string` before this function regains control, and `contains` reads a whole pack
+/// index with `fs::read` between its own deadline checks. Bounding those would mean changing that
+/// module's I/O, which this slice does not own. The residual is named in
+/// `docs/implementation/phase-2-proposal-v1.md`.
+fn compare_readable_context_within(
+    connection: &Connection,
+    workspace_id: Uuid,
+    payload: &ProposalV1,
+    deadline: &mut impl FnMut() -> bool,
+) -> Result<Option<ContextComparison>, ProposalError> {
+    if deadline() {
+        return Ok(Some(ContextComparison::InspectionTimedOut));
+    }
     let Some(binding) = stored_repository_for_preflight(
         connection,
         workspace_id,
@@ -1591,23 +1628,29 @@ fn compare_readable_context(
     .map_err(map_repository_error)?
     else {
         // The bound revision is immutable and was proved to exist at submission, so this is not
-        // reachable through the store's own rules -- but "the binding is gone" is a thing we do
-        // not know the answer from, not a mismatch.
-        return Ok(Some(ContextComparison::RepositoryUnavailable));
+        // reachable through the store's own rules -- but a binding we cannot load is a broken
+        // referent, not a missing revision.
+        return Ok(Some(ContextComparison::RepositoryUnreadable));
     };
     if binding.source_kind != RepositorySourceKind::LocalPath {
         return Ok(Some(ContextComparison::RepositorySourceNotLocal));
     }
+    if deadline() {
+        return Ok(Some(ContextComparison::InspectionTimedOut));
+    }
     let Ok(store) = ObjectStore::open(Path::new(&binding.source)) else {
-        return Ok(Some(ContextComparison::RepositoryUnavailable));
+        return Ok(Some(ContextComparison::RepositoryUnreadable));
     };
-    let started = Instant::now();
-    let mut deadline = move || started.elapsed().as_millis() > CONTEXT_INSPECTION_BUDGET_MS;
-    match store.contains(&payload.bindings.pinned_base_revision, &mut deadline) {
+    if deadline() {
+        return Ok(Some(ContextComparison::InspectionTimedOut));
+    }
+    match store.contains(&payload.bindings.pinned_base_revision, deadline) {
         Ok(true) => Ok(Some(ContextComparison::ContentUnreadableAtRevision)),
         Ok(false) => Ok(Some(ContextComparison::PinnedRevisionAbsent)),
-        // An elapsed budget and an unreadable store are the same fact to a caller: not known.
-        Err(_) => Ok(Some(ContextComparison::RepositoryUnavailable)),
+        // The lower layer keeps these apart; so does this one. An elapsed inspection was not
+        // evaluated; any other error means a step broke. Neither is a negative answer.
+        Err(ObjectStoreError::Elapsed) => Ok(Some(ContextComparison::InspectionTimedOut)),
+        Err(_) => Ok(Some(ContextComparison::InspectionFailed)),
     }
 }
 
@@ -2104,6 +2147,49 @@ mod tests {
 
     fn fixture_bytes() -> Vec<u8> {
         encode(&fixture_payload()).unwrap()
+    }
+
+    #[test]
+    fn an_elapsed_budget_stops_the_comparison_before_it_touches_the_store() {
+        // "Not evaluated" is its own state (AGENTS.md:152). The wrong answer is reporting an
+        // elapsed inspection as RepositoryUnreadable -- that says the Operator's repository is
+        // broken when nothing was ever looked at.
+        //
+        // The deadline is consulted on entry, so an already-elapsed budget returns before the
+        // connection is read at all. That is what makes the outcome reachable without a slow test:
+        // an in-memory store with no schema would fail any query, and none is made.
+        let connection = Connection::open_in_memory().unwrap();
+        let mut elapsed = || true;
+        let outcome = compare_readable_context_within(
+            &connection,
+            WORKSPACE_ID,
+            &fixture_payload(),
+            &mut elapsed,
+        )
+        .unwrap();
+
+        assert_eq!(outcome, Some(ContextComparison::InspectionTimedOut));
+    }
+
+    #[test]
+    fn a_budget_with_time_left_gets_past_the_entry_check() {
+        // The control: a deadline that has NOT elapsed must not short-circuit, or the test above
+        // would pass against a function that always reports a timeout.
+        let connection = Connection::open_in_memory().unwrap();
+        let mut plenty = || false;
+        // No `proposals`/`projects` schema exists here, so the first real store read errors. That
+        // it errors rather than returning InspectionTimedOut is the whole point.
+        let outcome = compare_readable_context_within(
+            &connection,
+            WORKSPACE_ID,
+            &fixture_payload(),
+            &mut plenty,
+        );
+
+        assert!(
+            !matches!(outcome, Ok(Some(ContextComparison::InspectionTimedOut))),
+            "a live budget short-circuited as a timeout: {outcome:?}"
+        );
     }
 
     #[test]
