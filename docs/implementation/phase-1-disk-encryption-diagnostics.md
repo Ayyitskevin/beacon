@@ -14,8 +14,34 @@ command. The account session is checked before and after the reads, as local-mod
 a result gathered under a session that has since closed is withheld.
 
 Budgets: `/proc/self/mountinfo` at most 4 MiB and 16,384 entries, each sysfs file at most 4 KiB, the
-block-stack walk at most 8 deep and 64 nodes with a visited set. Recorded observations are truncated
-to 200 characters, stripped of control characters, and capped at 32 entries.
+block-stack walk at most 8 deep and 64 nodes with a visited set. The `slaves/` iterator is bounded
+**before it is consumed**, not while: a pre-child budget check is only as good as the loop honouring
+it, and collecting every entry first and checking afterwards still walks the whole directory.
+Enumerating costs no open, so no fixture can observe that difference from outside — bounding the
+iterator makes the property structural instead of asserted. Recorded observations are cut at 200 characters
+with the `truncated` flag set, stripped of control characters, and capped at 32 entries.
+
+## The shape
+
+The report carries a **conclusion**, not a sentence: a closed `state`, a closed `ReasonCode`, a
+bounded list of `Subject`s (each with a role, a value capped at 24 characters, and a `shortened`
+flag), and a count of the subjects that did not fit. There is no free text on the wire. The human
+sentence is rendered from those fields by a total function — once in Rust for logs, once in
+TypeScript for the panel — and it cannot overflow because its inputs cannot.
+
+That is a change of approach, not another patch. Five review rounds found the same class in a new
+place each time: a conclusion or a failure message composed from unbounded parts and then cut. Every
+previous fix bounded the strings that had overflowed. This one bounds the type that admitted them,
+so there is no longer anywhere for an unbounded value to enter a conclusion.
+
+Evidence keeps its two text fields and gains `truncated`. The panel prints "…(shortened)" from that
+flag rather than looking for an ellipsis — a redaction marker in one field previously made a silent
+truncation in another look guarded.
+
+What a reader can expect: the state and the reason are drawn from fixed sets and can be matched on;
+the sentence is a rendering of them and may be reworded; a subject that was cut says so; a subject
+list that was capped carries the number it dropped. What a reader cannot expect: that a subject is
+the complete value, or that the sentence is stable text to parse.
 
 ## The rule
 

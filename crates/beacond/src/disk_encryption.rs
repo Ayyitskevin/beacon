@@ -36,7 +36,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{OperatorAccountError, OperatorAccountService, Recorded};
+use crate::{OperatorAccountError, OperatorAccountService};
 
 const MAX_MOUNTINFO_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_MOUNTINFO_ENTRIES: usize = 16_384;
@@ -51,74 +51,22 @@ const MAX_CRYPT_TYPE_CHARS: usize = 16;
 const MAX_PATH_ANCESTORS: usize = 32;
 /// A path inside a one-sentence conclusion keeps its tail, which is the part
 /// that says which device it is.
-const MAX_PATH_IN_REASON: usize = 96;
 /// A device or mapping name inside a conclusion. Small enough that the sentence
 /// around it always fits, with the count of anything omitted.
-const MAX_NAME_IN_REASON: usize = 40;
-const MAX_MAPPINGS_IN_REASON: usize = 2;
-const MAX_LEAVES_IN_REASON: usize = 3;
 /// A hexadecimal run at least this long is treated as an identifier, not text.
 const MAX_IDENTIFIER_RUN_CHARS: usize = 12;
+/// A subject inside a conclusion, and how many one conclusion may carry. Small
+/// enough that the longest template plus the most subjects stays inside the
+/// adapter's bound -- asserted by a property test, not assumed.
+const MAX_SUBJECT_CHARS: usize = 24;
+const MAX_SUBJECTS: usize = 3;
+pub const MAX_RENDERED_CONCLUSION_CHARS: usize = 200;
 
 const NOT_VERIFIED_OPAL: &str = "drive-firmware encryption (OPAL or another self-encrypting drive), which Beacon cannot observe";
 const NOT_VERIFIED_FSCRYPT: &str = "filesystem-level encryption such as fscrypt or ext4 encryption";
 const NOT_VERIFIED_BELOW_HOST: &str =
     "encryption applied beneath this host, such as by a hypervisor or a storage array";
 const NOT_VERIFIED_KEY: &str = "the strength, custody, or current lock state of any key";
-
-/// Why a volume is reported `disabled`, in terms of what was actually seen.
-///
-/// A mixed stack really does contain a crypt layer, so a flat "found no
-/// encryption" is false there and the operator would rightly disbelieve the
-/// warning. Name the covered mapping and the path that is not covered.
-fn uncovered_reason(uncovered: &[DeviceNumber], crypt_seen: &[String]) -> String {
-    let leaves = summarize(
-        &uncovered
-            .iter()
-            .map(DeviceNumber::to_string)
-            .collect::<Vec<_>>(),
-        MAX_LEAVES_IN_REASON,
-    );
-    if crypt_seen.is_empty() {
-        format!("at least one path to disk has no crypt layer: {leaves}")
-    } else {
-        format!(
-            "{} is encrypted; {leaves} is not",
-            summarize(crypt_seen, MAX_MAPPINGS_IN_REASON)
-        )
-    }
-}
-
-/// Lists a few names inside a sentence, shortening each and counting the rest.
-///
-/// The bound belongs on the components, never on the assembled sentence.
-/// Truncating the sentence is how a conclusion becomes a fragment of a device
-/// name: two valid 120-character mapping names spent the whole budget before
-/// either half of "<mapping> is encrypted; <leaf> is not" was reached, and the
-/// report still called itself Disabled while explaining nothing.
-fn summarize(names: &[String], keep: usize) -> String {
-    let shown = names
-        .iter()
-        .take(keep)
-        .map(|name| shorten(name, MAX_NAME_IN_REASON))
-        .collect::<Vec<_>>()
-        .join(", ");
-    match names.len().saturating_sub(keep) {
-        0 => shown,
-        1 => format!("{shown} and 1 more"),
-        rest => format!("{shown} and {rest} more"),
-    }
-}
-
-/// Keeps the head of a name and marks what was dropped. A name that was
-/// shortened must say so, or the report quietly renames the operator's volume.
-fn shorten(value: &str, keep: usize) -> String {
-    if value.chars().count() <= keep {
-        return value.to_owned();
-    }
-    let head: String = value.chars().take(keep.saturating_sub(1)).collect();
-    format!("{head}\u{2026}")
-}
 
 /// What Beacon proved about operating-system disk encryption for the volume
 /// holding this Installation's live data.
@@ -152,6 +100,10 @@ pub enum LiveDataEncryption {
 pub struct EncryptionEvidence {
     pub source: String,
     pub observation: String,
+    /// True when either field was cut. The interface says "(shortened)" from
+    /// this flag, never by looking for an ellipsis -- a redaction marker in one
+    /// field made a silent truncation in the other look guarded.
+    pub truncated: bool,
 }
 
 /// The result of one live reading. Never stored, so every field describes the
@@ -159,16 +111,274 @@ pub struct EncryptionEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LiveDataEncryptionReport {
-    pub state: LiveDataEncryption,
-    /// The volume this report is about. One subject in this slice; the field
-    /// exists so a second managed location is additive rather than a reshape.
-    pub mount_point: Recorded<String>,
-    /// Present only for `Enabled`. For the other two states this is the reason
-    /// Beacon reports what it reports.
-    pub mechanism: Recorded<String>,
+    /// The answer. The sentence an operator reads is rendered from this, never
+    /// carried as free text something later has to cut.
+    pub conclusion: LiveDataEncryptionConclusion,
+    /// The volume this report is about, or absent when none was identified.
+    pub mount_point: Option<Subject>,
     pub evidence: Vec<EncryptionEvidence>,
     pub not_verified: Vec<String>,
     pub observed_at_ms: u64,
+}
+
+/// A value that appears inside a rendered conclusion: a device number, a
+/// mapping name, a path tail, an error kind.
+///
+/// Bounded when it is CONSTRUCTED, not when it is printed. Five rounds of
+/// review found the same class in a new shape each time -- a sentence composed
+/// from unbounded parts and then cut -- because every fix bounded the strings
+/// that had overflowed rather than the type that let them in. A conclusion now
+/// holds no strings of its own, so there is nothing left to overflow.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Subject {
+    pub role: SubjectRole,
+    pub value: String,
+    /// True when the value was cut. The interface says so from this flag, never
+    /// by looking for an ellipsis in the text.
+    pub shortened: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubjectRole {
+    /// A block device, always `major:minor`.
+    Device,
+    /// A device-mapper mapping name.
+    Mapping,
+    /// A crypt mechanism, e.g. `dm-crypt (LUKS2)`.
+    Mechanism,
+    /// A filesystem path, mount point, or filesystem type.
+    Location,
+    /// A short technical detail, e.g. an I/O error kind.
+    Detail,
+}
+
+impl Subject {
+    fn new(role: SubjectRole, value: &str) -> Self {
+        let cleaned: String = redact_identifiers(value)
+            .chars()
+            .map(|character| {
+                if character.is_control() {
+                    ' '
+                } else {
+                    character
+                }
+            })
+            .collect();
+        let cleaned = cleaned.trim();
+        let shortened = cleaned.chars().count() > MAX_SUBJECT_CHARS;
+        let value = if shortened {
+            cleaned.chars().take(MAX_SUBJECT_CHARS).collect()
+        } else {
+            cleaned.to_owned()
+        };
+        Self {
+            role,
+            value,
+            shortened,
+        }
+    }
+
+    fn device(device: DeviceNumber) -> Self {
+        Self::new(SubjectRole::Device, &device.to_string())
+    }
+
+    /// A path keeps its TAIL, which is the part that says which device it is.
+    fn path(path: &Path) -> Self {
+        let text = redact_identifiers(&path.display().to_string());
+        let count = text.chars().count();
+        if count <= MAX_SUBJECT_CHARS {
+            return Self::new(SubjectRole::Location, &text);
+        }
+        Self {
+            role: SubjectRole::Location,
+            value: text.chars().skip(count - MAX_SUBJECT_CHARS).collect(),
+            shortened: true,
+        }
+    }
+}
+
+/// Every reason this reader can produce. Closed, so the sentence an operator
+/// sees is chosen from a fixed set rather than assembled from whatever the
+/// kernel handed back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasonCode {
+    CryptCoversEveryPath,
+    NoCryptOnAnyPath,
+    SomePathsUncovered,
+    StorePathUnresolved,
+    StoreNotInspectable,
+    MountTableUnreadable,
+    MountTableUnparsed,
+    MountTableEmpty,
+    NoMountForStore,
+    MountAndStatDisagree,
+    MemoryBackedFilesystem,
+    OverlayFilesystem,
+    UserspaceFilesystem,
+    NetworkFilesystem,
+    NoBlockDeviceForFilesystem,
+    LinkResolvesToNothing,
+    DeviceUnreadable,
+    ReadOverBudget,
+    StackOverBudget,
+    NoPhysicalLeaf,
+    MappingWithoutBackingDevice,
+    LoopbackImage,
+    PlatformNotSupported,
+}
+
+/// The answer, and only the answer: a closed state, a closed reason, and a
+/// bounded list of what the reason is about. No free text.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LiveDataEncryptionConclusion {
+    pub state: LiveDataEncryption,
+    pub reason: ReasonCode,
+    pub subjects: Vec<Subject>,
+    /// How many subjects did not fit. A capped list that does not say it was
+    /// capped is a partial answer wearing a complete one -- and a count is
+    /// bounded by construction where "and N more" spliced into a sentence was
+    /// not.
+    pub omitted_subjects: u32,
+}
+
+impl LiveDataEncryptionConclusion {
+    fn new(state: LiveDataEncryption, reason: ReasonCode, mut subjects: Vec<Subject>) -> Self {
+        let omitted_subjects =
+            u32::try_from(subjects.len().saturating_sub(MAX_SUBJECTS)).unwrap_or(u32::MAX);
+        subjects.truncate(MAX_SUBJECTS);
+        Self {
+            state,
+            reason,
+            subjects,
+            omitted_subjects,
+        }
+    }
+}
+
+/// The human sentence, rendered from the conclusion by a total function.
+///
+/// It cannot overflow because its inputs cannot: one fixed template per reason,
+/// at most `MAX_SUBJECTS` subjects, each at most `MAX_SUBJECT_CHARS`. The
+/// desktop renders the same sentence from the same fields; this one is for logs
+/// and for anything that reads a report without an interface.
+pub fn render_conclusion(conclusion: &LiveDataEncryptionConclusion) -> String {
+    let of = |role: SubjectRole| -> String {
+        let named: Vec<String> = conclusion
+            .subjects
+            .iter()
+            .filter(|subject| subject.role == role)
+            .map(|subject| {
+                if subject.shortened {
+                    format!("{}\u{2026}", subject.value)
+                } else {
+                    subject.value.clone()
+                }
+            })
+            .collect();
+        if named.is_empty() {
+            "an unnamed subject".to_owned()
+        } else {
+            named.join(", ")
+        }
+    };
+    let more = match conclusion.omitted_subjects {
+        0 => String::new(),
+        1 => " and 1 more".to_owned(),
+        count => format!(" and {count} more"),
+    };
+    let sentence = match conclusion.reason {
+        ReasonCode::CryptCoversEveryPath => format!(
+            "every path to disk passes through {}",
+            of(SubjectRole::Mechanism)
+        ),
+        ReasonCode::NoCryptOnAnyPath => format!(
+            "at least one path to disk has no crypt layer: {}",
+            of(SubjectRole::Device)
+        ),
+        ReasonCode::SomePathsUncovered => format!(
+            "{} is encrypted; {} is not",
+            of(SubjectRole::Mapping),
+            of(SubjectRole::Device)
+        ),
+        ReasonCode::StorePathUnresolved => format!(
+            "the live store path could not be resolved: {}",
+            of(SubjectRole::Detail)
+        ),
+        ReasonCode::StoreNotInspectable => "the live store could not be inspected".to_owned(),
+        ReasonCode::MountTableUnreadable => "the mount table could not be read".to_owned(),
+        ReasonCode::MountTableUnparsed => "the mount table could not be parsed".to_owned(),
+        ReasonCode::MountTableEmpty => "the mount table was empty".to_owned(),
+        ReasonCode::NoMountForStore => "no mount table entry covers the live store".to_owned(),
+        ReasonCode::MountAndStatDisagree => {
+            "the mount table and the live store disagree about which volume holds it".to_owned()
+        }
+        ReasonCode::MemoryBackedFilesystem => {
+            "the live store is on a memory-backed filesystem".to_owned()
+        }
+        ReasonCode::OverlayFilesystem => {
+            "the live store is on an overlay filesystem; its layers are decided outside this mount"
+                .to_owned()
+        }
+        ReasonCode::UserspaceFilesystem => "the live store is on a userspace filesystem".to_owned(),
+        ReasonCode::NetworkFilesystem => {
+            "the live store is on a network filesystem; its encryption is decided off this host"
+                .to_owned()
+        }
+        ReasonCode::NoBlockDeviceForFilesystem => format!(
+            "this filesystem ({}) exposes no block device Beacon can inspect",
+            of(SubjectRole::Location)
+        ),
+        ReasonCode::LinkResolvesToNothing => format!(
+            "{} is a link that resolves to nothing",
+            of(SubjectRole::Location)
+        ),
+        ReasonCode::DeviceUnreadable => format!(
+            "a device in the volume's stack could not be read: {}",
+            of(SubjectRole::Location)
+        ),
+        ReasonCode::ReadOverBudget => format!(
+            "{} exceeded Beacon's read budget",
+            of(SubjectRole::Location)
+        ),
+        ReasonCode::StackOverBudget => {
+            "the volume's device stack exceeded Beacon's read budget".to_owned()
+        }
+        ReasonCode::NoPhysicalLeaf => "no physical device terminated the volume's stack".to_owned(),
+        ReasonCode::MappingWithoutBackingDevice => format!(
+            "mapping {} has no readable backing device",
+            of(SubjectRole::Mapping)
+        ),
+        ReasonCode::LoopbackImage => format!(
+            "the volume is a loopback image backed by {}; Beacon does not follow the backing file",
+            of(SubjectRole::Location)
+        ),
+        ReasonCode::PlatformNotSupported => "not detectable on this platform".to_owned(),
+    };
+    format!("{sentence}{more}")
+}
+
+/// One reason with the things it is about, before it becomes a conclusion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Verdict {
+    reason: ReasonCode,
+    subjects: Vec<Subject>,
+}
+
+impl Verdict {
+    fn bare(reason: ReasonCode) -> Self {
+        Self {
+            reason,
+            subjects: Vec::new(),
+        }
+    }
+
+    fn about(reason: ReasonCode, subjects: Vec<Subject>) -> Self {
+        Self { reason, subjects }
+    }
 }
 
 /// Where the host's mount table and block-device tree live.
@@ -263,10 +473,8 @@ fn inspect(
     if !cfg!(target_os = "linux") {
         return unknown(
             Vec::new(),
-            Recorded::Absent {
-                reason: "the platform was not inspected".to_owned(),
-            },
-            "not detectable on this platform",
+            None,
+            Verdict::bare(ReasonCode::PlatformNotSupported),
             observed_at_ms,
         );
     }
@@ -279,19 +487,16 @@ fn inspect_linux(
     observed_at_ms: u64,
 ) -> LiveDataEncryptionReport {
     let mut evidence = Vec::new();
-    let no_mount = || Recorded::Absent {
-        reason: "the volume holding live data was not identified".to_owned(),
-    };
 
     let target = match resolve_target(store_path) {
         Ok(target) => target,
-        Err(reason) => return unknown_owned(evidence, no_mount(), reason, observed_at_ms),
+        Err(verdict) => return unknown(evidence, None, verdict, observed_at_ms),
     };
     let Some(stat_device) = device_of(&target) else {
         return unknown(
             evidence,
-            no_mount(),
-            "the live store could not be inspected",
+            None,
+            Verdict::bare(ReasonCode::StoreNotInspectable),
             observed_at_ms,
         );
     };
@@ -305,13 +510,13 @@ fn inspect_linux(
 
     let mounts = match read_mountinfo(&system.mountinfo) {
         Ok(mounts) => mounts,
-        Err(reason) => return unknown_owned(evidence, no_mount(), reason, observed_at_ms),
+        Err(verdict) => return unknown(evidence, None, verdict, observed_at_ms),
     };
     let Some(mount) = select_mount(&mounts, &target) else {
         return unknown(
             evidence,
-            no_mount(),
-            "no mount table entry covers the live store",
+            None,
+            Verdict::bare(ReasonCode::NoMountForStore),
             observed_at_ms,
         );
     };
@@ -323,9 +528,8 @@ fn inspect_linux(
             mount.device, mount.fstype, mount.source, mount.mount_point
         ),
     );
-    let mount_point = Recorded::Present {
-        value: bounded_text(mount.mount_point.clone()),
-    };
+    // A path keeps its tail: the leaf directory is what names the volume.
+    let mount_point = Some(Subject::path(Path::new(&mount.mount_point)));
 
     // A longest-prefix selection that picked the wrong entry would answer
     // confidently about a volume the store does not live on. An anonymous
@@ -334,13 +538,13 @@ fn inspect_linux(
         return unknown(
             evidence,
             mount_point,
-            "the mount table and the live store disagree about which volume holds it",
+            Verdict::bare(ReasonCode::MountAndStatDisagree),
             observed_at_ms,
         );
     }
 
     if let Some(reason) = unsupported_filesystem(&mount.fstype) {
-        return unknown(evidence, mount_point, reason, observed_at_ms);
+        return unknown(evidence, mount_point, Verdict::bare(reason), observed_at_ms);
     }
 
     let root = if mount.device.major != 0 {
@@ -350,7 +554,7 @@ fn inspect_linux(
         // has to come from the mount source instead.
         match match block_device_of_source(&mount.source) {
             Ok(found) => found,
-            Err(reason) => return unknown_owned(evidence, mount_point, reason, observed_at_ms),
+            Err(verdict) => return unknown(evidence, mount_point, verdict, observed_at_ms),
         } {
             Some(device) => {
                 record(
@@ -361,22 +565,30 @@ fn inspect_linux(
                 device
             }
             None => {
-                let reason = format!(
-                    "this filesystem ({}) exposes no block device Beacon can inspect",
-                    mount.fstype
+                return unknown(
+                    evidence,
+                    mount_point,
+                    Verdict::about(
+                        ReasonCode::NoBlockDeviceForFilesystem,
+                        vec![Subject::new(SubjectRole::Location, &mount.fstype)],
+                    ),
+                    observed_at_ms,
                 );
-                return unknown_owned(evidence, mount_point, reason, observed_at_ms);
             }
         }
     };
 
     match walk_block_stack(system, root, &mut evidence) {
-        Walk::Encrypted { mechanism } => LiveDataEncryptionReport {
-            state: LiveDataEncryption::Enabled,
+        Walk::Encrypted { mechanisms } => LiveDataEncryptionReport {
+            conclusion: LiveDataEncryptionConclusion::new(
+                LiveDataEncryption::Enabled,
+                ReasonCode::CryptCoversEveryPath,
+                mechanisms
+                    .iter()
+                    .map(|kind| Subject::new(SubjectRole::Mechanism, kind))
+                    .collect(),
+            ),
             mount_point,
-            mechanism: Recorded::Present {
-                value: conclusion(mechanism),
-            },
             evidence,
             not_verified: vec![NOT_VERIFIED_KEY.to_owned()],
             observed_at_ms,
@@ -385,18 +597,33 @@ fn inspect_linux(
             uncovered,
             crypt_seen,
         } => {
-            let reason = conclusion(uncovered_reason(&uncovered, &crypt_seen));
+            let mut subjects: Vec<Subject> = crypt_seen
+                .iter()
+                .take(1)
+                .map(|name| Subject::new(SubjectRole::Mapping, name))
+                .collect();
+            // Every uncovered device, not a pre-trimmed few: the conclusion
+            // caps the list and counts what it dropped, so the count is real.
+            subjects.extend(uncovered.iter().map(|device| Subject::device(*device)));
+            let conclusion = LiveDataEncryptionConclusion::new(
+                LiveDataEncryption::Disabled,
+                if crypt_seen.is_empty() {
+                    ReasonCode::NoCryptOnAnyPath
+                } else {
+                    ReasonCode::SomePathsUncovered
+                },
+                subjects,
+            );
             // Name the branches that are not covered in evidence too; a
             // negative nobody can locate is not much better than no answer.
             record(
                 &mut evidence,
                 system.sys_dev_block.display().to_string(),
-                reason.clone(),
+                render_conclusion(&conclusion),
             );
             LiveDataEncryptionReport {
-                state: LiveDataEncryption::Disabled,
+                conclusion,
                 mount_point,
-                mechanism: Recorded::Absent { reason },
                 evidence,
                 not_verified: vec![
                     NOT_VERIFIED_OPAL.to_owned(),
@@ -406,36 +633,23 @@ fn inspect_linux(
                 observed_at_ms,
             }
         }
-        Walk::Undetermined { reason } => {
-            unknown_owned(evidence, mount_point, reason, observed_at_ms)
-        }
+        Walk::Undetermined { verdict } => unknown(evidence, mount_point, verdict, observed_at_ms),
     }
 }
 
 fn unknown(
     evidence: Vec<EncryptionEvidence>,
-    mount_point: Recorded<String>,
-    reason: &str,
-    observed_at_ms: u64,
-) -> LiveDataEncryptionReport {
-    unknown_owned(evidence, mount_point, reason.to_owned(), observed_at_ms)
-}
-
-fn unknown_owned(
-    evidence: Vec<EncryptionEvidence>,
-    mount_point: Recorded<String>,
-    reason: String,
+    mount_point: Option<Subject>,
+    verdict: Verdict,
     observed_at_ms: u64,
 ) -> LiveDataEncryptionReport {
     LiveDataEncryptionReport {
-        state: LiveDataEncryption::Unknown,
+        conclusion: LiveDataEncryptionConclusion::new(
+            LiveDataEncryption::Unknown,
+            verdict.reason,
+            verdict.subjects,
+        ),
         mount_point,
-        // Bounded like the evidence beside it: these two fields are rendered,
-        // and the desktop adapter refuses text over the same limit. A reason
-        // carrying a long sysfs path must not make a whole report unreadable.
-        mechanism: Recorded::Absent {
-            reason: conclusion(reason),
-        },
         evidence,
         not_verified: vec![
             NOT_VERIFIED_OPAL.to_owned(),
@@ -451,54 +665,19 @@ fn record(evidence: &mut Vec<EncryptionEvidence>, source: String, observation: S
     if evidence.len() >= MAX_EVIDENCE_ENTRIES {
         return;
     }
+    let (source, source_cut) = bounded(source);
+    let (observation, observation_cut) = bounded(observation);
     evidence.push(EncryptionEvidence {
-        source: bounded(source),
-        observation: bounded(observation),
+        source,
+        observation,
+        truncated: source_cut || observation_cut,
     });
-}
-
-/// Bounds text without redacting it.
-///
-/// The mount point is how the operator recognises which volume the report is
-/// about, and it is a directory they chose, not a device identifier read out of
-/// the kernel. Redacting it would bound the wrong thing: the report would stop
-/// naming its own subject to hide something it did not learn from the stack.
-fn bounded_text(value: String) -> String {
-    let cleaned: String = value
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect();
-    shorten(cleaned.trim(), MAX_OBSERVATION_CHARS)
-}
-
-/// A conclusion: redacted and stripped of control characters like evidence, but
-/// never truncated. It is assembled from components that were already
-/// shortened, so bounding it again could only remove the answer.
-fn conclusion(value: String) -> String {
-    redact_identifiers(&value)
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect::<String>()
-        .trim()
-        .to_owned()
 }
 
 /// Evidence: redacted, control-stripped, and shortened WITH a marker. A
 /// silently truncated observation reads as the whole value it is a prefix of,
 /// which is the same lie in a smaller place than a truncated conclusion.
-fn bounded(value: String) -> String {
+fn bounded(value: String) -> (String, bool) {
     let cleaned: String = redact_identifiers(&value)
         .chars()
         .map(|character| {
@@ -508,9 +687,12 @@ fn bounded(value: String) -> String {
                 character
             }
         })
-        .take(MAX_OBSERVATION_CHARS)
         .collect();
-    cleaned.trim().to_owned()
+    let cleaned = cleaned.trim();
+    if cleaned.chars().count() <= MAX_OBSERVATION_CHARS {
+        return (cleaned.to_owned(), false);
+    }
+    (cleaned.chars().take(MAX_OBSERVATION_CHARS).collect(), true)
 }
 
 /// Replaces any long hexadecimal run with an ellipsis before it is recorded.
@@ -584,7 +766,7 @@ impl std::fmt::Display for DeviceNumber {
 /// permission failure, an I/O error, a symlink loop. Swapping in the parent
 /// there would answer confidently about a different subject, so it is reported
 /// rather than papered over.
-fn resolve_target(store_path: &Path) -> Result<PathBuf, String> {
+fn resolve_target(store_path: &Path) -> Result<PathBuf, Verdict> {
     match fs::canonicalize(store_path) {
         Ok(resolved) => Ok(resolved),
         // NotFound from canonicalize does not prove the store is absent: a link
@@ -595,7 +777,7 @@ fn resolve_target(store_path: &Path) -> Result<PathBuf, String> {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     let parent = store_path
                         .parent()
-                        .ok_or_else(|| unresolved("the live store path has no parent directory"))?;
+                        .ok_or_else(|| Verdict::bare(ReasonCode::StorePathUnresolved))?;
                     fs::canonicalize(parent)
                         .map_err(|error| unresolved(&format!("{:?}", error.kind())))
                 }
@@ -607,8 +789,11 @@ fn resolve_target(store_path: &Path) -> Result<PathBuf, String> {
     }
 }
 
-fn unresolved(detail: &str) -> String {
-    format!("the live store path could not be resolved: {detail}")
+fn unresolved(detail: &str) -> Verdict {
+    Verdict::about(
+        ReasonCode::StorePathUnresolved,
+        vec![Subject::new(SubjectRole::Detail, detail)],
+    )
 }
 
 fn device_of(path: &Path) -> Option<DeviceNumber> {
@@ -619,7 +804,7 @@ fn device_of(path: &Path) -> Option<DeviceNumber> {
 /// number is anonymous. Routed through `presence` like every other link the
 /// walk follows: a `/dev/mapper/...` entry pointing at nothing is broken, not
 /// a filesystem that exposes no block device.
-fn block_device_of_source(source: &str) -> Result<Option<DeviceNumber>, String> {
+fn block_device_of_source(source: &str) -> Result<Option<DeviceNumber>, Verdict> {
     let path = Path::new(source);
     if !path.is_absolute() {
         return Ok(None);
@@ -638,18 +823,14 @@ fn block_device_of_source(source: &str) -> Result<Option<DeviceNumber>, String> 
 
 /// Filesystems whose encryption is not decided by a block device under this
 /// host. Each is `Unknown` with its own reason rather than a guess.
-fn unsupported_filesystem(fstype: &str) -> Option<&'static str> {
+fn unsupported_filesystem(fstype: &str) -> Option<ReasonCode> {
     match fstype {
-        "tmpfs" | "ramfs" => Some("the live store is on a memory-backed filesystem"),
-        "overlay" | "overlayfs" => Some(
-            "the live store is on an overlay filesystem; its layers are decided outside this mount",
-        ),
-        _ if fstype.starts_with("fuse") => Some(
-            "the live store is on a userspace filesystem; its encryption is decided outside the kernel block layer",
-        ),
-        "nfs" | "nfs4" | "cifs" | "smb3" | "9p" | "virtiofs" | "ceph" | "afs" => Some(
-            "the live store is on a network filesystem; its encryption is decided off this host",
-        ),
+        "tmpfs" | "ramfs" => Some(ReasonCode::MemoryBackedFilesystem),
+        "overlay" | "overlayfs" => Some(ReasonCode::OverlayFilesystem),
+        _ if fstype.starts_with("fuse") => Some(ReasonCode::UserspaceFilesystem),
+        "nfs" | "nfs4" | "cifs" | "smb3" | "9p" | "virtiofs" | "ceph" | "afs" => {
+            Some(ReasonCode::NetworkFilesystem)
+        }
         _ => None,
     }
 }
@@ -662,11 +843,11 @@ struct MountEntry {
     source: String,
 }
 
-fn read_mountinfo(path: &Path) -> Result<Vec<MountEntry>, String> {
-    const UNREADABLE: &str = "the mount table could not be read";
+fn read_mountinfo(path: &Path) -> Result<Vec<MountEntry>, Verdict> {
+    let unreadable = || Verdict::bare(ReasonCode::MountTableUnreadable);
     let text = match read_bounded(path, MAX_MOUNTINFO_BYTES) {
         Ok(text) => text,
-        Err(BoundedRead::Failed(_)) => return Err(UNREADABLE.to_owned()),
+        Err(BoundedRead::Failed(_)) => return Err(unreadable()),
         Err(BoundedRead::OverBudget) => return Err(over_budget(path)),
     };
     let mut entries = Vec::new();
@@ -675,18 +856,17 @@ fn read_mountinfo(path: &Path) -> Result<Vec<MountEntry>, String> {
             continue;
         }
         if entries.len() >= MAX_MOUNTINFO_ENTRIES {
-            return Err("the mount table exceeded Beacon's read budget".to_owned());
+            return Err(over_budget(path));
         }
         // A line Beacon cannot parse is a line it does not understand, and a
         // misunderstood mount table is exactly how a confident wrong volume
         // gets chosen. The format is stable kernel ABI, so this is strict.
         entries.push(
-            parse_mount_line(line)
-                .ok_or_else(|| "the mount table could not be parsed".to_owned())?,
+            parse_mount_line(line).ok_or_else(|| Verdict::bare(ReasonCode::MountTableUnparsed))?,
         );
     }
     if entries.is_empty() {
-        return Err("the mount table was empty".to_owned());
+        return Err(Verdict::bare(ReasonCode::MountTableEmpty));
     }
     Ok(entries)
 }
@@ -769,7 +949,7 @@ enum Walk {
     /// Every branch terminated at a physical leaf and every one of those paths
     /// passed through a crypt layer.
     Encrypted {
-        mechanism: String,
+        mechanisms: Vec<String>,
     },
     /// Every branch terminated at a physical leaf and at least one of those
     /// paths had no crypt layer. `uncovered` names them; `crypt_seen` names the
@@ -779,7 +959,7 @@ enum Walk {
         crypt_seen: Vec<String>,
     },
     Undetermined {
-        reason: String,
+        verdict: Verdict,
     },
 }
 
@@ -787,7 +967,7 @@ enum Walk {
 /// reached a physical leaf; nothing else counts as an answer.
 enum Branch {
     Terminated { uncovered: Vec<DeviceNumber> },
-    Undetermined { reason: String },
+    Undetermined { verdict: Verdict },
 }
 
 /// A physical leaf: a real disk or partition. It has no `dm/` directory and no
@@ -822,14 +1002,11 @@ fn walk_block_stack(
         on_path: HashSet::new(),
     };
     match walker.explore(root, 0, false, evidence) {
-        Branch::Undetermined { reason } => Walk::Undetermined { reason },
+        Branch::Undetermined { verdict } => Walk::Undetermined { verdict },
         Branch::Terminated { uncovered } if uncovered.is_empty() => Walk::Encrypted {
             // Every component of a conclusion is bounded, including this one:
             // a stack can carry more crypt types than a sentence can name.
-            mechanism: summarize(
-                &walker.crypt_kinds.into_iter().collect::<Vec<_>>(),
-                MAX_MAPPINGS_IN_REASON,
-            ),
+            mechanisms: walker.crypt_kinds.into_iter().collect(),
         },
         Branch::Terminated { uncovered } => Walk::UncoveredPath {
             uncovered,
@@ -863,15 +1040,13 @@ impl Walker<'_> {
         }
         if self.on_path.contains(&key) {
             return Branch::Undetermined {
-                reason: format!(
-                    "device {device} is reached from below itself, so this branch terminates at no physical device"
-                ),
+                verdict: Verdict::about(ReasonCode::NoPhysicalLeaf, vec![Subject::device(device)]),
             };
         }
         // Checked before the node is counted, not after it is explored.
         if self.nodes >= MAX_STACK_NODES || depth > MAX_STACK_DEPTH {
             return Branch::Undetermined {
-                reason: over_stack_budget(),
+                verdict: over_stack_budget(),
             };
         }
         self.nodes += 1;
@@ -896,10 +1071,10 @@ impl Walker<'_> {
             Ok(Presence::Present) => {}
             Ok(Presence::Missing) => {
                 return Branch::Undetermined {
-                    reason: unreadable_reason(&node, std::io::ErrorKind::NotFound),
+                    verdict: unreadable_reason(&node, std::io::ErrorKind::NotFound),
                 };
             }
-            Err(reason) => return Branch::Undetermined { reason },
+            Err(verdict) => return Branch::Undetermined { verdict },
         }
 
         let backing = node.join("loop/backing_file");
@@ -907,29 +1082,27 @@ impl Walker<'_> {
             Ok(Presence::Present) => {
                 let path = match read_sysfs(&backing) {
                     Ok(path) => path,
-                    Err(reason) => return Branch::Undetermined { reason },
+                    Err(verdict) => return Branch::Undetermined { verdict },
                 };
                 return Branch::Undetermined {
-                    reason: format!(
-                        "the volume is a loopback image backed by {}; Beacon does not follow the backing file",
-                        // A sysfs value, so up to the read budget long. Shorten
-                        // the component; the sentence around it must survive.
-                        shorten(&path, MAX_PATH_IN_REASON)
+                    verdict: Verdict::about(
+                        ReasonCode::LoopbackImage,
+                        vec![Subject::new(SubjectRole::Location, &path)],
                     ),
                 };
             }
             Ok(Presence::Missing) => {}
-            Err(reason) => return Branch::Undetermined { reason },
+            Err(verdict) => return Branch::Undetermined { verdict },
         }
 
         // A `dm/` directory is what makes this a mapping rather than a disk.
         let mapping = match directory_presence(&node.join("dm")) {
             Ok(Presence::Present) => match self.read_mapping(&node, evidence) {
                 Ok(mapping) => Some(mapping),
-                Err(reason) => return Branch::Undetermined { reason },
+                Err(verdict) => return Branch::Undetermined { verdict },
             },
             Ok(Presence::Missing) => None,
-            Err(reason) => return Branch::Undetermined { reason },
+            Err(verdict) => return Branch::Undetermined { verdict },
         };
         let crypt_on_path = crypt_above || mapping.as_ref().is_some_and(|found| found.is_crypt);
 
@@ -939,7 +1112,7 @@ impl Walker<'_> {
         let slaves = node.join("slaves");
         let slaves_present = match presence(&slaves) {
             Ok(found) => found == Presence::Present,
-            Err(reason) => return Branch::Undetermined { reason },
+            Err(verdict) => return Branch::Undetermined { verdict },
         };
         let mut parents = Vec::new();
         if slaves_present {
@@ -947,25 +1120,32 @@ impl Walker<'_> {
                 Ok(children) => children,
                 Err(error) => {
                     return Branch::Undetermined {
-                        reason: unreadable_reason(&slaves, error.kind()),
+                        verdict: unreadable_reason(&slaves, error.kind()),
                     };
                 }
             };
-            for child in children {
+            // The iterator is bounded BEFORE it is consumed, not while it is.
+            // A pre-child budget check is only as good as the loop that honours
+            // it: collecting every DirEntry first and then checking still walks
+            // the whole directory, and no fixture can see that from outside --
+            // enumerating costs no open, so there is nothing to poison. Bounding
+            // the iterator makes the property structural instead.
+            let remaining = MAX_STACK_NODES.saturating_sub(self.nodes) + 1;
+            for child in children.take(remaining) {
                 // The budget bounds the work, so it is spent before the work:
                 // one more child means one more device to read and explore, and
                 // asking after the fan-out is enumerated lets a single wide node
                 // perform arbitrarily many reads before the ceiling is reported.
                 if self.nodes + parents.len() >= MAX_STACK_NODES {
                     return Branch::Undetermined {
-                        reason: over_stack_budget(),
+                        verdict: over_stack_budget(),
                     };
                 }
                 let child = match child {
                     Ok(child) => child,
                     Err(error) => {
                         return Branch::Undetermined {
-                            reason: unreadable_reason(&slaves, error.kind()),
+                            verdict: unreadable_reason(&slaves, error.kind()),
                         };
                     }
                 };
@@ -975,14 +1155,14 @@ impl Walker<'_> {
                         Some(parent) => parents.push(parent),
                         None => {
                             return Branch::Undetermined {
-                                reason: unreadable_reason(
+                                verdict: unreadable_reason(
                                     &dev_file,
                                     std::io::ErrorKind::InvalidData,
                                 ),
                             };
                         }
                     },
-                    Err(reason) => return Branch::Undetermined { reason },
+                    Err(verdict) => return Branch::Undetermined { verdict },
                 }
             }
         }
@@ -991,9 +1171,9 @@ impl Walker<'_> {
             return match mapping {
                 // A mapping with no backing device is an unread stack.
                 Some(found) => Branch::Undetermined {
-                    reason: format!(
-                        "mapping {} has no readable backing device",
-                        shorten(&found.name, MAX_NAME_IN_REASON)
+                    verdict: Verdict::about(
+                        ReasonCode::MappingWithoutBackingDevice,
+                        vec![Subject::new(SubjectRole::Mapping, &found.name)],
                     ),
                 },
                 // A real disk or partition: the only thing that terminates a branch.
@@ -1022,13 +1202,13 @@ impl Walker<'_> {
         &mut self,
         node: &Path,
         evidence: &mut Vec<EncryptionEvidence>,
-    ) -> Result<Mapping, String> {
+    ) -> Result<Mapping, Verdict> {
         let uuid_path = node.join("dm/uuid");
         let uuid = read_required(&uuid_path)?;
         // A mapping with a uuid always has a name beside it. Substituting a
         // placeholder for a failed read would let a read failure reach a
         // confident state, which is the one thing this reader must never do.
-        let name = bounded(read_required(&node.join("dm/name"))?);
+        let name = read_required(&node.join("dm/name"))?;
         match crypt_type(&uuid) {
             Some(kind) => {
                 // The type prefix only. The remainder of a crypt UUID is a
@@ -1137,7 +1317,7 @@ enum Presence {
 /// never created does. Believing that answer is how an unread stack becomes a
 /// proven negative, so `NotFound` is only absence once every component of the
 /// path is known to resolve.
-fn presence(path: &Path) -> Result<Presence, String> {
+fn presence(path: &Path) -> Result<Presence, Verdict> {
     match fs::symlink_metadata(path) {
         // The name is there. Following it is a separate question: a dangling
         // link has metadata of its own and none at its target.
@@ -1172,16 +1352,16 @@ fn presence(path: &Path) -> Result<Presence, String> {
     }
 }
 
-fn over_stack_budget() -> String {
-    "the volume's device stack exceeded Beacon's read budget".to_owned()
+fn over_stack_budget() -> Verdict {
+    Verdict::bare(ReasonCode::StackOverBudget)
 }
 
-fn dangling(path: &Path) -> String {
-    format!("{} is a link that resolves to nothing", shorten_path(path))
+fn dangling(path: &Path) -> Verdict {
+    Verdict::about(ReasonCode::LinkResolvesToNothing, vec![Subject::path(path)])
 }
 
 /// Reads a value the walk requires. Absence is a broken stack, not a value.
-fn read_required(path: &Path) -> Result<String, String> {
+fn read_required(path: &Path) -> Result<String, Verdict> {
     match presence(path)? {
         Presence::Present => read_sysfs(path),
         Presence::Missing => Err(unreadable_reason(path, std::io::ErrorKind::NotFound)),
@@ -1191,7 +1371,7 @@ fn read_required(path: &Path) -> Result<String, String> {
 /// The same question for a directory. Presence already followed the link --
 /// every entry under /sys/dev/block is a symlink to the device's real
 /// directory -- so this only adds "and it is a directory".
-fn directory_presence(path: &Path) -> Result<Presence, String> {
+fn directory_presence(path: &Path) -> Result<Presence, Verdict> {
     match presence(path)? {
         Presence::Missing => Ok(Presence::Missing),
         Presence::Present => match fs::metadata(path) {
@@ -1202,31 +1382,18 @@ fn directory_presence(path: &Path) -> Result<Presence, String> {
     }
 }
 
-fn unreadable_reason(path: &Path, kind: std::io::ErrorKind) -> String {
-    format!(
-        "a device in the volume's stack could not be read: {} ({kind:?})",
-        shorten_path(path)
+fn unreadable_reason(path: &Path, kind: std::io::ErrorKind) -> Verdict {
+    Verdict::about(
+        ReasonCode::DeviceUnreadable,
+        vec![
+            Subject::path(path),
+            Subject::new(SubjectRole::Detail, &format!("{kind:?}")),
+        ],
     )
 }
 
-/// Shortens a path for a one-sentence conclusion without losing which path it
-/// is. A bound belongs on the components a sentence is built from, never on the
-/// sentence: truncating the assembled text is how a conclusion turns into a
-/// fragment of a device name.
-fn shorten_path(path: &Path) -> String {
-    let text = path.display().to_string();
-    if text.chars().count() <= MAX_PATH_IN_REASON {
-        return text;
-    }
-    let tail: String = text
-        .chars()
-        .skip(text.chars().count() - (MAX_PATH_IN_REASON - 1))
-        .collect();
-    format!("\u{2026}{tail}")
-}
-
-fn over_budget(path: &Path) -> String {
-    format!("{} exceeded Beacon's read budget", shorten_path(path))
+fn over_budget(path: &Path) -> Verdict {
+    Verdict::about(ReasonCode::ReadOverBudget, vec![Subject::path(path)])
 }
 
 /// Reads one bounded value, and can tell a complete read from a truncated one.
@@ -1260,7 +1427,7 @@ fn read_bounded(path: &Path, budget: u64) -> Result<String, BoundedRead> {
     String::from_utf8(bytes).map_err(|_| BoundedRead::Failed(std::io::ErrorKind::InvalidData))
 }
 
-fn read_sysfs(path: &Path) -> Result<String, String> {
+fn read_sysfs(path: &Path) -> Result<String, Verdict> {
     match read_bounded(path, MAX_SYSFS_FILE_BYTES) {
         Ok(value) => Ok(value.trim().to_owned()),
         Err(BoundedRead::Failed(kind)) => Err(unreadable_reason(path, kind)),
@@ -1350,14 +1517,84 @@ mod tests {
 
     #[test]
     fn redacts_long_identifiers_before_they_reach_evidence() {
-        let recorded = bounded(
+        let (recorded, truncated) = bounded(
             "device-mapper uuid prefix CRYPT-LUKS2, mapping luks-4f8c1d2e9a7b6c5d4e3f2a1b0c9d8e7f"
                 .to_owned(),
         );
         assert!(recorded.contains("CRYPT-LUKS2"));
         assert!(!recorded.contains("4f8c1d2e9a7b6c5d4e3f2a1b0c9d8e7f"));
         assert!(recorded.contains('\u{2026}'));
+        // Redaction is not truncation: the flag says only whether text was cut.
+        assert!(!truncated);
         // Short hexadecimal text is ordinary text and survives.
-        assert_eq!(bounded("dm-0 ext4".to_owned()), "dm-0 ext4");
+        assert_eq!(
+            bounded("dm-0 ext4".to_owned()),
+            ("dm-0 ext4".to_owned(), false)
+        );
     }
+
+    #[test]
+    fn a_conclusion_cannot_outgrow_its_bound() {
+        // The property the type exists for. Compose the largest conclusion the
+        // shape allows -- every reason, the most subjects, each at its maximum
+        // length -- and every rendered sentence must still fit.
+        let long = "m".repeat(400);
+        for reason in EVERY_REASON {
+            let conclusion = LiveDataEncryptionConclusion::new(
+                LiveDataEncryption::Unknown,
+                reason,
+                vec![
+                    Subject::new(SubjectRole::Mechanism, &long),
+                    Subject::new(SubjectRole::Mapping, &long),
+                    Subject::new(SubjectRole::Device, &long),
+                    Subject::new(SubjectRole::Location, &long),
+                    Subject::new(SubjectRole::Detail, &long),
+                ],
+            );
+            assert!(conclusion.subjects.len() <= MAX_SUBJECTS);
+            let rendered = render_conclusion(&conclusion);
+            assert!(
+                rendered.chars().count() <= MAX_RENDERED_CONCLUSION_CHARS,
+                "{reason:?} rendered {} chars",
+                rendered.chars().count()
+            );
+            assert!(!rendered.is_empty(), "{reason:?} rendered nothing");
+        }
+    }
+
+    #[test]
+    fn a_shortened_subject_says_so_by_flag() {
+        let short = Subject::new(SubjectRole::Mapping, "vg0-root");
+        assert!(!short.shortened);
+        assert_eq!(short.value, "vg0-root");
+        let long = Subject::new(SubjectRole::Mapping, &"mapping-".repeat(20));
+        assert!(long.shortened);
+        assert_eq!(long.value.chars().count(), MAX_SUBJECT_CHARS);
+    }
+
+    const EVERY_REASON: [ReasonCode; 23] = [
+        ReasonCode::CryptCoversEveryPath,
+        ReasonCode::NoCryptOnAnyPath,
+        ReasonCode::SomePathsUncovered,
+        ReasonCode::StorePathUnresolved,
+        ReasonCode::StoreNotInspectable,
+        ReasonCode::MountTableUnreadable,
+        ReasonCode::MountTableUnparsed,
+        ReasonCode::MountTableEmpty,
+        ReasonCode::NoMountForStore,
+        ReasonCode::MountAndStatDisagree,
+        ReasonCode::MemoryBackedFilesystem,
+        ReasonCode::OverlayFilesystem,
+        ReasonCode::UserspaceFilesystem,
+        ReasonCode::NetworkFilesystem,
+        ReasonCode::NoBlockDeviceForFilesystem,
+        ReasonCode::LinkResolvesToNothing,
+        ReasonCode::DeviceUnreadable,
+        ReasonCode::ReadOverBudget,
+        ReasonCode::StackOverBudget,
+        ReasonCode::NoPhysicalLeaf,
+        ReasonCode::MappingWithoutBackingDevice,
+        ReasonCode::LoopbackImage,
+        ReasonCode::PlatformNotSupported,
+    ];
 }
