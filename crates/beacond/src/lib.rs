@@ -22,6 +22,7 @@ mod project;
 mod project_policy;
 mod project_repository;
 mod proposal;
+mod recent_receipts;
 mod resident_configuration;
 mod resident_lifecycle;
 mod resource_discovery;
@@ -46,6 +47,11 @@ pub use declared_checks::{
 pub use local_transport::{
     LocalErrorCode, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
     LocalTransportError, initialize_local_auth_token,
+};
+#[cfg(unix)]
+pub use recent_receipts::{
+    DEFAULT_RECENT_RUN_WINDOW, MAX_RECENT_RUN_WINDOW, RecentReceipt, RecentReceiptError,
+    RecentReceiptOutcome, RecentReceiptPage, RecentReceiptService,
 };
 pub use sandbox::{
     Ceiling, ExecutionBounds, ExecutionOutcome, ExecutionRecord, Interrupt, ProbeObservation,
@@ -123,7 +129,7 @@ pub use team::{
 };
 pub use worktree::{CleanupOutcome, KeepReason, Worktree, WorktreeError};
 
-const SCHEMA_VERSION: i64 = 19;
+const SCHEMA_VERSION: i64 = 20;
 const MAX_WORKSPACE_NAME_CHARS: usize = 120;
 
 const SCHEMA_V1: &str = include_str!("../migrations/0001_initial.sql");
@@ -152,6 +158,7 @@ const MIGRATION_V16_ONLY: &str = include_str!("../migrations/0016_execution_rece
 const MIGRATION_V17: &str = include_str!("../migrations/0017_sample_project.sql");
 const MIGRATION_V18: &str = include_str!("../migrations/0018_proposals.sql");
 const MIGRATION_V19: &str = include_str!("../migrations/0019_rulings.sql");
+const MIGRATION_V20: &str = include_str!("../migrations/0020_recent_receipts_index.sql");
 
 #[derive(Debug, Clone)]
 pub struct StartupConfig {
@@ -469,6 +476,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V16)?;
                     transaction.execute_batch(MIGRATION_V18)?;
                     transaction.execute_batch(MIGRATION_V19)?;
+                    transaction.execute_batch(MIGRATION_V20)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 2 => {
@@ -489,6 +497,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V16)?;
                     transaction.execute_batch(MIGRATION_V18)?;
                     transaction.execute_batch(MIGRATION_V19)?;
+                    transaction.execute_batch(MIGRATION_V20)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 3 => {
@@ -508,6 +517,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V16)?;
                     transaction.execute_batch(MIGRATION_V18)?;
                     transaction.execute_batch(MIGRATION_V19)?;
+                    transaction.execute_batch(MIGRATION_V20)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 4 => {
@@ -526,6 +536,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V16)?;
                     transaction.execute_batch(MIGRATION_V18)?;
                     transaction.execute_batch(MIGRATION_V19)?;
+                    transaction.execute_batch(MIGRATION_V20)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 5 => {
@@ -543,6 +554,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V16)?;
                     transaction.execute_batch(MIGRATION_V18)?;
                     transaction.execute_batch(MIGRATION_V19)?;
+                    transaction.execute_batch(MIGRATION_V20)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 6 => {
@@ -559,6 +571,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V16)?;
                     transaction.execute_batch(MIGRATION_V18)?;
                     transaction.execute_batch(MIGRATION_V19)?;
+                    transaction.execute_batch(MIGRATION_V20)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 7 => {
@@ -574,6 +587,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V16)?;
                     transaction.execute_batch(MIGRATION_V18)?;
                     transaction.execute_batch(MIGRATION_V19)?;
+                    transaction.execute_batch(MIGRATION_V20)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 8 => {
@@ -588,6 +602,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V16)?;
                     transaction.execute_batch(MIGRATION_V18)?;
                     transaction.execute_batch(MIGRATION_V19)?;
+                    transaction.execute_batch(MIGRATION_V20)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 9 => {
@@ -601,6 +616,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V16)?;
                     transaction.execute_batch(MIGRATION_V18)?;
                     transaction.execute_batch(MIGRATION_V19)?;
+                    transaction.execute_batch(MIGRATION_V20)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 10 => {
@@ -613,6 +629,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V16)?;
                     transaction.execute_batch(MIGRATION_V18)?;
                     transaction.execute_batch(MIGRATION_V19)?;
+                    transaction.execute_batch(MIGRATION_V20)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 11 => {
@@ -624,6 +641,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V16)?;
                     transaction.execute_batch(MIGRATION_V18)?;
                     transaction.execute_batch(MIGRATION_V19)?;
+                    transaction.execute_batch(MIGRATION_V20)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 12 => {
@@ -634,6 +652,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V16)?;
                     transaction.execute_batch(MIGRATION_V18)?;
                     transaction.execute_batch(MIGRATION_V19)?;
+                    transaction.execute_batch(MIGRATION_V20)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 13 => {
@@ -643,6 +662,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V16)?;
                     transaction.execute_batch(MIGRATION_V18)?;
                     transaction.execute_batch(MIGRATION_V19)?;
+                    transaction.execute_batch(MIGRATION_V20)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 14 => {
@@ -651,6 +671,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V16)?;
                     transaction.execute_batch(MIGRATION_V18)?;
                     transaction.execute_batch(MIGRATION_V19)?;
+                    transaction.execute_batch(MIGRATION_V20)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 15 => {
@@ -658,6 +679,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V16)?;
                     transaction.execute_batch(MIGRATION_V18)?;
                     transaction.execute_batch(MIGRATION_V19)?;
+                    transaction.execute_batch(MIGRATION_V20)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 16 => {
@@ -665,17 +687,25 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V17)?;
                     transaction.execute_batch(MIGRATION_V18)?;
                     transaction.execute_batch(MIGRATION_V19)?;
+                    transaction.execute_batch(MIGRATION_V20)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 17 => {
                     verify_schema(&transaction, 17)?;
                     transaction.execute_batch(MIGRATION_V18)?;
                     transaction.execute_batch(MIGRATION_V19)?;
+                    transaction.execute_batch(MIGRATION_V20)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 18 => {
                     verify_schema(&transaction, 18)?;
                     transaction.execute_batch(MIGRATION_V19)?;
+                    transaction.execute_batch(MIGRATION_V20)?;
+                    verify_schema(&transaction, SCHEMA_VERSION)?;
+                }
+                19 => {
+                    verify_schema(&transaction, 19)?;
+                    transaction.execute_batch(MIGRATION_V20)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 SCHEMA_VERSION => verify_schema(&transaction, SCHEMA_VERSION)?,
@@ -700,6 +730,7 @@ impl Supervisor {
             transaction.execute_batch(MIGRATION_V16)?;
             transaction.execute_batch(MIGRATION_V18)?;
             transaction.execute_batch(MIGRATION_V19)?;
+            transaction.execute_batch(MIGRATION_V20)?;
             verify_schema(&transaction, SCHEMA_VERSION)?;
         }
 
@@ -929,6 +960,9 @@ fn verify_schema(connection: &Connection, version: i64) -> Result<(), Supervisor
     }
     if version >= 19 {
         expected_connection.execute_batch(MIGRATION_V19)?;
+    }
+    if version >= 20 {
+        expected_connection.execute_batch(MIGRATION_V20)?;
     }
     if !(1..=SCHEMA_VERSION).contains(&version) {
         return Err(SupervisorError::UnsupportedSchemaVersion(version));
@@ -1350,6 +1384,7 @@ fn count_rows(connection: &Connection, table: &str) -> Result<u64, SupervisorErr
 
 #[cfg(test)]
 mod tests {
+    use crate::SCHEMA_VERSION;
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -1633,7 +1668,7 @@ mod tests {
         assert!(report.workspace.created);
         assert_eq!(report.workspace.name, "Personal");
         assert_eq!(report.diagnostics.status, DiagnosticStatus::Ready);
-        assert_eq!(report.diagnostics.schema_version, 19);
+        assert_eq!(report.diagnostics.schema_version, SCHEMA_VERSION);
         assert_eq!(report.diagnostics.integrity_check, "ok");
         assert_eq!(report.diagnostics.foreign_key_violations, 0);
         assert_eq!(report.diagnostics.workspace_count, 1);
@@ -1716,7 +1751,7 @@ mod tests {
         assert_eq!(report.workspace.id, workspace_id);
         assert_eq!(report.workspace.name, "Existing");
         assert!(!report.workspace.created);
-        assert_eq!(report.diagnostics.schema_version, 19);
+        assert_eq!(report.diagnostics.schema_version, SCHEMA_VERSION);
         assert_eq!(report.diagnostics.workspace_count, 1);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         assert_eq!(report.diagnostics.security_event_count, 0);
@@ -1755,7 +1790,7 @@ mod tests {
 
         let report = Supervisor::bootstrap(config(&store.path, "Personal")).unwrap();
 
-        assert_eq!(report.diagnostics.schema_version, 19);
+        assert_eq!(report.diagnostics.schema_version, SCHEMA_VERSION);
         assert_eq!(report.diagnostics.security_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(
@@ -1814,7 +1849,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 19);
+        assert_eq!(report.diagnostics.schema_version, SCHEMA_VERSION);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(
             connection
@@ -1917,7 +1952,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 19);
+        assert_eq!(report.diagnostics.schema_version, SCHEMA_VERSION);
         assert_eq!(report.diagnostics.persisted_event_count, 2);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(
@@ -1979,7 +2014,7 @@ mod tests {
 
         assert_eq!(report.workspace.id, workspace_id);
         assert_eq!(report.workspace.name, "Existing");
-        assert_eq!(report.diagnostics.schema_version, 19);
+        assert_eq!(report.diagnostics.schema_version, SCHEMA_VERSION);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(
@@ -2078,7 +2113,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 19);
+        assert_eq!(report.diagnostics.schema_version, SCHEMA_VERSION);
         assert_eq!(report.diagnostics.persisted_event_count, 2);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(
@@ -2139,7 +2174,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 19);
+        assert_eq!(report.diagnostics.schema_version, SCHEMA_VERSION);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         let event = connection
@@ -2214,7 +2249,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 19);
+        assert_eq!(report.diagnostics.schema_version, SCHEMA_VERSION);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         let event = connection
@@ -2287,7 +2322,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 19);
+        assert_eq!(report.diagnostics.schema_version, SCHEMA_VERSION);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         let event = connection
@@ -2387,7 +2422,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 19);
+        assert_eq!(report.diagnostics.schema_version, SCHEMA_VERSION);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         let event = connection
@@ -2495,7 +2530,7 @@ mod tests {
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
         assert_eq!(report.workspace.id, workspace_id);
-        assert_eq!(report.diagnostics.schema_version, 19);
+        assert_eq!(report.diagnostics.schema_version, SCHEMA_VERSION);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         let event = connection
@@ -2823,7 +2858,7 @@ mod tests {
 
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
-        assert_eq!(report.diagnostics.schema_version, 19);
+        assert_eq!(report.diagnostics.schema_version, SCHEMA_VERSION);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(read_run(&connection), run_before);
         assert_eq!(read_receipt(&connection), receipt_before);
@@ -2880,7 +2915,7 @@ mod tests {
 
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
-        assert_eq!(report.diagnostics.schema_version, 19);
+        assert_eq!(report.diagnostics.schema_version, SCHEMA_VERSION);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(
@@ -3068,7 +3103,7 @@ mod tests {
         drop(connection);
 
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
-        assert_eq!(report.diagnostics.schema_version, 19);
+        assert_eq!(report.diagnostics.schema_version, SCHEMA_VERSION);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         connection
@@ -3122,7 +3157,7 @@ mod tests {
 
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
-        assert_eq!(report.diagnostics.schema_version, 19);
+        assert_eq!(report.diagnostics.schema_version, SCHEMA_VERSION);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         // The exact payload bytes, the exact sequence, and the exact timestamp survive the
@@ -3397,7 +3432,7 @@ mod tests {
         drop(connection);
 
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
-        assert_eq!(report.diagnostics.schema_version, 19);
+        assert_eq!(report.diagnostics.schema_version, SCHEMA_VERSION);
         assert_eq!(report.diagnostics.persisted_event_count, 1);
         let connection = Connection::open(&store.path).unwrap();
         connection
