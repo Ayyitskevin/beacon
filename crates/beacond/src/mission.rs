@@ -659,6 +659,55 @@ fn map_team_error(error: TeamError) -> MissionError {
     }
 }
 
+/// What one admitted Mission tells a caller that must bind to it: the Project it
+/// belongs to, and the immutable admission Configuration recorded for one Resident —
+/// `None` when that Resident is not on this Mission's admission roster.
+///
+/// A Proposal names Project, Mission, Resident, and Configuration redundantly so a
+/// cross-Project or cross-Resident substitution is detectable without following one
+/// identity to discover the others. This is one bounded read rather than four.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MissionAdmissionFacts {
+    pub(crate) project_id: Uuid,
+    pub(crate) member_configuration_id: Option<Uuid>,
+}
+
+pub(crate) fn mission_admission_facts(
+    connection: &Connection,
+    workspace_id: Uuid,
+    mission_id: Uuid,
+    resident_id: Uuid,
+) -> Result<Option<MissionAdmissionFacts>, MissionError> {
+    let Some(project_id) = connection
+        .query_row(
+            "SELECT project_id FROM missions WHERE workspace_id = ?1 AND id = ?2",
+            params![workspace_id.to_string(), mission_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let member_configuration_id = connection
+        .query_row(
+            "SELECT configuration_id FROM mission_admission_members
+             WHERE workspace_id = ?1 AND mission_id = ?2 AND resident_id = ?3",
+            params![
+                workspace_id.to_string(),
+                mission_id.to_string(),
+                resident_id.to_string()
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(parse_uuid)
+        .transpose()?;
+    Ok(Some(MissionAdmissionFacts {
+        project_id: parse_uuid(project_id)?,
+        member_configuration_id,
+    }))
+}
+
 pub(crate) fn verify_mission_event(
     connection: &Connection,
     workspace_id: Uuid,

@@ -537,6 +537,18 @@ impl OperatorAccountService {
     }
 }
 
+/// Whether this store still holds its singleton Owner account. A record that names
+/// `owner` as its authorization basis is only truthful while that account exists, so
+/// reconciliation asks the account module rather than reading its table directly.
+pub(crate) fn owner_account_exists(connection: &Connection) -> Result<bool, rusqlite::Error> {
+    let count: i64 = connection.query_row(
+        "SELECT count(*) FROM operator_accounts WHERE singleton = 1 AND role = 'owner'",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(count == 1)
+}
+
 fn require_active_session(state: &mut AccountState, now: i64) -> Result<(), OperatorAccountError> {
     let session = state
         .session
