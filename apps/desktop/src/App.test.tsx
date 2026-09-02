@@ -218,7 +218,7 @@ function encryptionReport(state: "enabled" | "disabled" | "unknown", reason?: st
             kind: "absent",
             reason:
               reason ??
-              "Beacon found no device-mapper crypt layer in this volume's block stack",
+              "at least one path to disk has no crypt layer: 259:2",
           },
     evidence: encryptionEvidence,
     notVerified: ["filesystem-level encryption such as fscrypt or ext4 encryption"],
