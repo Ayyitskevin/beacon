@@ -354,7 +354,7 @@ describe("Beacon desktop shell", () => {
     await screen.findByRole("heading", { name: "Briefing" });
 
     expect(
-      await screen.findByText(/Live data is not protected by disk encryption\./),
+      await screen.findByText(/Live data is not fully protected by disk encryption\./),
     ).toBeVisible();
     // Unobtrusive, but not dismissible: the condition, not the operator, ends it.
     expect(screen.queryByRole("button", { name: /dismiss|ignore|close/i })).toBeNull();
@@ -370,11 +370,35 @@ describe("Beacon desktop shell", () => {
     expect(
       await screen.findByText(/Operating-system disk encryption detected/),
     ).toBeVisible();
-    expect(screen.queryByText(/Live data is not protected by disk encryption\./)).toBeNull();
+    expect(
+      screen.queryByText(/Live data is not fully protected by disk encryption\./),
+    ).toBeNull();
     expect(invokeMock).toHaveBeenCalledWith("live_data_encryption_status");
 
     const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
     expect(results.violations).toEqual([]);
+  });
+
+  it("does not deny encryption the reading itself observed", async () => {
+    mockInitialState("unlocked");
+    const base = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "live_data_encryption_status") {
+        // A mixed stack: one member encrypted, one not. Telling the operator
+        // Beacon "found no encryption" here is false, and an operator who can
+        // see the crypt layer in the evidence learns to disbelieve the warning.
+        return Promise.resolve(encryptionReport("disabled", "pv0 is encrypted; 8:17 is not"));
+      }
+      return base(command, args);
+    });
+
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await screen.findByRole("heading", { name: "Live data" });
+
+    expect(container.textContent).not.toContain("found no operating-system disk encryption");
+    expect(screen.getByText(/pv0 is encrypted; 8:17 is not/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "How to turn this on" })).toBeVisible();
   });
 
   it("never describes the open live store as Beacon-encrypted", async () => {

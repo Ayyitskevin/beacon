@@ -192,6 +192,13 @@ fn encrypted_branch_does_not_mask_a_plain_sibling() {
     assert!(evidence_text(&report).contains("8:17"));
     // And still say what it did find, so the operator is not told "nothing".
     assert!(evidence_text(&report).contains("CRYPT-LUKS2"));
+    // The reason must not deny the encryption this very report observed. An
+    // operator who can see CRYPT-LUKS2 in the evidence and reads "found no
+    // encryption" learns to disbelieve the warning.
+    let reason = reason(&report);
+    assert!(reason.contains("pv0 is encrypted"), "{reason}");
+    assert!(reason.contains("8:17 is not"), "{reason}");
+    assert!(!reason.contains("found no"), "{reason}");
 }
 
 #[test]
@@ -480,6 +487,8 @@ fn plain_partition_with_no_dm_layer_reports_disabled_and_names_what_it_cannot_se
     let report = fixture.read();
 
     assert_eq!(report.state, LiveDataEncryption::Disabled);
+    // Nothing encrypted was seen here, so the reason says only that.
+    assert!(reason(&report).starts_with("at least one path to disk has no crypt layer"));
     assert!(!report.not_verified.is_empty());
     let gaps = report.not_verified.join(" ");
     assert!(gaps.contains("self-encrypting drive"));
