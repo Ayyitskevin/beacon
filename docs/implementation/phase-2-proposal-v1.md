@@ -104,9 +104,30 @@ Preflight reads, under the same inspection budget:
 | reason | what was observed |
 |---|---|
 | `RepositorySourceNotLocal` | the binding names a Git URL; nothing local exists to compare, and this slice performs no fetch |
-| `RepositoryUnavailable` | the local path did not open as a Git object store, or the inspection budget elapsed — both mean *not known* |
+| `RepositoryUnreadable` | the local path did not open as a Git object store: missing, unreadable, or not a repository |
+| `InspectionFailed` | the store opened and an inspection step errored — an unparseable pack index, a `.git` indirection chain |
+| `InspectionTimedOut` | the inspection did not finish inside its budget: not evaluated, distinct from both a negative answer and an error |
 | `PinnedRevisionAbsent` | the store opened, but the pinned base revision is not in it: the basis for the comparison is what is missing |
 | `ContentUnreadableAtRevision` | the store opened and the pinned revision is present, and Beacon still cannot read a path's content at that revision |
+
+**The inspection budget is best-effort, not a hard bound.** The comparison consults a 5-second
+deadline on entry and between every object-store step, and passes that same deadline into
+`ObjectStore::contains`, so an elapsed budget is reported as `InspectionTimedOut` — not evaluated,
+never a negative answer. Four things it does not bound, all of them inside
+`crates/beacond/src/git_object_store.rs` or the startup loop rather than in this module:
+
+- `ObjectStore::open` takes no deadline at all, and reads a `.git` file with `read_to_string`
+  before this code regains control (`git_object_store.rs:62`);
+- `index_contains` reads an entire pack index with `fs::read` before its first deadline check
+  (`:186` versus `:217`), so one very large index can overrun;
+- the pack directory is enumerated and collected before the per-index deadline loop begins
+  (`:130-140`);
+- startup grants each declared-context Proposal its own fresh budget, so N such Proposals cost up
+  to N × 5s, not 5s in total.
+
+Bounding the first three means changing that module's I/O, which this slice does not own. The
+fourth would need one budget threaded through startup reconciliation rather than per read. Both are
+follow-ups; what is claimed here is only what is enforced.
 
 **`ContentUnreadableAtRevision` is the terminal state today, and that is a capability limit, not a
 policy choice.** Resolving `path` to its bytes at a revision means decompressing the commit object,
