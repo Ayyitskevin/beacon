@@ -1566,8 +1566,11 @@ fn positive_u32(value: i64) -> Result<u32, SampleProjectError> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::CString;
     use std::fs;
     use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
@@ -1876,9 +1879,66 @@ mod tests {
     }
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn assert_at_fdcwd_rename_filter_live(path: &std::path::Path) -> std::io::Result<()> {
+        let scratch_directory = path
+            .parent()
+            .expect("staging directory has a parent")
+            .join(format!(".seccomp-control-{}", Uuid::new_v4()));
+        fs::create_dir(&scratch_directory)?;
+        let source_path = scratch_directory.join("a");
+        let destination_path = scratch_directory.join("b");
+        fs::write(&source_path, b"seccomp control")?;
+
+        let source_path = CString::new(source_path.as_os_str().as_bytes()).unwrap();
+        let destination_path = CString::new(destination_path.as_os_str().as_bytes()).unwrap();
+        let at_fdcwd_result = unsafe {
+            libc::renameat(
+                libc::AT_FDCWD,
+                source_path.as_ptr(),
+                libc::AT_FDCWD,
+                destination_path.as_ptr(),
+            )
+        };
+        let at_fdcwd_error = std::io::Error::last_os_error();
+        assert_eq!(
+            at_fdcwd_result, -1,
+            "AT_FDCWD rename unexpectedly bypassed the seccomp filter"
+        );
+        assert_eq!(
+            at_fdcwd_error.raw_os_error(),
+            Some(libc::EPERM),
+            "AT_FDCWD rename failed for the wrong reason: {at_fdcwd_error}"
+        );
+
+        let directory = fs::File::open(&scratch_directory)?;
+        let source_name = CString::new("a").unwrap();
+        let destination_name = CString::new("b").unwrap();
+        let descriptor_relative_result = unsafe {
+            libc::renameat(
+                directory.as_raw_fd(),
+                source_name.as_ptr(),
+                directory.as_raw_fd(),
+                destination_name.as_ptr(),
+            )
+        };
+        assert_eq!(
+            descriptor_relative_result,
+            0,
+            "descriptor-relative rename was blocked: {}",
+            std::io::Error::last_os_error()
+        );
+        assert_eq!(fs::read(scratch_directory.join("b"))?, b"seccomp control");
+
+        fs::remove_file(scratch_directory.join("b"))?;
+        fs::remove_dir(scratch_directory)?;
+        Ok(())
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     fn sync_then_forbid_at_fdcwd_rename(path: &std::path::Path) -> std::io::Result<()> {
         super::sync_directory_tree(path)?;
-        forbid_at_fdcwd_rename()
+        forbid_at_fdcwd_rename()?;
+        assert_at_fdcwd_rename_filter_live(path)
     }
 
     #[test]
