@@ -67,11 +67,13 @@ kills — an AppDir with the supervisor removed exits 1 with
 
 linuxdeploy bundles the build host's GTK and WebKit libraries, so the package job's base image sets
 the floor. On `ubuntu-latest` the shell needs `GLIBC_2.39` and the bundled libraries need `2.38`,
-which excludes Debian 12, Ubuntu 22.04, and Mint 21. The job is pinned to `ubuntu-22.04`, measured
-by building the same tree in an `ubuntu:22.04` container and launching the result on three clean
+which excludes Debian 12 and Ubuntu 22.04. The job is pinned to `ubuntu-22.04`, measured by
+building the same tree in an `ubuntu:22.04` container and launching the result on three clean
 hosts — Ubuntu 22.04, Debian 12, and Ubuntu 24.04 — all of which reached a rendered first-run screen
-with the supervisor running. RHEL 9 is glibc 2.34 and remains out; going lower means a
-manylinux-style container build rather than a runner label.
+with the supervisor running. Those three are the whole of what was launched. Other hosts at glibc
+2.35 or newer are loader-eligible and expected to work, which is not the same claim: the bundle also
+needs four libraries it does not carry and, run directly, `libfuse2`. RHEL 9 is glibc 2.34 and is
+below the floor; going lower means a manylinux-style container build rather than a runner label.
 
 ## Verification
 

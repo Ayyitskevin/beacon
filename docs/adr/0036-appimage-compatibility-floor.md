@@ -49,9 +49,15 @@ available on jammy), and an AppImage that launches on all three.
 ## Options
 
 **A — floor 2.35 via `runs-on: ubuntu-22.04` on the package job (recommended).**
-One line, already measured on three hosts. Reaches Ubuntu 22.04 and 24.04,
-Debian 12, Mint 21 and 22, and anything else at glibc 2.35 or newer.
-Excludes RHEL 9 and CentOS Stream 9 (2.34), SLES 15 (2.31), and Debian 11 (2.31).
+One line. **Measured:** launches on Ubuntu 22.04, Debian 12, and Ubuntu 24.04 —
+the three rows above, and the only hosts anything was launched on.
+**Expected but not measured:** any other host at glibc 2.35 or newer, such as
+Mint 21 and 22, is loader-*eligible*. That is necessary, not sufficient: the
+bundle also needs the four libraries it does not carry and, for direct
+execution, `libfuse2` (`CONTRIBUTING.md`). No non-Debian-family host and no real
+desktop session has been launched at all.
+**Excluded** below the floor: RHEL 9 and CentOS Stream 9 (2.34), SLES 15 (2.31),
+and Debian 11 (2.31).
 Cost if wrong: GitHub retires the `ubuntu-22.04` label and the package job fails
 at start — loudly, and revertible in one line. That label's continued
 availability is the one thing in this proposal not verified locally.
@@ -66,8 +72,10 @@ download.
 
 **C — a manylinux-style container build.** Build inside a pinned old-glibc image
 rather than on a runner label, decoupling the floor from GitHub's fleet
-entirely and reaching RHEL 9 and older. It is the only option that reaches
-anything below 2.35. Cost: a container image to build and maintain, WebKit and
+entirely. It is the only option that could make hosts below 2.35 loader-eligible
+at all; RHEL 9 and older are its **intended target, not a measured result** —
+nothing has been built or launched this way, and the same unmeasured
+runtime-library and desktop boundary would still apply on top of the loader. Cost: a container image to build and maintain, WebKit and
 GTK development packages sourced for that base, and a slower package job — a
 project rather than a line, and not justified by any Alpha requirement now.
 
