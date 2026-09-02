@@ -1580,12 +1580,14 @@ mod tests {
     }
 
     #[test]
-    fn a_reordered_field_is_refused_rather_than_read_as_another_field() {
-        // The two `u32` revisions are adjacent and the same width, so swapping them is the one
-        // reordering a length-prefixed grammar cannot catch structurally -- it must change the
-        // identity instead. Swapping the two adjacent strings is caught outright.
+    fn two_same_width_values_swapped_are_a_different_record_rather_than_a_refusal() {
+        // Named for what it proves, because the earlier name claimed more than a positional
+        // grammar can deliver (gpt2, SP2). A record whose `charter_revision` and
+        // `project_policy_revision` are swapped IS a legitimate record whose revisions are those
+        // numbers -- no predicate can tell the two apart without knowing an intent the bytes do
+        // not carry. What holds is that the swap changes the identity, and that is asserted here.
         let bytes = encode(&fixture()).unwrap();
-        let swapped_revisions = encode(&RulingV1 {
+        let swapped = encode(&RulingV1 {
             bindings: ProposalBindings {
                 charter_revision: 2,
                 project_policy_revision: 1,
@@ -1594,18 +1596,31 @@ mod tests {
             ..fixture()
         })
         .unwrap();
-        assert_ne!(swapped_revisions, bytes);
+        assert_ne!(swapped, bytes);
+        assert_ne!(sha256(&swapped), sha256(&bytes));
+        // And it decodes, as a different record. Saying so is the point: the refusal a caller
+        // might expect does not exist, and a test that implied otherwise was hiding that.
+        let decoded = decode(&swapped).unwrap();
+        assert_eq!(decoded.bindings.charter_revision, 2);
+        assert_eq!(decoded.bindings.project_policy_revision, 1);
+    }
 
-        let mut swapped_strings = Vec::new();
-        swapped_strings.extend_from_slice(MAGIC);
-        swapped_strings.extend_from_slice(&HEXLOWER.decode(PROPOSAL.as_bytes()).unwrap());
-        swapped_strings.extend_from_slice(&18_u64.to_be_bytes());
-        swapped_strings.extend_from_slice(b"beacon.proposal.v1");
-        swapped_strings.extend_from_slice(&6_u64.to_be_bytes());
-        swapped_strings.extend_from_slice(b"sha256");
-        swapped_strings.extend_from_slice(&bytes[MAGIC.len() + 32 + 8 + 6 + 8 + 18..]);
+    #[test]
+    fn a_reordering_the_grammar_can_see_is_refused() {
+        // The other half of the same ruling: where a reordering IS structurally visible -- here
+        // the two adjacent length-prefixed strings of the Proposal envelope -- it is refused
+        // rather than read as some other record.
+        let bytes = encode(&fixture()).unwrap();
+        let mut swapped = Vec::new();
+        swapped.extend_from_slice(MAGIC);
+        swapped.extend_from_slice(&HEXLOWER.decode(PROPOSAL.as_bytes()).unwrap());
+        swapped.extend_from_slice(&18_u64.to_be_bytes());
+        swapped.extend_from_slice(b"beacon.proposal.v1");
+        swapped.extend_from_slice(&6_u64.to_be_bytes());
+        swapped.extend_from_slice(b"sha256");
+        swapped.extend_from_slice(&bytes[MAGIC.len() + 32 + 8 + 6 + 8 + 18..]);
         assert_eq!(
-            decode(&swapped_strings),
+            decode(&swapped),
             Err(MalformedRuling::ProposalDigestEnvelope)
         );
     }

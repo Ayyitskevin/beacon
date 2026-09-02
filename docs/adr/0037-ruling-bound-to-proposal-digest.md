@@ -78,10 +78,51 @@ tag that is never renumbered.
 | 12 | `supersedes` | tag: `none` = `0x00`; `digest` = `0x01` followed by 32 raw bytes |
 | 13 | `ruled_at_ms` | `u64` |
 
-The decoder consumes the entire input. Trailing bytes, a reordered field, an
-unknown tag, invalid UTF-8, and an over-limit length are each refused rather than
-tolerated. `supersedes` is the one place a `0x00` tag is assigned, because absence
-is a *value* here and must encode as one.
+The decoder consumes the entire input. Trailing bytes, an unknown tag, invalid
+UTF-8, and an over-limit length are each refused rather than tolerated.
+`supersedes` is the one place a `0x00` tag is assigned, because absence is a
+*value* here and must encode as one.
+
+**What "reordering is refused" can and cannot mean here.** This grammar is
+positional and untagged, so the two claims must be separated. A reordering the
+decoder can *see* — two adjacent strings swapped, a tag where a length belongs —
+is refused, because the bytes stop parsing or a closed vocabulary rejects them.
+A reordering of two **same-width** values is not detectable by construction: a
+record whose `charter_revision` and `project_policy_revision` are swapped is
+byte-for-byte a legitimate record whose revisions are those numbers, and no
+predicate can tell the two apart without knowing an intent the bytes do not
+carry. What holds instead is that such a swap **changes the identity**, because
+every field is positional and every byte is covered by the digest. Field order is
+fixed by the table above and pinned by the published identity vector below; it is
+not, and is not claimed to be, enforced by a runtime check.
+
+### Published identity vector
+
+The exact bytes and digest of one record, pinned so that an encoder and a
+hand-built expected buffer cannot drift together. Constructed independently from
+the table above, in Python, by a non-author reviewer, and byte-identical to this
+implementation's encoder.
+
+Fields: `proposal_digest` =
+`3b1f8c0e5d4a2b697f8e1d0c3a5b7e9d2f4a6c8e0b1d3f5a7c9e1b3d5f7a9c1e`, algorithm
+`sha256`, canonicalizer `beacon.proposal.v1`, revisions 1/2/3,
+`pinned_base_revision` = `a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2`, decision
+`approve`, reason `The declared effects stay inside the Repository and spend
+nothing.`, decider `owner`, `supersedes` = `none`, `ruled_at_ms` =
+`1756800000000`. **234 bytes.**
+
+```text
+record = 626561636f6e2e72756c696e672e7631003b1f8c0e5d4a2b697f8e1d0c3a5b7e9d2f4a
+         6c8e0b1d3f5a7c9e1b3d5f7a9c1e00000000000000067368613235360000000000000012
+         626561636f6e2e70726f706f73616c2e7631000000010000000200000003000000000000
+         002861316232633364346535663661316232633364346535663661316232633364346535
+         663661316232010000000000000042546865206465636c6172656420656666656374732073
+         74617920696e7369646520746865205265706f7369746f727920616e64207370656e64206e
+         6f7468696e672e0100000001990970a000
+sha256 = 8c9c3367fff1e77524014506a9bf48d0786d105b9011ccc373b79af0ae803b3d
+```
+
+(The `record` line is wrapped for width; the bytes are its concatenation.)
 
 **The command accepts typed arguments rather than a byte slice.** This is the one
 place Ruling v1 does not copy Proposal v1, and the reason is the difference
