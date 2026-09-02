@@ -1056,6 +1056,59 @@ fn a_second_admitted_member_may_request_its_own_proposal() {
     assert_ne!(proposal.digest().value, fixture.record().digest());
 }
 
+#[test]
+fn a_declared_check_argument_longer_than_an_invented_cap_is_accepted_when_it_matches_a_real_binding()
+ {
+    // S4 (gpt2 non-author review). Repository Binding (project_repository.rs:398-423) accepts
+    // any non-empty, NUL-free argument with no length limit -- only the check name is capped, at
+    // 64 bytes, matching this grammar's own MAX_CHECK_NAME_BYTES. A field limit invented here
+    // that Repository Binding does not share would silently narrow the exact-byte match Proposal
+    // v1 must be able to make: a bound Declared Check with a long argument could never appear in
+    // ANY Proposal, even one comfortably inside the ADR's 64 KiB envelope.
+    let fixture = admitted_mission("long-declared-check-argument");
+    // 4,097 bytes: one byte past the removed invented cap, and nowhere near 64 KiB.
+    let long_argument = "-".repeat(4_097);
+    let oversized_check = DeclaredCheck {
+        name: "cargo-test".to_owned(),
+        argv: vec!["cargo".to_owned(), "test".to_owned(), long_argument.clone()],
+        working_directory: ".".to_owned(),
+    };
+    ProjectRepositoryService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .bind(
+            fixture.project_id,
+            1,
+            Some(1),
+            RepositoryDraft {
+                source_kind: RepositorySourceKind::LocalPath,
+                source: REPOSITORY_SOURCE.to_owned(),
+                base_revision: BASE_REVISION.to_owned(),
+                declared_checks: vec![oversized_check],
+            },
+        )
+        .unwrap();
+
+    let mut record = fixture.record();
+    record.repository_revision = 2;
+    record.checks = vec![(
+        "cargo-test".to_owned(),
+        vec!["cargo".to_owned(), "test".to_owned(), long_argument],
+        ".".to_owned(),
+    )];
+    let bytes = record.bytes();
+    assert!(
+        bytes.len() < 64 * 1024,
+        "fixture stayed well inside the envelope"
+    );
+
+    let proposal = fixture.proposals.submit(&bytes).unwrap();
+
+    assert_eq!(proposal.payload().intent.declared_checks[0].argv.len(), 3);
+    assert_eq!(
+        proposal.payload().intent.declared_checks[0].argv[2].len(),
+        4_097
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // Reads
 // ---------------------------------------------------------------------------------------------
