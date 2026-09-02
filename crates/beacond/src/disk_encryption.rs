@@ -234,7 +234,7 @@ fn inspect_linux(
 
     let mounts = match read_mountinfo(&system.mountinfo) {
         Ok(mounts) => mounts,
-        Err(reason) => return unknown(evidence, no_mount(), reason, observed_at_ms),
+        Err(reason) => return unknown_owned(evidence, no_mount(), reason, observed_at_ms),
     };
     let Some(mount) = select_mount(&mounts, &target) else {
         return unknown(
@@ -510,28 +510,37 @@ struct MountEntry {
     source: String,
 }
 
-fn read_mountinfo(path: &Path) -> Result<Vec<MountEntry>, &'static str> {
+fn read_mountinfo(path: &Path) -> Result<Vec<MountEntry>, String> {
     const UNREADABLE: &str = "the mount table could not be read";
-    let file = File::open(path).map_err(|_| UNREADABLE)?;
-    let mut text = String::new();
-    file.take(MAX_MOUNTINFO_BYTES)
-        .read_to_string(&mut text)
-        .map_err(|_| UNREADABLE)?;
+    let file = File::open(path).map_err(|_| UNREADABLE.to_owned())?;
+    let mut bytes = Vec::new();
+    // One byte past the budget, so a mount table too large to read is an
+    // overflow rather than a clean parse of whichever mounts happened to fit.
+    file.take(MAX_MOUNTINFO_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| UNREADABLE.to_owned())?;
+    if bytes.len() as u64 > MAX_MOUNTINFO_BYTES {
+        return Err(over_budget(path));
+    }
+    let text = String::from_utf8(bytes).map_err(|_| UNREADABLE.to_owned())?;
     let mut entries = Vec::new();
     for line in text.lines() {
         if line.trim().is_empty() {
             continue;
         }
         if entries.len() >= MAX_MOUNTINFO_ENTRIES {
-            return Err("the mount table exceeded Beacon's read budget");
+            return Err("the mount table exceeded Beacon's read budget".to_owned());
         }
         // A line Beacon cannot parse is a line it does not understand, and a
         // misunderstood mount table is exactly how a confident wrong volume
         // gets chosen. The format is stable kernel ABI, so this is strict.
-        entries.push(parse_mount_line(line).ok_or("the mount table could not be parsed")?);
+        entries.push(
+            parse_mount_line(line)
+                .ok_or_else(|| "the mount table could not be parsed".to_owned())?,
+        );
     }
     if entries.is_empty() {
-        return Err("the mount table was empty");
+        return Err("the mount table was empty".to_owned());
     }
     Ok(entries)
 }
@@ -634,33 +643,46 @@ fn walk_block_stack(
             };
         }
         let node = system.sys_dev_block.join(device.to_string());
-        if !node.is_dir() {
-            return unreadable(&node);
+        match directory_presence(&node) {
+            Ok(Presence::Present) => {}
+            Ok(Presence::Missing) => return unreadable(&node),
+            Err(reason) => return Walk::Undetermined { reason },
         }
 
         let backing = node.join("loop/backing_file");
-        if backing.exists() {
-            let Ok(path) = read_sysfs(&backing) else {
-                return unreadable(&backing);
-            };
-            return Walk::Undetermined {
-                reason: format!(
-                    "the volume is a loopback image backed by {path}; Beacon does not follow the backing file"
-                ),
-            };
+        match presence(&backing) {
+            Ok(Presence::Present) => {
+                let path = match read_sysfs(&backing) {
+                    Ok(path) => path,
+                    Err(reason) => return Walk::Undetermined { reason },
+                };
+                return Walk::Undetermined {
+                    reason: format!(
+                        "the volume is a loopback image backed by {path}; Beacon does not follow the backing file"
+                    ),
+                };
+            }
+            Ok(Presence::Missing) => {}
+            Err(reason) => return Walk::Undetermined { reason },
         }
 
         let uuid_path = node.join("dm/uuid");
-        if uuid_path.exists() {
-            let Ok(uuid) = read_sysfs(&uuid_path) else {
-                return unreadable(&uuid_path);
-            };
+        let uuid = match presence(&uuid_path) {
+            Ok(Presence::Present) => match read_sysfs(&uuid_path) {
+                Ok(uuid) => Some(uuid),
+                Err(reason) => return Walk::Undetermined { reason },
+            },
+            Ok(Presence::Missing) => None,
+            Err(reason) => return Walk::Undetermined { reason },
+        };
+        if let Some(uuid) = uuid {
             // A mapping with a uuid always has a name beside it. Substituting a
             // placeholder for a failed read would let a read failure reach a
             // confident state, which is the one thing this reader must never do.
             let name_path = node.join("dm/name");
-            let Ok(name) = read_sysfs(&name_path) else {
-                return unreadable(&name_path);
+            let name = match read_sysfs(&name_path) {
+                Ok(name) => name,
+                Err(reason) => return Walk::Undetermined { reason },
             };
             match crypt_type(&uuid) {
                 Some(kind) => {
@@ -687,23 +709,34 @@ fn walk_block_stack(
             }
         }
 
+        // read_dir is the presence check: a missing slaves directory means this
+        // device has no parents, and any other error means Beacon could not ask.
         let slaves = node.join("slaves");
-        if !slaves.is_dir() {
-            continue;
-        }
-        let Ok(children) = fs::read_dir(&slaves) else {
-            return unreadable(&slaves);
+        let children = match fs::read_dir(&slaves) {
+            Ok(children) => children,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Walk::Undetermined {
+                    reason: unreadable_reason(&slaves, error.kind()),
+                };
+            }
         };
         for child in children {
-            let Ok(child) = child else {
-                return unreadable(&slaves);
+            let child = match child {
+                Ok(child) => child,
+                Err(error) => {
+                    return Walk::Undetermined {
+                        reason: unreadable_reason(&slaves, error.kind()),
+                    };
+                }
             };
             let dev_file = child.path().join("dev");
-            let Some(parent) = read_sysfs(&dev_file)
-                .ok()
-                .and_then(|value| DeviceNumber::parse(&value))
-            else {
-                return unreadable(&dev_file);
+            let parent = match read_sysfs(&dev_file) {
+                Ok(value) => match DeviceNumber::parse(&value) {
+                    Some(parent) => parent,
+                    None => return unreadable(&dev_file),
+                },
+                Err(reason) => return Walk::Undetermined { reason },
             };
             queue.push_back((parent, depth + 1));
         }
@@ -770,12 +803,65 @@ fn subsystem_prefix(uuid: &str) -> String {
     }
 }
 
-fn read_sysfs(path: &Path) -> Result<String, ()> {
-    let file = File::open(path).map_err(|_| ())?;
-    let mut value = String::new();
-    file.take(MAX_SYSFS_FILE_BYTES)
-        .read_to_string(&mut value)
-        .map_err(|_| ())?;
+/// Whether a path is there, keeping the difference between "absent" and
+/// "Beacon could not tell". A boolean probe collapses those into one answer,
+/// and the collapsed answer is the one that lets an unread stack look proven.
+#[derive(Debug, PartialEq, Eq)]
+enum Presence {
+    Present,
+    Missing,
+}
+
+fn presence(path: &Path) -> Result<Presence, String> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(Presence::Present),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Presence::Missing),
+        Err(error) => Err(unreadable_reason(path, error.kind())),
+    }
+}
+
+/// The same question for a directory. `fs::metadata` follows, deliberately:
+/// every entry under /sys/dev/block is a symlink to the device's real
+/// directory, so a non-following check would call every live device a
+/// non-directory. A link that resolves to nothing is an error, not an absence.
+fn directory_presence(path: &Path) -> Result<Presence, String> {
+    match presence(path)? {
+        Presence::Missing => Ok(Presence::Missing),
+        Presence::Present => match fs::metadata(path) {
+            Ok(metadata) if metadata.is_dir() => Ok(Presence::Present),
+            Ok(_) => Err(unreadable_reason(path, std::io::ErrorKind::NotADirectory)),
+            Err(error) => Err(unreadable_reason(path, error.kind())),
+        },
+    }
+}
+
+fn unreadable_reason(path: &Path, kind: std::io::ErrorKind) -> String {
+    format!(
+        "a device in the volume's stack could not be read: {} ({kind:?})",
+        path.display()
+    )
+}
+
+fn over_budget(path: &Path) -> String {
+    format!("{} exceeded Beacon's read budget", path.display())
+}
+
+/// Reads one bounded value, and can tell a complete read from a truncated one.
+///
+/// `take(budget)` alone cannot: it returns the first `budget` bytes of a larger
+/// file and looks exactly like a whole small file. Reading one byte past the
+/// budget makes the overflow visible, and an overflowing read is no answer.
+fn read_sysfs(path: &Path) -> Result<String, String> {
+    let file = File::open(path).map_err(|error| unreadable_reason(path, error.kind()))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_SYSFS_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| unreadable_reason(path, error.kind()))?;
+    if bytes.len() as u64 > MAX_SYSFS_FILE_BYTES {
+        return Err(over_budget(path));
+    }
+    let value = String::from_utf8(bytes)
+        .map_err(|_| unreadable_reason(path, std::io::ErrorKind::InvalidData))?;
     Ok(value.trim().to_owned())
 }
 

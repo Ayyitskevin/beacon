@@ -224,6 +224,82 @@ fn unreadable_slave_device_number_reports_unknown() {
 }
 
 #[test]
+fn failed_metadata_on_loop_backing_file_reports_unknown() {
+    let fixture = Fixture::new("loop-metadata");
+    let device = fixture.mounted_on_host_device();
+    // `loop` is a file, so asking about `loop/backing_file` errors with
+    // NotADirectory. A boolean exists() reads that as "no loop device".
+    fs::write(fixture.node(&device).join("loop"), b"not a directory\n").unwrap();
+
+    let report = fixture.read();
+
+    assert_eq!(report.state, LiveDataEncryption::Unknown);
+    assert!(reason(&report).contains("could not be read"));
+}
+
+#[test]
+fn failed_metadata_on_dm_uuid_reports_unknown() {
+    let fixture = Fixture::new("dm-metadata");
+    let device = fixture.mounted_on_host_device();
+    fs::write(fixture.node(&device).join("dm"), b"not a directory\n").unwrap();
+
+    let report = fixture.read();
+
+    assert_eq!(report.state, LiveDataEncryption::Unknown);
+    assert!(reason(&report).contains("could not be read"));
+}
+
+#[test]
+fn failed_metadata_on_slaves_reports_unknown() {
+    let fixture = Fixture::new("slaves-metadata");
+    let device = fixture.mounted_on_host_device();
+    // Not a missing slaves directory -- an unreadable one. The difference
+    // between "this device has no parents" and "Beacon could not ask" is the
+    // difference between a proven negative and no answer at all.
+    fs::write(fixture.node(&device).join("slaves"), b"not a directory\n").unwrap();
+
+    let report = fixture.read();
+
+    assert_eq!(report.state, LiveDataEncryption::Unknown);
+    assert!(reason(&report).contains("could not be read"));
+}
+
+#[test]
+fn an_over_budget_mount_table_reports_unknown() {
+    let fixture = Fixture::new("mountinfo-budget");
+    let device = fixture.host_device();
+    let mut lines = vec![fixture.mount_line(&device, "ext4", "/dev/nvme0n1p2")];
+    // Past the byte budget. A truncated read parses cleanly and answers about
+    // whatever mounts happened to fit, which is a confident wrong answer.
+    let filler = "x".repeat(4096);
+    while lines.iter().map(String::len).sum::<usize>() <= 4 * 1024 * 1024 {
+        lines.push(format!("36 25 9:9 / /pad-{} rw - ext4 /dev/pad rw", filler));
+    }
+    fixture.mount_lines(&lines);
+    fixture.node(&device);
+
+    let report = fixture.read();
+
+    assert_eq!(report.state, LiveDataEncryption::Unknown);
+    assert!(reason(&report).contains("budget"));
+}
+
+#[test]
+fn an_over_budget_sysfs_read_reports_unknown() {
+    let fixture = Fixture::new("sysfs-budget");
+    let device = fixture.mounted_on_host_device();
+    let dm = fixture.node(&device).join("dm");
+    fs::create_dir_all(&dm).unwrap();
+    fs::write(dm.join("uuid"), "C".repeat(8 * 1024)).unwrap();
+    fs::write(dm.join("name"), "live\n").unwrap();
+
+    let report = fixture.read();
+
+    assert_eq!(report.state, LiveDataEncryption::Unknown);
+    assert!(reason(&report).contains("budget"));
+}
+
+#[test]
 fn unreadable_sysfs_directory_reports_unknown_not_disabled() {
     let fixture = Fixture::new("sysfs-absent");
     fixture.mounted_on_host_device();
