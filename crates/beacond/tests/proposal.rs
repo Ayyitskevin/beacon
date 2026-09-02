@@ -1219,3 +1219,189 @@ fn a_new_charter_revision_makes_get_report_a_moved_binding_and_startup_still_suc
     // And a historical Proposal does not become corrupt merely because a current revision moved.
     fixture.restart().unwrap();
 }
+
+// ---------------------------------------------------------------------------------------------
+// Startup reconciliation
+//
+// "Refuses startup" is concrete here: `Supervisor::bootstrap` returns an error instead of a
+// `StartupReport`, so no Workspace identity and no service is produced against that store.
+// ---------------------------------------------------------------------------------------------
+
+fn submitted(label: &str) -> (Fixture, Record) {
+    let fixture = admitted_mission(label);
+    let record = fixture.record();
+    fixture.proposals.submit(&record.bytes()).unwrap();
+    (fixture, record)
+}
+
+fn assert_refuses_startup(fixture: &Fixture, case: &str) {
+    let error = fixture.restart().unwrap_err();
+    assert!(
+        matches!(
+            error,
+            SupervisorError::ProposalEventMismatch(_) | SupervisorError::ProposalStateMismatch
+        ),
+        "{case}: {error:?} / {error}"
+    );
+}
+
+#[test]
+fn a_truthful_store_starts_and_reconciles() {
+    // The control the refusals are measured against: without it, a reconciliation that refused
+    // every store would pass every test below.
+    let (fixture, record) = submitted("startup-clean");
+
+    fixture.restart().unwrap();
+
+    assert_eq!(
+        fixture
+            .proposals
+            .get(&record.digest())
+            .unwrap()
+            .digest()
+            .value,
+        record.digest()
+    );
+}
+
+#[test]
+fn startup_refuses_a_proposal_without_its_event() {
+    let (fixture, _) = submitted("startup-missing-event");
+    fixture
+        .store
+        .connect()
+        .execute("DELETE FROM events WHERE kind = 'proposal.submitted'", [])
+        .unwrap();
+
+    assert_refuses_startup(&fixture, "missing event");
+}
+
+#[test]
+fn startup_refuses_a_duplicate_proposal_event() {
+    let (fixture, _) = submitted("startup-duplicate-event");
+    // A byte-identical second Event. Reconciliation that only asked "is there an Event?" would
+    // accept two recordings of one submission.
+    fixture
+        .store
+        .connect()
+        .execute(
+            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+             SELECT workspace_id, kind, payload_json, occurred_at_ms
+             FROM events WHERE kind = 'proposal.submitted'",
+            [],
+        )
+        .unwrap();
+
+    assert_refuses_startup(&fixture, "duplicate event");
+}
+
+#[test]
+fn startup_refuses_an_orphan_proposal_event() {
+    let (fixture, _) = submitted("startup-orphan-event");
+    fixture.tamper("DELETE FROM proposals");
+
+    assert_refuses_startup(&fixture, "orphan event");
+}
+
+#[test]
+fn startup_refuses_altered_proposal_bytes() {
+    let (fixture, record) = submitted("startup-altered-bytes");
+    let mut altered = record.clone();
+    altered.summary = "A summary the recorded digest never covered.".to_owned();
+    fixture.tamper(&format!(
+        "UPDATE proposals SET canonical_bytes = x'{}'",
+        HEXLOWER.encode(&altered.bytes())
+    ));
+
+    assert_refuses_startup(&fixture, "altered bytes");
+}
+
+#[test]
+fn startup_refuses_an_indexed_column_that_disagrees_with_the_bytes() {
+    let (fixture, _) = submitted("startup-column-drift");
+    // The bytes are untouched and the digest still names them. Only the column lies. A
+    // reconciliation that trusted the columns, or that never re-decoded the bytes to compare,
+    // would start cleanly on a store whose index disagrees with its own record.
+    fixture.tamper("UPDATE proposals SET bootstrap_reason = 'A reason nobody submitted.'");
+
+    assert_refuses_startup(&fixture, "column drift");
+}
+
+#[test]
+fn startup_refuses_a_differently_encoded_event_payload() {
+    let (fixture, record) = submitted("startup-unpadded-base64");
+    let payload = format!(
+        "{{\"proposal\":{{\"digest\":{{\"algorithm\":\"sha256\",\
+         \"canonicalizer\":\"beacon.proposal.v1\",\"value\":\"{}\"}},\
+         \"canonicalBytesBase64\":\"{}\",\"actor\":\"owner\",\"submittedAtMs\":{}}}}}",
+        record.digest(),
+        // The same bytes, encoded without padding: canonical RFC 4648 padded base64 is the
+        // recorded form, and evidence written another way is different evidence.
+        data_encoding::BASE64_NOPAD.encode(&record.bytes()),
+        fixture
+            .store
+            .connect()
+            .query_row(
+                "SELECT occurred_at_ms FROM events WHERE kind = 'proposal.submitted'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+    );
+    fixture
+        .store
+        .connect()
+        .execute(
+            "UPDATE events SET payload_json = ?1 WHERE kind = 'proposal.submitted'",
+            [payload],
+        )
+        .unwrap();
+
+    assert_refuses_startup(&fixture, "unpadded base64");
+}
+
+#[test]
+fn startup_refuses_an_event_whose_bytes_are_not_the_stored_bytes() {
+    let (fixture, record) = submitted("startup-event-bytes");
+    let mut other = record.clone();
+    other.summary = "Evidence for a Proposal that was never stored.".to_owned();
+    let payload = format!(
+        "{{\"proposal\":{{\"digest\":{{\"algorithm\":\"sha256\",\
+         \"canonicalizer\":\"beacon.proposal.v1\",\"value\":\"{}\"}},\
+         \"canonicalBytesBase64\":\"{}\",\"actor\":\"owner\",\"submittedAtMs\":{}}}}}",
+        record.digest(),
+        BASE64.encode(&other.bytes()),
+        fixture
+            .store
+            .connect()
+            .query_row(
+                "SELECT occurred_at_ms FROM events WHERE kind = 'proposal.submitted'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+    );
+    fixture
+        .store
+        .connect()
+        .execute(
+            "UPDATE events SET payload_json = ?1 WHERE kind = 'proposal.submitted'",
+            [payload],
+        )
+        .unwrap();
+
+    assert_refuses_startup(&fixture, "event bytes are not the stored bytes");
+}
+
+#[test]
+fn startup_refuses_when_the_owner_account_is_gone() {
+    let (fixture, _) = submitted("startup-no-owner");
+    // A record whose authorization basis is `owner` is only truthful while that Owner exists.
+    fixture
+        .store
+        .connect()
+        .execute("DELETE FROM operator_accounts", [])
+        .unwrap();
+
+    assert_refuses_startup(&fixture, "no owner account");
+}
