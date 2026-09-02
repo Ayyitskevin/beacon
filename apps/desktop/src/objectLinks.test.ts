@@ -8,14 +8,40 @@ import {
   type LinkContext,
   type ObjectLink,
 } from "./objectLinks";
-import type { MissionView, ProjectView } from "./session";
+import type { MissionView, ProjectSummary } from "./session";
 
 const WORKSPACE = "1a2b3c4d-5e6f-4a8b-9c0d-1e2f3a4b5c6d";
 const PROJECT = "44444444-4444-4444-8444-444444444444";
 const MISSION = "55555555-5555-4555-8555-555555555555";
+const TEAM = "66666666-6666-4666-8666-666666666666";
 
-const project = { id: PROJECT, workspaceId: WORKSPACE } as ProjectView;
-const mission = { id: MISSION, workspaceId: WORKSPACE, projectId: PROJECT } as MissionView;
+// The shell's real state types, built without a cast. `App.tsx:286,297` holds
+// `ProjectSummary[] | null` and `MissionView[] | null`; the previous fixture
+// used `as ProjectView` on a two-field object, which typechecked a shape the
+// shell never produces. If the context stops accepting the real state, `tsc -b`
+// fails HERE -- rather than slice 2 discovering it at the wiring.
+const project: ProjectSummary = {
+  id: PROJECT,
+  name: "Wayfinding",
+  charterRevision: 1,
+  autonomyProfile: "supervised",
+  createdAtMs: 1_756_000_000_000,
+};
+const mission: MissionView = {
+  id: MISSION,
+  workspaceId: WORKSPACE,
+  projectId: PROJECT,
+  charterRevision: 1,
+  teamId: TEAM,
+  desiredOutcome: "Chart the approach",
+  successConditions: [],
+  constraints: [],
+  prohibitions: [],
+  lifecycle: "admitted",
+  admittedBy: "operator",
+  admittedAtMs: 1_756_000_000_001,
+  members: [],
+};
 
 const context = (overrides: Partial<LinkContext> = {}): LinkContext => ({
   phase: "unlocked",
