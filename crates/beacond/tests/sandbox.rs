@@ -45,6 +45,38 @@ fn this_host_enforces_and_names_the_abi_it_proved() {
 }
 
 #[test]
+fn public_detection_preserves_the_real_probe_child_observations() {
+    match detect_sandbox() {
+        SandboxCapability::Enforcing { observed, .. } => assert_eq!(
+            observed,
+            ProbeObservation {
+                wrote_inside_target: true,
+                refused_write_outside_target: true,
+                read_system_path: true,
+                refused_tcp_connect: true,
+            },
+            "the public capability must decode the real child's exact exit bits"
+        ),
+        SandboxCapability::FilesystemOnly { observed, .. } => assert_eq!(
+            observed,
+            ProbeObservation {
+                wrote_inside_target: true,
+                refused_write_outside_target: true,
+                read_system_path: true,
+                refused_tcp_connect: false,
+            },
+            "a pre-network ruleset must preserve the real child's filesystem bits"
+        ),
+        SandboxCapability::Unavailable {
+            reason: SandboxUnavailableReason::ProbeRefused { observed },
+        } => panic!("the real probe child reported a broken observation protocol: {observed:?}"),
+        // These outcomes mean setup could not reach a reporting child. They are
+        // legitimate capability answers and carry no exit-bit claim to check.
+        SandboxCapability::Unavailable { .. } => {}
+    }
+}
+
+#[test]
 fn filesystem_only_never_admits_execution() {
     // The Blueprint denies network by default, so a sandbox that cannot
     // restrict the network is not sufficient, however well it bounds writes.
