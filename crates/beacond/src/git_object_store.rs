@@ -607,7 +607,7 @@ mod tests {
     use sha1::{Digest, Sha1};
     use uuid::Uuid;
 
-    use super::{ObjectStore, ObjectStoreError, index_contains};
+    use super::{ObjectStore, ObjectStoreError};
 
     /// A temporary directory removed on drop.
     struct TempDir {
@@ -659,111 +659,66 @@ mod tests {
         (directory, revision)
     }
 
-    /// A minimal but valid version 2 pack index holding one name, whose first byte is `0xaa`.
+    /// The deadline immediately after the index read must run before parsing can make any claim.
     ///
-    /// Any target whose first byte is below `0xaa` lands in an EMPTY fanout bucket, so the binary
-    /// search runs zero iterations. That is the shape that used to escape every deadline check.
-    fn one_name_index(first_byte: u8) -> Vec<u8> {
-        let mut index = Vec::new();
-        index.extend_from_slice(b"\xfftOc");
-        index.extend_from_slice(&2_u32.to_be_bytes());
-        for bucket in 0..256_usize {
-            let cumulative: u32 = if bucket >= first_byte as usize { 1 } else { 0 };
-            index.extend_from_slice(&cumulative.to_be_bytes());
-        }
-        index.extend_from_slice(&[first_byte; 20]);
-        index
-    }
-
-    /// A read that finishes AFTER the budget must not become an absence claim.
-    ///
-    /// The index is served through a FIFO, so `fs::read` blocks until the writer closes it. By then
-    /// the deadline has expired. With an empty target bucket the search body never runs, so before
-    /// this guard the function fell straight through to `Ok(false)` — reporting "the revision is not
-    /// in this repository" on the strength of a read that was already stale. An absence is a claim
-    /// about the store; a timeout is a claim about Beacon. They are not interchangeable.
+    /// A real pack keeps this fixture aligned with the descriptor-based reader. Corrupting the
+    /// index magic makes the next operation deterministic: if five earlier `contains` checks pass,
+    /// the sixth is the post-read check and reports elapsed; if one more check is allowed, parsing
+    /// refuses the index before any later deadline can fire. This pins the guard's sequence without
+    /// reintroducing a FIFO, which `O_NONBLOCK` and the regular-file check correctly reject. It
+    /// proves ordering, not that a genuinely slow filesystem call can be interrupted.
     #[test]
-    fn a_read_that_completes_after_the_budget_is_elapsed_not_absent() {
-        let directory = TempDir::new("fifo-late-read");
-        let pack = directory.path.join("objects/pack");
-        fs::create_dir_all(&pack).unwrap();
-        let fifo = pack.join("pack-late.idx");
-        let made = std::process::Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .expect("mkfifo is available in the test environment");
-        assert!(made.success(), "mkfifo failed");
+    fn the_post_index_read_deadline_precedes_parsing() {
+        let (repository, _) = commit_repository("post-index-read-deadline");
+        git(&repository.path, &["gc", "--quiet", "--prune=now"]);
+        let pack_directory = repository.path.join(".git/objects/pack");
+        let index_path = fs::read_dir(&pack_directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|extension| extension == "idx"))
+            .expect("git gc produced a pack index");
+        let mut index = fs::read(&index_path).unwrap();
 
-        let index = one_name_index(0xaa);
-        let writer_path = fifo.clone();
-        let writer = std::thread::spawn(move || {
-            // Opening for write blocks until the reader opens; the reader then blocks until this
-            // side closes, so the read finishes strictly after the sleep.
-            use std::io::Write;
-            let mut file = fs::File::create(&writer_path).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(400));
-            let _ = file.write_all(&index);
-        });
+        // Preserve an absent target from an empty fanout bucket, even though the deliberate magic
+        // corruption below makes parsing refuse before the search. This retains the old fixture's
+        // zero-search shape if the parser is instrumented while diagnosing a regression.
+        let empty_bucket = (0..256_usize)
+            .find(|bucket| {
+                let at = 8 + bucket * 4;
+                let current = u32::from_be_bytes(index[at..at + 4].try_into().unwrap());
+                let previous = if *bucket == 0 {
+                    0
+                } else {
+                    u32::from_be_bytes(index[at - 4..at].try_into().unwrap())
+                };
+                current == previous
+            })
+            .expect("the small fixture has an empty fanout bucket");
+        let target = format!("{empty_bucket:02x}{}", "00".repeat(19));
+        index[0] ^= 1;
+        fs::set_permissions(&index_path, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::write(index_path, index).unwrap();
 
-        let store = ObjectStore::open(&directory.path).expect("a bare store with objects/");
-        let started = std::time::Instant::now();
-        // A 100 ms budget the blocking read is guaranteed to outlast.
-        let mut deadline = move || started.elapsed().as_millis() > 100;
-        // First byte 0x01 is below 0xaa, so its bucket is empty and no search iteration runs.
-        let outcome = store.contains(&"01".repeat(20), &mut deadline);
-        writer.join().unwrap();
-
+        let store = ObjectStore::open(&repository.path).unwrap();
+        let mut calls = 0_usize;
+        let mut after_five_calls = || {
+            calls += 1;
+            calls > 5
+        };
         assert_eq!(
-            outcome,
-            Err(ObjectStoreError::Elapsed),
-            "a stale read was reported as a definite answer"
-        );
-        assert_ne!(outcome, Ok(false), "elapsed work became an absence claim");
-    }
-
-    /// The same stale read, pinned at the function that performs it.
-    ///
-    /// The test above goes through `contains`, which has its own guard before its final answer, so
-    /// it stays green even with both of `index_contains`'s checks removed. This one calls
-    /// `index_contains` directly, which narrows what it pins — but not to a single line.
-    ///
-    /// What it actually pins: `index_contains` honours its deadline across a late read. Two checks
-    /// inside it enforce that — the one after `fs::read` and the one before its `Ok(false)` — and
-    /// they are **mutually redundant for this fixture**: removing either alone leaves this test
-    /// green, and removing both makes it fail with `Ok(false)`. Both are kept as defence in depth
-    /// on a path whose failure mode is a false claim about someone else's repository, not because
-    /// either is separately load-bearing. Anyone deleting one as redundant should know the suite
-    /// will not object; deleting both is what this test exists to stop.
-    #[test]
-    fn index_contains_reports_a_late_read_as_elapsed_rather_than_returning_false() {
-        let directory = TempDir::new("fifo-index-late-read");
-        fs::create_dir_all(&directory.path).unwrap();
-        let fifo = directory.path.join("pack-late.idx");
-        assert!(
-            std::process::Command::new("mkfifo")
-                .arg(&fifo)
-                .status()
-                .expect("mkfifo is available in the test environment")
-                .success()
+            store.contains(&target, &mut after_five_calls),
+            Err(ObjectStoreError::Elapsed)
         );
 
-        let index = one_name_index(0xaa);
-        let writer_path = fifo.clone();
-        let writer = std::thread::spawn(move || {
-            use std::io::Write;
-            let mut file = fs::File::create(&writer_path).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(400));
-            let _ = file.write_all(&index);
-        });
-
-        let started = std::time::Instant::now();
-        let mut deadline = move || started.elapsed().as_millis() > 100;
-        // First byte 0x01 lands in an empty bucket: zero search iterations, so neither of the
-        // in-loop checks can fire and the answer is decided by the two checks around them.
-        let outcome = index_contains(&fifo, &[0x01; 20], &mut deadline);
-        writer.join().unwrap();
-
-        assert_eq!(outcome, Err(ObjectStoreError::Elapsed));
+        let mut calls = 0_usize;
+        let mut after_six_calls = || {
+            calls += 1;
+            calls > 6
+        };
+        assert_eq!(
+            store.contains(&target, &mut after_six_calls),
+            Err(ObjectStoreError::UnreadableIndex)
+        );
     }
 
     fn never_elapsed() -> impl FnMut() -> bool {
