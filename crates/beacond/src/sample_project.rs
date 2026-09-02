@@ -11,13 +11,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::Arc;
 
-use flate2::{Decompress, FlushDecompress, Status};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::git_object_store::{LooseRead, ObjectKind, ObjectStore};
 use crate::{
     AutonomyProfile, BudgetBoundary, DeclaredCheck, ExternalEffects, OperatorAccountError,
     OperatorAccountService, ProjectCharter, ProjectView, RepositoryAuthor, RepositorySourceKind,
@@ -966,7 +966,7 @@ fn verify_frozen_git_state(repository: &Path) -> Result<(), SampleProjectError> 
     {
         return Err(SampleProjectError::TamperedInstallation);
     }
-    verify_loose_object(repository, EXPECTED_BASE_REVISION, b"commit")?;
+    verify_loose_object(repository, EXPECTED_BASE_REVISION, ObjectKind::Commit)?;
     verify_frozen_index(repository)
 }
 
@@ -979,66 +979,30 @@ fn read_small_regular(path: &Path, maximum: u64) -> Result<Vec<u8>, SampleProjec
     fs::read(path).map_err(|_| SampleProjectError::TamperedInstallation)
 }
 
+/// The Sample Project's bundled objects, checked through the ONE loose-object reader.
+///
+/// This used to be a second inflate-and-self-verify implementation beside
+/// `git_object_store`'s. The discipline was the same in both, which is exactly why keeping two was
+/// a risk: the next correction would have had to be made twice, and the copy that missed it would
+/// still have looked right.
+///
+/// Every outcome the shared reader distinguishes collapses to `TamperedInstallation` here, and
+/// that is correct for this caller alone: the bundled repository is fixed, so an object of the
+/// wrong size, a packed one, or an absent one all mean the same thing about an installation that
+/// is supposed to be byte-identical to what Beacon shipped. A caller inspecting the Operator's own
+/// repository must not collapse them, and does not.
 fn verify_loose_object(
     repository: &Path,
     object_id: &str,
-    expected_type: &[u8],
+    expected: ObjectKind,
 ) -> Result<(), SampleProjectError> {
-    if object_id.len() != 40 || !object_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(SampleProjectError::TamperedInstallation);
+    let store =
+        ObjectStore::open(repository).map_err(|_| SampleProjectError::TamperedInstallation)?;
+    // The 1 MiB bound the path-based reader applied, preserved exactly rather than re-chosen.
+    match store.read_loose_object(object_id, 1_048_576, &mut || false) {
+        Ok(LooseRead::Read { kind, .. }) if kind == expected => Ok(()),
+        _ => Err(SampleProjectError::TamperedInstallation),
     }
-    let path = repository
-        .join(".git/objects")
-        .join(&object_id[..2])
-        .join(&object_id[2..]);
-    let compressed = read_small_regular(&path, 1_048_576)?;
-    let mut decoder = Decompress::new(true);
-    let mut object = Vec::with_capacity(1_048_577);
-    let status = decoder
-        .decompress_vec(&compressed, &mut object, FlushDecompress::Finish)
-        .map_err(|_| SampleProjectError::TamperedInstallation)?;
-    if status != Status::StreamEnd
-        || decoder.total_in() != compressed.len() as u64
-        || object.len() > 1_048_576
-    {
-        return Err(SampleProjectError::TamperedInstallation);
-    }
-    let header_end = object
-        .iter()
-        .position(|byte| *byte == 0)
-        .ok_or(SampleProjectError::TamperedInstallation)?;
-    let header = object
-        .get(..header_end)
-        .ok_or(SampleProjectError::TamperedInstallation)?;
-    let type_end = header
-        .iter()
-        .position(|byte| *byte == b' ')
-        .ok_or(SampleProjectError::TamperedInstallation)?;
-    let object_type = &header[..type_end];
-    let size = &header[type_end + 1..];
-    let body = object
-        .get(header_end + 1..)
-        .ok_or(SampleProjectError::TamperedInstallation)?;
-    if object_type != expected_type || parse_git_object_size(size) != Some(body.len()) {
-        return Err(SampleProjectError::TamperedInstallation);
-    }
-    let expected_id =
-        decode_object_id(object_id).ok_or(SampleProjectError::TamperedInstallation)?;
-    if Sha1::digest(&object)[..] != expected_id {
-        return Err(SampleProjectError::TamperedInstallation);
-    }
-    Ok(())
-}
-
-fn parse_git_object_size(value: &[u8]) -> Option<usize> {
-    if value.is_empty() || (value.len() > 1 && value[0] == b'0') {
-        return None;
-    }
-    value.iter().try_fold(0_usize, |size, byte| {
-        size.checked_mul(10)?.checked_add(usize::from(
-            byte.checked_sub(b'0').filter(|digit| *digit < 10)?,
-        ))
-    })
 }
 
 fn verify_frozen_index(repository: &Path) -> Result<(), SampleProjectError> {
@@ -1100,7 +1064,7 @@ fn verify_frozen_index(repository: &Path) -> Result<(), SampleProjectError> {
         {
             return Err(SampleProjectError::TamperedInstallation);
         }
-        verify_loose_object(repository, expected_object_id, b"blob")?;
+        verify_loose_object(repository, expected_object_id, ObjectKind::Blob)?;
         let unpadded = 62_usize
             .checked_add(name.len())
             .and_then(|value| value.checked_add(1))

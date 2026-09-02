@@ -13,9 +13,17 @@
 //! left behind by a rebase is present and unreachable. Every caller must record
 //! the difference rather than let a presence check read as a reachability claim.
 //!
-//! Nothing here decompresses object data or reads outside the repository's
-//! `.git` directory. Files are opened relative to retained directory
-//! descriptors with `O_NOFOLLOW`; names are never accepted as file identity.
+//! It also reads one loose object at a time, on request: [`ObjectStore::read_loose_object`]
+//! inflates a loose file, proves it is the object its own name hashes to, and hands back the body.
+//! That is a bounded read of one named object, not the reachability walk above -- it still cannot
+//! say what a ref points at, and it still reads nothing that is packed.
+//!
+//! Until #33 this module decompressed nothing, and its doc said so. The reader arrived because the
+//! readable-context comparison needs object CONTENT, not presence, and a second inflate-and-verify
+//! path beside `sample_project`'s would have been two chances to get the self-authentication wrong.
+//!
+//! Nothing here reads outside the repository's `.git` directory. Files are opened relative to
+//! retained directory descriptors with `O_NOFOLLOW`; names are never accepted as file identity.
 
 use std::ffi::{CStr, CString, OsString};
 use std::fs::{self, File, OpenOptions};
@@ -25,6 +33,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
+use flate2::{Decompress, FlushDecompress, Status};
 use sha1::{Digest, Sha1};
 
 /// Why a repository could not be inspected.
@@ -41,6 +50,50 @@ pub(crate) enum ObjectStoreError {
     /// The inspection budget elapsed before the answer was known. This is not a
     /// negative answer: the caller must keep the two apart.
     Elapsed,
+}
+
+/// The four object types a loose read may name. `tag` is in the vocabulary and parsed; a caller
+/// that does not expect one refuses it explicitly rather than meeting an unnamed type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObjectKind {
+    Commit,
+    Tree,
+    Blob,
+    Tag,
+}
+
+impl ObjectKind {
+    fn parse(value: &[u8]) -> Option<Self> {
+        match value {
+            b"commit" => Some(Self::Commit),
+            b"tree" => Some(Self::Tree),
+            b"blob" => Some(Self::Blob),
+            b"tag" => Some(Self::Tag),
+            _ => None,
+        }
+    }
+}
+
+/// What one loose-object read established. Four outcomes, kept apart on purpose.
+///
+/// `NotLoose` is **not** a claim that the object is absent. A loose file may be missing because the
+/// object is packed, because it was never written, or because a repack is running, and only an
+/// authenticated pack lookup tells those apart. A caller that reports `NotLoose` as absence is
+/// making a claim this read did not establish.
+///
+/// `TooLarge` is a resource refusal, not a broken object: the file is there and may be perfectly
+/// well formed, and this read declined to hold it. `Malformed` is the broken answer. Collapsing the
+/// two would describe Beacon's own bound as the Operator's repository being corrupt.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum LooseRead {
+    /// Inflated, header-parsed, and self-authenticated against the object's own name.
+    Read {
+        kind: ObjectKind,
+        body: Vec<u8>,
+    },
+    NotLoose,
+    TooLarge,
+    Malformed,
 }
 
 /// A repository resolved to its object directory.
@@ -120,6 +173,120 @@ impl ObjectStore {
     /// The repository's working root, canonicalized. Used to decide containment.
     pub(crate) fn canonical_root(&self) -> Result<PathBuf, ObjectStoreError> {
         fs::canonicalize(&self.root).map_err(|_| ObjectStoreError::NotARepository)
+    }
+
+    /// Read one loose object by its 40-hex name.
+    ///
+    /// `maximum` bounds both the compressed file and the inflated object, and is the CALLER's
+    /// bound: this function invents no limit of its own, because a limit chosen here would be a
+    /// policy about how large a legitimate file may be, applied where nothing knows what the file
+    /// is for. Exceeding it is [`LooseRead::TooLarge`] -- never an error, never an absence.
+    ///
+    /// Every open is descriptor-relative through the retained object directory with `O_NOFOLLOW`,
+    /// so the read cannot be redirected by a symlink swapped in between two path resolutions. The
+    /// path-based shape `sample_project::read_small_regular` used is deliberately not inherited.
+    ///
+    /// The self-authentication is what makes the returned bytes usable at all: a Git object's name
+    /// is the SHA-1 of its uncompressed `<type> <size>\0<body>` form, so an object that hashes to
+    /// its own filename cannot have been substituted for another. Bytes that fail it are
+    /// `Malformed`, and no caller ever sees them.
+    ///
+    /// `deadline` is consulted after each blocking step and before the definite answer, for the
+    /// reason [`ObjectStore::contains`] gives: a read that finished late describes the store as it
+    /// was before the answer was due.
+    pub(crate) fn read_loose_object(
+        &self,
+        object_id: &str,
+        maximum: usize,
+        deadline: &mut impl FnMut() -> bool,
+    ) -> Result<LooseRead, ObjectStoreError> {
+        let raw_id = decode_revision(object_id).ok_or(ObjectStoreError::NotARepository)?;
+        if deadline() {
+            return Err(ObjectStoreError::Elapsed);
+        }
+        let Some(prefix) = open_directory_at(&self.objects, &object_id.as_bytes()[..2])
+            .map_err(|_| ObjectStoreError::NotARepository)?
+        else {
+            return Ok(LooseRead::NotLoose);
+        };
+        let Some(mut file) = open_regular_at(&prefix, &object_id.as_bytes()[2..])
+            .map_err(|_| ObjectStoreError::NotARepository)?
+        else {
+            return Ok(LooseRead::NotLoose);
+        };
+        if deadline() {
+            return Err(ObjectStoreError::Elapsed);
+        }
+        // Sized from the descriptor already open, never from the path: a stat-then-open pair
+        // answers about a file that need not be the one read.
+        let length = file
+            .metadata()
+            .map_err(|_| ObjectStoreError::NotARepository)?
+            .len();
+        if length > maximum as u64 {
+            return Ok(LooseRead::TooLarge);
+        }
+        let mut compressed = Vec::with_capacity(length as usize);
+        file.by_ref()
+            .take(length)
+            .read_to_end(&mut compressed)
+            .map_err(|_| ObjectStoreError::NotARepository)?;
+        if deadline() {
+            return Err(ObjectStoreError::Elapsed);
+        }
+
+        // Capacity is the inflation bound: `decompress_vec` will not grow past it, so an object
+        // that wants more stops short of `StreamEnd`. That is why the capacity is `maximum + 1`
+        // and why the status check below is a size guard as well as a completeness one.
+        let mut decoder = Decompress::new(true);
+        let mut object = Vec::with_capacity(maximum.saturating_add(1));
+        let status = match decoder.decompress_vec(&compressed, &mut object, FlushDecompress::Finish)
+        {
+            Ok(status) => status,
+            Err(_) => return Ok(LooseRead::Malformed),
+        };
+        if status != Status::StreamEnd || decoder.total_in() != compressed.len() as u64 {
+            // Either the stream did not finish -- which includes hitting the inflation bound --
+            // or bytes trail it. A loose object file holds one zlib stream and nothing after it.
+            return Ok(if object.len() > maximum {
+                LooseRead::TooLarge
+            } else {
+                LooseRead::Malformed
+            });
+        }
+        if object.len() > maximum {
+            return Ok(LooseRead::TooLarge);
+        }
+        if deadline() {
+            return Err(ObjectStoreError::Elapsed);
+        }
+
+        // The name authenticates the whole uncompressed form, header included, so this runs before
+        // the header is trusted for anything.
+        if Sha1::digest(&object)[..] != raw_id {
+            return Ok(LooseRead::Malformed);
+        }
+        let Some(header_end) = object.iter().position(|byte| *byte == 0) else {
+            return Ok(LooseRead::Malformed);
+        };
+        let header = &object[..header_end];
+        let Some(type_end) = header.iter().position(|byte| *byte == b' ') else {
+            return Ok(LooseRead::Malformed);
+        };
+        let Some(kind) = ObjectKind::parse(&header[..type_end]) else {
+            return Ok(LooseRead::Malformed);
+        };
+        let body = &object[header_end + 1..];
+        if parse_object_size(&header[type_end + 1..]) != Some(body.len()) {
+            return Ok(LooseRead::Malformed);
+        }
+        if deadline() {
+            return Err(ObjectStoreError::Elapsed);
+        }
+        Ok(LooseRead::Read {
+            kind,
+            body: body.to_vec(),
+        })
     }
 
     /// Is `revision` (40 lowercase hex characters) present in this object store?
@@ -206,6 +373,18 @@ impl ObjectStore {
         }
         Ok(false)
     }
+}
+
+/// A Git object header's decimal size: no leading zero, no sign, no overflow.
+pub(crate) fn parse_object_size(value: &[u8]) -> Option<usize> {
+    if value.is_empty() || (value.len() > 1 && value[0] == b'0') {
+        return None;
+    }
+    value.iter().try_fold(0_usize, |size, byte| {
+        size.checked_mul(10)?.checked_add(usize::from(
+            byte.checked_sub(b'0').filter(|digit| *digit < 10)?,
+        ))
+    })
 }
 
 fn open_directory_path(path: &Path) -> std::io::Result<File> {
@@ -600,14 +779,17 @@ fn read_u64(data: &[u8], at: usize) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use std::fs::{self, OpenOptions};
+    use std::io::Write;
     use std::os::unix::fs::{PermissionsExt, symlink};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
+    use data_encoding::HEXLOWER;
+    use flate2::{Compression, write::ZlibEncoder};
     use sha1::{Digest, Sha1};
     use uuid::Uuid;
 
-    use super::{ObjectStore, ObjectStoreError};
+    use super::{LooseRead, ObjectKind, ObjectStore, ObjectStoreError, parse_object_size};
 
     /// A temporary directory removed on drop.
     struct TempDir {
@@ -730,6 +912,302 @@ mod tests {
         let (repository, revision) = commit_repository("loose");
         let store = ObjectStore::open(&repository.path).unwrap();
         assert!(store.contains(&revision, &mut never_elapsed()).unwrap());
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The loose-object reader
+    //
+    // Four outcomes that must stay apart -- read, not-loose, too-large, malformed -- plus the
+    // deadline, which is an error rather than an outcome because it is not an answer about the
+    // store at all.
+    // ---------------------------------------------------------------------------------------
+
+    /// The path a loose object occupies, so a test can corrupt exactly one file.
+    fn loose_path(repository: &Path, id: &str) -> PathBuf {
+        repository
+            .join(".git/objects")
+            .join(&id[..2])
+            .join(&id[2..])
+    }
+
+    /// Rewrite a loose object's file, working around the read-only mode Git gives it.
+    ///
+    /// The mode is set explicitly rather than through `set_readonly(false)`, which clippy refuses
+    /// because it grants write to group and other as a side effect.
+    fn rewrite_loose(path: &Path, bytes: &[u8]) {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn a_loose_commit_is_read_and_names_its_own_type() {
+        // The control the refusals below are measured against: without it, a reader that refused
+        // everything would satisfy every other test in this section.
+        let (repository, revision) = commit_repository("loose-read");
+        let store = ObjectStore::open(&repository.path).unwrap();
+
+        let read = store
+            .read_loose_object(&revision, 1_048_576, &mut never_elapsed())
+            .unwrap();
+
+        let LooseRead::Read { kind, body } = read else {
+            panic!("a freshly committed object is loose and readable: {read:?}");
+        };
+        assert_eq!(kind, ObjectKind::Commit);
+        // The body is the object WITHOUT its header, and a commit body starts with its tree line.
+        assert!(
+            body.starts_with(b"tree "),
+            "{}",
+            String::from_utf8_lossy(&body[..body.len().min(64)])
+        );
+        assert_eq!(body[45], b'\n');
+    }
+
+    #[test]
+    fn an_object_that_is_not_loose_is_not_reported_as_absent_or_broken() {
+        // The wrong answer this kills is the one gpt1's S1 names: treating a missing loose file as
+        // proof the object is packed, or as proof it is gone. This read establishes neither. The
+        // object here genuinely does not exist, and the outcome is STILL only `NotLoose` -- which
+        // is the point, because the reader cannot tell that case from a packed one.
+        let (repository, _) = commit_repository("loose-absent");
+        let store = ObjectStore::open(&repository.path).unwrap();
+
+        let read = store
+            .read_loose_object(&"a".repeat(40), 1_048_576, &mut never_elapsed())
+            .unwrap();
+
+        assert_eq!(read, LooseRead::NotLoose);
+    }
+
+    #[test]
+    fn a_packed_object_is_not_loose_and_the_reader_says_only_that() {
+        // Packed and absent produce the same answer from this reader, deliberately. Whichever
+        // caller needs to tell them apart asks `contains`, which authenticates the pack index --
+        // and here it does, so the same object is simultaneously "present" and "not loose".
+        let (repository, revision) = commit_repository("loose-packed");
+        git(&repository.path, &["gc", "--quiet", "--prune=now"]);
+        let store = ObjectStore::open(&repository.path).unwrap();
+
+        assert_eq!(
+            store
+                .read_loose_object(&revision, 1_048_576, &mut never_elapsed())
+                .unwrap(),
+            LooseRead::NotLoose
+        );
+        assert!(store.contains(&revision, &mut never_elapsed()).unwrap());
+    }
+
+    #[test]
+    fn an_object_larger_than_the_callers_bound_is_a_refusal_not_a_broken_object() {
+        // gpt1's S2. A legitimate file over the bound must not be reported as corrupt: that would
+        // describe Beacon's own limit as the Operator's repository being broken. The same object,
+        // read with a bound that fits, is `Read` -- which is what makes this a statement about the
+        // bound rather than about the file.
+        let (repository, revision) = commit_repository("loose-large");
+        let store = ObjectStore::open(&repository.path).unwrap();
+
+        assert_eq!(
+            store
+                .read_loose_object(&revision, 8, &mut never_elapsed())
+                .unwrap(),
+            LooseRead::TooLarge
+        );
+        assert!(matches!(
+            store
+                .read_loose_object(&revision, 1_048_576, &mut never_elapsed())
+                .unwrap(),
+            LooseRead::Read { .. }
+        ));
+    }
+
+    #[test]
+    fn an_object_that_inflates_past_the_bound_is_a_refusal_not_a_broken_object() {
+        // The compressed file is small and the inflated object is not, which is the shape a zip
+        // bomb has. The bound is enforced on the inflated size through the output capacity, so the
+        // stream never finishes -- and the reader must still call that a refusal, not corruption.
+        let (repository, _) = commit_repository("loose-inflates");
+        let body = vec![b'x'; 4096];
+        let mut object = format!("blob {}\0", body.len()).into_bytes();
+        object.extend_from_slice(&body);
+        let id = HEXLOWER.encode(&Sha1::digest(&object));
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(&object).unwrap();
+        let compressed = encoder.finish().unwrap();
+        assert!(compressed.len() < 512, "{}", compressed.len());
+        let path = loose_path(&repository.path, &id);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, &compressed).unwrap();
+        let store = ObjectStore::open(&repository.path).unwrap();
+
+        assert_eq!(
+            store
+                .read_loose_object(&id, 1024, &mut never_elapsed())
+                .unwrap(),
+            LooseRead::TooLarge
+        );
+        assert!(matches!(
+            store
+                .read_loose_object(&id, 1_048_576, &mut never_elapsed())
+                .unwrap(),
+            LooseRead::Read {
+                kind: ObjectKind::Blob,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn an_object_that_does_not_hash_to_its_own_name_is_refused() {
+        // The self-authentication is the whole reason a caller may trust these bytes. Without it,
+        // anything that can write into `.git/objects` chooses what Beacon compares against.
+        let (repository, revision) = commit_repository("loose-tampered");
+        let mut body = b"blob 5\0".to_vec();
+        body.extend_from_slice(b"lied!");
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(&body).unwrap();
+        let forged = encoder.finish().unwrap();
+        rewrite_loose(&loose_path(&repository.path, &revision), &forged);
+        let store = ObjectStore::open(&repository.path).unwrap();
+
+        assert_eq!(
+            store
+                .read_loose_object(&revision, 1_048_576, &mut never_elapsed())
+                .unwrap(),
+            LooseRead::Malformed
+        );
+    }
+
+    #[test]
+    fn bytes_after_the_stream_and_a_header_that_lies_are_both_malformed() {
+        // Two ways a file can hold a real object and still not BE one: a valid stream with bytes
+        // appended after it, and a header whose declared size disagrees with the body it precedes.
+        // Both would pass a reader that stopped at "it inflated".
+        let (repository, revision) = commit_repository("loose-trailing");
+        let store = ObjectStore::open(&repository.path).unwrap();
+        let path = loose_path(&repository.path, &revision);
+        let original = fs::read(&path).unwrap();
+
+        let mut trailing = original.clone();
+        trailing.push(0x00);
+        rewrite_loose(&path, &trailing);
+        assert_eq!(
+            store
+                .read_loose_object(&revision, 1_048_576, &mut never_elapsed())
+                .unwrap(),
+            LooseRead::Malformed
+        );
+
+        // A header whose size is wrong, re-named so it still authenticates: the SHA-1 check
+        // passes and only the size comparison refuses it.
+        let mut object = b"blob 99\0".to_vec();
+        object.extend_from_slice(b"short");
+        let id = HEXLOWER.encode(&Sha1::digest(&object));
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(&object).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let lying = loose_path(&repository.path, &id);
+        fs::create_dir_all(lying.parent().unwrap()).unwrap();
+        fs::write(&lying, &compressed).unwrap();
+        assert_eq!(
+            store
+                .read_loose_object(&id, 1_048_576, &mut never_elapsed())
+                .unwrap(),
+            LooseRead::Malformed
+        );
+    }
+
+    #[test]
+    fn an_unknown_object_type_is_refused_rather_than_carried() {
+        // The vocabulary is closed. An object naming a type this reader does not know is refused
+        // at the reader, so no caller has to decide what an unnamed type means.
+        let (repository, _) = commit_repository("loose-unknown-type");
+        let mut object = b"widget 5\0".to_vec();
+        object.extend_from_slice(b"stuff");
+        let id = HEXLOWER.encode(&Sha1::digest(&object));
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(&object).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let path = loose_path(&repository.path, &id);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, &compressed).unwrap();
+        let store = ObjectStore::open(&repository.path).unwrap();
+
+        assert_eq!(
+            store
+                .read_loose_object(&id, 1_048_576, &mut never_elapsed())
+                .unwrap(),
+            LooseRead::Malformed
+        );
+    }
+
+    #[test]
+    fn an_elapsed_deadline_is_an_error_and_never_one_of_the_four_outcomes() {
+        // Not evaluated is not an answer about the store. A reader that returned `NotLoose` when
+        // it simply ran out of time would report Beacon's slowness as the Operator's repository
+        // missing an object -- the distinction AGENTS.md requires, at this seam.
+        let (repository, revision) = commit_repository("loose-deadline");
+        let store = ObjectStore::open(&repository.path).unwrap();
+
+        assert_eq!(
+            store
+                .read_loose_object(&revision, 1_048_576, &mut || true)
+                .unwrap_err(),
+            ObjectStoreError::Elapsed
+        );
+    }
+
+    #[test]
+    fn a_symlinked_loose_object_is_refused_rather_than_followed() {
+        // `contains` already refuses this; the reader must too, and for the same reason. A path
+        // that is a symlink names a file the store does not own.
+        let (repository, revision) = commit_repository("loose-read-symlink");
+        let path = loose_path(&repository.path, &revision);
+        let held = repository.path.join("held-object");
+        fs::rename(&path, &held).unwrap();
+        symlink(&held, &path).unwrap();
+        let store = ObjectStore::open(&repository.path).unwrap();
+
+        assert_eq!(
+            store
+                .read_loose_object(&revision, 1_048_576, &mut never_elapsed())
+                .unwrap_err(),
+            ObjectStoreError::NotARepository
+        );
+    }
+
+    #[test]
+    fn a_name_that_is_not_forty_hex_characters_is_refused_before_any_read() {
+        let (repository, _) = commit_repository("loose-bad-name");
+        let store = ObjectStore::open(&repository.path).unwrap();
+
+        for name in ["", "abc", &"z".repeat(40), &"A".repeat(40), &"a".repeat(41)] {
+            assert_eq!(
+                store
+                    .read_loose_object(name, 1_048_576, &mut never_elapsed())
+                    .unwrap_err(),
+                ObjectStoreError::NotARepository,
+                "{name:?} was not refused"
+            );
+        }
+    }
+
+    #[test]
+    fn the_object_size_parser_refuses_padding_signs_and_overflow() {
+        assert_eq!(parse_object_size(b"0"), Some(0));
+        assert_eq!(parse_object_size(b"12"), Some(12));
+        for refused in [
+            &b""[..],
+            b"01",
+            b"007",
+            b"-1",
+            b"+1",
+            b"1 ",
+            b" 1",
+            b"1a",
+            b"99999999999999999999999999",
+        ] {
+            assert_eq!(parse_object_size(refused), None, "{refused:?} was accepted");
+        }
     }
 
     #[test]
