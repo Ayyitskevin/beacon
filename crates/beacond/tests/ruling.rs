@@ -1050,10 +1050,14 @@ fn a_second_ruling_supersedes_the_first_and_both_remain_readable() {
     // Both readable, and the first is not rewritten: it is superseded, not erased.
     let first_record = fixture.rulings.get(&first).unwrap();
     assert_eq!(first_record.payload().decision, RulingDecision::Approve);
-    assert_eq!(
-        first_record.force().superseded_by(),
-        Some(second.digest().value.as_str())
-    );
+    // The whole envelope, not a bare value: a digest that did not carry its algorithm and
+    // canonicalizer would leave a reader to assume which function produced it, which is the
+    // assumption every digest in this store exists to remove.
+    let superseded_by = first_record.force().superseded_by().unwrap();
+    assert_eq!(superseded_by.algorithm, "sha256");
+    assert_eq!(superseded_by.canonicalizer, "beacon.ruling.v1");
+    assert_eq!(superseded_by.value, second.digest().value);
+    assert_eq!(superseded_by, second.digest());
     assert_eq!(second.force().superseded_by(), None);
 
     // The effective Ruling is the LAST link -- not the first, and not the approve.
@@ -1227,10 +1231,12 @@ fn a_ruling_can_be_both_superseded_and_drifted_and_says_so() {
         .unwrap();
 
     let superseded = fixture.rulings.get(&first).unwrap();
-    assert_eq!(
-        superseded.force().superseded_by(),
-        Some(second.digest().value.as_str())
-    );
+    // Both facts, and the supersession reported as a whole envelope even while the Ruling is also
+    // drifted -- a compound state must not degrade either half.
+    let superseded_by = superseded.force().superseded_by().unwrap();
+    assert_eq!(superseded_by.algorithm, "sha256");
+    assert_eq!(superseded_by.canonicalizer, "beacon.ruling.v1");
+    assert_eq!(superseded_by.value, second.digest().value);
     assert_eq!(
         superseded.force().drift(),
         [UnmetPrecondition::CharterRevisionMoved]

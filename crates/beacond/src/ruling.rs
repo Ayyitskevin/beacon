@@ -200,14 +200,20 @@ pub struct RulingDigest {
 /// required to perform itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RulingForce {
-    superseded_by: Option<String>,
+    superseded_by: Option<RulingDigest>,
     drift: Vec<UnmetPrecondition>,
 }
 
 impl RulingForce {
-    /// The digest of the Ruling that reverses this one, if any.
-    pub fn superseded_by(&self) -> Option<&str> {
-        self.superseded_by.as_deref()
+    /// The identity of the Ruling that reverses this one, if any.
+    ///
+    /// The whole envelope, not a bare hex value: a digest carries its algorithm and canonicalizer
+    /// everywhere else in this store, and reporting one without them would leave a reader to
+    /// assume which function produced it. That the two are fixed in v1 makes them predictable, not
+    /// implied -- the day a second canonicalizer exists, a caller that had been inferring them
+    /// would be inferring wrongly.
+    pub fn superseded_by(&self) -> Option<&RulingDigest> {
+        self.superseded_by.as_ref()
     }
 
     /// Which of the four copied revisions has moved. Empty means every one still matches.
@@ -959,7 +965,8 @@ fn derive_force(
             ],
             |row| row.get::<_, String>(0),
         )
-        .optional()?;
+        .optional()?
+        .map(|value| digest_envelope(&value));
 
     let Some(facts) = proposal_binding_facts(connection, workspace_id, &stored.proposal_digest)
         .map_err(map_proposal_error)?
