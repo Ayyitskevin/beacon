@@ -33,8 +33,11 @@ than only an act.
 ## Decision
 
 Dispatch is **one Operator-triggered Command with twelve gates, one irreversible
-step, and three outcomes**, and it is the only act in Beacon that mutates the
-Operator's Repository on the strength of a record.
+step, and three outcomes**, and it is the only act in Beacon that mutates a Git
+repository on the strength of a record. **In v1 that repository is a Beacon-made
+disposable copy and nothing else**, enforced by a hard provenance gate: landing into
+a repository the Operator owns stays disabled, for the reasons in "Conditions on the
+landing slices" below. Everything this section says is scoped by that sentence.
 
 ```text
 dispatch(ruling_digest, content) -> DispatchReceipt
@@ -71,10 +74,12 @@ worktree exists, before one object enters the Operator's object database.
                                                              IRREVERSIBLE STEP
 ```
 
-`Refused` is a fact about the request and leaves the repository byte-identical.
-`Applied` names the resulting revision, verified after the fact. `Unconfirmed`
-means the landing step produced no establishable result, and the Receipt says so
-and names the commit to check. The three never collapse, for the reason ADR 0027
+`Refused` is a fact about the request. A refusal at any gate G1-G12 leaves the
+repository byte-identical, which is the strong claim and the one row 34 needs; a
+refusal after W3 leaves the source refs and working tree unchanged and **may leave
+unreachable objects**, which the Receipt names. `Applied` names the resulting
+revision, verified after the fact. `LandingUnobserved` means the swap produced no
+establishable result, and the Receipt names the commit to check. The three never collapse, for the reason ADR 0027
 gives about preflight's outcomes: a negative answer, an error, and a step that did
 not finish are different facts.
 
@@ -109,18 +114,21 @@ the Proposal's own order.
 Two structural rules make the record authority-bearing rather than decorative,
 and both live in the store rather than in a Command that could be bypassed:
 
-- **One Candidate per Proposal**, enforced by a unique index. Two sets of
-  post-image digests for one decision would make "the bytes the Operator ruled
-  on" ambiguous, and dispatch would have to choose which. It does not choose: the
-  second record is refused, and a revised change is a new Proposal — which is what
-  ADR 0034 already says about anything that changes a Proposal's identity.
-- **Recorded before the Ruling**, compared at dispatch time against
-  `events.sequence`. Sequence rather than timestamp: it is the store's own
-  ordering primitive, so the rule needs no clock and cannot be defeated by two
-  records landing in one millisecond.
+- **One Candidate per Proposal**, enforced structurally by a unique index rather
+  than by a Command that could be bypassed. Two sets of post-image digests would
+  leave "which bytes" with no answer and force dispatch to choose. It does not
+  choose: the second record is refused, and a revised change is a new Proposal —
+  which is what ADR 0034 already says about anything that changes a Proposal's
+  identity.
+- **Recorded before the Ruling**, compared against `events.sequence` — the store's
+  own ordering primitive, so the rule needs no clock and cannot be defeated by two
+  records in one millisecond. This one is a **dispatch-time gate**, not a Candidate
+  store invariant: the `candidates` table does not refuse a late record, and the
+  Ruling that binds it is what makes the order matter.
 
 Together they mean that at the moment the Owner ruled, exactly one set of
-post-image digests existed for that Proposal, and it is the one dispatch applies.
+post-image digests existed for that Proposal. That is byte selection, and it is all
+it is.
 
 ### What that does not prove, and what must land before a dispatch may apply anything
 
@@ -356,8 +364,9 @@ exists in `beacond` today, and recording "pause not verified" in a Receipt does 
 make a forbidden dispatch permissible. A live pause gate lands before the first
 applying slice; it is **not** one of the seven undeclared families below.
 
-**A Candidate authorizes effects, so it is a Material Artifact.** `CONTEXT.md:199-201`
-defines one as an Artifact used to support a Ruling or authorize effects, and
+**A Candidate is used to support a Ruling, so it is a Material Artifact.**
+`CONTEXT.md:199-201` defines one as an Artifact used to support a Ruling or authorize
+effects — a Candidate does the first, and a v2 Ruling turns it into the second — and
 `BLUEPRINT.md:627-631` requires a non-author Evaluation before it may do either. v1
 has no Evaluation citation. The scope this ADR asks the Steward to accept, in
 writing rather than by implication: **the whole v1 landing path reaches only
