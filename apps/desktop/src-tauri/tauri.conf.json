@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "dev.beacon.phase0",
   "build": {
-    "beforeDevCommand": "cargo build --release -p beacond && mkdir -p ../../target/sidecar && cp ../../target/release/beacond \"../../target/sidecar/beacond-$(rustc -vV | awk '/^host:/ {print $2}')\" && npm run dev",
-    "beforeBuildCommand": "cargo build --release -p beacond && mkdir -p ../../target/sidecar && cp ../../target/release/beacond \"../../target/sidecar/beacond-$(rustc -vV | awk '/^host:/ {print $2}')\" && npm run build",
+    "beforeDevCommand": "../../scripts/stage-sidecar && npm run dev",
+    "beforeBuildCommand": "../../scripts/stage-sidecar && npm run build",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../dist"
   },

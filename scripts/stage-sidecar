@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+#
+# Build beacond and stage it under the target-triple name Tauri's externalBin
+# expects. One implementation, called from three places: the gate's cargo-only
+# stage, and tauri.conf.json's beforeBuildCommand and beforeDevCommand.
+#
+# It existed three times before, in three shapes, and the shapes had already
+# drifted in failure semantics -- the gate's copy reported a failed release
+# build as success. Failure handling is the thing least likely to be kept in
+# sync by hand, so it lives in one file.
+#
+# Runs from anywhere: callers have different working directories.
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+cargo build --release -p beacond
+
+triple="$(rustc -vV | awk '/^host:/ {print $2}')"
+# An empty triple would stage `beacond-` and satisfy nothing.
+if [ -z "$triple" ]; then
+    echo "stage-sidecar: could not determine the host target triple" >&2
+    exit 1
+fi
+
+mkdir -p target/sidecar
+cp target/release/beacond "target/sidecar/beacond-$triple"

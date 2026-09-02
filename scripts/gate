@@ -80,18 +80,14 @@ run_in_desktop() {
 # the gate exited 0 -- a construct whose failure mode is "quietly does nothing",
 # checking the very build it was added to protect.
 #
-# `set -e` in a subshell does NOT fix it. `run` calls this as `if "$@"; then`,
+# `set -e` in a subshell does NOT fix that. `run` calls this as `if "$@"; then`,
 # and -e is suppressed for a command whose status is being tested; the first
-# attempted repair here was written that way and the injected failure still
-# printed ok. `|| return` is unaffected by that rule.
+# attempted repair was written that way and the injected failure still printed
+# ok. A separate script has its own shell, so its `set -e` is its own, and its
+# exit status is all this function returns.
 # tests/harness/test_gate_sidecar_staging.py injects the failure permanently.
 stage_sidecar() {
-    cargo build --release -p beacond || return
-    triple="$(rustc -vV | awk '/^host:/ {print $2}')" || return
-    # An empty triple would stage `beacond-` and satisfy nothing.
-    [ -n "$triple" ] || return 1
-    mkdir -p target/sidecar || return
-    cp target/release/beacond "target/sidecar/beacond-$triple"
+    scripts/stage-sidecar
 }
 
 echo "gate: $(git rev-parse --abbrev-ref HEAD) @ $(git rev-parse --short HEAD)"
