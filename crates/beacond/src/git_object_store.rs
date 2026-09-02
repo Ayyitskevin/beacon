@@ -291,12 +291,12 @@ impl ObjectStore {
         let Some(prefix) = open_directory_at(&self.objects, &object_id.as_bytes()[..2])
             .map_err(|_| ObjectStoreError::NotARepository)?
         else {
-            return Ok(LooseRead::NotLoose);
+            return settled(LooseRead::NotLoose, deadline);
         };
         let Some(mut file) = open_regular_at(&prefix, &object_id.as_bytes()[2..])
             .map_err(|_| ObjectStoreError::NotARepository)?
         else {
-            return Ok(LooseRead::NotLoose);
+            return settled(LooseRead::NotLoose, deadline);
         };
         if deadline() {
             return Err(ObjectStoreError::Elapsed);
@@ -308,7 +308,7 @@ impl ObjectStore {
             .map_err(|_| ObjectStoreError::NotARepository)?
             .len();
         if length > maximum as u64 {
-            return Ok(LooseRead::TooLarge);
+            return settled(LooseRead::TooLarge, deadline);
         }
         let mut compressed = Vec::with_capacity(length as usize);
         file.by_ref()
@@ -327,19 +327,22 @@ impl ObjectStore {
         let status = match decoder.decompress_vec(&compressed, &mut object, FlushDecompress::Finish)
         {
             Ok(status) => status,
-            Err(_) => return Ok(LooseRead::Malformed),
+            Err(_) => return settled(LooseRead::Malformed, deadline),
         };
         if status != Status::StreamEnd || decoder.total_in() != compressed.len() as u64 {
             // Either the stream did not finish -- which includes hitting the inflation bound --
             // or bytes trail it. A loose object file holds one zlib stream and nothing after it.
-            return Ok(if object.len() > maximum {
-                LooseRead::TooLarge
-            } else {
-                LooseRead::Malformed
-            });
+            return settled(
+                if object.len() > maximum {
+                    LooseRead::TooLarge
+                } else {
+                    LooseRead::Malformed
+                },
+                deadline,
+            );
         }
         if object.len() > maximum {
-            return Ok(LooseRead::TooLarge);
+            return settled(LooseRead::TooLarge, deadline);
         }
         if deadline() {
             return Err(ObjectStoreError::Elapsed);
@@ -348,29 +351,32 @@ impl ObjectStore {
         // The name authenticates the whole uncompressed form, header included, so this runs before
         // the header is trusted for anything.
         if Sha1::digest(&object)[..] != raw_id {
-            return Ok(LooseRead::Malformed);
+            return settled(LooseRead::Malformed, deadline);
         }
         let Some(header_end) = object.iter().position(|byte| *byte == 0) else {
-            return Ok(LooseRead::Malformed);
+            return settled(LooseRead::Malformed, deadline);
         };
         let header = &object[..header_end];
         let Some(type_end) = header.iter().position(|byte| *byte == b' ') else {
-            return Ok(LooseRead::Malformed);
+            return settled(LooseRead::Malformed, deadline);
         };
         let Some(kind) = ObjectKind::parse(&header[..type_end]) else {
-            return Ok(LooseRead::Malformed);
+            return settled(LooseRead::Malformed, deadline);
         };
         let body = &object[header_end + 1..];
         if parse_object_size(&header[type_end + 1..]) != Some(body.len()) {
-            return Ok(LooseRead::Malformed);
+            return settled(LooseRead::Malformed, deadline);
         }
         if deadline() {
             return Err(ObjectStoreError::Elapsed);
         }
-        Ok(LooseRead::Read {
-            kind,
-            body: body.to_vec(),
-        })
+        settled(
+            LooseRead::Read {
+                kind,
+                body: body.to_vec(),
+            },
+            deadline,
+        )
     }
 
     /// Resolve one repository-relative path to its file bytes at `revision`.
@@ -414,7 +420,7 @@ impl ObjectStore {
                     || component.contains('\0')
             })
         {
-            return Ok(PathResolution::Malformed);
+            return settled(PathResolution::Malformed, deadline);
         }
 
         // The commit names exactly one tree, and its own body is what says so.
@@ -424,12 +430,12 @@ impl ObjectStore {
                 body,
             } => match commit_tree_id(&body) {
                 Some(id) => id,
-                None => return Ok(PathResolution::Malformed),
+                None => return settled(PathResolution::Malformed, deadline),
             },
-            LooseRead::Read { .. } => return Ok(PathResolution::Malformed),
-            LooseRead::NotLoose => return Ok(PathResolution::NotLoose),
-            LooseRead::TooLarge => return Ok(PathResolution::TooLarge),
-            LooseRead::Malformed => return Ok(PathResolution::Malformed),
+            LooseRead::Read { .. } => return settled(PathResolution::Malformed, deadline),
+            LooseRead::NotLoose => return settled(PathResolution::NotLoose, deadline),
+            LooseRead::TooLarge => return settled(PathResolution::TooLarge, deadline),
+            LooseRead::Malformed => return settled(PathResolution::Malformed, deadline),
         };
 
         for (index, component) in components.iter().enumerate() {
@@ -439,50 +445,53 @@ impl ObjectStore {
                     kind: ObjectKind::Tree,
                     body,
                 } => body,
-                LooseRead::Read { .. } => return Ok(PathResolution::Malformed),
-                LooseRead::NotLoose => return Ok(PathResolution::NotLoose),
-                LooseRead::TooLarge => return Ok(PathResolution::TooLarge),
-                LooseRead::Malformed => return Ok(PathResolution::Malformed),
+                LooseRead::Read { .. } => return settled(PathResolution::Malformed, deadline),
+                LooseRead::NotLoose => return settled(PathResolution::NotLoose, deadline),
+                LooseRead::TooLarge => return settled(PathResolution::TooLarge, deadline),
+                LooseRead::Malformed => return settled(PathResolution::Malformed, deadline),
             };
             // The whole tree is parsed before any entry is used, so a malformed tail cannot be
             // hidden behind an early match: a tree that does not parse establishes nothing, and
             // reporting "absent" from a half-read one would be a claim about a tree nobody read.
             let Some(entries) = parse_tree(&body) else {
-                return Ok(PathResolution::Malformed);
+                return settled(PathResolution::Malformed, deadline);
             };
             let Some(entry) = entries
                 .iter()
                 .find(|entry| entry.name == component.as_bytes())
             else {
-                return Ok(PathResolution::Absent);
+                return settled(PathResolution::Absent, deadline);
             };
             if !last {
                 if !entry.mode.is_directory() {
                     // A path continues through something that is not a directory, so the path
                     // itself is not in this tree. That is an absence, not a wrong kind of entry:
                     // the entry the declaration named is the LAST component, and it is not here.
-                    return Ok(PathResolution::Absent);
+                    return settled(PathResolution::Absent, deadline);
                 }
                 tree_id = HEXLOWER.encode(&entry.id);
                 continue;
             }
             if !entry.mode.is_regular_file() {
-                return Ok(PathResolution::NotARegularFile);
+                return settled(PathResolution::NotARegularFile, deadline);
             }
             let blob_id = HEXLOWER.encode(&entry.id);
-            return Ok(match self.read_loose_object(&blob_id, maximum, deadline)? {
-                LooseRead::Read {
-                    kind: ObjectKind::Blob,
-                    body,
-                } => PathResolution::Blob { body },
-                LooseRead::Read { .. } => PathResolution::Malformed,
-                LooseRead::NotLoose => PathResolution::NotLoose,
-                LooseRead::TooLarge => PathResolution::TooLarge,
-                LooseRead::Malformed => PathResolution::Malformed,
-            });
+            return settled(
+                match self.read_loose_object(&blob_id, maximum, deadline)? {
+                    LooseRead::Read {
+                        kind: ObjectKind::Blob,
+                        body,
+                    } => PathResolution::Blob { body },
+                    LooseRead::Read { .. } => PathResolution::Malformed,
+                    LooseRead::NotLoose => PathResolution::NotLoose,
+                    LooseRead::TooLarge => PathResolution::TooLarge,
+                    LooseRead::Malformed => PathResolution::Malformed,
+                },
+                deadline,
+            );
         }
         // `components` is non-empty and the loop returns on its last iteration.
-        Ok(PathResolution::Malformed)
+        settled(PathResolution::Malformed, deadline)
     }
 
     /// Is `revision` (40 lowercase hex characters) present in this object store?
@@ -632,6 +641,21 @@ fn tree_sort_key(name: &[u8], mode: EntryMode) -> Vec<u8> {
         key.push(b'/');
     }
     key
+}
+
+/// The one way a definite outcome leaves a read or a walk.
+///
+/// Work that finished after the budget expired describes the store as it was before the answer was
+/// due, so reporting it as a fact about the repository turns Beacon's own slowness into a claim
+/// about the Operator's history. Every arm routes through here rather than each remembering to
+/// check, which is what makes "consulted before the definite answer" true of all of them instead of
+/// most of them: a non-author review staged a deadline that expired after the first blocking call
+/// and got `NotLoose` back, because four arms returned before reaching a check.
+fn settled<T>(outcome: T, deadline: &mut impl FnMut() -> bool) -> Result<T, ObjectStoreError> {
+    if deadline() {
+        return Err(ObjectStoreError::Elapsed);
+    }
+    Ok(outcome)
 }
 
 /// A Git object header's decimal size: no leading zero, no sign, no overflow.
@@ -1416,6 +1440,107 @@ mod tests {
                 .unwrap_err(),
             ObjectStoreError::Elapsed
         );
+    }
+
+    /// A deadline that is false for `allowed` checks and true afterwards.
+    ///
+    /// `|| true` only proves the entry-time check. This is what proves the rest: it lets a read
+    /// begin, expires partway through, and demands that whatever the read had already worked out is
+    /// not published as a fact about the store.
+    fn elapses_after(allowed: usize) -> impl FnMut() -> bool {
+        let mut seen = 0_usize;
+        move || {
+            seen += 1;
+            seen > allowed
+        }
+    }
+
+    #[test]
+    fn a_deadline_that_expires_mid_read_is_not_published_as_an_outcome() {
+        // A non-author review staged exactly this and got `Ok(NotLoose)` where `Err(Elapsed)` was
+        // required: four arms returned before reaching a check, so absent and not-evaluated were
+        // separate types but not separate runtime states. Every count from 1 upward is exercised,
+        // so no arm can quietly return early again without this going red.
+        let (repository, revision) = walk_repository("deadline-staged");
+        let store = ObjectStore::open(&repository.path).unwrap();
+
+        // An object that is not loose: the arm the review reached.
+        for allowed in 0..6 {
+            let outcome =
+                store.read_loose_object(&"b".repeat(40), 1_048_576, &mut elapses_after(allowed));
+            assert!(
+                matches!(
+                    outcome,
+                    Err(ObjectStoreError::Elapsed) | Ok(LooseRead::NotLoose)
+                ),
+                "allowed={allowed}: {outcome:?}"
+            );
+            if allowed < 2 {
+                assert_eq!(
+                    outcome,
+                    Err(ObjectStoreError::Elapsed),
+                    "allowed={allowed}: an unfinished read answered about the store"
+                );
+            }
+        }
+
+        // A real object, over its bound: `TooLarge` must not outrun the budget either.
+        assert_eq!(
+            store
+                .read_loose_object(&revision, 8, &mut elapses_after(2))
+                .unwrap_err(),
+            ObjectStoreError::Elapsed
+        );
+
+        // And the successful read: expiring on the very last check still refuses to answer.
+        let mut counted = 0_usize;
+        let _ = store.read_loose_object(&revision, 1_048_576, &mut || {
+            counted += 1;
+            false
+        });
+        assert!(
+            counted >= 2,
+            "the read consulted the deadline {counted} times"
+        );
+        assert_eq!(
+            store
+                .read_loose_object(&revision, 1_048_576, &mut elapses_after(counted - 1))
+                .unwrap_err(),
+            ObjectStoreError::Elapsed,
+            "a read that finished after its budget still returned an answer"
+        );
+    }
+
+    #[test]
+    fn a_walk_whose_deadline_expires_mid_traversal_publishes_nothing() {
+        // The same rule one layer up: a walk that ran out of budget after reading the commit must
+        // not report the path as absent, or as anything else about the repository.
+        let (repository, revision) = walk_repository("deadline-walk");
+        let store = ObjectStore::open(&repository.path).unwrap();
+        let mut counted = 0_usize;
+        let _ = store.resolve_path_at(&revision, "src/lib.rs", 1_048_576, &mut || {
+            counted += 1;
+            false
+        });
+        assert!(
+            counted > 4,
+            "the walk consulted the deadline {counted} times"
+        );
+
+        for allowed in 0..counted {
+            assert_eq!(
+                store
+                    .resolve_path_at(
+                        &revision,
+                        "src/lib.rs",
+                        1_048_576,
+                        &mut elapses_after(allowed)
+                    )
+                    .unwrap_err(),
+                ObjectStoreError::Elapsed,
+                "allowed={allowed}: an unfinished walk answered about the repository"
+            );
+        }
     }
 
     #[test]
