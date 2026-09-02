@@ -2,15 +2,17 @@ use std::collections::BTreeSet;
 use std::ffi::{CString, OsString};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::Arc;
 
+use flate2::read::ZlibDecoder;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
+use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -890,7 +892,7 @@ fn verify_frozen_git_state(repository: &Path) -> Result<(), SampleProjectError> 
     {
         return Err(SampleProjectError::TamperedInstallation);
     }
-    verify_loose_object(repository, EXPECTED_BASE_REVISION)?;
+    verify_loose_object(repository, EXPECTED_BASE_REVISION, b"commit")?;
     verify_frozen_index(repository)
 }
 
@@ -903,7 +905,11 @@ fn read_small_regular(path: &Path, maximum: u64) -> Result<Vec<u8>, SampleProjec
     fs::read(path).map_err(|_| SampleProjectError::TamperedInstallation)
 }
 
-fn verify_loose_object(repository: &Path, object_id: &str) -> Result<(), SampleProjectError> {
+fn verify_loose_object(
+    repository: &Path,
+    object_id: &str,
+    expected_type: &[u8],
+) -> Result<(), SampleProjectError> {
     if object_id.len() != 40 || !object_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(SampleProjectError::TamperedInstallation);
     }
@@ -911,12 +917,53 @@ fn verify_loose_object(repository: &Path, object_id: &str) -> Result<(), SampleP
         .join(".git/objects")
         .join(&object_id[..2])
         .join(&object_id[2..]);
-    let metadata =
-        fs::symlink_metadata(path).map_err(|_| SampleProjectError::TamperedInstallation)?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 1_048_576 {
+    let compressed = read_small_regular(&path, 1_048_576)?;
+    let mut decoder = ZlibDecoder::new(compressed.as_slice());
+    let mut object = Vec::new();
+    decoder
+        .by_ref()
+        .take(1_048_577)
+        .read_to_end(&mut object)
+        .map_err(|_| SampleProjectError::TamperedInstallation)?;
+    if object.len() > 1_048_576 {
+        return Err(SampleProjectError::TamperedInstallation);
+    }
+    let header_end = object
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or(SampleProjectError::TamperedInstallation)?;
+    let header = object
+        .get(..header_end)
+        .ok_or(SampleProjectError::TamperedInstallation)?;
+    let type_end = header
+        .iter()
+        .position(|byte| *byte == b' ')
+        .ok_or(SampleProjectError::TamperedInstallation)?;
+    let object_type = &header[..type_end];
+    let size = &header[type_end + 1..];
+    let body = object
+        .get(header_end + 1..)
+        .ok_or(SampleProjectError::TamperedInstallation)?;
+    if object_type != expected_type || parse_git_object_size(size) != Some(body.len()) {
+        return Err(SampleProjectError::TamperedInstallation);
+    }
+    let expected_id =
+        decode_object_id(object_id).ok_or(SampleProjectError::TamperedInstallation)?;
+    if Sha1::digest(&object)[..] != expected_id {
         return Err(SampleProjectError::TamperedInstallation);
     }
     Ok(())
+}
+
+fn parse_git_object_size(value: &[u8]) -> Option<usize> {
+    if value.is_empty() || (value.len() > 1 && value[0] == b'0') {
+        return None;
+    }
+    value.iter().try_fold(0_usize, |size, byte| {
+        size.checked_mul(10)?.checked_add(usize::from(
+            byte.checked_sub(b'0').filter(|digit| *digit < 10)?,
+        ))
+    })
 }
 
 fn verify_frozen_index(repository: &Path) -> Result<(), SampleProjectError> {
@@ -939,6 +986,9 @@ fn verify_frozen_index(repository: &Path) -> Result<(), SampleProjectError> {
     }
 
     let content_end = index.len() - 20;
+    if Sha1::digest(&index[..content_end])[..] != index[content_end..] {
+        return Err(SampleProjectError::TamperedInstallation);
+    }
     let mut offset = 12_usize;
     for (expected_path, expected_object_id) in EXPECTED_INDEX_ENTRIES {
         let fixed_end = offset
@@ -975,7 +1025,7 @@ fn verify_frozen_index(repository: &Path) -> Result<(), SampleProjectError> {
         {
             return Err(SampleProjectError::TamperedInstallation);
         }
-        verify_loose_object(repository, expected_object_id)?;
+        verify_loose_object(repository, expected_object_id, b"blob")?;
         let unpadded = 62_usize
             .checked_add(name.len())
             .and_then(|value| value.checked_add(1))
@@ -1563,6 +1613,47 @@ mod tests {
             "failed to prepare orphaned repository: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+
+        assert!(matches!(
+            service.install(),
+            Err(SampleProjectError::TamperedInstallation)
+        ));
+        assert_eq!(store.count("sample_project_installations"), 0);
+    }
+
+    #[test]
+    fn orphan_with_rewritten_expected_object_is_refused() {
+        let store = TestStore::new("orphan-rewritten-object");
+        let service = store.isolated_service();
+        let destination = service.repository_path();
+        service.materialize_repository(&destination).unwrap();
+        let object = destination
+            .join(".git/objects")
+            .join(&EXPECTED_BASE_REVISION[..2])
+            .join(&EXPECTED_BASE_REVISION[2..]);
+        let mut permissions = fs::metadata(&object).unwrap().permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(&object, permissions).unwrap();
+        fs::write(object, b"not the expected commit object").unwrap();
+
+        assert!(matches!(
+            service.install(),
+            Err(SampleProjectError::TamperedInstallation)
+        ));
+        assert_eq!(store.count("sample_project_installations"), 0);
+    }
+
+    #[test]
+    fn orphan_with_rewritten_index_checksum_is_refused() {
+        let store = TestStore::new("orphan-rewritten-index-checksum");
+        let service = store.isolated_service();
+        let destination = service.repository_path();
+        service.materialize_repository(&destination).unwrap();
+        let index = destination.join(".git/index");
+        let mut bytes = fs::read(&index).unwrap();
+        let last = bytes.last_mut().unwrap();
+        *last ^= 0xff;
+        fs::write(index, bytes).unwrap();
 
         assert!(matches!(
             service.install(),
