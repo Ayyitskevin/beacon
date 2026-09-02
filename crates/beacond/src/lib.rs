@@ -2761,7 +2761,7 @@ mod tests {
 
         let report = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap();
 
-        assert_eq!(report.diagnostics.schema_version, 17);
+        assert_eq!(report.diagnostics.schema_version, 18);
         let connection = Connection::open(&store.path).unwrap();
         assert_eq!(read_run(&connection), run_before);
         assert_eq!(read_receipt(&connection), receipt_before);
