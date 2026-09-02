@@ -569,9 +569,11 @@ fn closed_git_command(git: &Path) -> Command {
 /// reported as [`Bounded::TimedOut`] rather than as a short read — the
 /// fail-toward-keep direction for every caller here.
 ///
-/// The kill on timeout reaches this child, not a process group; Git spawns
-/// nothing long-lived for these three commands, and process-group interruption
-/// belongs to whichever layer runs repository-declared programs.
+/// The kill on timeout reaches this child, not a process group; under the
+/// hardened configuration above, the bounded `rev-parse`, `config --file`,
+/// `worktree add`, `status`, and `worktree remove` invocations spawn no
+/// long-lived processes, while process-group interruption belongs to whichever
+/// layer runs repository-declared programs.
 fn run_git_bounded(mut command: Command, budget: Duration) -> Bounded {
     command
         .stdin(Stdio::null())
