@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Set the distributed AppImage's compatibility floor at glibc 2.35
