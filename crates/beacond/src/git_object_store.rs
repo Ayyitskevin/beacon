@@ -110,8 +110,11 @@ impl ObjectStore {
     /// Is `revision` (40 lowercase hex characters) present in this object store?
     ///
     /// Checks loose objects first, then every pack index. `deadline` is consulted
-    /// between packs and inside the binary search so that a pathological store
-    /// yields [`ObjectStoreError::Elapsed`] rather than blocking.
+    /// after every blocking filesystem call and before every definite answer, so
+    /// a pathological store yields [`ObjectStoreError::Elapsed`] rather than a
+    /// presence or absence derived from work that finished too late. It cannot
+    /// interrupt a call already in progress: the overrun is bounded by one
+    /// filesystem operation, not eliminated.
     pub(crate) fn contains(
         &self,
         revision: &str,
@@ -122,11 +125,23 @@ impl ObjectStore {
             return Err(ObjectStoreError::Elapsed);
         }
         let loose = self.objects.join(&revision[..2]).join(&revision[2..]);
-        if fs::metadata(&loose).map(|m| m.is_file()).unwrap_or(false) {
+        let loose_present = fs::metadata(&loose).map(|m| m.is_file()).unwrap_or(false);
+        // Every definite answer below follows a blocking filesystem call, so the budget is
+        // re-checked after each one. A read that finished late describes a store as it was before
+        // the answer was due; reporting it as presence or absence turns Beacon's own slowness into
+        // a claim about the Operator's repository.
+        if deadline() {
+            return Err(ObjectStoreError::Elapsed);
+        }
+        if loose_present {
             return Ok(true);
         }
         let pack_dir = self.objects.join("pack");
-        let entries = match fs::read_dir(&pack_dir) {
+        let entries = fs::read_dir(&pack_dir);
+        if deadline() {
+            return Err(ObjectStoreError::Elapsed);
+        }
+        let entries = match entries {
             Ok(entries) => entries,
             // No pack directory is normal for a young repository.
             Err(_) => return Ok(false),
@@ -137,6 +152,9 @@ impl ObjectStore {
             .filter(|path| path.extension().is_some_and(|ext| ext == "idx"))
             .collect();
         indexes.sort();
+        if deadline() {
+            return Err(ObjectStoreError::Elapsed);
+        }
         for index in indexes {
             if deadline() {
                 return Err(ObjectStoreError::Elapsed);
@@ -144,6 +162,9 @@ impl ObjectStore {
             if index_contains(&index, &raw, deadline)? {
                 return Ok(true);
             }
+        }
+        if deadline() {
+            return Err(ObjectStoreError::Elapsed);
         }
         Ok(false)
     }
@@ -184,6 +205,12 @@ fn index_contains(
     deadline: &mut impl FnMut() -> bool,
 ) -> Result<bool, ObjectStoreError> {
     let data = fs::read(path).map_err(|_| ObjectStoreError::UnreadableIndex)?;
+    // The read above blocks for as long as the filesystem takes, and an index whose target bucket
+    // is empty reaches `Ok(false)` below without entering the search loop -- so without this check
+    // a read that completed after the budget became an absence claim.
+    if deadline() {
+        return Err(ObjectStoreError::Elapsed);
+    }
     const HEADER: usize = 8;
     const FANOUT: usize = 256 * 4;
     if data.len() < HEADER + FANOUT {
@@ -226,6 +253,9 @@ fn index_contains(
             std::cmp::Ordering::Equal => return Ok(true),
         }
     }
+    if deadline() {
+        return Err(ObjectStoreError::Elapsed);
+    }
     Ok(false)
 }
 
@@ -238,7 +268,7 @@ mod tests {
 
     use uuid::Uuid;
 
-    use super::{ObjectStore, ObjectStoreError};
+    use super::{ObjectStore, ObjectStoreError, index_contains};
 
     /// A temporary directory removed on drop.
     struct TempDir {
@@ -288,6 +318,106 @@ mod tests {
             .unwrap();
         let revision = String::from_utf8(output.stdout).unwrap().trim().to_owned();
         (directory, revision)
+    }
+
+    /// A minimal but valid version 2 pack index holding one name, whose first byte is `0xaa`.
+    ///
+    /// Any target whose first byte is below `0xaa` lands in an EMPTY fanout bucket, so the binary
+    /// search runs zero iterations. That is the shape that used to escape every deadline check.
+    fn one_name_index(first_byte: u8) -> Vec<u8> {
+        let mut index = Vec::new();
+        index.extend_from_slice(b"\xfftOc");
+        index.extend_from_slice(&2_u32.to_be_bytes());
+        for bucket in 0..256_usize {
+            let cumulative: u32 = if bucket >= first_byte as usize { 1 } else { 0 };
+            index.extend_from_slice(&cumulative.to_be_bytes());
+        }
+        index.extend_from_slice(&[first_byte; 20]);
+        index
+    }
+
+    /// A read that finishes AFTER the budget must not become an absence claim.
+    ///
+    /// The index is served through a FIFO, so `fs::read` blocks until the writer closes it. By then
+    /// the deadline has expired. With an empty target bucket the search body never runs, so before
+    /// this guard the function fell straight through to `Ok(false)` — reporting "the revision is not
+    /// in this repository" on the strength of a read that was already stale. An absence is a claim
+    /// about the store; a timeout is a claim about Beacon. They are not interchangeable.
+    #[test]
+    fn a_read_that_completes_after_the_budget_is_elapsed_not_absent() {
+        let directory = TempDir::new("fifo-late-read");
+        let pack = directory.path.join("objects/pack");
+        fs::create_dir_all(&pack).unwrap();
+        let fifo = pack.join("pack-late.idx");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo is available in the test environment");
+        assert!(made.success(), "mkfifo failed");
+
+        let index = one_name_index(0xaa);
+        let writer_path = fifo.clone();
+        let writer = std::thread::spawn(move || {
+            // Opening for write blocks until the reader opens; the reader then blocks until this
+            // side closes, so the read finishes strictly after the sleep.
+            use std::io::Write;
+            let mut file = fs::File::create(&writer_path).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let _ = file.write_all(&index);
+        });
+
+        let store = ObjectStore::open(&directory.path).expect("a bare store with objects/");
+        let started = std::time::Instant::now();
+        // A 100 ms budget the blocking read is guaranteed to outlast.
+        let mut deadline = move || started.elapsed().as_millis() > 100;
+        // First byte 0x01 is below 0xaa, so its bucket is empty and no search iteration runs.
+        let outcome = store.contains(&"01".repeat(20), &mut deadline);
+        writer.join().unwrap();
+
+        assert_eq!(
+            outcome,
+            Err(ObjectStoreError::Elapsed),
+            "a stale read was reported as a definite answer"
+        );
+        assert_ne!(outcome, Ok(false), "elapsed work became an absence claim");
+    }
+
+    /// The same stale read, pinned at the function that performs it.
+    ///
+    /// `contains` also guards its final answer, so the test above passes even if this guard is
+    /// removed. That makes it a property test, not a regression test for this line. This one calls
+    /// `index_contains` directly, so the post-read check is the only thing that can produce the
+    /// timeout — remove it and this fails while everything else stays green.
+    #[test]
+    fn index_contains_reports_a_late_read_as_elapsed_rather_than_returning_false() {
+        let directory = TempDir::new("fifo-index-late-read");
+        fs::create_dir_all(&directory.path).unwrap();
+        let fifo = directory.path.join("pack-late.idx");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .expect("mkfifo is available in the test environment")
+                .success()
+        );
+
+        let index = one_name_index(0xaa);
+        let writer_path = fifo.clone();
+        let writer = std::thread::spawn(move || {
+            use std::io::Write;
+            let mut file = fs::File::create(&writer_path).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let _ = file.write_all(&index);
+        });
+
+        let started = std::time::Instant::now();
+        let mut deadline = move || started.elapsed().as_millis() > 100;
+        // First byte 0x01 lands in an empty bucket: zero search iterations, so the only deadline
+        // check that can fire is the one after the read.
+        let outcome = index_contains(&fifo, &[0x01; 20], &mut deadline);
+        writer.join().unwrap();
+
+        assert_eq!(outcome, Err(ObjectStoreError::Elapsed));
     }
 
     fn never_elapsed() -> impl FnMut() -> bool {
