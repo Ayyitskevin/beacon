@@ -101,9 +101,17 @@ starter-organization, and Residents states without substituting daemon calls for
 
 Every asserted state has a screenshot or socket-response artifact. Recovery Key pixels never
 leave tmpfs: the corresponding image band is covered before the screenshot is written, and requests
-(including the local capability token) are never written. Per-step `result.json` and whole-matrix
-`matrix.json` keep `absent`, `broken`, and `not_evaluated` separate and the harness exits nonzero
-unless every selected observation succeeds.
+(including the local capability token) are never written. Raw AppImage and Xvfb logs also remain in
+tmpfs until the export scan accepts them. The outer runner validates the closed five-transition
+`result.json` schema and every named artifact; Docker's exit code alone cannot create an observed
+host. Per-step `result.json` and whole-matrix `matrix.json` keep `absent`, `broken`, and
+`not_evaluated` separate, including the transition-specific cause and an interrupted active step.
+Every persisted byte is scanned for the fixture password, grouped Recovery Keys, and password- or
+token-shaped values. Only a clean scan writes `.export-safe`, and CI's evidence upload requires that
+marker even under `always()`.
+
+Acceptance criterion row 2 remains **partial** until the round-2 harness fixes receive focused
+cross-seat confirmation. A green local gate proves the implementation state, not that ruling.
 
 This is part of the package job, with its evidence uploaded separately from the AppImage. The final
 local matrix took 39 seconds on Ubuntu 22.04, 37 on Debian 12, and 61 on Ubuntu 24.04. The
