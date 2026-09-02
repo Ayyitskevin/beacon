@@ -53,6 +53,13 @@ const BUNDLE_FILES: &[BundleFile] = &[
     },
 ];
 
+const EXPECTED_INDEX_ENTRIES: &[(&str, &str)] = &[
+    ("Cargo.lock", "db6a33eb2f275ff188dd6c05a798b3e5832c98bb"),
+    ("Cargo.toml", "3c0cae6f7d394e7d2cd6dcb2516a927df042abd9"),
+    ("README.md", "6de4c063801d0e996e9e6e828188105fac53369a"),
+    ("src/lib.rs", "46fb840cffb4154a8c1e7964f75271e9826c6e65"),
+];
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SampleProjectDigest {
@@ -431,45 +438,9 @@ impl SampleProjectService {
         if git_metadata.file_type().is_symlink() || !git_metadata.is_dir() {
             return Err(SampleProjectError::TamperedInstallation);
         }
-        for bundled in BUNDLE_FILES {
-            let path = repository.join(bundled.path);
-            let metadata = fs::symlink_metadata(&path)
-                .map_err(|_| SampleProjectError::TamperedInstallation)?;
-            if metadata.file_type().is_symlink()
-                || !metadata.is_file()
-                || metadata.permissions().mode() & 0o111 != 0
-                || fs::read(path)? != bundled.bytes
-            {
-                return Err(SampleProjectError::TamperedInstallation);
-            }
-        }
-        let tracked = output_text(self.git_output(repository, &["ls-files"])?)
-            .map_err(|_| SampleProjectError::TamperedInstallation)?;
-        let actual = tracked.lines().collect::<BTreeSet<_>>();
-        let expected = BUNDLE_FILES
-            .iter()
-            .map(|bundled| bundled.path)
-            .collect::<BTreeSet<_>>();
-        if actual != expected {
-            return Err(SampleProjectError::TamperedInstallation);
-        }
-        let status = output_text(self.git_output(
-            repository,
-            &["status", "--porcelain=v1", "--untracked-files=all"],
-        )?)
-        .map_err(|_| SampleProjectError::TamperedInstallation)?;
-        if !status.is_empty() {
-            return Err(SampleProjectError::TamperedInstallation);
-        }
-        output_text(self.git_output(repository, &["rev-parse", "--verify", "HEAD"])?)
-            .map_err(|_| SampleProjectError::TamperedInstallation)
-            .and_then(|revision| {
-                if revision == EXPECTED_BASE_REVISION {
-                    Ok(revision)
-                } else {
-                    Err(SampleProjectError::TamperedInstallation)
-                }
-            })
+        verify_bundled_tree(repository)?;
+        verify_frozen_git_state(repository)?;
+        Ok(EXPECTED_BASE_REVISION.to_owned())
     }
 
     fn git_command(&self, repository: &Path) -> Command {
@@ -801,6 +772,267 @@ fn computed_bundle_digest() -> String {
         .collect()
 }
 
+fn verify_bundled_tree(repository: &Path) -> Result<(), SampleProjectError> {
+    let mut actual_files = BTreeSet::new();
+    let mut actual_directories = BTreeSet::new();
+    collect_bundled_tree_paths(
+        repository,
+        repository,
+        &mut actual_files,
+        &mut actual_directories,
+    )?;
+
+    let expected_files = BUNDLE_FILES
+        .iter()
+        .map(|bundled| bundled.path.to_owned())
+        .collect::<BTreeSet<_>>();
+    let mut expected_directories = BTreeSet::new();
+    for bundled in BUNDLE_FILES {
+        let mut parent = Path::new(bundled.path).parent();
+        while let Some(directory) = parent.filter(|directory| !directory.as_os_str().is_empty()) {
+            expected_directories.insert(
+                directory
+                    .to_str()
+                    .ok_or(SampleProjectError::TamperedInstallation)?
+                    .to_owned(),
+            );
+            parent = directory.parent();
+        }
+    }
+    if actual_files != expected_files || actual_directories != expected_directories {
+        return Err(SampleProjectError::TamperedInstallation);
+    }
+
+    let mut digest = Sha256::new();
+    digest.update(DIGEST_CANONICALIZER.as_bytes());
+    for bundled in BUNDLE_FILES {
+        let path = repository.join(bundled.path);
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|_| SampleProjectError::TamperedInstallation)?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.permissions().mode() & 0o111 != 0
+            || metadata.len()
+                != u64::try_from(bundled.bytes.len())
+                    .map_err(|_| SampleProjectError::TamperedInstallation)?
+        {
+            return Err(SampleProjectError::TamperedInstallation);
+        }
+        let bytes = fs::read(path).map_err(|_| SampleProjectError::TamperedInstallation)?;
+        if bytes != bundled.bytes {
+            return Err(SampleProjectError::TamperedInstallation);
+        }
+        digest.update((bundled.path.len() as u64).to_be_bytes());
+        digest.update(bundled.path.as_bytes());
+        digest.update(0o100644_u32.to_be_bytes());
+        digest.update((bytes.len() as u64).to_be_bytes());
+        digest.update(&bytes);
+    }
+    let actual_digest = digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if actual_digest != EXPECTED_BUNDLE_DIGEST {
+        return Err(SampleProjectError::TamperedInstallation);
+    }
+    Ok(())
+}
+
+fn collect_bundled_tree_paths(
+    repository: &Path,
+    directory: &Path,
+    files: &mut BTreeSet<String>,
+    directories: &mut BTreeSet<String>,
+) -> Result<(), SampleProjectError> {
+    let entries = fs::read_dir(directory).map_err(|_| SampleProjectError::TamperedInstallation)?;
+    for entry in entries {
+        let entry = entry.map_err(|_| SampleProjectError::TamperedInstallation)?;
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(repository)
+            .map_err(|_| SampleProjectError::TamperedInstallation)?;
+        if relative == Path::new(".git") {
+            continue;
+        }
+        let relative = relative
+            .to_str()
+            .ok_or(SampleProjectError::TamperedInstallation)?
+            .to_owned();
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|_| SampleProjectError::TamperedInstallation)?;
+        if metadata.file_type().is_symlink() {
+            return Err(SampleProjectError::TamperedInstallation);
+        }
+        if metadata.is_dir() {
+            directories.insert(relative);
+            collect_bundled_tree_paths(repository, &path, files, directories)?;
+        } else if metadata.is_file() {
+            files.insert(relative);
+        } else {
+            return Err(SampleProjectError::TamperedInstallation);
+        }
+    }
+    Ok(())
+}
+
+/// Validate the frozen Git control files without asking Git to interpret them.
+///
+/// Adoption is the only call path that reaches a tree Beacon did not create in
+/// this process. Keeping this parser data-only prevents repository-local hooks,
+/// filters, filesystem monitors, and other configured programs from running.
+fn verify_frozen_git_state(repository: &Path) -> Result<(), SampleProjectError> {
+    if read_small_regular(&repository.join(".git/HEAD"), 64)? != b"ref: refs/heads/main\n" {
+        return Err(SampleProjectError::TamperedInstallation);
+    }
+    let expected_ref = format!("{EXPECTED_BASE_REVISION}\n");
+    if read_small_regular(&repository.join(".git/refs/heads/main"), 64)? != expected_ref.as_bytes()
+    {
+        return Err(SampleProjectError::TamperedInstallation);
+    }
+    verify_loose_object(repository, EXPECTED_BASE_REVISION)?;
+    verify_frozen_index(repository)
+}
+
+fn read_small_regular(path: &Path, maximum: u64) -> Result<Vec<u8>, SampleProjectError> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|_| SampleProjectError::TamperedInstallation)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > maximum {
+        return Err(SampleProjectError::TamperedInstallation);
+    }
+    fs::read(path).map_err(|_| SampleProjectError::TamperedInstallation)
+}
+
+fn verify_loose_object(repository: &Path, object_id: &str) -> Result<(), SampleProjectError> {
+    if object_id.len() != 40 || !object_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(SampleProjectError::TamperedInstallation);
+    }
+    let path = repository
+        .join(".git/objects")
+        .join(&object_id[..2])
+        .join(&object_id[2..]);
+    let metadata =
+        fs::symlink_metadata(path).map_err(|_| SampleProjectError::TamperedInstallation)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 1_048_576 {
+        return Err(SampleProjectError::TamperedInstallation);
+    }
+    Ok(())
+}
+
+fn verify_frozen_index(repository: &Path) -> Result<(), SampleProjectError> {
+    let index = read_small_regular(&repository.join(".git/index"), 65_536)?;
+    if index.len() < 32 || index.get(..4) != Some(b"DIRC") {
+        return Err(SampleProjectError::TamperedInstallation);
+    }
+    let version = u32::from_be_bytes(
+        index[4..8]
+            .try_into()
+            .map_err(|_| SampleProjectError::TamperedInstallation)?,
+    );
+    let entry_count = u32::from_be_bytes(
+        index[8..12]
+            .try_into()
+            .map_err(|_| SampleProjectError::TamperedInstallation)?,
+    );
+    if version != 2 || usize::try_from(entry_count).ok() != Some(EXPECTED_INDEX_ENTRIES.len()) {
+        return Err(SampleProjectError::TamperedInstallation);
+    }
+
+    let content_end = index.len() - 20;
+    let mut offset = 12_usize;
+    for (expected_path, expected_object_id) in EXPECTED_INDEX_ENTRIES {
+        let fixed_end = offset
+            .checked_add(62)
+            .ok_or(SampleProjectError::TamperedInstallation)?;
+        let fixed = index
+            .get(offset..fixed_end)
+            .ok_or(SampleProjectError::TamperedInstallation)?;
+        let mode = u32::from_be_bytes(
+            fixed[24..28]
+                .try_into()
+                .map_err(|_| SampleProjectError::TamperedInstallation)?,
+        );
+        let flags = u16::from_be_bytes(
+            fixed[60..62]
+                .try_into()
+                .map_err(|_| SampleProjectError::TamperedInstallation)?,
+        );
+        let name_end = index
+            .get(fixed_end..content_end)
+            .and_then(|bytes| bytes.iter().position(|byte| *byte == 0))
+            .map(|relative| fixed_end + relative)
+            .ok_or(SampleProjectError::TamperedInstallation)?;
+        let name = index
+            .get(fixed_end..name_end)
+            .ok_or(SampleProjectError::TamperedInstallation)?;
+        if mode != 0o100644
+            || flags != u16::try_from(name.len()).unwrap_or(u16::MAX)
+            || name != expected_path.as_bytes()
+            || fixed.get(40..60)
+                != decode_object_id(expected_object_id)
+                    .as_ref()
+                    .map(|id| &id[..])
+        {
+            return Err(SampleProjectError::TamperedInstallation);
+        }
+        verify_loose_object(repository, expected_object_id)?;
+        let unpadded = 62_usize
+            .checked_add(name.len())
+            .and_then(|value| value.checked_add(1))
+            .ok_or(SampleProjectError::TamperedInstallation)?;
+        let padded = unpadded
+            .checked_add(7)
+            .map(|value| value & !7)
+            .ok_or(SampleProjectError::TamperedInstallation)?;
+        offset = offset
+            .checked_add(padded)
+            .ok_or(SampleProjectError::TamperedInstallation)?;
+    }
+    while offset < content_end {
+        let header_end = offset
+            .checked_add(8)
+            .ok_or(SampleProjectError::TamperedInstallation)?;
+        let header = index
+            .get(offset..header_end)
+            .ok_or(SampleProjectError::TamperedInstallation)?;
+        if !header[0].is_ascii_uppercase() {
+            return Err(SampleProjectError::TamperedInstallation);
+        }
+        let size = usize::try_from(u32::from_be_bytes(
+            header[4..8]
+                .try_into()
+                .map_err(|_| SampleProjectError::TamperedInstallation)?,
+        ))
+        .map_err(|_| SampleProjectError::TamperedInstallation)?;
+        offset = header_end
+            .checked_add(size)
+            .ok_or(SampleProjectError::TamperedInstallation)?;
+        if offset > content_end {
+            return Err(SampleProjectError::TamperedInstallation);
+        }
+    }
+    Ok(())
+}
+
+fn decode_object_id(value: &str) -> Option<[u8; 20]> {
+    if value.len() != 40 {
+        return None;
+    }
+    let mut decoded = [0_u8; 20];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        decoded[index] = (decode_hex(pair[0])? << 4) | decode_hex(pair[1])?;
+    }
+    Some(decoded)
+}
+
+fn decode_hex(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        _ => None,
+    }
+}
+
 fn load_installation(
     connection: &Connection,
     workspace_id: Uuid,
@@ -1025,7 +1257,7 @@ fn positive_u32(value: i64) -> Result<u32, SampleProjectError> {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
     use std::sync::{Arc, Mutex};
@@ -1121,6 +1353,17 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    fn sentinel_program(path: &std::path::Path, sentinel: &std::path::Path) {
+        fs::write(
+            path,
+            format!("#!/bin/sh\n: > '{}'\nexit 97\n", sentinel.display()),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(path, permissions).unwrap();
     }
 
     #[test]
@@ -1326,6 +1569,31 @@ mod tests {
             Err(SampleProjectError::TamperedInstallation)
         ));
         assert_eq!(store.count("sample_project_installations"), 0);
+    }
+
+    #[test]
+    fn adopting_an_exact_orphan_executes_no_program_from_its_tree() {
+        let store = TestStore::new("orphan-no-program");
+        let service = store.isolated_service();
+        let destination = service.repository_path();
+        service.materialize_repository(&destination).unwrap();
+        let sentinel = store.root.join("orphan-program-ran");
+        let hostile_git = destination.join(".git/hostile-git");
+        sentinel_program(&hostile_git, &sentinel);
+
+        let result = store
+            .isolated_service()
+            .with_git_program(&hostile_git)
+            .install();
+
+        assert!(
+            !sentinel.exists(),
+            "orphan verification executed a program from the tree"
+        );
+        assert!(
+            result.is_ok(),
+            "an exact orphan remains adoptable: {result:?}"
+        );
     }
 
     #[test]
