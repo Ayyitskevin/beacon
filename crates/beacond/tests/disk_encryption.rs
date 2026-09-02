@@ -348,7 +348,12 @@ fn unreadable_dm_uuid_reports_unknown_not_enabled() {
     let device = fixture.mounted_on_host_device();
     // Present but not readable as a value. The distinction the reader must keep
     // is "there is a uuid here I could not read" versus "there is no uuid here".
-    fs::create_dir_all(fixture.node(&device).join("dm").join("uuid")).unwrap();
+    // The name IS readable, so only the uuid read can fail this reading -- with
+    // both missing the test passed for the wrong reason and a mutant that
+    // swallowed the uuid failure alone survived.
+    let dm = fixture.node(&device).join("dm");
+    fs::create_dir_all(dm.join("uuid")).unwrap();
+    fs::write(dm.join("name"), "live\n").unwrap();
 
     let report = fixture.read();
 
