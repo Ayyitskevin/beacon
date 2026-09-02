@@ -231,6 +231,23 @@ fn plain_partition_with_no_dm_layer_reports_disabled_and_names_what_it_cannot_se
 }
 
 #[test]
+fn an_existing_unresolvable_store_does_not_fall_back_to_its_parent() {
+    let fixture = Fixture::new("unresolvable-store");
+    let device = fixture.mounted_on_host_device();
+    fixture.node(&device);
+    // The store is present and cannot be resolved. Its parent still resolves,
+    // and the block stack under it reads as a proven negative -- so falling
+    // back would answer confidently about a subject that is not the store.
+    fs::remove_file(&fixture.store).unwrap();
+    std::os::unix::fs::symlink("beacon.sqlite3", &fixture.store).unwrap();
+
+    let report = fixture.read();
+
+    assert_eq!(report.state, LiveDataEncryption::Unknown);
+    assert!(reason(&report).contains("could not be resolved"));
+}
+
+#[test]
 fn missing_mountinfo_reports_unknown() {
     let fixture = Fixture::new("no-mountinfo");
     fixture.node("1:1");
