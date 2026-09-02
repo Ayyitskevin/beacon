@@ -274,3 +274,64 @@ def test_each_wait_failure_preserves_its_cause_and_transition() -> None:
         assert actual_state == state
         assert transition in detail
         assert cause in detail
+
+
+def test_an_interrupted_active_step_is_broken_and_later_steps_are_not_evaluated(
+    tmp_path: Path,
+) -> None:
+    result_path = tmp_path / "result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "steps": {
+                    "operator_setup_form": {
+                        "status": "observed",
+                        "detail": "setup form",
+                        "artifacts": ["01-operator-setup.png"],
+                    },
+                    "recovery_key_confirmation": {
+                        "status": "not_evaluated",
+                        "artifacts": [],
+                    },
+                    "account_and_workspace": {
+                        "status": "not_evaluated",
+                        "artifacts": [],
+                    },
+                }
+            }
+        )
+    )
+    state_helper = REPO / "scripts" / "clean-host-first-run-state"
+
+    interrupted = subprocess.run(
+        [
+            "bash",
+            "-c",
+            """
+source "$1"
+first_run_result="$2"
+first_run_begin_step recovery_key_confirmation "Recovery Key confirmation"
+first_run_install_signal_traps
+kill -TERM $$
+sleep 1
+""",
+            "first-run-interruption-probe",
+            str(state_helper),
+            str(result_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert interrupted.returncode == 143
+    steps = json.loads(result_path.read_text())["steps"]
+    assert steps["recovery_key_confirmation"] == {
+        "status": "broken",
+        "detail": "Recovery Key confirmation was interrupted by TERM",
+        "artifacts": [],
+    }
+    assert steps["account_and_workspace"] == {
+        "status": "not_evaluated",
+        "artifacts": [],
+    }

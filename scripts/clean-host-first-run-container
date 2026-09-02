@@ -30,6 +30,7 @@ with open(sys.argv[1], "x", encoding="utf-8") as handle:
     json.dump(document, handle, indent=2, sort_keys=True)
     handle.write("\n")
 PY
+first_run_result="$result"
 
 set_step() {
     local step="$1"
@@ -82,7 +83,9 @@ cleanup() {
     fi
     exit "$status"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+first_run_install_signal_traps
+first_run_begin_step operator_setup_form "Operator setup form observation"
 
 cp /opt/beacon/Beacon.AppImage /work/Beacon.AppImage
 chmod 700 /work/Beacon.AppImage
@@ -301,6 +304,8 @@ if ! assert_session /evidence/01-session-before.json operator_setup_required fal
 fi
 set_step operator_setup_form observed "setup-required form and locked socket status" \
     01-operator-setup.png 01-session-before.json
+first_run_finish_step operator_setup_form
+first_run_begin_step recovery_key_confirmation "Recovery Key confirmation"
 
 password='beacon-clean-host-passphrase-2026'
 xdotool mousemove --sync 490 451 click 1
@@ -319,6 +324,8 @@ require_text recovery_key_confirmation "Recovery Key confirmation" \
     "Save this one-time Recovery Key" "$recovery_screen" yes
 set_step recovery_key_confirmation observed "one-time Recovery Key confirmation rendered; credential pixels excluded" \
     02-recovery-confirmation-redacted.png
+first_run_finish_step recovery_key_confirmation
+first_run_begin_step account_and_workspace "Account and Workspace transition"
 
 if ! click_word saved; then
     fail_step account_and_workspace absent "Recovery Key saved confirmation was not uniquely observable" \
@@ -344,6 +351,8 @@ if ! assert_session /evidence/03-session-unlocked.json unlocked true; then
 fi
 set_step account_and_workspace observed "operator account unlocked its newly created Workspace" \
     03-starter-organization.png 03-session-unlocked.json
+first_run_finish_step account_and_workspace
+first_run_begin_step starter_organization "Starter Organization acceptance"
 
 # This window is fixed at 1280x800 by tauri.conf.json and the proposal action
 # is visible at its lower-left. Tesseract 4 on Ubuntu 22.04 missed the rendered
@@ -383,8 +392,11 @@ then
 fi
 set_step starter_organization observed "default starter Resident proposal accepted through the UI" \
     04-starter-organization.json 05-authenticated-briefing.png
+first_run_finish_step starter_organization
+first_run_begin_step authenticated_briefing "Authenticated Briefing observation"
 set_step authenticated_briefing observed "authenticated Briefing rendered and exposed Residents over the read-only socket" \
     05-authenticated-briefing.png 05-residents.json
+first_run_finish_step authenticated_briefing
 
 python3 - "$result" <<'PY'
 import json
