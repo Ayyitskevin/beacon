@@ -655,7 +655,13 @@ fn walk_block_stack(
             let Ok(uuid) = read_sysfs(&uuid_path) else {
                 return unreadable(&uuid_path);
             };
-            let name = read_sysfs(&node.join("dm/name")).unwrap_or_else(|()| "unnamed".to_owned());
+            // A mapping with a uuid always has a name beside it. Substituting a
+            // placeholder for a failed read would let a read failure reach a
+            // confident state, which is the one thing this reader must never do.
+            let name_path = node.join("dm/name");
+            let Ok(name) = read_sysfs(&name_path) else {
+                return unreadable(&name_path);
+            };
             match crypt_type(&uuid) {
                 Some(kind) => {
                     // The type prefix only. The remainder of a crypt UUID is a
