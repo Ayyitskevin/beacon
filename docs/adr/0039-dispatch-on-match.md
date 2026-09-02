@@ -67,7 +67,8 @@ worktree exists, before one object enters the Operator's object database.
   W3  stage exactly the declared targets; commit
   W4  post-condition: base..commit touches exactly the declared set
   ------------------------------------------------------------- still discardable
-  L1  git merge --ff-only     << THE ONLY IRREVERSIBLE STEP
+  L1  git update-ref <branch> <candidate> <pinned base>   << THE ONLY
+                                                             IRREVERSIBLE STEP
 ```
 
 `Refused` is a fact about the request and leaves the repository byte-identical.
@@ -235,16 +236,85 @@ Three independent equalities, all required:
    every post-image digest gates a creation or a modification; the supplied
    content is checked before the worktree exists (G12) and each written file is
    re-read and checked after (W2).
-3. **The effect.** After the commit, `git diff --name-status base commit` must
+3. **The effect.** After the commit, `git diff --name-status -z base commit` must
    produce exactly the declared mutation set — same paths, same kinds, no extra
    row. This is what makes "applied exactly what was declared" a measurement
    rather than an assertion, and it is what catches a write that a hook, a
-   filter, a `.gitattributes` transform, or a defect added on the side.
+   filter, or a defect added on the side.
+
+A kernel review measured two ways this was wrong as first written, and both
+corrections are part of this decision:
+
+- **Staging is literal or it is not staging.** `git add -- <path>` still applies
+  pathspec magic; a valid Proposal path `:(glob)*.txt` staged a second, undeclared
+  file. Every Git invocation passes `--literal-pathspecs`, and every path list is
+  consumed NUL-delimited, because a Proposal path may contain a newline.
+- **Compare the blob, not the file.** Git's built-in `text eol=lf` conversion — no
+  external filter, so the filter-driver hardening never sees it — turned CRLF
+  Candidate bytes into an LF blob with a different SHA-256 while
+  `diff --name-status` still reported the declared `M`. Post-image digests are
+  therefore verified against **the blob bytes in the prepared commit's tree**, which
+  is the artifact that will be published, not against the worktree file.
+
+## What a kernel review measured, and what it changed
+
+Every mechanism below was probed directly against `main` on this host (Git 2.43.0) by a non-author
+reviewer. Two held: the hardened Git shape executed **zero** planted `post-checkout`, `post-merge`,
+`pre-commit`, `prepare-commit-msg`, `commit-msg`, `post-commit`, `core.fsmonitor` and clean/smudge
+programs, and `openat2` with `RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS` refused `..`, an outward
+symlink and `/proc/self/fd/0` with `EXDEV`. Four did not, and this decision is what they leave:
+
+**The landing primitive is a compare-and-swap, not a fast-forward merge.**
+`git merge --ff-only` requires HEAD to be *an ancestor* of the candidate commit, not equal to its
+first parent. With the branch moved **backward** to an ancestor after the head check, the merge
+exited 0 and published the commit. The landing step is therefore
+`git update-ref <branch> <candidate> <pinned base>`, which fails unless the ref still holds exactly
+the value the gate observed. Where a checkout is materialized afterwards it is a separately
+observable step and is not described as atomic with the ref.
+
+**The source repository is pinned by identity, not by pathname.** `Worktree::create` canonicalizes
+to a path and every Git child re-enters it by name, so renaming the directory and installing an
+equivalent decoy at the same pathname redirected the mutation: the decoy advanced, the real
+repository stayed at base. Dispatch pins the repository once, retains its descriptor and identity
+for the whole Run, enters it by descriptor, and fails closed if the name stops resolving to the
+pinned identity. Deterministic swaps between the head check and the worktree, and between the head
+check and the landing, are required tests.
+
+**Gate reads may not write.** `git status --porcelain` refreshes and rewrites `.git/index`, so the
+head-and-cleanliness gate mutated the repository it was measuring — and the design's own
+five-part fingerprint could not see it. Git hardening is split: a **read-only** variant carrying
+`GIT_OPTIONAL_LOCKS=0` for every gate read, and the mutating variant for the worktree and the
+landing.
+
+**Zero mutation is measured over raw bytes.** The fingerprint is replaced by
+`raw_repository_snapshot(root)`: a recursive walk of the whole repository root that runs no Git,
+follows no symlink, sorts entries by raw `OsStr` bytes, and hashes each entry's relative name, file
+type, mode, symlink target, length and full contents — `.git` included, so the index, reflogs,
+pseudorefs, config, worktree metadata, and untracked and ignored files are all in scope. Its own
+control proves that one changed byte of `.git/index`, of a loose object, or of worktree metadata
+changes the snapshot. It establishes **final byte identity** and is never described as proof that no
+transient file existed.
+
+**Exactly once is reserved before the act, not indexed after it.** Two dispatchers each running the
+landing both exit 0 — the second reports the branch already current — so a unique `Applied` row
+cannot make application exactly once. Inside the serialized transaction below, dispatch **spends**
+the authorizing Ruling digest and persists `{run, source identity, branch, pinned base, prepared
+commit}` before the irreversible step. An attempt whose result was never established stays spent
+until the Operator resolves it, and that record is also what lets startup name the exact commit to
+inspect.
 
 ## Conditions on the landing slices
 
 The record slices (Candidate v1) stand alone. Every condition below binds the slices
 that write to a repository, and each came from a non-author review of this design.
+
+**Authority is read through transaction-bound, owning-module readers.** A service
+method that opens its own store closure returns a snapshot, and a `RulingForce`
+derived a moment ago is not a fact about the moment of landing. Each owning module
+exposes a crate-internal reader that takes the caller's `&Connection` and performs
+its own full proof — digest over the stored bytes, strict decode, re-encode,
+indexed-column equality, and the Event pairing — before any field of its record is
+used. Dispatch never assembles authority by joining tables.
 
 **Authority linearizes at one point.** Nothing in the gate list stops a Ruling from
 being superseded, or a policy or binding from moving, between G4/G5 and L1. A final
@@ -290,11 +360,16 @@ which the Receipt names**. The zero-mutation tests measure refs, the working tre
 `.git/worktrees`, and the object listing separately, so the weaker claim cannot pass
 for the stronger one.
 
-**Every material Run terminates with a Receipt, including this one.** `AGENTS.md:154`
-admits no exception, so a dispatch Run whose lease expires without one is not left
-Receipt-less: startup reconciliation writes an explicit `Unconfirmed` Receipt naming
-the commit to check and what may or may not have landed, and the Run reaches its
-terminal state through that Receipt rather than beside it.
+**Every material Run terminates with a Receipt, and the vocabulary keeps ADR 0031's
+meaning.** `AGENTS.md:154` admits no exception. ADR 0031 already reserves the Run
+state `unconfirmed` for a lease that expired with **no terminal Receipt**, so this
+ADR does not reuse that word for a Receipt outcome. Three distinct states:
+`Refused` for a pre-mutation gate, with the repository unchanged; a
+post-preparation refusal that names its residue; and `LandingUnobserved` for a
+Receipt that exists and whose Git result could not be established — which names the
+prepared commit, because the reservation record above persisted it before the act.
+A Run whose lease expires without any Receipt stays `unconfirmed`, and startup
+writes the Receipt that terminates it from that same durable record.
 
 ## The gap this decision proceeds past, in its own words
 
@@ -341,6 +416,16 @@ put criterion `:905`'s attribution chain inside Git itself.
 repository that is not a Beacon-made copy.** A rename afterwards is not
 retroactive: every commit already minted keeps the old identity.
 
+## What Beacon writes into the Operator's history, encoded unambiguously
+
+A Proposal summary may contain newlines and tabs (ADR 0034 permits both), so using it
+verbatim above the authority trailers would let a summary forge trailer-shaped lines.
+The message is therefore built, not concatenated: the subject is the summary's first
+line with every control character except space removed and the result truncated on a
+character boundary; the body is a blank line, then the three trailers, and nothing
+else. A summary that contains a line looking like `Beacon-Ruling: …` cannot produce a
+second trailer, and a test drives exactly that.
+
 ## Receipt v3, and what is still owed
 
 A non-author review built a Receipt specimen from the field list in this ADR's
@@ -366,7 +451,12 @@ one pinned specimen per outcome arm — `Refused`, `Applied`, `Unconfirmed`.
 It must also carry what the accepted Receipt contract requires
 (`BLUEPRINT.md:790-800`) or name each exception: the commands run and their exit
 statuses, the Evaluations and checks with their exact inputs, the sandbox version,
-and an explicit stop, interruption, or failure state. A dispatch runs no Declared
+and an explicit stop, interruption, or failure state. A kernel review added four
+more: the autonomy profile the dispatch ran under, the exact Git argv and a bounded
+result category for every attempted step (never dynamic stderr text), the pinned
+source identity and branch, and typed absence for every domain that genuinely has
+none. G12 additionally enforces the Proposal's own byte, file-size and time bounds
+before any caller-supplied content is read. A dispatch runs no Declared
 Check, so several of those are `Absent` with a reason rather than omitted — the
 distinction `Recorded` already exists to keep.
 
@@ -440,8 +530,23 @@ The dispatch act (later slices, each proved before the next opens):
 - dispatch refuses under Observe, and refuses while the Installation is paused;
 - the dispatch service is absent from every Agent, MCP, schedule, and reconnect
   surface, proved by an inventory test rather than by prose;
-- a dispatch Run whose lease expired reaches its terminal state through an explicit
-  `Unconfirmed` Receipt;
+- a dispatch Run whose lease expired reaches its terminal state through a Receipt
+  written from the durable pre-landing record, while `unconfirmed` keeps ADR 0031's
+  meaning;
+- the branch moved **backward** to an ancestor after the head check does not land —
+  the case that kills both a deleted head gate and the belief that a fast-forward
+  merge is an exact-base compare-and-swap;
+- a decoy repository installed at the pinned pathname between the head check and the
+  worktree, and again between the head check and the landing, does not receive the
+  mutation;
+- a Candidate path carrying pathspec magic stages only itself;
+- a Candidate whose bytes would be normalized on the way into the tree refuses,
+  because post-image digests are compared against the prepared commit's blobs;
+- two dispatchers of one authority produce one application, by reservation rather
+  than by a unique row written afterwards;
+- the raw repository snapshot changes when one byte of `.git/index`, one loose
+  object, or one worktree-metadata file changes — the control without which every
+  zero-mutation assertion above is weaker than it reads;
 - a moved repository head refuses **even though every stored record still
   agrees**, which is the only test that fails if G11 is deleted;
 - content that does not hash to the Candidate refuses before any write;
