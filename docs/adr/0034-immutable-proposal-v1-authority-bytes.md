@@ -350,3 +350,268 @@ contract and its required evidence. A material change to the canonical bytes,
 identity semantics, authority boundary, or implementation fence requires a new
 Product Steward ruling before merge. Applying migration 0018 to live data and
 opening any production transport or execution surface remain separately gated.
+
+## Amendment (proposed 2026-09-02): the byte layout, recorded
+
+**Status: DRAFT. Proposed, not accepted.** The decision above remains `accepted`
+as written; nothing here changes it. This section records what
+`beacon.proposal.v1` *is*, at the level of detail a second implementation needs,
+so the grammar can be reproduced without reading Rust. Kevin's merge is the
+acceptance; until then this is a proposal from the implementing seat.
+
+### Why an amendment, not a new ADR
+
+The accepted text above requires "an explicitly assigned one-byte tag that is
+never renumbered" and integers "of the field's fixed width" — and then assigns
+neither. It states the shape of the grammar without stating the grammar. A
+reader could not build a second encoder from it and get byte-identical output,
+which is what the identity depends on.
+
+That is a gap in the record, not a different decision. Every value below was
+read out of the implementation this ADR authorised, and every one of them is a
+choice the accepted text already committed to making. Recording them changes no
+accepted behaviour. A layout that *differs* from this one is a different
+canonicalizer and takes a new identity (`beacon.proposal.v2`), never a silent
+change under the v1 name — which is the accepted text's own rule.
+
+Derived from `team/opus` at `0b44a58`, by reading `encode()`, its decoder, and
+the constants they share.
+
+### Ordered field layout
+
+Every field, in `encode()` order. `u32`/`u64` are unsigned big-endian.
+`string` is a `u64` big-endian **byte** length followed by that many UTF-8 bytes.
+`list<T>` is a `u32` big-endian count followed by that many entries. `uuid` is 16
+raw bytes; `sha256` is 32 raw bytes. Neither is length-framed.
+
+| # | field | encoding | bound, and where the bound comes from |
+|---|---|---|---|
+| 1 | magic | 19 literal bytes `beacon.proposal.v1\0` | fixed; not length-framed |
+| 2 | `scope.workspace_id` | uuid | — |
+| 3 | `scope.project_id` | uuid | — |
+| 4 | `scope.mission_id` | uuid | — |
+| 5 | `requester.resident_id` | uuid | — |
+| 6 | `requester.resident_configuration_id` | uuid | — |
+| 7 | `requester.bootstrap` | tag | `0x01` = `owner`; the only assigned value |
+| 8 | └ `reason` | string | ≤ 500 Unicode scalars (ADR); decoder byte bound 2,000 = 500 × 4 |
+| 9 | `bindings.charter_revision` | u32 | ≥ 1 |
+| 10 | `bindings.project_policy_revision` | u32 | ≥ 1 |
+| 11 | `bindings.repository_revision` | u32 | ≥ 1 |
+| 12 | `bindings.pinned_base_revision` | string | exactly 40 bytes, `[0-9a-f]` (ADR) |
+| 13 | `intent.summary` | string | ≤ 2,000 Unicode scalars (ADR); decoder byte bound 8,000 = 2,000 × 4 |
+| 14 | `intent.readable_context` | tag | `0x01` = `not_declared`, `0x02` = `declared` |
+| 15 | └ if `declared`: entries | `list<context_entry>` | envelope |
+| 16 | &nbsp;&nbsp;└ `path` | string | envelope |
+| 17 | &nbsp;&nbsp;└ `content_sha256` | sha256 | — |
+| 18 | └ if `declared`: `manifest_sha256` | sha256 | — |
+| 19 | `intent.target_paths` | `list<string>` | envelope |
+| 20 | `intent.declared_mutations` | `list<mutation>` | envelope |
+| 21 | &nbsp;&nbsp;└ `kind` | tag | `0x01`/`0x02`/`0x03` |
+| 22 | &nbsp;&nbsp;└ `target` | string | envelope |
+| 23 | `intent.declared_check_runs` | `list<string>` | each name ≤ 64 bytes (Repository Binding) |
+| 24 | `intent.declared_checks` | `list<declared_check>` | envelope |
+| 25 | &nbsp;&nbsp;└ `name` | string | ≤ 64 bytes (Repository Binding) |
+| 26 | &nbsp;&nbsp;└ `argv` | `list<string>` | envelope; Repository Binding sets no per-argument limit |
+| 27 | &nbsp;&nbsp;└ `working_directory` | string | envelope; Repository Binding sets no length limit |
+| 28 | `requirements` | 7 × `constraint`, fixed order | see below |
+| 29 | `bounds.wall_clock_ms` | u64 | zero is legal |
+| 30 | `bounds.cpu_seconds` | u64 | zero is legal |
+| 31 | `bounds.address_space_bytes` | u64 | zero is legal |
+| 32 | `bounds.file_size_bytes` | u64 | zero is legal |
+| 33 | `bounds.output_bytes` | u64 | zero is legal |
+| 34 | `bounds.token_ceiling` | u64 | zero is legal |
+| 35 | `budget` | tag | `0x01` = `no_spend` |
+| 36 | `rollback` | tag | `0x01` = `discard_disposable_worktree` |
+
+The seven `requirements`, in this exact order: `execution_policy`, `sandbox`,
+`network`, `model_provider`, `command_allowlist`, `tool_allowlist`,
+`evaluations`. Each is a `constraint`:
+
+```text
+constraint := 0x01                                        -- not_declared
+            | 0x02 kind:string version:u32 canonicalizer:string sha256:sha256
+```
+
+`kind` and `canonicalizer` are ≤ 64 bytes and `version` must be ≥ 1. The
+`sha256` member is 32 raw bytes and is **not** length-framed: the "byte strings
+and nested requirement identities use the same 64-bit framing" bullet above
+applies to the two string members, and the requirement-identity paragraph's own
+"`sha256` is 32 raw bytes" governs the digest. Only `not_declared` is accepted
+by submission today; `0x02` decodes so that a later reviewed decision needs no
+new tag, and is then refused.
+
+"Envelope" above means the record's own 64 KiB limit, not a narrower per-field
+number. The accepted text states exactly two sizes — the 64 KiB whole-record
+envelope and the 40-character pinned base revision — and where a field must
+byte-match another module's record, its limit is that module's, never a tighter
+one invented here. Repository Binding caps a check name at 64 and places no
+limit on an argument or a working directory, so neither does this grammar.
+
+### Tag assignments
+
+Every one-byte tag, by position. **`0x00` is unassigned everywhere**, so a
+zero-filled buffer cannot decode as any valid variant. Any value not listed is
+refused as an unknown tag; none is ever renumbered.
+
+| position | `0x01` | `0x02` | `0x03` |
+|---|---|---|---|
+| bootstrap basis | `owner` | — | — |
+| readable context | `not_declared` | `declared` | — |
+| mutation kind | `create_file` | `modify_file` | `delete_file` |
+| constraint (each of the 7) | `not_declared` | `bound` | — |
+| budget | `no_spend` | — | — |
+| rollback | `discard_disposable_worktree` | — | — |
+
+### Ordering, distinctness, and the manifest preimage
+
+`target_paths`, `declared_check_runs`, `declared_checks` (by name), and declared
+readable-context entries (by path) are each **strictly ascending by raw UTF-8
+bytes**. Equal neighbours are a duplicate; a descending pair is non-canonical.
+Both are refused rather than sorted or de-duplicated.
+
+`declared_mutations` is the caller's intended sequence: order is preserved,
+carries identity, and is not checked for sortedness. Duplicates are refused on
+the exact `(kind, target)` pair.
+
+`manifest_sha256` is SHA-256 over the canonical encoding of the entry list
+**including its `u32` count prefix** — byte-for-byte the bytes fields 15-17
+occupy. It is recomputed during strict decoding and must match.
+
+### Field validation
+
+Widths and tags alone do not determine what is accepted. A second implementation
+must apply these too, or it will accept records Beacon refuses.
+
+**Human text** (`summary`, bootstrap `reason`): non-empty; equal to its own
+trimmed form, so leading or trailing whitespace is refused rather than stripped;
+within its scalar limit; and free of control characters other than whitespace
+(which excludes NUL, and permits newline and tab).
+
+**Repository-relative paths** (`target_paths`, mutation targets, declared
+readable-context entry paths): non-empty; not beginning with `/`; containing no
+NUL and no backslash; and no component that is empty, `.`, or `..`. Paths are
+neither Unicode-normalized nor case-folded, so two paths differing only by
+normalization form or case are two distinct entries.
+
+**Declared check working directory**: `.`, or a repository-relative path by the
+rule above.
+
+**Declared check name and check-run name**: first character `[a-z0-9]`, the rest
+`[a-z0-9._-]`, at most 64 bytes. This is Repository Binding's own rule; a
+Proposal's declared checks must reproduce a bound check exactly, so the two
+vocabularies cannot diverge.
+
+**Declared check arguments**: the argument vector itself must be non-empty, and
+each argument must be non-empty and free of NUL. Repository Binding imposes no
+length limit on an argument, so neither does this grammar.
+
+**Descriptor tokens** (`kind`, `canonicalizer` inside a `bound` constraint):
+non-empty, at most 64 bytes, and drawn from lowercase ASCII letters, digits, `.`
+and `-`. Note that `_` is **not** accepted here, though it is in a check name;
+the accepted text says only "lowercase ASCII tokens", and this is the narrower
+set the implementation chose.
+
+**Pinned base revision**: exactly 40 bytes, each `[0-9a-f]`. Uppercase hex is
+refused rather than lowered — a case-folded Binding would silently name the same
+commit under a different identity.
+
+**Cross-field rules**: every declared mutation names a `target_paths` entry, and
+every target is named by at least one mutation; every `declared_check_runs` name
+resolves in `declared_checks`, though a declared check with no run is accepted.
+All four intent lists may be empty.
+
+### Refusal before allocation
+
+No declared length or count is used to reserve capacity; every list is built by
+appending. Before decoding any entry, a count is checked against the envelope
+and then against the remaining input using the smallest possible size of one
+entry: 8 bytes for a string entry, 40 for a context entry, 9 for a mutation, 20
+for a declared check. A count that could not fit is refused before the first
+entry is read.
+
+### Canonical fixture
+
+A complete 690-byte v1 record and its identity. A second implementation that
+produces these bytes for this value, and this digest for these bytes, agrees
+with Beacon.
+
+```text
+626561636f6e2e70726f706f73616c2e7631001111111111111111111111111111111122222222222222222222222222
+222222333333333333333333333333333333334444444444444444444444444444444455555555555555555555555555
+55555501000000000000003e546865204f776e65722073656c65637465642074686973205265736964656e7420746f20
+726571756573742074686973206f6e652050726f706f73616c2e00000001000000010000000100000000000000286131
+623263336434653566366131623263336434653566366131623263336434653566366131623200000000000000304164
+6420612072656772657373696f6e207465737420666f722074686520696e76617269616e7420636865636b65722e0200
+000002000000000000000a7372632f6c69622e7273666666666666666666666666666666666666666666666666666666
+6666666666000000000000001374657374732f696e76617269616e74732e727377777777777777777777777777777777
+7777777777777777777777777777777772e7780cda9baa6a2c6ab87af538f7b629937ba6f4c31cb94c3f2aad8cd67a10
+00000002000000000000000a7372632f6c69622e7273000000000000001374657374732f696e76617269616e74732e72
+730000000202000000000000000a7372632f6c69622e727301000000000000001374657374732f696e76617269616e74
+732e727300000001000000000000000a636172676f2d7465737400000001000000000000000a636172676f2d74657374
+000000030000000000000005636172676f000000000000000474657374000000000000000b2d2d776f726b7370616365
+00000000000000012e0101010101010100000000000493e000000000000000f000000000800000000000000010000000
+000000000010000000000000000000000101
+```
+
+```text
+sha256 = a40cb728defbb93cdad8c9c81286f31a8bca9287b92ec1baa5f260016f7ae404
+```
+
+Reproduce the identity with no Beacon code:
+
+```sh
+printf '%s' '<the hex above, joined onto one line>' | xxd -r -p | sha256sum
+```
+
+The value it encodes: scope `11111111-…`/`22222222-…`/`33333333-…`, requester
+`44444444-…` at configuration `55555555-…` with an `owner` bootstrap reason;
+charter, policy and repository revisions all `1`; pinned base revision
+`a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2`; a declared readable context of
+`src/lib.rs` and `tests/invariants.rs`; the same two files as targets, modified
+and created respectively; one check run and one declared check
+`cargo-test`/`["cargo","test","--workspace"]` in `.`; all seven requirement
+families `not_declared`; bounds `300000, 240, 2147483648, 268435456, 1048576, 0`;
+`no_spend`; `discard_disposable_worktree`.
+
+### Readiness vocabulary as shipped
+
+Readiness is a list of unmet preconditions with no boolean accessor, over this
+closed vocabulary: `ExecutionPolicyNotDeclared`, `SandboxNotDeclared`,
+`NetworkNotDeclared`, `ModelProviderNotDeclared`, `CommandAllowlistNotDeclared`,
+`ToolAllowlistNotDeclared`, `EvaluationsNotDeclared`,
+`ReadableContextNotDeclared`, `ReadableContextNotVerified { reason }`,
+`CharterRevisionMoved`, `ProjectPolicyRevisionMoved`, `RepositoryRevisionMoved`,
+`BaseRevisionMoved`, `ResidentLifecycleChanged`, `ConfigurationChanged`.
+
+`ReadableContextNotVerified` carries one of four reasons, each decided by
+inspecting the Repository revision the Proposal *names*: `RepositorySourceNotLocal`
+(a Git URL — nothing local, and no fetch is performed), `RepositoryUnavailable`
+(the path did not open as an object store, or the inspection budget elapsed —
+both mean *not known*), `PinnedRevisionAbsent` (the store opened; the revision
+that would be the comparison basis is missing), and
+`ContentUnreadableAtRevision` (the store opened and holds the pinned revision,
+and content still cannot be read).
+
+**A stated limit.** The "when the bound Repository is locally available …
+compares every entry with that revision" branch of this ADR's readable-context
+section is **not implemented**, and `ContentUnreadableAtRevision` is the terminal
+state today. Resolving a path to its bytes at a revision requires decompressing
+commit and tree objects; `crates/beacond/src/git_object_store.rs` is deliberately
+presence-only, `beacond` declares no decompression dependency, and ADR 0027
+forbids spawning `git`. No code path can therefore conclude that a declared entry
+*agrees* with the pinned revision, and none claims to — which satisfies this
+ADR's binding requirement that no surface label the context verified from the
+manifest's self-consistency alone. There is deliberately no "mismatch" outcome,
+because nothing can currently produce one. Completing that branch needs a
+decompression dependency, which is a separate decision.
+
+### What this amendment does not add
+
+The reconciliation record-count and total-byte limits proposed in Athena BCN-40
+(1,024 records / 16 MiB) are **not** written here, because they are not
+implemented. Startup reconciliation walks every Proposal row with no record-count
+or aggregate-byte ceiling; the only size enforcement is per record — the 64 KiB
+envelope, mirrored in migration 0018 as
+`CHECK (length(canonical_bytes) BETWEEN 19 AND 65536)`. Whether to add those
+limits is an open question for the Product Steward, not a fact this amendment may
+record.
