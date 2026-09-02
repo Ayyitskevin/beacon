@@ -1584,8 +1584,9 @@ export function isPreflightReceipt(value: unknown): value is PreflightReceipt {
     typeof value.sandboxVersion === "string" &&
     typeof value.policyCharterRevision === "number" &&
     typeof value.policyRepositoryRevision === "number" &&
-    typeof value.startedAtMs === "number" &&
-    typeof value.endedAtMs === "number" &&
+    isRenderableInstant(value.startedAtMs) &&
+    isRenderableInstant(value.endedAtMs) &&
+    value.startedAtMs <= value.endedAtMs &&
     Array.isArray(value.notVerified) &&
     value.notVerified.every(isString) &&
     isUnavailableEvidence(value.unavailable)
@@ -1596,6 +1597,23 @@ export function isPreflightReceipt(value: unknown): value is PreflightReceipt {
  *  every Receipt a Project has -- so the only bound is here. Matches the cap on
  *  repository history: an unbounded array is a Workspace-sized allocation
  *  crossing the boundary before anything decides how many rows to draw. */
+/** A millisecond instant the interface can actually render.
+ *
+ *  `typeof x === "number"` admits NaN, Infinity, fractions, and values past the
+ *  ECMAScript time range. The renderer calls `new Date(x).toISOString()`, which
+ *  throws RangeError on those, so an unrenderable instant bypasses the designed
+ *  failed-read state and takes the panel down instead. Refusing at the boundary
+ *  is what the failed-read state is for. */
+const MAX_TIME_VALUE = 8.64e15;
+function isRenderableInstant(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= -MAX_TIME_VALUE &&
+    value <= MAX_TIME_VALUE
+  );
+}
+
 function isPreflightReceiptList(value: unknown): value is PreflightReceipt[] {
   return Array.isArray(value) && value.length <= 512 && value.every(isPreflightReceipt);
 }
