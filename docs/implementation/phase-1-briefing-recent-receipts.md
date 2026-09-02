@@ -76,6 +76,14 @@ truncation line exists to prevent.
   stated above. Nothing in the interface passed it; one test did. A degree of freedom whose only
   user is a test is not a smaller interface, it is a wider one — so the parameter is gone and the
   ordering property is exercised at the real cap instead.
+
+  Its guard is the COMPILER, and the guard itself had to be fixed once. The first attempt asserted
+  `collectRecentReceipts.length === 2`, which passes against the exact regression it names, because
+  JavaScript counts only required parameters — a test that survives its own plausible wrong answer,
+  committed as the guard for it. A `@ts-expect-error` on a three-argument call inverts that: the
+  extra argument must be an error today, so restoring an optional `limit` leaves the directive
+  unused and `tsc -b` fails with TS2578. Vitest cannot see this at all; the gate's desktop build
+  (`tsc -b && vite build`) is what enforces it.
 - **The daemon applies no LIMIT.** `check_preflight.rs` returns every Receipt a Project has, so the
   bound is entirely the desktop's. The adapter now caps the list at 512, matching the repository
   history cap; the panel then draws five.
