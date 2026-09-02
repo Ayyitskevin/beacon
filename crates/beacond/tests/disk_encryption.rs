@@ -162,6 +162,73 @@ fn luks_under_lvm_reports_enabled_through_the_slaves_chain() {
 }
 
 #[test]
+fn encrypted_branch_does_not_mask_a_plain_sibling() {
+    let fixture = Fixture::new("mixed-stack");
+    let device = fixture.mounted_on_host_device();
+    // One volume group over two physical volumes: one LUKS2, one plain. Extents
+    // on the plain member are not protected by the crypt layer on its sibling.
+    fixture.dm(&device, "LVM-9f8e7d6c5b4a39281706f5e4d3c2b1a0", "vg0-root");
+    fixture.slaves(&device, &[("dm-0", "253:0"), ("sdb1", "8:17")]);
+    fixture.dm(
+        "253:0",
+        "CRYPT-LUKS2-0011223344556677889900aabbccddee-pv0",
+        "pv0",
+    );
+    fixture.slaves("253:0", &[("sda2", "8:2")]);
+    fixture.node("8:2");
+    fixture.node("8:17");
+
+    let report = fixture.read();
+
+    assert_ne!(report.state, LiveDataEncryption::Enabled);
+    assert_eq!(report.state, LiveDataEncryption::Disabled);
+    // The report must name the branch that is not covered.
+    assert!(evidence_text(&report).contains("8:17"));
+    // And still say what it did find, so the operator is not told "nothing".
+    assert!(evidence_text(&report).contains("CRYPT-LUKS2"));
+}
+
+#[test]
+fn a_crypt_layer_above_a_plain_leaf_covers_that_path() {
+    let fixture = Fixture::new("luks-over-lvm");
+    let device = fixture.mounted_on_host_device();
+    // LUKS on top of a logical volume: the physical members are plain, but every
+    // path to them passes through the crypt layer.
+    fixture.dm(
+        &device,
+        "CRYPT-LUKS2-aabbccddeeff00112233445566778899-live",
+        "live",
+    );
+    fixture.slaves(&device, &[("dm-1", "253:1")]);
+    fixture.dm("253:1", "LVM-9f8e7d6c5b4a39281706f5e4d3c2b1a0", "vg0-root");
+    fixture.slaves("253:1", &[("sda2", "8:2"), ("sdb1", "8:17")]);
+    fixture.node("8:2");
+    fixture.node("8:17");
+
+    let report = fixture.read();
+
+    assert_eq!(report.state, LiveDataEncryption::Enabled);
+    assert_eq!(mechanism(&report), "dm-crypt (LUKS2)");
+}
+
+#[test]
+fn a_stack_that_reaches_no_physical_device_reports_unknown() {
+    let fixture = Fixture::new("no-leaf");
+    let device = fixture.mounted_on_host_device();
+    // Every branch loops. Nothing terminates, so "every leaf is covered" is
+    // vacuously true -- and a vacuous truth must not become `enabled`.
+    fixture.dm(&device, "LVM-9f8e7d6c5b4a39281706f5e4d3c2b1a0", "vg0-root");
+    fixture.slaves(&device, &[("dm-1", "253:1")]);
+    fixture.node("253:1");
+    fixture.slaves("253:1", &[("top", &device)]);
+
+    let report = fixture.read();
+
+    assert_eq!(report.state, LiveDataEncryption::Unknown);
+    assert!(reason(&report).contains("no physical device"));
+}
+
+#[test]
 fn lvm_over_plain_disks_reports_disabled_not_enabled() {
     let fixture = Fixture::new("lvm-plain");
     let device = fixture.mounted_on_host_device();
@@ -452,9 +519,13 @@ fn device_stack_cycle_terminates_within_budget() {
 
     let report = fixture.read();
 
-    // The point is that this returns at all, and that a graph read end to end
-    // with no crypt layer is still a proven negative.
-    assert_eq!(report.state, LiveDataEncryption::Disabled);
+    // The point is that this returns at all rather than looping. It is no longer
+    // a proven negative: nothing in a cycle terminates, so the walk reaches no
+    // physical device and has proved nothing either way. Asserting the reason,
+    // not just the state, keeps the visited-set mutant dead -- without it the
+    // walk exhausts the node budget and says so instead.
+    assert_eq!(report.state, LiveDataEncryption::Unknown);
+    assert!(reason(&report).contains("no physical device"));
 }
 
 #[test]

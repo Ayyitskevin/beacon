@@ -27,7 +27,7 @@
 //! which is why the match is on the generic `CRYPT-` prefix with the type token
 //! derived from the UUID, not on an allowlist of known types.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::Read;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -617,23 +617,44 @@ fn select_mount<'a>(entries: &'a [MountEntry], target: &Path) -> Option<&'a Moun
     best
 }
 
+/// What the walk proved about the whole stack, not about one branch of it.
 enum Walk {
-    Encrypted { mechanism: String },
+    /// Every leaf was reached and every path to it passed through a crypt layer.
+    Encrypted {
+        mechanism: String,
+    },
+    /// Every leaf was reached and at least one path to one had no crypt layer.
     NoCryptProven,
-    Undetermined { reason: String },
+    Undetermined {
+        reason: String,
+    },
 }
 
+/// Walks every branch of the block stack to its physical leaves.
+///
+/// A crypt layer is a fact about one path, never a verdict about the volume. A
+/// logical volume over one LUKS member and one plain member has half its
+/// extents in the clear, so the walk carries "crypt seen on this path" down
+/// each branch and only calls the volume encrypted when every leaf is covered.
+/// A crypt layer ABOVE a plain leaf covers it; one on a sibling branch does not.
+///
+/// The visited set is keyed on the device AND that flag, because the same
+/// physical disk can be reached by a covered and an uncovered path, and pruning
+/// the second visit is how a plain branch would disappear.
 fn walk_block_stack(
     system: &SystemView,
     root: DeviceNumber,
     evidence: &mut Vec<EncryptionEvidence>,
 ) -> Walk {
-    let mut queue = VecDeque::from([(root, 0usize)]);
-    let mut seen = HashSet::new();
+    let mut queue = VecDeque::from([(root, 0usize, false)]);
+    let mut seen: HashSet<(DeviceNumber, bool)> = HashSet::new();
     let mut nodes = 0usize;
+    let mut crypt_kinds: BTreeSet<String> = BTreeSet::new();
+    let mut plain_leaves: Vec<DeviceNumber> = Vec::new();
+    let mut leaves = 0usize;
 
-    while let Some((device, depth)) = queue.pop_front() {
-        if !seen.insert(device) {
+    while let Some((device, depth, crypt_above)) = queue.pop_front() {
+        if !seen.insert((device, crypt_above)) {
             continue;
         }
         nodes += 1;
@@ -675,6 +696,7 @@ fn walk_block_stack(
             Ok(Presence::Missing) => None,
             Err(reason) => return Walk::Undetermined { reason },
         };
+        let mut crypt_here = false;
         if let Some(uuid) = uuid {
             // A mapping with a uuid always has a name beside it. Substituting a
             // placeholder for a failed read would let a read failure reach a
@@ -694,9 +716,8 @@ fn walk_block_stack(
                         uuid_path.display().to_string(),
                         format!("device-mapper uuid prefix {}, mapping {name}", label(&kind)),
                     );
-                    return Walk::Encrypted {
-                        mechanism: mechanism_label(&kind),
-                    };
+                    crypt_kinds.insert(mechanism_label(&kind));
+                    crypt_here = true;
                 }
                 None => record(
                     evidence,
@@ -708,19 +729,27 @@ fn walk_block_stack(
                 ),
             }
         }
+        let crypt_on_path = crypt_above || crypt_here;
 
         // read_dir is the presence check: a missing slaves directory means this
         // device has no parents, and any other error means Beacon could not ask.
         let slaves = node.join("slaves");
         let children = match fs::read_dir(&slaves) {
             Ok(children) => children,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                leaves += 1;
+                if !crypt_on_path {
+                    plain_leaves.push(device);
+                }
+                continue;
+            }
             Err(error) => {
                 return Walk::Undetermined {
                     reason: unreadable_reason(&slaves, error.kind()),
                 };
             }
         };
+        let mut parents = 0usize;
         for child in children {
             let child = match child {
                 Ok(child) => child,
@@ -738,10 +767,42 @@ fn walk_block_stack(
                 },
                 Err(reason) => return Walk::Undetermined { reason },
             };
-            queue.push_back((parent, depth + 1));
+            parents += 1;
+            queue.push_back((parent, depth + 1, crypt_on_path));
+        }
+        // An empty slaves directory is a whole disk: a leaf like a partition.
+        if parents == 0 {
+            leaves += 1;
+            if !crypt_on_path {
+                plain_leaves.push(device);
+            }
         }
     }
 
+    // Nothing terminated the stack, so "every leaf is covered" would be true of
+    // no leaves at all. A vacuous truth is not proof of encryption.
+    if leaves == 0 {
+        return Walk::Undetermined {
+            reason: "no physical device terminated the volume's stack".to_owned(),
+        };
+    }
+    if plain_leaves.is_empty() {
+        return Walk::Encrypted {
+            mechanism: crypt_kinds.into_iter().collect::<Vec<_>>().join(", "),
+        };
+    }
+    // Name the branches that are not covered; a negative nobody can locate is
+    // not much better than no answer.
+    let named = plain_leaves
+        .iter()
+        .map(DeviceNumber::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    record(
+        evidence,
+        system.sys_dev_block.display().to_string(),
+        format!("no crypt layer covers block device(s) {named}"),
+    );
     Walk::NoCryptProven
 }
 
