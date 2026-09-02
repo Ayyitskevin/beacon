@@ -109,6 +109,21 @@ describe("the object-link grammar", () => {
     });
   });
 
+  it("routes identical objects identically, whatever the spelling", () => {
+    // The predicate accepts either case, so the parser must not let the
+    // accepted spelling become the object's identity: an uppercase spelling of
+    // the current Workspace would otherwise route to `otherWorkspace`, and an
+    // uppercase Project to `absent`. Canonical lowercase is the daemon's own
+    // spelling, so the conversion happens once, here, rather than at every
+    // comparison downstream.
+    const shouted = `${OBJECT_LINK_SCHEME}/${WORKSPACE.toUpperCase()}/project/${PROJECT.toUpperCase()}/mission/${MISSION.toUpperCase()}`;
+    expect(parseObjectLink(shouted)).toEqual(parseObjectLink(missionLink));
+    expect(routeObjectLink(parseObjectLink(shouted), context())).toEqual({
+      outcome: "open",
+      link: parseObjectLink(missionLink),
+    });
+  });
+
   it("refuses what it did not understand instead of ignoring it", () => {
     expect(link(`${briefing}/extra`)).toEqual({ kind: "malformed", reason: "trailing_segments" });
     expect(link(`${missionLink}/extra`)).toEqual({ kind: "malformed", reason: "trailing_segments" });
