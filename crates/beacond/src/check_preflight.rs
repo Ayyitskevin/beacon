@@ -90,7 +90,12 @@ impl PreflightOutcome {
 
     /// The Run state this outcome terminates in. Only a sandbox-admissible
     /// preflight is `verified`; every other terminal outcome is a refusal.
-    fn run_state(self) -> &'static str {
+    ///
+    /// `pub(crate)` because it is the single source of this mapping: the
+    /// recent-Receipts reader validates a stored `(outcome, state)` pair
+    /// against it rather than keeping a third copy that a remapped variant
+    /// would leave stale.
+    pub(crate) fn run_state(self) -> &'static str {
         match self {
             Self::Verified => "verified",
             _ => "refused",

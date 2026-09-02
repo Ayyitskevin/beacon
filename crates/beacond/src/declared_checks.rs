@@ -65,7 +65,10 @@ impl ExecutionSummary {
         }
     }
 
-    fn run_state(self) -> &'static str {
+    /// The Run state this summary terminates in. `pub(crate)` for the reason
+    /// `PreflightOutcome::run_state` is: one owner per mapping, and the
+    /// recent-Receipts reader reads it instead of restating it.
+    pub(crate) fn run_state(self) -> &'static str {
         match self {
             Self::NotAdmissible | Self::WorktreeUnavailable => "refused",
             Self::Completed => "verified",

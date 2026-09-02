@@ -332,22 +332,17 @@ impl StoredRun {
     }
 }
 
-/// The Run state each outcome terminates in, read off the two producers rather
-/// than restated: `check_preflight.rs`'s `PreflightOutcome::run_state` and
-/// `declared_checks.rs`'s `ExecutionSummary::run_state`.
+/// The Run state each outcome terminates in, READ from the two producers.
+///
+/// This restated their tables in a third match until gpt1's review. The enum
+/// match was exhaustive, so a new variant would have been compiler-visible --
+/// but a REMAPPED existing variant would not, and the reader would have gone
+/// on validating against a mapping its producers had abandoned. One owner per
+/// mapping; this asks them.
 fn terminal_state_for(outcome: RecentReceiptOutcome) -> &'static str {
     match outcome {
-        RecentReceiptOutcome::CheckPreflight {
-            outcome: PreflightOutcome::Verified,
-        } => "verified",
-        RecentReceiptOutcome::CheckPreflight { .. } => "refused",
-        RecentReceiptOutcome::DeclaredChecks {
-            summary: ExecutionSummary::Completed,
-        } => "verified",
-        RecentReceiptOutcome::DeclaredChecks {
-            summary: ExecutionSummary::Incomplete,
-        } => "incomplete",
-        RecentReceiptOutcome::DeclaredChecks { .. } => "refused",
+        RecentReceiptOutcome::CheckPreflight { outcome } => outcome.run_state(),
+        RecentReceiptOutcome::DeclaredChecks { summary } => summary.run_state(),
     }
 }
 
