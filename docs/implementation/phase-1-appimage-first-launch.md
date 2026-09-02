@@ -43,11 +43,20 @@ missing fails the build — including under `--no-bundle`, at `build.rs`, with
 `resource path ... doesn't exist`. `beforeBuildCommand` and `beforeDevCommand` therefore build
 `beacond` in release and stage it before the shell compiles.
 
-That keeps `scripts/gate all` working from a clean checkout, because its desktop stage runs
-`npm run tauri build -- --no-bundle` before any bare cargo command. It does **not** cover
-`scripts/gate rust` or `cargo build --workspace` run alone first; those fail until one tauri build
-has staged the sidecar. CONTRIBUTING records the one-line remedy. Moving that staging into
-`scripts/gate` would remove the seam entirely and belongs to whoever owns that file.
+There is one implementation of that: `scripts/stage-sidecar`, called by the gate's cargo-only stage
+and by both Tauri hooks. It lived in three shapes before, and they had already drifted where it
+mattered most — the gate's copy ran its commands independently and so reported only the last, which
+meant a FAILED release build followed by a successful copy of a stale binary printed
+`ok stage sidecar` and the gate exited 0. `tests/harness/test_gate_sidecar_staging.py` injects that
+failure permanently and requires `FAIL stage sidecar` and a nonzero exit.
+
+`set -e` in a subshell does not fix that class: `run` calls the helper as `if "$@"; then`, and `-e`
+is suppressed for a command whose status is being tested. A separate script gets its own shell, so
+its `set -euo pipefail` is its own.
+
+`scripts/gate all` and `scripts/gate rust` therefore both work from a clean checkout with no
+`target/sidecar`. A bare `cargo build --workspace` does not go through the gate and still needs one
+`scripts/stage-sidecar` first; CONTRIBUTING records that.
 
 CI needs no staging step for the same reason, but it now asserts the outcome: a step fails the
 package job when `Beacon.AppDir/usr/bin/beacond` is missing. It was run against the wrong answer it

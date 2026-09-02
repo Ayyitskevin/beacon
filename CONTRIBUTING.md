@@ -76,10 +76,11 @@ the bundle contains both `beacon-desktop` and the `beacond` supervisor it spawns
 upload action's [permission-loss
 note](https://github.com/actions/upload-artifact/blob/v4.6.2/README.md#permission-loss).
 
-First launch has been observed on a clean `ubuntu:24.04` container — no development packages
-installed — through both AppImage entry paths. It has not been observed on a real desktop session,
-on Wayland, or on any distribution other than Ubuntu 24.04, so treat the criterion as met for that
-one host shape and open everywhere else.
+First launch has been observed on clean containers with no development packages installed —
+`ubuntu:24.04` through both AppImage entry paths, and `ubuntu:22.04` and `debian:12` for the
+bundle the pinned package job produces. It has not been observed on a real desktop session, on
+Wayland, or outside the Debian family, and nothing past the first screen was exercised. Treat the
+criterion as met for those container shapes and open everywhere else.
 
 ### What the AppImage requires of the host
 
@@ -90,11 +91,13 @@ This is what was measured, not what we would like to promise.
   bundle was observed launching on Ubuntu 22.04, Debian 12, and Ubuntu 24.04. Anything older than
   glibc 2.35 — RHEL 9 is 2.34 — fails with a loader error naming the missing version, not a crash.
   Built on `ubuntu-latest` instead, the floor is 2.39 and Debian 12 and Ubuntu 22.04 both fail.
-- **A desktop's ordinary graphics and text libraries.** The bundle does not carry `libfribidi0`,
-  `libharfbuzz0b`, `libegl1`, or `libgles2`. Every desktop install has them —
-  `apt-get install --simulate ubuntu-desktop-minimal` pulls all four, `libgtk-3-0t64` depends on the
-  first two, `xserver-xorg-core` on `libegl1`, and `gnome-shell`, `mutter`, and `libwebkit2gtk-4.1-0`
-  on `libgles2` — but a bare container does not, and it fails there with a missing-library error.
+- **`libfribidi0`, `libharfbuzz0b`, `libegl1`, and `libgles2`,** which the bundle does not carry.
+  One desktop shape was measured: on Ubuntu 24.04, `apt-get install --simulate
+  ubuntu-desktop-minimal` pulls all four. The dependency edges that put them there are not
+  Ubuntu-specific — `libgtk-3-0t64` depends on the first two, `xserver-xorg-core` on `libegl1`, and
+  `gnome-shell`, `mutter`, and `libwebkit2gtk-4.1-0` on `libgles2` — so any GTK desktop is expected
+  to carry them, but no non-Ubuntu desktop image was tested. A bare container has none of them and
+  fails with a missing-library error.
 - **`libfuse2` only if you run the AppImage directly.** Ubuntu 24.04 ships `fuse3` and not
   `libfuse2t64`, so a default desktop cannot double-click this file; it prints "Cannot mount
   AppImage, please check your FUSE setup." Either install `libfuse2t64` or run
@@ -102,19 +105,24 @@ This is what was measured, not what we would like to promise.
 
 ### Building the bundle locally
 
-`npm run tauri build` from `apps/desktop` is the whole command. Its `beforeBuildCommand` builds
-`beacond` in release and stages it as the sidecar `tauri.conf.json` names, so there is no separate
-step to forget.
+`npm run tauri build` from `apps/desktop` is the whole command. Its `beforeBuildCommand` runs
+`scripts/stage-sidecar`, which builds `beacond` in release and stages it under the target-triple
+name `tauri.conf.json` expects, so there is no separate step to forget.
 
 Because that sidecar is a declared bundle input, `apps/desktop/src-tauri/build.rs` requires it to
-exist before the desktop crate compiles — including under `--no-bundle`. `scripts/gate all` is fine:
-its desktop stage runs `npm run tauri build -- --no-bundle` before any bare cargo command, and that
-stages the sidecar. But **`scripts/gate rust` or `cargo build --workspace` run alone on a fresh
-checkout will fail** with `resource path ... doesn't exist`. Run this once first:
+exist before the desktop crate compiles — including under `--no-bundle`. Every `scripts/gate` stage
+that compiles the desktop crate stages it first, so `scripts/gate all` and `scripts/gate rust` both
+work from a fresh checkout with no `target/sidecar`.
+
+A bare **`cargo build --workspace`** or **`cargo test --workspace`** does not go through the gate
+and will fail with `resource path ... doesn't exist`. Stage it once:
 
 ```sh
-cd apps/desktop && npm run tauri build -- --no-bundle
+scripts/stage-sidecar
 ```
+
+That is the same script the gate and `tauri build` call, so there is only one staging behaviour to
+know about.
 
 ## What good looks like here
 
