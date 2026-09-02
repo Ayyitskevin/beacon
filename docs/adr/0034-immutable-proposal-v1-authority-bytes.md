@@ -648,8 +648,7 @@ record.
 as written; nothing here changes its bytes, its identity, or its authority
 boundary. This section records what the readable-context comparison now does, so
 the readiness vocabulary a consumer sees is described where the vocabulary is
-defined. Kevin's merge is the acceptance; until then this is a proposal from the
-implementing seat.
+defined.
 
 ### What this proposes to change
 
