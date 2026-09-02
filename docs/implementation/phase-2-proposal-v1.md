@@ -88,6 +88,19 @@ Seven interpretations were made and ruled on before implementation, rather than 
    constraint families can only be `not_declared`, so every v1 Proposal is unready by construction;
    that fact is stated rather than implied.
 
+**Deferred, not silently dropped:** ADR 0034's readable-context section
+(`docs/adr/0034-immutable-proposal-v1-authority-bytes.md:166-170`) describes "a later readiness
+diagnostic" that independently compares every declared entry against the pinned base revision when
+the bound Repository is locally available, and otherwise reports that comparison as not verified.
+That diagnostic ships with the slice that first lets a Proposal's `readable_context` be
+`declared(...)` and accepted past submission — this slice's readiness intentionally reports only
+whether the context was declared at all (`ReadableContextNotDeclared`), because v1 has no local
+Repository checkout to compare a declared entry against, and no `verified` / `not_verified` /
+`mismatch` vocabulary would have anything true to say yet. Adding one now would either always read
+`not_verified` (a permanent, uninformative field) or require guessing the comparison's shape before
+the Run I/O decision that would make it meaningful. The unmet-precondition enum is additive, so this
+is a scope boundary, not a closed door.
+
 ### The recorded fixture
 
 `crates/beacond/src/proposal.rs` pins one fabricated Proposal by its bytes and by its digest, as two
