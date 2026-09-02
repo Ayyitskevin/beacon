@@ -16,16 +16,16 @@ use std::thread::{self, JoinHandle};
 
 use beacond::{
     AutonomyProfile, BeaconCapability, Conflicts, DeclaredCheck, EvaluationDraft, EvaluationError,
-    EvaluationService, Evaluator, Finding, FindingSeverity, InconsistentEvaluation,
-    LocalModelActivationService, LocalModelEndpoint, MissionDraft, MissionMemberDraft,
-    MissionService, OperatorAccountService, OperatorSessionPhase, ProjectCharterDraft,
-    ProjectDraft, ProjectPolicyDraft, ProjectPolicyService, ProjectRepositoryService,
-    ProjectService, ProposalService, ProviderFeature, RepositoryDraft, RepositorySourceKind,
-    ResidentConfigurationService, ResidentLifecycleService, RubricDeclaration, SecretString,
-    StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig, Supervisor,
-    TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule,
-    TeamLeadSelectionPolicy, TeamMemberDraft, TeamService, TrackRecordEvidenceKind,
-    TrackRecordRequirement, Verdict,
+    EvaluationService, EvaluationSupersedes, Evaluator, Finding, FindingSeverity,
+    InconsistentEvaluation, LocalModelActivationService, LocalModelEndpoint, MissionDraft,
+    MissionMemberDraft, MissionService, OperatorAccountService, OperatorSessionPhase,
+    ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService,
+    ProjectRepositoryService, ProjectService, ProposalService, ProviderFeature, RepositoryDraft,
+    RepositorySourceKind, ResidentConfigurationService, ResidentLifecycleService,
+    RubricDeclaration, SecretString, StarterOrganizationService, StarterResidentDraft, StarterRole,
+    StartupConfig, Supervisor, TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
+    TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft, TeamService,
+    TrackRecordEvidenceKind, TrackRecordRequirement, UnmetPrecondition, Verdict,
 };
 use data_encoding::{BASE64, HEXLOWER};
 use rusqlite::Connection;
@@ -549,6 +549,7 @@ fn evaluation_draft(fixture: &Fixture, proposal_digest: &str) -> EvaluationDraft
         }],
         conflicts: Conflicts::None,
         rationale: "Independent evaluator reviewed the exact Proposal bytes.".to_owned(),
+        supersedes: EvaluationSupersedes::None,
     }
 }
 
@@ -1207,9 +1208,7 @@ fn a_cited_run_without_a_receipt_is_refused() {
         )
         .expect("the Run inserts");
     assert_eq!(
-        fixture.count(&format!(
-            "SELECT count(*) FROM runs WHERE id = '{run_id}'"
-        )),
+        fixture.count(&format!("SELECT count(*) FROM runs WHERE id = '{run_id}'")),
         1,
         "the fixture Run was not created"
     );
@@ -1365,10 +1364,360 @@ fn the_migrated_column_repeats_the_codecs_owned_byte_bound() {
         other => panic!("expected a constraint failure, got {other:?}"),
     };
     // 275 is SQLITE_CONSTRAINT_CHECK; 787 is SQLITE_CONSTRAINT_FOREIGNKEY.
-    assert_eq!(code(&over), 275, "the column accepted one byte over the bound");
+    assert_eq!(
+        code(&over),
+        275,
+        "the column accepted one byte over the bound"
+    );
     assert_eq!(
         code(&at_bound),
         787,
         "the column refused a blob AT the bound, so its limit is not the codec's"
+    );
+}
+
+/// An evaluator changes their mind. Both records stay readable, because an Evaluation is a true
+/// account of what somebody judged about exact bytes and no later record makes that untrue -- and
+/// the earlier one now reports, as a fact rather than a verdict, that it was superseded.
+#[test]
+fn a_second_evaluation_supersedes_the_first_and_both_stay_readable() {
+    let fixture = admitted_mission("evaluation-supersedes");
+    let record = fixture.record();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+
+    let first = evaluations
+        .record(evaluation_draft(&fixture, &proposal.digest().value))
+        .unwrap();
+    let mut draft = evaluation_draft(&fixture, &proposal.digest().value);
+    draft.verdict = Verdict::Meets;
+    draft.rationale = "On a second reading the criteria are met.".to_owned();
+    draft.supersedes = EvaluationSupersedes::Evaluation(first.digest().value.clone());
+    let second = evaluations.record(draft).unwrap();
+
+    let first = evaluations.get(&first.digest().value).unwrap();
+    assert_eq!(
+        first
+            .force()
+            .superseded_by()
+            .map(|digest| digest.value.as_str()),
+        Some(second.digest().value.as_str()),
+        "the superseded Evaluation does not name its successor"
+    );
+    assert!(
+        second.force().superseded_by().is_none(),
+        "the current tail claims to be superseded"
+    );
+    // Both readable, and the first still says exactly what it said.
+    assert_eq!(first.payload().verdict, Verdict::Uncertain);
+    assert_eq!(second.payload().verdict, Verdict::Meets);
+    assert!(
+        Supervisor::bootstrap(StartupConfig {
+            store_path: fixture.store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        })
+        .is_ok(),
+        "a superseded Evaluation must not fail startup"
+    );
+}
+
+/// Superseding anything but the current tail would fork the chain, and a fork has no last link, so
+/// "the effective Evaluation" would stop having an answer. Each wrong digest gets its own refusal,
+/// because they lead a caller to different corrections.
+#[test]
+fn superseding_any_link_but_the_current_tail_is_refused() {
+    let fixture = admitted_mission("evaluation-tail");
+    let record = fixture.record();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    let mut second_record = fixture.record();
+    second_record.summary = "A second Proposal, with its own chain.".to_owned();
+    let other_proposal = fixture.proposals.submit(&second_record.bytes()).unwrap();
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+
+    let first = evaluations
+        .record(evaluation_draft(&fixture, &proposal.digest().value))
+        .unwrap();
+    let mut draft = evaluation_draft(&fixture, &proposal.digest().value);
+    draft.supersedes = EvaluationSupersedes::Evaluation(first.digest().value.clone());
+    let second = evaluations.record(draft).unwrap();
+    let elsewhere = evaluations
+        .record(evaluation_draft(&fixture, &other_proposal.digest().value))
+        .unwrap();
+
+    let refuse = |supersedes: EvaluationSupersedes| {
+        let mut draft = evaluation_draft(&fixture, &proposal.digest().value);
+        draft.supersedes = supersedes;
+        evaluations.record(draft).expect_err("must be refused")
+    };
+
+    // An already-superseded link: this is the fork.
+    assert!(
+        matches!(
+            refuse(EvaluationSupersedes::Evaluation(
+                first.digest().value.clone()
+            )),
+            EvaluationError::Inconsistent(InconsistentEvaluation::NotTheCurrentTail)
+        ),
+        "superseding a superseded link was not refused as a non-tail"
+    );
+    // A digest naming nothing.
+    assert!(
+        matches!(
+            refuse(EvaluationSupersedes::Evaluation(
+                HEXLOWER.encode(&[0x44_u8; 32])
+            )),
+            EvaluationError::Inconsistent(InconsistentEvaluation::SupersedesNotRecorded)
+        ),
+        "a digest naming nothing was not told apart from a non-tail"
+    );
+    // A real Evaluation of ANOTHER Proposal: a different mistake again.
+    assert!(
+        matches!(
+            refuse(EvaluationSupersedes::Evaluation(
+                elsewhere.digest().value.clone()
+            )),
+            EvaluationError::Inconsistent(InconsistentEvaluation::SupersedesOtherProposal)
+        ),
+        "another Proposal's Evaluation was not told apart"
+    );
+    // And declaring NO predecessor when a chain already exists is the same fork from the other end.
+    let mut draft = evaluation_draft(&fixture, &proposal.digest().value);
+    draft.supersedes = EvaluationSupersedes::None;
+    assert!(
+        matches!(
+            evaluations.record(draft).expect_err("must be refused"),
+            EvaluationError::Inconsistent(InconsistentEvaluation::NotTheCurrentTail)
+        ),
+        "a second first-link was admitted"
+    );
+    assert_eq!(
+        second.payload().supersedes,
+        EvaluationSupersedes::Evaluation(first.digest().value.clone())
+    );
+}
+
+/// Time along the chain is non-decreasing, and EQUAL times are allowed: two records can land in the
+/// same millisecond, and refusing that would invent a precision the clock does not have.
+#[test]
+fn an_evaluated_time_earlier_than_the_link_it_supersedes_is_refused() {
+    let fixture = admitted_mission("evaluation-chain-time");
+    let record = fixture.record();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+
+    let first = evaluations
+        .record(evaluation_draft(&fixture, &proposal.digest().value))
+        .unwrap();
+    let mut draft = evaluation_draft(&fixture, &proposal.digest().value);
+    draft.supersedes = EvaluationSupersedes::Evaluation(first.digest().value.clone());
+    let second = evaluations.record(draft).unwrap();
+    // The service clock supplies both, so the ordinary path cannot produce a decreasing chain.
+    assert!(second.payload().evaluated_at_ms >= first.payload().evaluated_at_ms);
+
+    // Move the FIRST link forward past its successor, so the chain decreases without any
+    // Evaluation's bytes being edited.
+    let connection = fixture.store.connect();
+    connection
+        .execute_batch("DROP TRIGGER evaluations_no_update;")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE evaluations SET evaluated_at_ms = ?1 WHERE digest_value = ?2",
+            rusqlite::params![
+                i64::try_from(second.payload().evaluated_at_ms + 1_000).unwrap(),
+                first.digest().value
+            ],
+        )
+        .unwrap();
+    drop(connection);
+
+    assert!(
+        Supervisor::bootstrap(StartupConfig {
+            store_path: fixture.store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        })
+        .is_err(),
+        "startup accepted a chain whose times decrease"
+    );
+}
+
+/// Moving a bound revision puts the Evaluation out of force NAMING that revision, and only that
+/// one. The Evaluation stays readable and startup still succeeds: drift is a fact about the world
+/// having moved, not a defect in the record.
+#[test]
+fn moving_a_bound_revision_puts_the_evaluation_out_of_force_naming_that_revision_and_only_that_one()
+{
+    let fixture = admitted_mission("evaluation-drift");
+    let record = fixture.record();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+    let evaluation = evaluations
+        .record(evaluation_draft(&fixture, &proposal.digest().value))
+        .unwrap();
+    assert!(
+        evaluation.force().drift().is_empty(),
+        "a fresh Evaluation already reports drift: {:?}",
+        evaluation.force().drift()
+    );
+
+    ProjectService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .revise_charter(
+            fixture.project_id,
+            1,
+            ProjectCharterDraft {
+                purpose: "Prove the local agent office, revised.".to_owned(),
+                desired_outcomes: vec!["Complete one attributable Mission".to_owned()],
+                constraints: vec!["Keep authority explicit".to_owned()],
+                prohibitions: vec!["Do not deploy".to_owned()],
+                autonomy_profile: AutonomyProfile::Supervised,
+            },
+        )
+        .unwrap();
+
+    let drifted = evaluations.get(&evaluation.digest().value).unwrap();
+    assert_eq!(
+        drifted.force().drift(),
+        [UnmetPrecondition::CharterRevisionMoved],
+        "the Charter move named more than the Charter"
+    );
+    assert!(
+        drifted.force().superseded_by().is_none(),
+        "drift was reported as supersession"
+    );
+    // Still readable, still the same bytes, and startup still succeeds.
+    assert_eq!(drifted.canonical_bytes(), evaluation.canonical_bytes());
+    assert!(
+        Supervisor::bootstrap(StartupConfig {
+            store_path: fixture.store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        })
+        .is_ok(),
+        "a drifted Evaluation failed startup"
+    );
+}
+
+/// A chain with two heads has no last link, so "the effective Evaluation" stops having an answer.
+/// The relation's own constraints already forbid a predecessor cited twice and an Evaluation citing
+/// two predecessors; what they cannot forbid is TOPOLOGY -- a second, disconnected chain -- and that
+/// is what the walk's length comparison refuses.
+///
+/// A cycle is the same branch from the other side: every Evaluation cited, so no head exists. It is
+/// unreachable through any committed path, because a relation row that disagrees with an
+/// Evaluation's `supersedes` byte tag is refused at the verified read before the walk is reached.
+#[test]
+fn an_evaluation_chain_that_forks_refuses_startup() {
+    let fixture = admitted_mission("evaluation-fork");
+    let record = fixture.record();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+
+    let first = evaluations
+        .record(evaluation_draft(&fixture, &proposal.digest().value))
+        .unwrap();
+    let mut draft = evaluation_draft(&fixture, &proposal.digest().value);
+    draft.supersedes = EvaluationSupersedes::Evaluation(first.digest().value.clone());
+    evaluations.record(draft).unwrap();
+
+    // A third Evaluation of the same Proposal with NO relation row: two heads, one link, three
+    // records. Its bytes say `supersedes = none`, so the relation and the tag still agree.
+    //
+    // ADR 0038's field table puts the rubric digest at 180: magic 21, subject 1, Proposal digest
+    // 32, two envelope strings (14 + 26), two UUIDs (32), rubric id (8+18), version 4, rubric
+    // canonicalizer (8+16).
+    const RUBRIC_DIGEST_OFFSET: usize = 180;
+    let mut bytes = first.canonical_bytes().to_vec();
+    assert_eq!(
+        HEXLOWER.encode(&bytes[RUBRIC_DIGEST_OFFSET..RUBRIC_DIGEST_OFFSET + 32]),
+        first.payload().rubric.sha256,
+        "the published offset is not where the rubric digest lives"
+    );
+    bytes[RUBRIC_DIGEST_OFFSET] ^= 0x01;
+    let digest = HEXLOWER.encode(&sha256(&bytes));
+    let rubric = HEXLOWER.encode(&bytes[RUBRIC_DIGEST_OFFSET..RUBRIC_DIGEST_OFFSET + 32]);
+
+    let connection = fixture.store.connect();
+    connection
+        .execute(
+            "INSERT INTO evaluations (
+                 workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+                 canonical_bytes, proposal_digest, proposal_digest_algorithm,
+                 proposal_digest_canonicalizer, mission_id, evaluator_resident_id,
+                 evaluator_configuration_id, rubric_id, rubric_version, rubric_canonicalizer,
+                 rubric_sha256, verdict, conflicts_declared, conflicts_text, rationale,
+                 evaluated_at_ms
+             )
+             SELECT workspace_id, digest_algorithm, digest_canonicalizer, ?1, ?2, proposal_digest,
+                    proposal_digest_algorithm, proposal_digest_canonicalizer, mission_id,
+                    evaluator_resident_id, evaluator_configuration_id, rubric_id, rubric_version,
+                    rubric_canonicalizer, ?3, verdict, conflicts_declared, conflicts_text,
+                    rationale, evaluated_at_ms
+             FROM evaluations WHERE digest_value = ?4",
+            rusqlite::params![digest, bytes, rubric, first.digest().value],
+        )
+        .expect("the store admits a disconnected Evaluation");
+    connection
+        .execute(
+            "INSERT INTO evaluation_findings (workspace_id, evaluation_digest, ordinal, severity, summary)
+             SELECT workspace_id, ?1, ordinal, severity, summary FROM evaluation_findings
+             WHERE evaluation_digest = ?2",
+            rusqlite::params![digest, first.digest().value],
+        )
+        .unwrap();
+    let event: String = connection
+        .query_row(
+            "SELECT payload_json FROM events WHERE kind = 'evaluation.recorded'
+             ORDER BY sequence LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let event = event
+        .replace(first.digest().value.as_str(), &digest)
+        .replace(
+            &BASE64.encode(first.canonical_bytes()),
+            &BASE64.encode(&bytes),
+        );
+    connection
+        .execute(
+            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+             SELECT workspace_id, kind, ?1, occurred_at_ms FROM events
+             WHERE kind = 'evaluation.recorded' ORDER BY sequence LIMIT 1",
+            [event],
+        )
+        .unwrap();
+    drop(connection);
+
+    assert!(
+        Supervisor::bootstrap(StartupConfig {
+            store_path: fixture.store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        })
+        .is_err(),
+        "startup accepted a forked chain"
+    );
+}
+
+/// Nothing in this module answers "is this Evaluation acceptable" with a bit. Supersession and
+/// drift are two separate facts and stay two, because collapsing them would answer the reader's
+/// question for them -- and because a boolean is exactly what a later dispatch would be tempted to
+/// branch on, which is `BLUEPRINT:445-447` in a field.
+#[test]
+fn no_accessor_reports_force_or_acceptability_as_a_boolean() {
+    let source = include_str!("../src/evaluation.rs");
+    let offenders: Vec<&str> = source
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("pub fn ") || line.starts_with("pub const fn "))
+        .filter(|line| line.contains("-> bool"))
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "a public accessor answers with a boolean: {offenders:?}"
+    );
+    assert!(
+        !source.contains("fn is_in_force")
+            && !source.contains("fn is_acceptable")
+            && !source.contains("fn is_current"),
+        "an acceptability predicate was added"
     );
 }
