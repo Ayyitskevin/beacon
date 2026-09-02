@@ -946,12 +946,27 @@ fn a_second_configuration_of_the_author_is_still_the_author() {
     let error = evaluations
         .record(draft)
         .expect_err("the author under another configuration must be refused");
+    // The COMMAND's arm, not a store error. This is the layer where Resident-only is observable:
+    // a pair-keyed comparison would let this through, and the membership foreign key would then
+    // refuse it for a different reason, which this assertion tells apart.
     assert!(
         matches!(
             error,
             EvaluationError::Inconsistent(InconsistentEvaluation::EvaluatorAuthoredTheProposal)
         ),
         "{error:?}"
+    );
+
+    // And the fact that makes the same distinction unobservable at the trigger:
+    // `mission_admission_members` is UNIQUE per (Workspace, Mission, Resident), so the author is
+    // admitted under exactly one configuration and no row can name them under another.
+    assert_eq!(
+        fixture.count(&format!(
+            "SELECT count(*) FROM mission_admission_members WHERE resident_id = '{}'",
+            fixture.resident_id
+        )),
+        1,
+        "the author is admitted more than once, and the trigger's key would then matter"
     );
 }
 
@@ -1238,6 +1253,71 @@ fn a_cited_run_without_a_receipt_is_refused() {
         .record(draft)
         .expect("a receipted Run is citable");
     assert_eq!(evaluation.payload().cited_runs, vec![run_id]);
+}
+
+/// gpt2's E1: the two-layer proof needs BOTH controls committed, and only the trigger half was.
+///
+/// This is the other half — the reachable decoy. The canonical bytes name one Proposal; the
+/// relational column names another, while the digest still genuinely hashes those bytes. Only
+/// `columns_match`'s Proposal-digest comparison can see that, which is the point: my first attempt
+/// at this test inserted a fabricated digest, so `DigestMismatch` fired first and the comparison
+/// this test is named for was never reached — gpt2's mutant survived it.
+#[test]
+fn a_projection_that_names_another_proposal_than_the_bytes_is_refused_at_the_read() {
+    let fixture = admitted_mission("evaluation-decoy-projection");
+    let record = fixture.record();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    let mut second = fixture.record();
+    second.summary = "A second Proposal, so the decoy has somewhere to point.".to_owned();
+    let decoy = fixture.proposals.submit(&second.bytes()).unwrap();
+    assert_ne!(proposal.digest().value, decoy.digest().value);
+
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+    let evaluation = evaluations
+        .record(evaluation_draft(&fixture, &proposal.digest().value))
+        .unwrap();
+
+    // Repoint the column only. The bytes, and therefore the digest, do not move -- so every other
+    // check still passes and exactly one thing is wrong with this row.
+    let connection = fixture.store.connect();
+    connection
+        .execute_batch("DROP TRIGGER evaluations_no_update;")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE evaluations SET proposal_digest = ?1 WHERE digest_value = ?2",
+            rusqlite::params![decoy.digest().value, evaluation.digest().value],
+        )
+        .expect("the store admits the decoy: SQL cannot read the bytes");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER evaluations_no_update
+             BEFORE UPDATE ON evaluations
+             BEGIN
+                 SELECT RAISE(ABORT, 'Evaluations are immutable');
+             END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let error = evaluations
+        .get(&evaluation.digest().value)
+        .expect_err("the verified read must refuse the decoy");
+    assert!(
+        matches!(
+            error,
+            EvaluationError::Inconsistent(InconsistentEvaluation::ColumnDisagreesWithBytes)
+        ),
+        "refused for the wrong reason, so this test does not measure the projection: {error:?}"
+    );
+    assert!(
+        Supervisor::bootstrap(StartupConfig {
+            store_path: fixture.store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        })
+        .is_err(),
+        "startup accepted a decoy projection"
+    );
 }
 
 /// gpt2's E3: the total-bound test proved the codec's bound and never the store's, so lowering the
