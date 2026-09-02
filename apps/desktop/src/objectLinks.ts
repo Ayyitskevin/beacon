@@ -30,6 +30,22 @@ export type ObjectLink =
   | { kind: "mission"; workspaceId: string; projectId: string; missionId: string }
   | { kind: "malformed"; reason: MalformedReason };
 
+export type AddressableObjectLink = Exclude<ObjectLink, { kind: "malformed" }>;
+
+/** The canonical spelling Beacon places on the clipboard.
+ *
+ *  Emission lives beside parsing so a kind cannot acquire a second grammar in
+ *  a view. UUIDs from the daemon are already canonical; lowercasing here also
+ *  keeps a typed fixture or future adapter from minting a second spelling. */
+export function formatObjectLink(link: AddressableObjectLink): string {
+  const workspaceId = link.workspaceId.toLowerCase();
+  if (link.kind === "briefing") return `${OBJECT_LINK_SCHEME}/${workspaceId}/briefing`;
+
+  const project = `${OBJECT_LINK_SCHEME}/${workspaceId}/project/${link.projectId.toLowerCase()}`;
+  if (link.kind === "project") return project;
+  return `${project}/mission/${link.missionId.toLowerCase()}`;
+}
+
 /** The session states a link can arrive in. Setup-required and locked are kept
  *  apart because the operator's next action differs. */
 export type LinkPhase = "operator_setup_required" | "locked" | "unlocked";
