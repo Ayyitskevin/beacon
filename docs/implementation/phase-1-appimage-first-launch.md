@@ -86,7 +86,7 @@ ls -l ../../target/release/bundle/appimage/Beacon.AppDir/usr/bin/
 ```
 
 Then, with the produced AppImage, on a host with no development packages
-(`beacon-team/clean-host/run-any.sh` and `probe3.sh` drive this):
+(`docs/evidence/2026-09-02-appimage-clean-host/run-any.sh` and `probe3.sh` drive this):
 
 ```sh
 docker run --rm ubuntu:24.04   # + xvfb x11-utils imagemagick libfribidi0 libharfbuzz0b libegl1 libgles2
