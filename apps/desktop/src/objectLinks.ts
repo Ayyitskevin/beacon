@@ -118,7 +118,19 @@ export function parseObjectLink(raw: string): ObjectLink {
     return { kind: "malformed", reason: "wrong_scheme" };
   }
   const segments = raw.slice(OBJECT_LINK_SCHEME.length + 1).split("/");
-  const [workspaceId, kind, projectId, missionSegment, missionId, ...rest] = segments;
+  const [rawWorkspaceId, kind, rawProjectId, missionSegment, rawMissionId, ...rest] = segments;
+
+  // The predicate below accepts either case, so the accepted SPELLING must not
+  // become the object's identity: routing compares strings, and an uppercase
+  // spelling of the current Workspace would report `otherWorkspace` while an
+  // uppercase Project reported `absent` -- two objects where there is one.
+  // Canonical lowercase is what the daemon emits, so the conversion happens
+  // once here rather than at every comparison downstream. Refusing uppercase
+  // was the alternative; it would tell an operator who retyped a perfectly
+  // legible identifier that it is malformed.
+  const workspaceId = rawWorkspaceId?.toLowerCase();
+  const projectId = rawProjectId?.toLowerCase();
+  const missionId = rawMissionId?.toLowerCase();
   if (!UUID.test(workspaceId ?? "")) return { kind: "malformed", reason: "malformed_identifier" };
 
   if (kind === "briefing") {
