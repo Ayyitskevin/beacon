@@ -4,6 +4,8 @@
 //! not give it. The shape that matters is the asymmetry: a reading that fails
 //! must land on `Unknown`, never on `Enabled` and never on `Disabled`.
 
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
@@ -21,6 +23,14 @@ struct Fixture {
     store: PathBuf,
     sys: PathBuf,
     mountinfo: PathBuf,
+    /// The store's real device number, and the majors this fixture invents on.
+    host: String,
+    disk_major: u32,
+    mapped_major: u32,
+    foreign_major: u32,
+    /// Every device number this fixture handed out. `node` refuses anything
+    /// else, so a literal cannot creep back in.
+    invented: RefCell<HashSet<String>>,
 }
 
 impl Fixture {
@@ -30,8 +40,31 @@ impl Fixture {
         fs::create_dir_all(&sys).unwrap();
         let store = root.join("beacon.sqlite3");
         fs::write(&store, b"").unwrap();
+        let raw = fs::metadata(&store).unwrap().dev();
+        let host_major = libc::major(raw);
+        // Majors for invented nodes, each moved off the store's real one.
+        //
+        // A fixture that invents the number the store is already on is not
+        // describing a second device. The walk starts at the store's number, so
+        // that "child" is its own ancestor and a fan-out silently becomes a
+        // cycle. This is not hypothetical: node-a's /tmp is on 259:2 and the CI
+        // runner's is on 8:1, so `many-leaves` (which invented 8:0..8:11) read
+        // `SomePathsUncovered` here and `NoPhysicalLeaf` there -- a rendered
+        // answer decided by the host, which is the class this module forbids.
+        let away = |preferred: u32| {
+            if preferred == host_major {
+                host_major + 1_000
+            } else {
+                preferred
+            }
+        };
         Self {
             mountinfo: root.join("mountinfo"),
+            host: format!("{host_major}:{}", libc::minor(raw)),
+            disk_major: away(8),
+            mapped_major: away(253),
+            foreign_major: away(9),
+            invented: RefCell::new(HashSet::new()),
             store,
             sys,
             root,
@@ -44,8 +77,34 @@ impl Fixture {
     /// that invented a device number could never reach the block-stack walk.
     /// Using the real one keeps that corroboration live rather than stubbed.
     fn host_device(&self) -> String {
-        let raw = fs::metadata(&self.store).unwrap().dev();
-        format!("{}:{}", libc::major(raw), libc::minor(raw))
+        self.host.clone()
+    }
+
+    /// A plain disk or partition this fixture invents.
+    fn disk(&self, minor: usize) -> String {
+        self.invent(self.disk_major, minor)
+    }
+
+    /// A device-mapper node this fixture invents.
+    fn mapped(&self, minor: usize) -> String {
+        self.invent(self.mapped_major, minor)
+    }
+
+    /// A device the store is provably NOT on, for the cases that need a mount
+    /// entry to disagree with `stat`. A literal could agree by accident on a
+    /// host that happens to be on it.
+    fn foreign(&self, minor: usize) -> String {
+        self.invent(self.foreign_major, minor)
+    }
+
+    fn invent(&self, major: u32, minor: usize) -> String {
+        let device = format!("{major}:{minor}");
+        assert_ne!(
+            device, self.host,
+            "an invented device must differ from the store's own"
+        );
+        self.invented.borrow_mut().insert(device.clone());
+        device
     }
 
     fn mount_lines(&self, lines: &[String]) {
@@ -53,6 +112,7 @@ impl Fixture {
     }
 
     fn mount_line(&self, device: &str, fstype: &str, source: &str) -> String {
+        self.known(device);
         format!(
             "36 25 {device} / {} rw,relatime shared:1 - {fstype} {source} rw",
             self.root.display()
@@ -67,6 +127,7 @@ impl Fixture {
     }
 
     fn node(&self, device: &str) -> PathBuf {
+        self.known(device);
         let path = self.sys.join(device);
         fs::create_dir_all(&path).unwrap();
         path
@@ -83,10 +144,22 @@ impl Fixture {
     /// directory holding the same `dev` file reads identically.
     fn slaves(&self, device: &str, children: &[(&str, &str)]) {
         for (name, child) in children {
+            self.known(child);
             let entry = self.node(device).join("slaves").join(name);
             fs::create_dir_all(&entry).unwrap();
             fs::write(entry.join("dev"), format!("{child}\n")).unwrap();
         }
+    }
+
+    /// Every device a fixture touches is either the store's own -- where the
+    /// walk starts -- or one this fixture invented, which is kept off the
+    /// store's number. A bare literal would describe a different stack on a
+    /// host whose store happens to be on it.
+    fn known(&self, device: &str) {
+        assert!(
+            device == self.host || self.invented.borrow().contains(device),
+            "device {device} is neither the store's own nor invented by this fixture"
+        );
     }
 
     fn view(&self) -> SystemView {
@@ -135,6 +208,53 @@ fn evidence_text(report: &LiveDataEncryptionReport) -> String {
         .join("\n")
 }
 
+/// The harness's own property, and the reason it has one.
+///
+/// `every_conclusion_survives_its_components_and_fits_the_adapter` passed on
+/// node-a and failed on CI at `f65f819`: /tmp is 259:2 here and 8:1 on the
+/// runner, and `many-leaves` invented children 8:0..8:11. On the runner one
+/// invented "child" WAS the store's own device, so the fan-out was a cycle and
+/// the reader answered `NoPhysicalLeaf` -- a rendered answer decided by the
+/// host, which is exactly the class this module forbids. Every invented number
+/// is now drawn from a major the store is not on.
+#[test]
+fn invented_device_numbers_never_share_the_stores_major() {
+    let fixture = Fixture::new("invented-numbers");
+    let host = fixture.host_device();
+    let host_major = host.split_once(':').unwrap().0;
+    for minor in 0..66 {
+        for invented in [
+            fixture.disk(minor),
+            fixture.mapped(minor),
+            fixture.foreign(minor),
+        ] {
+            assert_ne!(invented, host, "invented {invented} is the store's own");
+            assert_ne!(
+                invented.split_once(':').unwrap().0,
+                host_major,
+                "invented {invented} shares the store's major; some host is on it"
+            );
+        }
+    }
+}
+
+/// The guard that keeps the property from decaying: a bare literal is refused,
+/// so the next fixture cannot reintroduce the collision by writing "8:1".
+#[test]
+#[should_panic(expected = "neither the store's own nor invented")]
+fn a_fixture_refuses_a_device_number_it_did_not_invent() {
+    let fixture = Fixture::new("literal-device");
+    let host_major: u32 = fixture
+        .host_device()
+        .split_once(':')
+        .unwrap()
+        .0
+        .parse()
+        .unwrap();
+    // Neither the store's own nor from an allocator, on any host.
+    fixture.node(&format!("{}:0", host_major + 2_000));
+}
+
 #[test]
 fn luks2_volume_reports_enabled_with_the_dm_uuid_it_read() {
     let fixture = Fixture::new("luks2");
@@ -146,8 +266,8 @@ fn luks2_volume_reports_enabled_with_the_dm_uuid_it_read() {
     );
     // A crypt mapping sits on a partition. Without one the stack terminates
     // nowhere, and an unread stack is not an encrypted one.
-    fixture.slaves(&device, &[("sda2", "8:2")]);
-    fixture.node("8:2");
+    fixture.slaves(&device, &[("sda2", &fixture.disk(2))]);
+    fixture.node(&fixture.disk(2));
 
     let report = fixture.read();
 
@@ -161,14 +281,14 @@ fn luks_under_lvm_reports_enabled_through_the_slaves_chain() {
     let fixture = Fixture::new("lvm-on-luks");
     let device = fixture.mounted_on_host_device();
     fixture.dm(&device, "LVM-9f8e7d6c5b4a39281706f5e4d3c2b1a0", "vg0-root");
-    fixture.slaves(&device, &[("dm-0", "253:0")]);
+    fixture.slaves(&device, &[("dm-0", &fixture.mapped(0))]);
     fixture.dm(
-        "253:0",
+        &fixture.mapped(0),
         "CRYPT-LUKS2-0011223344556677889900aabbccddee-root",
         "root",
     );
-    fixture.slaves("253:0", &[("sda2", "8:2")]);
-    fixture.node("8:2");
+    fixture.slaves(&fixture.mapped(0), &[("sda2", &fixture.disk(2))]);
+    fixture.node(&fixture.disk(2));
 
     let report = fixture.read();
 
@@ -183,22 +303,25 @@ fn encrypted_branch_does_not_mask_a_plain_sibling() {
     // One volume group over two physical volumes: one LUKS2, one plain. Extents
     // on the plain member are not protected by the crypt layer on its sibling.
     fixture.dm(&device, "LVM-9f8e7d6c5b4a39281706f5e4d3c2b1a0", "vg0-root");
-    fixture.slaves(&device, &[("dm-0", "253:0"), ("sdb1", "8:17")]);
+    fixture.slaves(
+        &device,
+        &[("dm-0", &fixture.mapped(0)), ("sdb1", &fixture.disk(17))],
+    );
     fixture.dm(
-        "253:0",
+        &fixture.mapped(0),
         "CRYPT-LUKS2-0011223344556677889900aabbccddee-pv0",
         "pv0",
     );
-    fixture.slaves("253:0", &[("sda2", "8:2")]);
-    fixture.node("8:2");
-    fixture.node("8:17");
+    fixture.slaves(&fixture.mapped(0), &[("sda2", &fixture.disk(2))]);
+    fixture.node(&fixture.disk(2));
+    fixture.node(&fixture.disk(17));
 
     let report = fixture.read();
 
     assert_ne!(report.conclusion.state, LiveDataEncryption::Enabled);
     assert_eq!(report.conclusion.state, LiveDataEncryption::Disabled);
     // The report must name the branch that is not covered.
-    assert!(evidence_text(&report).contains("8:17"));
+    assert!(evidence_text(&report).contains(&fixture.disk(17)));
     // And still say what it did find, so the operator is not told "nothing".
     assert!(evidence_text(&report).contains("CRYPT-LUKS2"));
     // The reason must not deny the encryption this very report observed. An
@@ -217,27 +340,31 @@ fn review_r3_long_mixed_mapping_names_preserve_the_disabled_conclusion() {
     fixture.dm(&device, "LVM-9f8e7d6c5b4a39281706f5e4d3c2b1a0", "vg0-root");
     fixture.slaves(
         &device,
-        &[("dm-0", "253:0"), ("dm-1", "253:1"), ("sdb1", "8:17")],
+        &[
+            ("dm-0", &fixture.mapped(0)),
+            ("dm-1", &fixture.mapped(1)),
+            ("sdb1", &fixture.disk(17)),
+        ],
     );
     // Valid, non-hex, and long enough that concatenating the names would spend
     // the whole 200-character bound before either half of the sentence.
     let first = "encrypted-volume-".repeat(20);
     let second = "another-encrypted-volume-".repeat(12);
     fixture.dm(
-        "253:0",
+        &fixture.mapped(0),
         "CRYPT-LUKS2-0011223344556677889900aabbccddee-a",
         &first,
     );
-    fixture.slaves("253:0", &[("sda2", "8:2")]);
+    fixture.slaves(&fixture.mapped(0), &[("sda2", &fixture.disk(2))]);
     fixture.dm(
-        "253:1",
+        &fixture.mapped(1),
         "CRYPT-LUKS2-1122334455667788990011bbccddeeff-b",
         &second,
     );
-    fixture.slaves("253:1", &[("sda3", "8:3")]);
-    fixture.node("8:2");
-    fixture.node("8:3");
-    fixture.node("8:17");
+    fixture.slaves(&fixture.mapped(1), &[("sda3", &fixture.disk(3))]);
+    fixture.node(&fixture.disk(2));
+    fixture.node(&fixture.disk(3));
+    fixture.node(&fixture.disk(17));
 
     let report = fixture.read();
 
@@ -302,7 +429,7 @@ fn every_conclusion_survives_its_components_and_fits_the_adapter() {
     let device = many.mounted_on_host_device();
     many.dm(&device, "LVM-9f8e7d6c5b4a39281706f5e4d3c2b1a0", "vg0");
     let children: Vec<(String, String)> = (0..12)
-        .map(|index| (format!("sd{index}"), format!("8:{index}")))
+        .map(|index| (format!("sd{index}"), many.disk(index)))
         .collect();
     let borrowed: Vec<(&str, &str)> = children
         .iter()
@@ -325,7 +452,7 @@ fn every_conclusion_survives_its_components_and_fits_the_adapter() {
     let names: Vec<(String, String)> = kinds
         .iter()
         .enumerate()
-        .map(|(index, _)| (format!("dm-{index}"), format!("253:{index}")))
+        .map(|(index, _)| (format!("dm-{index}"), mechanisms.mapped(index)))
         .collect();
     let borrowed: Vec<(&str, &str)> = names
         .iter()
@@ -333,14 +460,14 @@ fn every_conclusion_survives_its_components_and_fits_the_adapter() {
         .collect();
     mechanisms.slaves(&device, &borrowed);
     for (index, kind) in kinds.iter().enumerate() {
-        let dev = format!("253:{index}");
+        let dev = mechanisms.mapped(index);
         mechanisms.dm(
             &dev,
             &format!("CRYPT-{kind}-0011223344556677889900aabbccdd{index:02}-m"),
             &format!("mapping-{index}"),
         );
-        mechanisms.slaves(&dev, &[("disk", &format!("8:{index}"))]);
-        mechanisms.node(&format!("8:{index}"));
+        mechanisms.slaves(&dev, &[("disk", &mechanisms.disk(index))]);
+        mechanisms.node(&mechanisms.disk(index));
     }
     let mechanism = conclusion(&mechanisms);
     assert!(mechanism.contains("dm-crypt"), "{mechanism}");
@@ -359,8 +486,8 @@ fn shortened_evidence_says_that_it_was_shortened() {
         "CRYPT-LUKS2-a1b2c3d4e5f60718293a4b5c6d7e8f90-x",
         &"evidence-mapping-".repeat(20),
     );
-    fixture.slaves(&device, &[("sda2", "8:2")]);
-    fixture.node("8:2");
+    fixture.slaves(&device, &[("sda2", &fixture.disk(2))]);
+    fixture.node(&fixture.disk(2));
 
     let report = fixture.read();
 
@@ -400,13 +527,16 @@ fn review_one_covered_leaf_cannot_mask_a_cyclic_sibling() {
         "CRYPT-LUKS2-aabbccddeeff00112233445566778899-live",
         "live",
     );
-    fixture.slaves(&device, &[("sda2", "8:2"), ("dm-9", "253:9")]);
-    fixture.node("8:2");
+    fixture.slaves(
+        &device,
+        &[("sda2", &fixture.disk(2)), ("dm-9", &fixture.mapped(9))],
+    );
+    fixture.node(&fixture.disk(2));
     // One branch terminates at a real disk under the crypt layer. The other
     // never terminates, so the volume's topology was never established -- and a
     // sibling that finished is not proof about the branch that did not.
-    fixture.node("253:9");
-    fixture.slaves("253:9", &[("loop", "253:9")]);
+    fixture.node(&fixture.mapped(9));
+    fixture.slaves(&fixture.mapped(9), &[("loop", &fixture.mapped(9))]);
 
     let report = fixture.read();
 
@@ -419,17 +549,24 @@ fn review_crypt_above_a_nested_fan_out_covers_both_plain_leaves() {
     let fixture = Fixture::new("nested-fan-out");
     let device = fixture.mounted_on_host_device();
     fixture.dm(&device, "LVM-1122334455667788990011223344556677", "outer");
-    fixture.slaves(&device, &[("dm-0", "253:0")]);
+    fixture.slaves(&device, &[("dm-0", &fixture.mapped(0))]);
     fixture.dm(
-        "253:0",
+        &fixture.mapped(0),
         "CRYPT-LUKS2-0011223344556677889900aabbccddee-crypt",
         "crypt",
     );
-    fixture.slaves("253:0", &[("dm-1", "253:1")]);
-    fixture.dm("253:1", "LVM-9f8e7d6c5b4a39281706f5e4d3c2b1a0", "inner");
-    fixture.slaves("253:1", &[("sda2", "8:2"), ("sdb1", "8:17")]);
-    fixture.node("8:2");
-    fixture.node("8:17");
+    fixture.slaves(&fixture.mapped(0), &[("dm-1", &fixture.mapped(1))]);
+    fixture.dm(
+        &fixture.mapped(1),
+        "LVM-9f8e7d6c5b4a39281706f5e4d3c2b1a0",
+        "inner",
+    );
+    fixture.slaves(
+        &fixture.mapped(1),
+        &[("sda2", &fixture.disk(2)), ("sdb1", &fixture.disk(17))],
+    );
+    fixture.node(&fixture.disk(2));
+    fixture.node(&fixture.disk(17));
 
     let report = fixture.read();
 
@@ -442,14 +579,17 @@ fn review_unreadable_leaf_next_to_a_luks_branch_is_unknown() {
     let fixture = Fixture::new("unreadable-sibling");
     let device = fixture.mounted_on_host_device();
     fixture.dm(&device, "LVM-9f8e7d6c5b4a39281706f5e4d3c2b1a0", "vg0-root");
-    fixture.slaves(&device, &[("dm-0", "253:0"), ("sdb1", "8:17")]);
+    fixture.slaves(
+        &device,
+        &[("dm-0", &fixture.mapped(0)), ("sdb1", &fixture.disk(17))],
+    );
     fixture.dm(
-        "253:0",
+        &fixture.mapped(0),
         "CRYPT-LUKS2-0011223344556677889900aabbccddee-pv0",
         "pv0",
     );
-    fixture.slaves("253:0", &[("sda2", "8:2")]);
-    fixture.node("8:2");
+    fixture.slaves(&fixture.mapped(0), &[("sda2", &fixture.disk(2))]);
+    fixture.node(&fixture.disk(2));
     // 8:17 is never created: one complete LUKS path, one branch Beacon cannot read.
 
     let report = fixture.read();
@@ -469,11 +609,18 @@ fn a_crypt_layer_above_a_plain_leaf_covers_that_path() {
         "CRYPT-LUKS2-aabbccddeeff00112233445566778899-live",
         "live",
     );
-    fixture.slaves(&device, &[("dm-1", "253:1")]);
-    fixture.dm("253:1", "LVM-9f8e7d6c5b4a39281706f5e4d3c2b1a0", "vg0-root");
-    fixture.slaves("253:1", &[("sda2", "8:2"), ("sdb1", "8:17")]);
-    fixture.node("8:2");
-    fixture.node("8:17");
+    fixture.slaves(&device, &[("dm-1", &fixture.mapped(1))]);
+    fixture.dm(
+        &fixture.mapped(1),
+        "LVM-9f8e7d6c5b4a39281706f5e4d3c2b1a0",
+        "vg0-root",
+    );
+    fixture.slaves(
+        &fixture.mapped(1),
+        &[("sda2", &fixture.disk(2)), ("sdb1", &fixture.disk(17))],
+    );
+    fixture.node(&fixture.disk(2));
+    fixture.node(&fixture.disk(17));
 
     let report = fixture.read();
 
@@ -488,9 +635,9 @@ fn a_stack_that_reaches_no_physical_device_reports_unknown() {
     // Every branch loops. Nothing terminates, so "every leaf is covered" is
     // vacuously true -- and a vacuous truth must not become `enabled`.
     fixture.dm(&device, "LVM-9f8e7d6c5b4a39281706f5e4d3c2b1a0", "vg0-root");
-    fixture.slaves(&device, &[("dm-1", "253:1")]);
-    fixture.node("253:1");
-    fixture.slaves("253:1", &[("top", &device)]);
+    fixture.slaves(&device, &[("dm-1", &fixture.mapped(1))]);
+    fixture.node(&fixture.mapped(1));
+    fixture.slaves(&fixture.mapped(1), &[("top", &device)]);
 
     let report = fixture.read();
 
@@ -503,8 +650,8 @@ fn lvm_over_plain_disks_reports_disabled_not_enabled() {
     let fixture = Fixture::new("lvm-plain");
     let device = fixture.mounted_on_host_device();
     fixture.dm(&device, "LVM-9f8e7d6c5b4a39281706f5e4d3c2b1a0", "vg0-root");
-    fixture.slaves(&device, &[("sda2", "8:2")]);
-    fixture.node("8:2");
+    fixture.slaves(&device, &[("sda2", &fixture.disk(2))]);
+    fixture.node(&fixture.disk(2));
 
     let report = fixture.read();
 
@@ -848,7 +995,7 @@ fn every_rendered_field_stays_within_the_adapter_bound() {
 #[test]
 fn missing_mountinfo_reports_unknown() {
     let fixture = Fixture::new("no-mountinfo");
-    fixture.node("1:1");
+    fixture.node(&fixture.foreign(1));
 
     let report = fixture.read();
 
@@ -870,8 +1017,8 @@ fn unparseable_mount_table_reports_unknown() {
 #[test]
 fn mount_table_and_stat_disagreement_reports_unknown() {
     let fixture = Fixture::new("disagree");
-    fixture.mount_lines(&[fixture.mount_line("9:9", "ext4", "/dev/sdz1")]);
-    fixture.node("9:9");
+    fixture.mount_lines(&[fixture.mount_line(&fixture.foreign(9), "ext4", "/dev/sdz1")]);
+    fixture.node(&fixture.foreign(9));
 
     let report = fixture.read();
 
@@ -886,7 +1033,7 @@ fn shadowed_mount_point_selects_the_last_entry() {
     // Same mount point twice. The later mount is the live one; selecting the
     // earlier entry answers about a volume nothing is stored on.
     fixture.mount_lines(&[
-        fixture.mount_line("9:9", "ext4", "/dev/sdz1"),
+        fixture.mount_line(&fixture.foreign(9), "ext4", "/dev/sdz1"),
         fixture.mount_line(&device, "ext4", "/dev/nvme0n1p2"),
     ]);
     fixture.node(&device);
@@ -988,9 +1135,9 @@ fn device_stack_cycle_terminates_within_budget() {
     let fixture = Fixture::new("cycle");
     let device = fixture.mounted_on_host_device();
     fixture.dm(&device, "LVM-9f8e7d6c5b4a39281706f5e4d3c2b1a0", "vg0-root");
-    fixture.slaves(&device, &[("dm-1", "253:1")]);
-    fixture.node("253:1");
-    fixture.slaves("253:1", &[("top", &device)]);
+    fixture.slaves(&device, &[("dm-1", &fixture.mapped(1))]);
+    fixture.node(&fixture.mapped(1));
+    fixture.slaves(&fixture.mapped(1), &[("top", &device)]);
 
     let report = fixture.read();
 
@@ -1014,7 +1161,7 @@ fn a_wide_slaves_directory_stops_at_the_budget_before_reading_it_all() {
     // enumeration, it stops and says so. The two reasons are distinguishable
     // whatever order read_dir returns.
     let children: Vec<(String, String)> = (0..66)
-        .map(|index| (format!("sd{index}"), format!("8:{index}")))
+        .map(|index| (format!("sd{index}"), fixture.disk(index)))
         .collect();
     let borrowed: Vec<(&str, &str)> = children
         .iter()
@@ -1054,13 +1201,13 @@ fn a_wide_slaves_directory_stops_at_the_budget_before_reading_it_all() {
 fn device_stack_deeper_than_the_budget_reports_unknown() {
     let fixture = Fixture::new("deep");
     let device = fixture.mounted_on_host_device();
-    fixture.slaves(&device, &[("dm-0", "253:0")]);
+    fixture.slaves(&device, &[("dm-0", &fixture.mapped(0))]);
     for step in 0..12 {
-        let child = format!("253:{}", step + 1);
-        fixture.node(&format!("253:{step}"));
-        fixture.slaves(&format!("253:{step}"), &[("next", &child)]);
+        let child = fixture.mapped(step + 1);
+        fixture.node(&fixture.mapped(step));
+        fixture.slaves(&fixture.mapped(step), &[("next", &child)]);
     }
-    fixture.node("253:12");
+    fixture.node(&fixture.mapped(12));
 
     let report = fixture.read();
 
@@ -1079,8 +1226,8 @@ fn dm_uuid_prefix_only_appears_in_evidence() {
         "CRYPT-LUKS2-4f8c1d2e9a7b6c5d4e3f2a1b0c9d8e7f-luks-4f8c1d2e9a7b6c5d4e3f2a1b0c9d8e7f",
         "luks-4f8c1d2e9a7b6c5d4e3f2a1b0c9d8e7f",
     );
-    fixture.slaves(&device, &[("sda2", "8:2")]);
-    fixture.node("8:2");
+    fixture.slaves(&device, &[("sda2", &fixture.disk(2))]);
+    fixture.node(&fixture.disk(2));
 
     let report = fixture.read();
 
@@ -1104,8 +1251,8 @@ fn two_calls_re_read_live_state() {
         "CRYPT-LUKS2-aabbccddeeff00112233445566778899-live",
         "live",
     );
-    fixture.slaves(&device, &[("sda2", "8:2")]);
-    fixture.node("8:2");
+    fixture.slaves(&device, &[("sda2", &fixture.disk(2))]);
+    fixture.node(&fixture.disk(2));
     let after = fixture.read();
 
     assert_eq!(after.conclusion.state, LiveDataEncryption::Enabled);
