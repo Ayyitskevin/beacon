@@ -454,7 +454,10 @@ describe("Beacon desktop shell", () => {
       await screen.findByText(/showing preflight Receipts for the 8 most recent Projects of 513/),
     ).toBeVisible();
     expect(reads).toBe(8);
-    expect(peak).toBeLessThanOrEqual(4);
+    // ONE page in flight, because a page in flight is a page held: a window of
+    // four concurrent reads of a 512-row page held 2,048 rows beside the 256
+    // kept, three times the documented bound.
+    expect(peak).toBe(1);
   });
 
   it("holds only the rows it will draw and reports the true number found", async () => {
@@ -545,7 +548,7 @@ describe("Beacon desktop shell", () => {
 
     // The failure is retryable rather than terminal, and the retry can reach
     // the genuinely-empty state.
-    await user.click(screen.getByRole("button", { name: "Refresh Receipts" }));
+    await user.click(screen.getByRole("button", { name: "Refresh preflight Receipts" }));
     expect(await screen.findByText("No preflight Receipts yet.")).toBeVisible();
     expect(screen.queryByText(/Recent preflight Receipts could not be read/)).toBeNull();
   });
