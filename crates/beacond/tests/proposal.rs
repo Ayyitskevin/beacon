@@ -1427,7 +1427,7 @@ fn a_fresh_v1_proposal_reports_exactly_its_undeclared_preconditions() {
 }
 
 #[test]
-fn a_declared_context_reports_that_it_was_not_compared_against_the_pinned_revision() {
+fn a_declared_context_over_an_unopenable_store_is_not_verified_as_unreadable() {
     // ADR 0034:166-170 -- "Internal manifest consistency does not prove that a path/digest pair
     // existed at the pinned base revision... No surface may label the context verified from the
     // manifest's self-consistency alone." The wrong answer this kills is SILENCE: a Proposal that
