@@ -3,7 +3,14 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
 
-import { BriefingReceipts, type ReceiptRow } from "./BriefingReceipts";
+import {
+  BriefingReceipts,
+  RECEIPT_AGGREGATE_LIMIT,
+  RECEIPT_HOLD_LIMIT,
+  collectRecentReceipts,
+  type ReceiptRow,
+} from "./BriefingReceipts";
+import { MAX_PROJECT_RECEIPT_PAGE } from "./session";
 import type { PreflightOutcome, PreflightReceipt } from "./session";
 
 const absent = (reason: string) => ({ kind: "absent" as const, reason });
@@ -144,7 +151,7 @@ it("keeps empty, loading and failed apart", async () => {
   const { rerender } = render(
     <BriefingReceipts rows={null} total={0} loading failure="" scope="" disabled={false} onRefresh={onRefresh} />,
   );
-  expect(screen.getByText("Loading Receipts")).toBeVisible();
+  expect(screen.getByText("Loading preflight Receipts")).toBeVisible();
   expect(screen.queryByText("No preflight Receipts yet.")).toBeNull();
 
   rerender(
@@ -167,7 +174,7 @@ it("keeps empty, loading and failed apart", async () => {
   expect(screen.getByText(/could not be read/)).toBeVisible();
   expect(screen.queryByText("No preflight Receipts yet.")).toBeNull();
 
-  await user.click(screen.getByRole("button", { name: "Refresh Receipts" }));
+  await user.click(screen.getByRole("button", { name: "Refresh preflight Receipts" }));
   expect(onRefresh).toHaveBeenCalledTimes(1);
 });
 
@@ -192,4 +199,78 @@ it("says the list is preflight Receipts, not every Receipt Beacon writes", () =>
   const section = screen.getByRole("heading", { name: "Recent preflight Receipts" }).parentElement;
   expect(section?.textContent).not.toMatch(/what each Run did/);
   expect(screen.getByText(/does not include execution Receipts/)).toBeVisible();
+});
+
+/** Eight Projects, each at the adapter's page cap: 4,096 rows exist. */
+function fullPages() {
+  const projects = Array.from({ length: 8 }, (_, index) => ({
+    id: `${index.toString(16).padStart(8, "0")}-4444-4444-8444-444444444444`,
+    name: `Project ${index}`,
+  }));
+  const page = (index: number) =>
+    Array.from({ length: MAX_PROJECT_RECEIPT_PAGE }, (_, row) =>
+      receipt(
+        `${(index * 1000 + row).toString(16).padStart(8, "0")}-1111-4111-8111-111111111111`,
+        "verified",
+        index * 1000 + row,
+      ),
+    );
+  return { projects, page };
+}
+
+it("never holds more than the cap plus one page, whatever the Workspace contains", async () => {
+  // The bound this collection documents, MEASURED. A rendered list of five
+  // looks identical whether the reading held 768 rows or 4,096, which is how
+  // the previous guard survived a gather-every-page-then-slice implementation:
+  // it observed only totals and list items, never the collection.
+  const { projects, page } = fullPages();
+  const collected = await collectRecentReceipts(projects, async (projectId) =>
+    page(projects.findIndex((project) => project.id === projectId)),
+  );
+
+  expect(collected.found).toBe(8 * MAX_PROJECT_RECEIPT_PAGE);
+  expect(collected.rows).toHaveLength(RECEIPT_AGGREGATE_LIMIT);
+  expect(collected.peakHeld).toBeLessThanOrEqual(RECEIPT_HOLD_LIMIT);
+  // And the bound is not vacuous: a reading of this size does approach it.
+  expect(collected.peakHeld).toBeGreaterThan(RECEIPT_AGGREGATE_LIMIT);
+});
+
+it("reads one Project at a time, because a page in flight is a page held", async () => {
+  // Four concurrent reads of a 512-row page held 2,048 rows beside the 256
+  // kept -- three times the documented bound. Concurrency here is not a
+  // scheduling choice, it is retention.
+  const { projects, page } = fullPages();
+  let inFlight = 0;
+  let peakInFlight = 0;
+  const collected = await collectRecentReceipts(projects, async (projectId) => {
+    inFlight += 1;
+    peakInFlight = Math.max(peakInFlight, inFlight);
+    await Promise.resolve();
+    inFlight -= 1;
+    return page(projects.findIndex((project) => project.id === projectId));
+  });
+
+  expect(peakInFlight).toBe(1);
+  expect(collected.rows).toHaveLength(RECEIPT_AGGREGATE_LIMIT);
+});
+
+it("keeps the newest rows across the merge, not the first page it read", async () => {
+  // Trimming per page is only correct if the trim is by the merge key. A
+  // collection that kept whichever page arrived first would draw the oldest.
+  const projects = [
+    { id: "00000001-4444-4444-8444-444444444444", name: "Older" },
+    { id: "00000002-4444-4444-8444-444444444444", name: "Newer" },
+  ];
+  const collected = await collectRecentReceipts(
+    projects,
+    async (projectId) =>
+      projectId === projects[0].id
+        ? [receipt("aaaaaaaa-1111-4111-8111-111111111111", "verified", 100)]
+        : [receipt("bbbbbbbb-2222-4222-8222-222222222222", "verified", 900)],
+    1,
+  );
+
+  expect(collected.found).toBe(2);
+  expect(collected.rows).toHaveLength(1);
+  expect(collected.rows[0].projectName).toBe("Newer");
 });

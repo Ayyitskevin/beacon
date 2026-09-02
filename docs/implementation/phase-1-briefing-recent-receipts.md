@@ -40,8 +40,11 @@ existing `projects` Query and merges. That fan-out is **bounded and disclosed**,
 unbounded one is not a design — it is an assumption about the Workspace, and 513 Projects meant 513
 concurrent IPC calls and up to N × 512 Receipts held before sorting to five.
 
-One reading opens at most **8 Projects**, newest first, at most **4 at a time**, and keeps at most
-**256 rows** before sorting to the five it draws. When the Workspace has more Projects than the
+One reading opens at most **8 Projects**, newest first, **one at a time**, and keeps at most **256
+rows** before sorting to the five it draws. One at a time is the bound, not a scheduling preference:
+a page in flight is a page held, so a window of four concurrent reads of a 512-row page held 2,048
+rows beside the 256 kept — three times the maximum this note states. The daemon dispatches on a
+single accept loop, so the window bought little to begin with. When the Workspace has more Projects than the
 budget the panel says so — "showing preflight Receipts for the 8 most recent Projects of 13" —
 because a bounded reading presented without its bound is a partial answer wearing a complete one.
 
@@ -56,9 +59,16 @@ truncation line exists to prevent.
 
 - **Five rows drawn.** Briefing "optimizes for exceptions, not activity volume".
 - **256 rows held, applied while collecting.** Each Project's page is merged and trimmed, so what
-  the reading holds never exceeds the cap plus one page whatever the Workspace contains. Slicing at
-  the end retained everything first, and then reported the capped length as the total — which made
-  every row past the cap vanish from the disclosure. The panel reports the number actually found.
+  the reading holds never exceeds the cap plus one page — `RECEIPT_HOLD_LIMIT`, 768 — whatever the
+  Workspace contains. Slicing at the end retained everything first, and then reported the capped
+  length as the total — which made every row past the cap vanish from the disclosure. The panel
+  reports the number actually found.
+
+  The bound is **measured, not asserted**: `collectRecentReceipts` returns the most rows it ever
+  held, and the guard reads it. Nothing else can see it. A rendered list of five looks identical
+  whether the reading held 768 rows or 4,096, which is why the earlier guard — 4,096 fixture rows,
+  asserting the rendered totals and five list items — survived a gather-every-page-then-slice
+  implementation unchanged.
 - **The daemon applies no LIMIT.** `check_preflight.rs` returns every Receipt a Project has, so the
   bound is entirely the desktop's. The adapter now caps the list at 512, matching the repository
   history cap; the panel then draws five.
