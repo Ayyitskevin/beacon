@@ -806,6 +806,26 @@ describe("Beacon desktop shell", () => {
     expect(results.violations).toEqual([]);
   });
 
+  it("presents the ruled v1 reading as not evaluated rather than guessing", async () => {
+    mockInitialState("unlocked");
+    const base = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "live_data_encryption_status") {
+        return Promise.resolve(
+          encryptionReport("unknown", "detection_not_evaluated", []),
+        );
+      }
+      return base(command, args);
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+
+    expect(await screen.findByText(/Disk-encryption status is unknown\./)).toBeVisible();
+    expect(screen.getByText(/detection was not evaluated in this version/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "Recheck" })).toBeVisible();
+  });
+
   it("states the window, the receiptless Runs and the overflow the daemon reported", async () => {
     // Every number the panel shows is a number the page carries. The bound is
     // the daemon's; the interface reports it rather than choosing it.

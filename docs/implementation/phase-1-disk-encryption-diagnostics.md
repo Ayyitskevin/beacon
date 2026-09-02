@@ -1,9 +1,9 @@
 # Phase 1 live-data disk-encryption diagnostics
 
-This checkpoint implements ADR 0017 and the Alpha criterion at `docs/BLUEPRINT.md:914-917`: Beacon
-reports the operating system's disk-encryption status for the volume holding live data as enabled,
-disabled, or unknown, shows the evidence it read, and never describes the open live store as
-Beacon-encrypted.
+This checkpoint implements the safe, unknown-only first slice of ADR 0017 and the Alpha criterion
+at `docs/BLUEPRINT.md:914-917`: Beacon reports `unknown`, shows bounded evidence it read, and never
+describes the open live store as Beacon-encrypted. The `enabled`/`disabled` detector remains a
+guarded candidate for a later type-first rewrite; it does not cross the production Query boundary.
 
 ## Boundary
 
@@ -43,14 +43,27 @@ the sentence is a rendering of them and may be reworded; a subject that was cut 
 list that was capped carries the number it dropped. What a reader cannot expect: that a subject is
 the complete value, or that the sentence is stable text to parse.
 
-## The rule
+## The shipped rule
+
+Production v1 returns only `unknown`. A failed read keeps its specific cause. If the guarded
+candidate reaches what it considers a confident answer, the production Query replaces that
+conclusion with `detection_not_evaluated`, retains the bounded observations, and restores every
+`notVerified` caveat. Candidate conclusions are never recorded as evidence. This is a
+deliberate not-evaluated outcome, not a negative result and not a guess.
+
+The candidate and its regression corpus stay executable so a future rewrite cannot discard seven
+rounds of edge cases. Keeping those tests does not promote the candidate to production evidence.
+The later rewrite must make the detector's type, checked Rust export, TypeScript adapter, iterator
+budget, and host-independent fixtures agree before `enabled` or `disabled` can cross the Query.
+
+## The deferred candidate rule
 
 A **physical leaf** is a node with no `dm/` directory and no parents: a real disk or partition. A
 device-mapper node with no parents is *not* a leaf — it is a mapping whose backing device Beacon
 never saw, which is an unread stack rather than an encrypted one, and real LUKS never looks like
 that.
 
-`enabled` means every branch terminated at a physical leaf, every node was readable, and **every**
+Inside the guarded candidate, `enabled` means every branch terminated at a physical leaf, every node was readable, and **every**
 one of those paths passed through a `CRYPT-` layer. `disabled` means every branch terminated at a
 physical leaf, every node was readable, and at least one of those paths had no crypt layer; the
 report names those devices. Any read, metadata, or budget failure anywhere is `unknown`, with the
@@ -80,7 +93,7 @@ encryption" does not conclude the report is subtle.
 (OPAL/SED) encryption, filesystem-level encryption such as fscrypt or ext4 encryption, and
 encryption applied beneath this host.
 
-## What is read, in order
+## What the bounded candidate reads, in order
 
 1. `canonicalize` the store path, falling back to its parent directory **only** when that fails
    with `NotFound` **and** `symlink_metadata` agrees the entry is not there — the store does not
@@ -140,11 +153,12 @@ on the way in, closing every door at once rather than one per source.
 ## Interfaces and presentation
 
 One closed report crosses the Rust service, the authenticated Unix socket, the Tauri command, and
-the strict TypeScript adapter. **No free text crosses that boundary.** The report carries a
-`conclusion` — a closed `state`, a closed `reason`, at most three `Subject`s (a role, a value of at
-most 24 characters, and a `shortened` flag), and `omittedSubjects` — and the sentence an operator
-reads is RENDERED from those fields by a total function, once in Rust for logs and once in
-TypeScript for the panel. It cannot overflow because its inputs cannot.
+the strict TypeScript adapter. **No free text crosses that boundary, and production v1 crosses it
+only with state `unknown`.** The report type retains the future states so the deferred candidate's
+executable specification remains intact. It carries a `conclusion` — a closed `state`, a closed
+`reason`, at most three `Subject`s (a role, a value of at most 24 characters, and a `shortened`
+flag), and `omittedSubjects` — and the sentence an operator reads is rendered from those fields by
+a total function, once in Rust for logs and once in TypeScript for the panel.
 
 The bound is by construction only because construction is the only door. Every field of `Subject`,
 `LiveDataEncryptionConclusion`, `EncryptionEvidence`, and `LiveDataEncryptionReport` is private, and
@@ -155,9 +169,10 @@ touching a single string in the implementation.
 
 The adapter re-checks the SHAPE, not lengths: the closed state and reason (the state is read off the
 reason, one direction, so the two cannot drift), the closed roles, the subject cap and character
-bound, `device` values as `major:minor` and never shortened, counts inside `u32`, a `mountPoint`
-whose role is `location`, the evidence cap and its flag, and that a reason's sentence has a subject
-for every role it names. A report this reader could not have produced is a refused read — the
+bound, canonical decimal `device` values as `major:minor` and never shortened, counts inside `u32`,
+a `mountPoint` whose role is `location`, the evidence cap and its flag, truthful omission counts
+that appear only after a list is full, and that a reason's sentence has a subject for every role it
+names. A report this reader could not have produced is a refused read — the
 designed failed-read state — rather than a rendered surprise.
 
 Two lists are capped, and each says so with a count rather than by going quiet: `omittedSubjects`
@@ -215,15 +230,18 @@ npx vitest run src/App.test.tsx -t "never describes the open live store"
 npx vitest run src/session.test.ts -t "refuses a live-data encryption report"
 ```
 
-Every test in this slice was first run against the wrong answer it exists to kill, and each was
-observed failing before the reader was written to satisfy it. The mutants and their observed
-assertions are recorded in the build report for this slice.
+The candidate regression suite preserves all seven review rounds and is mutation-tested separately
+from the production unknown-only guard. The production transport test asserts that no confident
+state crosses the real socket. The mutants and their observed assertions are recorded in the build
+report for this slice.
 
 ## Evidence limits
 
-The reading is proved against fixtures, not against a live encrypted volume: the measurement host
-has no device-mapper crypt device, so `enabled` has never been observed against real sysfs. The
-`CRYPT-` prefix set is observed convention, not a local citation. macOS and Windows detection does
-not exist. The desktop assertions run under jsdom, which lays out nothing, so rendered contrast and
-visible focus for the new status line remain unproven, exactly as
+Production detection is deliberately not evaluated in v1, so criterion 38 remains partial: the
+warning, evidence, guide, recheck, authentication boundary, and honest unknown state ship; an
+accepted confident detector does not. The candidate is proved against fixtures, not against a live
+encrypted volume: `enabled` has never been observed against real sysfs. The `CRYPT-` prefix set is
+observed convention, not a local citation. macOS and Windows detection does not exist. The desktop
+assertions run under jsdom, which lays out nothing, so rendered contrast and visible focus for the
+new status line remain unproven, exactly as
 `docs/evals/2026-08-30-desktop-accessibility-baseline.md` records for the rest of the interface.

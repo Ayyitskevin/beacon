@@ -14,16 +14,16 @@ use std::time::Duration;
 
 use beacond::{
     AccessOrigin, AutonomyProfile, BeaconCapability, BudgetBoundary, DeclaredCheck,
-    DiscoveryStatus, LiveDataEncryption, LocalErrorCode, LocalModelActivationState, LocalModelEndpoint,
-    LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer, LocalTransportError,
-    MAX_RECENT_RUN_WINDOW, MissionAdmissionActor, MissionDraft, MissionLifecycle,
-    MissionMemberDraft, ModelActivation, OperatorSessionPhase, PlatformMonitorState, PolicyAuthor,
-    ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProviderFeature, RepositoryAuthor,
-    RepositoryDraft, RepositorySourceKind, ResidentConfigurationState, ResidentLifecycle,
-    SecretString, StarterOrganizationDecision, StarterResidentDraft, StarterRole, TeamDraft,
-    TeamFormationActor, TeamIneligibilityReason, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
-    TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft, TrackRecordEvidenceKind,
-    TrackRecordRequirement, initialize_local_auth_token,
+    DiscoveryStatus, LiveDataEncryption, LocalErrorCode, LocalModelActivationState,
+    LocalModelEndpoint, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
+    LocalTransportError, MAX_RECENT_RUN_WINDOW, MissionAdmissionActor, MissionDraft,
+    MissionLifecycle, MissionMemberDraft, ModelActivation, OperatorSessionPhase,
+    PlatformMonitorState, PolicyAuthor, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft,
+    ProviderFeature, RepositoryAuthor, RepositoryDraft, RepositorySourceKind,
+    ResidentConfigurationState, ResidentLifecycle, SecretString, StarterOrganizationDecision,
+    StarterResidentDraft, StarterRole, TeamDraft, TeamFormationActor, TeamIneligibilityReason,
+    TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy,
+    TeamMemberDraft, TrackRecordEvidenceKind, TrackRecordRequirement, initialize_local_auth_token,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -252,12 +252,9 @@ fn authenticated_client_reads_live_data_encryption_over_both_real_transports() {
 
     let report = client.live_data_encryption_status().unwrap();
     // The host running this test is whatever it is, so the assertion is on the
-    // contract rather than on one state: the answer is one of three, it names
-    // the volume it is about, and it carries the evidence it read.
-    assert!(matches!(
-        report.conclusion().state(),
-        LiveDataEncryption::Enabled | LiveDataEncryption::Disabled | LiveDataEncryption::Unknown
-    ));
+    // Option (b) is an interface property, not a fixture assumption: v1 never
+    // promotes the detector candidate into a confident encryption claim.
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert!(!report.evidence().is_empty());
     assert!(report.observed_at_ms() > 0);
     // The conclusion is bounded by its own shape, so what crosses the wire can

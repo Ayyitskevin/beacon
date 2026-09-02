@@ -311,9 +311,9 @@ export type LocalModelDiscoveryReport = {
   observedAtMs: number;
 };
 
-/** Three states, closed. `disabled` is a proven negative; absence of proof is
- *  `unknown`, and the conclusion's `reason` says which. A state is read off its
- *  reason (`stateForReason`), never agreed with it, so the two cannot drift. */
+/** Three states, closed. Production v1 emits only `unknown`; `enabled` and
+ *  `disabled` remain the deferred detector candidate's executable vocabulary.
+ *  A state is read off its reason (`stateForReason`), never agreed with it. */
 export type LiveDataEncryption = "enabled" | "disabled" | "unknown";
 
 /** Every reason the reader can produce. Closed on both sides of the wire: a
@@ -342,6 +342,9 @@ export const REASON_CODES = [
   "mapping_without_backing_device",
   "loopback_image",
   "platform_not_supported",
+  /** Version 1 records bounded observations but deliberately does not promote
+   *  the detector candidate's inference into an encryption claim. */
+  "detection_not_evaluated",
   /** The Query itself did not answer. Built here rather than read off the
    *  wire: the reader cannot report that it was never reached, so the client
    *  says so in the same closed vocabulary instead of carrying a free-text
@@ -431,9 +434,6 @@ export const MAX_SUBJECTS = 3;
 export const MAX_EVIDENCE_ENTRIES = 32;
 export const MAX_NOT_VERIFIED_ENTRIES = 8;
 export const MAX_OBSERVATION_CHARS = 200;
-/** Rust counts omissions in a `u32`; anything larger is a shape the reader
- *  cannot have produced. */
-const MAX_U32 = 4_294_967_295;
 
 export type ProviderFeature = "completion" | "embedding" | "thinking" | "tools" | "vision";
 export type LocalModelBinding = {
@@ -2148,7 +2148,10 @@ function isDeviceNumber(value: string): boolean {
   const parts = value.split(":");
   if (parts.length !== 2) return false;
   return parts.every(
-    (part) => /^[0-9]{1,10}$/.test(part) && Number(part) <= MAX_U32,
+    (part) =>
+      /^[0-9]{1,10}$/.test(part) &&
+      Number(part) <= MAX_U32_COUNT &&
+      String(Number(part)) === part,
   );
 }
 
@@ -2162,6 +2165,7 @@ function isLiveDataEncryptionConclusion(
     !isBoundedCount(value.omittedSubjects) ||
     !Array.isArray(subjects) ||
     subjects.length > MAX_SUBJECTS ||
+    (value.omittedSubjects > 0 && subjects.length !== MAX_SUBJECTS) ||
     !subjects.every(isSubject)
   ) {
     return false;
@@ -2198,15 +2202,12 @@ function isLiveDataEncryptionReport(value: unknown): value is LiveDataEncryption
       (isSubject(value.mountPoint) && value.mountPoint.role === "location")) &&
     Array.isArray(evidence) &&
     evidence.length <= MAX_EVIDENCE_ENTRIES &&
+    (value.omittedEvidence === 0 || evidence.length === MAX_EVIDENCE_ENTRIES) &&
     evidence.every(isEncryptionEvidence) &&
     Array.isArray(notVerified) &&
     notVerified.length <= MAX_NOT_VERIFIED_ENTRIES &&
     notVerified.every((entry) => isTrimmedTextWithoutControls(entry, MAX_OBSERVATION_CHARS))
   );
-}
-
-function isBoundedCount(value: unknown): value is number {
-  return isNonnegativeInteger(value) && value <= MAX_U32;
 }
 
 function isEncryptionEvidence(value: unknown): value is EncryptionEvidence {

@@ -96,6 +96,10 @@ export function renderConclusion(conclusion: LiveDataEncryptionConclusion): stri
     case "platform_not_supported":
       sentence = "not detectable on this platform";
       break;
+    case "detection_not_evaluated":
+      sentence =
+        "disk-encryption detection was not evaluated in this version; the recorded observations are evidence only";
+      break;
     case "initial_read_failed":
       sentence = `the disk-encryption reading did not complete: ${subjectsForRole("detail")}`;
       break;
