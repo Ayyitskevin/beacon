@@ -64,17 +64,45 @@ function absent(value: Recorded<string>): string | null {
  */
 export function LiveDataEncryptionStatus({
   report,
+  failure,
   busy,
   onRecheck,
 }: {
   report: LiveDataEncryptionReport | null;
+  failure: string;
   busy: boolean;
   onRecheck: () => void;
 }) {
   const styles = useStyles();
   const [showGuide, setShowGuide] = useState(false);
   const [showEvidence, setShowEvidence] = useState(false);
-  if (!report) return null;
+
+  // A diagnostic that could not run is not a diagnostic that said "encrypted".
+  // Rendering nothing here would hide the failure AND remove the only control
+  // that could retry it.
+  if (!report) {
+    if (!failure) return null;
+    return (
+      <section className={styles.section} aria-labelledby="live-data-encryption-heading">
+        <div className={styles.warning}>
+          <h3 id="live-data-encryption-heading" className={styles.warningHeading}>
+            Live data
+          </h3>
+          <div role="status">
+            <p className={styles.body}>
+              <strong>Disk-encryption status could not be read.</strong> {failure} Beacon does not
+              claim this Installation's live data is encrypted.
+            </p>
+          </div>
+          <div className={styles.actions}>
+            <Button size="small" appearance="secondary" disabled={busy} onClick={onRecheck}>
+              {busy ? "Rechecking…" : "Recheck"}
+            </Button>
+          </div>
+        </div>
+      </section>
+    );
+  }
 
   const guide = encryptionGuide(detectGuidePlatform(navigator.userAgent));
   const mechanism = present(report.mechanism);
