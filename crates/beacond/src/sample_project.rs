@@ -2054,6 +2054,21 @@ mod tests {
     }
 
     #[test]
+    fn workspace_anchor_open_refuses_a_symlink_to_a_private_directory() {
+        let store = TestStore::new("workspace-anchor-symlink");
+        let target = store.root.join("operator-owned");
+        fs::create_dir(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+        let sentinel = target.join("keep");
+        fs::write(&sentinel, b"operator data").unwrap();
+        let workspace_alias = store.root.join("workspace-alias");
+        symlink(&target, &workspace_alias).unwrap();
+
+        assert!(super::open_private_directory(&workspace_alias).is_err());
+        assert_eq!(fs::read(&sentinel).unwrap(), b"operator data");
+    }
+
+    #[test]
     fn git_failure_cleans_partial_staging_and_publishes_no_database_state() {
         let store = TestStore::new("git-failure");
         let service = store.isolated_service().with_git_program("/bin/false");
