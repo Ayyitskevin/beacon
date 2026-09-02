@@ -76,6 +76,13 @@ impl ObjectKind {
     }
 }
 
+/// A charged read: either the underlying outcome, or the allowance ran out first.
+#[derive(Debug, PartialEq, Eq)]
+enum ChargedRead {
+    Read(LooseRead),
+    BudgetExhausted,
+}
+
 /// What one loose-object read established. Four outcomes, kept apart on purpose.
 ///
 /// `NotLoose` is **not** a claim that the object is absent. A loose file may be missing because the
@@ -174,6 +181,11 @@ pub(crate) enum PathResolution {
     NotLoose { object_id: String },
     /// Some object on the path exceeded the caller's bound.
     TooLarge,
+    /// The caller's aggregate byte allowance was spent before this path could be resolved.
+    ///
+    /// Distinct from `TooLarge`, which is about ONE object against the per-object bound. The two
+    /// are different limits and lead to different corrections, so they are different answers.
+    BudgetExhausted,
     /// The declared path has more components than this walk will descend.
     ///
     /// A resource refusal, and its own arm rather than `Malformed`: paths this deep are legal
@@ -405,9 +417,17 @@ impl ObjectStore {
     /// reads a packed object; a path that crosses one is [`PathResolution::NotLoose`] and no
     /// stronger claim is made about it.
     ///
-    /// `maximum` bounds each object individually, as the reader's own bound does; the walk adds a
-    /// depth bound of its own ([`MAX_PATH_COMPONENTS`]) so a tree cannot choose how far Beacon
-    /// descends.
+    /// `maximum` bounds each object individually, as the reader's own bound does. `budget` is the
+    /// caller's AGGREGATE allowance, and every object this walk reads is charged against it --
+    /// commit, every tree, and the blob -- so the total is a total. Charging only the final blob
+    /// would leave the traversal free, and a declaration naming many deep paths would read
+    /// arbitrarily much while the counter barely moved (gpt1, opus2 F2). Exhausting it is
+    /// [`PathResolution::BudgetExhausted`], which is deliberately not `TooLarge`: a six-byte file
+    /// refused because the allowance ran out is not a large file, and an Operator told otherwise
+    /// shrinks the wrong thing (opus2 F1).
+    ///
+    /// The walk adds a depth bound of its own ([`MAX_PATH_COMPONENTS`]) so a tree cannot choose how
+    /// far Beacon descends.
     ///
     /// The path is expected to be repository-relative and already validated by its owning module.
     /// This function re-checks the shape it depends on -- non-empty components, no `.` or `..`, no
@@ -418,6 +438,7 @@ impl ObjectStore {
         revision: &str,
         path: &str,
         maximum: usize,
+        budget: &mut usize,
         deadline: &mut impl FnMut() -> bool,
     ) -> Result<PathResolution, ObjectStoreError> {
         // Bounded as it goes: the 65th component ends the split rather than being collected and
@@ -440,17 +461,23 @@ impl ObjectStore {
             return settled(PathResolution::Malformed, deadline);
         }
 
-        // The commit names exactly one tree, and its own body is what says so.
-        let mut tree_id = match self.read_loose_object(revision, maximum, deadline)? {
-            LooseRead::Read {
+        // Every object below is charged before its result is used, so a walk that cannot afford
+        // the next read stops rather than reading it and subtracting afterwards.
+        let mut tree_id = match self.charged_read(revision, maximum, budget, deadline)? {
+            ChargedRead::BudgetExhausted => {
+                return settled(PathResolution::BudgetExhausted, deadline);
+            }
+            ChargedRead::Read(LooseRead::Read {
                 kind: ObjectKind::Commit,
                 body,
-            } => match commit_tree_id(&body) {
+            }) => match commit_tree_id(&body) {
                 Some(id) => id,
                 None => return settled(PathResolution::Malformed, deadline),
             },
-            LooseRead::Read { .. } => return settled(PathResolution::Malformed, deadline),
-            LooseRead::NotLoose => {
+            ChargedRead::Read(LooseRead::Read { .. }) => {
+                return settled(PathResolution::Malformed, deadline);
+            }
+            ChargedRead::Read(LooseRead::NotLoose) => {
                 return settled(
                     PathResolution::NotLoose {
                         object_id: revision.to_owned(),
@@ -458,19 +485,28 @@ impl ObjectStore {
                     deadline,
                 );
             }
-            LooseRead::TooLarge => return settled(PathResolution::TooLarge, deadline),
-            LooseRead::Malformed => return settled(PathResolution::Malformed, deadline),
+            ChargedRead::Read(LooseRead::TooLarge) => {
+                return settled(PathResolution::TooLarge, deadline);
+            }
+            ChargedRead::Read(LooseRead::Malformed) => {
+                return settled(PathResolution::Malformed, deadline);
+            }
         };
 
         for (index, component) in components.iter().enumerate() {
             let last = index + 1 == components.len();
-            let body = match self.read_loose_object(&tree_id, maximum, deadline)? {
-                LooseRead::Read {
+            let body = match self.charged_read(&tree_id, maximum, budget, deadline)? {
+                ChargedRead::BudgetExhausted => {
+                    return settled(PathResolution::BudgetExhausted, deadline);
+                }
+                ChargedRead::Read(LooseRead::Read {
                     kind: ObjectKind::Tree,
                     body,
-                } => body,
-                LooseRead::Read { .. } => return settled(PathResolution::Malformed, deadline),
-                LooseRead::NotLoose => {
+                }) => body,
+                ChargedRead::Read(LooseRead::Read { .. }) => {
+                    return settled(PathResolution::Malformed, deadline);
+                }
+                ChargedRead::Read(LooseRead::NotLoose) => {
                     return settled(
                         PathResolution::NotLoose {
                             object_id: tree_id.clone(),
@@ -478,8 +514,12 @@ impl ObjectStore {
                         deadline,
                     );
                 }
-                LooseRead::TooLarge => return settled(PathResolution::TooLarge, deadline),
-                LooseRead::Malformed => return settled(PathResolution::Malformed, deadline),
+                ChargedRead::Read(LooseRead::TooLarge) => {
+                    return settled(PathResolution::TooLarge, deadline);
+                }
+                ChargedRead::Read(LooseRead::Malformed) => {
+                    return settled(PathResolution::Malformed, deadline);
+                }
             };
             // The whole tree is parsed before any entry is used, so a malformed tail cannot be
             // hidden behind an early match: a tree that does not parse establishes nothing, and
@@ -508,23 +548,55 @@ impl ObjectStore {
             }
             let blob_id = HEXLOWER.encode(&entry.id);
             return settled(
-                match self.read_loose_object(&blob_id, maximum, deadline)? {
-                    LooseRead::Read {
+                match self.charged_read(&blob_id, maximum, budget, deadline)? {
+                    ChargedRead::BudgetExhausted => PathResolution::BudgetExhausted,
+                    ChargedRead::Read(LooseRead::Read {
                         kind: ObjectKind::Blob,
                         body,
-                    } => PathResolution::Blob { body },
-                    LooseRead::Read { .. } => PathResolution::Malformed,
-                    LooseRead::NotLoose => PathResolution::NotLoose {
+                    }) => PathResolution::Blob { body },
+                    ChargedRead::Read(LooseRead::Read { .. }) => PathResolution::Malformed,
+                    ChargedRead::Read(LooseRead::NotLoose) => PathResolution::NotLoose {
                         object_id: blob_id.clone(),
                     },
-                    LooseRead::TooLarge => PathResolution::TooLarge,
-                    LooseRead::Malformed => PathResolution::Malformed,
+                    ChargedRead::Read(LooseRead::TooLarge) => PathResolution::TooLarge,
+                    ChargedRead::Read(LooseRead::Malformed) => PathResolution::Malformed,
                 },
                 deadline,
             );
         }
         // `components` is non-empty and the loop returns on its last iteration.
         settled(PathResolution::Malformed, deadline)
+    }
+
+    /// One loose read, charged against the caller's aggregate allowance.
+    ///
+    /// The charge is the inflated body, taken after the read and before the caller uses it. A
+    /// budget already at zero refuses before the read happens, so an exhausted allowance costs
+    /// nothing more; anything the read did spend is subtracted even when the outcome is a refusal,
+    /// because the bytes were held either way.
+    fn charged_read(
+        &self,
+        object_id: &str,
+        maximum: usize,
+        budget: &mut usize,
+        deadline: &mut impl FnMut() -> bool,
+    ) -> Result<ChargedRead, ObjectStoreError> {
+        if *budget == 0 {
+            return settled(ChargedRead::BudgetExhausted, deadline);
+        }
+        // The per-object bound is passed through UNSHRUNK. Handing the reader `maximum.min(budget)`
+        // would make a nearly-spent allowance report `TooLarge` for a six-byte file, which is the
+        // exact conflation this arm exists to end -- one layer further down than opus2 found it.
+        // The cost is reading one object that is then discarded, bounded by `maximum`.
+        let read = self.read_loose_object(object_id, maximum, deadline)?;
+        if let LooseRead::Read { body, .. } = &read {
+            if body.len() > *budget {
+                *budget = 0;
+                return settled(ChargedRead::BudgetExhausted, deadline);
+            }
+            *budget -= body.len();
+        }
+        Ok(ChargedRead::Read(read))
     }
 
     /// Is `revision` (40 lowercase hex characters) present in this object store?
@@ -1726,10 +1798,16 @@ mod tests {
         let (repository, revision) = walk_repository("deadline-walk");
         let store = ObjectStore::open(&repository.path).unwrap();
         let mut counted = 0_usize;
-        let _ = store.resolve_path_at(&revision, "src/lib.rs", 1_048_576, &mut || {
-            counted += 1;
-            false
-        });
+        let _ = store.resolve_path_at(
+            &revision,
+            "src/lib.rs",
+            1_048_576,
+            &mut unbounded(),
+            &mut || {
+                counted += 1;
+                false
+            },
+        );
         assert!(
             counted > 4,
             "the walk consulted the deadline {counted} times"
@@ -1742,6 +1820,7 @@ mod tests {
                         &revision,
                         "src/lib.rs",
                         1_048_576,
+                        &mut unbounded(),
                         &mut elapses_after(allowed)
                     )
                     .unwrap_err(),
@@ -1834,9 +1913,20 @@ mod tests {
         (directory, revision)
     }
 
+    /// A budget no fixture can exhaust, for the tests that are not about the budget.
+    fn unbounded() -> usize {
+        usize::MAX
+    }
+
     fn resolve(store: &ObjectStore, revision: &str, path: &str) -> PathResolution {
         store
-            .resolve_path_at(revision, path, 1_048_576, &mut never_elapsed())
+            .resolve_path_at(
+                revision,
+                path,
+                1_048_576,
+                &mut unbounded(),
+                &mut never_elapsed(),
+            )
             .unwrap()
     }
 
@@ -2000,13 +2090,105 @@ mod tests {
     }
 
     #[test]
+    fn the_aggregate_budget_is_charged_by_every_object_and_is_its_own_refusal() {
+        // Both reviewers found the same thing from different directions: the aggregate bound was
+        // charged only the final blob, so the commit and every tree were free (gpt1), and deleting
+        // its effect entirely left every test green (opus2 F2). It also reported its own exhaustion
+        // as "this object is too large", which tells an Operator to shrink a six-byte file
+        // (opus2 F1).
+        //
+        // A budget the traversal cannot spend is not a total, and a bound nothing can tell from its
+        // own absence is not a bound.
+        let (repository, revision) = walk_repository("budget");
+        let store = ObjectStore::open(&repository.path).unwrap();
+
+        // A budget large enough for everything resolves, and is left SMALLER than it started --
+        // which is the charge the commit and the trees used to escape.
+        let mut plenty = 1_048_576;
+        assert!(matches!(
+            store
+                .resolve_path_at(
+                    &revision,
+                    "src/lib.rs",
+                    1_048_576,
+                    &mut plenty,
+                    &mut never_elapsed()
+                )
+                .unwrap(),
+            PathResolution::Blob { .. }
+        ));
+        let spent = 1_048_576 - plenty;
+        assert!(spent > 0, "the walk charged nothing at all");
+
+        // The blob is 13 bytes. If only the blob were charged, a budget of 64 would be ample; the
+        // commit and two trees are what make it insufficient. This is the traversal charge, pinned.
+        assert!(
+            spent > 64,
+            "only the blob was charged: the walk spent {spent} bytes on a 13-byte file"
+        );
+
+        // Exhausted mid-walk: its own outcome, and never `TooLarge`.
+        let mut tight = spent - 1;
+        assert_eq!(
+            store
+                .resolve_path_at(
+                    &revision,
+                    "src/lib.rs",
+                    1_048_576,
+                    &mut tight,
+                    &mut never_elapsed()
+                )
+                .unwrap(),
+            PathResolution::BudgetExhausted
+        );
+
+        // And zero refuses before reading anything.
+        let mut none_left = 0;
+        assert_eq!(
+            store
+                .resolve_path_at(
+                    &revision,
+                    "src/lib.rs",
+                    1_048_576,
+                    &mut none_left,
+                    &mut never_elapsed()
+                )
+                .unwrap(),
+            PathResolution::BudgetExhausted
+        );
+        assert_eq!(none_left, 0, "an exhausted budget was charged again");
+
+        // The boundary: exactly enough resolves, one byte short does not. A `<`/`<=` slip lives
+        // here, and without both sides it is invisible.
+        let mut exact = spent;
+        assert!(matches!(
+            store
+                .resolve_path_at(
+                    &revision,
+                    "src/lib.rs",
+                    1_048_576,
+                    &mut exact,
+                    &mut never_elapsed()
+                )
+                .unwrap(),
+            PathResolution::Blob { .. }
+        ));
+    }
+
+    #[test]
     fn a_bound_that_excludes_an_object_on_the_path_is_a_refusal_not_an_absence() {
         let (repository, revision) = walk_repository("walk-bound");
         let store = ObjectStore::open(&repository.path).unwrap();
 
         assert_eq!(
             store
-                .resolve_path_at(&revision, "src/lib.rs", 8, &mut never_elapsed())
+                .resolve_path_at(
+                    &revision,
+                    "src/lib.rs",
+                    8,
+                    &mut unbounded(),
+                    &mut never_elapsed()
+                )
                 .unwrap(),
             PathResolution::TooLarge
         );
@@ -2306,7 +2488,13 @@ mod tests {
 
         assert_eq!(
             store
-                .resolve_path_at(&revision, "src/lib.rs", 1_048_576, &mut || true)
+                .resolve_path_at(
+                    &revision,
+                    "src/lib.rs",
+                    1_048_576,
+                    &mut unbounded(),
+                    &mut || true
+                )
                 .unwrap_err(),
             ObjectStoreError::Elapsed
         );

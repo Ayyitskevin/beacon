@@ -1650,6 +1650,44 @@ fn a_declared_path_absent_at_the_pinned_revision_is_a_mismatch_not_an_inspection
 }
 
 #[test]
+fn an_exhausted_aggregate_budget_is_its_own_reason_and_not_a_large_object() {
+    // opus2's F1, at the surface an Operator reads. Their probe declared eight 8 MiB blobs and then
+    // a six-byte file, and Beacon told them the six-byte file was too large -- so they would shrink
+    // the wrong thing, or conclude Beacon is broken.
+    //
+    // The budget is a parameter here for the reason the deadline is: it is the seam that makes the
+    // outcome reachable without a 64 MiB fixture. gpt1 and opus2 both found that the constant was
+    // indistinguishable from its own deletion, and the fix for that is the same fix as this one.
+    let fixture = admitted_mission("context-budget");
+    let (repository, real_revision) = TempRepository::with_one_commit("budget");
+    let revision = fixture.rebind_repository(
+        1,
+        RepositorySourceKind::LocalPath,
+        repository.path.to_str().unwrap(),
+        &real_revision,
+    );
+    let mut record = fixture.record();
+    record.repository_revision = revision;
+    record.base_revision = real_revision;
+    record.context = Context::Declared {
+        entries: vec![("src/lib.rs".to_owned(), sha256(b"fn main() {}\n"))],
+        manifest: None,
+    };
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+
+    // With room, the declared entry agrees and nothing is reported.
+    assert!(
+        !proposal.readiness().unmet().iter().any(|item| matches!(
+            item,
+            UnmetPrecondition::ReadableContextMismatch { .. }
+                | UnmetPrecondition::ReadableContextNotVerified { .. }
+        )),
+        "{:?}",
+        proposal.readiness().unmet()
+    );
+}
+
+#[test]
 fn a_packed_repository_is_not_verified_rather_than_mismatched() {
     // After a repack every object on the path is packed, and this reader reads only loose objects.
     // The wrong answer is reporting the declared entry as false because Beacon could not read the

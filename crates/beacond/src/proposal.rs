@@ -414,6 +414,13 @@ pub enum ContextComparison {
     /// A refusal like `ObjectTooLargeToInspect`, and named separately because the two are different
     /// limits and a reader deciding what to change needs to know which one was hit.
     PathTooDeepToInspect,
+    /// The comparison's aggregate byte allowance was spent before every declared entry resolved.
+    ///
+    /// Its own reason, not `ObjectTooLargeToInspect`. Those are different limits: one says a single
+    /// object will not fit, the other says the whole reading ran out of room. Reporting the second
+    /// as the first told an Operator their six-byte file was too large, which sends them to shrink
+    /// the wrong thing (opus2's F1).
+    ContextBudgetExhausted,
     /// An object on the declared path is larger than the comparison's own bound.
     ///
     /// A resource refusal, and its own reason rather than `InspectionFailed`: the object may be
@@ -1698,7 +1705,13 @@ fn compare_readable_context(
 ) -> Result<ContextOutcome, ProposalError> {
     let started = Instant::now();
     let mut deadline = move || started.elapsed().as_millis() > CONTEXT_INSPECTION_BUDGET_MS;
-    compare_readable_context_within(connection, workspace_id, payload, &mut deadline)
+    compare_readable_context_within(
+        connection,
+        workspace_id,
+        payload,
+        CONTEXT_TOTAL_BYTES,
+        &mut deadline,
+    )
 }
 
 /// The comparison, driven by a caller-supplied deadline.
@@ -1719,6 +1732,7 @@ fn compare_readable_context_within(
     connection: &Connection,
     workspace_id: Uuid,
     payload: &ProposalV1,
+    total_bytes: usize,
     deadline: &mut impl FnMut() -> bool,
 ) -> Result<ContextOutcome, ProposalError> {
     if deadline() {
@@ -1792,7 +1806,7 @@ fn compare_readable_context_within(
     // it did. A not-verified says less and is always true; a mismatch from an unfinished walk says
     // more than Beacon knows.
     let mut mismatches: Vec<ContextMismatch> = Vec::new();
-    let mut budget = CONTEXT_TOTAL_BYTES;
+    let mut budget = total_bytes;
 
     for entry in entries {
         if deadline() {
@@ -1800,11 +1814,14 @@ fn compare_readable_context_within(
                 ContextComparison::InspectionTimedOut,
             ));
         }
-        let object_bound = CONTEXT_OBJECT_BYTES.min(budget);
+        // The walk charges every object it reads against `budget` and reports its own exhaustion,
+        // so the per-object bound stays the per-object bound. Passing `min(budget)` here was what
+        // made a six-byte file report "too large" once the aggregate ran out (opus2's F1).
         let resolved = match store.resolve_path_at(
             &payload.bindings.pinned_base_revision,
             &entry.path,
-            object_bound,
+            CONTEXT_OBJECT_BYTES,
+            &mut budget,
             deadline,
         ) {
             Ok(resolved) => resolved,
@@ -1812,7 +1829,6 @@ fn compare_readable_context_within(
         };
         match resolved {
             PathResolution::Blob { body } => {
-                budget = budget.saturating_sub(body.len());
                 // ADR 0034:157-158: the declared identity is the SHA-256 of the exact file bytes,
                 // which is not the object's Git name -- that is a SHA-1 over a header and the same
                 // body, and comparing names would fail every entry that is actually correct.
@@ -1852,6 +1868,11 @@ fn compare_readable_context_within(
             PathResolution::TooDeep => {
                 return Ok(ContextOutcome::NotVerified(
                     ContextComparison::PathTooDeepToInspect,
+                ));
+            }
+            PathResolution::BudgetExhausted => {
+                return Ok(ContextOutcome::NotVerified(
+                    ContextComparison::ContextBudgetExhausted,
                 ));
             }
             PathResolution::Malformed => {
@@ -2442,6 +2463,7 @@ mod tests {
             &connection,
             WORKSPACE_ID,
             &fixture_payload(),
+            CONTEXT_TOTAL_BYTES,
             &mut elapsed,
         )
         .unwrap();
@@ -2464,6 +2486,7 @@ mod tests {
             &connection,
             WORKSPACE_ID,
             &fixture_payload(),
+            CONTEXT_TOTAL_BYTES,
             &mut plenty,
         );
 
