@@ -16,6 +16,10 @@
 #   `str.replace()`  no-op'd against text that was not there, reporting nothing
 #   `a ; b`          b runs regardless — this one let an unformatted commit through
 #
+# A later harness defect was duplicate ownership: the desktop stage ran
+# `cargo test -p beacon-desktop`, then the Rust stage ran those same tests again
+# through `cargo test --workspace`. The Rust stage owns every workspace package test.
+#
 # None of those were in the code under test. All were in the tooling that was
 # supposed to be checking it. The code failed loudly; the harness failed silently.
 #
@@ -75,7 +79,6 @@ case "$stage" in
     desktop)
         run "npm clean install" run_in_desktop npm ci --ignore-scripts
         run "desktop tests"    run_in_desktop npm test
-        run "desktop Rust test" cargo test -p beacon-desktop --all-targets
         run "desktop build"    run_in_desktop npm run build
         run "Tauri build"      run_in_desktop npm run tauri build -- --no-bundle
         ;;
@@ -91,7 +94,6 @@ case "$stage" in
         run "pytest"      "$PY" -m pytest -q
         run "npm clean install" run_in_desktop npm ci --ignore-scripts
         run "desktop tests"    run_in_desktop npm test
-        run "desktop Rust test" cargo test -p beacon-desktop --all-targets
         run "desktop build"    run_in_desktop npm run build
         run "Tauri build"      run_in_desktop npm run tauri build -- --no-bundle
         run "cargo fmt"    cargo fmt --all --check
