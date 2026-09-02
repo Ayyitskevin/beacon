@@ -188,6 +188,30 @@ CREATE TABLE evaluation_cited_runs (
 CREATE UNIQUE INDEX evaluations_workspace_digest
 ON evaluations (workspace_id, digest_value);
 
+-- Non-authorship, made structural. An Agent cannot approve its own Proposal through a model
+-- judgment (`BLUEPRINT:445-447`), and a rule that lives only in a Command is a rule anything
+-- reaching the store can walk past.
+--
+-- The comparison is on the RESIDENT, never on (resident, configuration): two configurations of one
+-- Resident are two evaluators for configuration purposes and ONE author for this purpose. Keying
+-- on the pair would let an author re-evaluate their own Proposal by changing configuration, which
+-- is the dodge this trigger exists to close.
+--
+-- This is one of the two layers. It proves what SQL can prove -- that the stored projection does
+-- not name the author -- and the verified read and startup reconciliation prove the other half,
+-- that the projection agrees with the canonical bytes. Neither alone is the invariant.
+CREATE TRIGGER evaluations_no_self_evaluation
+BEFORE INSERT ON evaluations
+WHEN EXISTS (
+    SELECT 1 FROM proposals
+    WHERE workspace_id = NEW.workspace_id
+      AND digest_value = NEW.proposal_digest
+      AND requester_resident_id = NEW.evaluator_resident_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'An Evaluation may not name the author of the Proposal it evaluates');
+END;
+
 CREATE TRIGGER evaluations_no_update
 BEFORE UPDATE ON evaluations
 BEGIN

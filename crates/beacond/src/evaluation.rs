@@ -11,6 +11,13 @@
 //! `beacon.ruling.v2` can cover the cited set with the Ruling's own digest, because a relation
 //! attached after the fact is indistinguishable from one made at ruling time.
 //!
+//! **Non-authorship is structural, in two layers.** The store refuses an insert whose projected
+//! evaluator Resident is the bound Proposal's author; the Command, every verified read, and
+//! startup re-derive the same relation from the canonical bytes. SQL proves the projection is
+//! clean, the bytes layer proves the projection is the one the bytes describe, and the comparison
+//! is on the Resident rather than the (Resident, configuration) pair -- two configurations of one
+//! Resident are two evaluators for configuration purposes and one author for this one.
+//!
 //! The rubric fields are a **self-report**. Nothing in Beacon resolves a rubric: there is no rubric
 //! table, no owning module and no foreign key. They record what the evaluator declared they
 //! applied, exactly as ADR 0034 treats a declared readable context, and **no surface may present a
@@ -353,6 +360,7 @@ pub enum InconsistentEvaluation {
     ColumnDisagreesWithBytes,
     ProposalEnvelopeDisagrees,
     MissionDisagreesWithProposal,
+    EvaluatorAuthoredTheProposal,
     FindingsDisagreeWithBytes,
     CitedRunsDisagreeWithBytes,
 }
@@ -369,6 +377,9 @@ impl fmt::Display for InconsistentEvaluation {
             }
             Self::MissionDisagreesWithProposal => {
                 "the derived Mission is not the bound Proposal's Mission"
+            }
+            Self::EvaluatorAuthoredTheProposal => {
+                "the evaluator authored the Proposal being evaluated"
             }
             Self::FindingsDisagreeWithBytes => "the stored findings are not the ones in the bytes",
             Self::CitedRunsDisagreeWithBytes => {
@@ -1103,6 +1114,16 @@ fn verified_evaluation(
             InconsistentEvaluation::MissionDisagreesWithProposal,
         ));
     }
+    // Re-derived on EVERY read, even though the trigger forbids it. Reconciliation must be complete
+    // on its own terms rather than on the order the store's checks happen to have run -- ADR 0037
+    // re-derives two store-forbidden properties for exactly this reason. The evaluator here comes
+    // from the canonical BYTES, so this is the layer that proves the projection the trigger saw
+    // was the projection the bytes describe.
+    if payload.evaluator.resident_id == facts.author_resident_id {
+        return Err(EvaluationError::Inconsistent(
+            InconsistentEvaluation::EvaluatorAuthoredTheProposal,
+        ));
+    }
     verify_children(connection, workspace_id, &row.digest_value, &payload)?;
     Ok(Evaluation {
         digest: EvaluationDigest {
@@ -1259,6 +1280,16 @@ impl EvaluationService {
                     InconsistentEvaluation::ProposalNotFound,
                 ));
             };
+
+            // Non-authorship, at the Command. The trigger below would refuse this write anyway,
+            // but a caller deserves the reason rather than a database abort, and the Command is
+            // where the two-layer proof starts: this compares against the AUTHOR the Proposal's
+            // verified bytes name, not against a column an earlier write chose.
+            if draft.evaluator.resident_id == facts.author_resident_id {
+                return Err(EvaluationError::Inconsistent(
+                    InconsistentEvaluation::EvaluatorAuthoredTheProposal,
+                ));
+            }
 
             // Cited Runs are a set in the bytes: sorted here so a caller's order cannot change the
             // identity, and duplicates refused rather than silently folded.

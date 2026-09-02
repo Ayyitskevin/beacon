@@ -144,6 +144,33 @@ YmVhY29uLmV2YWx1YXRpb24udjEAAQABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fAAAAAAAA
 offsets the refusal tests measure, so a layout change fails a named test instead
 of silently moving what those tests look at.
 
+## Non-authorship, in two layers
+
+`BLUEPRINT:445-447` requires that an Agent cannot approve its own Proposal
+through a model judgment. That is enforced structurally, not by a caller
+remembering a policy check, and it takes **two** layers because neither proves
+the whole thing alone:
+
+- **The store** refuses an insert whose projected evaluator Resident is the
+  bound Proposal's author. SQL can prove that the *projection* does not name the
+  author; it cannot know what the canonical bytes say.
+- **The Command, every verified read, and startup reconciliation** re-derive the
+  same relation from the canonical **bytes** against the bound Proposal. That is
+  the layer proving the projection the trigger saw is the projection the bytes
+  describe.
+
+The comparison is on the **Resident**, never on the (Resident, configuration)
+pair. Two configurations of one Resident are two evaluators for configuration
+purposes and **one author** for this one; keying on the pair would let an author
+re-evaluate their own Proposal by changing configuration.
+
+The re-derivation at read and startup is deliberately redundant with the
+trigger, exactly as ADR 0037 re-derives two store-forbidden properties:
+reconciliation must be complete on its own terms rather than on the order the
+store's checks happen to have run, and a store written by an older binary, a
+manual repair, or a future migration bug is precisely the case a trigger cannot
+speak to.
+
 ## Storage
 
 Migration 0023 creates `evaluations`, `evaluation_findings` and
@@ -173,7 +200,7 @@ Artifact-subject arm on `subject`, and no dispatch that would produce a Material
 Artifact to evaluate. Closing criterion 26 needs all three. A later reader must
 not mistake this evidence primitive for the criterion it serves.
 
-Slices 2 and 3 add structural non-authorship and supersession. Slice 4 — the
+Slice 3 adds supersession. Slice 4 — the
 Ruling citation — is deferred, per the decision above. Until then no surface
 consumes an Evaluation, which is deliberate: a panel showing `meets` with no
 dispatch behind it would be `BLUEPRINT:446` in an interface.
