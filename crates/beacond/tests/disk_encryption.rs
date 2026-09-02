@@ -12,7 +12,8 @@ use std::path::PathBuf;
 
 use beacond::{
     LiveDataEncryption, LiveDataEncryptionReport, MAX_RENDERED_CONCLUSION_CHARS, ReasonCode,
-    SubjectRole, SystemView, live_data_encryption_for_test, render_conclusion,
+    SubjectRole, SystemView, disk_encryption_detection_candidate_for_test,
+    live_data_encryption_for_test, render_conclusion,
 };
 use uuid::Uuid;
 
@@ -138,9 +139,17 @@ impl Fixture {
         )
     }
 
-    /// The ordinary case: one mount covering the store, on the host's device.
+    /// The ordinary case: one mount covering the store. A real, non-anonymous
+    /// `st_dev` keeps the corroboration live. On an anonymous fixture host,
+    /// `stat` cannot corroborate by definition, so choose one fixture-owned
+    /// non-anonymous mount device rather than letting `/tmp` vs `/dev/shm`
+    /// decide whether the candidate reaches its stack walk.
     fn mounted_on_host_device(&self) -> String {
-        let device = self.host_device();
+        let device = if self.host.starts_with("0:") {
+            self.foreign(0)
+        } else {
+            self.host_device()
+        };
         self.mount_lines(&[self.mount_line(&device, "ext4", "/dev/nvme0n1p2")]);
         device
     }
@@ -186,6 +195,10 @@ impl Fixture {
     }
 
     fn read(&self) -> LiveDataEncryptionReport {
+        disk_encryption_detection_candidate_for_test(&self.store, &self.view(), OBSERVED_AT_MS)
+    }
+
+    fn read_v1(&self) -> LiveDataEncryptionReport {
         live_data_encryption_for_test(&self.store, &self.view(), OBSERVED_AT_MS)
     }
 }
@@ -225,6 +238,19 @@ fn evidence_text(report: &LiveDataEncryptionReport) -> String {
         .map(|entry| format!("{} => {}", entry.source(), entry.observation()))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn assert_unknown_only_v1(fixture: &Fixture) {
+    let report = fixture.read_v1();
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
+    assert_eq!(
+        report.conclusion().reason(),
+        ReasonCode::DetectionNotEvaluated
+    );
+    assert!(
+        !report.evidence().is_empty(),
+        "unknown-only v1 still carries what the probe read"
+    );
 }
 
 /// The harness's own property, and the reason it has one.
@@ -293,6 +319,7 @@ fn luks2_volume_reports_enabled_with_the_dm_uuid_it_read() {
     assert_eq!(report.conclusion().state(), LiveDataEncryption::Enabled);
     assert_eq!(mechanism(&report), "dm-crypt (LUKS2)");
     assert!(evidence_text(&report).contains("CRYPT-LUKS2"));
+    assert_unknown_only_v1(&fixture);
 }
 
 #[test]
@@ -339,8 +366,10 @@ fn encrypted_branch_does_not_mask_a_plain_sibling() {
 
     assert_ne!(report.conclusion().state(), LiveDataEncryption::Enabled);
     assert_eq!(report.conclusion().state(), LiveDataEncryption::Disabled);
-    // The report must name the branch that is not covered.
-    assert!(evidence_text(&report).contains(&fixture.disk(17)));
+    // The candidate conclusion must name the branch that is not covered.
+    assert!(report.conclusion().subjects().iter().any(|subject| {
+        subject.role() == SubjectRole::Device && subject.value() == fixture.disk(17)
+    }));
     // And still say what it did find, so the operator is not told "nothing".
     assert!(evidence_text(&report).contains("CRYPT-LUKS2"));
     // The reason must not deny the encryption this very report observed. An
@@ -350,6 +379,7 @@ fn encrypted_branch_does_not_mask_a_plain_sibling() {
     assert!(reason.contains("pv0 is encrypted"), "{reason}");
     assert!(reason.contains("8:17 is not"), "{reason}");
     assert!(!reason.contains("found no"), "{reason}");
+    assert_unknown_only_v1(&fixture);
 }
 
 #[test]

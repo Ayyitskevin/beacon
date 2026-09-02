@@ -1330,6 +1330,20 @@ describe("desktop session transport", () => {
         subjects: [{ role: "device", value: "8:1", shortened: true }],
       },
     });
+    // The Rust constructor emits canonical decimal device numbers. Values
+    // that merely parse are aliases the reader cannot have produced, and the
+    // two checked doors must agree about refusing them.
+    for (const value of ["+8:1", "08:01"]) {
+      await refused({
+        conclusion: {
+          ...report.conclusion,
+          subjects: [{ role: "device", value, shortened: false }],
+        },
+      });
+    }
+    // Omission counts are truthful only after the corresponding list filled.
+    await refused({ conclusion: { ...report.conclusion, omittedSubjects: 1 } });
+    await refused({ omittedEvidence: 1 });
     // A volume named by a device rather than by where it is mounted.
     await refused({
       mountPoint: { role: "device", value: "8:1", shortened: false },

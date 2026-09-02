@@ -53,7 +53,8 @@ pub use declared_checks::{
 pub use disk_encryption::{
     DiskEncryptionService, EncryptionEvidence, LiveDataEncryption, LiveDataEncryptionConclusion,
     LiveDataEncryptionReport, MAX_RENDERED_CONCLUSION_CHARS, ReasonCode, Subject, SubjectRole,
-    SystemView, live_data_encryption_for_test, render_conclusion,
+    SystemView, disk_encryption_detection_candidate_for_test, live_data_encryption_for_test,
+    render_conclusion,
 };
 pub use local_transport::{
     LocalErrorCode, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
