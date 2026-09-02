@@ -8,11 +8,12 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use beacond::{
-    AutonomyProfile, BeaconCapability, DeclaredCheck, InconsistentProposal,
+    AutonomyProfile, BeaconCapability, ContextComparison, DeclaredCheck, InconsistentProposal,
     LocalModelActivationService, LocalModelEndpoint, MalformedProposal, MissionDraft,
     MissionMemberDraft, MissionService, OperatorAccountError, OperatorAccountService,
     OperatorSessionPhase, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft,
@@ -552,6 +553,30 @@ impl Fixture {
         self.count("SELECT count(*) FROM events WHERE kind = 'proposal.submitted'")
     }
 
+    /// Bind the Project's Repository to a new revision, returning that revision number.
+    fn rebind_repository(
+        &self,
+        prior: u32,
+        source_kind: RepositorySourceKind,
+        source: &str,
+        base_revision: &str,
+    ) -> u32 {
+        ProjectRepositoryService::new(Arc::clone(&self.accounts), self.workspace_id)
+            .bind(
+                self.project_id,
+                1,
+                Some(prior),
+                RepositoryDraft {
+                    source_kind,
+                    source: source.to_owned(),
+                    base_revision: base_revision.to_owned(),
+                    declared_checks: declared_checks(),
+                },
+            )
+            .unwrap()
+            .revision
+    }
+
     /// A second Project in this SAME Workspace and store, with its own Charter, Policy,
     /// Repository, Team and admitted Mission, and the same Resident on its roster.
     ///
@@ -659,6 +684,57 @@ impl Fixture {
         for trigger in triggers {
             connection.execute_batch(&trigger).unwrap();
         }
+    }
+}
+
+/// A real Git repository on disk, so the readable-context comparison inspects a real object
+/// store rather than a fabricated path. Tests may run `git`; the code under test may not.
+struct TempRepository {
+    path: PathBuf,
+}
+
+impl TempRepository {
+    fn new(label: &str) -> Self {
+        let path =
+            std::env::temp_dir().join(format!("beacond-proposal-repo-{label}-{}", Uuid::new_v4()));
+        fs::create_dir_all(&path).unwrap();
+        Self { path }
+    }
+
+    fn git(&self, arguments: &[&str]) {
+        let status = Command::new("git")
+            .args(arguments)
+            .current_dir(&self.path)
+            .env("GIT_AUTHOR_NAME", "Beacon Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "Beacon Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+            .status()
+            .expect("git is available in the test environment");
+        assert!(status.success(), "git {arguments:?} failed");
+    }
+
+    /// Initialise the repository with one commit containing `src/lib.rs`, and return its revision.
+    fn with_one_commit(label: &str) -> (Self, String) {
+        let repository = Self::new(label);
+        repository.git(&["init", "--quiet"]);
+        fs::create_dir_all(repository.path.join("src")).unwrap();
+        fs::write(repository.path.join("src/lib.rs"), "fn main() {}\n").unwrap();
+        repository.git(&["add", "."]);
+        repository.git(&["commit", "--quiet", "-m", "one"]);
+        let output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repository.path)
+            .output()
+            .unwrap();
+        let revision = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+        (repository, revision)
+    }
+}
+
+impl Drop for TempRepository {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
     }
 }
 
@@ -1289,6 +1365,11 @@ fn a_fresh_v1_proposal_reports_exactly_its_undeclared_preconditions() {
 
     // All seven constraint families can only be not_declared in v1, so every v1 Proposal is
     // unready by construction. Nothing here is a boolean, and nothing may read as permission.
+    //
+    // The eighth item is the readable-context comparison ADR 0034:166-170 requires. This fixture
+    // declares src/lib.rs against a fabricated repository path, so the comparison could not be
+    // performed and says so. An earlier revision of this test asserted a list with no context
+    // status at all, which is what let a declared context read as though nothing needed saying.
     assert_eq!(
         declared.readiness().unmet(),
         [
@@ -1299,6 +1380,9 @@ fn a_fresh_v1_proposal_reports_exactly_its_undeclared_preconditions() {
             UnmetPrecondition::CommandAllowlistNotDeclared,
             UnmetPrecondition::ToolAllowlistNotDeclared,
             UnmetPrecondition::EvaluationsNotDeclared,
+            UnmetPrecondition::ReadableContextNotVerified {
+                reason: ContextComparison::RepositoryUnavailable
+            },
         ]
     );
 
@@ -1317,6 +1401,165 @@ fn a_fresh_v1_proposal_reports_exactly_its_undeclared_preconditions() {
             UnmetPrecondition::EvaluationsNotDeclared,
             UnmetPrecondition::ReadableContextNotDeclared,
         ]
+    );
+}
+
+#[test]
+fn a_declared_context_reports_that_it_was_not_compared_against_the_pinned_revision() {
+    // ADR 0034:166-170 -- "Internal manifest consistency does not prove that a path/digest pair
+    // existed at the pinned base revision... No surface may label the context verified from the
+    // manifest's self-consistency alone." The wrong answer this kills is SILENCE: a Proposal that
+    // declares src/lib.rs, submits, and reports a readiness list carrying no comparison status at
+    // all -- which is what shipped before, and reads as "nothing to say about the context".
+    let fixture = admitted_mission("context-not-verified");
+    let record = fixture.record();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+
+    assert!(matches!(
+        proposal.payload().intent.readable_context,
+        ReadableContext::Declared { .. }
+    ));
+    // The fixture's bound source is a fabricated path, so the object store cannot be opened.
+    assert!(
+        proposal
+            .readiness()
+            .unmet()
+            .contains(&UnmetPrecondition::ReadableContextNotVerified {
+                reason: ContextComparison::RepositoryUnavailable
+            }),
+        "{:?}",
+        proposal.readiness().unmet()
+    );
+    // And it is never reported as merely undeclared: those are different facts.
+    assert!(
+        !proposal
+            .readiness()
+            .unmet()
+            .contains(&UnmetPrecondition::ReadableContextNotDeclared)
+    );
+}
+
+#[test]
+fn a_git_url_repository_reports_that_there_is_nothing_local_to_compare() {
+    // The wrong answer: treating a Git URL as "unavailable" (which invites a retry) or, worse,
+    // fetching it. Neither. It is a distinct reason -- there is no local revision to read.
+    let fixture = admitted_mission("context-git-url");
+    let revision = fixture.rebind_repository(
+        1,
+        RepositorySourceKind::GitUrl,
+        "https://example.invalid/beacon.git",
+        BASE_REVISION,
+    );
+
+    let mut record = fixture.record();
+    record.repository_revision = revision;
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+
+    assert!(
+        proposal
+            .readiness()
+            .unmet()
+            .contains(&UnmetPrecondition::ReadableContextNotVerified {
+                reason: ContextComparison::RepositorySourceNotLocal
+            }),
+        "{:?}",
+        proposal.readiness().unmet()
+    );
+}
+
+#[test]
+fn a_pinned_revision_absent_from_a_real_object_store_is_reported_as_absent_not_unavailable() {
+    // A REAL repository that opens cleanly, pinned to a commit it does not contain. The wrong
+    // answer is collapsing this into RepositoryUnavailable: the store was read successfully, and
+    // what is missing is the revision the entries would have been compared against.
+    let fixture = admitted_mission("context-revision-absent");
+    let (repository, _real_revision) = TempRepository::with_one_commit("absent");
+    let revision = fixture.rebind_repository(
+        1,
+        RepositorySourceKind::LocalPath,
+        repository.path.to_str().unwrap(),
+        // A syntactically valid commit id that this repository does not hold.
+        "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00",
+    );
+
+    let mut record = fixture.record();
+    record.repository_revision = revision;
+    record.base_revision = "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00".to_owned();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+
+    assert!(
+        proposal
+            .readiness()
+            .unmet()
+            .contains(&UnmetPrecondition::ReadableContextNotVerified {
+                reason: ContextComparison::PinnedRevisionAbsent
+            }),
+        "{:?}",
+        proposal.readiness().unmet()
+    );
+}
+
+#[test]
+fn a_present_pinned_revision_still_reports_that_content_could_not_be_read() {
+    // Everything the comparison needs is here: a real object store that opens, holding the exact
+    // pinned commit. The comparison still cannot run, because reading a path's blob at a revision
+    // means decompressing commit and tree objects and `beacond` has no decompressor.
+    //
+    // The wrong answer this kills is the dangerous one: reporting nothing -- i.e. treating "the
+    // repository is right there and the revision is present" as though the entries had been
+    // checked. That is precisely "labelling the context verified from the manifest's
+    // self-consistency alone", which ADR 0034 forbids.
+    let fixture = admitted_mission("context-content-unreadable");
+    let (repository, real_revision) = TempRepository::with_one_commit("present");
+    let revision = fixture.rebind_repository(
+        1,
+        RepositorySourceKind::LocalPath,
+        repository.path.to_str().unwrap(),
+        &real_revision,
+    );
+
+    let mut record = fixture.record();
+    record.repository_revision = revision;
+    record.base_revision = real_revision;
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+
+    assert!(
+        proposal
+            .readiness()
+            .unmet()
+            .contains(&UnmetPrecondition::ReadableContextNotVerified {
+                reason: ContextComparison::ContentUnreadableAtRevision
+            }),
+        "{:?}",
+        proposal.readiness().unmet()
+    );
+}
+
+#[test]
+fn a_not_declared_context_reports_only_that_it_is_undeclared() {
+    // The comparison applies to a DECLARED context. An undeclared one has no entries to compare,
+    // so it must keep reporting exactly what it reported before -- the wrong answer here is a
+    // NotVerified item appearing on a Proposal that declared nothing, which would read as a failed
+    // check rather than an absent declaration.
+    let fixture = admitted_mission("context-not-declared");
+    let mut record = fixture.record();
+    record.context = Context::NotDeclared;
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+
+    assert!(
+        proposal
+            .readiness()
+            .unmet()
+            .contains(&UnmetPrecondition::ReadableContextNotDeclared)
+    );
+    assert!(
+        !proposal
+            .readiness()
+            .unmet()
+            .iter()
+            .any(|item| matches!(item, UnmetPrecondition::ReadableContextNotVerified { .. })),
+        "{:?}",
+        proposal.readiness().unmet()
     );
 }
 
