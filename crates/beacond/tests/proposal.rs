@@ -853,9 +853,14 @@ fn submission_creates_no_run_receipt_worktree_or_external_effect() {
         before_events + 1
     );
     assert_eq!(fixture.proposal_events(), 1);
-    // Ruling, model Invocation, and capability state have no tables in this slice: there is
-    // nothing to count because nothing was built, which is the honest form of this assertion.
-    for table in ["rulings", "invocations", "capabilities"] {
+    // Submitting a Proposal records no decision about it. Migration 0019 gives Rulings a table, so
+    // the honest assertion is now that the table stays EMPTY rather than that it is absent -- which
+    // is the stronger claim, because an absent table cannot be written to by accident and a present
+    // one can.
+    assert_eq!(fixture.count("SELECT count(*) FROM rulings"), 0);
+    // Model Invocation and capability state still have no tables at all. There is nothing to count
+    // because nothing was built, which is the honest form of this assertion until they exist.
+    for table in ["invocations", "capabilities"] {
         let exists: i64 = fixture
             .store
             .connect()
