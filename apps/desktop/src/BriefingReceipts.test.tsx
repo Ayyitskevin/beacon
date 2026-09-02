@@ -290,21 +290,29 @@ it("keeps the newest rows across the merge, not the first page it read", async (
   expect(collected.rows.map((row) => row.receipt.startedAtMs)).not.toContain(0);
 });
 
-it("requires exactly the projects and the page read", async () => {
+it("refuses a caller-supplied cap at compile time", async () => {
   // gpt2's round-four finding: the function took an optional cap defaulting to
   // the aggregate limit, so a valid call with 1024 over eight full pages
-  // returned 1,024 rows and held 1,536 against a documented bound of 768. The
-  // parameter had exactly one caller -- a test -- and removing it makes that
-  // call unwritable rather than merely unwise.
+  // returned 1,024 rows and held 1,536 against a documented bound of 768.
   //
-  // What this asserts is only what it can: `length` counts REQUIRED
-  // parameters, so it fails a third required one and would NOT fail an
-  // optional one. The compiler is what makes the optional shape unwritable
-  // (`Expected 2 arguments, but got 3`), and that is stated here rather than
-  // left for a reader to assume this test covers it.
-  expect(collectRecentReceipts.length).toBe(2);
-  // And the bound holds at the far end of the input range too: no Projects is
-  // no rows held, not an empty answer arrived at by holding everything.
+  // The guard has to be the COMPILER, and it has to fail when the parameter
+  // comes back. `length` counts required parameters only, so the previous
+  // assertion passed against the exact regression it was named for -- a test
+  // that survives its own plausible wrong answer, which is the defect this
+  // branch has spent four rounds removing, committed as its own guard.
+  //
+  // `@ts-expect-error` inverts that: the third argument must be an error today,
+  // and if an optional `limit` returns, the error disappears, the directive
+  // becomes unused, and `tsc -b` fails with TS2578. Runtime ignores the extra
+  // argument, so the call below is also a live assertion that no cap reached
+  // the collection.
+  // @ts-expect-error a third argument is not part of this signature: the cap is
+  // the function's, not a caller's.
+  const capped = await collectRecentReceipts([], async () => [], 1024);
+  expect(capped).toEqual({ rows: [], found: 0, peakHeld: 0 });
+
+  // And the bound holds at the far end of the input range: no Projects is no
+  // rows held, not an empty answer arrived at by holding everything.
   const empty = await collectRecentReceipts([], async () => []);
   expect(empty).toEqual({ rows: [], found: 0, peakHeld: 0 });
 });
