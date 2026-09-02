@@ -379,6 +379,40 @@ describe("Beacon desktop shell", () => {
     expect(results.violations).toEqual([]);
   });
 
+  it("keeps an initial live-data diagnostic failure visible and retryable", async () => {
+    const user = userEvent.setup();
+    mockInitialState("unlocked");
+    const base = invokeMock.getMockImplementation()!;
+    let attempts = 0;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "live_data_encryption_status") {
+        attempts += 1;
+        // The first read fails. Swallowing it left no status, no warning, no
+        // error and no Recheck -- the operator could not even retry.
+        if (attempts === 1) {
+          return Promise.reject({ code: "account_service_unavailable" });
+        }
+        return Promise.resolve(encryptionReport("disabled"));
+      }
+      return base(command, args);
+    });
+
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+
+    await screen.findByRole("heading", { name: "Live data" });
+    expect(screen.getByText(/could not be read/i)).toBeVisible();
+    const recheck = screen.getByRole("button", { name: "Recheck" });
+
+    await user.click(recheck);
+    expect(
+      await screen.findByText(/Live data is not fully protected by disk encryption\./),
+    ).toBeVisible();
+
+    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
+    expect(results.violations).toEqual([]);
+  });
+
   it("does not deny encryption the reading itself observed", async () => {
     mockInitialState("unlocked");
     const base = invokeMock.getMockImplementation()!;
@@ -1600,6 +1634,12 @@ describe("Beacon desktop shell", () => {
       if (command === "starter_organization") return Promise.resolve(proposedOrganization);
       if (command === "residents") return Promise.resolve([]);
       if (command === "discard_starter_organization") return Promise.resolve(discarded);
+      // This test is about the Starter Organization, not about a diagnostic
+      // that could not run; a rejected read would now correctly add a second
+      // status region and make the assertion below ambiguous.
+      if (command === "live_data_encryption_status") {
+        return Promise.resolve(encryptionReport("enabled"));
+      }
       return Promise.reject(new Error(`unexpected command: ${command}`));
     });
 
@@ -1608,11 +1648,13 @@ describe("Beacon desktop shell", () => {
     await user.click(screen.getByRole("button", { name: "Start without Residents" }));
 
     expect(invokeMock).not.toHaveBeenCalledWith("discard_starter_organization", expect.anything());
-    expect(screen.getByRole("status")).toHaveTextContent("closes the one-time proposal");
+    // By text, not by "the one status region on the page": the Installation
+    // inspector legitimately carries its own now.
+    expect(screen.getByText(/closes the one-time proposal/)).toBeVisible();
     fireEvent.submit(screen.getByRole("form", { name: "Starter Organization proposal" }));
     expect(invokeMock).not.toHaveBeenCalledWith("accept_starter_organization", expect.anything());
     await user.click(screen.getByRole("button", { name: "Keep proposal" }));
-    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.queryByText(/closes the one-time proposal/)).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Start without Residents" }));
     await user.click(screen.getByRole("button", { name: "Confirm start without Residents" }));
