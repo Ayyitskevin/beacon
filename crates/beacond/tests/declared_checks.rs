@@ -245,10 +245,15 @@ fn downgrade_execution_schema_to_v15(store_path: &Path) {
     connection
         .execute_batch(
             "BEGIN IMMEDIATE;
-             -- Candidates (migration 0022) reference proposals, so they come off first.
+             -- Migration 0022's records come off innermost first: the Ruling/Candidate binding
+             -- references both rulings and candidates, and candidates references proposals.
+             DROP TRIGGER ruling_candidates_no_update;
+             DROP TRIGGER ruling_candidates_no_delete;
+             DROP TABLE ruling_candidates;
              DROP TRIGGER candidates_no_update;
              DROP TRIGGER candidates_no_delete;
              DROP INDEX candidates_one_per_proposal;
+             DROP INDEX candidates_workspace_digest;
              DROP TABLE candidates;
              DROP TABLE ruling_supersessions;
              DROP TABLE rulings;

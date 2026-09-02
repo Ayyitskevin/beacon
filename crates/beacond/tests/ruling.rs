@@ -2223,10 +2223,14 @@ fn the_store_refuses_a_ruling_row_whose_digest_envelopes_are_not_this_versions()
     // reconciliation does not re-compare them against the payload: the columns cannot hold a value
     // the codec would disagree with. This is the guard that makes that true, so it is the guard
     // that gets a test -- deleting any one of these CHECKs turns this red.
+    //
+    // `beacon.ruling.v2` is a LEGAL canonicalizer since ADR 0039, so it is no longer an example
+    // here: the two grammars are kept apart by `columns_match` against the bytes' own magic rather
+    // than by this CHECK, and `a_row_claiming_v2_over_v1_bytes_fails_startup` is that guard.
     let (fixture, _, first, _) = chained("envelope-checks");
     let cases = [
         ("digest_algorithm", "sha512"),
-        ("digest_canonicalizer", "beacon.ruling.v2"),
+        ("digest_canonicalizer", "beacon.ruling.v3"),
         ("proposal_digest_algorithm", "sha512"),
         ("proposal_digest_canonicalizer", "beacon.proposal.v2"),
         ("decider_basis", "resident"),
