@@ -720,6 +720,71 @@ fn a_dangling_slave_device_link_is_broken_not_a_leaf() {
 }
 
 #[test]
+fn a_dangling_dm_uuid_link_is_broken_not_absent() {
+    let fixture = Fixture::new("dangling-dm-uuid");
+    let device = fixture.mounted_on_host_device();
+    let dm = fixture.node(&device).join("dm");
+    fs::create_dir_all(&dm).unwrap();
+    // The exact composition edge: the `dm` directory is there, the uuid inside
+    // it is a link to nothing. One helper answers for every followed link, so
+    // this must read the same as the others rather than a generic read error.
+    std::os::unix::fs::symlink(dm.join("gone"), dm.join("uuid")).unwrap();
+    fs::write(dm.join("name"), "live\n").unwrap();
+
+    let report = fixture.read();
+
+    assert_eq!(report.state, LiveDataEncryption::Unknown);
+    assert!(
+        reason(&report).contains("resolves to nothing"),
+        "{}",
+        reason(&report)
+    );
+}
+
+#[test]
+fn a_dangling_dm_name_link_is_broken_not_absent() {
+    let fixture = Fixture::new("dangling-dm-name");
+    let device = fixture.mounted_on_host_device();
+    let dm = fixture.node(&device).join("dm");
+    fs::create_dir_all(&dm).unwrap();
+    fs::write(
+        dm.join("uuid"),
+        "CRYPT-LUKS2-a1b2c3d4e5f60718293a4b5c6d7e8f90-x\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(dm.join("gone"), dm.join("name")).unwrap();
+
+    let report = fixture.read();
+
+    assert_eq!(report.state, LiveDataEncryption::Unknown);
+    assert!(
+        reason(&report).contains("resolves to nothing"),
+        "{}",
+        reason(&report)
+    );
+}
+
+#[test]
+fn a_dangling_slave_entry_link_is_broken_not_absent() {
+    let fixture = Fixture::new("dangling-slave-entry");
+    let device = fixture.mounted_on_host_device();
+    let slaves = fixture.node(&device).join("slaves");
+    fs::create_dir_all(&slaves).unwrap();
+    // The `../device` hop itself: in real sysfs each slaves entry is a symlink
+    // to the parent device's directory, and this one points at nothing.
+    std::os::unix::fs::symlink(slaves.join("gone"), slaves.join("sda2")).unwrap();
+
+    let report = fixture.read();
+
+    assert_eq!(report.state, LiveDataEncryption::Unknown);
+    assert!(
+        reason(&report).contains("resolves to nothing"),
+        "{}",
+        reason(&report)
+    );
+}
+
+#[test]
 fn review_dangling_slaves_symlink_is_broken_not_a_leaf() {
     let fixture = Fixture::new("dangling-slaves");
     let device = fixture.mounted_on_host_device();
