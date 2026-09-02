@@ -89,6 +89,31 @@ const CONTEXT_OBJECT_BYTES: usize = 8 * 1024 * 1024;
 /// walk, and hitting it is not-verified for the same reason a single oversized object is.
 const CONTEXT_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 
+/// The buffering rule, in one place: buffered mismatches are published only from a **completed**
+/// comparison.
+///
+/// `interrupted` is `Some(reason)` when the walk stopped before every declared entry finished, and
+/// the buffer is discarded with it -- the entry that was never reached might have explained the one
+/// that was, so an accusation from an unfinished walk says more than Beacon knows.
+///
+/// It is a function rather than control flow spread through the loop because the rule has to hold
+/// for EVERY way the walk can stop, and a loop proves it only for the ways a fixture can reach. A
+/// non-author review asked for the `mismatch-first / timeout-later` sequence by name and found the
+/// committed control drove `mismatch-first / symlink-later` instead -- the same rule through one
+/// arm. Here every arm is one argument.
+fn resolve_context_outcome(
+    mismatches: Vec<ContextMismatch>,
+    interrupted: Option<ContextComparison>,
+) -> ContextOutcome {
+    if let Some(reason) = interrupted {
+        return ContextOutcome::NotVerified(reason);
+    }
+    if mismatches.is_empty() {
+        return ContextOutcome::Agreed;
+    }
+    ContextOutcome::Mismatched(mismatches)
+}
+
 /// What the comparison established about a declared readable context.
 ///
 /// Three outcomes, and the middle one is the whole reason this slice exists. `Agreed` and
@@ -1810,8 +1835,9 @@ fn compare_readable_context_within(
 
     for entry in entries {
         if deadline() {
-            return Ok(ContextOutcome::NotVerified(
-                ContextComparison::InspectionTimedOut,
+            return Ok(resolve_context_outcome(
+                mismatches,
+                Some(ContextComparison::InspectionTimedOut),
             ));
         }
         // The walk charges every object it reads against `budget` and reports its own exhaustion,
@@ -1825,7 +1851,12 @@ fn compare_readable_context_within(
             deadline,
         ) {
             Ok(resolved) => resolved,
-            Err(error) => return Ok(ContextOutcome::NotVerified(inspection_error(error))),
+            Err(error) => {
+                return Ok(resolve_context_outcome(
+                    mismatches,
+                    Some(inspection_error(error)),
+                ));
+            }
         };
         match resolved {
             PathResolution::Blob { body } => {
@@ -1844,56 +1875,57 @@ fn compare_readable_context_within(
                 reason: ContextMismatchReason::PathAbsent,
             }),
             PathResolution::NotARegularFile => {
-                return Ok(ContextOutcome::NotVerified(
-                    ContextComparison::EntryIsNotARegularFile,
+                return Ok(resolve_context_outcome(
+                    mismatches,
+                    Some(ContextComparison::EntryIsNotARegularFile),
                 ));
             }
             PathResolution::NotLoose { object_id } => {
                 // gpt1's S1: "packed" is claimed only after the authenticated pack lookup says the
                 // object is present. An object an authenticated commit or tree names and that is in
                 // no storage at all is a broken store, and saying "packed" would excuse it.
-                return Ok(ContextOutcome::NotVerified(
-                    match store.contains(&object_id, deadline) {
-                        Ok(true) => ContextComparison::PackedObjectUnreadable,
-                        Ok(false) => ContextComparison::InspectionFailed,
-                        Err(error) => inspection_error(error),
-                    },
-                ));
+                let reason = Some(match store.contains(&object_id, deadline) {
+                    Ok(true) => ContextComparison::PackedObjectUnreadable,
+                    Ok(false) => ContextComparison::InspectionFailed,
+                    Err(error) => inspection_error(error),
+                });
+                return Ok(resolve_context_outcome(mismatches, reason));
             }
             PathResolution::TooLarge => {
-                return Ok(ContextOutcome::NotVerified(
-                    ContextComparison::ObjectTooLargeToInspect,
+                return Ok(resolve_context_outcome(
+                    mismatches,
+                    Some(ContextComparison::ObjectTooLargeToInspect),
                 ));
             }
             PathResolution::TooDeep => {
-                return Ok(ContextOutcome::NotVerified(
-                    ContextComparison::PathTooDeepToInspect,
+                return Ok(resolve_context_outcome(
+                    mismatches,
+                    Some(ContextComparison::PathTooDeepToInspect),
                 ));
             }
             PathResolution::BudgetExhausted => {
-                return Ok(ContextOutcome::NotVerified(
-                    ContextComparison::ContextBudgetExhausted,
+                return Ok(resolve_context_outcome(
+                    mismatches,
+                    Some(ContextComparison::ContextBudgetExhausted),
                 ));
             }
             PathResolution::Malformed => {
-                return Ok(ContextOutcome::NotVerified(
-                    ContextComparison::InspectionFailed,
+                return Ok(resolve_context_outcome(
+                    mismatches,
+                    Some(ContextComparison::InspectionFailed),
                 ));
             }
         }
     }
 
     if deadline() {
-        return Ok(ContextOutcome::NotVerified(
-            ContextComparison::InspectionTimedOut,
+        return Ok(resolve_context_outcome(
+            mismatches,
+            Some(ContextComparison::InspectionTimedOut),
         ));
     }
     // Every entry completed. Only now may a buffered mismatch be published.
-    Ok(if mismatches.is_empty() {
-        ContextOutcome::Agreed
-    } else {
-        ContextOutcome::Mismatched(mismatches)
-    })
+    Ok(resolve_context_outcome(mismatches, None))
 }
 
 /// How an object-store failure is reported. The lower layer keeps these apart; so does this one.
@@ -2446,6 +2478,63 @@ mod tests {
             ContextComparison::InspectionTimedOut
         );
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_buffered_mismatch_is_discarded_by_every_way_the_walk_can_stop() {
+        // gpt1's Spec P2: the design requires `mismatch-first / timeout-later` by name, and the
+        // committed control drove `mismatch-first / symlink-later` -- the same rule through one
+        // arm. The general timeout tests expire before any comparison work, so the named sequence
+        // was never driven at all.
+        //
+        // With the rule in one function, every arm is one argument, so the sequence gpt1 asked for
+        // and the six others are all deterministic and need no repository.
+        let buffered = || {
+            vec![ContextMismatch {
+                path: "src/lib.rs".to_owned(),
+                reason: ContextMismatchReason::DigestDiffers,
+            }]
+        };
+
+        // The named sequence, first.
+        assert_eq!(
+            resolve_context_outcome(buffered(), Some(ContextComparison::InspectionTimedOut)),
+            ContextOutcome::NotVerified(ContextComparison::InspectionTimedOut),
+            "a mismatch buffered before a later timeout was published"
+        );
+
+        // And every other way the walk can stop after buffering one.
+        for reason in [
+            ContextComparison::EntryIsNotARegularFile,
+            ContextComparison::PackedObjectUnreadable,
+            ContextComparison::ObjectTooLargeToInspect,
+            ContextComparison::PathTooDeepToInspect,
+            ContextComparison::ContextBudgetExhausted,
+            ContextComparison::InspectionFailed,
+        ] {
+            assert_eq!(
+                resolve_context_outcome(buffered(), Some(reason)),
+                ContextOutcome::NotVerified(reason),
+                "a buffered mismatch survived {reason:?}"
+            );
+        }
+
+        // A completed walk publishes what it buffered, and an empty buffer is agreement -- without
+        // these two the rule above is satisfied by a function that always returns not-verified.
+        assert_eq!(
+            resolve_context_outcome(buffered(), None),
+            ContextOutcome::Mismatched(buffered())
+        );
+        assert_eq!(
+            resolve_context_outcome(Vec::new(), None),
+            ContextOutcome::Agreed
+        );
+
+        // An interrupted walk that buffered nothing is still not-verified, never agreement.
+        assert_eq!(
+            resolve_context_outcome(Vec::new(), Some(ContextComparison::InspectionTimedOut)),
+            ContextOutcome::NotVerified(ContextComparison::InspectionTimedOut)
+        );
     }
 
     #[test]
