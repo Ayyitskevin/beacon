@@ -1010,6 +1010,28 @@ fn review_dangling_store_symlink_is_broken_not_absent() {
 }
 
 #[test]
+fn deep_broken_ancestry_exhaustion_keeps_its_cause_through_v1() {
+    let fixture = Fixture::new("deep-broken-ancestry");
+    fixture.mounted_on_host_device();
+
+    let dangling = fixture.root.join("dangling-sys");
+    std::os::unix::fs::symlink("missing-sys", &dangling).unwrap();
+    let sys = (0..40).fold(dangling, |path, index| path.join(format!("level-{index}")));
+    let report = live_data_encryption_for_test(
+        &fixture.store,
+        &SystemView::new(fixture.mountinfo.clone(), sys),
+        OBSERVED_AT_MS,
+    );
+
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
+    assert_eq!(
+        code(&report),
+        ReasonCode::StackOverBudget,
+        "spending the ancestor budget is not evidence that the missing path is absent"
+    );
+}
+
+#[test]
 fn review_r3_dangling_loop_symlink_is_broken_not_absent() {
     let fixture = Fixture::new("dangling-loop");
     let device = fixture.mounted_on_host_device();
