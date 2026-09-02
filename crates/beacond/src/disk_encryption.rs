@@ -855,12 +855,13 @@ impl Walker<'_> {
                 ),
             };
         }
-        self.nodes += 1;
-        if self.nodes > MAX_STACK_NODES || depth > MAX_STACK_DEPTH {
+        // Checked before the node is counted, not after it is explored.
+        if self.nodes >= MAX_STACK_NODES || depth > MAX_STACK_DEPTH {
             return Branch::Undetermined {
-                reason: "the volume's device stack exceeded Beacon's read budget".to_owned(),
+                reason: over_stack_budget(),
             };
         }
+        self.nodes += 1;
         self.on_path.insert(key);
         let outcome = self.explore_node(device, depth, crypt_above, evidence);
         self.on_path.remove(&key);
@@ -938,6 +939,15 @@ impl Walker<'_> {
                 }
             };
             for child in children {
+                // The budget bounds the work, so it is spent before the work:
+                // one more child means one more device to read and explore, and
+                // asking after the fan-out is enumerated lets a single wide node
+                // perform arbitrarily many reads before the ceiling is reported.
+                if self.nodes + parents.len() >= MAX_STACK_NODES {
+                    return Branch::Undetermined {
+                        reason: over_stack_budget(),
+                    };
+                }
                 let child = match child {
                     Ok(child) => child,
                     Err(error) => {
@@ -1144,6 +1154,10 @@ fn presence(path: &Path) -> Result<Presence, String> {
         }
         Err(error) => Err(unreadable_reason(path, error.kind())),
     }
+}
+
+fn over_stack_budget() -> String {
+    "the volume's device stack exceeded Beacon's read budget".to_owned()
 }
 
 fn dangling(path: &Path) -> String {
