@@ -85,27 +85,41 @@ npm run tauri build                      # produces the AppImage and its AppDir
 ls -l ../../target/release/bundle/appimage/Beacon.AppDir/usr/bin/
 ```
 
-Then, with the produced AppImage, on a host with no development packages
-(`docs/evidence/2026-09-02-appimage-clean-host/run-any.sh` and `probe3.sh` drive this):
+Then, with the produced or downloaded AppImage, the repository-owned harness drives first-run setup
+on the three clean hosts:
 
 ```sh
-docker run --rm ubuntu:24.04   # + xvfb x11-utils imagemagick libfribidi0 libharfbuzz0b libegl1 libgles2
-xvfb-run -a --server-args="-screen 0 1280x800x24" ./Beacon_0.1.0_amd64.AppImage --appimage-extract-and-run
+scripts/clean-host-first-run ./Beacon_0.1.0_amd64.AppImage ./first-run-evidence
 ```
 
-Observed: alive at 24 s, an X window named `Beacon` at 1280x800, a screenshot with mean luminance
-0.946 across 1416 colours showing the operator-account setup screen, a `beacond` child process
-serving the socket, and a 364,544-byte store at
-`$HOME/.local/share/dev.beacon.phase0/beacon.sqlite3`. The same holds for the direct FUSE path with
-`libfuse2t64` installed.
+The outer script runs `ubuntu:22.04`, `debian:12`, and `ubuntu:24.04` with `docker run --rm`, a
+tmpfs home, and no development packages. The inner driver uses Xvfb and `xdotool` to enter the
+password, advance through the Recovery Key confirmation, finish Account and Workspace creation,
+and accept the default starter organization. It then requires authenticated Briefing to render.
+The UI remains the writer; read-only daemon-socket queries verify the setup-required, unlocked,
+starter-organization, and Residents states without substituting daemon calls for user actions.
+
+Every asserted state has a screenshot or socket-response artifact. Recovery Key pixels never
+leave tmpfs: the corresponding image band is covered before the screenshot is written, and requests
+(including the local capability token) are never written. Per-step `result.json` and whole-matrix
+`matrix.json` keep `absent`, `broken`, and `not_evaluated` separate and the harness exits nonzero
+unless every selected observation succeeds.
+
+This is part of the package job, with its evidence uploaded separately from the AppImage. The final
+local matrix took 39 seconds on Ubuntu 22.04, 37 on Debian 12, and 61 on Ubuntu 24.04. The
+immediately preceding main package job took 11 minutes 21 seconds without the harness, so the
+measured addition fits its 30-minute budget with substantial room rather than converting a timeout
+into a product verdict.
 
 ## Evidence limits
 
-- Observed on `ubuntu:24.04`, `ubuntu:22.04`, and `debian:12` **containers under Xvfb**. Not on a
+- Observed through complete first-run setup on `ubuntu:24.04`, `ubuntu:22.04`, and `debian:12`
+  **containers under Xvfb**. Not on a
   real desktop session, not on Wayland, not on a non-Debian-family distribution, and not with a GPU.
-- Nothing was typed. The application was observed reaching its first screen with its supervisor
-  running; no account was created and no Workspace was opened. "It launches" is not "it works".
+- The real UI was driven, but only along the default password and starter-organization path. Native
+  passkeys, Recovery Key account recovery, edited or discarded starter rosters, and relaunch are
+  outside this harness.
 - The AppImage's desktop integration — file-manager launch, `.desktop` registration, the icon — was
   not exercised. Only shell invocation was.
-- The `ubuntu-22.04` runner label was not verified to still exist on GitHub; that is checkable only
-  by running the workflow.
+- CI's `ubuntu-22.04` package runner and its AppImage artifact were both observed on main run
+  `33658544612`; the harness was run against those downloaded, checksum-verified bytes.
