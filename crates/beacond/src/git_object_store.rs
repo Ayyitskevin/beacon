@@ -1250,6 +1250,68 @@ mod tests {
     }
 
     #[test]
+    fn every_object_type_is_read_as_the_type_it_is() {
+        // Two mutants survived the first version of this suite: parsing `tree` as `Blob`, and
+        // parsing `tag` as `Commit`. Nothing read anything but a commit, so the closed vocabulary
+        // was a claim rather than a guarded property -- and the first of those mutants is directly
+        // dangerous to a walk, which decides what to do next from the kind it was handed.
+        //
+        // Positive controls for all four, on real objects git wrote.
+        let (repository, revision) = walk_repository("kinds");
+        git(&repository.path, &["tag", "-a", "v1", "-m", "annotated"]);
+        let store = ObjectStore::open(&repository.path).unwrap();
+
+        let kind_of = |id: &str| match store
+            .read_loose_object(id, 1_048_576, &mut never_elapsed())
+            .unwrap()
+        {
+            LooseRead::Read { kind, .. } => kind,
+            other => panic!("{id} was not readable: {other:?}"),
+        };
+
+        assert_eq!(kind_of(&revision), ObjectKind::Commit);
+
+        let LooseRead::Read { body, .. } = store
+            .read_loose_object(&revision, 1_048_576, &mut never_elapsed())
+            .unwrap()
+        else {
+            panic!("the commit is loose");
+        };
+        let tree_id = commit_tree_id(&body).unwrap();
+        assert_eq!(kind_of(&tree_id), ObjectKind::Tree);
+
+        let LooseRead::Read { body: tree, .. } = store
+            .read_loose_object(&tree_id, 1_048_576, &mut never_elapsed())
+            .unwrap()
+        else {
+            panic!("the root tree is loose");
+        };
+        let blob_id = HEXLOWER.encode(
+            &parse_tree(&tree)
+                .unwrap()
+                .iter()
+                .find(|entry| entry.name == b"run.sh")
+                .expect("run.sh is in the root tree")
+                .id,
+        );
+        assert_eq!(kind_of(&blob_id), ObjectKind::Blob);
+
+        let tag_id = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "v1"])
+                .current_dir(&repository.path)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        assert_ne!(tag_id, revision, "an annotated tag is its own object");
+        assert_eq!(kind_of(&tag_id), ObjectKind::Tag);
+    }
+
+    #[test]
     fn an_object_that_is_not_loose_is_not_reported_as_absent_or_broken() {
         // The wrong answer this kills is the one gpt1's S1 names: treating a missing loose file as
         // proof the object is packed, or as proof it is gone. This read establishes neither. The
