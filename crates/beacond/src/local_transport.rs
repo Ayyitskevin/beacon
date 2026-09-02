@@ -545,9 +545,6 @@ enum LocalCommand {
     PreflightProjectChecks {
         project_id: uuid::Uuid,
     },
-    PreflightReceipts {
-        project_id: uuid::Uuid,
-    },
     RecentReceipts {
         window: u32,
     },
@@ -654,9 +651,6 @@ enum LocalResult {
     },
     PreflightReceipt {
         receipt: PreflightReceipt,
-    },
-    PreflightReceipts {
-        receipts: Vec<PreflightReceipt>,
     },
     RecentReceipts {
         page: crate::RecentReceiptPage,
@@ -1039,9 +1033,6 @@ impl LocalSupervisorServer {
             }
             LocalCommand::PreflightProjectChecks { project_id } => LocalResult::PreflightReceipt {
                 receipt: self.check_preflights.preflight(project_id)?,
-            },
-            LocalCommand::PreflightReceipts { project_id } => LocalResult::PreflightReceipts {
-                receipts: self.check_preflights.receipts(project_id)?,
             },
             LocalCommand::RecentReceipts { window } => LocalResult::RecentReceipts {
                 page: self.recent_receipts.recent(window)?,
@@ -1444,13 +1435,6 @@ impl LocalSupervisorClient {
         expect_preflight_receipt(self.send(LocalCommand::PreflightProjectChecks { project_id })?)
     }
 
-    pub fn preflight_receipts(
-        &self,
-        project_id: uuid::Uuid,
-    ) -> Result<Vec<PreflightReceipt>, LocalTransportError> {
-        expect_preflight_receipts(self.send(LocalCommand::PreflightReceipts { project_id })?)
-    }
-
     pub fn recent_receipts(
         &self,
         window: u32,
@@ -1736,15 +1720,6 @@ fn expect_project_repository(
 fn expect_preflight_receipt(result: LocalResult) -> Result<PreflightReceipt, LocalTransportError> {
     match result {
         LocalResult::PreflightReceipt { receipt } => Ok(receipt),
-        _ => Err(LocalTransportError::Protocol),
-    }
-}
-
-fn expect_preflight_receipts(
-    result: LocalResult,
-) -> Result<Vec<PreflightReceipt>, LocalTransportError> {
-    match result {
-        LocalResult::PreflightReceipts { receipts } => Ok(receipts),
         _ => Err(LocalTransportError::Protocol),
     }
 }

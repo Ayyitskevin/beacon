@@ -14,10 +14,10 @@ use std::sync::Arc;
 
 use beacond::{
     AutonomyProfile, CheckPreflightError, CheckPreflightService, DeclaredCheck,
-    DeclaredCheckService, ExecutionBounds, OperatorAccountService, OperatorSessionPhase,
-    PreflightOutcome, PreflightReceipt, ProjectCharterDraft, ProjectDraft,
-    ProjectRepositoryService, ProjectService, Recorded, RepositoryDraft, RepositorySourceKind,
-    SecretString, StartupConfig, Supervisor, SupervisorError, detect_sandbox,
+    OperatorAccountService, OperatorSessionPhase, PreflightOutcome, PreflightReceipt,
+    ProjectCharterDraft, ProjectDraft, ProjectRepositoryService, ProjectService, Recorded,
+    RepositoryDraft, RepositorySourceKind, SecretString, StartupConfig, Supervisor,
+    SupervisorError, detect_sandbox,
 };
 use rusqlite::Connection;
 use uuid::Uuid;
@@ -127,41 +127,6 @@ fn enrolled_services(
     )
 }
 
-fn enrolled_mixed_services(
-    label: &str,
-) -> (
-    TestStore,
-    ProjectService,
-    ProjectRepositoryService,
-    CheckPreflightService,
-    DeclaredCheckService,
-) {
-    let store = TestStore::new(label);
-    let report = Supervisor::bootstrap(StartupConfig {
-        store_path: store.path.clone(),
-        initial_workspace_name: "Personal".to_owned(),
-    })
-    .unwrap();
-    let accounts = Arc::new(OperatorAccountService::open(&store.path).unwrap());
-    accounts
-        .begin_password_setup(
-            SecretString::new("a long local passphrase".to_owned()),
-            SecretString::new("a long local passphrase".to_owned()),
-        )
-        .unwrap();
-    assert_eq!(
-        accounts.complete_operator_setup(true).unwrap().phase,
-        OperatorSessionPhase::Unlocked
-    );
-    (
-        store,
-        ProjectService::new(Arc::clone(&accounts), report.workspace.id),
-        ProjectRepositoryService::new(Arc::clone(&accounts), report.workspace.id),
-        CheckPreflightService::new(Arc::clone(&accounts), report.workspace.id),
-        DeclaredCheckService::new(accounts, report.workspace.id),
-    )
-}
-
 fn project_draft() -> ProjectDraft {
     ProjectDraft {
         name: "Beacon Alpha".to_owned(),
@@ -234,48 +199,6 @@ fn preflight_events(store: &TestStore) -> Vec<String> {
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap()
-}
-
-fn insert_terminal_preflight_receipt(
-    store: &TestStore,
-    project_id: Uuid,
-    run_id: Uuid,
-    repository_revision: u32,
-    charter_revision: u32,
-    started_at_ms: u64,
-    receipt_json: &str,
-) {
-    let connection = Connection::open(&store.path).unwrap();
-    connection
-        .execute(
-            "INSERT INTO runs (
-                 workspace_id, id, project_id, kind, repository_revision, charter_revision,
-                 state, lease_expires_at_ms, started_at_ms, ended_at_ms
-             ) VALUES (
-                 (SELECT id FROM workspaces LIMIT 1), ?1, ?2, 'check_preflight', ?3, ?4,
-                 'refused', ?5, ?5, ?5
-             )",
-            rusqlite::params![
-                run_id.to_string(),
-                project_id.to_string(),
-                i64::from(repository_revision),
-                i64::from(charter_revision),
-                i64::try_from(started_at_ms).unwrap(),
-            ],
-        )
-        .unwrap();
-    connection
-        .execute(
-            "INSERT INTO receipts (
-                 workspace_id, run_id, version, outcome, receipt_json, recorded_at_ms
-             ) VALUES ((SELECT id FROM workspaces LIMIT 1), ?1, 1, 'source_kind_unsupported', ?2, ?3)",
-            rusqlite::params![
-                run_id.to_string(),
-                receipt_json,
-                i64::try_from(started_at_ms).unwrap(),
-            ],
-        )
-        .unwrap();
 }
 
 const REACHABILITY_GAP: &str =
@@ -771,162 +694,6 @@ fn a_receipt_round_trips_and_rejects_an_unknown_field() {
         serde_json::from_value::<PreflightReceipt>(value).is_err(),
         "a Receipt without notVerified is not evidence"
     );
-}
-
-#[test]
-fn receipts_are_listed_newest_first() {
-    let (store, projects, repositories, preflight) = enrolled_services("listing");
-    let project = projects.create(project_draft()).unwrap();
-    repositories
-        .bind(
-            project.id,
-            project.charter.revision,
-            None,
-            draft(
-                RepositorySourceKind::GitUrl,
-                "https://example.invalid/listing.git",
-                &"a".repeat(40),
-            ),
-        )
-        .unwrap();
-    let first = preflight.preflight(project.id).unwrap();
-    assert_eq!(first.outcome, PreflightOutcome::SourceKindUnsupported);
-
-    let lower_run_id = Uuid::from_u128(1);
-    let higher_run_id = Uuid::from_u128(2);
-    for run_id in [lower_run_id, higher_run_id] {
-        let mut receipt = first.clone();
-        receipt.run_id = run_id;
-        receipt.started_at_ms = 1;
-        receipt.ended_at_ms = 1;
-        insert_terminal_preflight_receipt(
-            &store,
-            project.id,
-            run_id,
-            receipt.repository_revision,
-            receipt.charter_revision,
-            receipt.started_at_ms,
-            &serde_json::to_string(&receipt).unwrap(),
-        );
-    }
-
-    let listed = preflight.receipts(project.id).unwrap();
-    assert_eq!(listed.len(), 3);
-    assert_eq!(
-        listed
-            .iter()
-            .map(|receipt| receipt.run_id)
-            .collect::<Vec<_>>(),
-        vec![first.run_id, higher_run_id, lower_run_id]
-    );
-    assert!(listed[0].started_at_ms > listed[1].started_at_ms);
-    assert_eq!(listed[1].started_at_ms, listed[2].started_at_ms);
-    assert!(listed[1].run_id.to_string() > listed[2].run_id.to_string());
-}
-
-#[test]
-fn preflight_history_excludes_declared_check_execution_receipts() {
-    let (repository, revision) = fixture_repository("mixed-history");
-    let source = repository.path.to_string_lossy().into_owned();
-    let (store, projects, repositories, preflight, checks) =
-        enrolled_mixed_services("mixed-history");
-    let project = projects.create(project_draft()).unwrap();
-    repositories
-        .bind(
-            project.id,
-            project.charter.revision,
-            None,
-            RepositoryDraft {
-                source_kind: RepositorySourceKind::LocalPath,
-                source,
-                base_revision: revision,
-                declared_checks: vec![DeclaredCheck {
-                    name: "true".to_owned(),
-                    argv: vec!["/bin/true".to_owned()],
-                    working_directory: ".".to_owned(),
-                }],
-            },
-        )
-        .unwrap();
-
-    let standalone_preflight = preflight.preflight(project.id).unwrap();
-    let execution = checks
-        .execute(
-            project.id,
-            ExecutionBounds {
-                wall_clock_ms: 10_000,
-                cpu_seconds: 5,
-                address_space_bytes: 1 << 30,
-                file_size_bytes: 1 << 20,
-                output_bytes: 8192,
-            },
-        )
-        .unwrap();
-
-    let connection = Connection::open(&store.path).unwrap();
-    let execution_kind: String = connection
-        .query_row(
-            "SELECT runs.kind
-             FROM receipts
-             JOIN runs ON runs.workspace_id = receipts.workspace_id AND runs.id = receipts.run_id
-             WHERE receipts.run_id = ?1",
-            [execution.run_id.to_string()],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(execution_kind, "declared_checks");
-    drop(connection);
-
-    let listed = preflight.receipts(project.id).unwrap();
-    assert_eq!(listed.len(), 2);
-    assert!(
-        listed
-            .iter()
-            .any(|receipt| receipt.run_id == standalone_preflight.run_id)
-    );
-    assert!(
-        listed
-            .iter()
-            .any(|receipt| receipt.run_id == execution.admitted_by.run_id)
-    );
-    assert!(
-        listed
-            .iter()
-            .all(|receipt| receipt.run_id != execution.run_id)
-    );
-}
-
-#[test]
-fn malformed_preflight_receipt_in_history_fails_closed() {
-    let (store, projects, repositories, preflight) = enrolled_services("malformed-history");
-    let project = projects.create(project_draft()).unwrap();
-    let repository = repositories
-        .bind(
-            project.id,
-            project.charter.revision,
-            None,
-            draft(
-                RepositorySourceKind::GitUrl,
-                "https://example.invalid/malformed.git",
-                &"b".repeat(40),
-            ),
-        )
-        .unwrap();
-    let malformed_run_id = Uuid::new_v4();
-    insert_terminal_preflight_receipt(
-        &store,
-        project.id,
-        malformed_run_id,
-        repository.revision,
-        repository.charter_revision,
-        1,
-        r#"{"version":1,"summary":"not_admissible"}"#,
-    );
-
-    assert!(matches!(
-        preflight.receipts(project.id),
-        Err(CheckPreflightError::Json(_))
-    ));
 }
 
 #[test]
