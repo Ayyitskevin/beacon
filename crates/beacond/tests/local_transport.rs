@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use beacond::{
     AccessOrigin, AutonomyProfile, BeaconCapability, BudgetBoundary, DeclaredCheck,
-    DiscoveryStatus, LocalErrorCode, LocalModelActivationState, LocalModelEndpoint,
+    DiscoveryStatus, LiveDataEncryption, LocalErrorCode, LocalModelActivationState, LocalModelEndpoint,
     LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer, LocalTransportError,
     MAX_RECENT_RUN_WINDOW, MissionAdmissionActor, MissionDraft, MissionLifecycle,
     MissionMemberDraft, ModelActivation, OperatorSessionPhase, PlatformMonitorState, PolicyAuthor,
@@ -220,6 +220,69 @@ fn authenticated_client_reviews_activates_and_deactivates_an_exact_local_model()
     assert_eq!(client.local_model_activations().unwrap(), [inactive]);
 
     running.store(false, Ordering::Release);
+    thread.join().unwrap().unwrap();
+}
+
+#[test]
+fn authenticated_client_reads_live_data_encryption_over_both_real_transports() {
+    let runtime = TestRuntime::new("disk-encryption");
+    let server = runtime.server();
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+
+    // A diagnostic about where live data sits is Workspace material: it is
+    // refused before enrolment and again after the session closes.
+    assert!(matches!(
+        client.live_data_encryption_status(),
+        Err(LocalTransportError::Remote {
+            code: LocalErrorCode::NotAuthenticated,
+            ..
+        })
+    ));
+    let recovery = client
+        .begin_password_setup(
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+    assert!(!recovery.expose().is_empty());
+    client.complete_operator_setup(true).unwrap();
+
+    let report = client.live_data_encryption_status().unwrap();
+    // The host running this test is whatever it is, so the assertion is on the
+    // contract rather than on one state: the answer is one of three, it names
+    // the volume it is about, and it carries the evidence it read.
+    assert!(matches!(
+        report.state,
+        LiveDataEncryption::Enabled | LiveDataEncryption::Disabled | LiveDataEncryption::Unknown
+    ));
+    assert!(!report.evidence.is_empty());
+    assert!(report.observed_at_ms > 0);
+    if report.state == LiveDataEncryption::Enabled {
+        assert!(matches!(
+            report.mechanism,
+            beacond::Recorded::Present { .. }
+        ));
+    } else {
+        assert!(matches!(report.mechanism, beacond::Recorded::Absent { .. }));
+    }
+    // Nothing about this reading may be presented as Beacon's own encryption.
+    let rendered = serde_json::to_string(&report).unwrap();
+    assert!(!rendered.contains("Beacon-encrypted"));
+
+    client.lock().unwrap();
+    assert!(matches!(
+        client.live_data_encryption_status(),
+        Err(LocalTransportError::Remote {
+            code: LocalErrorCode::NotAuthenticated,
+            ..
+        })
+    ));
+
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
     thread.join().unwrap().unwrap();
 }
 
