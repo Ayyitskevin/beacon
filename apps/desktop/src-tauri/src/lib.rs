@@ -1798,6 +1798,131 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Registration is not permission.
+    ///
+    /// A command reaches `generate_handler!` and compiles; the capability is a
+    /// separate file, and `build.rs` generates its permission from a third
+    /// list. Nothing ties the three together, so a command can ship registered
+    /// and ungranted -- reachable from the interface, refused by the ACL, and
+    /// reported to the operator as a generic account error. The list below is
+    /// derived from the source rather than written by hand, so a future
+    /// handler cannot ship that way without this test failing.
+    ///
+    /// The needles are assembled with `concat!` so this parser does not match
+    /// its own source text.
+    fn registered_commands(source: &str) -> Vec<String> {
+        let handler = concat!("generate_handler", "![");
+        let body = source
+            .split_once(handler)
+            .expect("lib.rs registers commands")
+            .1
+            .split_once(']')
+            .expect("the registration list closes")
+            .0;
+        body.split(',')
+            .map(|entry| entry.trim().to_owned())
+            .filter(|entry| !entry.is_empty())
+            .collect()
+    }
+
+    fn attributed_commands(source: &str) -> Vec<String> {
+        let attribute = concat!("#[tauri::", "command]");
+        source
+            .split(attribute)
+            .skip(1)
+            .filter_map(|rest| {
+                let after = rest.split_once("fn ")?.1;
+                Some(after.split_once('(')?.0.trim().to_owned())
+            })
+            .collect()
+    }
+
+    fn declared_commands(build_source: &str) -> Vec<String> {
+        let body = build_source
+            .split_once("COMMANDS: &[&str] = &[")
+            .expect("build.rs declares its command list")
+            .1
+            .split_once("];")
+            .expect("the declaration closes")
+            .0;
+        body.split(',')
+            .filter_map(|entry| {
+                let entry = entry.trim();
+                entry
+                    .strip_prefix('"')
+                    .and_then(|value| value.strip_suffix('"'))
+                    .map(str::to_owned)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn no_registered_command_can_ship_without_its_permission() {
+        let source = include_str!("lib.rs");
+        let registered = registered_commands(source);
+        let attributed = attributed_commands(source);
+        let declared = declared_commands(include_str!("../build.rs"));
+        let capability: Value =
+            serde_json::from_str(include_str!("../capabilities/main-window.json")).unwrap();
+        let granted = capability["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|permission| permission.as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+
+        assert!(
+            registered.len() > 40,
+            "the registration list did not parse: {registered:?}"
+        );
+
+        // Every command the interface can reach must be granted, and must have
+        // a permission for the capability to name.
+        let ungranted = registered
+            .iter()
+            .filter(|command| !granted.contains(&format!("allow-{}", command.replace('_', "-"))))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ungranted,
+            Vec::<String>::new(),
+            "registered but not granted by capabilities/main-window.json"
+        );
+        let undeclared = registered
+            .iter()
+            .filter(|command| !declared.contains(command))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            undeclared,
+            Vec::<String>::new(),
+            "registered but absent from build.rs COMMANDS, so no permission exists"
+        );
+
+        // And nothing is granted that the interface cannot reach, so a stale
+        // grant cannot outlive the command it was written for.
+        let unregistered = declared
+            .iter()
+            .filter(|command| !registered.contains(command))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            unregistered,
+            Vec::<String>::new(),
+            "declared in build.rs COMMANDS but not registered"
+        );
+        let unattributed = registered
+            .iter()
+            .filter(|command| !attributed.contains(command))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            unattributed,
+            Vec::<String>::new(),
+            "registered but not defined as a Tauri command in this file"
+        );
+    }
+
     #[test]
     fn main_window_capability_grants_every_registered_account_command() {
         let capability: Value =
@@ -1847,6 +1972,8 @@ mod tests {
                 "allow-current-project-repository",
                 "allow-project-repository-history",
                 "allow-bind-project-repository",
+                "allow-preflight-project-checks",
+                "allow-preflight-receipts",
                 "allow-teams",
                 "allow-team",
                 "allow-form-team",
