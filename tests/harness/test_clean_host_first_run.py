@@ -19,8 +19,61 @@ REPO = Path(__file__).resolve().parents[2]
 
 FAKE_DOCKER = """#!/bin/sh
 case " $* " in
-    *" debian:12 "*) exit "${DEBIAN_EXIT:-0}" ;;
+    *" debian:12 "*) [ "${DEBIAN_EXIT:-0}" -eq 0 ] || exit "$DEBIAN_EXIT" ;;
 esac
+
+evidence=
+for argument in "$@"; do
+    case "$argument" in
+        *:/evidence) evidence=${argument%:/evidence} ;;
+    esac
+done
+[ -n "$evidence" ] || exit 97
+
+# This is the reviewer's dead-inner-driver mutant: Docker itself succeeds, but
+# the mounted driver exits before it materializes any evidence.
+[ "${DEAD_INNER_DRIVER:-0}" -eq 0 ] || exit 0
+
+for artifact in \
+    01-operator-setup.png 01-session-before.json \
+    02-recovery-confirmation-redacted.png \
+    03-starter-organization.png 03-session-unlocked.json \
+    04-starter-organization.json \
+    05-authenticated-briefing.png 05-residents.json
+do
+    : > "$evidence/$artifact"
+done
+cat > "$evidence/result.json" <<'JSON'
+{
+  "steps": {
+    "operator_setup_form": {
+      "status": "observed",
+      "detail": "setup form",
+      "artifacts": ["01-operator-setup.png", "01-session-before.json"]
+    },
+    "recovery_key_confirmation": {
+      "status": "observed",
+      "detail": "recovery confirmation",
+      "artifacts": ["02-recovery-confirmation-redacted.png"]
+    },
+    "account_and_workspace": {
+      "status": "observed",
+      "detail": "workspace unlocked",
+      "artifacts": ["03-starter-organization.png", "03-session-unlocked.json"]
+    },
+    "starter_organization": {
+      "status": "observed",
+      "detail": "organization accepted",
+      "artifacts": ["04-starter-organization.json", "05-authenticated-briefing.png"]
+    },
+    "authenticated_briefing": {
+      "status": "observed",
+      "detail": "briefing rendered",
+      "artifacts": ["05-authenticated-briefing.png", "05-residents.json"]
+    }
+  }
+}
+JSON
 exit 0
 """
 
@@ -108,6 +161,28 @@ def test_a_single_host_run_leaves_other_hosts_not_evaluated(tmp_path: Path) -> N
         "debian-12": "observed",
         "ubuntu-24.04": "not_evaluated",
     }
+
+
+def test_a_dead_inner_driver_cannot_create_an_observed_host(tmp_path: Path) -> None:
+    root, environment = _isolated_harness(tmp_path)
+    environment["DEAD_INNER_DRIVER"] = "1"
+    output = tmp_path / "evidence"
+
+    result = _run(
+        root,
+        environment,
+        tmp_path / "Beacon.AppImage",
+        output,
+        "ubuntu-22.04",
+    )
+
+    assert result.returncode != 0
+    matrix = json.loads((output / "matrix.json").read_text())
+    row = matrix["environments"]["ubuntu-22.04"]
+    assert row["status"] == "broken"
+    assert row["evidence_error"] == "result.json is absent"
+    assert not (output / "ubuntu-22.04" / "result.json").exists()
+    assert "inner evidence is broken" in result.stderr
 
 
 def test_an_absent_appimage_is_not_reported_as_a_broken_host(tmp_path: Path) -> None:
