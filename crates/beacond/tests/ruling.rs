@@ -673,6 +673,7 @@ fn recording_a_ruling_creates_no_run_receipt_worktree_or_external_effect() {
     let fixture = admitted_mission("inert");
     let proposal_digest = fixture.submit("Add a regression test.");
     let before_runs = fixture.count("SELECT count(*) FROM runs");
+    let before_rulings = fixture.ruling_rows();
     let before_receipts = fixture.count("SELECT count(*) FROM receipts");
     let before_security = fixture.count("SELECT count(*) FROM security_events");
     let before_events = fixture.count("SELECT count(*) FROM events");
@@ -702,6 +703,11 @@ fn recording_a_ruling_creates_no_run_receipt_worktree_or_external_effect() {
         before_events + 1
     );
     assert_eq!(fixture.ruling_events(), 1);
+    // And exactly one new Ruling. Stating the intended delta beside the unchanged ones is what
+    // makes this test say "this and nothing else" rather than only "nothing else": `rule` builds
+    // its return value from the row it constructed and never re-reads it, so this count is the
+    // only thing here that observes whether the row landed at all.
+    assert_eq!(fixture.ruling_rows(), before_rulings + 1);
     // Model Invocation and capability state still have no tables at all. There is nothing to count
     // because nothing was built, which is the honest form of this assertion until they exist.
     for table in ["invocations", "capabilities"] {
