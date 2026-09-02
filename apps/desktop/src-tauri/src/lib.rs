@@ -877,16 +877,6 @@ fn preflight_project_checks_value(
         .map_err(Into::into)
 }
 
-fn preflight_receipts_value(
-    state: &DesktopState,
-    project_id: uuid::Uuid,
-) -> Result<Vec<PreflightReceipt>, CommandError> {
-    state
-        .supervisor
-        .preflight_receipts(project_id)
-        .map_err(Into::into)
-}
-
 fn teams_value(
     state: &DesktopState,
     project_id: uuid::Uuid,
@@ -1301,14 +1291,6 @@ fn preflight_project_checks(
 }
 
 #[tauri::command]
-fn preflight_receipts(
-    state: State<'_, DesktopState>,
-    project_id: uuid::Uuid,
-) -> Result<Vec<PreflightReceipt>, CommandError> {
-    preflight_receipts_value(&state, project_id)
-}
-
-#[tauri::command]
 fn teams(
     state: State<'_, DesktopState>,
     project_id: uuid::Uuid,
@@ -1634,7 +1616,6 @@ pub fn run() {
             project_repository_history,
             bind_project_repository,
             preflight_project_checks,
-            preflight_receipts,
             teams,
             team,
             form_team,
@@ -1678,12 +1659,12 @@ mod tests {
         bind_project_repository_value, complete_operator_setup_value, create_project_value,
         current_project_repository_value, install_sample_project_value, migrate_legacy_app_data,
         mission_value, platform_session_monitor_status_value, preflight_project_checks_value,
-        preflight_receipts_value, prepare_runtime_directory, project_charter_history_value,
-        project_policy_history_value, project_policy_value, project_repository_history_value,
-        project_value, projects_value, publish_project_policy_value, reactivate_resident_value,
-        residents_value, retire_resident_value, revise_project_charter_value,
-        sample_project_status_value, session_policy_value, session_status_value,
-        set_session_timeout_value, starter_organization_value, suspend_resident_value,
+        prepare_runtime_directory, project_charter_history_value, project_policy_history_value,
+        project_policy_value, project_repository_history_value, project_value, projects_value,
+        publish_project_policy_value, reactivate_resident_value, residents_value,
+        retire_resident_value, revise_project_charter_value, sample_project_status_value,
+        session_policy_value, session_status_value, set_session_timeout_value,
+        starter_organization_value, suspend_resident_value,
     };
 
     #[test]
@@ -1973,7 +1954,6 @@ mod tests {
                 "allow-project-repository-history",
                 "allow-bind-project-repository",
                 "allow-preflight-project-checks",
-                "allow-preflight-receipts",
                 "allow-teams",
                 "allow-team",
                 "allow-form-team",
@@ -2475,13 +2455,6 @@ mod tests {
 
         let missing = preflight_project_checks_value(&state.state, Uuid::new_v4()).unwrap_err();
         assert_eq!(missing.code, "project_not_found");
-
-        // Listing Receipts for a Project that has none is empty, not an error.
-        assert!(
-            preflight_receipts_value(&state.state, project.id)
-                .unwrap()
-                .is_empty()
-        );
     }
 
     fn repository_project_draft() -> ProjectDraft {

@@ -714,15 +714,6 @@ export async function preflightProjectChecks(projectId: string): Promise<Preflig
   );
 }
 
-export async function loadPreflightReceipts(projectId: string): Promise<PreflightReceipt[]> {
-  return invokeAndValidate(
-    "preflight_receipts",
-    { projectId },
-    isPreflightReceiptList,
-    "preflight Receipt list",
-  );
-}
-
 export async function loadTeams(projectId: string): Promise<TeamView[]> {
   return invokeAndValidate("teams", { projectId }, isTeamList, "Team list");
 }
@@ -1590,10 +1581,6 @@ export function isPreflightReceipt(value: unknown): value is PreflightReceipt {
     value.notVerified.every(isString) &&
     isUnavailableEvidence(value.unavailable)
   );
-}
-
-function isPreflightReceiptList(value: unknown): value is PreflightReceipt[] {
-  return Array.isArray(value) && value.every(isPreflightReceipt);
 }
 
 function isProjectRepositoryOrNull(value: unknown): value is ProjectRepository | null {

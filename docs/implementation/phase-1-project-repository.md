@@ -58,6 +58,12 @@ declared, not verified — Beacon has not opened this repository.
 The Tauri wire-error table gained arms for the four Repository codes, so a refusal now reaches the
 interface under its own code instead of the generic account-service message.
 
+The later Check Preflight slice presents only the Receipt returned by the Operator's explicit
+**Preflight checks** action. It did not design a desktop Receipt-history view, so the desktop does
+not register or grant a separate `preflight_receipts` command and exports no TypeScript adapter for
+one. The authenticated daemon and local transport keep their newest-first Receipt-history Query for
+other clients; a future desktop history surface must be designed before exposing that Query there.
+
 ## Verification
 
 From the repository root:

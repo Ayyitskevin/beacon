@@ -40,7 +40,6 @@
     "allow-project-repository-history",
     "allow-bind-project-repository",
     "allow-preflight-project-checks",
-    "allow-preflight-receipts",
     "allow-teams",
     "allow-team",
     "allow-form-team",
