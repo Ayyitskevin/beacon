@@ -31,10 +31,13 @@ python3.12 -m venv .venv && .venv/bin/pip install -e ".[dev]"   # the legacy Pyt
 npm --prefix apps/desktop ci                                    # the desktop app
 ```
 
-The Rust toolchain is pinned in `rust-toolchain.toml` and installs itself via rustup. The gate
-refuses to run without `.venv`, on purpose: importing another checkout's copy is a false green this
-repository has actually hit. Without the Linux development libraries and build tools above, the
-native Tauri compile and link steps in the desktop and Rust gates fail before Beacon can be built.
+The Rust toolchain is pinned in `rust-toolchain.toml` and installs itself via rustup. Every gate
+stage that needs Python refuses to run without `.venv`, on purpose: importing another checkout's
+copy is a false green this repository has actually hit. `scripts/gate rust` and `scripts/gate
+desktop` are exempt, because they use none of it — so those two do run in a checkout that has no
+`.venv`, and `scripts/gate all` does not. Without the Linux development libraries and build tools
+above, the native Tauri compile and link steps in the desktop and Rust gates fail before Beacon can
+be built.
 
 ## The gate
 
