@@ -546,6 +546,30 @@ fn an_existing_unresolvable_store_does_not_fall_back_to_its_parent() {
 }
 
 #[test]
+fn every_rendered_field_stays_within_the_adapter_bound() {
+    // The desktop adapter refuses mountPoint or mechanism text over 200
+    // characters. A reason built from a long sysfs path would otherwise make an
+    // otherwise-valid report unreadable at the boundary.
+    let fixture = Fixture::new("bounded-text-".repeat(6).trim_end_matches('-'));
+    fixture.mounted_on_host_device();
+
+    let report = fixture.read();
+
+    assert_eq!(report.state, LiveDataEncryption::Unknown);
+    let mount_point = match &report.mount_point {
+        beacond::Recorded::Present { value } => value.chars().count(),
+        beacond::Recorded::Absent { reason } => reason.chars().count(),
+    };
+    assert!(mount_point <= 200, "mountPoint is {mount_point} characters");
+    let mechanism = reason(&report).chars().count();
+    assert!(mechanism <= 200, "mechanism is {mechanism} characters");
+    for entry in &report.evidence {
+        assert!(entry.source.chars().count() <= 200);
+        assert!(entry.observation.chars().count() <= 200);
+    }
+}
+
+#[test]
 fn missing_mountinfo_reports_unknown() {
     let fixture = Fixture::new("no-mountinfo");
     fixture.node("1:1");
