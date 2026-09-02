@@ -1654,6 +1654,18 @@ fn verified_proposal(
     if !columns_match(&stored, &payload) {
         return Err(ProposalError::InvalidStore);
     }
+    // ADR 0034: "Until those content and owning-module surfaces exist, the only accepted value
+    // is not_declared." `submit` refuses a `Bound` constraint on the way in; this is the same
+    // rule enforced on the way out, so a row that reached the store some other way -- or one a
+    // future migration widens the grammar under -- cannot present a supported constraint that no
+    // owning module can resolve. Every caller of this function (submit's idempotent-return path,
+    // get, list_for_mission, and startup) goes through this check.
+    if constraints(&payload.requirements)
+        .iter()
+        .any(|constraint| constraint.is_declared())
+    {
+        return Err(ProposalError::InvalidStore);
+    }
     let readiness = derive_readiness(connection, stored.workspace_id, &payload)?;
     Ok(Proposal {
         digest: digest_envelope(&stored.digest_value),
