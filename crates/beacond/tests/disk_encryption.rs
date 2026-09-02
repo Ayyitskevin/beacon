@@ -842,6 +842,14 @@ fn unreadable_dm_uuid_reports_unknown_not_enabled() {
 
     assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert_eq!(code(&report), ReasonCode::DeviceUnreadable);
+
+    let production = fixture.read_v1();
+    assert_eq!(production.conclusion().state(), LiveDataEncryption::Unknown);
+    assert_eq!(
+        code(&production),
+        ReasonCode::DeviceUnreadable,
+        "the unknown-only Query must preserve the read failure that made the result unknown"
+    );
 }
 
 #[test]
