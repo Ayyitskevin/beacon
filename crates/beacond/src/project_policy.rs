@@ -548,6 +548,52 @@ fn monotonic_time(
     })
 }
 
+/// What one stored Policy revision tells a caller that binds to it: the exact Charter
+/// revision it interprets, and whether it is still this Project's terminal revision.
+/// `None` when that Policy revision does not exist in this Project.
+///
+/// Binding validity and staleness are different questions — the first is decided
+/// against the named immutable revision, the second is derived at read time — so this
+/// reader answers both without letting a caller confuse them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PolicyRevisionFacts {
+    pub(crate) charter_revision: u32,
+    pub(crate) is_current: bool,
+}
+
+pub(crate) fn policy_revision_facts(
+    connection: &Connection,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    revision: u32,
+) -> Result<Option<PolicyRevisionFacts>, ProjectPolicyError> {
+    let Some(charter_revision) = connection
+        .query_row(
+            "SELECT charter_revision FROM project_policy_revisions
+             WHERE workspace_id = ?1 AND project_id = ?2 AND revision = ?3",
+            params![
+                workspace_id.to_string(),
+                project_id.to_string(),
+                i64::from(revision)
+            ],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let latest = connection.query_row(
+        "SELECT max(revision) FROM project_policy_revisions
+         WHERE workspace_id = ?1 AND project_id = ?2",
+        params![workspace_id.to_string(), project_id.to_string()],
+        |row| row.get::<_, Option<i64>>(0),
+    )?;
+    Ok(Some(PolicyRevisionFacts {
+        charter_revision: positive_u32(charter_revision)?,
+        is_current: latest == Some(i64::from(revision)),
+    }))
+}
+
 pub(crate) fn verify_project_policy_state(
     connection: &Connection,
 ) -> Result<(), ProjectPolicyError> {
