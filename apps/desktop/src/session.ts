@@ -257,18 +257,74 @@ export type LocalModelDiscoveryReport = {
 /** Three states, closed. `disabled` is a proven negative; absence of proof is
  *  `unknown`, and `mechanism` carries its reason. */
 export type LiveDataEncryption = "enabled" | "disabled" | "unknown";
+
+/** Every reason the reader can produce. Closed on both sides of the wire: a
+ *  report naming anything else is a refused read, not a rendered surprise. */
+export const REASON_CODES = [
+  "crypt_covers_every_path",
+  "no_crypt_on_any_path",
+  "some_paths_uncovered",
+  "store_path_unresolved",
+  "store_not_inspectable",
+  "mount_table_unreadable",
+  "mount_table_unparsed",
+  "mount_table_empty",
+  "no_mount_for_store",
+  "mount_and_stat_disagree",
+  "memory_backed_filesystem",
+  "overlay_filesystem",
+  "userspace_filesystem",
+  "network_filesystem",
+  "no_block_device_for_filesystem",
+  "link_resolves_to_nothing",
+  "device_unreadable",
+  "read_over_budget",
+  "stack_over_budget",
+  "no_physical_leaf",
+  "mapping_without_backing_device",
+  "loopback_image",
+  "platform_not_supported",
+] as const;
+export type ReasonCode = (typeof REASON_CODES)[number];
+
+export const SUBJECT_ROLES = ["device", "mapping", "mechanism", "location", "detail"] as const;
+export type SubjectRole = (typeof SUBJECT_ROLES)[number];
+
+/** A value inside a conclusion. Bounded where it was made, and it says whether
+ *  it was cut -- the panel reads the flag rather than hunting for an ellipsis. */
+export type Subject = {
+  role: SubjectRole;
+  value: string;
+  shortened: boolean;
+};
+
 export type EncryptionEvidence = {
   source: string;
   observation: string;
+  /** True when either field was cut. */
+  truncated: boolean;
 };
-export type LiveDataEncryptionReport = {
+
+/** The answer: closed state, closed reason, bounded subjects, and a count of
+ *  the subjects that did not fit. No free text crosses the wire. */
+export type LiveDataEncryptionConclusion = {
   state: LiveDataEncryption;
-  mountPoint: Recorded<string>;
-  mechanism: Recorded<string>;
+  reason: ReasonCode;
+  subjects: Subject[];
+  omittedSubjects: number;
+};
+
+export type LiveDataEncryptionReport = {
+  conclusion: LiveDataEncryptionConclusion;
+  mountPoint: Subject | null;
   evidence: EncryptionEvidence[];
   notVerified: string[];
   observedAtMs: number;
 };
+
+/** The bound the wire shape makes structural. */
+export const MAX_SUBJECT_CHARS = 24;
+export const MAX_SUBJECTS = 3;
 
 export type ProviderFeature = "completion" | "embedding" | "thinking" | "tools" | "vision";
 export type LocalModelBinding = {
@@ -1791,59 +1847,68 @@ function isMissionList(value: unknown): value is MissionView[] {
   });
 }
 
+function isSubject(value: unknown): value is Subject {
+  return (
+    hasExactKeys(value, ["role", "shortened", "value"]) &&
+    SUBJECT_ROLES.includes(value.role as SubjectRole) &&
+    typeof value.shortened === "boolean" &&
+    isTrimmedTextWithoutControls(value.value, MAX_SUBJECT_CHARS)
+  );
+}
+
+function isLiveDataEncryptionConclusion(
+  value: unknown,
+): value is LiveDataEncryptionConclusion {
+  if (!hasExactKeys(value, ["omittedSubjects", "reason", "state", "subjects"])) return false;
+  const { subjects } = value;
+  if (
+    !["enabled", "disabled", "unknown"].includes(String(value.state)) ||
+    !REASON_CODES.includes(value.reason as ReasonCode) ||
+    !isNonnegativeInteger(value.omittedSubjects) ||
+    !Array.isArray(subjects) ||
+    subjects.length > MAX_SUBJECTS ||
+    !subjects.every(isSubject)
+  ) {
+    return false;
+  }
+  // Only `enabled` may claim crypt covers every path, and only that reason may
+  // be `enabled`. A state and a reason that disagree is not a report.
+  const covered = value.reason === "crypt_covers_every_path";
+  if (covered !== (value.state === "enabled")) return false;
+  const uncovered = value.reason === "no_crypt_on_any_path" || value.reason === "some_paths_uncovered";
+  return uncovered === (value.state === "disabled");
+}
+
 function isLiveDataEncryptionReport(value: unknown): value is LiveDataEncryptionReport {
   if (
     !hasExactKeys(value, [
+      "conclusion",
       "evidence",
-      "mechanism",
       "mountPoint",
       "notVerified",
       "observedAtMs",
-      "state",
     ])
   ) {
     return false;
   }
   const { evidence, notVerified } = value;
-  if (
-    !["enabled", "disabled", "unknown"].includes(String(value.state)) ||
-    !isNonnegativeInteger(value.observedAtMs) ||
-    !isBoundedRecordedText(value.mountPoint) ||
-    !isBoundedRecordedText(value.mechanism) ||
-    !Array.isArray(evidence) ||
-    evidence.length > 32 ||
-    !evidence.every(isEncryptionEvidence) ||
-    !Array.isArray(notVerified) ||
-    notVerified.length > 8 ||
-    !notVerified.every((entry) => isTrimmedTextWithoutControls(entry, 200))
-  ) {
-    return false;
-  }
-  // Only `enabled` may name a mechanism. Any other state carrying one would be
-  // a claim Beacon did not prove.
-  return (value.mechanism as Recorded<string>).kind === "present"
-    ? value.state === "enabled"
-    : value.state !== "enabled";
-}
-
-/** Both halves of a `Recorded<string>` bounded like the evidence beside them.
- *
- *  `isRecorded` accepts any present value and any absent reason, and both of
- *  these fields are rendered. Unbounded text in a rendered field is a hole in a
- *  boundary the rest of this adapter closes. */
-function isBoundedRecordedText(value: unknown): boolean {
-  if (hasExactKeys(value, ["kind", "reason"])) {
-    return value.kind === "absent" && isTrimmedTextWithoutControls(value.reason, 200);
-  }
-  if (hasExactKeys(value, ["kind", "value"])) {
-    return value.kind === "present" && isTrimmedTextWithoutControls(value.value, 200);
-  }
-  return false;
+  return (
+    isLiveDataEncryptionConclusion(value.conclusion) &&
+    isNonnegativeInteger(value.observedAtMs) &&
+    (value.mountPoint === null || isSubject(value.mountPoint)) &&
+    Array.isArray(evidence) &&
+    evidence.length <= 32 &&
+    evidence.every(isEncryptionEvidence) &&
+    Array.isArray(notVerified) &&
+    notVerified.length <= 8 &&
+    notVerified.every((entry) => isTrimmedTextWithoutControls(entry, 200))
+  );
 }
 
 function isEncryptionEvidence(value: unknown): value is EncryptionEvidence {
   return (
-    hasExactKeys(value, ["observation", "source"]) &&
+    hasExactKeys(value, ["observation", "source", "truncated"]) &&
+    typeof value.truncated === "boolean" &&
     isTrimmedTextWithoutControls(value.source, 200) &&
     isTrimmedTextWithoutControls(value.observation, 200)
   );

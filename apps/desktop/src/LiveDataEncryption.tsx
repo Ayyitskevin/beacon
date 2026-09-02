@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { Button, makeStyles, shorthands, tokens } from "@fluentui/react-components";
 
-import type { LiveDataEncryptionReport, Recorded } from "./session";
+import { renderConclusion, renderMechanisms } from "./liveDataEncryptionSentence";
+import type { LiveDataEncryptionReport } from "./session";
 import { detectGuidePlatform, encryptionGuide } from "./liveDataEncryptionGuide";
 
 const useStyles = makeStyles({
@@ -46,13 +47,7 @@ const useStyles = makeStyles({
   evidence: { fontFamily: tokens.fontFamilyMonospace, wordBreak: "break-all" },
 });
 
-function present(value: Recorded<string>): string | null {
-  return value.kind === "present" ? value.value : null;
-}
 
-function absent(value: Recorded<string>): string | null {
-  return value.kind === "absent" ? value.reason : null;
-}
 
 /** The Installation's live-data encryption diagnostic.
  *
@@ -105,10 +100,13 @@ export function LiveDataEncryptionStatus({
   }
 
   const guide = encryptionGuide(detectGuidePlatform(navigator.userAgent));
-  const mechanism = present(report.mechanism);
-  const reason = absent(report.mechanism);
-  const mountPoint = present(report.mountPoint);
-  const warned = report.state !== "enabled";
+  // Rendered from the closed conclusion, never read as text off the wire.
+  const mechanism = renderMechanisms(report.conclusion);
+  const reason = renderConclusion(report.conclusion);
+  const mountPoint = report.mountPoint
+    ? `${report.mountPoint.value}${report.mountPoint.shortened ? "…" : ""}`
+    : null;
+  const warned = report.conclusion.state !== "enabled";
 
   return (
     <section className={styles.section} aria-labelledby="live-data-encryption-heading">
@@ -120,13 +118,13 @@ export function LiveDataEncryptionStatus({
           Live data
         </h3>
         <div role="status">
-          {report.state === "enabled" ? (
+          {report.conclusion.state === "enabled" ? (
             <p className={styles.status}>
               Operating-system disk encryption detected on the volume holding live data
               {mechanism ? ` — ${mechanism}` : ""}. This is your operating system's encryption;
               Beacon does not encrypt the open live store.
             </p>
-          ) : report.state === "disabled" ? (
+          ) : report.conclusion.state === "disabled" ? (
             // Not "found no encryption": a volume can have one encrypted member
             // and one plain one, and the reading says which. Denying what the
             // same report shows in its evidence teaches the operator to
@@ -134,16 +132,14 @@ export function LiveDataEncryptionStatus({
             <p className={styles.body}>
               <strong>Live data is not fully protected by disk encryption.</strong> At least one
               path to the disk holding this Installation's live data has no operating-system disk
-              encryption
-              {reason ? `: ${reason}` : ""}. Beacon does not encrypt the open live store itself.
-              Turn on your operating system's disk encryption to protect this data at rest.
+              encryption: {reason}. Beacon does not encrypt the open live store itself. Turn on
+              your operating system's disk encryption to protect this data at rest.
             </p>
           ) : (
             <p className={styles.body}>
               <strong>Disk-encryption status is unknown.</strong> Beacon could not determine
               whether the volume holding this Installation's live data is encrypted by the
-              operating system, so it does not claim that it is
-              {reason ? `: ${reason}` : ""}.
+              operating system, so it does not claim that it is: {reason}.
             </p>
           )}
         </div>
@@ -196,6 +192,7 @@ export function LiveDataEncryptionStatus({
               {report.evidence.map((entry) => (
                 <li key={entry.source} className={styles.evidence}>
                   {entry.source} — {entry.observation}
+                  {entry.truncated ? " …(shortened)" : ""}
                 </li>
               ))}
             </ul>

@@ -134,25 +134,41 @@ const residentCapabilityCatalog = [
 ] as const;
 
 const encryptionEvidence = [
-  { source: "stat(live store)", observation: "st_dev = 259:2" },
+  { source: "stat(live store)", observation: "st_dev = 259:2", truncated: false },
   {
     source: "/proc/self/mountinfo",
     observation: "259:2 ext4 /dev/nvme0n1p2 at /home/operator",
+    truncated: false,
   },
 ] as const;
-function encryptionReport(state: "enabled" | "disabled" | "unknown", reason?: string) {
+
+/** The wire shape is a closed conclusion now: no free text to compose here. */
+function encryptionReport(
+  state: "enabled" | "disabled" | "unknown",
+  reason?: string,
+  subjects?: { role: string; value: string; shortened: boolean }[],
+) {
+  const chosen =
+    reason ??
+    (state === "enabled"
+      ? "crypt_covers_every_path"
+      : state === "disabled"
+        ? "no_crypt_on_any_path"
+        : "mount_table_unreadable");
+  const defaults =
+    chosen === "crypt_covers_every_path"
+      ? [{ role: "mechanism", value: "dm-crypt (LUKS2)", shortened: false }]
+      : chosen === "no_crypt_on_any_path"
+        ? [{ role: "device", value: "259:2", shortened: false }]
+        : [];
   return {
-    state,
-    mountPoint: { kind: "present", value: "/home/operator" },
-    mechanism:
-      state === "enabled"
-        ? { kind: "present", value: "dm-crypt (LUKS2)" }
-        : {
-            kind: "absent",
-            reason:
-              reason ??
-              "at least one path to disk has no crypt layer: 259:2",
-          },
+    conclusion: {
+      state,
+      reason: chosen,
+      subjects: subjects ?? defaults,
+      omittedSubjects: 0,
+    },
+    mountPoint: { role: "location", value: "/home/operator", shortened: false },
     evidence: encryptionEvidence,
     notVerified: ["filesystem-level encryption such as fscrypt or ext4 encryption"],
     observedAtMs: 1_756_000_000_000,
@@ -424,7 +440,12 @@ describe("Beacon desktop shell", () => {
         // A mixed stack: one member encrypted, one not. Telling the operator
         // Beacon "found no encryption" here is false, and an operator who can
         // see the crypt layer in the evidence learns to disbelieve the warning.
-        return Promise.resolve(encryptionReport("disabled", "pv0 is encrypted; 8:17 is not"));
+        return Promise.resolve(
+          encryptionReport("disabled", "some_paths_uncovered", [
+            { role: "mapping", value: "pv0", shortened: false },
+            { role: "device", value: "8:17", shortened: false },
+          ]),
+        );
       }
       return base(command, args);
     });
@@ -444,9 +465,7 @@ describe("Beacon desktop shell", () => {
       const base = invokeMock.getMockImplementation()!;
       invokeMock.mockImplementation((command, args) => {
         if (command === "live_data_encryption_status") {
-          return Promise.resolve(
-            encryptionReport(state, "the mount table could not be read"),
-          );
+          return Promise.resolve(encryptionReport(state));
         }
         return base(command, args);
       });
