@@ -163,8 +163,14 @@ pub(crate) enum PathResolution {
     /// The path resolved to an entry that is not a regular file: a symlink, a gitlink, or a
     /// directory where a file was named.
     NotARegularFile,
-    /// Some object on the path is not loose. Not an absence -- see [`LooseRead::NotLoose`].
-    NotLoose,
+    /// Some object on the path is not loose, and this names which one.
+    ///
+    /// Not an absence -- see [`LooseRead::NotLoose`]. The id travels with the outcome so a caller
+    /// can put the authenticated pack lookup behind it and tell "packed, and this reader does not
+    /// read packs" apart from "referenced by an authenticated commit or tree and present in no
+    /// storage at all", which is a broken store rather than a limitation (gpt1's S1). Without the
+    /// id the caller could only guess which of the two it had.
+    NotLoose { object_id: String },
     /// Some object on the path exceeded the caller's bound.
     TooLarge,
     /// Some object on the path did not inflate, did not authenticate, did not parse, or was not
@@ -289,12 +295,12 @@ impl ObjectStore {
             return Err(ObjectStoreError::Elapsed);
         }
         let Some(prefix) = open_directory_at(&self.objects, &object_id.as_bytes()[..2])
-            .map_err(|_| ObjectStoreError::NotARepository)?
+            .map_err(|_| settled_error(ObjectStoreError::NotARepository, deadline))?
         else {
             return settled(LooseRead::NotLoose, deadline);
         };
         let Some(mut file) = open_regular_at(&prefix, &object_id.as_bytes()[2..])
-            .map_err(|_| ObjectStoreError::NotARepository)?
+            .map_err(|_| settled_error(ObjectStoreError::NotARepository, deadline))?
         else {
             return settled(LooseRead::NotLoose, deadline);
         };
@@ -305,7 +311,7 @@ impl ObjectStore {
         // answers about a file that need not be the one read.
         let length = file
             .metadata()
-            .map_err(|_| ObjectStoreError::NotARepository)?
+            .map_err(|_| settled_error(ObjectStoreError::NotARepository, deadline))?
             .len();
         if length > maximum as u64 {
             return settled(LooseRead::TooLarge, deadline);
@@ -314,7 +320,7 @@ impl ObjectStore {
         file.by_ref()
             .take(length)
             .read_to_end(&mut compressed)
-            .map_err(|_| ObjectStoreError::NotARepository)?;
+            .map_err(|_| settled_error(ObjectStoreError::NotARepository, deadline))?;
         if deadline() {
             return Err(ObjectStoreError::Elapsed);
         }
@@ -433,7 +439,14 @@ impl ObjectStore {
                 None => return settled(PathResolution::Malformed, deadline),
             },
             LooseRead::Read { .. } => return settled(PathResolution::Malformed, deadline),
-            LooseRead::NotLoose => return settled(PathResolution::NotLoose, deadline),
+            LooseRead::NotLoose => {
+                return settled(
+                    PathResolution::NotLoose {
+                        object_id: revision.to_owned(),
+                    },
+                    deadline,
+                );
+            }
             LooseRead::TooLarge => return settled(PathResolution::TooLarge, deadline),
             LooseRead::Malformed => return settled(PathResolution::Malformed, deadline),
         };
@@ -446,7 +459,14 @@ impl ObjectStore {
                     body,
                 } => body,
                 LooseRead::Read { .. } => return settled(PathResolution::Malformed, deadline),
-                LooseRead::NotLoose => return settled(PathResolution::NotLoose, deadline),
+                LooseRead::NotLoose => {
+                    return settled(
+                        PathResolution::NotLoose {
+                            object_id: tree_id.clone(),
+                        },
+                        deadline,
+                    );
+                }
                 LooseRead::TooLarge => return settled(PathResolution::TooLarge, deadline),
                 LooseRead::Malformed => return settled(PathResolution::Malformed, deadline),
             };
@@ -483,7 +503,9 @@ impl ObjectStore {
                         body,
                     } => PathResolution::Blob { body },
                     LooseRead::Read { .. } => PathResolution::Malformed,
-                    LooseRead::NotLoose => PathResolution::NotLoose,
+                    LooseRead::NotLoose => PathResolution::NotLoose {
+                        object_id: blob_id.clone(),
+                    },
                     LooseRead::TooLarge => PathResolution::TooLarge,
                     LooseRead::Malformed => PathResolution::Malformed,
                 },
@@ -651,6 +673,19 @@ fn tree_sort_key(name: &[u8], mode: EntryMode) -> Vec<u8> {
 /// check, which is what makes "consulted before the definite answer" true of all of them instead of
 /// most of them: a non-author review staged a deadline that expired after the first blocking call
 /// and got `NotLoose` back, because four arms returned before reaching a check.
+fn settled_error(error: ObjectStoreError, deadline: &mut impl FnMut() -> bool) -> ObjectStoreError {
+    // An I/O failure is an externally reported state exactly like a value is, and a read that
+    // failed after its budget expired still describes the store as it was before the answer was
+    // due. `settled` covered the value arms and the error arms went out through `?`, so a
+    // post-budget open failure was published as `NotARepository` -- Beacon's slowness reported as
+    // the Operator's repository being broken, which is the collapse the whole taxonomy exists to
+    // prevent. Elapsed wins, because "we did not finish" is true whenever it is true.
+    if deadline() {
+        return ObjectStoreError::Elapsed;
+    }
+    error
+}
+
 fn settled<T>(outcome: T, deadline: &mut impl FnMut() -> bool) -> Result<T, ObjectStoreError> {
     if deadline() {
         return Err(ObjectStoreError::Elapsed);
@@ -1574,6 +1609,36 @@ mod tests {
     }
 
     #[test]
+    fn an_io_failure_after_the_budget_expires_is_elapsed_not_a_broken_repository() {
+        // gpt2's slice-2 P1. `settled` covered the value arms; the error arms went out through
+        // `?`, so a post-budget open failure was published as `NotARepository`. The wrong answer is
+        // Beacon reporting its own slowness as the Operator's repository being broken -- the same
+        // collapse as answering `NotLoose` late, in the one direction the first repair missed.
+        //
+        // The object prefix is made a regular file, so opening it as a directory fails. The
+        // deadline is allowed through the entry check and expires at the post-open one.
+        let (repository, revision) = walk_repository("io-error-late");
+        let prefix = repository.path.join(".git/objects").join(&revision[..2]);
+        fs::remove_dir_all(&prefix).unwrap();
+        fs::write(&prefix, b"not a directory").unwrap();
+        let store = ObjectStore::open(&repository.path).unwrap();
+
+        assert_eq!(
+            store
+                .read_loose_object(&revision, 1_048_576, &mut elapses_after(1))
+                .unwrap_err(),
+            ObjectStoreError::Elapsed
+        );
+        // And with budget to spare it is still the honest broken-store answer.
+        assert_eq!(
+            store
+                .read_loose_object(&revision, 1_048_576, &mut never_elapsed())
+                .unwrap_err(),
+            ObjectStoreError::NotARepository
+        );
+    }
+
+    #[test]
     fn a_walk_whose_deadline_expires_mid_traversal_publishes_nothing() {
         // The same rule one layer up: a walk that ran out of budget after reading the commit must
         // not report the path as absent, or as anything else about the repository.
@@ -1788,9 +1853,12 @@ mod tests {
         git(&repository.path, &["gc", "--quiet", "--prune=now"]);
         let store = ObjectStore::open(&repository.path).unwrap();
 
-        assert_eq!(
-            resolve(&store, &revision, "src/lib.rs"),
-            PathResolution::NotLoose
+        assert!(
+            matches!(
+                resolve(&store, &revision, "src/lib.rs"),
+                PathResolution::NotLoose { .. }
+            ),
+            "a not-loose object was not reported as such"
         );
         // And the revision is still present -- so "not loose" is provably not "not there".
         assert!(store.contains(&revision, &mut never_elapsed()).unwrap());
@@ -1831,16 +1899,22 @@ mod tests {
                 .id,
         );
         fs::remove_file(loose_path(&repository.path, &blob_id)).unwrap();
-        assert_eq!(
-            resolve(&store, &revision, "run.sh"),
-            PathResolution::NotLoose
+        assert!(
+            matches!(
+                resolve(&store, &revision, "run.sh"),
+                PathResolution::NotLoose { .. }
+            ),
+            "a not-loose object was not reported as such"
         );
 
         // And a TREE removed mid-walk, which is the arm the surviving mutant sat in.
         fs::remove_file(loose_path(&repository.path, &tree_id)).unwrap();
-        assert_eq!(
-            resolve(&store, &revision, "src/lib.rs"),
-            PathResolution::NotLoose
+        assert!(
+            matches!(
+                resolve(&store, &revision, "src/lib.rs"),
+                PathResolution::NotLoose { .. }
+            ),
+            "a not-loose object was not reported as such"
         );
     }
 
