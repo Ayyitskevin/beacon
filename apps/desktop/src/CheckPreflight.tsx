@@ -1,6 +1,7 @@
 import { Button, makeStyles, shorthands, tokens } from "@fluentui/react-components";
 
-import type { PreflightOutcome, PreflightReceipt, Recorded } from "./session";
+import { preflightOutcomeCopy } from "./preflightOutcomes";
+import type { PreflightReceipt, Recorded } from "./session";
 
 const useStyles = makeStyles({
   section: {
@@ -42,52 +43,6 @@ const useStyles = makeStyles({
   absent: { color: tokens.colorNeutralForeground3, fontStyle: "italic" },
 });
 
-/** What each outcome means to the operator. Preflight never runs a check, so
- *  none of these is a check result. */
-const outcomeCopy: Record<PreflightOutcome, { title: string; detail: string }> = {
-  verified: {
-    title: "Execution would be admissible",
-    detail: "Every step held and a sandbox is available. This is not a passing check.",
-  },
-  sandbox_unavailable: {
-    title: "Refused — no sandbox",
-    detail:
-      "Every verification step held. Execution is refused because Beacon has no sandbox capability yet.",
-  },
-  source_kind_unsupported: {
-    title: "Refused — Git URL",
-    detail:
-      "Confirming a pinned revision in a remote needs a network fetch the operating envelope denies. Bind a local path to preflight it.",
-  },
-  binding_stale_for_charter: {
-    title: "Refused — binding is stale",
-    detail: "The Charter was republished after this binding. Rebind before preflighting.",
-  },
-  repository_unreadable: {
-    title: "Refused — repository unreadable",
-    detail: "The declared source is missing, unreadable, or not a Git repository.",
-  },
-  base_revision_unreachable: {
-    title: "Refused — base revision absent",
-    detail: "The pinned commit is not present in that repository's object store.",
-  },
-  declared_checks_changed: {
-    title: "Refused — the binding moved",
-    detail: "The Repository Binding changed while this preflight was inspecting it.",
-  },
-  working_directory_escapes: {
-    title: "Refused — working directory escapes",
-    detail: "A check's resolved working directory lies outside the repository root.",
-  },
-  preflight_failed: {
-    title: "Refused — a step errored",
-    detail: "A verification step could not complete. This is not the same as a negative answer.",
-  },
-  preflight_timed_out: {
-    title: "Refused — a step did not finish",
-    detail: "A verification step ran out of budget, so its answer is unknown rather than negative.",
-  },
-};
 
 function RecordedValue({ value }: { value: Recorded<string> }) {
   const styles = useStyles();
@@ -107,7 +62,7 @@ export function CheckPreflightSection({
   onPreflight: () => void;
 }) {
   const styles = useStyles();
-  const copy = receipt ? outcomeCopy[receipt.outcome] : null;
+  const copy = receipt ? preflightOutcomeCopy[receipt.outcome] : null;
 
   return (
     <section className={styles.section} aria-labelledby="check-preflight-heading">

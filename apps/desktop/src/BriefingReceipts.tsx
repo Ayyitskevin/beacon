@@ -1,6 +1,7 @@
 import { Button, makeStyles, shorthands, tokens } from "@fluentui/react-components";
 
-import type { PreflightOutcome, PreflightReceipt } from "./session";
+import { preflightOutcomeCopy } from "./preflightOutcomes";
+import type { PreflightReceipt } from "./session";
 
 /** How many rows Briefing draws. It "optimizes for exceptions, not activity
  *  volume" (BLUEPRINT §3), and the Query it reads is unbounded, so the bound
@@ -52,22 +53,6 @@ const useStyles = makeStyles({
   actions: { marginTop: tokens.spacingVerticalM },
 });
 
-/** One line per outcome, taken from the same closed set the Project panel
- *  renders. Two vocabularies for one recorded fact is how a surface starts
- *  claiming more than the Receipt says. `verified` is deliberately not a
- *  success: preflight never runs a check. */
-const outcomeSummary: Record<PreflightOutcome, string> = {
-  verified: "Execution would be admissible — not a passing check",
-  sandbox_unavailable: "Refused — no sandbox",
-  source_kind_unsupported: "Refused — Git URL",
-  binding_stale_for_charter: "Refused — binding is stale",
-  repository_unreadable: "Refused — repository unreadable",
-  base_revision_unreachable: "Refused — base revision absent",
-  declared_checks_changed: "Refused — the binding moved",
-  working_directory_escapes: "Refused — working directory escapes",
-  preflight_failed: "Refused — a step errored",
-  preflight_timed_out: "Refused — a step did not finish",
-};
 
 export type ReceiptRow = { receipt: PreflightReceipt; projectName: string };
 
@@ -141,7 +126,7 @@ export function BriefingReceipts({
             {shown.map(({ receipt, projectName }) => (
               <li key={receipt.runId} className={styles.row}>
                 <span>
-                  <p className={styles.outcome}>Check preflight — {outcomeSummary[receipt.outcome]}</p>
+                  <p className={styles.outcome}>Check preflight — {preflightOutcomeCopy[receipt.outcome].summary}</p>
                   <p className={styles.detail}>
                     {projectName} · {new Date(receipt.startedAtMs).toISOString()}
                   </p>
