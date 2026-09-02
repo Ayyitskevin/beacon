@@ -1381,7 +1381,7 @@ fn a_fresh_v1_proposal_reports_exactly_its_undeclared_preconditions() {
             UnmetPrecondition::ToolAllowlistNotDeclared,
             UnmetPrecondition::EvaluationsNotDeclared,
             UnmetPrecondition::ReadableContextNotVerified {
-                reason: ContextComparison::RepositoryUnavailable
+                reason: ContextComparison::RepositoryUnreadable
             },
         ]
     );
@@ -1425,7 +1425,7 @@ fn a_declared_context_reports_that_it_was_not_compared_against_the_pinned_revisi
             .readiness()
             .unmet()
             .contains(&UnmetPrecondition::ReadableContextNotVerified {
-                reason: ContextComparison::RepositoryUnavailable
+                reason: ContextComparison::RepositoryUnreadable
             }),
         "{:?}",
         proposal.readiness().unmet()
@@ -1533,6 +1533,55 @@ fn a_present_pinned_revision_still_reports_that_content_could_not_be_read() {
         "{:?}",
         proposal.readiness().unmet()
     );
+}
+
+#[test]
+fn an_object_store_inspection_that_errors_is_reported_as_failed_not_absent() {
+    // AGENTS.md:152 -- "Terminal, absent, broken, and not evaluated are distinct states." A pack
+    // index that cannot be parsed is an inspection that BROKE. The wrong answer is reporting it as
+    // PinnedRevisionAbsent: that is a negative answer, and it would tell an Operator the revision
+    // is not in the repository when what actually happened is that Beacon could not finish looking.
+    let fixture = admitted_mission("context-inspection-failed");
+    let (repository, _) = TempRepository::with_one_commit("broken-index");
+    // A pack index that is not a version 2 index. The queried revision is not a loose object, so
+    // the lookup falls through to the pack scan and has to parse this.
+    let pack = repository.path.join(".git/objects/pack");
+    fs::create_dir_all(&pack).unwrap();
+    fs::write(pack.join("pack-beacon.idx"), b"not a pack index at all").unwrap();
+
+    let absent = "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00";
+    let revision = fixture.rebind_repository(
+        1,
+        RepositorySourceKind::LocalPath,
+        repository.path.to_str().unwrap(),
+        absent,
+    );
+    let mut record = fixture.record();
+    record.repository_revision = revision;
+    record.base_revision = absent.to_owned();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+
+    assert!(
+        proposal
+            .readiness()
+            .unmet()
+            .contains(&UnmetPrecondition::ReadableContextNotVerified {
+                reason: ContextComparison::InspectionFailed
+            }),
+        "{:?}",
+        proposal.readiness().unmet()
+    );
+    // Specifically not the negative answer, and not the broken-store reason: the store opened.
+    assert!(!proposal.readiness().unmet().contains(
+        &UnmetPrecondition::ReadableContextNotVerified {
+            reason: ContextComparison::PinnedRevisionAbsent
+        }
+    ));
+    assert!(!proposal.readiness().unmet().contains(
+        &UnmetPrecondition::ReadableContextNotVerified {
+            reason: ContextComparison::RepositoryUnreadable
+        }
+    ));
 }
 
 #[test]
