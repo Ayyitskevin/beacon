@@ -24,7 +24,7 @@ Read-only throughout: no checkout, no chat completion, no secret file opened.
 | Vulcan deploy `~/deploy/vulcan` | `cbc5066` (10 behind main: `git rev-list --count cbc5066..56ba96e` → 10) | HEAD only | `git -C ~/deploy/vulcan rev-parse HEAD` |
 | Icarus `~/ai-workspace/claude/icarus` | `origin/main` = `c919cd2` | `packages/core/src/providers.ts`, `live-evidence-profile.ts`, ADR 0056, ADR 0065, `docs/evals/2026-08-27-headless-vulcan-admission.md`, gate2 eval artifacts, `tests/provider/vulcan-chat-completions-gateway.test.ts` | `git show c919cd2:<path>`, `gh pr view 51/69/70` |
 | Beacon `~/ai-workspace/claude/beacon` | `c59dde1` | README, CONTEXT, AGENTS, BLUEPRINT §Models (221-229) and §Nested Budget Envelopes (430-436), ADR 0009, docs/authority.md, `crates/beacond/src/{resource_discovery,local_model_activation}.rs`, phase-0 activation checkpoint | `sed -n`, `grep -n` |
-| Live roster | `/home/kevin-lee/deploy/vulcan-data/vulcan.toml` (mtime 2026-08-26 13:23) | whole file; no values resembled a key | `cat` |
+| Live roster | `~/deploy/vulcan-data/vulcan.toml` (mtime 2026-08-26 13:23) | whole file; no values resembled a key | `cat` |
 | Other consumers | `~/ai-workspace/buzz/run-qwen-agent.sh`; `~/deploy/minerva` @ `acdca45` | lines 1-15; `integrations/ai/anthropic.py` grep | `sed -n`, `grep -n` |
 
 Live probes (all GET / read-only, 2026-08-29 ~10:40 EDT):
@@ -176,7 +176,7 @@ the kernel down through amdgpu, not an OOM kill
 (`shared/handoffs/2026-08-18_session-wrap-mickey-crash-hardening.md`, "The one-paragraph
 version"). The fix class: `inference-preflight --need <GiB> --assert` gates
 every large load against a memory floor in `~/.config/inference-limits.env` (present on this box,
-`/home/kevin-lee/.local/bin/inference-preflight`). Four defects that session were "a check that
+`~/.local/bin/inference-preflight`). Four defects that session were "a check that
 reported fine while being weaker than it looked" — the durable fix was to make the unknown/failed
 state louder than the healthy one. Beacon's Worker health for activated local inference must model
 free memory and resident models *before* a Route may dispatch a load, and Pause Work must reach

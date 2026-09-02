@@ -23,13 +23,18 @@ is who decides what.
 ## Setting up
 
 ```sh
+sudo apt-get update && \
+  sudo apt-get install --no-install-recommends --yes \
+    libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev \
+    libayatana-appindicator3-dev librsvg2-dev
 python3.12 -m venv .venv && .venv/bin/pip install -e ".[dev]"   # the legacy Python tree
-cd apps/desktop && npm ci                                       # the desktop app
+npm --prefix apps/desktop ci                                    # the desktop app
 ```
 
 The Rust toolchain is pinned in `rust-toolchain.toml` and installs itself via rustup. The gate
 refuses to run without `.venv`, on purpose: importing another checkout's copy is a false green this
-repository has actually hit.
+repository has actually hit. Without the Linux development libraries and build tools above, the
+native Tauri compile and link steps in the desktop and Rust gates fail before Beacon can be built.
 
 ## The gate
 

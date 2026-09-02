@@ -2,7 +2,7 @@
 
 AI Town is **seven** capabilities, not six. The roadmap's product trace is
 Buzz -> Athena -> Minerva -> Vulcan -> ReplayDeck -> Janus -> Icarus, and
-ReplayDeck (the `fleet-eval` repo) is in it at the evaluation step. Almost every
+ReplayDeck has no repository; it is the intended capability at the evaluation step. Almost every
 handoff written about this work says six and quietly drops it.
 
 So the registry lists all seven, and each one declares how it is read and whether

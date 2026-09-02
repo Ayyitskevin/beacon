@@ -270,6 +270,11 @@ size, and captured output, interruptible, with the environment cleared and files
 confined to the worktree. Every Run carries a lease and reaches a terminal Receipt or is recorded
 `unconfirmed`; a worktree that refuses removal is reported rather than overridden.
 
+The authenticated Owner can opt in to install the bundled
+[Sample Project](docs/implementation/sample-project-installation.md). It installs inert Project
+and repository state and runs nothing. The installation creates no Run, Receipt, Proposal, Ruling,
+model request, network request, or Declared Check execution, and grants no authority.
+
 Resident-issued Team formation, Conversations, Proposals, Rulings, Evaluations, model Invocations,
 Cloud Link, passkeys, active agent work, and a downloadable installer do not exist yet. Nothing an
 Agent authored has ever been executed: the only commands Beacon runs are the Declared Checks an
