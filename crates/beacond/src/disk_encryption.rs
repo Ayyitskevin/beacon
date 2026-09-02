@@ -123,9 +123,19 @@ fn shorten(value: &str, keep: usize) -> String {
 /// What Beacon proved about operating-system disk encryption for the volume
 /// holding this Installation's live data.
 ///
-/// Three states, closed. `Disabled` is a proven negative — a block stack that
-/// was read end to end and contained no crypt layer — not merely an absence of
-/// proof. Absence of proof is `Unknown`, and `mechanism` carries its reason.
+/// Three states, closed.
+///
+/// `Enabled`: every branch of the stack was read to a physical leaf and every
+/// one of those paths passed through a crypt layer.
+///
+/// `Disabled`: the same completeness, and at least one of those paths had no
+/// crypt layer. It does NOT mean the stack contained no crypt layer — a volume
+/// over one encrypted member and one plain one is `Disabled` and its reason
+/// names both. It is a proven negative about at least one path to disk, not an
+/// absence of proof.
+///
+/// `Unknown`: anything unproved — a read that failed, a branch that terminated
+/// at no physical device, a budget spent. `mechanism` carries the reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LiveDataEncryption {

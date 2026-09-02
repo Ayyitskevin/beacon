@@ -1091,7 +1091,7 @@ describe("desktop session transport", () => {
       mountPoint: { kind: "present", value: "/" },
       mechanism: {
         kind: "absent",
-        reason: "Beacon found no device-mapper crypt layer in this volume's block stack",
+        reason: "at least one path to disk has no crypt layer: 259:2",
       },
       evidence: [{ source: "stat(live store)", observation: "st_dev = 259:2" }],
       notVerified: ["filesystem-level encryption such as fscrypt or ext4 encryption"],
