@@ -1869,6 +1869,11 @@ fn verified_proposal(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProposalBindingFacts {
     pub(crate) project_id: Uuid,
+    /// The verified Proposal's own digest envelope, for a consumer that must record which exact
+    /// bytes it acted on. Returned rather than left to the caller to rebuild from constants: the
+    /// caller would then be asserting an algorithm and a canonicalizer it never read, and equality
+    /// with what the store happens to hold is not provenance.
+    pub(crate) digest: ProposalDigest,
     pub(crate) bindings: ProposalBindings,
 }
 
@@ -1907,6 +1912,9 @@ pub(crate) fn proposal_binding_facts(
     }
     Ok(Some(ProposalBindingFacts {
         project_id: payload.scope.project_id,
+        // `load_stored` already refused a row whose algorithm or canonicalizer columns are not
+        // this module's, so this envelope is what the store holds, verified, and not a guess.
+        digest: digest_envelope(&stored.digest_value),
         bindings: payload.bindings,
     }))
 }

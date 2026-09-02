@@ -748,11 +748,11 @@ impl RulingService {
             }
 
             let payload = RulingV1 {
-                proposal: ProposalDigest {
-                    algorithm: PROPOSAL_DIGEST_ALGORITHM.to_owned(),
-                    canonicalizer: PROPOSAL_CANONICALIZER.to_owned(),
-                    value: proposal_digest.to_owned(),
-                },
+                // COPIED from the verified Proposal, never rebuilt from this module's constants.
+                // The store's CHECK constraints make the two equal today, but equality is not
+                // provenance: a Ruling that asserted an algorithm and a canonicalizer it never
+                // read would be inferring exactly what recording the envelope exists to stop.
+                proposal: facts.digest,
                 bindings: facts.bindings,
                 decision,
                 reason: reason.to_owned(),
