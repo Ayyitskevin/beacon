@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 
 use beacond::{Ceiling, ExecutionBounds, ExecutionOutcome, detect_sandbox, run_bounded_for_test};
 
+const WALL_CLOCK_RECEIPT_GRACE_MS: u64 = 750;
+
 fn tiny_bounds() -> ExecutionBounds {
     ExecutionBounds {
         wall_clock_ms: 3_000,
@@ -148,9 +150,19 @@ fn a_run_that_never_ends_is_stopped_by_the_wall_clock_and_says_so() {
         bounds,
         None,
     );
+    let maximum_elapsed_ms = bounds
+        .wall_clock_ms
+        .saturating_add(WALL_CLOCK_RECEIPT_GRACE_MS);
     assert!(
-        started.elapsed() < Duration::from_secs(20),
-        "the bound did not hold"
+        record.elapsed_ms <= maximum_elapsed_ms,
+        "Receipt elapsed {}ms exceeded the {}ms ceiling plus the named {}ms termination and output grace",
+        record.elapsed_ms,
+        bounds.wall_clock_ms,
+        WALL_CLOCK_RECEIPT_GRACE_MS,
+    );
+    assert!(
+        started.elapsed() <= Duration::from_millis(maximum_elapsed_ms),
+        "observed wall time exceeded the same bounded grace"
     );
     assert_eq!(
         record.outcome,
