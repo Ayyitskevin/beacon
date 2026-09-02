@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   admitMission,
   bindProjectRepository,
+  loadPreflightReceipts,
   preflightProjectChecks,
   activateLocalModel,
   activateResident,
@@ -1012,6 +1013,49 @@ describe("desktop session transport", () => {
       ],
       ["resident_configurations"],
     ]);
+  });
+
+  it("refuses a Receipt list longer than the interface will ever render", async () => {
+    const absent = (reason: string) => ({ kind: "absent", reason });
+    const receipt = {
+      version: 1,
+      runId: "7f1d5a9c-3b2e-4c8a-9d6f-1e2b3c4d5e6f",
+      workspaceId: "1a2b3c4d-5e6f-4a8b-9c0d-1e2f3a4b5c6d",
+      projectId: "2b3c4d5e-6f7a-4b8c-9d0e-2f3a4b5c6d7e",
+      repositoryRevision: 1,
+      charterRevision: 1,
+      outcome: "verified",
+      sourceKind: "local_path",
+      source: "/private/beacon/repo",
+      baseRevision: "0123456789012345678901234567890123456789",
+      resolvedChecks: [],
+      sandboxVersion: "landlock-v1",
+      policyCharterRevision: 1,
+      policyRepositoryRevision: 1,
+      startedAtMs: 10,
+      endedAtMs: 20,
+      notVerified: ["nothing ran"],
+      unavailable: {
+        proposalDigest: absent("no Proposal surface exists"),
+        rulingDigest: absent("no Proposal surface exists"),
+        resultingRevision: absent("preflight refuses to execute, so nothing ran"),
+        filesystemEffects: absent("preflight refuses to execute, so nothing ran"),
+        diffDigest: absent("preflight refuses to execute, so nothing ran"),
+        modelInvocations: absent("preflight performs no model inference"),
+        costUsdMicros: absent("preflight performs no model inference"),
+      },
+    };
+
+    invokeMock.mockResolvedValue([receipt, receipt]);
+    await expect(loadPreflightReceipts(receipt.projectId)).resolves.toHaveLength(2);
+
+    // The daemon applies no LIMIT to this Query, so the only bound is here. An
+    // unbounded array is a Workspace-sized allocation crossing the boundary
+    // before anything decides how many rows to draw.
+    invokeMock.mockResolvedValue(Array.from({ length: 513 }, () => receipt));
+    await expect(loadPreflightReceipts(receipt.projectId)).rejects.toThrow(
+      "invalid preflight Receipt list",
+    );
   });
 
   it("accepts an exact preflight Receipt and rejects one that hides what it skipped", async () => {
