@@ -173,17 +173,28 @@ pub(crate) enum PathResolution {
     NotLoose { object_id: String },
     /// Some object on the path exceeded the caller's bound.
     TooLarge,
+    /// The declared path has more components than this walk will descend.
+    ///
+    /// A resource refusal, and its own arm rather than `Malformed`: paths this deep are legal
+    /// Proposal paths -- the owning validator sets no component-count rule -- so the walk simply
+    /// did not finish, and calling that a broken object would describe Beacon's own limit as
+    /// repository corruption (gpt2's slice-2 P1).
+    TooDeep,
     /// Some object on the path did not inflate, did not authenticate, did not parse, or was not
     /// the type its position requires.
     Malformed,
 }
 
-/// How deep a declared path may go before this reader refuses to keep descending.
+/// How deep a declared path may go before this walk refuses to descend further.
 ///
-/// A bound on the walk, not a statement about repositories: paths this deep exist, and one that
-/// hits the cap is `Malformed` rather than absent, because the walk did not finish. The declared
-/// path is already validated by its own module; this is the second, independent limit that keeps a
-/// hostile tree from choosing how much work Beacon does.
+/// A bound on the walk, not a statement about repositories: paths this deep are legal, and one that
+/// hits the cap is [`PathResolution::TooDeep`] -- a refusal, never `Absent` and never `Malformed`.
+/// The declared path is validated by its own module, which sets no component-count rule; this is
+/// the second, independent limit that keeps a hostile path from choosing how much work Beacon does.
+///
+/// It is enforced WHILE splitting rather than after: collecting the whole component vector first
+/// would let the caller's string size choose the allocation before any limit applied, which is the
+/// work the bound exists to refuse (gpt2's slice-2 P2).
 const MAX_PATH_COMPONENTS: usize = 64;
 
 /// A repository resolved to its object directory.
@@ -416,16 +427,23 @@ impl ObjectStore {
         maximum: usize,
         deadline: &mut impl FnMut() -> bool,
     ) -> Result<PathResolution, ObjectStoreError> {
-        let components: Vec<&str> = path.split('/').collect();
-        if components.is_empty()
-            || components.len() > MAX_PATH_COMPONENTS
-            || components.iter().any(|component| {
-                component.is_empty()
-                    || *component == "."
-                    || *component == ".."
-                    || component.contains('\0')
-            })
-        {
+        // Bounded as it goes: the 65th component ends the split rather than being collected and
+        // then counted, so a hostile path cannot choose the allocation before the limit applies.
+        let mut components: Vec<&str> = Vec::new();
+        for component in path.split('/') {
+            if components.len() == MAX_PATH_COMPONENTS {
+                return settled(PathResolution::TooDeep, deadline);
+            }
+            if component.is_empty()
+                || component == "."
+                || component == ".."
+                || component.contains('\0')
+            {
+                return settled(PathResolution::Malformed, deadline);
+            }
+            components.push(component);
+        }
+        if components.is_empty() {
             return settled(PathResolution::Malformed, deadline);
         }
 
@@ -2064,8 +2082,21 @@ mod tests {
                 "{path:?} was walked"
             );
         }
+
+        // A path deeper than the cap is a REFUSAL, not corruption: paths this deep are legal, and
+        // the walk simply declined to descend. Reporting `Malformed` would describe Beacon's own
+        // limit as a broken repository.
         let deep = vec!["a"; MAX_PATH_COMPONENTS + 1].join("/");
-        assert_eq!(resolve(&store, &revision, &deep), PathResolution::Malformed);
+        assert_eq!(resolve(&store, &revision, &deep), PathResolution::TooDeep);
+
+        // The boundary itself, in both directions. A `>` / `>=` slip is invisible without it, and
+        // gpt2's own mutant of exactly that shape survived the first version of this suite.
+        let exact = vec!["a"; MAX_PATH_COMPONENTS].join("/");
+        assert_eq!(
+            resolve(&store, &revision, &exact),
+            PathResolution::Absent,
+            "a path at the cap was refused instead of walked"
+        );
     }
 
     #[test]
