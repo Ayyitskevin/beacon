@@ -1459,13 +1459,25 @@ fn derive_readiness(
     if !policy.is_some_and(|facts| facts.is_current) {
         unmet.push(UnmetPrecondition::ProjectPolicyRevisionMoved);
     }
+    // Repository and base are separate facts (ADR 0034:220-228), so a rebind that keeps the
+    // same pinned commit must report only the revision as moved -- not a false base-drift
+    // diagnosis riding on top of a true one. Both are unmet only when there is no current
+    // binding at all to compare against, which never happens for a Proposal that passed
+    // submission (Repository Bindings are append-only, so a bound revision never disappears);
+    // it stays the honest answer for that state if it is ever reached some other way.
     match latest_repository {
         Some(binding) if binding.revision == payload.bindings.repository_revision => {
             if binding.base_revision != payload.bindings.pinned_base_revision {
                 unmet.push(UnmetPrecondition::BaseRevisionMoved);
             }
         }
-        _ => {
+        Some(binding) => {
+            unmet.push(UnmetPrecondition::RepositoryRevisionMoved);
+            if binding.base_revision != payload.bindings.pinned_base_revision {
+                unmet.push(UnmetPrecondition::BaseRevisionMoved);
+            }
+        }
+        None => {
             unmet.push(UnmetPrecondition::RepositoryRevisionMoved);
             unmet.push(UnmetPrecondition::BaseRevisionMoved);
         }

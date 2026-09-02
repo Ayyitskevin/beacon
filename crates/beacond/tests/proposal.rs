@@ -1187,6 +1187,49 @@ fn a_fresh_v1_proposal_reports_exactly_its_undeclared_preconditions() {
 }
 
 #[test]
+fn a_new_repository_revision_with_the_same_base_reports_only_the_revision_as_moved() {
+    // ADR 0034 treats "Repository" and "base" as separate facts in its readiness list
+    // (":220-228"), so a Repository rebind that keeps the same pinned commit must not also claim
+    // the base moved -- that is a second, false diagnosis riding on the first true one.
+    let fixture = admitted_mission("repository-moved-same-base");
+    let record = fixture.record();
+    fixture.proposals.submit(&record.bytes()).unwrap();
+
+    ProjectRepositoryService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .bind(
+            fixture.project_id,
+            1,
+            Some(1),
+            RepositoryDraft {
+                source_kind: RepositorySourceKind::LocalPath,
+                // A different fabricated source, same pinned commit -- only the revision moved.
+                source: "/home/operator/projects/sample-tracker-relocated".to_owned(),
+                base_revision: BASE_REVISION.to_owned(),
+                declared_checks: declared_checks(),
+            },
+        )
+        .unwrap();
+
+    let after = fixture.proposals.get(&record.digest()).unwrap();
+    assert!(
+        after
+            .readiness()
+            .unmet()
+            .contains(&UnmetPrecondition::RepositoryRevisionMoved),
+        "{:?}",
+        after.readiness().unmet()
+    );
+    assert!(
+        !after
+            .readiness()
+            .unmet()
+            .contains(&UnmetPrecondition::BaseRevisionMoved),
+        "same base falsely reported as moved: {:?}",
+        after.readiness().unmet()
+    );
+}
+
+#[test]
 fn a_new_charter_revision_makes_get_report_a_moved_binding_and_startup_still_succeeds() {
     let fixture = admitted_mission("moved-charter");
     let record = fixture.record();
