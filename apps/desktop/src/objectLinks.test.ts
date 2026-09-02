@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_OBJECT_LINK_CHARS,
   OBJECT_LINK_SCHEME,
+  formatObjectLink,
   parseObjectLink,
   routeObjectLink,
   type LinkContext,
@@ -58,6 +59,20 @@ const projectLink = `${OBJECT_LINK_SCHEME}/${WORKSPACE}/project/${PROJECT}`;
 const missionLink = `${projectLink}/mission/${MISSION}`;
 
 describe("the object-link grammar", () => {
+  it("emits one canonical link that parses back to every object kind", () => {
+    const objects = [
+      { kind: "briefing", workspaceId: WORKSPACE },
+      { kind: "project", workspaceId: WORKSPACE, projectId: PROJECT },
+      { kind: "mission", workspaceId: WORKSPACE, projectId: PROJECT, missionId: MISSION },
+    ] as const;
+
+    for (const object of objects) {
+      const emitted = formatObjectLink(object);
+      expect(emitted).toBe(emitted.toLowerCase());
+      expect(parseObjectLink(emitted)).toEqual(object);
+    }
+  });
+
   it("reads the three kinds that have surfaces", () => {
     expect(link(briefing)).toEqual({ kind: "briefing", workspaceId: WORKSPACE });
     expect(link(projectLink)).toEqual({ kind: "project", workspaceId: WORKSPACE, projectId: PROJECT });
