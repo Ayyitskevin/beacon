@@ -31,6 +31,18 @@ cannot substitute for the non-author review or Product Steward sign-off.
 Evidence settles technical disagreements when possible. The Product Steward decides when a
 material disagreement remains.
 
+### Recorded implementation-only security disposition: A-G1-03
+
+On 2026-09-02 Kevin approved all recommendations in A-G1-03 as staged security work, including the
+20–30 hour planning correction and exact-commit non-author review before merge. This is an
+implementation-only correction to the private materialization mechanics already decided by
+[ADR 0033](docs/adr/0033-install-the-sample-project-as-inert-managed-state.md): the destination,
+bundle, persistence, recovery, compatibility, and public-interface decisions remain unchanged, so
+ADR 0033's text remains unchanged. Slice 1 binds staging creation, initialization Git processes,
+failure cleanup, and publication to held directory descriptors. Later slices still own
+descriptor-relative adoption verification, recursive synchronization, and remaining identity-drift
+races; accepting this first slice does not dispose of them.
+
 ## Commercial boundary
 
 The complete local core remains free under the project license. The Product Steward may offer paid
