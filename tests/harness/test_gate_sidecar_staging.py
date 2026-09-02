@@ -31,10 +31,31 @@ STALE_BINARY = b"a supervisor left behind by an earlier build\n"
 FAKE_CARGO = f"""#!/bin/sh
 # Fails only the sidecar release build. Every other cargo invocation succeeds,
 # so the gate reaches its remaining checks and the assertion is about staging.
-if [ "$*" = "{FAILING_BUILD}" ]; then
-    echo "injected sidecar build failure" >&2
-    exit 42
-fi
+# Matched as a prefix: the real call carries --message-format after these words.
+case "$*" in
+    "{FAILING_BUILD}"*)
+        echo "injected sidecar build failure" >&2
+        exit 42
+        ;;
+esac
+exit 0
+"""
+
+# Succeeds, writes the freshly built binary ONLY under the relocated target
+# directory, and reports that path the way cargo's JSON output does.
+RELOCATED_CARGO = """#!/bin/sh
+mkdir -p "$CARGO_TARGET_DIR/release"
+printf '%s' "$RELOCATED_BYTES" > "$CARGO_TARGET_DIR/release/beacond"
+chmod +x "$CARGO_TARGET_DIR/release/beacond"
+printf '%s\\n' \\
+  '{"reason":"compiler-artifact","target":{"name":"beacond","kind":["bin"]},"executable":"'"$CARGO_TARGET_DIR"'/release/beacond"}'
+exit 0
+"""
+
+# Succeeds and reports no executable at all: there is nothing to stage, and a
+# fixed path would have quietly supplied one.
+SILENT_CARGO = """#!/bin/sh
+echo '{"reason":"build-finished","success":true}'
 exit 0
 """
 
@@ -57,12 +78,34 @@ def _isolated_checkout(tmp_path: Path) -> Path:
     stale.write_bytes(STALE_BINARY)
     stale.chmod(0o755)
 
-    binaries = tmp_path / "bin"
-    binaries.mkdir()
-    cargo = binaries / "cargo"
-    cargo.write_text(FAKE_CARGO)
-    cargo.chmod(0o755)
+    _write_cargo(tmp_path, FAKE_CARGO)
     return root
+
+
+def _write_cargo(tmp_path: Path, body: str) -> None:
+    """The only cargo on PATH for a run. Each test supplies the behaviour its
+    wrong answer needs; nothing else about the scripts is replaced."""
+    binaries = tmp_path / "bin"
+    binaries.mkdir(exist_ok=True)
+    cargo = binaries / "cargo"
+    cargo.write_text(body)
+    cargo.chmod(0o755)
+
+
+def _run_staging(
+    root: Path, tmp_path: Path, extra_environment: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
+    environment = dict(os.environ)
+    environment["PATH"] = f"{tmp_path / 'bin'}{os.pathsep}{environment['PATH']}"
+    environment.update(extra_environment)
+    return subprocess.run(
+        [str(root / "scripts" / "stage-sidecar")],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def test_a_failed_sidecar_build_with_a_stale_binary_fails_the_gate(tmp_path: Path) -> None:
@@ -87,4 +130,44 @@ def test_a_failed_sidecar_build_with_a_stale_binary_fails_the_gate(tmp_path: Pat
     # The stale binary is the fixture's own, so a copy that should never have
     # happened is visible here rather than hidden in the developer's checkout.
     assert (root / "target" / "release" / "beacond").read_bytes() == STALE_BINARY
+    assert not (root / "target" / "sidecar").exists()
+
+
+def test_a_relocated_build_stages_the_binary_it_produced(tmp_path: Path) -> None:
+    """Cargo's output directory moves; the staged bytes must move with it.
+
+    A successful build under CARGO_TARGET_DIR, with older bytes still at the
+    default path, used to stage the older bytes and exit 0 -- and the sidecar
+    exists so the packaged supervisor is the one just built.
+    """
+    root = _isolated_checkout(tmp_path)
+    _write_cargo(tmp_path, RELOCATED_CARGO)
+    fresh = "the supervisor this build produced\n"
+
+    result = _run_staging(
+        root,
+        tmp_path,
+        {
+            "CARGO_TARGET_DIR": str(tmp_path / "relocated-target"),
+            "RELOCATED_BYTES": fresh,
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    staged = next((root / "target" / "sidecar").iterdir())
+    assert staged.read_bytes() == fresh.encode(), "staged the stale default-path binary"
+    assert staged.read_bytes() != STALE_BINARY
+    # The stale binary is untouched, so the difference is the source, not a race.
+    assert (root / "target" / "release" / "beacond").read_bytes() == STALE_BINARY
+
+
+def test_a_build_that_reports_no_executable_refuses_to_stage(tmp_path: Path) -> None:
+    root = _isolated_checkout(tmp_path)
+    _write_cargo(tmp_path, SILENT_CARGO)
+
+    result = _run_staging(root, tmp_path, {})
+
+    assert result.returncode != 0
+    assert "cargo produced no beacond executable" in result.stderr
+    # No fallback: nothing was staged from the binary at the default path.
     assert not (root / "target" / "sidecar").exists()
