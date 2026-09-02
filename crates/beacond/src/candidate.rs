@@ -44,8 +44,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::proposal::{
-    MutationKind, ProposalDigest, is_base_revision, is_repository_relative_path,
-    proposal_intent_facts, sha256,
+    MutationKind, ProposalDigest, ProposalIntentFacts, is_base_revision,
+    is_repository_relative_path, proposal_intent_facts, sha256,
 };
 use crate::{OperatorAccountError, OperatorAccountService, ProposalError};
 
@@ -778,17 +778,7 @@ impl CandidateService {
     /// to apply yet", the other is "this decision names bytes this Workspace does not hold".
     pub fn for_proposal(&self, proposal_digest: &str) -> Result<Option<Candidate>, CandidateError> {
         self.accounts.with_authenticated_store(|connection, _now| {
-            if proposal_intent_facts(connection, self.workspace_id, proposal_digest)
-                .map_err(map_proposal_error)?
-                .is_none()
-            {
-                return Err(CandidateError::Inconsistent(
-                    InconsistentCandidate::ProposalNotFound,
-                ));
-            }
-            load_stored_for_proposal(connection, self.workspace_id, proposal_digest)?
-                .map(verified_candidate)
-                .transpose()
+            verified_candidate_for_proposal(connection, self.workspace_id, proposal_digest)
         })
     }
 }
@@ -995,6 +985,81 @@ fn columns_match(stored: &StoredCandidate, payload: &CandidateV1) -> bool {
         && stored.recorded_at_ms == payload.recorded_at_ms
 }
 
+/// Exactly one `proposal.candidate_recorded` Event names this Candidate.
+///
+/// A record whose evidence is missing, or duplicated, is not a Candidate with a caveat. Checked at
+/// startup over the whole table and again by [`verified_candidate_for_proposal`] for the one record
+/// a consumer is about to act on, because a consumer that acts inside its own transaction cannot
+/// borrow the last startup's conclusion.
+fn require_one_event(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+) -> Result<(), CandidateError> {
+    let count: i64 = connection.query_row(
+        "SELECT count(*) FROM events
+         WHERE workspace_id = ?1 AND kind = 'proposal.candidate_recorded'
+           AND json_extract(payload_json, '$.candidate.digest.value') = ?2",
+        params![workspace_id.to_string(), digest_value],
+        |row| row.get(0),
+    )?;
+    if count == 1 {
+        Ok(())
+    } else {
+        Err(CandidateError::InvalidStore)
+    }
+}
+
+/// The one Candidate for a Proposal, proved from bytes **inside the caller's transaction**.
+///
+/// This exists because a snapshot is not a fact about the moment it is used. `CandidateService`
+/// methods open their own authenticated store closure and return a value derived at that instant;
+/// a consumer that must decide inside one serialized transaction -- dispatch, when it lands --
+/// cannot treat such a value as current, and must not assemble the record by joining tables
+/// itself. So the proof lives here, once, and runs against the connection the caller is already
+/// holding: the digest names these bytes, they decode, they re-encode identically, every indexed
+/// column repeats them, exactly one Event carries them, and the entries still match the Proposal's
+/// declared mutations in order.
+///
+/// `Ok(None)` means the Proposal has no Candidate, which is a different fact from a Proposal this
+/// Workspace never recorded -- that is `ProposalNotFound` -- and from a Candidate that disagrees
+/// with itself, which is `InvalidStore`. A consumer acts differently on each.
+pub(crate) fn verified_candidate_for_proposal(
+    connection: &Connection,
+    workspace_id: Uuid,
+    proposal_digest: &str,
+) -> Result<Option<Candidate>, CandidateError> {
+    let Some(facts) = proposal_intent_facts(connection, workspace_id, proposal_digest)
+        .map_err(map_proposal_error)?
+    else {
+        return Err(CandidateError::Inconsistent(
+            InconsistentCandidate::ProposalNotFound,
+        ));
+    };
+    let Some(stored) = load_stored_for_proposal(connection, workspace_id, proposal_digest)? else {
+        return Ok(None);
+    };
+    let digest_value = stored.digest_value.clone();
+    let candidate = verified_candidate(stored)?;
+    require_one_event(connection, workspace_id, &digest_value)?;
+    if !agrees_with_proposal(&facts, candidate.payload()) {
+        return Err(CandidateError::InvalidStore);
+    }
+    Ok(Some(candidate))
+}
+
+/// The copy rule: a Candidate's entries are the Proposal's declared mutations, in order, at the
+/// Proposal's own pinned base. Checked wherever a Candidate is read for use, not only at startup.
+fn agrees_with_proposal(facts: &ProposalIntentFacts, payload: &CandidateV1) -> bool {
+    facts.pinned_base_revision == payload.pinned_base_revision
+        && facts.declared_mutations.len() == payload.entries.len()
+        && facts
+            .declared_mutations
+            .iter()
+            .zip(&payload.entries)
+            .all(|(mutation, entry)| mutation.kind == entry.kind && mutation.target == entry.path)
+}
+
 // ---------------------------------------------------------------------------------------------
 // Startup reconciliation
 // ---------------------------------------------------------------------------------------------
@@ -1035,31 +1100,11 @@ pub(crate) fn verify_candidate_state(connection: &Connection) -> Result<(), Cand
         let facts = proposal_intent_facts(connection, workspace_id, proposal_digest)
             .map_err(map_proposal_error)?
             .ok_or(CandidateError::InvalidStore)?;
-        if facts.pinned_base_revision != candidate.payload().pinned_base_revision {
-            return Err(CandidateError::InvalidStore);
-        }
-        if facts.declared_mutations.len() != candidate.payload().entries.len() {
-            return Err(CandidateError::InvalidStore);
-        }
-        if facts
-            .declared_mutations
-            .iter()
-            .zip(&candidate.payload().entries)
-            .any(|(mutation, entry)| mutation.kind != entry.kind || mutation.target != entry.path)
-        {
+        if !agrees_with_proposal(&facts, candidate.payload()) {
             return Err(CandidateError::InvalidStore);
         }
 
-        let event_count: i64 = connection.query_row(
-            "SELECT count(*) FROM events
-             WHERE workspace_id = ?1 AND kind = 'proposal.candidate_recorded'
-               AND json_extract(payload_json, '$.candidate.digest.value') = ?2",
-            params![workspace_id.to_string(), digest_value.as_str()],
-            |row| row.get(0),
-        )?;
-        if event_count != 1 {
-            return Err(CandidateError::InvalidStore);
-        }
+        require_one_event(connection, workspace_id, digest_value)?;
     }
 
     let total_events: i64 = connection.query_row(
