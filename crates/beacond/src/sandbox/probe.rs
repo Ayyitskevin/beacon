@@ -277,3 +277,76 @@ unsafe fn run_child(
         libc::_exit(observed)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn observation_for(code: i32) -> ProbeObservation {
+        ProbeObservation {
+            wrote_inside_target: code & BIT_WROTE_INSIDE != 0,
+            refused_write_outside_target: code & BIT_REFUSED_OUTSIDE != 0,
+            read_system_path: code & BIT_READ_SYSTEM != 0,
+            refused_tcp_connect: code & BIT_REFUSED_TCP != 0,
+        }
+    }
+
+    fn expected_for(code: i32, restricts_network: bool) -> SandboxCapability {
+        let observed = observation_for(code);
+        let filesystem_held = observed.wrote_inside_target
+            && observed.refused_write_outside_target
+            && observed.read_system_path;
+        if !filesystem_held || (restricts_network && !observed.refused_tcp_connect) {
+            SandboxCapability::Unavailable {
+                reason: SandboxUnavailableReason::ProbeRefused { observed },
+            }
+        } else if restricts_network {
+            SandboxCapability::Enforcing {
+                landlock_abi: NETWORK_ABI_FLOOR,
+                observed,
+            }
+        } else {
+            SandboxCapability::FilesystemOnly {
+                landlock_abi: NETWORK_ABI_FLOOR,
+                observed,
+            }
+        }
+    }
+
+    #[test]
+    fn interpret_decodes_every_observation_bit_shape() {
+        for code in 0..=BIT_WROTE_INSIDE | BIT_REFUSED_OUTSIDE | BIT_READ_SYSTEM | BIT_REFUSED_TCP {
+            for restricts_network in [false, true] {
+                assert_eq!(
+                    interpret(NETWORK_ABI_FLOOR, code, restricts_network),
+                    expected_for(code, restricts_network),
+                    "status {code:#06b}, restricts_network={restricts_network}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn interpret_keeps_setup_and_unknown_statuses_out_of_the_bit_protocol() {
+        assert_eq!(
+            interpret(NETWORK_ABI_FLOOR, EXIT_NO_NEW_PRIVS, true),
+            SandboxCapability::Unavailable {
+                reason: SandboxUnavailableReason::NoNewPrivsRefused { errno: 0 },
+            }
+        );
+        assert_eq!(
+            interpret(NETWORK_ABI_FLOOR, EXIT_RESTRICT, true),
+            SandboxCapability::Unavailable {
+                reason: SandboxUnavailableReason::RestrictRefused { errno: 0 },
+            }
+        );
+        assert_eq!(
+            interpret(NETWORK_ABI_FLOOR, 16, true),
+            SandboxCapability::Unavailable {
+                reason: SandboxUnavailableReason::ProbeInconclusive {
+                    detail: "the probe child reported an unknown status 16".to_owned(),
+                },
+            }
+        );
+    }
+}
