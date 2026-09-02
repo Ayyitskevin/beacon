@@ -63,7 +63,7 @@ it("lists recent Receipts newest first, not in the order they arrived", async ()
     <BriefingReceipts rows={rows} total={3} loading={false} failure="" busy={false} onRefresh={vi.fn()} />,
   );
 
-  const listed = within(screen.getByRole("list", { name: "Recent Receipts" })).getAllByRole(
+  const listed = within(screen.getByRole("list", { name: "Recent preflight Receipts" })).getAllByRole(
     "listitem",
   );
   expect(listed.map((item) => item.textContent)).toEqual([
@@ -91,7 +91,7 @@ it("does not render a verified Receipt as a passing check", () => {
   // Preflight runs no check. A row that says "passed" claims something no
   // Receipt in this set records.
   expect(screen.getByText(/not a passing check/)).toBeVisible();
-  const text = screen.getByRole("list", { name: "Recent Receipts" }).textContent ?? "";
+  const text = screen.getByRole("list", { name: "Recent preflight Receipts" }).textContent ?? "";
   expect(text).not.toMatch(/passed|succeeded|completed/i);
 });
 
@@ -127,7 +127,7 @@ it("says a truncated list is truncated instead of implying completeness", () => 
   );
 
   expect(
-    within(screen.getByRole("list", { name: "Recent Receipts" })).getAllByRole("listitem"),
+    within(screen.getByRole("list", { name: "Recent preflight Receipts" })).getAllByRole("listitem"),
   ).toHaveLength(5);
   expect(screen.getByText(/Showing the 5 most recent of 9/)).toBeVisible();
 });
@@ -162,4 +162,26 @@ it("keeps empty, loading and failed apart", async () => {
 
   await user.click(screen.getByRole("button", { name: "Refresh Receipts" }));
   expect(onRefresh).toHaveBeenCalledTimes(1);
+});
+
+it("says the list is preflight Receipts, not every Receipt Beacon writes", () => {
+  render(
+    <BriefingReceipts
+      rows={[row("aaaaaaaa-1111-4111-8111-111111111111", "verified", 100)]}
+      total={1}
+      loading={false}
+      failure=""
+      busy={false}
+      onRefresh={vi.fn()}
+    />,
+  );
+
+  // Beacon already writes execution Receipts for declared-check Runs; this
+  // Query filters runs.kind = 'check_preflight'. Calling the result "Recent
+  // Receipts" presents a kind-filtered subset as the whole.
+  expect(screen.getByRole("heading", { name: "Recent preflight Receipts" })).toBeVisible();
+  expect(screen.getByRole("list", { name: "Recent preflight Receipts" })).toBeVisible();
+  const section = screen.getByRole("heading", { name: "Recent preflight Receipts" }).parentElement;
+  expect(section?.textContent).not.toMatch(/what each Run did/);
+  expect(screen.getByText(/does not include execution Receipts/)).toBeVisible();
 });

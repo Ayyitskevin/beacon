@@ -402,7 +402,7 @@ describe("Beacon desktop shell", () => {
     const { container } = render(<App />);
     await screen.findByRole("heading", { name: "Briefing" });
 
-    const list = await screen.findByRole("list", { name: "Recent Receipts" });
+    const list = await screen.findByRole("list", { name: "Recent preflight Receipts" });
     const rows = within(list).getAllByRole("listitem");
     // Two Projects, merged. Per-Project order would put the tracker's older
     // Receipt above the ledger's newer one.
@@ -431,7 +431,7 @@ describe("Beacon desktop shell", () => {
 
     render(<App />);
     await screen.findByRole("heading", { name: "Briefing" });
-    const list = await screen.findByRole("list", { name: "Recent Receipts" });
+    const list = await screen.findByRole("list", { name: "Recent preflight Receipts" });
 
     // A Receipt records what a Run did. Preflight runs no check, so nothing
     // here may read as a completed or passing one.
@@ -457,14 +457,14 @@ describe("Beacon desktop shell", () => {
     render(<App />);
     await screen.findByRole("heading", { name: "Briefing" });
 
-    expect(await screen.findByText(/Recent Receipts could not be read/)).toBeVisible();
+    expect(await screen.findByText(/Recent preflight Receipts could not be read/)).toBeVisible();
     expect(screen.queryByText("No preflight Receipts yet.")).toBeNull();
 
     // The failure is retryable rather than terminal, and the retry can reach
     // the genuinely-empty state.
     await user.click(screen.getByRole("button", { name: "Refresh Receipts" }));
     expect(await screen.findByText("No preflight Receipts yet.")).toBeVisible();
-    expect(screen.queryByText(/Recent Receipts could not be read/)).toBeNull();
+    expect(screen.queryByText(/Recent preflight Receipts could not be read/)).toBeNull();
   });
 
   it("discovers installed local models as inactive resources from Briefing", async () => {

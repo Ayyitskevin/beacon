@@ -115,16 +115,17 @@ export function BriefingReceipts({
   return (
     <section className={styles.section} aria-labelledby="briefing-receipts-heading">
       <h2 id="briefing-receipts-heading" className={styles.heading}>
-        Recent Receipts
+        Recent preflight Receipts
       </h2>
       <p className={styles.body}>
-        An immutable account of what each Run did. Preflight establishes whether execution would be
-        admissible; it runs no check.
+        An immutable account of what each preflight Run did. Preflight establishes whether
+        execution would be admissible; it runs no check. This list does not include execution
+        Receipts, which Beacon also writes.
       </p>
 
       {failure ? (
         <p className={styles.body} role="status">
-          Recent Receipts could not be read. {failure}
+          Recent preflight Receipts could not be read. {failure}
         </p>
       ) : loading ? (
         <p className={styles.body} role="status">
@@ -136,7 +137,7 @@ export function BriefingReceipts({
         </p>
       ) : (
         <>
-          <ul className={styles.list} aria-label="Recent Receipts">
+          <ul className={styles.list} aria-label="Recent preflight Receipts">
             {shown.map(({ receipt, projectName }) => (
               <li key={receipt.runId} className={styles.row}>
                 <span>
