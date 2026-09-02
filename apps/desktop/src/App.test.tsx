@@ -133,6 +133,32 @@ const residentCapabilityCatalog = [
   },
 ] as const;
 
+const encryptionEvidence = [
+  { source: "stat(live store)", observation: "st_dev = 259:2" },
+  {
+    source: "/proc/self/mountinfo",
+    observation: "259:2 ext4 /dev/nvme0n1p2 at /home/operator",
+  },
+] as const;
+function encryptionReport(state: "enabled" | "disabled" | "unknown", reason?: string) {
+  return {
+    state,
+    mountPoint: { kind: "present", value: "/home/operator" },
+    mechanism:
+      state === "enabled"
+        ? { kind: "present", value: "dm-crypt (LUKS2)" }
+        : {
+            kind: "absent",
+            reason:
+              reason ??
+              "Beacon found no device-mapper crypt layer in this volume's block stack",
+          },
+    evidence: encryptionEvidence,
+    notVerified: ["filesystem-level encryption such as fscrypt or ext4 encryption"],
+    observedAtMs: 1_756_000_000_000,
+  };
+}
+
 type Phase = "operator_setup_required" | "locked" | "unlocked";
 
 function status(phase: Phase) {
@@ -149,6 +175,9 @@ function mockInitialState(phase: Phase) {
     if (command === "starter_organization") return Promise.resolve(acceptedOrganization);
     if (command === "residents") return Promise.resolve(residentRoster);
     if (command === "record_operator_activity") return Promise.resolve(null);
+    if (command === "live_data_encryption_status") {
+      return Promise.resolve(encryptionReport("enabled"));
+    }
     if (command === "set_session_timeout") {
       return Promise.resolve({
         inactivityTimeoutMinutes: (args as { inactivityTimeoutMinutes: number })
@@ -307,6 +336,72 @@ describe("Beacon desktop shell", () => {
     expect(within(suiteNavigation).getByRole("button", { name: "Conversations" })).toBeDisabled();
     expect(within(suiteNavigation).getByRole("button", { name: "Knowledge" })).toBeDisabled();
     expect(within(suiteNavigation).getByRole("button", { name: "Software" })).toBeDisabled();
+  });
+
+  it("warns persistently while live-data encryption is disabled and rechecks on demand", async () => {
+    const user = userEvent.setup();
+    mockInitialState("unlocked");
+    let state: "enabled" | "disabled" = "disabled";
+    const base = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "live_data_encryption_status") {
+        return Promise.resolve(encryptionReport(state));
+      }
+      return base(command, args);
+    });
+
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+
+    expect(
+      await screen.findByText(/Live data is not protected by disk encryption\./),
+    ).toBeVisible();
+    // Unobtrusive, but not dismissible: the condition, not the operator, ends it.
+    expect(screen.queryByRole("button", { name: /dismiss|ignore|close/i })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "How to turn this on" }));
+    expect(screen.getByText(/Turning on disk encryption on Linux/)).toBeVisible();
+    // The destructive path is named, never handed over as a command to run.
+    expect(container.textContent).not.toMatch(/reencrypt|cryptsetup-reencrypt/);
+    expect(screen.getByText(/can destroy all data on the volume/)).toBeVisible();
+
+    state = "enabled";
+    await user.click(screen.getByRole("button", { name: "Recheck" }));
+    expect(
+      await screen.findByText(/Operating-system disk encryption detected/),
+    ).toBeVisible();
+    expect(screen.queryByText(/Live data is not protected by disk encryption\./)).toBeNull();
+    expect(invokeMock).toHaveBeenCalledWith("live_data_encryption_status");
+
+    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
+    expect(results.violations).toEqual([]);
+  });
+
+  it("never describes the open live store as Beacon-encrypted", async () => {
+    for (const state of ["enabled", "disabled", "unknown"] as const) {
+      mockInitialState("unlocked");
+      const base = invokeMock.getMockImplementation()!;
+      invokeMock.mockImplementation((command, args) => {
+        if (command === "live_data_encryption_status") {
+          return Promise.resolve(
+            encryptionReport(state, "the mount table could not be read"),
+          );
+        }
+        return base(command, args);
+      });
+
+      const { container, unmount } = render(<App />);
+      await screen.findByRole("heading", { name: "Briefing" });
+      await screen.findByRole("heading", { name: "Live data" });
+      if (state === "unknown") {
+        expect(screen.getByText(/Disk-encryption status is unknown\./)).toBeVisible();
+        // An unknown reading states why, rather than implying a negative.
+        expect(screen.getByText(/the mount table could not be read/)).toBeVisible();
+      }
+      expect(container.textContent).not.toContain("Beacon-encrypted");
+      expect(container.textContent).not.toMatch(/Beacon (encrypts|has encrypted) (your|the) live/);
+      unmount();
+    }
   });
 
   it("discovers installed local models as inactive resources from Briefing", async () => {
