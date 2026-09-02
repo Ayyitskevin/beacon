@@ -1394,6 +1394,82 @@ fn startup_refuses_an_event_whose_bytes_are_not_the_stored_bytes() {
 }
 
 #[test]
+fn startup_and_get_refuse_a_stored_bound_constraint() {
+    // ADR 0034: "Until those content and owning-module surfaces exist, the only accepted value
+    // is not_declared." Submission enforces that; this proves the common verified-read path used
+    // by `get`, `list_for_mission`, and startup enforces it too, on a row that is otherwise
+    // perfectly coherent -- correct digest, correct bytes, correct Event, correct columns. Only
+    // the constraint tag is something submission would have refused.
+    let (fixture, record) = submitted("startup-bound-constraint");
+    let mut bound = record.clone();
+    bound.requirements = (0..7)
+        .map(|index| Constraint::Bound {
+            kind: format!("descriptor-{index}"),
+            version: 1,
+            canonicalizer: "beacon.sandbox.v1".to_owned(),
+            sha256: [0x99; 32],
+        })
+        .collect();
+    let bytes = bound.bytes();
+    let digest = bound.digest();
+    assert_ne!(digest, record.digest());
+
+    // The row and its Event are rewritten together so every OTHER check still passes: the new
+    // digest names the new bytes, the columns (none of which encode requirements) still match,
+    // and the Event's digest and base64 payload match the new bytes exactly.
+    fixture.tamper(&format!(
+        "UPDATE proposals SET canonical_bytes = x'{}', digest_value = '{}' \
+         WHERE digest_value = '{}'",
+        HEXLOWER.encode(&bytes),
+        digest,
+        record.digest()
+    ));
+    let occurred_at_ms: i64 = fixture
+        .store
+        .connect()
+        .query_row(
+            "SELECT occurred_at_ms FROM events WHERE kind = 'proposal.submitted'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let payload = format!(
+        "{{\"proposal\":{{\"digest\":{{\"algorithm\":\"sha256\",\
+         \"canonicalizer\":\"beacon.proposal.v1\",\"value\":\"{digest}\"}},\
+         \"canonicalBytesBase64\":\"{}\",\"actor\":\"owner\",\"submittedAtMs\":{occurred_at_ms}}}}}",
+        BASE64.encode(&bytes)
+    );
+    fixture
+        .store
+        .connect()
+        .execute(
+            "UPDATE events SET payload_json = ?1 WHERE kind = 'proposal.submitted'",
+            [payload],
+        )
+        .unwrap();
+
+    // Prove the plant is otherwise coherent: bytes hash to the new digest, and it decodes.
+    assert_eq!(HEXLOWER.encode(&sha256(&bytes)), digest);
+
+    let get_error = fixture.proposals.get(&digest).unwrap_err();
+    assert!(
+        matches!(get_error, ProposalError::InvalidStore),
+        "{get_error:?}"
+    );
+
+    let list_error = fixture
+        .proposals
+        .list_for_mission(fixture.mission_id)
+        .unwrap_err();
+    assert!(
+        matches!(list_error, ProposalError::InvalidStore),
+        "{list_error:?}"
+    );
+
+    assert_refuses_startup(&fixture, "stored bound constraint");
+}
+
+#[test]
 fn startup_refuses_when_the_owner_account_is_gone() {
     let (fixture, _) = submitted("startup-no-owner");
     // A record whose authorization basis is `owner` is only truthful while that Owner exists.
