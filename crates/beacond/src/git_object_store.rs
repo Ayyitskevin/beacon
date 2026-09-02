@@ -25,6 +25,8 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
+use sha1::{Digest, Sha1};
+
 /// Why a repository could not be inspected.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ObjectStoreError {
@@ -410,19 +412,23 @@ fn index_contains(
         return Err(ObjectStoreError::UnreadableIndex);
     }
     let pack_data_end = pack_length - 20;
+    let mut object_offsets = vec![0_u64; total];
     let mut large_indexes = Vec::new();
-    for object in 0..total {
+    for (object, object_offset) in object_offsets.iter_mut().enumerate() {
         let offset =
             read_u32(&data, crc_end + object * 4).ok_or(ObjectStoreError::UnreadableIndex)?;
         if offset & 0x8000_0000 == 0 {
-            if !(12..pack_data_end).contains(&u64::from(offset)) {
+            let offset = u64::from(offset);
+            if !(12..pack_data_end).contains(&offset) {
                 return Err(ObjectStoreError::UnreadableIndex);
             }
+            *object_offset = offset;
         } else {
-            large_indexes.push(
+            large_indexes.push((
+                object,
                 usize::try_from(offset & 0x7fff_ffff)
                     .map_err(|_| ObjectStoreError::UnreadableIndex)?,
-            );
+            ));
         }
     }
     let large_offsets_end = checked_table_end(offsets_end, large_indexes.len(), 8)?;
@@ -433,7 +439,7 @@ fn index_contains(
         return Err(ObjectStoreError::UnreadableIndex);
     }
     let mut used_large_offsets = vec![false; large_indexes.len()];
-    for large_index in large_indexes {
+    for (object, large_index) in large_indexes {
         let Some(used) = used_large_offsets.get_mut(large_index) else {
             return Err(ObjectStoreError::UnreadableIndex);
         };
@@ -446,6 +452,7 @@ fn index_contains(
         if !(12..pack_data_end).contains(&offset) {
             return Err(ObjectStoreError::UnreadableIndex);
         }
+        object_offsets[object] = offset;
     }
     if used_large_offsets.iter().any(|used| !used) {
         return Err(ObjectStoreError::UnreadableIndex);
@@ -465,8 +472,34 @@ fn index_contains(
     let mut pack_checksum = [0_u8; 20];
     pack.read_exact_at(&mut pack_checksum, pack_data_end)
         .map_err(|_| ObjectStoreError::UnreadableIndex)?;
-    if data.get(large_offsets_end..large_offsets_end + 20) != Some(pack_checksum.as_slice()) {
+    let computed_pack_checksum = sha1_file_prefix(pack, pack_data_end, deadline)?;
+    if computed_pack_checksum != pack_checksum
+        || data.get(large_offsets_end..large_offsets_end + 20)
+            != Some(computed_pack_checksum.as_slice())
+        || data.get(large_offsets_end + 20..trailer_end)
+            != Some(Sha1::digest(&data[..large_offsets_end + 20]).as_slice())
+    {
         return Err(ObjectStoreError::UnreadableIndex);
+    }
+
+    let mut objects_by_offset = object_offsets
+        .into_iter()
+        .enumerate()
+        .map(|(name_index, offset)| (offset, name_index))
+        .collect::<Vec<_>>();
+    objects_by_offset.sort_unstable();
+    for (position, (start, name_index)) in objects_by_offset.iter().copied().enumerate() {
+        let end = objects_by_offset
+            .get(position + 1)
+            .map_or(pack_data_end, |(offset, _)| *offset);
+        if start >= end {
+            return Err(ObjectStoreError::UnreadableIndex);
+        }
+        let expected_crc =
+            read_u32(&data, names_end + name_index * 4).ok_or(ObjectStoreError::UnreadableIndex)?;
+        if crc32_file_range(pack, start, end, deadline)? != expected_crc {
+            return Err(ObjectStoreError::UnreadableIndex);
+        }
     }
 
     let first = target[0] as usize;
@@ -500,6 +533,57 @@ fn index_contains(
     Ok(false)
 }
 
+fn sha1_file_prefix(
+    file: &File,
+    end: u64,
+    deadline: &mut impl FnMut() -> bool,
+) -> Result<[u8; 20], ObjectStoreError> {
+    let mut digest = Sha1::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut offset = 0_u64;
+    while offset < end {
+        if deadline() {
+            return Err(ObjectStoreError::Elapsed);
+        }
+        let remaining = usize::try_from((end - offset).min(buffer.len() as u64))
+            .map_err(|_| ObjectStoreError::UnreadableIndex)?;
+        file.read_exact_at(&mut buffer[..remaining], offset)
+            .map_err(|_| ObjectStoreError::UnreadableIndex)?;
+        digest.update(&buffer[..remaining]);
+        offset += u64::try_from(remaining).map_err(|_| ObjectStoreError::UnreadableIndex)?;
+    }
+    Ok(digest.finalize().into())
+}
+
+fn crc32_file_range(
+    file: &File,
+    start: u64,
+    end: u64,
+    deadline: &mut impl FnMut() -> bool,
+) -> Result<u32, ObjectStoreError> {
+    let mut crc = u32::MAX;
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut offset = start;
+    while offset < end {
+        if deadline() {
+            return Err(ObjectStoreError::Elapsed);
+        }
+        let remaining = usize::try_from((end - offset).min(buffer.len() as u64))
+            .map_err(|_| ObjectStoreError::UnreadableIndex)?;
+        file.read_exact_at(&mut buffer[..remaining], offset)
+            .map_err(|_| ObjectStoreError::UnreadableIndex)?;
+        for byte in &buffer[..remaining] {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                let mask = 0_u32.wrapping_sub(crc & 1);
+                crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+            }
+        }
+        offset += u64::try_from(remaining).map_err(|_| ObjectStoreError::UnreadableIndex)?;
+    }
+    Ok(!crc)
+}
+
 fn checked_table_end(start: usize, rows: usize, width: usize) -> Result<usize, ObjectStoreError> {
     rows.checked_mul(width)
         .and_then(|length| start.checked_add(length))
@@ -521,6 +605,7 @@ mod tests {
     use std::path::PathBuf;
     use std::process::Command;
 
+    use sha1::{Digest, Sha1};
     use uuid::Uuid;
 
     use super::{ObjectStore, ObjectStoreError, index_contains};
@@ -845,6 +930,93 @@ mod tests {
         permissions.set_mode(0o644);
         fs::set_permissions(&index, permissions).unwrap();
         fs::write(&index, b"not an index").unwrap();
+        let store = ObjectStore::open(&repository.path).unwrap();
+        assert_eq!(
+            store.contains(&revision, &mut never_elapsed()).unwrap_err(),
+            ObjectStoreError::UnreadableIndex
+        );
+    }
+
+    #[test]
+    fn pack_contents_must_match_the_claimed_checksum() {
+        let (repository, revision) = commit_repository("forged-pack-checksum");
+        git(&repository.path, &["gc", "--quiet", "--prune=now"]);
+        let pack_directory = repository.path.join(".git/objects/pack");
+        let pack = fs::read_dir(&pack_directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "pack")
+            })
+            .expect("gc produced a pack");
+        let mut permissions = fs::metadata(&pack).unwrap().permissions();
+        permissions.set_mode(0o644);
+        fs::set_permissions(&pack, permissions).unwrap();
+        let mut bytes = fs::read(&pack).unwrap();
+        // Keep the PACK header, pack trailer, and the index's claimed pack
+        // checksum intact. The old structural check therefore answered true
+        // even though the bytes authenticated by that claim had changed.
+        bytes[12] ^= 0xff;
+        fs::write(&pack, bytes).unwrap();
+
+        let store = ObjectStore::open(&repository.path).unwrap();
+        assert_eq!(
+            store.contains(&revision, &mut never_elapsed()).unwrap_err(),
+            ObjectStoreError::UnreadableIndex
+        );
+    }
+
+    #[test]
+    fn crc_rows_must_match_packed_object_bytes() {
+        let (repository, revision) = commit_repository("forged-pack-crc");
+        git(&repository.path, &["gc", "--quiet", "--prune=now"]);
+        let pack_directory = repository.path.join(".git/objects/pack");
+        let index = fs::read_dir(&pack_directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.extension().is_some_and(|extension| extension == "idx"))
+            .expect("gc produced a pack index");
+        let mut permissions = fs::metadata(&index).unwrap().permissions();
+        permissions.set_mode(0o644);
+        fs::set_permissions(&index, permissions).unwrap();
+        let mut bytes = fs::read(&index).unwrap();
+        let total = u32::from_be_bytes(bytes[1028..1032].try_into().unwrap()) as usize;
+        let first_crc = 8 + 256 * 4 + total * 20;
+        bytes[first_crc] ^= 0xff;
+        let checksum_at = bytes.len() - 20;
+        let checksum = Sha1::digest(&bytes[..checksum_at]);
+        bytes[checksum_at..].copy_from_slice(&checksum);
+        fs::write(&index, bytes).unwrap();
+
+        let store = ObjectStore::open(&repository.path).unwrap();
+        assert_eq!(
+            store.contains(&revision, &mut never_elapsed()).unwrap_err(),
+            ObjectStoreError::UnreadableIndex
+        );
+    }
+
+    #[test]
+    fn pack_index_contents_must_match_their_own_checksum() {
+        let (repository, revision) = commit_repository("forged-index-checksum");
+        git(&repository.path, &["gc", "--quiet", "--prune=now"]);
+        let pack_directory = repository.path.join(".git/objects/pack");
+        let index = fs::read_dir(&pack_directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.extension().is_some_and(|extension| extension == "idx"))
+            .expect("gc produced a pack index");
+        let mut permissions = fs::metadata(&index).unwrap().permissions();
+        permissions.set_mode(0o644);
+        fs::set_permissions(&index, permissions).unwrap();
+        let mut bytes = fs::read(&index).unwrap();
+        let last = bytes.last_mut().unwrap();
+        *last ^= 0xff;
+        fs::write(&index, bytes).unwrap();
+
         let store = ObjectStore::open(&repository.path).unwrap();
         assert_eq!(
             store.contains(&revision, &mut never_elapsed()).unwrap_err(),
