@@ -129,13 +129,37 @@ describe("the object-link grammar", () => {
     expect(link(`${missionLink}/extra`)).toEqual({ kind: "malformed", reason: "trailing_segments" });
   });
 
-  it("checks the bound before it does the parsing", () => {
-    // An operating system can hand a process an arbitrarily long argument. The
-    // reason must be `too_long`, not whatever the oversized tail happens to
-    // look like once it has been split.
-    const oversize = `${projectLink}/${"x".repeat(MAX_OBJECT_LINK_CHARS)}`;
-    expect(oversize.length).toBeGreaterThan(MAX_OBJECT_LINK_CHARS);
-    expect(link(oversize)).toEqual({ kind: "malformed", reason: "too_long" });
+  it("refuses an over-long string ahead of every other reason", () => {
+    // An operating system can hand a process an arbitrarily long argument.
+    // `too_long` outranks the rest of the vocabulary: whatever else is wrong
+    // with the string, the actionable fact is that it is too long to be a link
+    // at all. Each case below would report a DIFFERENT reason if the bound were
+    // checked after that reason's check -- which is what makes the ordering
+    // observable rather than merely intended.
+    const tail = "x".repeat(MAX_OBJECT_LINK_CHARS);
+    for (const oversize of [
+      `https://${tail}`, // would be `wrong_scheme`
+      `${OBJECT_LINK_SCHEME}/${tail}`, // would be `malformed_identifier`
+      `${briefing}/${tail}`, // would be `trailing_segments`
+      `${projectLink}/${tail}`,
+    ]) {
+      expect(oversize.length).toBeGreaterThan(MAX_OBJECT_LINK_CHARS);
+      expect(link(oversize)).toEqual({ kind: "malformed", reason: "too_long" });
+    }
+  });
+
+  it("admits a string of exactly the bound, and refuses one over it", () => {
+    // The positive control for the bound itself. Without it, `>` and `>=` are
+    // indistinguishable: every oversize case above stays green either way, and
+    // the parser would silently refuse a link one character inside its own
+    // documented limit.
+    const atBound = `${OBJECT_LINK_SCHEME}/${"a".repeat(MAX_OBJECT_LINK_CHARS - OBJECT_LINK_SCHEME.length - 1)}`;
+    expect(atBound).toHaveLength(MAX_OBJECT_LINK_CHARS);
+    expect(link(atBound)).toEqual({ kind: "malformed", reason: "malformed_identifier" });
+
+    const overBound = `${atBound}a`;
+    expect(overBound).toHaveLength(MAX_OBJECT_LINK_CHARS + 1);
+    expect(link(overBound)).toEqual({ kind: "malformed", reason: "too_long" });
   });
 
   it("never throws, whatever it is given", () => {
@@ -178,6 +202,28 @@ describe("routing an object link", () => {
       outcome: "otherWorkspace",
       workspaceId: MISSION,
     });
+  });
+
+  it("finds the object the link names, not merely an object", () => {
+    // The positive control for both lookups. With empty collections a `find`
+    // that matched anything and a `find` that matched the id are
+    // indistinguishable -- both return undefined. These readings are loaded and
+    // non-empty, and contain the wrong object.
+    const otherId = "99999999-9999-4999-8999-999999999999";
+    const otherProject: ProjectSummary = { ...project, id: otherId };
+    const otherMission: MissionView = { ...mission, id: otherId };
+
+    expect(routeObjectLink(link(projectLink), context({ projects: [otherProject] }))).toEqual({
+      outcome: "absent",
+      missing: "project",
+      id: PROJECT,
+    });
+    expect(
+      routeObjectLink(
+        link(missionLink),
+        context({ missions: { projectId: PROJECT, items: [otherMission] } }),
+      ),
+    ).toEqual({ outcome: "absent", missing: "mission", id: MISSION });
   });
 
   it("names the object that is missing, and does not land on Briefing", () => {
