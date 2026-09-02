@@ -27,7 +27,7 @@ use beacond::{
     TeamLeadSelectionPolicy, TeamMemberDraft, TeamService, TrackRecordEvidenceKind,
     TrackRecordRequirement, Verdict,
 };
-use data_encoding::HEXLOWER;
+use data_encoding::{BASE64, HEXLOWER};
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -726,5 +726,144 @@ fn a_recorded_evaluation_is_immutable_and_survives_startup_verification() {
     assert_eq!(
         evaluations.get(&evaluation.digest().value).unwrap(),
         evaluation
+    );
+}
+
+/// gpt2's P2: the audit Event must bind the EXACT canonical bytes, not merely quote a digest that
+/// the row it names would have answered for anyway. Each case below is a way the Event and the
+/// record can disagree, and startup must refuse every one of them.
+#[test]
+fn the_audit_event_binds_the_exact_bytes_and_refuses_every_way_it_can_disagree() {
+    let fixture = admitted_mission("evaluation-event-binding");
+    let record = fixture.record();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+    let evaluation = evaluations
+        .record(evaluation_draft(&fixture, &proposal.digest().value))
+        .unwrap();
+
+    let restart = |fixture: &Fixture| {
+        Supervisor::bootstrap(StartupConfig {
+            store_path: fixture.store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        })
+    };
+    assert!(restart(&fixture).is_ok(), "the untouched store must start");
+
+    let original: String = fixture
+        .store
+        .connect()
+        .query_row(
+            "SELECT payload_json FROM events WHERE kind = 'evaluation.recorded'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    // The Event really does carry the bytes, not just their name.
+    assert!(
+        original.contains(&BASE64.encode(evaluation.canonical_bytes())),
+        "the Event does not carry the canonical bytes"
+    );
+
+    let set_payload = |payload: &str| {
+        fixture
+            .store
+            .connect()
+            .execute(
+                "UPDATE events SET payload_json = ?1 WHERE kind = 'evaluation.recorded'",
+                [payload],
+            )
+            .unwrap();
+    };
+
+    // 1. Different bytes in the Event than in the row. What this actually measures is the Event's
+    //    SELF-consistency -- its bytes no longer hash to the digest it names -- because both sides
+    //    are digest-verified, so a byte disagreement cannot survive to reach the row comparison.
+    //    Named for what it checks rather than for the check it looks like it exercises.
+    let mut other = evaluation.canonical_bytes().to_vec();
+    let last = other.len() - 1;
+    other[last] ^= 0x01;
+    let forged = original.replace(
+        &BASE64.encode(evaluation.canonical_bytes()),
+        &BASE64.encode(&other),
+    );
+    set_payload(&forged);
+    assert!(restart(&fixture).is_err(), "changed bytes started");
+
+    // 2. An extra field. A closed payload refuses it rather than ignoring it.
+    let extra = original.replace("{\"evaluation\":{", "{\"evaluation\":{\"note\":\"extra\",");
+    assert_ne!(extra, original, "the probe did not modify the payload");
+    set_payload(&extra);
+    assert!(restart(&fixture).is_err(), "an extra Event field started");
+
+    // 3. A renamed field is the same defect from the other side.
+    let renamed = original.replace("\"verdict\"", "\"verdict_\"");
+    assert_ne!(renamed, original);
+    set_payload(&renamed);
+    assert!(restart(&fixture).is_err(), "a renamed Event field started");
+
+    set_payload(&original);
+    assert!(restart(&fixture).is_ok(), "the restored Event must start");
+
+    // 4. A duplicate Event. One record, one Event -- two is not "extra evidence".
+    fixture
+        .store
+        .connect()
+        .execute(
+            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+             SELECT workspace_id, kind, payload_json, occurred_at_ms FROM events
+             WHERE kind = 'evaluation.recorded'",
+            [],
+        )
+        .unwrap();
+    assert!(restart(&fixture).is_err(), "a duplicate Event started");
+
+    // 5. A missing Event: the record exists and nothing witnesses it.
+    fixture
+        .store
+        .connect()
+        .execute("DELETE FROM events WHERE kind = 'evaluation.recorded'", [])
+        .unwrap();
+    assert!(restart(&fixture).is_err(), "a missing Event started");
+}
+
+/// An Event naming an Evaluation that is not stored is not a harmless leftover: it asserts a
+/// judgment nothing recorded.
+#[test]
+fn an_event_naming_no_stored_evaluation_refuses_startup() {
+    let fixture = admitted_mission("evaluation-orphan-event");
+    let record = fixture.record();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+    let evaluation = evaluations
+        .record(evaluation_draft(&fixture, &proposal.digest().value))
+        .unwrap();
+
+    let connection = fixture.store.connect();
+    let payload: String = connection
+        .query_row(
+            "SELECT payload_json FROM events WHERE kind = 'evaluation.recorded'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    // Same shape, a digest nothing stores.
+    let orphan = payload.replace(&evaluation.digest().value, &HEXLOWER.encode(&[0x33_u8; 32]));
+    connection
+        .execute(
+            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+             VALUES (?1, 'evaluation.recorded', ?2, 7)",
+            rusqlite::params![fixture.workspace_id.to_string(), orphan],
+        )
+        .unwrap();
+    drop(connection);
+
+    assert!(
+        Supervisor::bootstrap(StartupConfig {
+            store_path: fixture.store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        })
+        .is_err(),
+        "an orphan Event started"
     );
 }
