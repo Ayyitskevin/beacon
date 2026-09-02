@@ -99,41 +99,9 @@ SELECT
     state, lease_expires_at_ms, started_at_ms, ended_at_ms
 FROM runs_v14;
 
-DROP TABLE runs_v14;
-
-CREATE INDEX runs_project_started
-ON runs (workspace_id, project_id, started_at_ms DESC);
-
-CREATE INDEX runs_open_lease
-ON runs (state, lease_expires_at_ms)
-WHERE state = 'preflighting';
-
-CREATE TRIGGER runs_no_delete
-BEFORE DELETE ON runs
-BEGIN
-    SELECT RAISE(ABORT, 'Runs are immutable once opened');
-END;
-
-CREATE TRIGGER runs_single_terminal_transition
-BEFORE UPDATE ON runs
-WHEN OLD.state <> 'preflighting'
-  OR NEW.state NOT IN ('refused', 'verified', 'unconfirmed')
-  OR OLD.ended_at_ms IS NOT NULL
-  OR NEW.ended_at_ms IS NULL
-  OR NEW.id <> OLD.id
-  OR NEW.workspace_id <> OLD.workspace_id
-  OR NEW.project_id <> OLD.project_id
-  OR NEW.kind <> OLD.kind
-  OR NEW.repository_revision <> OLD.repository_revision
-  OR NEW.charter_revision <> OLD.charter_revision
-  OR NEW.started_at_ms <> OLD.started_at_ms
-  OR NEW.lease_expires_at_ms <> OLD.lease_expires_at_ms
-BEGIN
-    SELECT RAISE(ABORT, 'A Run advances once from preflighting to a terminal state');
-END;
-
 -- An execution Receipt records that the checks RAN, never that they passed:
 -- a successful process exit is not a successful Mission.
+-- Its renamed foreign key still targets runs_v14, so move the dependent rows first.
 ALTER TABLE receipts RENAME TO receipts_v14;
 
 CREATE TABLE receipts (
@@ -166,6 +134,38 @@ SELECT workspace_id, run_id, version, outcome, receipt_json, recorded_at_ms
 FROM receipts_v14;
 
 DROP TABLE receipts_v14;
+DROP TABLE runs_v14;
+
+CREATE INDEX runs_project_started
+ON runs (workspace_id, project_id, started_at_ms DESC);
+
+CREATE INDEX runs_open_lease
+ON runs (state, lease_expires_at_ms)
+WHERE state = 'preflighting';
+
+CREATE TRIGGER runs_no_delete
+BEFORE DELETE ON runs
+BEGIN
+    SELECT RAISE(ABORT, 'Runs are immutable once opened');
+END;
+
+CREATE TRIGGER runs_single_terminal_transition
+BEFORE UPDATE ON runs
+WHEN OLD.state <> 'preflighting'
+  OR NEW.state NOT IN ('refused', 'verified', 'unconfirmed')
+  OR OLD.ended_at_ms IS NOT NULL
+  OR NEW.ended_at_ms IS NULL
+  OR NEW.id <> OLD.id
+  OR NEW.workspace_id <> OLD.workspace_id
+  OR NEW.project_id <> OLD.project_id
+  OR NEW.kind <> OLD.kind
+  OR NEW.repository_revision <> OLD.repository_revision
+  OR NEW.charter_revision <> OLD.charter_revision
+  OR NEW.started_at_ms <> OLD.started_at_ms
+  OR NEW.lease_expires_at_ms <> OLD.lease_expires_at_ms
+BEGIN
+    SELECT RAISE(ABORT, 'A Run advances once from preflighting to a terminal state');
+END;
 
 CREATE TRIGGER receipts_no_update
 BEFORE UPDATE ON receipts
