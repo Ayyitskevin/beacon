@@ -961,11 +961,16 @@ export function App() {
       setRecentReceiptTotal(found);
       const projectsCapped = readable.length < ordered.length;
       const rowsCapped = found > kept.length;
+      // What the READING did, never what the panel displays. "showing 256"
+      // described retained rows as displayed ones and contradicted the five-row
+      // list a line above it: both numbers were real and the sentence between
+      // them was not. The panel owns one display claim ("Showing the 5 most
+      // recent of N"); this owns the scope that claim was drawn from.
       setRecentReceiptScope(
         rowsCapped
-          ? `showing ${kept.length} most recent preflight Receipts from ${readable.length} of ${ordered.length} Projects; more exist`
+          ? `this reading covered ${readable.length} of ${ordered.length} Projects and kept the ${kept.length} most recent Receipts of the ${found} it found`
           : projectsCapped
-            ? `showing preflight Receipts for the ${readable.length} most recent Projects of ${ordered.length}`
+            ? `this reading covered the ${readable.length} most recent Projects of ${ordered.length}`
             : "",
       );
     } catch (error) {
