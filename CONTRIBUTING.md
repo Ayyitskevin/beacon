@@ -88,9 +88,11 @@ This is what was measured, not what we would like to promise.
 
 - **glibc 2.35 or newer.** linuxdeploy bundles the build host's GTK and WebKit libraries, so the
   package job's base image sets this floor; it is pinned to `ubuntu-22.04` for that reason. The
-  bundle was observed launching on Ubuntu 22.04, Debian 12, and Ubuntu 24.04. Anything older than
-  glibc 2.35 — RHEL 9 is 2.34 — fails with a loader error naming the missing version, not a crash.
-  Built on `ubuntu-latest` instead, the floor is 2.39 and Debian 12 and Ubuntu 22.04 both fail.
+  bundle was observed launching on Ubuntu 22.04, Debian 12, and Ubuntu 24.04 — those three, and
+  nothing else. A newer glibc makes a host loader-eligible, not proven: it still needs the four
+  libraries below and, run directly, `libfuse2`. Anything older than glibc 2.35 — RHEL 9 is 2.34 —
+  fails with a loader error naming the missing version, not a crash. Built on `ubuntu-latest`
+  instead, the floor is 2.39 and Debian 12 and Ubuntu 22.04 both fail.
 - **`libfribidi0`, `libharfbuzz0b`, `libegl1`, and `libgles2`,** which the bundle does not carry.
   One desktop shape was measured: on Ubuntu 24.04, `apt-get install --simulate
   ubuntu-desktop-minimal` pulls all four. The dependency edges that put them there are not
