@@ -310,7 +310,14 @@ transport has no dispatch, pause or resume arm, and no desktop Command exists ye
 dispatch is reachable only in-process, and that Command — with its own capability and `actor: owner`
 derived at the boundary — is a condition on exposing it, not something this checkpoint has.
 
-Resident-issued Team formation, Conversations, Gates, Evaluations, model Invocations,
+An **Evaluation** records one Resident's verdict about one exact Proposal digest, under a rubric
+the evaluator declares (ADR 0038, proposed). It is backend-only and inert: no surface consumes it,
+`meets` is not approval, and no Ruling cites one in v1 -- that relation waits for a Ruling
+canonicalizer that can cover the cited set with the Ruling's own digest. The rubric fields are a
+self-report Beacon does not resolve, and no surface may present a rubric as applied on their
+strength alone. It makes criterion 26 CHECKABLE for Proposals; it does not satisfy it.
+
+Resident-issued Team formation, Conversations, Gates, model Invocations,
 Cloud Link, passkeys, active agent work, and a downloadable installer do not exist yet. Nothing an
 Agent authored has ever been executed: the only commands Beacon runs are the Declared Checks an
 Owner bound by hand, and the only bytes it has ever published are ones an Owner ruled on and Beacon
