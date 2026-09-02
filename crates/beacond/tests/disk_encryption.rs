@@ -829,6 +829,33 @@ fn device_stack_cycle_terminates_within_budget() {
 }
 
 #[test]
+fn a_wide_slaves_directory_stops_at_the_budget_before_reading_it_all() {
+    let fixture = Fixture::new("wide-fan-out");
+    let device = fixture.mounted_on_host_device();
+    // More children than the node budget allows. Every dev file is valid, and
+    // no child device node exists -- so if the budget is enforced only AFTER
+    // the fan-out is enumerated, the walk reads all 66 dev files, explores the
+    // first child, and reports "could not be read". Enforced during
+    // enumeration, it stops and says so. The two reasons are distinguishable
+    // whatever order read_dir returns.
+    let children: Vec<(String, String)> = (0..66)
+        .map(|index| (format!("sd{index}"), format!("8:{index}")))
+        .collect();
+    let borrowed: Vec<(&str, &str)> = children
+        .iter()
+        .map(|(name, dev)| (name.as_str(), dev.as_str()))
+        .collect();
+    fixture.slaves(&device, &borrowed);
+
+    let report = fixture.read();
+
+    assert_eq!(report.state, LiveDataEncryption::Unknown);
+    let reason = reason(&report);
+    assert!(reason.contains("read budget"), "{reason}");
+    assert!(!reason.contains("could not be read"), "{reason}");
+}
+
+#[test]
 fn device_stack_deeper_than_the_budget_reports_unknown() {
     let fixture = Fixture::new("deep");
     let device = fixture.mounted_on_host_device();
