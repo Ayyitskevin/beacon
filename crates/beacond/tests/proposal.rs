@@ -1585,6 +1585,55 @@ fn an_object_store_inspection_that_errors_is_reported_as_failed_not_absent() {
 }
 
 #[test]
+fn a_git_indirection_chain_is_reported_as_unreadable_not_as_a_failed_inspection() {
+    // Guards a documentation claim rather than a behaviour change. Round four found the enum
+    // comment offering a `.git` indirection chain as an example of InspectionFailed; it cannot be
+    // one, because IndirectionTooDeep comes only from ObjectStore::open, and an open failure is
+    // reported before any inspection starts. The wrong answer is the doc's: describing a state the
+    // production path cannot reach, which sends a reader debugging the wrong layer.
+    let fixture = admitted_mission("context-indirection-chain");
+    let (target, revision) = TempRepository::with_one_commit("indirection-target");
+
+    // A source whose `.git` is a FILE pointing at a directory that itself has a `.git` -- one
+    // level more indirection than the object store follows.
+    let source = std::env::temp_dir().join(format!("beacond-indirect-{}", Uuid::new_v4()));
+    fs::create_dir_all(&source).unwrap();
+    fs::write(
+        source.join(".git"),
+        format!("gitdir: {}\n", target.path.display()),
+    )
+    .unwrap();
+
+    let bound = fixture.rebind_repository(
+        1,
+        RepositorySourceKind::LocalPath,
+        source.to_str().unwrap(),
+        &revision,
+    );
+    let mut record = fixture.record();
+    record.repository_revision = bound;
+    record.base_revision = revision;
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+
+    assert!(
+        proposal
+            .readiness()
+            .unmet()
+            .contains(&UnmetPrecondition::ReadableContextNotVerified {
+                reason: ContextComparison::RepositoryUnreadable
+            }),
+        "{:?}",
+        proposal.readiness().unmet()
+    );
+    assert!(!proposal.readiness().unmet().contains(
+        &UnmetPrecondition::ReadableContextNotVerified {
+            reason: ContextComparison::InspectionFailed
+        }
+    ));
+    fs::remove_dir_all(&source).unwrap();
+}
+
+#[test]
 fn a_not_declared_context_reports_only_that_it_is_undeclared() {
     // The comparison applies to a DECLARED context. An undeclared one has no entries to compare,
     // so it must keep reporting exactly what it reported before -- the wrong answer here is a

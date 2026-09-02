@@ -358,8 +358,13 @@ pub enum ContextComparison {
     /// `RepositoryUnreadable`, `PreflightFailed` and `PreflightTimedOut`, and AGENTS.md requires
     /// it: "Terminal, absent, broken, and not evaluated are distinct states."
     RepositoryUnreadable,
-    /// The store opened and an inspection step errored -- an unparseable pack index, a `.git`
-    /// indirection chain. An error, never a negative answer. Mirrors `PreflightFailed`.
+    /// The store opened and an inspection step errored -- in practice, a pack index that cannot be
+    /// parsed as a version 2 index. An error, never a negative answer. Mirrors `PreflightFailed`.
+    ///
+    /// A `.git` indirection chain is NOT an example of this: `IndirectionTooDeep` is produced only
+    /// by `ObjectStore::open`, whose failure this module reports as `RepositoryUnreadable` before
+    /// any inspection begins. `inspection_error` still maps it, because that mapping is exhaustive
+    /// over the store's error enum and must stay so, but no production path reaches it.
     InspectionFailed,
     /// The inspection did not finish inside its budget. Not evaluated: distinct from both a
     /// negative answer and an error. Mirrors `PreflightTimedOut`.

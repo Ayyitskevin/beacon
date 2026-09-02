@@ -105,7 +105,7 @@ Preflight reads, under the same inspection budget:
 |---|---|
 | `RepositorySourceNotLocal` | the binding names a Git URL; nothing local exists to compare, and this slice performs no fetch |
 | `RepositoryUnreadable` | the local path did not open as a Git object store: missing, unreadable, or not a repository |
-| `InspectionFailed` | the store opened and an inspection step errored — an unparseable pack index, a `.git` indirection chain |
+| `InspectionFailed` | the store opened and an inspection step errored — in practice a pack index that cannot be parsed as version 2 (a `.git` indirection chain is *not* an example: that fails `open`, and is reported as `RepositoryUnreadable`) |
 | `InspectionTimedOut` | the inspection did not finish inside its budget: not evaluated, distinct from both a negative answer and an error |
 | `PinnedRevisionAbsent` | the store opened, but the pinned base revision is not in it: the basis for the comparison is what is missing |
 | `ContentUnreadableAtRevision` | the store opened and the pinned revision is present, and Beacon still cannot read a path's content at that revision |
