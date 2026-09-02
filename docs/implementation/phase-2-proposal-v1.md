@@ -135,28 +135,98 @@ Bounding the first three means changing that module's I/O, which this slice does
 fourth would need one budget threaded through startup reconciliation rather than per read. Both are
 follow-ups; what is claimed here is only what is enforced.
 
-**`ContentUnreadableAtRevision` is the terminal state today.** Resolving `path` to its bytes at a
-revision means decompressing the commit object, walking its tree, and reading the blob. When this
-note was written that was a capability limit: `beacond` declared no decompression dependency and
-`git_object_store.rs` was presence-only. It is no longer. #33 added `flate2`, and the
-readable-context comparison slice added `ObjectStore::read_loose_object` and
-`ObjectStore::resolve_path_at`, which do exactly that walk for loose objects.
+**The comparison runs, for loose objects.** Resolving `path` to its bytes at a revision means
+decompressing the commit object, walking its tree, and reading the blob. When this note was first
+written that was a capability limit and `ContentUnreadableAtRevision` was the terminal state:
+`beacond` declared no decompression dependency and `git_object_store.rs` was presence-only. Both
+changed. The Git-hardening work added `flate2`, and the readable-context slices added
+`ObjectStore::read_loose_object`, `ObjectStore::resolve_path_at`, and the comparison that calls them.
 
-What remains is the wiring: no code path in this module calls them yet, so no path can currently
-conclude that a declared entry *agrees* with the pinned revision, and none claims to. The
-distinction matters to a reader deciding what is possible here — this is now a slice that has not
-landed rather than a thing Beacon cannot do.
+A declared entry that holds at the pinned base revision now adds **no readiness item at all**, which
+is the outcome the whole area exists for. One that does not is `ReadableContextMismatch`, naming the
+entry and whether its digest differs or its path is absent. Reading the entries out of the working
+tree at `source` is still refused, for the reason it always was: that compares against whatever is
+checked out now rather than against the pinned revision, manufacturing both false agreement and
+false disagreement from the wrong evidence.
 
-There is deliberately no "mismatch" outcome. A variant nothing can produce is worse than an honest
-absence: it would look like a check that runs. Reading the entries out of the working tree at
-`source` was also rejected — that compares against whatever is checked out now rather than against
-the pinned revision, manufacturing both false agreement and false disagreement from the wrong
-evidence, which is the ADR's prohibition in reverse.
+**Loose objects only, and that is the honest scope.** Every object on the path must be a loose file.
+A repository that has been freshly cloned or `git gc`-ed keeps everything in packs, and reports
+`PackedObjectUnreadable` for every entry — which may well be the common case. What the slices buy is
+that the comparison is true for repositories an Operator has been *working in*, and that
+`ReadableContextMismatch` has a real producer. Nobody should read it as "the comparison now runs"
+without that qualifier. A pack reader is its own slice: varint entry headers, `OFS_DELTA` and
+`REF_DELTA` chains, a recursive resolver with depth and reconstructed-size caps, and an abuse
+surface of its own.
 
-What a later slice adds is the final step only: given a decompressor, resolve each entry's path at
-the pinned revision, hash the blob, and compare it to the entry's SHA-256 — yielding "no item" when
-every entry agrees and a mismatch outcome naming the entries that do not. Every step before it
-already runs and is already tested.
+**What each outcome is a fact about.** `Agreed` and `Mismatched` are facts about the repository;
+every not-verified reason is a fact about what Beacon could reach. The two are never collapsed, and
+no failure path produces silence, because silence is the only outcome that reads as agreement.
+`PackedObjectUnreadable` in particular is claimed only after an authenticated pack lookup finds the
+object — one that an authenticated tree names and that lives in no storage at all is
+`InspectionFailed`, because calling that "packed" would excuse a broken store as a Beacon
+limitation.
+
+**Mismatches are buffered.** They are published only after every declared entry has completed from a
+fully read, self-authenticated object. A mismatch is an accusation about the Operator's declaration
+and an unfinished walk has not earned one, so a later packed, oversized, too-deep or malformed entry
+discards the buffer and the whole comparison is not-verified.
+
+### The comparison's bounds, and which are proved
+
+The comparison owns its bounds rather than inheriting them, because `read_loose_object` deliberately
+invents no limit of its own — a limit chosen inside the reader would be a policy about how large a
+legitimate file may be, applied where nothing knows what the file is for.
+
+| bound | owned by | proved by |
+|---|---|---|
+| one object's compressed and inflated size | the caller, per read | `an_object_larger_than_the_callers_bound_is_a_refusal_not_a_broken_object`, `an_object_that_inflates_past_the_bound_is_a_refusal_not_a_broken_object` |
+| path depth | the walk (`MAX_PATH_COMPONENTS`) | `a_malformed_or_over_deep_path_is_refused_before_the_walk_trusts_it`, both sides of the boundary |
+| `CONTEXT_OBJECT_BYTES` | the comparison | at the walk layer only — see below |
+| `CONTEXT_TOTAL_BYTES` | the comparison | **not proved — see below** |
+
+**Two bounds have no test at the comparison layer, and this says so rather than implying otherwise.**
+Exhausting `CONTEXT_TOTAL_BYTES` needs a 64 MiB fixture, and neither constant is reachable from an
+integration test, so a mutant deleting the total budget stays green. Both are exercised one layer
+down, where the walk's `maximum` parameter is testable with a small bound. Closing the gap means
+threading the budget as a parameter the way the deadline already is — which is exactly why the
+deadline is a parameter — and it is recorded here rather than papered over with a test that cannot
+fail.
+
+### Object validation, and why authentication is not enough
+
+A Git object's name is the SHA-1 of its uncompressed `<type> <size>\0<body>` form, so an object that
+hashes to its own filename cannot have been substituted for another. That is necessary and not
+sufficient: it proves the bytes match the name, not that they are the object that name is supposed
+to hold. Bytes that authenticate and are not a well-formed object are refused before any result is
+drawn from them.
+
+- A **commit** must begin `tree <40 lowercase hex>\n`, and its headers must parse: each
+  `<name> SP <value> LF` until the blank line, `parent` values are object names, exactly one
+  `author` and one `committer`. Searching the body for a `tree` line instead would let a commit
+  *message* choose which tree Beacon walks.
+- A **tree** is parsed whole before any entry is used: a known mode, a non-empty name free of `/`,
+  `.` and `..`, a full 20-byte id with no truncated trailing entry, strictly increasing order, and
+  no repeated raw name. Ordering uses Git's real rule, where a directory sorts as though its name
+  ended in `/` — a naive byte sort refuses ordinary repositories, `src` after `src.rs`. The raw
+  directory mode is `40000`; `git cat-file -p` prints `040000`, and a parser written from the
+  display refuses every directory that exists.
+- The **raw-name** check is separate from the ordering check on purpose: a file `a` has sort key `a`
+  and a directory `a` has key `a/`, so a tree naming one path twice passes an ordering check while
+  leaving the walk to take whichever entry came first.
+
+### Not evaluated is not an answer
+
+Every definite outcome of a read or a walk — value **and** error — leaves through one gate that
+consults the deadline first. Work that finished after the budget expired describes the store as it
+was before the answer was due, so publishing it turns Beacon's slowness into a claim about the
+Operator's repository. Routing every arm through one gate is what makes that true of all of them
+rather than of most of them.
+
+The deadline tests are staged rather than immediate, and the count of checks a successful read
+performs is a **pinned constant**. An earlier version measured the count and then expired at it,
+which meant that against a mutated implementation it measured the mutant and recalibrated around the
+missing guard — an assertion that could not fail. Changing that constant is a decision someone
+writes down.
 
 ### The recorded fixture
 
