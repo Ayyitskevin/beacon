@@ -255,7 +255,8 @@ export type LocalModelDiscoveryReport = {
 };
 
 /** Three states, closed. `disabled` is a proven negative; absence of proof is
- *  `unknown`, and `mechanism` carries its reason. */
+ *  `unknown`, and the conclusion's `reason` says which. A state is read off its
+ *  reason (`stateForReason`), never agreed with it, so the two cannot drift. */
 export type LiveDataEncryption = "enabled" | "disabled" | "unknown";
 
 /** Every reason the reader can produce. Closed on both sides of the wire: a
@@ -284,8 +285,49 @@ export const REASON_CODES = [
   "mapping_without_backing_device",
   "loopback_image",
   "platform_not_supported",
+  /** The Query itself did not answer. Built here rather than read off the
+   *  wire: the reader cannot report that it was never reached, so the client
+   *  says so in the same closed vocabulary instead of carrying a free-text
+   *  failure beside a missing report. */
+  "initial_read_failed",
 ] as const;
 export type ReasonCode = (typeof REASON_CODES)[number];
+
+/** The state a reason means. One direction, mirroring `state_for` in
+ *  `crates/beacond/src/disk_encryption.rs`, so the two can never drift. */
+export function stateForReason(reason: ReasonCode): LiveDataEncryption {
+  if (reason === "crypt_covers_every_path") return "enabled";
+  if (reason === "no_crypt_on_any_path" || reason === "some_paths_uncovered") return "disabled";
+  return "unknown";
+}
+
+/** The roles a reason's sentence names, and therefore the roles a conclusion
+ *  carrying it must have a subject for. Mirrors `required_roles`. A conclusion
+ *  missing one renders "an unnamed subject" -- a sentence that says nothing --
+ *  so it is a refused read rather than a rendered surprise. */
+export function requiredRoles(reason: ReasonCode): readonly SubjectRole[] {
+  switch (reason) {
+    case "crypt_covers_every_path":
+      return ["mechanism"];
+    case "no_crypt_on_any_path":
+      return ["device"];
+    case "some_paths_uncovered":
+      return ["mapping", "device"];
+    case "store_path_unresolved":
+    case "initial_read_failed":
+      return ["detail"];
+    case "no_block_device_for_filesystem":
+    case "link_resolves_to_nothing":
+    case "device_unreadable":
+    case "read_over_budget":
+    case "loopback_image":
+      return ["location"];
+    case "mapping_without_backing_device":
+      return ["mapping"];
+    default:
+      return [];
+  }
+}
 
 export const SUBJECT_ROLES = ["device", "mapping", "mechanism", "location", "detail"] as const;
 export type SubjectRole = (typeof SUBJECT_ROLES)[number];
@@ -318,6 +360,10 @@ export type LiveDataEncryptionReport = {
   conclusion: LiveDataEncryptionConclusion;
   mountPoint: Subject | null;
   evidence: EncryptionEvidence[];
+  /** How many readings did not fit. The evidence list is capped like the
+   *  subject list, and a capped list that does not say so is a partial answer
+   *  wearing a complete one. */
+  omittedEvidence: number;
   notVerified: string[];
   observedAtMs: number;
 };
@@ -325,6 +371,12 @@ export type LiveDataEncryptionReport = {
 /** The bound the wire shape makes structural. */
 export const MAX_SUBJECT_CHARS = 24;
 export const MAX_SUBJECTS = 3;
+export const MAX_EVIDENCE_ENTRIES = 32;
+export const MAX_NOT_VERIFIED_ENTRIES = 8;
+export const MAX_OBSERVATION_CHARS = 200;
+/** Rust counts omissions in a `u32`; anything larger is a shape the reader
+ *  cannot have produced. */
+const MAX_U32 = 4_294_967_295;
 
 export type ProviderFeature = "completion" | "embedding" | "thinking" | "tools" | "vision";
 export type LocalModelBinding = {
@@ -891,12 +943,57 @@ export function verbatimFailure(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
   if (typeof error === "string" && error) return error;
   if (typeof error === "object" && error !== null) {
-    const code = (error as Record<string, unknown>).code;
-    if (typeof code === "string" && code) return code;
+    // The MESSAGE first. A structured error's `code` is a label for the class;
+    // the message is the only text that says what actually failed, and
+    // preferring the label discarded it -- the same substitution this
+    // diagnostic exists to avoid, one level up.
     const message = (error as Record<string, unknown>).message;
     if (typeof message === "string" && message) return message;
+    const code = (error as Record<string, unknown>).code;
+    if (typeof code === "string" && code) return code;
   }
   return "no reason was reported";
+}
+
+/** The report for a Query that did not answer.
+ *
+ *  A diagnostic that could not run is not a diagnostic that said "encrypted",
+ *  and the operator has to be able to see the failure and retry it. It used to
+ *  reach the panel as a free-text `failure` string beside a missing report --
+ *  unbounded, outside the closed vocabulary, and rendered by a second code
+ *  path. It is a report now: a closed reason, a bounded detail, and the
+ *  original failure text as flagged evidence, so fidelity survives where it
+ *  fits and the flag says so where it does not.
+ */
+export function failedReadReport(error: unknown, observedAtMs: number): LiveDataEncryptionReport {
+  const [observation, truncated] = boundedText(verbatimFailure(error), MAX_OBSERVATION_CHARS);
+  const [detail, shortened] = boundedText(verbatimFailure(error), MAX_SUBJECT_CHARS);
+  return {
+    conclusion: {
+      state: stateForReason("initial_read_failed"),
+      reason: "initial_read_failed",
+      subjects: [{ role: "detail", value: detail, shortened }],
+      omittedSubjects: 0,
+    },
+    mountPoint: null,
+    evidence: [
+      { source: "beacon: live-data encryption reading", observation, truncated },
+    ],
+    omittedEvidence: 0,
+    notVerified: [],
+    observedAtMs,
+  };
+}
+
+/** Cleaned and cut the way the reader cuts, so a client-built report satisfies
+ *  the same shape a read one does. */
+function boundedText(value: string, maxCharacters: number): [string, boolean] {
+  const cleaned = value.replace(/\p{Cc}/gu, " ").trim();
+  const characters = Array.from(cleaned);
+  if (characters.length === 0) return ["(empty)", false];
+  if (characters.length <= maxCharacters) return [cleaned, false];
+  const window = characters.slice(0, maxCharacters).join("").trim();
+  return [window.length === 0 ? "(empty)" : window, true];
 }
 
 export function describeLocalAccountError(error: unknown): string {
@@ -1848,11 +1945,29 @@ function isMissionList(value: unknown): value is MissionView[] {
 }
 
 function isSubject(value: unknown): value is Subject {
-  return (
-    hasExactKeys(value, ["role", "shortened", "value"]) &&
-    SUBJECT_ROLES.includes(value.role as SubjectRole) &&
-    typeof value.shortened === "boolean" &&
-    isTrimmedTextWithoutControls(value.value, MAX_SUBJECT_CHARS)
+  if (
+    !hasExactKeys(value, ["role", "shortened", "value"]) ||
+    !SUBJECT_ROLES.includes(value.role as SubjectRole) ||
+    typeof value.shortened !== "boolean" ||
+    !isTrimmedTextWithoutControls(value.value, MAX_SUBJECT_CHARS)
+  ) {
+    return false;
+  }
+  // A device number is a SHAPE, not bounded text, and it is short enough that
+  // no constructor ever cuts one: `4294967295:4294967295` is 21 characters
+  // against a bound of 24. Accepting `not-a-device`, or a three-character value
+  // that claims it was shortened, accepts a report the reader cannot produce.
+  if (value.role === "device") {
+    return !value.shortened && isDeviceNumber(value.value);
+  }
+  return true;
+}
+
+function isDeviceNumber(value: string): boolean {
+  const parts = value.split(":");
+  if (parts.length !== 2) return false;
+  return parts.every(
+    (part) => /^[0-9]{1,10}$/.test(part) && Number(part) <= MAX_U32,
   );
 }
 
@@ -1862,21 +1977,20 @@ function isLiveDataEncryptionConclusion(
   if (!hasExactKeys(value, ["omittedSubjects", "reason", "state", "subjects"])) return false;
   const { subjects } = value;
   if (
-    !["enabled", "disabled", "unknown"].includes(String(value.state)) ||
     !REASON_CODES.includes(value.reason as ReasonCode) ||
-    !isNonnegativeInteger(value.omittedSubjects) ||
+    !isBoundedCount(value.omittedSubjects) ||
     !Array.isArray(subjects) ||
     subjects.length > MAX_SUBJECTS ||
     !subjects.every(isSubject)
   ) {
     return false;
   }
-  // Only `enabled` may claim crypt covers every path, and only that reason may
-  // be `enabled`. A state and a reason that disagree is not a report.
-  const covered = value.reason === "crypt_covers_every_path";
-  if (covered !== (value.state === "enabled")) return false;
-  const uncovered = value.reason === "no_crypt_on_any_path" || value.reason === "some_paths_uncovered";
-  return uncovered === (value.state === "disabled");
+  const reason = value.reason as ReasonCode;
+  // A state is READ OFF its reason rather than agreed with it, so the two
+  // cannot drift and no third combination has to be enumerated.
+  if (value.state !== stateForReason(reason)) return false;
+  const roles = new Set((subjects as Subject[]).map((subject) => subject.role));
+  return requiredRoles(reason).every((role) => roles.has(role));
 }
 
 function isLiveDataEncryptionReport(value: unknown): value is LiveDataEncryptionReport {
@@ -1887,6 +2001,7 @@ function isLiveDataEncryptionReport(value: unknown): value is LiveDataEncryption
       "mountPoint",
       "notVerified",
       "observedAtMs",
+      "omittedEvidence",
     ])
   ) {
     return false;
@@ -1895,22 +2010,30 @@ function isLiveDataEncryptionReport(value: unknown): value is LiveDataEncryption
   return (
     isLiveDataEncryptionConclusion(value.conclusion) &&
     isNonnegativeInteger(value.observedAtMs) &&
-    (value.mountPoint === null || isSubject(value.mountPoint)) &&
+    isBoundedCount(value.omittedEvidence) &&
+    // A volume is named by where it is mounted. Any other role here is a
+    // report the reader could not have produced.
+    (value.mountPoint === null ||
+      (isSubject(value.mountPoint) && value.mountPoint.role === "location")) &&
     Array.isArray(evidence) &&
-    evidence.length <= 32 &&
+    evidence.length <= MAX_EVIDENCE_ENTRIES &&
     evidence.every(isEncryptionEvidence) &&
     Array.isArray(notVerified) &&
-    notVerified.length <= 8 &&
-    notVerified.every((entry) => isTrimmedTextWithoutControls(entry, 200))
+    notVerified.length <= MAX_NOT_VERIFIED_ENTRIES &&
+    notVerified.every((entry) => isTrimmedTextWithoutControls(entry, MAX_OBSERVATION_CHARS))
   );
+}
+
+function isBoundedCount(value: unknown): value is number {
+  return isNonnegativeInteger(value) && value <= MAX_U32;
 }
 
 function isEncryptionEvidence(value: unknown): value is EncryptionEvidence {
   return (
     hasExactKeys(value, ["observation", "source", "truncated"]) &&
     typeof value.truncated === "boolean" &&
-    isTrimmedTextWithoutControls(value.source, 200) &&
-    isTrimmedTextWithoutControls(value.observation, 200)
+    isTrimmedTextWithoutControls(value.source, MAX_OBSERVATION_CHARS) &&
+    isTrimmedTextWithoutControls(value.observation, MAX_OBSERVATION_CHARS)
   );
 }
 

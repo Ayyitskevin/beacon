@@ -10,7 +10,7 @@ import type { LiveDataEncryptionConclusion, SubjectRole } from "./session";
  *  and every fix bounded the strings rather than the type that admitted them.
  */
 export function renderConclusion(conclusion: LiveDataEncryptionConclusion): string {
-  const of = (role: SubjectRole): string => {
+  const subjectsForRole = (role: SubjectRole): string => {
     const named = conclusion.subjects
       .filter((subject) => subject.role === role)
       .map((subject) => (subject.shortened ? `${subject.value}…` : subject.value));
@@ -26,16 +26,16 @@ export function renderConclusion(conclusion: LiveDataEncryptionConclusion): stri
   let sentence: string;
   switch (conclusion.reason) {
     case "crypt_covers_every_path":
-      sentence = `every path to disk passes through ${of("mechanism")}`;
+      sentence = `every path to disk passes through ${subjectsForRole("mechanism")}`;
       break;
     case "no_crypt_on_any_path":
-      sentence = `at least one path to disk has no crypt layer: ${of("device")}`;
+      sentence = `at least one path to disk has no crypt layer: ${subjectsForRole("device")}`;
       break;
     case "some_paths_uncovered":
-      sentence = `${of("mapping")} is encrypted; ${of("device")} is not`;
+      sentence = `${subjectsForRole("mapping")} is encrypted; ${subjectsForRole("device")} is not`;
       break;
     case "store_path_unresolved":
-      sentence = `the live store path could not be resolved: ${of("detail")}`;
+      sentence = `the live store path could not be resolved: ${subjectsForRole("detail")}`;
       break;
     case "store_not_inspectable":
       sentence = "the live store could not be inspected";
@@ -70,16 +70,16 @@ export function renderConclusion(conclusion: LiveDataEncryptionConclusion): stri
         "the live store is on a network filesystem; its encryption is decided off this host";
       break;
     case "no_block_device_for_filesystem":
-      sentence = `this filesystem (${of("location")}) exposes no block device Beacon can inspect`;
+      sentence = `this filesystem (${subjectsForRole("location")}) exposes no block device Beacon can inspect`;
       break;
     case "link_resolves_to_nothing":
-      sentence = `${of("location")} is a link that resolves to nothing`;
+      sentence = `${subjectsForRole("location")} is a link that resolves to nothing`;
       break;
     case "device_unreadable":
-      sentence = `a device in the volume's stack could not be read: ${of("location")}`;
+      sentence = `a device in the volume's stack could not be read: ${subjectsForRole("location")}`;
       break;
     case "read_over_budget":
-      sentence = `${of("location")} exceeded Beacon's read budget`;
+      sentence = `${subjectsForRole("location")} exceeded Beacon's read budget`;
       break;
     case "stack_over_budget":
       sentence = "the volume's device stack exceeded Beacon's read budget";
@@ -88,13 +88,16 @@ export function renderConclusion(conclusion: LiveDataEncryptionConclusion): stri
       sentence = "no physical device terminated the volume's stack";
       break;
     case "mapping_without_backing_device":
-      sentence = `mapping ${of("mapping")} has no readable backing device`;
+      sentence = `mapping ${subjectsForRole("mapping")} has no readable backing device`;
       break;
     case "loopback_image":
-      sentence = `the volume is a loopback image backed by ${of("location")}; Beacon does not follow the backing file`;
+      sentence = `the volume is a loopback image backed by ${subjectsForRole("location")}; Beacon does not follow the backing file`;
       break;
     case "platform_not_supported":
       sentence = "not detectable on this platform";
+      break;
+    case "initial_read_failed":
+      sentence = `the disk-encryption reading did not complete: ${subjectsForRole("detail")}`;
       break;
   }
   return `${sentence}${more}`;

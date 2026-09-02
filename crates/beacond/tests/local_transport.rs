@@ -255,18 +255,18 @@ fn authenticated_client_reads_live_data_encryption_over_both_real_transports() {
     // contract rather than on one state: the answer is one of three, it names
     // the volume it is about, and it carries the evidence it read.
     assert!(matches!(
-        report.conclusion.state,
+        report.conclusion().state(),
         LiveDataEncryption::Enabled | LiveDataEncryption::Disabled | LiveDataEncryption::Unknown
     ));
-    assert!(!report.evidence.is_empty());
-    assert!(report.observed_at_ms > 0);
+    assert!(!report.evidence().is_empty());
+    assert!(report.observed_at_ms() > 0);
     // The conclusion is bounded by its own shape, so what crosses the wire can
     // never be a sentence something downstream has to cut.
-    assert!(report.conclusion.subjects.len() <= 3);
-    for subject in &report.conclusion.subjects {
-        assert!(subject.value.chars().count() <= 24);
+    assert!(report.conclusion().subjects().len() <= 3);
+    for subject in report.conclusion().subjects() {
+        assert!(subject.value().chars().count() <= 24);
     }
-    let sentence = beacond::render_conclusion(&report.conclusion);
+    let sentence = beacond::render_conclusion(report.conclusion());
     assert!(!sentence.is_empty());
     assert!(sentence.chars().count() <= beacond::MAX_RENDERED_CONCLUSION_CHARS);
     // Nothing about this reading may be presented as Beacon's own encryption.

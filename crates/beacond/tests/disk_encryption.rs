@@ -35,7 +35,26 @@ struct Fixture {
 
 impl Fixture {
     fn new(label: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("beacon-diskenc-{label}-{}", Uuid::new_v4()));
+        Self::under(std::env::temp_dir(), label)
+    }
+
+    /// A fixture whose store sits on a memory-backed filesystem, so the kernel
+    /// reports an ANONYMOUS device number for it (major 0). That is the only
+    /// way to reach the block-device-of-source path: the reader skips the
+    /// mount-versus-`stat` corroboration exactly when `stat` cannot corroborate.
+    /// `None` when this host has no such filesystem to build on, which the
+    /// caller reports rather than passing quietly.
+    fn on_anonymous_device(label: &str) -> Option<Self> {
+        let base = PathBuf::from("/dev/shm");
+        if !base.is_dir() {
+            return None;
+        }
+        let fixture = Self::under(base, label);
+        fixture.host_device().starts_with("0:").then_some(fixture)
+    }
+
+    fn under(base: PathBuf, label: &str) -> Self {
+        let root = base.join(format!("beacon-diskenc-{label}-{}", Uuid::new_v4()));
         let sys = root.join("sys");
         fs::create_dir_all(&sys).unwrap();
         let store = root.join("beacon.sqlite3");
@@ -179,31 +198,31 @@ impl Drop for Fixture {
 
 /// The rendered sentence, for cases that care what an operator reads.
 fn reason(report: &LiveDataEncryptionReport) -> String {
-    render_conclusion(&report.conclusion)
+    render_conclusion(report.conclusion())
 }
 
 /// The closed reason code, which is what most cases should assert: a code
 /// cannot drift the way a substring match against a sentence can.
 fn code(report: &LiveDataEncryptionReport) -> ReasonCode {
-    report.conclusion.reason
+    report.conclusion().reason()
 }
 
 fn mechanism(report: &LiveDataEncryptionReport) -> String {
     report
-        .conclusion
-        .subjects
+        .conclusion()
+        .subjects()
         .iter()
-        .filter(|subject| subject.role == SubjectRole::Mechanism)
-        .map(|subject| subject.value.clone())
+        .filter(|subject| subject.role() == SubjectRole::Mechanism)
+        .map(|subject| subject.value().to_owned())
         .collect::<Vec<_>>()
         .join(", ")
 }
 
 fn evidence_text(report: &LiveDataEncryptionReport) -> String {
     report
-        .evidence
+        .evidence()
         .iter()
-        .map(|entry| format!("{} => {}", entry.source, entry.observation))
+        .map(|entry| format!("{} => {}", entry.source(), entry.observation()))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -271,7 +290,7 @@ fn luks2_volume_reports_enabled_with_the_dm_uuid_it_read() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Enabled);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Enabled);
     assert_eq!(mechanism(&report), "dm-crypt (LUKS2)");
     assert!(evidence_text(&report).contains("CRYPT-LUKS2"));
 }
@@ -292,7 +311,7 @@ fn luks_under_lvm_reports_enabled_through_the_slaves_chain() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Enabled);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Enabled);
     assert_eq!(mechanism(&report), "dm-crypt (LUKS2)");
 }
 
@@ -318,8 +337,8 @@ fn encrypted_branch_does_not_mask_a_plain_sibling() {
 
     let report = fixture.read();
 
-    assert_ne!(report.conclusion.state, LiveDataEncryption::Enabled);
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Disabled);
+    assert_ne!(report.conclusion().state(), LiveDataEncryption::Enabled);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Disabled);
     // The report must name the branch that is not covered.
     assert!(evidence_text(&report).contains(&fixture.disk(17)));
     // And still say what it did find, so the operator is not told "nothing".
@@ -368,7 +387,7 @@ fn review_r3_long_mixed_mapping_names_preserve_the_disabled_conclusion() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Disabled);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Disabled);
     // The conclusion is not evidence and is never truncated away: both halves
     // of the sentence survive names long enough to consume the bound.
     let reason = reason(&report);
@@ -392,18 +411,18 @@ fn every_conclusion_survives_its_components_and_fits_the_adapter() {
         let report = fixture.read();
         // Bounded by construction now: every subject is capped when it is made,
         // so this asserts the property holds rather than that a cut happened.
-        for subject in &report.conclusion.subjects {
-            assert!(subject.value.chars().count() <= 24);
+        for subject in report.conclusion().subjects() {
+            assert!(subject.value().chars().count() <= 24);
         }
-        let text = render_conclusion(&report.conclusion);
+        let text = render_conclusion(report.conclusion());
         assert!(
             text.chars().count() <= MAX_RENDERED_CONCLUSION_CHARS,
             "{} chars: {text}",
             text.chars().count()
         );
-        for entry in &report.evidence {
-            assert!(entry.source.chars().count() <= 200);
-            assert!(entry.observation.chars().count() <= 200);
+        for entry in report.evidence() {
+            assert!(entry.source().chars().count() <= 200);
+            assert!(entry.observation().chars().count() <= 200);
         }
         text
     }
@@ -493,9 +512,126 @@ fn shortened_evidence_says_that_it_was_shortened() {
 
     let text = evidence_text(&report);
     assert!(text.contains('\u{2026}'), "{text}");
-    for entry in &report.evidence {
-        assert!(entry.observation.chars().count() <= 200);
+    for entry in report.evidence() {
+        assert!(entry.observation().chars().count() <= 200);
     }
+
+    // The FLAG, not the ellipsis. Forcing every `truncated` to false left this
+    // test green while the panel said nothing was shortened, because an
+    // ellipsis from identifier redaction in one field satisfied an assertion
+    // about a cut in the other.
+    let cut: Vec<&str> = report
+        .evidence()
+        .iter()
+        .filter(|entry| entry.truncated())
+        .map(|entry| entry.observation())
+        .collect();
+    assert_eq!(cut.len(), 1, "exactly one reading was cut: {text}");
+    assert_eq!(cut[0].chars().count(), 200);
+    // And a reading that was NOT cut does not claim it was.
+    assert!(
+        report
+            .evidence()
+            .iter()
+            .any(|entry| !entry.truncated() && entry.observation().chars().count() < 200),
+        "{text}"
+    );
+}
+
+/// The count is about what the reading found, not about what the caller
+/// remembered to pass. Four encrypted mappings and one uncovered device is five
+/// subjects; three fit; two are omitted. `crypt_seen.iter().take(1)` trimmed the
+/// mappings before the conclusion saw them, so this said 0 -- a capped list
+/// claiming it was whole -- and the mapping the sentence names could be crowded
+/// out by the devices beside it.
+#[test]
+fn a_mixed_stack_counts_every_subject_that_did_not_fit() {
+    let fixture = Fixture::new("mixed-omissions");
+    let device = fixture.mounted_on_host_device();
+    fixture.dm(&device, "LVM-9f8e7d6c5b4a39281706f5e4d3c2b1a0", "vg0");
+    let mut children: Vec<(String, String)> = (0..4)
+        .map(|index| (format!("dm-{index}"), fixture.mapped(index)))
+        .collect();
+    children.push(("sdb1".to_owned(), fixture.disk(17)));
+    let borrowed: Vec<(&str, &str)> = children
+        .iter()
+        .map(|(name, dev)| (name.as_str(), dev.as_str()))
+        .collect();
+    fixture.slaves(&device, &borrowed);
+    for index in 0..4 {
+        let mapping = fixture.mapped(index);
+        fixture.dm(
+            &mapping,
+            &format!("CRYPT-LUKS2-a1b2c3d4e5f60718293a4b5c6d7e8f9{index}-m"),
+            &format!("crypt-{index}"),
+        );
+        fixture.slaves(&mapping, &[("disk", &fixture.disk(index))]);
+        fixture.node(&fixture.disk(index));
+    }
+    fixture.node(&fixture.disk(17));
+
+    let report = fixture.read();
+
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Disabled);
+    assert_eq!(code(&report), ReasonCode::SomePathsUncovered);
+    assert_eq!(report.conclusion().omitted_subjects(), 2);
+    // And the role the sentence names survived the cap: a conclusion that
+    // spent every slot on mappings would render "an unnamed subject" where the
+    // uncovered device belongs.
+    for role in [SubjectRole::Mapping, SubjectRole::Device] {
+        assert!(
+            report
+                .conclusion()
+                .subjects()
+                .iter()
+                .any(|subject| subject.role() == role),
+            "{role:?} was crowded out: {}",
+            reason(&report)
+        );
+    }
+    let rendered = reason(&report);
+    assert!(rendered.contains("and 2 more"), "{rendered}");
+    assert!(!rendered.contains("an unnamed subject"), "{rendered}");
+}
+
+/// A filesystem that exposes no block device names itself, and the name is
+/// bounded like every other subject. Reaching this path needs a store whose own
+/// device number is anonymous, which is the named condition below.
+#[test]
+fn an_anonymous_filesystem_names_itself_within_the_bound() {
+    let Some(fixture) = Fixture::on_anonymous_device("anonymous-fs") else {
+        // Not a silent pass: this host has no memory-backed filesystem to build
+        // the case on, and the reader's anonymous-device path went untested.
+        eprintln!(
+            "SKIPPED an_anonymous_filesystem_names_itself_within_the_bound: \
+             /dev/shm is absent or not anonymous on this host"
+        );
+        return;
+    };
+    let long_fstype = "beaconfs-".repeat(60);
+    fixture.mount_lines(&[fixture.mount_line(
+        &fixture.host_device(),
+        &long_fstype,
+        "not-an-absolute-path",
+    )]);
+
+    let report = fixture.read();
+
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
+    assert_eq!(code(&report), ReasonCode::NoBlockDeviceForFilesystem);
+    let named = report
+        .conclusion()
+        .subjects()
+        .iter()
+        .find(|subject| subject.role() == SubjectRole::Location)
+        .expect("the filesystem names itself");
+    assert!(named.shortened());
+    assert!(named.value().chars().count() <= 24);
+    let rendered = reason(&report);
+    assert!(
+        rendered.chars().count() <= MAX_RENDERED_CONCLUSION_CHARS,
+        "{rendered}"
+    );
 }
 
 #[test]
@@ -514,7 +650,7 @@ fn review_crypt_mapping_without_a_physical_leaf_is_unknown() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert_eq!(code(&report), ReasonCode::MappingWithoutBackingDevice);
 }
 
@@ -540,8 +676,8 @@ fn review_one_covered_leaf_cannot_mask_a_cyclic_sibling() {
 
     let report = fixture.read();
 
-    assert_ne!(report.conclusion.state, LiveDataEncryption::Enabled);
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_ne!(report.conclusion().state(), LiveDataEncryption::Enabled);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
 }
 
 #[test]
@@ -570,7 +706,7 @@ fn review_crypt_above_a_nested_fan_out_covers_both_plain_leaves() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Enabled);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Enabled);
     assert_eq!(mechanism(&report), "dm-crypt (LUKS2)");
 }
 
@@ -594,8 +730,8 @@ fn review_unreadable_leaf_next_to_a_luks_branch_is_unknown() {
 
     let report = fixture.read();
 
-    assert_ne!(report.conclusion.state, LiveDataEncryption::Enabled);
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_ne!(report.conclusion().state(), LiveDataEncryption::Enabled);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
 }
 
 #[test]
@@ -624,7 +760,7 @@ fn a_crypt_layer_above_a_plain_leaf_covers_that_path() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Enabled);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Enabled);
     assert_eq!(mechanism(&report), "dm-crypt (LUKS2)");
 }
 
@@ -641,7 +777,7 @@ fn a_stack_that_reaches_no_physical_device_reports_unknown() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert_eq!(code(&report), ReasonCode::NoPhysicalLeaf);
 }
 
@@ -655,7 +791,7 @@ fn lvm_over_plain_disks_reports_disabled_not_enabled() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Disabled);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Disabled);
     assert!(evidence_text(&report).contains("not a crypt target"));
 }
 
@@ -674,7 +810,7 @@ fn unreadable_dm_uuid_reports_unknown_not_enabled() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert_eq!(code(&report), ReasonCode::DeviceUnreadable);
 }
 
@@ -695,7 +831,7 @@ fn unreadable_dm_name_reports_unknown() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert_eq!(code(&report), ReasonCode::DeviceUnreadable);
 }
 
@@ -708,7 +844,7 @@ fn unreadable_slave_device_number_reports_unknown() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert_eq!(code(&report), ReasonCode::DeviceUnreadable);
 }
 
@@ -722,7 +858,7 @@ fn failed_metadata_on_loop_backing_file_reports_unknown() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert_eq!(code(&report), ReasonCode::DeviceUnreadable);
 }
 
@@ -734,7 +870,7 @@ fn failed_metadata_on_dm_uuid_reports_unknown() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert_eq!(code(&report), ReasonCode::DeviceUnreadable);
 }
 
@@ -749,7 +885,7 @@ fn failed_metadata_on_slaves_reports_unknown() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert_eq!(code(&report), ReasonCode::DeviceUnreadable);
 }
 
@@ -769,7 +905,7 @@ fn an_over_budget_mount_table_reports_unknown() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert_eq!(code(&report), ReasonCode::ReadOverBudget);
 }
 
@@ -784,7 +920,7 @@ fn an_over_budget_sysfs_read_reports_unknown() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert_eq!(code(&report), ReasonCode::ReadOverBudget);
 }
 
@@ -796,7 +932,7 @@ fn unreadable_sysfs_directory_reports_unknown_not_disabled() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert_eq!(code(&report), ReasonCode::DeviceUnreadable);
 }
 
@@ -808,11 +944,11 @@ fn plain_partition_with_no_dm_layer_reports_disabled_and_names_what_it_cannot_se
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Disabled);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Disabled);
     // Nothing encrypted was seen here, so the reason says only that.
     assert!(reason(&report).starts_with("at least one path to disk has no crypt layer"));
-    assert!(!report.not_verified.is_empty());
-    let gaps = report.not_verified.join(" ");
+    assert!(!report.not_verified().is_empty());
+    let gaps = report.not_verified().join(" ");
     assert!(gaps.contains("self-encrypting drive"));
     assert!(gaps.contains("fscrypt"));
     assert!(gaps.contains("beneath this host"));
@@ -831,7 +967,7 @@ fn review_dangling_store_symlink_is_broken_not_absent() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert_eq!(code(&report), ReasonCode::LinkResolvesToNothing);
 }
 
@@ -846,7 +982,7 @@ fn review_r3_dangling_loop_symlink_is_broken_not_absent() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert_eq!(code(&report), ReasonCode::LinkResolvesToNothing);
 }
 
@@ -861,7 +997,7 @@ fn a_dangling_dm_link_is_broken_not_a_plain_disk() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert_eq!(code(&report), ReasonCode::LinkResolvesToNothing);
 }
 
@@ -876,7 +1012,7 @@ fn a_dangling_slave_device_link_is_broken_not_a_leaf() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert_eq!(code(&report), ReasonCode::LinkResolvesToNothing);
 }
 
@@ -894,7 +1030,7 @@ fn a_dangling_dm_uuid_link_is_broken_not_absent() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert_eq!(code(&report), ReasonCode::LinkResolvesToNothing);
 }
 
@@ -913,7 +1049,7 @@ fn a_dangling_dm_name_link_is_broken_not_absent() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert_eq!(code(&report), ReasonCode::LinkResolvesToNothing);
 }
 
@@ -929,7 +1065,7 @@ fn a_dangling_slave_entry_link_is_broken_not_absent() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert_eq!(code(&report), ReasonCode::LinkResolvesToNothing);
 }
 
@@ -944,7 +1080,7 @@ fn review_dangling_slaves_symlink_is_broken_not_a_leaf() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     // One helper answers this for every link the walk follows, so the wording
     // is the same here as for a dangling store, dm, loop, or dev entry.
     assert_eq!(code(&report), ReasonCode::LinkResolvesToNothing);
@@ -963,7 +1099,7 @@ fn an_existing_unresolvable_store_does_not_fall_back_to_its_parent() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert_eq!(code(&report), ReasonCode::StorePathUnresolved);
 }
 
@@ -977,18 +1113,17 @@ fn every_rendered_field_stays_within_the_adapter_bound() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     let mount_point = report
-        .mount_point
-        .as_ref()
-        .map(|subject| subject.value.chars().count())
+        .mount_point()
+        .map(|subject| subject.value().chars().count())
         .unwrap_or(0);
     assert!(mount_point <= 24, "mountPoint is {mount_point} characters");
     let rendered = reason(&report).chars().count();
     assert!(rendered <= MAX_RENDERED_CONCLUSION_CHARS);
-    for entry in &report.evidence {
-        assert!(entry.source.chars().count() <= 200);
-        assert!(entry.observation.chars().count() <= 200);
+    for entry in report.evidence() {
+        assert!(entry.source().chars().count() <= 200);
+        assert!(entry.observation().chars().count() <= 200);
     }
 }
 
@@ -999,7 +1134,7 @@ fn missing_mountinfo_reports_unknown() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert_eq!(code(&report), ReasonCode::MountTableUnreadable);
 }
 
@@ -1010,7 +1145,7 @@ fn unparseable_mount_table_reports_unknown() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert_eq!(code(&report), ReasonCode::MountTableUnparsed);
 }
 
@@ -1022,7 +1157,7 @@ fn mount_table_and_stat_disagreement_reports_unknown() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert_eq!(code(&report), ReasonCode::MountAndStatDisagree);
 }
 
@@ -1040,7 +1175,7 @@ fn shadowed_mount_point_selects_the_last_entry() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Disabled);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Disabled);
 }
 
 #[test]
@@ -1052,7 +1187,7 @@ fn tmpfs_backed_store_reports_unknown_with_its_reason() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert_eq!(code(&report), ReasonCode::MemoryBackedFilesystem);
 }
 
@@ -1067,7 +1202,7 @@ fn overlay_mounted_store_reports_unknown() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert_eq!(code(&report), ReasonCode::OverlayFilesystem);
 }
 
@@ -1080,7 +1215,7 @@ fn network_filesystem_reports_unknown_with_its_reason() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert_eq!(code(&report), ReasonCode::NetworkFilesystem);
 }
 
@@ -1094,7 +1229,7 @@ fn loopback_backed_volume_reports_unknown() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     let reason = reason(&report);
     assert!(reason.contains("loopback image"));
     // The backing path is recorded so a later slice can follow it.
@@ -1114,7 +1249,7 @@ fn a_long_backing_file_shortens_the_path_not_the_sentence() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     let reason = reason(&report);
     // The sentence survives; the path is shortened and says so.
     assert!(reason.contains("loopback image"), "{reason}");
@@ -1146,7 +1281,7 @@ fn device_stack_cycle_terminates_within_budget() {
     // physical device and has proved nothing either way. Asserting the reason,
     // not just the state, keeps the visited-set mutant dead -- without it the
     // walk exhausts the node budget and says so instead.
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert_eq!(code(&report), ReasonCode::NoPhysicalLeaf);
 }
 
@@ -1191,7 +1326,7 @@ fn a_wide_slaves_directory_stops_at_the_budget_before_reading_it_all() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     let reason = reason(&report);
     assert!(reason.contains("read budget"), "{reason}");
     assert!(!reason.contains("could not be read"), "{reason}");
@@ -1211,7 +1346,7 @@ fn device_stack_deeper_than_the_budget_reports_unknown() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Unknown);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Unknown);
     assert!(reason(&report).contains("read budget"));
 }
 
@@ -1231,7 +1366,7 @@ fn dm_uuid_prefix_only_appears_in_evidence() {
 
     let report = fixture.read();
 
-    assert_eq!(report.conclusion.state, LiveDataEncryption::Enabled);
+    assert_eq!(report.conclusion().state(), LiveDataEncryption::Enabled);
     let text = evidence_text(&report);
     assert!(text.contains("CRYPT-LUKS2"));
     assert!(!text.contains("4f8c1d2e9a7b6c5d4e3f2a1b0c9d8e7f"));
@@ -1244,7 +1379,7 @@ fn two_calls_re_read_live_state() {
     fixture.node(&device);
 
     let before = fixture.read();
-    assert_eq!(before.conclusion.state, LiveDataEncryption::Disabled);
+    assert_eq!(before.conclusion().state(), LiveDataEncryption::Disabled);
 
     fixture.dm(
         &device,
@@ -1255,7 +1390,7 @@ fn two_calls_re_read_live_state() {
     fixture.node(&fixture.disk(2));
     let after = fixture.read();
 
-    assert_eq!(after.conclusion.state, LiveDataEncryption::Enabled);
+    assert_eq!(after.conclusion().state(), LiveDataEncryption::Enabled);
 }
 
 #[test]
@@ -1267,14 +1402,14 @@ fn stat_evidence_reports_the_hosts_own_device_number() {
     let report = fixture.read();
 
     let stat_line = report
-        .evidence
+        .evidence()
         .iter()
-        .find(|entry| entry.source == "stat(live store)")
+        .find(|entry| entry.source() == "stat(live store)")
         .expect("the reading records the device it stat'd");
-    assert_eq!(stat_line.observation, format!("st_dev = {device}"));
+    assert_eq!(stat_line.observation(), format!("st_dev = {device}"));
     // The mount point is a bounded subject now, not a raw path: present, in
     // its own role, and inside the subject bound whatever the fixture is named.
-    let mount_point = report.mount_point.as_ref().expect("a mount point");
-    assert_eq!(mount_point.role, SubjectRole::Location);
-    assert!(mount_point.value.chars().count() <= 24);
+    let mount_point = report.mount_point().expect("a mount point");
+    assert_eq!(mount_point.role(), SubjectRole::Location);
+    assert!(mount_point.value().chars().count() <= 24);
 }
