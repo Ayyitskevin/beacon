@@ -1190,43 +1190,6 @@ impl DispatchService {
         }
         Ok(true)
     }
-
-    /// Spend the authority and persist the prepared commit, before anything irreversible.
-    fn reserve(
-        &self,
-        opened: &OpenRun,
-        decided: &Decided,
-        branch: &str,
-        base: &str,
-        commit: &str,
-    ) -> Result<(), DispatchError> {
-        let repository = decided
-            .repository
-            .as_ref()
-            .ok_or(DispatchError::InvalidStore)?;
-        let (device, inode) = repository.identity();
-        self.accounts.with_authenticated_store(|connection, now| {
-            connection.execute(
-                "INSERT INTO dispatch_preparations (
-                     workspace_id, run_id, ruling_digest, source, source_device, source_inode,
-                     branch, pinned_base_revision, prepared_commit, prepared_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![
-                    self.workspace_id.to_string(),
-                    opened.run_id.to_string(),
-                    opened.ruling_digest.as_str(),
-                    repository.path().to_string_lossy(),
-                    i64::try_from(device).unwrap_or(i64::MAX),
-                    i64::try_from(inode).unwrap_or(i64::MAX),
-                    branch,
-                    base,
-                    commit,
-                    now,
-                ],
-            )?;
-            Ok(())
-        })
-    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1401,8 +1364,8 @@ impl DispatchService {
             diff_digest: decided.diff_digest.clone(),
             checkout_updated: decided.checkout_updated,
             git_steps: decided.git_steps.clone(),
-            /// No Declared Check ran and no model was invoked, so these are measured zeroes rather
-            /// than absences: dispatch performs neither by construction.
+            // No Declared Check ran and no model was invoked, so these are measured zeroes rather
+            // than absences: dispatch performs neither by construction.
             model_invocations: 0,
             cost_usd_micros: 0,
             per_mutation: decided.per_mutation.clone(),
@@ -1885,11 +1848,21 @@ fn interrupted_receipt(
         NotVerified::SafetySnapshot,
         NotVerified::BaseRevisionReachability,
         NotVerified::DeclaredChecksAgainstResult,
-        NotVerified::ReconstructedAfterInterruption,
     ];
-    if outcome != DispatchOutcome::Applied {
+    // The same outcome tokens a live Receipt carries, in the same order: a reconstructed refusal
+    // that did not say the change was not applied would be the one refusal in the store a reader
+    // could not check.
+    match outcome {
+        DispatchOutcome::Applied => {}
+        DispatchOutcome::LandingUnobserved => {
+            not_verified.push(NotVerified::LandingResultUnknown);
+        }
+        _ => not_verified.push(NotVerified::ChangeNotApplied),
+    }
+    if outcome != DispatchOutcome::Applied && prepared.is_some() {
         not_verified.push(NotVerified::UnreferencedObjectResidue);
     }
+    not_verified.push(NotVerified::ReconstructedAfterInterruption);
     if residue_unnamed {
         // The interruption landed between writing objects and persisting what they were, so the
         // residue exists and nothing can name it.
@@ -2044,6 +2017,108 @@ pub(crate) fn verify_dispatch_event(
         || state != receipt.outcome.run_state()
         || receipt_json.as_bytes() != payload_json.as_bytes()
         || stored_receipt != receipt
+    {
+        return Err(DispatchError::InvalidStore);
+    }
+    verify_outcome_invariants(&receipt)?;
+    verify_against_preparation(connection, workspace_id, &receipt)
+}
+
+/// The invariants one outcome arm owes its own record.
+///
+/// Byte equality between a Receipt and its Event proves the two copies agree; it does not prove
+/// either says something a dispatch could have produced. An `Applied` naming no commit, or a
+/// refusal naming a resulting revision, is incoherent whatever its bytes (gpt2).
+fn verify_outcome_invariants(receipt: &DispatchReceipt) -> Result<(), DispatchError> {
+    let names = |token: NotVerified| receipt.not_verified.contains(&token);
+    let reconstructed = names(NotVerified::ReconstructedAfterInterruption);
+    let coherent = match receipt.outcome {
+        DispatchOutcome::Applied => {
+            receipt.prepared_commit.is_some()
+                && receipt.resulting_revision == receipt.prepared_commit
+                && receipt.branch.is_some()
+                && receipt.source_identity.is_some()
+                && !names(NotVerified::ChangeNotApplied)
+                // A reconstructed Applied read the ref rather than measuring a landing, so it
+                // carries neither the diff it did not take nor the profile it did not read.
+                && (reconstructed
+                    || (receipt.diff_digest.is_some()
+                        && receipt.observed_head.is_some()
+                        && receipt.autonomy_profile == Some(AutonomyProfile::Supervised)))
+        }
+        DispatchOutcome::LandingUnobserved => {
+            receipt.resulting_revision.is_none()
+                && receipt.diff_digest.is_none()
+                && !receipt.checkout_updated
+                && names(NotVerified::LandingResultUnknown)
+        }
+        // Every other arm refused. Objects it wrote may survive -- that is what the residue token
+        // is for -- but nothing it prepared may be presented as a landing.
+        _ => {
+            receipt.resulting_revision.is_none()
+                && receipt.diff_digest.is_none()
+                && !receipt.checkout_updated
+                && names(NotVerified::ChangeNotApplied)
+                && (receipt.prepared_commit.is_none()
+                    || names(NotVerified::UnreferencedObjectResidue))
+        }
+    };
+    if coherent {
+        Ok(())
+    } else {
+        Err(DispatchError::InvalidStore)
+    }
+}
+
+/// Check a Receipt against the durable preparation its own landing transaction wrote.
+///
+/// The preparation is the independent record: it is inserted inside the transaction that performs
+/// the swap, before the swap, and is never rewritten. So the arms that claim the swap ran must have
+/// one, and it must name the same commit, branch, base and repository identity. This re-derives
+/// nothing about the repository -- later history is ordinary work, and `resulting_revision` is a
+/// landing-at-time fact rather than a claim about the ref now.
+fn verify_against_preparation(
+    connection: &Connection,
+    workspace_id: Uuid,
+    receipt: &DispatchReceipt,
+) -> Result<(), DispatchError> {
+    let claims_a_swap = matches!(
+        receipt.outcome,
+        DispatchOutcome::Applied | DispatchOutcome::LandingRefused
+    ) || (receipt.outcome == DispatchOutcome::LandingUnobserved
+        && receipt.prepared_commit.is_some());
+    let prepared: Option<(String, String, String, i64, i64)> = connection
+        .query_row(
+            "SELECT prepared_commit, branch, pinned_base_revision, source_device, source_inode
+             FROM dispatch_preparations
+             WHERE workspace_id = ?1 AND run_id = ?2",
+            params![workspace_id.to_string(), receipt.run_id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((commit, branch, base, device, inode)) = prepared else {
+        return if claims_a_swap {
+            Err(DispatchError::InvalidStore)
+        } else {
+            Ok(())
+        };
+    };
+    let identity = SourceIdentity {
+        device: u64::try_from(device).unwrap_or(u64::MAX),
+        inode: u64::try_from(inode).unwrap_or(u64::MAX),
+    };
+    if receipt.prepared_commit.as_deref() != Some(commit.as_str())
+        || receipt.branch.as_deref() != Some(branch.as_str())
+        || receipt.pinned_base_revision.as_deref() != Some(base.as_str())
+        || receipt.source_identity != Some(identity)
     {
         return Err(DispatchError::InvalidStore);
     }
