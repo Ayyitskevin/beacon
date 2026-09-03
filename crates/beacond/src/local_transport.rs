@@ -1994,7 +1994,8 @@ fn wire_error_from_check_preflight(error: CheckPreflightError) -> WireError {
 fn wire_error_from_sample_project(error: SampleProjectError) -> WireError {
     let code = match error {
         SampleProjectError::Account(error) => return wire_error_from_account(error),
-        SampleProjectError::UnsafeDestination
+        SampleProjectError::NotInstalled
+        | SampleProjectError::UnsafeDestination
         | SampleProjectError::BundleMismatch
         | SampleProjectError::MaterializationFailed
         | SampleProjectError::TamperedInstallation
@@ -2203,5 +2204,66 @@ mod tests {
         running.store(false, Ordering::Release);
         server_thread.join().unwrap();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Every arm of the wire vocabulary, read out of this file's own source.
+    fn command_vocabulary(source: &str) -> Vec<&str> {
+        source
+            .split("enum LocalCommand {")
+            .nth(1)
+            .expect("the wire vocabulary is an enum in this file")
+            .split("\n}")
+            .next()
+            .expect("the enum closes")
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.ends_with(',') || line.ends_with(" {"))
+            .collect()
+    }
+
+    /// Is any arm a way to reach dispatch, Pause or Resume?
+    fn reaches_dispatch(arms: &[&str]) -> Option<String> {
+        arms.iter()
+            .find(|arm| {
+                let lowered = arm.to_lowercase();
+                lowered.contains("dispatch")
+                    || lowered.contains("pause")
+                    || lowered.contains("resume")
+            })
+            .map(|arm| (*arm).to_owned())
+    }
+
+    #[test]
+    fn no_transport_command_can_reach_dispatch_or_pause() {
+        // ADR 0039 requires dispatch to be reachable only from one named Operator surface, and this
+        // build exposes none. The executable inventory is the wire vocabulary itself: without it,
+        // adding a `Dispatch` arm would be a silent widening of what can mutate a repository -- the
+        // absence is true today and would be unguarded tomorrow (gpt1). Pause is included because
+        // it gates dispatch, and a remote Resume would be a remote way past that gate.
+        let arms = command_vocabulary(include_str!("local_transport.rs"));
+        assert!(arms.len() > 20, "the inventory did not find the vocabulary");
+        assert_eq!(reaches_dispatch(&arms), None);
+    }
+
+    #[test]
+    fn the_surface_inventory_would_notice_a_dispatch_arm() {
+        // The inventory's own control. Mutating the real enum cannot demonstrate this -- every
+        // exhaustive match in the crate would stop compiling first -- so the predicate is exercised
+        // against a synthetic vocabulary instead.
+        let synthetic =
+            "enum LocalCommand {\n    Status,\n    DispatchProposal { ruling: String },\n}\n";
+        let arms = command_vocabulary(synthetic);
+        assert_eq!(arms.len(), 2);
+        assert_eq!(
+            reaches_dispatch(&arms).as_deref(),
+            Some("DispatchProposal { ruling: String },")
+        );
+
+        // And Resume, for the same reason.
+        let synthetic = "enum LocalCommand {\n    Status,\n    ResumeWork,\n}\n";
+        assert_eq!(
+            reaches_dispatch(&command_vocabulary(synthetic)).as_deref(),
+            Some("ResumeWork,")
+        );
     }
 }

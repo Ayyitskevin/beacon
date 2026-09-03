@@ -2152,6 +2152,32 @@ pub(crate) struct ProposalBindingFacts {
     pub(crate) bindings: ProposalBindings,
 }
 
+/// Which Project and revisions a stored Proposal is indexed under.
+///
+/// **Not an authority read.** It returns the row's own columns without proving them against the
+/// bytes, and exists for one purpose: opening a Run row needs a Project and its revisions before
+/// any gate has run, and a corrupt record must reach the gate that refuses it rather than escaping
+/// as an error that leaves a Run with no Receipt. Every fact a decision rests on comes from
+/// `verified_proposal_within` instead.
+pub(crate) fn proposal_row_scope(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+) -> Result<Option<(Uuid, ProposalBindings)>, ProposalError> {
+    let Some(stored) = load_stored(connection, workspace_id, digest_value)? else {
+        return Ok(None);
+    };
+    Ok(Some((
+        stored.project_id,
+        ProposalBindings {
+            charter_revision: stored.charter_revision,
+            project_policy_revision: stored.project_policy_revision,
+            repository_revision: stored.repository_revision,
+            pinned_base_revision: stored.pinned_base_revision,
+        },
+    )))
+}
+
 /// One stored Proposal's payload, proved against its own bytes.
 ///
 /// The digest names these bytes, the bytes decode, they re-encode identically, every indexed column
@@ -2195,7 +2221,19 @@ pub(crate) fn verified_proposal_within(
     let Some(stored) = load_stored(connection, workspace_id, digest_value)? else {
         return Ok(None);
     };
-    verified_proposal(connection, stored).map(Some)
+    let proposal = verified_proposal(connection, stored)?;
+    // And its audit Event, through this module's own verifier. A consumer that proved the row and
+    // skipped the Event would accept a Proposal whose evidence says something else (gpt1's P0).
+    let (payload_json, occurred_at_ms) = connection.query_row(
+        "SELECT payload_json, occurred_at_ms FROM events
+         WHERE workspace_id = ?1 AND kind = 'proposal.submitted'
+           AND json_extract(payload_json, '$.proposal.digest.value') = ?2",
+        params![workspace_id.to_string(), digest_value],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+    )?;
+    let occurred_at_ms = u64::try_from(occurred_at_ms).map_err(|_| ProposalError::InvalidStore)?;
+    verify_proposal_event(connection, workspace_id, occurred_at_ms, &payload_json)?;
+    Ok(Some(proposal))
 }
 
 /// What one Proposal declared it would change, for the records that bind to those effects.
