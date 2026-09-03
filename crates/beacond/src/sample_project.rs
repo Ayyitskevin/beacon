@@ -324,16 +324,25 @@ impl SampleProjectService {
 
         let root = copies_root.as_ref();
         fs::create_dir_all(root)?;
-        let destination = root.join(format!("sample-project-{label}"));
-        if destination.exists() {
-            return Err(SampleProjectError::UnsafeDestination);
-        }
-        // The root is created here and opened immediately, so a descriptor is held on the
-        // directory Beacon made from the moment it exists. The copy then fills that directory, and
-        // the repository opened afterwards must have the identity captured at creation -- otherwise
-        // something replaced the pathname in between and this is not the directory Beacon created.
-        fs::create_dir(&destination)?;
-        let created = File::open(&destination)?;
+        let name = format!("sample-project-{label}");
+        let destination = root.join(&name);
+
+        // The copy's root is created and opened THROUGH the copies-root descriptor: `mkdirat` then
+        // `openat` on a single component, with no pathname resolution of the parent chain and no
+        // symlink to follow. The previous version created the directory by pathname and opened that
+        // pathname in the next operation, and a review replaced the empty directory in exactly that
+        // interval -- so the copy was made into a directory Beacon had not created.
+        //
+        // What this does NOT do is make creation and opening one operation: POSIX has no `O_CREAT`
+        // for a directory, so a window between `mkdirat` and `openat` remains. Its residual is
+        // stated in ADR 0039 rather than claimed away; exploiting it needs write access to Beacon's
+        // own copies root, which is also what it takes to defeat the provenance token.
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        let root_directory = options.open(root)?;
+        let created = create_private_directory_at(&root_directory, OsStr::new(name.as_str()))?;
         let created_identity = {
             let metadata = created.metadata()?;
             (metadata.dev(), metadata.ino())
@@ -640,12 +649,11 @@ impl SampleProjectService {
 /// No symlink is followed and none is recreated: a copy that reproduced a link would carry a
 /// reference out of the tree Beacon owns, and the whole point of the copy is that everything the
 /// dispatch path can reach is inside it.
-/// Copy `source` into `destination`, which the caller has already created.
+/// Copy `source` into `destination`, which the caller has already created and opened.
 ///
-/// The root is created by the caller rather than here, so the caller can hold a descriptor on the
-/// directory it created from the moment it exists: a copy that creates its own root leaves an
-/// interval between creating a pathname and opening it, and whatever is opened afterwards need not
-/// be what was created (gpt1).
+/// The root is the caller's to create because the caller holds a descriptor on it: a copy that
+/// created its own root left an interval between creating a pathname and opening it, and whatever
+/// was opened afterwards need not have been what was created (gpt1).
 fn copy_tree(source: &Path, destination: &Path) -> Result<(), SampleProjectError> {
     for entry in fs::read_dir(source)? {
         let entry = entry?;

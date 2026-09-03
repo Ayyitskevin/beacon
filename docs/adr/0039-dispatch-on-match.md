@@ -449,9 +449,14 @@ separator wherever two attempts can both reach it. If the Steward intends R9 lit
 the same-Ruling case — the claim removed and CAS alone deciding — that is a different
 durability trade and it should be ruled explicitly, not assumed from this paragraph.
 
-**What "Beacon-made" is proved by, and what it is not.** The copy is created by Beacon and a
-descriptor is held on the created directory from the moment it exists, so the row records the
-identity of the directory Beacon made rather than of whatever a later pathname lookup returns.
+**What "Beacon-made" is proved by, and what it is not.** The copy's root is created and opened
+through the copies-root descriptor — `mkdirat` then `openat` on one component, no resolution of
+the parent chain, no symlink to follow — and everything after that uses the descriptor, so the
+row records the identity of the directory Beacon made rather than of whatever a later pathname
+lookup returns. POSIX offers no `O_CREAT` for a directory, so a window between those two calls
+remains: it is one syscall wide, it cannot be reached by resolving a pathname differently, and
+exploiting it needs write access to Beacon's own copies root — which is also what it takes to
+read the provenance token below. That residual is stated rather than claimed away.
 The row carries a device, an inode, and a **provenance token** Beacon generates and writes into
 the copy's own configuration; the gate re-reads that token through the pinned descriptor and
 requires it to equal the recorded one. Identity alone would not do: device and inode are reused
