@@ -300,20 +300,25 @@ impl DispatchReceipt {
     /// when a commit was prepared, so a Receipt with no prepared commit and nothing unknown is one
     /// that refused before anything reached the object database.
     pub fn repository_effect(&self) -> RepositoryEffect {
-        // Two tokens say the record cannot answer, and both must reach the same arm.
-        // `ObjectResidueUnknown`: the interruption fell before the claim, so whether anything was
-        // written is unrecorded. `LandingResultUnknown`: the repository could not say what became
-        // of the prepared commit -- which is precisely when `UnreferencedObjects` must not be
-        // claimed, because its contract asserts that objects exist which no ref names, and a branch
-        // holding a descendant of that commit makes the assertion false rather than unproven
-        // (gpt2). Closing one reachable unknown state and leaving the other was the same defect
-        // this method was introduced to fix.
+        // `ObjectResidueUnknown` is its own fact rather than an outcome: the interruption fell
+        // before the claim, so whether anything was written is unrecorded even for outcomes that
+        // would otherwise be definite.
         if self
             .not_verified
             .contains(&NotVerified::ObjectResidueUnknown)
-            || self
-                .not_verified
-                .contains(&NotVerified::LandingResultUnknown)
+        {
+            return RepositoryEffect::Unknown;
+        }
+        // The repository could not say what became of the prepared commit. Every record that holds
+        // this state names this token -- the coherence check requires it of a `LandingUnobserved`
+        // Receipt (`receipt_is_coherent`), and records written before the write-side exclusion
+        // above named it too, so this one arm covers old and new alike. An arm keyed on the outcome
+        // as well was written and removed: it and this one masked each other, each surviving its
+        // own mutant because the other answered first, and a check that cannot fail is a sentence
+        // rather than a guard (C37).
+        if self
+            .not_verified
+            .contains(&NotVerified::LandingResultUnknown)
         {
             return RepositoryEffect::Unknown;
         }
@@ -1650,7 +1655,17 @@ fn not_verified(outcome: &DispatchOutcome, decided: &Decided) -> Vec<NotVerified
         DispatchOutcome::LandingUnobserved => names.push(NotVerified::LandingResultUnknown),
         _ => names.push(NotVerified::ChangeNotApplied),
     }
-    if decided.prepared_commit.is_some() && *outcome != DispatchOutcome::Applied {
+    // Not for an unobserved landing: this token asserts that objects exist which NO REF NAMES, and
+    // an unobserved landing is the one state where the repository could not say whether a ref names
+    // them. Emitting it there is not an unproven claim but a false one -- the branch may hold a
+    // descendant of the prepared commit (gpt2, s4f). `landing_result_unknown` is what that state
+    // has to say, and it is already above.
+    if decided.prepared_commit.is_some()
+        && !matches!(
+            outcome,
+            DispatchOutcome::Applied | DispatchOutcome::LandingUnobserved
+        )
+    {
         names.push(NotVerified::UnreferencedObjectResidue);
     }
     names
@@ -2103,7 +2118,14 @@ fn interrupted_receipt(
         }
         _ => not_verified.push(NotVerified::ChangeNotApplied),
     }
-    if outcome != DispatchOutcome::Applied && prepared.is_some() {
+    // Same exclusion as the live path, and for the same reason: a reconstructed unobserved landing
+    // is exactly the record gpt2 drove, where the prepared commit turned out to be reachable.
+    if prepared.is_some()
+        && !matches!(
+            outcome,
+            DispatchOutcome::Applied | DispatchOutcome::LandingUnobserved
+        )
+    {
         not_verified.push(NotVerified::UnreferencedObjectResidue);
     }
     not_verified.push(NotVerified::ReconstructedAfterInterruption);
