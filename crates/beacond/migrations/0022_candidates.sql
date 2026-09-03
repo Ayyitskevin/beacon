@@ -514,6 +514,12 @@ CREATE TABLE beacon_repositories (
     device INTEGER NOT NULL,
     inode INTEGER NOT NULL,
     origin TEXT NOT NULL CHECK (origin = 'sample_project_copy'),
+    -- A value Beacon generated when it made this copy and wrote into the copy's own
+    -- configuration. Device and inode name a directory the kernel currently has; they are
+    -- reusable after a deletion, so a later unrelated directory can inherit them. This is not
+    -- reusable: the gate re-reads it through the pinned descriptor and refuses a repository
+    -- that cannot produce the token recorded against its identity.
+    provenance_token TEXT NOT NULL CHECK (length(provenance_token) = 36),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
     PRIMARY KEY (workspace_id, path)
 ) STRICT;

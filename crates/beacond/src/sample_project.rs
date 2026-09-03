@@ -18,6 +18,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::git_object_store::{LooseRead, ObjectKind, ObjectStore};
+use crate::worktree::{PinnedRepository, WRITE_BUDGET, write_pinned};
 use crate::{
     AutonomyProfile, BudgetBoundary, DeclaredCheck, ExternalEffects, OperatorAccountError,
     OperatorAccountService, ProjectCharter, ProjectView, RepositoryAuthor, RepositorySourceKind,
@@ -328,18 +329,39 @@ impl SampleProjectService {
             return Err(SampleProjectError::UnsafeDestination);
         }
         copy_tree(&source, &destination)?;
+
+        // The copy is pinned by descriptor from here to the record, and the token is written and
+        // read back through that descriptor. Copying to a pathname and reopening the pathname
+        // afterwards left a window in which the directory recorded need not be the one created.
+        let pinned = PinnedRepository::open(&destination)
+            .map_err(|_| SampleProjectError::UnsafeDestination)?;
+        let token = Uuid::new_v4().to_string();
+        write_pinned(
+            &pinned,
+            None,
+            None,
+            &[
+                "config",
+                "--file",
+                ".git/config",
+                crate::dispatch::PROVENANCE_TOKEN_KEY,
+                &token,
+            ],
+            None,
+            WRITE_BUDGET,
+        )
+        .ok_or(SampleProjectError::UnsafeDestination)?;
+
         // The act that makes the copy Beacon-made, recorded where a gate can read it. A dispatch
         // asks this record whether Beacon created a repository; without it, "Beacon-made" would be
         // a claim about a directory's location rather than about its origin.
         self.with_authenticated_store(|connection, now| {
-            crate::dispatch::record_beacon_repository(
-                connection,
-                self.workspace_id,
-                &destination,
-                now,
-            )
-            .map_err(|_| SampleProjectError::InvalidStore)
+            crate::dispatch::record_beacon_repository(connection, self.workspace_id, &pinned, now)
+                .map_err(|_| SampleProjectError::InvalidStore)
         })?;
+        if !pinned.still_pinned() {
+            return Err(SampleProjectError::UnsafeDestination);
+        }
         Ok(destination)
     }
 
