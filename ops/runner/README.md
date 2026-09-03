@@ -6,8 +6,9 @@ user. It has no login shell and no sudo access. GitHub assigns one job, removes
 the ephemeral registration, and the runner exits. A fresh short-lived
 registration token is required before the next job.
 
-The package job itself runs in the digest-pinned Ubuntu 22.04 container declared
-in `.github/workflows/ci.yml`. Mickey is Ubuntu 24.04 with glibc 2.39; building
+The self-hosted package job runs in the digest-pinned Ubuntu 22.04 container
+declared in `.github/workflows/ci.yml`; package-labeled PRs retain the original
+GitHub-hosted Ubuntu 22.04 job. Mickey is Ubuntu 24.04 with glibc 2.39; building
 directly on the host would undo the glibc 2.35 compatibility floor accepted in
 [ADR 0036](../../docs/adr/0036-appimage-compatibility-floor.md). The runner work
 root is therefore `/__w`: GitHub mounts that same path into the job container,
@@ -24,10 +25,11 @@ there. The account is not placed in `sudo` or given a usable login shell.
 The exception is Docker. `scripts/clean-host-first-run` calls the rootful Docker
 daemon, so the unit receives the `docker` supplementary group. Access to that
 socket is effectively root access and can bypass `ProtectHome` by asking the
-daemon to mount host paths. Consequently, only a maintainer should add the
-`package` label, and only after reviewing the PR as host-trusted code. The direct
-runner process cannot read `/home/kevin-lee`; Docker-capable workflow code is not
-inside that boundary. Do not route arbitrary or fork-authored jobs here.
+daemon to mount host paths. Because a PR label persists across `synchronize` and
+is not bound to the reviewed head SHA, even package-labeled PRs run only on
+hosted Ubuntu 22.04; the root-equivalent mickey runner is reserved for pushes to
+`main` and explicit `workflow_dispatch` refs. The direct runner process cannot
+read `/home/kevin-lee`; Docker-capable workflow code is not inside that boundary.
 
 The runner otherwise reads the checked-out repository, ordinary system files,
 and the public network resources used by the build. Its registration
@@ -151,10 +153,10 @@ after its one-shot registration is gone.
 
 ## Workflow check
 
-An unlabeled pull request skips `package`. Adding the exact `package` label
-causes the `pull_request:labeled` event to schedule it, where it waits for all
-four runner labels. Pushes to `main` always schedule it. Fast suites remain on
-GitHub-hosted runners.
+An unlabeled pull request skips packaging. Adding the exact `package` label
+schedules the GitHub-hosted Ubuntu 22.04 job, including after later synchronize
+events. Pushes to `main` and manual dispatches with an explicit `ref` schedule
+the mickey job. Fast suites remain on GitHub-hosted runners.
 
 ## Remove the runner
 
