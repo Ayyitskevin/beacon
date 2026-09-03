@@ -299,9 +299,10 @@ repository the Operator owns remains impossible in this build. It runs sixteen r
 requires an approved `beacon.ruling.v2` that is neither superseded nor drifted, requires the
 Project's autonomy profile to be Supervised, refuses while the Installation is paused, and refuses a
 Ruling that has already been dispatched. Its one irreversible step is a ref compare-and-swap against
-the exact base the gates observed, performed inside a single write transaction that re-verifies the
-authority, claims the Ruling, swaps the ref, and writes the Receipt, Event and terminal Run state
-together. Every dispatch Receipt names the seven constraint families ADR 0034 leaves undeclarable in
+the exact base the gates observed. The one-use claim is committed first, in its own transaction,
+because the swap is an external effect a rolled-back transaction cannot undo; the swap then happens
+inside a single write transaction that re-verifies the authority, swaps the ref, and writes the
+Receipt, Event and terminal Run state together. Every dispatch Receipt names the seven constraint families ADR 0034 leaves undeclarable in
 Proposal v1, so no record of an applied change can be read as having checked them.
 
 No transport surface reaches it: an inventory test with a positive control proves the local

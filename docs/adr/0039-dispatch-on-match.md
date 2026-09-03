@@ -101,9 +101,11 @@ repository byte-identical, which is the strong claim and the one row 34 needs; a
 refusal after W3 leaves the source refs and working tree unchanged and **may leave
 unreachable objects**, which the Receipt names. `Applied` names the resulting
 revision, verified after the fact. `LandingUnobserved` means the swap produced no
-establishable result, and the Receipt names the commit to check. The three never collapse, for the reason ADR 0027
-gives about preflight's outcomes: a negative answer, an error, and a step that did
-not finish are different facts.
+establishable result: the Receipt names the commit to check **when the claim recorded one**,
+and when the interruption fell before the claim it says instead that any object residue is
+unknown — because the same durable state is left by a death before a single object was
+written. The three never collapse, for the reason ADR 0027 gives about preflight's outcomes:
+a negative answer, an error, and a step that did not finish are different facts.
 
 ## Candidate v1: the record that carries what a dispatch would write
 
@@ -265,8 +267,10 @@ Three independent equalities, all required:
    (G9).
 2. **The content.** Every pre-image digest gates a modification or a deletion;
    every post-image digest gates a creation or a modification; the supplied
-   content is checked before the worktree exists (G12) and each written file is
-   re-read and checked after (W2).
+   content is checked before anything is written (G12), the declared pre-images are
+   checked against the pinned base tree before that (G14), and every blob in the
+   prepared commit is re-read from the object database and checked afterwards (W4).
+   No worktree and no checkout is involved: the objects are built with plumbing.
 3. **The effect.** After the commit, `git diff --name-status -z base commit` must
    produce exactly the declared mutation set — same paths, same kinds, no extra
    row. This is what makes "applied exactly what was declared" a measurement
@@ -502,15 +506,17 @@ post-preparation refusal that names its residue; and `LandingUnobserved` for a
 Receipt that exists and whose Git result could not be established — which names the
 prepared commit, because the reservation record above persisted it before the act.
 A Run whose lease expires without any Receipt stays `unconfirmed` only until startup,
-which writes the Receipt that terminates it from that same durable record — asking the
-ref what became of the prepared commit, and recording `LandingUnobserved` naming that
-commit whenever the repository cannot be read or no longer has the identity that was
-pinned.
+which writes the Receipt that terminates it — asking the ref what became of the prepared
+commit when a claim recorded one, and recording `LandingUnobserved` naming that commit
+whenever the repository cannot be read or no longer has the identity that was pinned. A Run
+with **no** claim gets the same outcome for a different reason and says so: nothing recorded
+what, if anything, this attempt wrote, so the Receipt carries `object_residue_unknown` rather
+than a residue claim nobody measured.
 
 **What startup does with a Receipt that already exists is narrower, deliberately.** It
 re-verifies the record: the stored bytes against the Event's bytes, the outcome against
 the Run state, the invariants that outcome arm owes, and the identity of the durable
-preparation the landing transaction wrote. It does **not** re-read the repository, and an
+claim the attempt committed before its swap. It does **not** re-read the repository, and an
 `Applied` Receipt is not a claim that the branch still names that commit — `resulting_revision`
 is a landing-at-time fact. Ordinary history continues after a dispatch, and a Receipt whose
 truth expired at the next commit would be no evidence at all.

@@ -2548,10 +2548,11 @@ fn the_claim_is_committed_before_the_swap_and_a_second_connection_can_read_it() 
 }
 
 #[test]
-fn an_interruption_before_the_claim_is_terminal_and_names_its_unnameable_residue() {
-    // The earliest boundary: objects exist and nothing has recorded what they are. The honest
-    // terminal record is that the result is unobserved AND that the residue cannot be named. A
-    // guess in either direction would be worse than the uncertainty.
+fn an_interruption_before_the_claim_is_terminal_and_says_what_it_cannot_know() {
+    // The earliest boundary: the Run is open, nothing was claimed, and whether any object reached
+    // the object database is unknown -- a death here can fall before the first write as easily as
+    // after it. The honest terminal record says the landing result is unobserved and that any
+    // residue is unknown. A guess in either direction would be worse than the uncertainty.
     let fixture = admitted_mission("killed-before-claim");
     let (repository, ruling_digest) = fixture.approved("killed-before-claim");
     let base = repository.revision.clone();
@@ -2581,7 +2582,7 @@ fn an_interruption_before_the_claim_is_terminal_and_names_its_unnameable_residue
     assert!(
         not_verified
             .iter()
-            .any(|entry| entry == "residue_cannot_be_named"),
+            .any(|entry| entry == "object_residue_unknown"),
         "{payload}"
     );
     assert!(value["preparedCommit"].is_null());
