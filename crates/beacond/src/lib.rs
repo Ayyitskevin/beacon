@@ -141,6 +141,9 @@ pub use team::{
     TeamDraft, TeamError, TeamFormationActor, TeamMemberDraft, TeamMemberView, TeamService,
     TeamView,
 };
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub use worktree::set_pinned_spawn_hook;
 pub use worktree::{CleanupOutcome, KeepReason, Worktree, WorktreeError};
 
 const SCHEMA_VERSION: i64 = 22;

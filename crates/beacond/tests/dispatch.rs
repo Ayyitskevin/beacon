@@ -3522,8 +3522,7 @@ fn a_reconstructed_receipt_that_cannot_name_its_residue_claims_no_byte_identity(
     assert!(
         receipt
             .not_verified
-            .iter()
-            .any(|entry| *entry == NotVerified::ObjectResidueUnknown)
+            .contains(&NotVerified::ObjectResidueUnknown)
     );
     assert_eq!(receipt.repository_effect(), RepositoryEffect::Unknown);
 }
@@ -3636,4 +3635,127 @@ fn two_dispatch_commands_racing_one_branch_are_separated_by_the_compare_and_swap
         ),
         "1"
     );
+}
+
+#[test]
+fn a_decoy_installed_between_the_head_check_and_the_landing_receives_nothing() {
+    // The kernel row as it was written: a decoy at the pinned pathname AFTER the gates measured the
+    // real repository and BEFORE the landing. The committed test swapped before `dispatch` was
+    // called, which measures the head gate rather than the landing -- my C32 report said otherwise
+    // and was wrong (gpt2).
+    //
+    // Entering by descriptor is what makes this safe: the pathname now resolves to the decoy, and
+    // nothing this attempt does can reach it.
+    let fixture = admitted_mission("decoy-mid-attempt");
+    let (repository, ruling_digest) = fixture.approved("decoy-mid-attempt");
+    let original = repository.path.clone();
+    let moved = fixture.copies_root.join("copy-decoy-mid-attempt-moved");
+    let copies_root = fixture.copies_root.clone();
+    let base = repository.revision.clone();
+    let decoy_snapshot = Arc::new(Mutex::new(String::new()));
+    let recorded = Arc::clone(&decoy_snapshot);
+    let moved_for_hook = moved.clone();
+
+    let dispatches = DispatchService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .with_failpoints(DispatchFailpoints {
+            before_landing: Some(Arc::new(move || {
+                fs::rename(&original, &moved_for_hook).unwrap();
+                let decoy = CopyRepository::create(&copies_root, "decoy-mid-attempt-decoy");
+                fs::write(decoy.path.join("decoy.txt"), "decoy\n").unwrap();
+                CopyRepository::git(&decoy.path, &["add", "-A"]);
+                CopyRepository::git(&decoy.path, &["commit", "--quiet", "-m", "decoy"]);
+                fs::rename(&decoy.path, &original).unwrap();
+                *recorded.lock().unwrap() = raw_repository_snapshot(&original);
+            })),
+            ..DispatchFailpoints::default()
+        });
+
+    let receipt = dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+
+    // Whatever this attempt concluded, the decoy standing at the pinned pathname received nothing.
+    assert_eq!(
+        raw_repository_snapshot(&repository.path),
+        decoy_snapshot.lock().unwrap().clone(),
+        "the decoy at the pinned pathname was written to"
+    );
+    // And the repository that was measured did not move either: a swap it could not verify is not
+    // a swap it performs.
+    assert_ne!(receipt.outcome, DispatchOutcome::Applied);
+    assert_eq!(CopyRepository::git(&moved, &["rev-parse", "HEAD"]), base);
+}
+
+#[test]
+fn a_target_that_escapes_the_repository_cannot_reach_a_dispatch_at_all() {
+    // "A target that escapes refuses before anything is published" is true one step earlier than it
+    // sounds: an escaping path is unrepresentable in a Proposal, so no Candidate can carry it, no
+    // Ruling can name it, and no dispatch exists to refuse. Asserted here, in the dispatch tests,
+    // because that is where the claim is made.
+    let fixture = admitted_mission("escape");
+    for escape in ["../outside.rs", "/etc/passwd", "src/../../outside.rs"] {
+        let mut record = fixture.proposal("Write outside the repository.");
+        record.mutations = vec![(MUTATION_MODIFY, escape.to_owned())];
+        assert!(
+            fixture.proposals.submit(&record.bytes()).is_err(),
+            "a Proposal declaring {escape} was accepted"
+        );
+    }
+}
+
+#[test]
+fn a_decoy_swapped_in_for_the_duration_of_one_invocation_receives_nothing() {
+    // The window `still_pinned` cannot see, and the only arrangement that tells descriptor entry
+    // apart from pathname entry: the directory is replaced AFTER the pin is checked and BEFORE the
+    // child runs, and put back before the check that follows. A command entering by name would
+    // write into the decoy and the post-check would still pass, which is exactly the probe that
+    // failed this code once already.
+    //
+    // I found this one myself, after the mid-attempt decoy test above turned out to be caught by
+    // `still_pinned` rather than by descriptor entry -- `current_dir(path)` survived every test in
+    // the repository. It does not survive this one.
+    let fixture = admitted_mission("swap-during");
+    let (repository, ruling_digest) = fixture.approved("swap-during");
+    let original = repository.path.clone();
+    let moved = fixture.copies_root.join("copy-swap-during-moved");
+    let decoy = CopyRepository::create(&fixture.copies_root, "swap-during-decoy");
+    let decoy_home = decoy.path.clone();
+    let decoy_before = raw_repository_snapshot(&decoy_home);
+    let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let watched = original.clone();
+    let moved_for_hook = moved.clone();
+    let decoy_for_hook = decoy_home.clone();
+    let counted = Arc::clone(&writes);
+    beacond::set_pinned_spawn_hook(Some(Arc::new(move |path| {
+        // Only this test's repository, and only its SECOND write: `hash-object -w`, which puts a
+        // loose object into whichever repository it runs in. The first write is `read-tree`, which
+        // would merely fail in the decoy and prove nothing about where it ran.
+        if path != watched || counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) != 1 {
+            return;
+        }
+        fs::rename(&watched, &moved_for_hook).unwrap();
+        fs::rename(&decoy_for_hook, &watched).unwrap();
+    })));
+
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES));
+    beacond::set_pinned_spawn_hook(None);
+    let receipt = receipt.unwrap();
+
+    // Put the decoy back where the test can measure it, and the real repository back in place.
+    fs::rename(&original, &decoy_home).unwrap();
+    fs::rename(&moved, &original).unwrap();
+
+    assert!(
+        writes.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+        "the invocation this test swaps around never ran, so it proves nothing"
+    );
+    assert_eq!(
+        raw_repository_snapshot(&decoy_home),
+        decoy_before,
+        "the decoy received a write from a command that should have entered by descriptor"
+    );
+    assert_ne!(receipt.outcome, DispatchOutcome::Applied);
 }

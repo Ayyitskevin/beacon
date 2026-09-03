@@ -54,6 +54,8 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+#[cfg(debug_assertions)]
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -630,6 +632,36 @@ impl PinnedRepository {
 /// measured `git status --porcelain` refreshing and rewriting `.git/index`: a gate that mutates the
 /// repository it is measuring cannot support a zero-mutation claim, and the optional-locks
 /// environment variable is what stops it.
+/// A hook that runs after a pinned command is built and before it is spawned. Debug builds only.
+///
+/// This is the one window `still_pinned` cannot see: it checks the pathname before the command runs
+/// and again after, so a directory swapped in for the duration of the invocation and swapped back
+/// is invisible to it -- and that window is the whole reason the child enters by descriptor rather
+/// than by name. Without a synchronization point here, replacing descriptor entry with
+/// `current_dir(path)` survives every test in the repository.
+///
+/// The hook receives the repository's path so a test can act on its own and leave every other
+/// test's invocations alone; the tests run in one process.
+#[cfg(debug_assertions)]
+type PinnedSpawnHook = Arc<dyn Fn(&Path) + Send + Sync>;
+
+#[cfg(debug_assertions)]
+static BEFORE_PINNED_SPAWN: Mutex<Option<PinnedSpawnHook>> = Mutex::new(None);
+
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn set_pinned_spawn_hook(hook: Option<PinnedSpawnHook>) {
+    *BEFORE_PINNED_SPAWN.lock().unwrap() = hook;
+}
+
+#[cfg(debug_assertions)]
+fn before_pinned_spawn(repository: &PinnedRepository) {
+    let hook = BEFORE_PINNED_SPAWN.lock().unwrap().clone();
+    if let Some(hook) = hook {
+        hook(repository.path());
+    }
+}
+
 pub(crate) fn read_only_git_command(git: &Path, filter_drivers: &[String]) -> Command {
     let mut command = Command::new(git);
     apply_git_hardening(&mut command, filter_drivers);
@@ -706,6 +738,8 @@ pub(crate) fn write_pinned(
     for argument in arguments {
         command.arg(argument);
     }
+    #[cfg(debug_assertions)]
+    before_pinned_spawn(repository);
     match run_git_bounded_with_stdin(command, stdin_bytes, budget) {
         Bounded::Finished {
             success: true,
