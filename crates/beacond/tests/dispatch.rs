@@ -24,17 +24,17 @@ use std::thread::{self, JoinHandle};
 
 use beacond::{
     AccessOrigin, AutonomyProfile, BeaconCapability, CandidateImages, CandidateService,
-    DeclaredCheck, DispatchFailpoints, DispatchOutcome, DispatchService,
+    CopyFailpoints, DeclaredCheck, DispatchFailpoints, DispatchOutcome, DispatchService,
     LocalModelActivationService, LocalModelEndpoint, MissionDraft, MissionMemberDraft,
     MissionService, MutationEffect, NotVerified, OperatorAccountService, OperatorSessionPhase,
     PauseService, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService,
     ProjectRepositoryService, ProjectService, ProposalService, ProviderFeature, RepositoryDraft,
     RepositoryEffect, RepositorySourceKind, ResidentConfigurationService, ResidentLifecycleService,
-    RulingDecision, RulingService, RulingSupersedes, SampleProjectService, SecretString,
-    StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig, Supervisor,
-    SupervisorError, SuppliedContent, TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
-    TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft, TeamService,
-    TrackRecordEvidenceKind, TrackRecordRequirement,
+    RulingDecision, RulingService, RulingSupersedes, SampleProjectError, SampleProjectService,
+    SecretString, StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig,
+    Supervisor, SupervisorError, SuppliedContent, TeamDraft, TeamLeadAmbiguityRule,
+    TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
+    TeamService, TrackRecordEvidenceKind, TrackRecordRequirement,
 };
 use data_encoding::HEXLOWER;
 use rusqlite::{Connection, OptionalExtension};
@@ -1865,6 +1865,243 @@ fn a_declared_path_carrying_pathspec_magic_touches_only_itself() {
         changed,
         vec![magic],
         "a pathspec expanded past its declaration"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The copy's creation-to-first-open window
+// ---------------------------------------------------------------------------------------------
+
+/// How many repositories Beacon has recorded as its own.
+fn beacon_repository_count(store: &Connection) -> i64 {
+    store
+        .query_row("SELECT COUNT(*) FROM beacon_repositories", [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
+/// The component belongs to this fixture's copies root, not to another test running in the same
+/// process.
+fn in_copies_root(created: &Path, copies_root: &Path) -> bool {
+    created
+        .parent()
+        .and_then(|parent| fs::canonicalize(parent).ok())
+        .is_some_and(|parent| parent == copies_root)
+}
+
+/// Move Beacon's own child aside and put a directory the test made at that component.
+///
+/// Beacon's child is moved rather than deleted, so it still exists: a check that only asked "is
+/// there a directory here?" would still say yes, and one that compared the name to Beacon's inode
+/// after this has something real to be wrong about.
+fn swap_in_impostor(created: &Path, copies_root: &Path) -> bool {
+    if !in_copies_root(created, copies_root) {
+        return false;
+    }
+    let aside = created.with_file_name("beacons-own-child");
+    fs::rename(created, &aside).unwrap();
+    fs::create_dir(created).unwrap();
+    true
+}
+
+/// Hand the component back to Beacon's own child, discarding the impostor.
+///
+/// This is what makes a substitution visible to exactly ONE of the two identity comparisons: the
+/// descriptor was opened on the impostor, but by the time the staging name is checked it names
+/// Beacon's directory again.
+fn restore_beacons_child(created: &Path, copies_root: &Path) -> bool {
+    if !in_copies_root(created, copies_root) {
+        return false;
+    }
+    let aside = created.with_file_name("beacons-own-child");
+    if !aside.is_dir() {
+        return false;
+    }
+    fs::remove_dir(created).unwrap();
+    fs::rename(&aside, created).unwrap();
+    true
+}
+
+#[test]
+fn the_directory_beacon_opens_must_be_the_one_beacon_created() {
+    // gpt1's probe, committed: the replacement is installed in the create-to-open window and LEFT
+    // there. Nothing is restored, so this is the shape a real substitution has.
+    //
+    // It is the scenario that pins WHEN the inode is captured. Reading it after `openat` instead of
+    // before makes both comparisons compare the impostor with itself, and everything downstream
+    // agrees: the copy is written into the replacement, the provenance token is generated for it,
+    // and `copy_for_dispatch` returns `Ok`. That mutant is invisible to the two tests below, which
+    // both restore or defer the swap -- measured, not assumed.
+    let fixture = admitted_mission("copy-probe");
+    let samples = SampleProjectService::new(
+        Arc::clone(&fixture.accounts),
+        fixture.workspace_id,
+        &fixture.store.path,
+    )
+    .unwrap();
+    samples.install().unwrap();
+
+    let copies_root = fs::canonicalize(&fixture.copies_root).unwrap();
+    let fired = Arc::new(Mutex::new(false));
+    let observed = Arc::clone(&fired);
+    let samples = samples.with_copy_failpoints(CopyFailpoints {
+        before_open: Some(Arc::new(move |created: &Path| {
+            let mut seen = observed.lock().unwrap();
+            if !*seen && swap_in_impostor(created, &copies_root) {
+                *seen = true;
+            }
+        })),
+        ..CopyFailpoints::default()
+    });
+    let outcome = samples.copy_for_dispatch(&fixture.copies_root, "probe");
+
+    assert!(
+        *fired.lock().unwrap(),
+        "the failpoint never fired, so this test proves nothing"
+    );
+    assert!(
+        matches!(outcome, Err(SampleProjectError::UnsafeDestination)),
+        "the directory Beacon opens must be the one Beacon created, got {outcome:?}"
+    );
+    assert_eq!(beacon_repository_count(&fixture.store.connect()), 0);
+    assert!(!fixture.copies_root.join("sample-project-probe").exists());
+}
+
+#[test]
+fn a_descriptor_that_is_not_the_directory_beacon_created_is_refused() {
+    // `copy_for_dispatch` creates the copy's root with `mkdirat` and opens it with `openat`: two
+    // syscalls, and POSIX offers no `O_CREAT` for a directory to make them one. A review replaced
+    // the final component in exactly that interval, and the previous build answered with the
+    // replacement -- which then received a freshly generated provenance token and was recorded in
+    // `beacon_repositories` as Beacon-created, with `copy_for_dispatch` returning `Ok`.
+    //
+    // Every run of that probe was a reviewer's temporary patch, because nothing in the tree could
+    // reach the interval. This is the first committed test of the seam.
+    //
+    // The substitution here is undone before the staging name is checked, so the NAME comparison
+    // cannot see it: only the comparison between the opened descriptor and the inode `mkdirat`
+    // produced can. That is deliberate -- with both comparisons firing on one scenario, deleting
+    // either left the test green.
+    let fixture = admitted_mission("copy-swap");
+    let samples = SampleProjectService::new(
+        Arc::clone(&fixture.accounts),
+        fixture.workspace_id,
+        &fixture.store.path,
+    )
+    .unwrap();
+    samples.install().unwrap();
+    assert_eq!(beacon_repository_count(&fixture.store.connect()), 0);
+
+    let copies_root = fs::canonicalize(&fixture.copies_root).unwrap();
+    let swap_root = copies_root.clone();
+    let fired = Arc::new(Mutex::new(false));
+    let observed = Arc::clone(&fired);
+    let samples = samples.with_copy_failpoints(CopyFailpoints {
+        // The impostor is in place for the length of the create-to-open window...
+        before_open: Some(Arc::new(move |created: &Path| {
+            let mut seen = observed.lock().unwrap();
+            if !*seen && swap_in_impostor(created, &swap_root) {
+                *seen = true;
+            }
+        })),
+        // ...and the name is handed back before it is checked, so only the descriptor can tell.
+        after_open: Some(Arc::new(move |created: &Path| {
+            restore_beacons_child(created, &copies_root);
+        })),
+    });
+    let outcome = samples.copy_for_dispatch(&fixture.copies_root, "swap");
+
+    assert!(
+        *fired.lock().unwrap(),
+        "the failpoint never fired, so this test proves nothing"
+    );
+    assert!(
+        matches!(outcome, Err(SampleProjectError::UnsafeDestination)),
+        "a descriptor that is not the directory Beacon made must be refused, got {outcome:?}"
+    );
+    // The refusal happens before provenance exists: nothing recorded, and the published name never
+    // created, so a later run cannot adopt what this one left behind.
+    assert_eq!(beacon_repository_count(&fixture.store.connect()), 0);
+    assert!(!fixture.copies_root.join("sample-project-swap").exists());
+}
+
+#[test]
+fn a_staging_name_that_stops_naming_beacons_directory_is_not_published() {
+    // The other half. Here the descriptor IS Beacon's -- the substitution happens after `openat` --
+    // so the descriptor comparison passes and only the check that the staging name still refers to
+    // that inode can refuse. Without it, `renameat` would publish the impostor under the name the
+    // copy is about to be written to.
+    let fixture = admitted_mission("copy-rename");
+    let samples = SampleProjectService::new(
+        Arc::clone(&fixture.accounts),
+        fixture.workspace_id,
+        &fixture.store.path,
+    )
+    .unwrap();
+    samples.install().unwrap();
+
+    let copies_root = fs::canonicalize(&fixture.copies_root).unwrap();
+    let fired = Arc::new(Mutex::new(false));
+    let observed = Arc::clone(&fired);
+    let samples = samples.with_copy_failpoints(CopyFailpoints {
+        after_open: Some(Arc::new(move |created: &Path| {
+            let mut seen = observed.lock().unwrap();
+            if !*seen && swap_in_impostor(created, &copies_root) {
+                *seen = true;
+            }
+        })),
+        ..CopyFailpoints::default()
+    });
+    let outcome = samples.copy_for_dispatch(&fixture.copies_root, "rename");
+
+    assert!(
+        *fired.lock().unwrap(),
+        "the failpoint never fired, so this test proves nothing"
+    );
+    assert!(
+        matches!(outcome, Err(SampleProjectError::UnsafeDestination)),
+        "a staging name that no longer names Beacon's directory must not be published, got {outcome:?}"
+    );
+    assert_eq!(beacon_repository_count(&fixture.store.connect()), 0);
+    assert!(!fixture.copies_root.join("sample-project-rename").exists());
+}
+
+#[test]
+fn an_unsubstituted_copy_is_made_and_recorded() {
+    // The counterexample: without a failpoint the same call succeeds and records exactly one
+    // repository. Without this, the two tests above are satisfiable by a `copy_for_dispatch` that
+    // refuses everything.
+    let fixture = admitted_mission("copy-clean");
+    let samples = SampleProjectService::new(
+        Arc::clone(&fixture.accounts),
+        fixture.workspace_id,
+        &fixture.store.path,
+    )
+    .unwrap();
+    samples.install().unwrap();
+
+    let copy = samples
+        .copy_for_dispatch(&fixture.copies_root, "clean")
+        .unwrap();
+
+    assert_eq!(copy, fixture.copies_root.join("sample-project-clean"));
+    assert!(copy.join("README.md").is_file());
+    assert_eq!(beacon_repository_count(&fixture.store.connect()), 1);
+    // Published under the name callers use, with no staging component left behind.
+    let leftovers: Vec<_> = fs::read_dir(&fixture.copies_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with('.'))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "staging names left behind: {leftovers:?}"
+    );
+    // Mode 0700, set on the descriptor.
+    assert_eq!(
+        fs::metadata(&copy).unwrap().permissions().mode() & 0o777,
+        0o700
     );
 }
 
