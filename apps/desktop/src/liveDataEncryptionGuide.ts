@@ -21,8 +21,10 @@ export type EncryptionGuide = {
   documentation: string;
 };
 
+const RUNNABLE_CRYPTSETUP_CAPABILITY =
+  /\bcryptsetup\b[^\r\n;&|]*\b(?:luksFormat|luksErase|reencrypt|erase)\b/i;
 const RUNNABLE_DESTRUCTIVE_COMMAND =
-  /\b(?:(?:sudo|doas)\s+)?(?:cryptsetup\s+(?:luksFormat|luksErase|reencrypt|erase)|cryptsetup-reencrypt|mkfs(?:\.[a-z0-9]+)?|wipefs|shred|dd\s+if=|rm\s+-rf|manage-bde|Enable-BitLocker)\b/i;
+  /\b(?:(?:sudo|doas)\s+)?(?:cryptsetup-reencrypt|mkfs(?:\.[a-z0-9]+)?|wipefs|shred|dd\s+if=|rm\s+-rf|manage-bde|Enable-BitLocker)\b/i;
 const RUNNABLE_SHELL_SYNTAX = /```(?:sh|bash|shell)|(?:^|\n)\s*[$#]\s+\S|&&|\|\|/i;
 
 /** The construction door for bundled guidance.
@@ -32,7 +34,11 @@ const RUNNABLE_SHELL_SYNTAX = /```(?:sh|bash|shell)|(?:^|\n)\s*[$#]\s+\S|&&|\|\|
  */
 export function checkedEncryptionGuide(guide: EncryptionGuide): EncryptionGuide {
   const text = [guide.title, ...guide.steps, guide.caution, guide.documentation].join("\n");
-  if (RUNNABLE_DESTRUCTIVE_COMMAND.test(text) || RUNNABLE_SHELL_SYNTAX.test(text)) {
+  if (
+    RUNNABLE_CRYPTSETUP_CAPABILITY.test(text) ||
+    RUNNABLE_DESTRUCTIVE_COMMAND.test(text) ||
+    RUNNABLE_SHELL_SYNTAX.test(text)
+  ) {
     throw new Error("an encryption guide contains a runnable destructive command");
   }
   return guide;

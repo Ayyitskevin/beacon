@@ -11,12 +11,17 @@ describe("the bundled live-data encryption guide", () => {
     expect(linux).not.toContain("Beacon detects exactly that");
   });
 
-  it("refuses a runnable destructive command at the guide's construction door", () => {
+  it.each([
+    "sudo cryptsetup luksFormat /dev/sda",
+    "cryptsetup --batch-mode luksFormat /dev/sda",
+    "doas cryptsetup -q luksErase /dev/nvme0n1p3",
+    "/usr/sbin/cryptsetup --debug --batch-mode reencrypt /dev/mapper/data",
+  ])("refuses the runnable destructive command %s at the guide's construction door", (command) => {
     expect(() =>
       checkedEncryptionGuide({
         platform: "linux",
         title: "Unsafe fixture",
-        steps: ["sudo cryptsetup luksFormat /dev/sda"],
+        steps: [command],
         caution: "This destroys data.",
         documentation: "Use vendor documentation.",
       }),
