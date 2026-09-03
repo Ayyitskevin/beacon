@@ -290,6 +290,8 @@ fn downgrade_execution_schema_to_v15(store_path: &Path) {
              DROP TRIGGER receipts_no_delete;
              DROP INDEX runs_project_started;
              DROP INDEX runs_open_lease;
+             DROP INDEX runs_workspace_started;
+             DROP TABLE installation_pause;
              ALTER TABLE receipts RENAME TO receipts_v16;
              ALTER TABLE runs RENAME TO runs_v16;",
         )

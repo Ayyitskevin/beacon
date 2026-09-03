@@ -241,7 +241,11 @@ pub enum ReadableContext {
 }
 
 /// The closed v1 mutation vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// The serde spelling is part of the dispatch Receipt's contract, not of this grammar's identity:
+/// the canonical bytes carry one-byte tags and are unaffected by it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MutationKind {
     CreateFile,
     ModifyFile,
@@ -2175,6 +2179,23 @@ fn verified_payload(stored: &StoredProposal) -> Result<ProposalV1, ProposalError
         return Err(ProposalError::InvalidStore);
     }
     Ok(payload)
+}
+
+/// One stored Proposal, proved and with its readiness derived, **inside the caller's transaction**.
+///
+/// The owning module's full contract, not a digest comparison: a consumer that only re-hashed the
+/// bytes would be applying a weaker rule than `ProposalService::get` applies, and readiness is
+/// exactly the part a dispatch must not skip. Returns `Ok(None)` when this Workspace has no such
+/// Proposal, which is a different fact from one that disagrees with itself.
+pub(crate) fn verified_proposal_within(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+) -> Result<Option<Proposal>, ProposalError> {
+    let Some(stored) = load_stored(connection, workspace_id, digest_value)? else {
+        return Ok(None);
+    };
+    verified_proposal(connection, stored).map(Some)
 }
 
 /// What one Proposal declared it would change, for the records that bind to those effects.
