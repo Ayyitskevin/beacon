@@ -402,16 +402,35 @@ its own full proof — digest over the stored bytes, strict decode, re-encode,
 indexed-column equality, and the Event pairing — before any field of its record is
 used. Dispatch never assembles authority by joining tables.
 
-**Authority linearizes at one point.** Nothing in the gate list stops a Ruling from
-being superseded, or a policy or binding from moving, between G4/G5 and L1. A final
-re-read without serialization narrows that window rather than closing it. So one
-`BEGIN IMMEDIATE` transaction holds the store's write lock — which serializes more than
-per Proposal, and is therefore stronger than the rule requires — across the Proposal's
-wall-clock ceiling, the full authority re-verification (Ruling proof, approve, not
-superseded, no drift, Supervised, not paused), the uniqueness claim, the ref
-compare-and-swap, and the Receipt, Event and terminal Run state. A dispatch that is
-superseded, drifted, paused or demoted in that window is refused at the last moment it
-could be, and a deterministic two-connection test drives both races.
+**Authority linearizes at one point, and the claim is committed before it.** Nothing in
+the gate list stops a Ruling from being superseded, or a policy or binding from moving,
+between G4/G5 and L1. A final re-read without serialization narrows that window rather
+than closing it. So one `BEGIN IMMEDIATE` transaction holds the store's write lock —
+which serializes more than per Proposal, and is therefore stronger than the rule requires
+— across the Proposal's wall-clock ceiling, the full authority re-verification (Ruling
+proof, approve, not superseded, no drift, live Proposal readiness, Supervised, not
+paused), the ref compare-and-swap, and the Receipt, Event and terminal Run state. A
+dispatch that is superseded, drifted, paused, demoted or made unready in that window is
+refused at the last moment it could be, and deterministic two-connection tests drive all
+three races.
+
+The **one-use claim is deliberately NOT in that transaction**: it commits in its own,
+immediately before it. The swap is an external effect, and a store transaction that spans
+it does not survive a crash the way the ref does — a process killed after `update-ref`
+would roll the claim back and leave a moved ref nothing in the store could explain. So the
+order is: claim committed, then the linearized transaction. The cost is stated rather than
+hidden: a Ruling claimed here stays claimed even if that transaction then refuses it,
+because a claim returned on failure is not a claim.
+
+Two different mechanisms therefore guard two different things, and neither stands in for
+the other. **The claim makes dispatch of one Ruling happen once**: a second dispatcher
+loses the unique insert and is refused before it reaches the swap. **The compare-and-swap
+makes the ref update safe against any writer at all** — including ordinary history that is
+not a dispatch — by refusing unless the ref still holds exactly the revision the gates
+observed. Each has its own test, because a test of one is not evidence for the other: the
+concurrent-dispatcher test survives removing the swap's expected-old value, and the test
+that does not is one where a competing commit, not a competing dispatch, arrives in the
+window.
 
 **Supervised only, and human-only by construction.** ADR 0004 gives Observe,
 Supervised, and Bounded; `BLUEPRINT.md:405-406` says Observe permits **no external
