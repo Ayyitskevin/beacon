@@ -634,11 +634,21 @@ is the same three-member shape this store uses everywhere: `algorithm`, `canonic
 `value`. A digest without the grammar that produced it names bytes without saying what they
 were bytes of.
 
-`gitSteps` is one entry per invocation actually made, in the order they were made, including
-the ones that failed: `step` is a closed `GitStepName`, `argv` is the exact argument vector
-(fixed text this build chooses plus the revisions and declared paths of the request — never a
-caller's free text), and `result` is a bounded `GitStepResult` category, never dynamic stderr
-text, so two implementations that run the same steps write the same bytes.
+`gitSteps` is one entry per Git invocation **dispatch makes on its own behalf**, in the order
+it made them, including the ones that did not succeed: the pre-image reads, the three live gate
+reads, the object writes, the effect post-condition, the swap, the observation of what the swap
+produced, and the checkout. `step` is a closed `GitStepName`; `argv` is the exact argument
+vector dispatch passes; `result` is a bounded `GitStepResult`, never dynamic stderr text, so two
+implementations that run the same steps write the same bytes.
+
+Two exclusions, stated because a record that leaves things out silently is worse than one that
+says what it leaves out. **The hardened wrapper's own prefix is not in `argv`** — the `-c`
+overrides, `--literal-pathspecs`, and the filter-driver inventory read the wrapper performs
+before each invocation are constant machinery, identical for every step of every dispatch, and
+listing them would bury the arguments that differ. **`result` has two arms**: the bounded runner
+reports a non-zero exit, a timeout, a failure to spawn, and a repository that stopped being the
+pinned one as one absent answer, so naming a cause here would be naming one this code was never
+told.
 
 The contract carries what the accepted Receipt contract requires (`BLUEPRINT.md:790-800`)
 or names each exception. A dispatch runs no Declared Check, invokes no model, and consumes
