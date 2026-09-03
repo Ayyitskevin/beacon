@@ -22,18 +22,18 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use beacond::{
-    AutonomyProfile, BeaconCapability, CandidateImages, CandidateService, DeclaredCheck,
-    DispatchFailpoints, DispatchOutcome, DispatchService, LocalModelActivationService,
-    LocalModelEndpoint, MissionDraft, MissionMemberDraft, MissionService, MutationEffect,
-    OperatorAccountService, OperatorSessionPhase, PauseService, ProjectCharterDraft, ProjectDraft,
-    ProjectPolicyDraft, ProjectPolicyService, ProjectRepositoryService, ProjectService,
-    ProposalService, ProviderFeature, RepositoryDraft, RepositorySourceKind,
-    ResidentConfigurationService, ResidentLifecycleService, RulingDecision, RulingService,
-    RulingSupersedes, SampleProjectService, SecretString, StarterOrganizationService,
-    StarterResidentDraft, StarterRole, StartupConfig, Supervisor, SupervisorError, SuppliedContent,
-    TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule,
-    TeamLeadSelectionPolicy, TeamMemberDraft, TeamService, TrackRecordEvidenceKind,
-    TrackRecordRequirement,
+    AccessOrigin, AutonomyProfile, BeaconCapability, CandidateImages, CandidateService,
+    DeclaredCheck, DispatchFailpoints, DispatchOutcome, DispatchService,
+    LocalModelActivationService, LocalModelEndpoint, MissionDraft, MissionMemberDraft,
+    MissionService, MutationEffect, OperatorAccountService, OperatorSessionPhase, PauseService,
+    ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService,
+    ProjectRepositoryService, ProjectService, ProposalService, ProviderFeature, RepositoryDraft,
+    RepositorySourceKind, ResidentConfigurationService, ResidentLifecycleService, RulingDecision,
+    RulingService, RulingSupersedes, SampleProjectService, SecretString,
+    StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig, Supervisor,
+    SupervisorError, SuppliedContent, TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
+    TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft, TeamService,
+    TrackRecordEvidenceKind, TrackRecordRequirement,
 };
 use data_encoding::HEXLOWER;
 use rusqlite::{Connection, OptionalExtension};
@@ -982,6 +982,12 @@ impl Fixture {
     /// The whole arrangement a dispatch needs: a Beacon-made copy, a Proposal, its Candidate, and
     /// an approving v2 Ruling that names it.
     fn approved(&self, label: &str) -> (CopyRepository, String) {
+        let (repository, _proposal, ruling) = self.approved_proposal(label);
+        (repository, ruling)
+    }
+
+    /// [`Fixture::approved`], with the Proposal digest a second writer needs to rule again.
+    fn approved_proposal(&self, label: &str) -> (CopyRepository, String, String) {
         let repository = CopyRepository::create(&self.copies_root, label);
         let (proposal_digest, _candidate) = self.candidate_for(
             &repository,
@@ -997,7 +1003,19 @@ impl Fixture {
                 RulingSupersedes::None,
             )
             .unwrap();
-        (repository, ruling.digest().value.clone())
+        (repository, proposal_digest, ruling.digest().value.clone())
+    }
+
+    /// A second session on its own connection, the way another window or process would arrive.
+    fn other_session(path: &Path) -> Arc<OperatorAccountService> {
+        let accounts = Arc::new(OperatorAccountService::open(path).unwrap());
+        accounts
+            .authenticate_password(
+                SecretString::new("a long local passphrase".to_owned()),
+                AccessOrigin::SameMachine,
+            )
+            .unwrap();
+        accounts
     }
 }
 
@@ -2990,5 +3008,130 @@ fn an_applied_receipt_that_names_no_landing_is_refused_at_startup() {
             Err(SupervisorError::DispatchEventMismatch(_))
         ),
         "startup accepted an Applied Receipt that names no landing"
+    );
+}
+
+#[test]
+fn a_supersession_committed_between_the_gates_and_the_swap_does_not_land() {
+    // The race R8 rules on, driven rather than argued. A second session -- its own connection, its
+    // own unlock, the real Command -- reverses the Ruling after every gate has passed it and before
+    // the landing transaction opens. The authority re-read inside that transaction is the only
+    // thing standing between the reversal and a published commit.
+    let fixture = admitted_mission("race-supersede");
+    let (repository, proposal_digest, ruling_digest) = fixture.approved_proposal("race-supersede");
+    let base = repository.revision.clone();
+    let path = fixture.store.path.clone();
+    let workspace_id = fixture.workspace_id;
+    let reversed = ruling_digest.clone();
+
+    let dispatches = DispatchService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .with_failpoints(DispatchFailpoints {
+            before_landing: Some(Arc::new(move || {
+                let others = Fixture::other_session(&path);
+                let candidates = CandidateService::new(Arc::clone(&others), workspace_id);
+                let rulings = RulingService::new(Arc::clone(&others), workspace_id);
+                rulings
+                    .rule_on_candidate(
+                        &candidates.present(&proposal_digest).unwrap(),
+                        RulingDecision::Refuse,
+                        "On reflection, not this change.",
+                        RulingSupersedes::Ruling(reversed.clone()),
+                    )
+                    .unwrap();
+            })),
+            ..DispatchFailpoints::default()
+        });
+
+    let receipt = dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+
+    assert_eq!(receipt.outcome, DispatchOutcome::RulingSuperseded);
+    assert_eq!(receipt.resulting_revision, None);
+    assert_eq!(
+        CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]),
+        base,
+        "a superseded Ruling published a commit"
+    );
+}
+
+#[test]
+fn a_policy_published_between_the_gates_and_the_swap_does_not_land() {
+    // The same race on the other authority fact: the Ruling copied a Policy revision, and a second
+    // session publishes the next one in the window. Drift is a refusal at the last moment it can be
+    // read, not a fact the gates cached.
+    let fixture = admitted_mission("race-drift");
+    let (repository, ruling_digest) = fixture.approved("race-drift");
+    let base = repository.revision.clone();
+    let path = fixture.store.path.clone();
+    let workspace_id = fixture.workspace_id;
+    let project_id = fixture.project_id;
+
+    let dispatches = DispatchService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .with_failpoints(DispatchFailpoints {
+            before_landing: Some(Arc::new(move || {
+                let others = Fixture::other_session(&path);
+                ProjectPolicyService::new(Arc::clone(&others), workspace_id)
+                    .publish(project_id, 1, Some(1), policy_draft(2))
+                    .unwrap();
+            })),
+            ..DispatchFailpoints::default()
+        });
+
+    let receipt = dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+
+    assert_eq!(receipt.outcome, DispatchOutcome::RulingDrifted);
+    assert_eq!(
+        CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]),
+        base,
+        "a drifted Ruling published a commit"
+    );
+}
+
+#[test]
+fn a_precondition_that_becomes_unmet_between_the_gates_and_the_swap_does_not_land() {
+    // The third authority fact the re-read owes: the Proposal's live readiness. A second session
+    // deactivates the Resident the Proposal was built against, which makes a precondition unmet in
+    // exactly the window the gates cannot see.
+    let fixture = admitted_mission("race-readiness");
+    let (repository, ruling_digest) = fixture.approved("race-readiness");
+    let base = repository.revision.clone();
+    let path = fixture.store.path.clone();
+    let workspace_id = fixture.workspace_id;
+    let resident_id = fixture.resident_id;
+
+    let dispatches = DispatchService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .with_failpoints(DispatchFailpoints {
+            before_landing: Some(Arc::new(move || {
+                let connection = Connection::open(&path).unwrap();
+                let decision: Uuid = connection
+                    .query_row(
+                        "SELECT id FROM resident_lifecycle_decisions
+                         WHERE resident_id = ?1 ORDER BY decided_at_ms DESC, id DESC LIMIT 1",
+                        [resident_id.to_string()],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map(|value| Uuid::parse_str(&value).unwrap())
+                    .unwrap();
+                drop(connection);
+                let others = Fixture::other_session(&path);
+                ResidentLifecycleService::new(Arc::clone(&others), workspace_id)
+                    .retire(resident_id, Some(decision))
+                    .unwrap();
+            })),
+            ..DispatchFailpoints::default()
+        });
+
+    let receipt = dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+
+    assert_eq!(receipt.outcome, DispatchOutcome::ProposalNotReady);
+    assert_eq!(
+        CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]),
+        base,
+        "a Proposal whose preconditions moved published a commit"
     );
 }
