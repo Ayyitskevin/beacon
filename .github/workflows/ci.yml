@@ -5,6 +5,11 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
+    inputs:
+      ref:
+        description: Exact branch, tag, or commit to package on node-a
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -31,8 +36,7 @@ jobs:
         if: >-
           success() && (
           (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-          (github.event_name == 'pull_request' &&
-          contains(github.event.pull_request.labels.*.name, 'package'))
+          github.event_name == 'workflow_dispatch'
           )
         env:
           PACKAGE_RUNNER_LABELS: ${{ vars.BEACON_PACKAGE_RUNNER_LABELS }}
@@ -73,6 +77,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22.23.2"
@@ -104,12 +109,119 @@ jobs:
   package:
     name: Linux AppImage package
     needs: product
+    # A PR label is deliberately only a request for GitHub-hosted packaging.
+    # Labels survive synchronize events, so they cannot authorize host access.
+    if: >-
+      github.event_name == 'pull_request' &&
+      contains(github.event.pull_request.labels.*.name, 'package')
+    # Pinned to 22.04, not ubuntu-latest. linuxdeploy bundles the host's GTK and
+    # WebKit libraries, so the build base sets the AppImage's glibc floor: built
+    # on 24.04 it needs GLIBC_2.39 and will not load on Debian 12 or Ubuntu
+    # 22.04. Built here it needs 2.35 and was observed launching on the three
+    # hosts that were measured -- Ubuntu 22.04, Debian 12, and Ubuntu 24.04.
+    # The product job stays on ubuntu-latest -- this is a packaging constraint,
+    # not a toolchain one.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      # Sources: https://github.com/actions/checkout/releases/tag/v7.0.1
+      #          https://github.com/actions/setup-node/releases/tag/v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.2"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      # Source: https://github.com/actions/cache/releases/tag/v6.1.0
+      - name: Restore package Cargo cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: package-cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+      - name: Select the pinned npm release
+        run: npm install --global npm@10.9.8
+      - name: Install Tauri Linux prerequisites
+        # Source: https://v2.tauri.app/start/prerequisites/#linux
+        run: >-
+          sudo apt-get update &&
+          sudo apt-get install --no-install-recommends --yes
+          libwebkit2gtk-4.1-dev
+          build-essential
+          curl
+          wget
+          file
+          libxdo-dev
+          libssl-dev
+          libayatana-appindicator3-dev
+          librsvg2-dev
+      - name: Install desktop dependencies
+        working-directory: apps/desktop
+        run: npm ci --ignore-scripts
+      # `tauri build` runs beforeBuildCommand, which builds beacond in release
+      # and stages it as the target-triple sidecar tauri.conf.json names. No
+      # separate staging step: one command owns the whole bundle.
+      - name: Build AppImage
+        working-directory: apps/desktop
+        run: npm run tauri build
+      # The bundle shipped without a supervisor once and nothing noticed until a
+      # clean-host launch panicked in the setup hook. An AppImage that cannot
+      # start is worse than a failed build, so this fails the build instead.
+      - name: Verify the bundle ships the supervisor
+        run: |
+          set -eu
+          appdir=target/release/bundle/appimage/Beacon.AppDir
+          test -x "$appdir/usr/bin/beacon-desktop" || { echo "no desktop shell in $appdir"; exit 1; }
+          test -x "$appdir/usr/bin/beacond" || { echo "no supervisor in $appdir -- the AppImage cannot complete first launch"; exit 1; }
+          ls -l "$appdir/usr/bin/"
+      - name: Write AppImage checksum
+        working-directory: target/release/bundle/appimage
+        run: sha256sum ./*.AppImage > Beacon.AppImage.sha256
+      - name: Drive first-run setup on clean hosts
+        run: |
+          set -eu
+          set -- target/release/bundle/appimage/*.AppImage
+          if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+            echo "expected exactly one AppImage, found $#" >&2
+            exit 1
+          fi
+          scripts/clean-host-first-run "$1" target/clean-host-first-run
+      # Source: https://github.com/actions/upload-artifact/blob/v4.6.2/README.md#usage
+      - name: Upload AppImage
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: beacon-linux-appimage
+          path: |
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/appimage/*.sha256
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload clean-host first-run evidence
+        # The harness writes this marker only after scanning every persisted
+        # byte. A red secret scan must not become an always()-upload.
+        if: ${{ always() && hashFiles('target/clean-host-first-run/.export-safe') != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: beacon-linux-appimage-first-run-evidence
+          path: target/clean-host-first-run
+          # A build failure can precede the harness. A harness failure still
+          # uploads its partial matrix without replacing the job's red result.
+          if-no-files-found: warn
+          retention-days: 14
+
+  package-self-hosted:
+    name: Linux AppImage package (node-a)
+    needs: product
     # Source: https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idif
     if: >-
       needs.product.result == 'success' && (
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-      (github.event_name == 'pull_request' &&
-      contains(github.event.pull_request.labels.*.name, 'package'))
+      github.event_name == 'workflow_dispatch'
       )
     runs-on: ${{ fromJSON(needs.product.outputs.package_runner_labels) }}
     # node-a is Ubuntu 24.04/glibc 2.39. Keep the accepted 2.35 AppImage floor
@@ -156,6 +268,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22.23.2"
