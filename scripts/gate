@@ -30,26 +30,97 @@
 # Run one stage only:
 #   scripts/gate lint | scripts/gate format | scripts/gate test
 #   scripts/gate desktop | scripts/gate rust
+#
+# Skip the stages that need the Python env (a fresh review worktree pays ten
+# minutes for a `.venv` it does not need to compile Rust or build the desktop
+# app):
+#   scripts/gate --no-venv all | scripts/gate --no-venv rust
+#
+# CONTRIBUTING is the source of the split, and it names exactly two exempt
+# stages: rust and desktop use none of the Python tree. --no-venv therefore
+# SKIPS lint/format/test and says so, one line per stage -- a stage that is not
+# run must never be indistinguishable from one that passed, which is this
+# file's whole subject. Asking for a Python stage BY NAME under --no-venv is a
+# refusal, not a skip: silently exiting 0 on the stage you explicitly requested
+# is the false green in its purest form.
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-stage="${1:-all}"
 failed=0
 PY=".venv/bin/python"
 RUFF=".venv/bin/ruff"
 
-case "$stage" in
-    rust|desktop) ;;
-    *)
-        if [ ! -x "$PY" ]; then
-            echo "gate: no .venv in $(pwd) -- create one and install this worktree editable." >&2
-            echo "gate: importing another checkout's copy is the false-green this repo has hit." >&2
+# The stages CONTRIBUTING lists as needing the Python env. Everything not named
+# here runs in a checkout that has no .venv.
+VENV_STAGES="lint format test"
+VENV_REASON="needs .venv (Python); CONTRIBUTING exempts only rust and desktop"
+
+usage() {
+    cat <<'USAGE'
+usage: scripts/gate [--no-venv] [stage]
+
+stages:
+  lint      ruff check                        (needs .venv)
+  format    ruff format --check               (needs .venv)
+  test      pytest                            (needs .venv)
+  desktop   npm ci, npm test, build, Tauri build
+  rust      stage sidecar, cargo fmt/clippy/test/build
+  all       every stage, in that order        (default)
+
+options:
+  --no-venv  run only the stages that need no Python env (desktop, rust).
+             Skipped stages are named on stdout, one line each. Naming a
+             stage that needs .venv together with --no-venv is refused
+             rather than skipped.
+  -h, --help this text.
+
+exit: 0 all checks passed - 1 a check failed - 2 usage, or a missing .venv
+USAGE
+}
+
+stage=""
+no_venv=0
+for arg in "$@"; do
+    case "$arg" in
+        --no-venv) no_venv=1 ;;
+        -h|--help) usage; exit 0 ;;
+        -*)
+            echo "gate: unknown option '$arg' (--no-venv|--help)" >&2
             exit 2
-        fi
-        ;;
-esac
+            ;;
+        *)
+            if [ -n "$stage" ]; then
+                echo "gate: one stage at a time (got '$stage' and '$arg')" >&2
+                exit 2
+            fi
+            stage="$arg"
+            ;;
+    esac
+done
+stage="${stage:-all}"
+
+needs_venv() {
+    case " $VENV_STAGES " in *" $1 "*) return 0 ;; esac
+    return 1
+}
+
+if [ "$no_venv" -eq 1 ]; then
+    # Refuse, never skip: the caller named this stage on purpose.
+    if needs_venv "$stage"; then
+        echo "gate: stage '$stage' $VENV_REASON." >&2
+        echo "gate: --no-venv cannot run it -- drop the flag, or run 'rust'/'desktop'." >&2
+        exit 2
+    fi
+elif needs_venv "$stage" || [ "$stage" = all ]; then
+    if [ ! -x "$PY" ]; then
+        echo "gate: no .venv in $(pwd) -- create one and install this worktree editable." >&2
+        echo "gate: importing another checkout's copy is the false-green this repo has hit." >&2
+        echo "gate: 'scripts/gate --no-venv $stage' runs the stages that do not need it." >&2
+        exit 2
+    fi
+fi
 
 run() {
     local name="$1"; shift
@@ -90,40 +161,57 @@ stage_sidecar() {
     scripts/stage-sidecar
 }
 
+# One owner per group. Before --no-venv, the `all` case carried a second copy of
+# every stage's check list; a third would have been the point where `all` and the
+# single-stage cases drifted apart without anything failing.
+python_checks() {
+    run "ruff check"  "$RUFF" check src tests
+    run "ruff format" "$RUFF" format --check src tests
+    run "pytest"      "$PY" -m pytest -q
+}
+
+desktop_checks() {
+    run "npm clean install" run_in_desktop npm ci --ignore-scripts
+    run "desktop tests"    run_in_desktop npm test
+    run "desktop build"    run_in_desktop npm run build
+    run "Tauri build"      run_in_desktop npm run tauri build -- --no-bundle
+}
+
+rust_checks() {
+    run "stage sidecar" stage_sidecar
+    run "cargo fmt"    cargo fmt --all --check
+    run "cargo clippy" cargo clippy --workspace --all-targets --all-features -- -D warnings
+    run "cargo test"   cargo test --workspace --all-targets
+    run "cargo build"  cargo build --workspace --all-targets
+}
+
+# A stage that was not run must be as visible as one that failed.
+skipped=""
+skip() {
+    printf '  skip  %-16s -- %s\n' "$1" "$2"
+    skipped="${skipped:+$skipped, }$1"
+}
+
 echo "gate: $(git rev-parse --abbrev-ref HEAD) @ $(git rev-parse --short HEAD)"
 
 # `run` must not abort the script on a failure, so the remaining checks still report.
 set +e
 case "$stage" in
-    lint)   run "ruff check"        "$RUFF" check src tests ;;
-    format) run "ruff format"       "$RUFF" format --check src tests ;;
-    test)   run "pytest"            "$PY" -m pytest -q ;;
-    desktop)
-        run "npm clean install" run_in_desktop npm ci --ignore-scripts
-        run "desktop tests"    run_in_desktop npm test
-        run "desktop build"    run_in_desktop npm run build
-        run "Tauri build"      run_in_desktop npm run tauri build -- --no-bundle
-        ;;
-    rust)
-        run "stage sidecar" stage_sidecar
-        run "cargo fmt"    cargo fmt --all --check
-        run "cargo clippy" cargo clippy --workspace --all-targets --all-features -- -D warnings
-        run "cargo test"   cargo test --workspace --all-targets
-        run "cargo build"  cargo build --workspace --all-targets
-        ;;
+    lint)    run "ruff check"  "$RUFF" check src tests ;;
+    format)  run "ruff format" "$RUFF" format --check src tests ;;
+    test)    run "pytest"      "$PY" -m pytest -q ;;
+    desktop) desktop_checks ;;
+    rust)    rust_checks ;;
     all)
-        run "ruff check"  "$RUFF" check src tests
-        run "ruff format" "$RUFF" format --check src tests
-        run "pytest"      "$PY" -m pytest -q
-        run "npm clean install" run_in_desktop npm ci --ignore-scripts
-        run "desktop tests"    run_in_desktop npm test
-        run "desktop build"    run_in_desktop npm run build
-        run "Tauri build"      run_in_desktop npm run tauri build -- --no-bundle
-        run "stage sidecar" stage_sidecar
-        run "cargo fmt"    cargo fmt --all --check
-        run "cargo clippy" cargo clippy --workspace --all-targets --all-features -- -D warnings
-        run "cargo test"   cargo test --workspace --all-targets
-        run "cargo build"  cargo build --workspace --all-targets
+        if [ "$no_venv" -eq 1 ]; then
+            for venv_stage in $VENV_STAGES; do
+                skip "$venv_stage" "$VENV_REASON"
+            done
+        else
+            python_checks
+        fi
+        desktop_checks
+        rust_checks
         ;;
     *) echo "gate: unknown stage '$stage' (lint|format|test|desktop|rust|all)" >&2; exit 2 ;;
 esac
@@ -134,4 +222,10 @@ if [ "$failed" -ne 0 ]; then
     exit 1
 fi
 
-echo "gate: all checks passed."
+# A green partial run must not read like a green full one.
+if [ -n "$skipped" ]; then
+    echo "gate: checks passed, but SKIPPED $skipped -- this is not a full gate."
+    echo "gate: run without --no-venv (after creating .venv) before committing."
+else
+    echo "gate: all checks passed."
+fi
