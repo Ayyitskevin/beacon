@@ -14,6 +14,7 @@ use uuid::Uuid;
 mod candidate;
 mod check_preflight;
 mod declared_checks;
+mod dispatch;
 mod git_object_store;
 mod local_model_activation;
 mod mission;
@@ -63,6 +64,10 @@ pub use sandbox::{
 pub use candidate::{
     Candidate, CandidateDigest, CandidateEntry, CandidateError, CandidateImages, CandidateService,
     CandidateV1, InconsistentCandidate, MalformedCandidate,
+};
+pub use dispatch::{
+    DispatchActor, DispatchError, DispatchOutcome, DispatchReceipt, DispatchService,
+    MutationEffect, MutationRecord, PauseService, SuppliedContent,
 };
 pub use local_model_activation::{
     LocalModelActivation, LocalModelActivationError, LocalModelActivationReview,
@@ -254,6 +259,7 @@ pub enum SupervisorError {
     RulingStateMismatch,
     CandidateEventMismatch(i64),
     CandidateStateMismatch,
+    DispatchEventMismatch(i64),
     SchemaMismatch,
     UnsupportedSchemaVersion(i64),
     IntegrityCheckFailed(String),
@@ -420,6 +426,11 @@ impl fmt::Display for SupervisorError {
                      its audit Event"
                 )
             }
+            Self::DispatchEventMismatch(sequence) => write!(
+                formatter,
+                "Event sequence {sequence} does not match its stored dispatch Receipt"
+            ),
+
             Self::SchemaMismatch => {
                 write!(
                     formatter,
@@ -1124,6 +1135,7 @@ enum PersistedEventKind {
     ProposalSubmitted,
     RulingRecorded,
     ProposalCandidateRecorded,
+    ProposalDispatched,
 }
 
 impl PersistedEventKind {
@@ -1152,6 +1164,7 @@ impl PersistedEventKind {
             Self::ProposalSubmitted => "proposal.submitted",
             Self::RulingRecorded => "ruling.recorded",
             Self::ProposalCandidateRecorded => "proposal.candidate_recorded",
+            Self::ProposalDispatched => "proposal.dispatched",
         }
     }
 
@@ -1180,6 +1193,7 @@ impl PersistedEventKind {
             "proposal.submitted" => Ok(Self::ProposalSubmitted),
             "ruling.recorded" => Ok(Self::RulingRecorded),
             "proposal.candidate_recorded" => Ok(Self::ProposalCandidateRecorded),
+            "proposal.dispatched" => Ok(Self::ProposalDispatched),
             _ => Err(SupervisorError::InvalidEventKind(value)),
         }
     }
@@ -1397,6 +1411,15 @@ fn verify_persisted_events(connection: &Connection) -> Result<u64, SupervisorErr
                     &payload_json,
                 )
                 .map_err(|_| SupervisorError::CandidateEventMismatch(sequence))?;
+            }
+            PersistedEventKind::ProposalDispatched => {
+                dispatch::verify_dispatch_event(
+                    connection,
+                    workspace_id,
+                    occurred_at_ms,
+                    &payload_json,
+                )
+                .map_err(|_| SupervisorError::DispatchEventMismatch(sequence))?;
             }
             PersistedEventKind::LocalModelActivated => {
                 local_model_activation::verify_activation_event(
@@ -4390,6 +4413,150 @@ mod tests {
         assert!(
             result.is_err(),
             "an event payload with an undeclared field was accepted"
+        );
+    }
+
+    /// Migration 0022 rebuilds `rulings` and `ruling_supersessions` to widen the canonicalizer
+    /// CHECK. gpt1 removed the `INSERT INTO rulings ... SELECT ... FROM rulings_v19` copy and every
+    /// integration test stayed green, because they all record their Rulings *after* the migration
+    /// has already run: nothing proved that a store which already held v1 Rulings keeps them.
+    ///
+    /// This applies the ladder to version 20, plants a v1 Ruling, its supersession link and its
+    /// Events with foreign keys off -- the migration's copy is what is under test, not the parent
+    /// chain -- then applies 0022 and requires every byte back.
+    #[test]
+    fn migration_0022_carries_existing_v1_rulings_across_the_table_rebuild() {
+        let connection = Connection::open_in_memory().unwrap();
+        // Foreign keys off on purpose: the parent chain a real Ruling hangs from (Proposal,
+        // Mission, Project, Charter) is not what this test is about, and building it would make
+        // the test a fixture exercise rather than a migration one.
+        connection
+            .pragma_update(None, "foreign_keys", "OFF")
+            .unwrap();
+        for migration in [
+            super::SCHEMA_V1,
+            super::MIGRATION_V2,
+            super::MIGRATION_V3,
+            super::MIGRATION_V4,
+            super::MIGRATION_V5,
+            super::MIGRATION_V6,
+            super::MIGRATION_V7,
+            super::MIGRATION_V8,
+            super::MIGRATION_V9,
+            super::MIGRATION_V10,
+            super::MIGRATION_V11,
+            super::MIGRATION_V12,
+            super::MIGRATION_V13,
+            super::MIGRATION_V14,
+            super::MIGRATION_V15,
+            super::MIGRATION_V16_ONLY,
+            super::MIGRATION_V17,
+            super::MIGRATION_V18,
+            super::MIGRATION_V19,
+            super::MIGRATION_V20,
+        ] {
+            connection.execute_batch(migration).unwrap();
+        }
+
+        let workspace = Uuid::new_v4().to_string();
+        let proposal = "a".repeat(64);
+        let first = "b".repeat(64);
+        let second = "c".repeat(64);
+        let bytes: Vec<u8> = (0..40_u8).collect();
+        connection
+            .execute(
+                "INSERT INTO workspaces (id, name, created_at_ms) VALUES (?1, 'Personal', 1)",
+                rusqlite::params![workspace],
+            )
+            .unwrap();
+        for digest in [&first, &second] {
+            connection
+                .execute(
+                    "INSERT INTO rulings (
+                         workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+                         canonical_bytes, proposal_digest, proposal_digest_algorithm,
+                         proposal_digest_canonicalizer, charter_revision, project_policy_revision,
+                         repository_revision, pinned_base_revision, decision, reason,
+                         decider_basis, ruled_at_ms
+                     ) VALUES (?1, 'sha256', 'beacon.ruling.v1', ?2, ?3, ?4, 'sha256',
+                               'beacon.proposal.v1', 1, 1, 1, ?5, 'approve', 'because', 'owner', 7)",
+                    rusqlite::params![workspace, digest, bytes, proposal, "d".repeat(40)],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO ruling_supersessions (
+                     workspace_id, proposal_digest, ruling_digest, supersedes_ruling_digest
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![workspace, proposal, second, first],
+            )
+            .unwrap();
+
+        connection.execute_batch(super::MIGRATION_V22).unwrap();
+
+        // Both Rulings, their exact bytes, and their canonicalizer column.
+        let mut statement = connection
+            .prepare(
+                "SELECT digest_value, canonical_bytes, digest_canonicalizer
+                 FROM rulings ORDER BY digest_value",
+            )
+            .unwrap();
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (first.clone(), bytes.clone(), "beacon.ruling.v1".to_owned()),
+                (second.clone(), bytes.clone(), "beacon.ruling.v1".to_owned()),
+            ],
+            "migration 0022 did not carry existing v1 Rulings across the rebuild"
+        );
+
+        // And the supersession link, whose foreign keys now point at the rebuilt table.
+        let link: (String, String) = connection
+            .query_row(
+                "SELECT ruling_digest, supersedes_ruling_digest FROM ruling_supersessions",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(link, (second, first));
+
+        // The widened vocabulary is what the rebuild was for. Inserted rather than updated,
+        // because the immutability trigger the rebuild restored refuses an UPDATE -- which is
+        // itself worth asserting here, since the trigger is one of the objects the rebuild had to
+        // put back.
+        connection
+            .execute(
+                "INSERT INTO rulings (
+                     workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+                     canonical_bytes, proposal_digest, proposal_digest_algorithm,
+                     proposal_digest_canonicalizer, charter_revision, project_policy_revision,
+                     repository_revision, pinned_base_revision, decision, reason,
+                     decider_basis, ruled_at_ms
+                 ) VALUES (?1, 'sha256', 'beacon.ruling.v2', ?2, ?3, ?4, 'sha256',
+                           'beacon.proposal.v1', 1, 1, 1, ?5, 'approve', 'because', 'owner', 8)",
+                rusqlite::params![workspace, "e".repeat(64), bytes, proposal, "d".repeat(40)],
+            )
+            .expect("the rebuilt table accepts the second grammar");
+        assert!(
+            connection
+                .execute(
+                    "UPDATE rulings SET reason = 'edited' WHERE digest_value = ?1",
+                    rusqlite::params![rows[0].0],
+                )
+                .is_err(),
+            "the rebuild did not restore the immutability trigger"
         );
     }
 }

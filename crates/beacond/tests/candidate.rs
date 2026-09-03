@@ -1347,3 +1347,72 @@ fn an_event_whose_digest_names_no_candidate_is_refused_by_the_replay() {
         "an Event naming no Candidate started: {outcome:?}"
     );
 }
+
+#[test]
+fn a_candidate_read_for_use_verifies_its_event_rather_than_counting_it() {
+    // gpt1's slice-2 P1. Counting rows whose digest matches proves a row exists and nothing about
+    // what it says: a probe changed only `$.candidate.actor` to a value the closed vocabulary does
+    // not have, and the reader handed the Candidate out. The point-of-use proof now runs the owning
+    // Event verifier against that exact row, so the actor, the time, the envelope and the bytes are
+    // all checked where the record is used.
+    let fixture = admitted_mission("event-verified");
+    let proposal_digest = fixture.submit("Add a regression test for the invariant checker.");
+    let candidate = fixture
+        .candidates
+        .record(&proposal_digest, &default_images())
+        .unwrap();
+
+    let tampered = serde_json::json!({
+        "candidate": {
+            "digest": {
+                "algorithm": "sha256",
+                "canonicalizer": "beacon.candidate.v1",
+                "value": candidate.digest().value,
+            },
+            "canonicalBytesBase64": BASE64.encode(candidate.canonical_bytes()),
+            "actor": "resident",
+            "recordedAtMs": candidate.payload().recorded_at_ms,
+        }
+    })
+    .to_string();
+    fixture.tamper(&format!(
+        "UPDATE events SET payload_json = '{}' WHERE kind = 'proposal.candidate_recorded'",
+        tampered.replace('\'', "''")
+    ));
+
+    // The refusal is the JSON one, because the actor vocabulary is closed and `resident` is not in
+    // it -- reached only because the reader now parses the Event instead of counting it.
+    let outcome = fixture.candidates.for_proposal(&proposal_digest);
+    assert!(
+        matches!(
+            outcome,
+            Err(CandidateError::InvalidStore | CandidateError::Json(_))
+        ),
+        "an Event naming an actor the vocabulary does not have was accepted: {outcome:?}"
+    );
+
+    // And the same Event with a valid actor but the wrong recorded time is refused too, so the
+    // check is not merely serde's.
+    let wrong_time = serde_json::json!({
+        "candidate": {
+            "digest": {
+                "algorithm": "sha256",
+                "canonicalizer": "beacon.candidate.v1",
+                "value": candidate.digest().value,
+            },
+            "canonicalBytesBase64": BASE64.encode(candidate.canonical_bytes()),
+            "actor": "owner",
+            "recordedAtMs": candidate.payload().recorded_at_ms + 1,
+        }
+    })
+    .to_string();
+    fixture.tamper(&format!(
+        "UPDATE events SET payload_json = '{}' WHERE kind = 'proposal.candidate_recorded'",
+        wrong_time.replace('\'', "''")
+    ));
+    let outcome = fixture.candidates.for_proposal(&proposal_digest);
+    assert!(
+        matches!(outcome, Err(CandidateError::InvalidStore)),
+        "an Event whose time disagrees with its record was accepted: {outcome:?}"
+    );
+}

@@ -288,7 +288,10 @@ authority, because a Ruling is evidence that a person decided and there is no di
 it. An authenticated Owner can also record one immutable Candidate per Proposal: the SHA-256 of
 each declared mutation's file bytes before and after, with the kind and path copied from the
 verified Proposal. It selects bytes, creates no authority, performs no repository action, and is
-refused if a second one is recorded for the same Proposal.
+refused if a second one is recorded for the same Proposal. A second Ruling grammar,
+`beacon.ruling.v2`, records a decision that names the Candidate it was shown: it is recorded only
+through a presentation of that exact change, v1 Rulings remain valid and simply name no Candidate,
+and neither grammar dispatches anything, because no dispatch exists.
 
 Resident-issued Team formation, Conversations, Gates, Evaluations, model Invocations,
 Cloud Link, passkeys, active agent work, and a downloadable installer do not exist yet. Nothing an
