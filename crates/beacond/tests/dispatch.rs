@@ -2742,10 +2742,6 @@ const RECEIPT_MEMBERS: &[&str] = &[
     "notVerified",
 ];
 
-/// The top-level member names in the order the stored bytes carry them.
-///
-/// Read off the text rather than out of a parsed map: `serde_json`'s map is sorted, so parsing and
-/// reading its keys would assert alphabetical order and pass no matter how the record is written.
 /// How the parent tells the child which boundary to die at, and what to dispatch.
 const CHILD_BOUNDARY: &str = "BEACON_DISPATCH_CRASH_AT";
 const CHILD_STORE: &str = "BEACON_DISPATCH_CRASH_STORE";
@@ -2818,6 +2814,10 @@ fn absent_members(payload: &str) -> Vec<String> {
         .collect()
 }
 
+/// The top-level member names in the order the stored bytes carry them.
+///
+/// Read off the text rather than out of a parsed map: `serde_json`'s map is sorted, so parsing and
+/// reading its keys would assert alphabetical order and pass no matter how the record is written.
 fn receipt_members(payload: &str) -> Vec<String> {
     let bytes = payload.as_bytes();
     let mut members = Vec::new();
