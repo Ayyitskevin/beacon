@@ -3433,3 +3433,46 @@ fn a_repository_that_lost_its_provenance_token_is_refused() {
 
     assert_eq!(receipt.outcome, DispatchOutcome::SourceNotBeaconMade);
 }
+
+#[test]
+fn a_branch_moved_between_the_gates_and_the_swap_is_not_clobbered() {
+    // The compare-and-swap's own service-level property, with nothing else standing in for it.
+    //
+    // The concurrent double-dispatch test cannot prove this: the one-use claim stops the second
+    // dispatcher before it reaches the swap, so removing the expected old value leaves that test
+    // green (gpt1). Here the competing write is not a second dispatch at all -- it is ordinary
+    // history, arriving after every gate has read the head and before the swap -- and the exact-base
+    // compare-and-swap is the only thing that can refuse it.
+    let fixture = admitted_mission("cas-bound");
+    let (repository, ruling_digest) = fixture.approved("cas-bound");
+    let head = repository.path.clone();
+    let later = Arc::new(Mutex::new(String::new()));
+    let recorded = Arc::clone(&later);
+
+    let dispatches = DispatchService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .with_failpoints(DispatchFailpoints {
+            before_landing: Some(Arc::new(move || {
+                CopyRepository::git(
+                    &head,
+                    &["commit", "--quiet", "--allow-empty", "-m", "ordinary history"],
+                );
+                *recorded.lock().unwrap() = CopyRepository::git(&head, &["rev-parse", "HEAD"]);
+            })),
+            ..DispatchFailpoints::default()
+        });
+
+    let receipt = dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+
+    assert_eq!(receipt.outcome, DispatchOutcome::LandingRefused);
+    assert_eq!(receipt.resulting_revision, None);
+    let moved = later.lock().unwrap().clone();
+    assert_eq!(
+        CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]),
+        moved,
+        "the swap overwrote a commit that arrived after the head gate"
+    );
+    // The declared bytes never reached the working tree either.
+    assert_ne!(fs::read(repository.path.join(TARGET)).unwrap(), NEW_BYTES.to_vec());
+}
