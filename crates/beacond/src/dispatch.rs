@@ -1736,9 +1736,9 @@ fn is_beacon_made(
     repository: &PinnedRepository,
 ) -> Result<bool, DispatchError> {
     let (device, inode) = repository.identity();
-    let found: Option<i64> = connection
+    let recorded: Option<String> = connection
         .query_row(
-            "SELECT 1 FROM beacon_repositories
+            "SELECT provenance_token FROM beacon_repositories
              WHERE workspace_id = ?1 AND device = ?2 AND inode = ?3",
             params![
                 workspace_id.to_string(),
@@ -1748,27 +1748,60 @@ fn is_beacon_made(
             |row| row.get(0),
         )
         .optional()?;
-    Ok(found.is_some())
+    let Some(recorded) = recorded else {
+        return Ok(false);
+    };
+    // The token, read from the repository itself through the pinned descriptor. Device and inode
+    // are reusable after a deletion, so the row alone proves "a directory Beacon once made had
+    // these numbers" rather than "this is that directory" (gpt1).
+    Ok(read_provenance_token(repository).as_deref() == Some(recorded.as_str()))
 }
 
+/// The provenance token this repository carries, read through the descriptor it was pinned by.
+pub(crate) fn read_provenance_token(repository: &PinnedRepository) -> Option<String> {
+    read_pinned(
+        repository,
+        &[
+            "config",
+            "--file",
+            ".git/config",
+            "--get",
+            PROVENANCE_TOKEN_KEY,
+        ],
+        READ_BUDGET,
+    )
+    .map(|value| value.trim().to_owned())
+    .filter(|value| !value.is_empty())
+}
+
+/// Where a Beacon-made copy carries the token that says Beacon made it.
+pub(crate) const PROVENANCE_TOKEN_KEY: &str = "beacon.provenanceToken";
+
 /// Record that Beacon created this repository, so a dispatch may reach it.
+/// Record a repository Beacon made, from the descriptor it has held since it made it.
+///
+/// The repository is passed in already pinned rather than opened from a pathname here: a review
+/// found the window between copying to a path and reopening that path, which is long enough for the
+/// directory recorded to be a different one from the directory created (gpt1). The token is read
+/// back through that same descriptor, so the row and the repository agree at the moment of writing.
 pub(crate) fn record_beacon_repository(
     connection: &Connection,
     workspace_id: Uuid,
-    path: &Path,
+    repository: &PinnedRepository,
     now: i64,
 ) -> Result<(), DispatchError> {
-    let repository = PinnedRepository::open(path).map_err(|_| DispatchError::InvalidStore)?;
     let (device, inode) = repository.identity();
+    let token = read_provenance_token(repository).ok_or(DispatchError::InvalidStore)?;
     connection.execute(
         "INSERT INTO beacon_repositories (
-             workspace_id, path, device, inode, origin, created_at_ms
-         ) VALUES (?1, ?2, ?3, ?4, 'sample_project_copy', ?5)",
+             workspace_id, path, device, inode, origin, provenance_token, created_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, 'sample_project_copy', ?5, ?6)",
         params![
             workspace_id.to_string(),
             repository.path().to_string_lossy(),
             i64::try_from(device).unwrap_or(i64::MAX),
             i64::try_from(inode).unwrap_or(i64::MAX),
+            token,
             now,
         ],
     )?;
