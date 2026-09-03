@@ -682,9 +682,11 @@ pub(crate) fn verify_run_state(connection: &Connection) -> Result<u64, CheckPref
         .map_err(|_| CheckPreflightError::InvalidStore)?
         .as_millis();
     let now = i64::try_from(now).map_err(|_| CheckPreflightError::InvalidStore)?;
+    // Both open states expire the same way: a lease that ran out without a terminal Receipt is
+    // `unconfirmed` whatever kind of Run held it.
     let expired = connection.execute(
         "UPDATE runs SET state = 'unconfirmed', ended_at_ms = ?1
-         WHERE state = 'preflighting' AND lease_expires_at_ms < ?1",
+         WHERE state IN ('preflighting', 'dispatching') AND lease_expires_at_ms < ?1",
         params![now],
     )?;
 
@@ -703,6 +705,10 @@ pub(crate) fn verify_run_state(connection: &Connection) -> Result<u64, CheckPref
                 (SELECT count(*) FROM events
                  WHERE events.workspace_id = runs.workspace_id
                    AND events.kind = 'run.executed'
+                   AND json_extract(events.payload_json, '$.runId') = runs.id),
+                (SELECT count(*) FROM events
+                 WHERE events.workspace_id = runs.workspace_id
+                   AND events.kind = 'proposal.dispatched'
                    AND json_extract(events.payload_json, '$.runId') = runs.id)
          FROM runs",
     )?;
@@ -714,18 +720,32 @@ pub(crate) fn verify_run_state(connection: &Connection) -> Result<u64, CheckPref
                 row.get::<_, i64>(2)?,
                 row.get::<_, i64>(3)?,
                 row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    for (kind, state, receipts, preflight_events, execution_events) in rows {
+    for (kind, state, receipts, preflight_events, execution_events, dispatch_events) in rows {
         let expected = match (kind.as_str(), state.as_str()) {
-            ("check_preflight", "refused" | "verified") => (1, 1, 0),
-            ("declared_checks", "refused" | "verified" | "incomplete") => (1, 0, 1),
+            ("check_preflight", "refused" | "verified") => (1, 1, 0, 0),
+            ("declared_checks", "refused" | "verified" | "incomplete") => (1, 0, 1, 0),
+            // A dispatch that reached a terminal state has exactly one Receipt and one Event, and
+            // is a Run like any other: this function owns every kind's cardinality so a relabelled
+            // Run cannot fall between two validators and be checked by neither.
+            ("proposal_dispatch", "refused" | "applied") => (1, 0, 0, 1),
             // An unconfirmed Run is precisely one that never recorded a Receipt.
-            ("check_preflight" | "declared_checks", "preflighting" | "unconfirmed") => (0, 0, 0),
+            (
+                "check_preflight" | "declared_checks" | "proposal_dispatch",
+                "preflighting" | "dispatching" | "unconfirmed",
+            ) => (0, 0, 0, 0),
             _ => return Err(CheckPreflightError::InvalidStore),
         };
-        if (receipts, preflight_events, execution_events) != expected {
+        if (
+            receipts,
+            preflight_events,
+            execution_events,
+            dispatch_events,
+        ) != expected
+        {
             return Err(CheckPreflightError::InvalidStore);
         }
     }

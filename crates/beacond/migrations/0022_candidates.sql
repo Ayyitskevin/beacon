@@ -48,7 +48,8 @@ CREATE TABLE events (
         'sample_project.installed',
         'proposal.submitted',
         'ruling.recorded',
-        'proposal.candidate_recorded'
+        'proposal.candidate_recorded',
+        'proposal.dispatched'
     )),
     payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
     occurred_at_ms INTEGER NOT NULL CHECK (occurred_at_ms >= 0)
@@ -282,5 +283,175 @@ BEFORE DELETE ON ruling_candidates
 BEGIN
     SELECT RAISE(ABORT, 'Ruling candidate bindings are immutable');
 END;
+
+-- Dispatch: the Run kind, its states, and the Receipt vocabulary. This build has no landing path,
+-- so `applied` and `landing_unobserved` are declared here and emitted by no code yet -- the
+-- vocabulary lands once, with the act it belongs to, rather than in pieces a store could be caught
+-- between.
+DROP TRIGGER runs_no_delete;
+DROP TRIGGER runs_single_terminal_transition;
+DROP TRIGGER receipts_no_update;
+DROP TRIGGER receipts_no_delete;
+DROP INDEX runs_project_started;
+DROP INDEX runs_open_lease;
+-- Migration 0020's ordering index too: a rename carries indexes with the table, so one left
+-- behind collides when the new table recreates it.
+DROP INDEX runs_workspace_started;
+
+ALTER TABLE receipts RENAME TO receipts_v21;
+ALTER TABLE runs RENAME TO runs_v21;
+
+CREATE TABLE runs (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+    id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('check_preflight', 'declared_checks', 'proposal_dispatch')),
+    repository_revision INTEGER NOT NULL CHECK (repository_revision >= 1),
+    charter_revision INTEGER NOT NULL CHECK (charter_revision >= 1),
+    -- `dispatching` is a dispatch Run's open state, beside preflight's `preflighting`. A Run
+    -- advances once, from its own open state to a terminal one.
+    state TEXT NOT NULL CHECK (state IN (
+        'preflighting',
+        'dispatching',
+        'refused',
+        'verified',
+        'incomplete',
+        'applied',
+        'unconfirmed'
+    )),
+    lease_expires_at_ms INTEGER NOT NULL CHECK (lease_expires_at_ms >= 0),
+    started_at_ms INTEGER NOT NULL CHECK (started_at_ms >= 0),
+    ended_at_ms INTEGER CHECK (ended_at_ms IS NULL OR ended_at_ms >= started_at_ms),
+    PRIMARY KEY (workspace_id, id),
+    FOREIGN KEY (workspace_id, project_id)
+        REFERENCES projects(workspace_id, id) ON DELETE RESTRICT,
+    FOREIGN KEY (workspace_id, project_id, repository_revision)
+        REFERENCES project_repository_revisions(workspace_id, project_id, revision) ON DELETE RESTRICT
+) STRICT;
+
+INSERT INTO runs (
+    workspace_id, id, project_id, kind, repository_revision, charter_revision,
+    state, lease_expires_at_ms, started_at_ms, ended_at_ms
+)
+SELECT
+    workspace_id, id, project_id, kind, repository_revision, charter_revision,
+    state, lease_expires_at_ms, started_at_ms, ended_at_ms
+FROM runs_v21;
+
+CREATE INDEX runs_project_started
+ON runs (workspace_id, project_id, started_at_ms DESC);
+
+CREATE INDEX runs_open_lease
+ON runs (state, lease_expires_at_ms)
+WHERE state IN ('preflighting', 'dispatching');
+
+-- Migration 0020's ordering index, recreated with the table it belongs to: Briefing's recent-Receipt
+-- Query is bounded only while this exists, and rebuilding `runs` takes its indexes with it.
+CREATE INDEX runs_workspace_started
+ON runs (workspace_id, started_at_ms DESC, id DESC);
+
+CREATE TABLE receipts (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+    run_id TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version IN (1, 2, 3)),
+    outcome TEXT NOT NULL CHECK (outcome IN (
+        'source_kind_unsupported',
+        'binding_stale_for_charter',
+        'repository_unreadable',
+        'base_revision_unreachable',
+        'declared_checks_changed',
+        'working_directory_escapes',
+        'sandbox_unavailable',
+        'preflight_failed',
+        'preflight_timed_out',
+        'verified',
+        'not_admissible',
+        'worktree_unavailable',
+        'completed',
+        'incomplete',
+        -- Dispatch v3. Every refusal names the gate that refused, so an Operator reads a
+        -- correction rather than a category.
+        'ruling_unreadable',
+        'ruling_refused',
+        'ruling_superseded',
+        'ruling_drifted',
+        'proposal_digest_mismatch',
+        'proposal_not_ready',
+        'candidate_absent',
+        'candidate_mismatch',
+        'content_digest_mismatch',
+        'content_over_bounds',
+        'source_not_local',
+        'source_not_beacon_made',
+        'repository_head_moved',
+        'source_detached',
+        'source_dirty',
+        'autonomy_profile_refuses',
+        'installation_paused',
+        'admissible',
+        'applied',
+        'landing_unobserved'
+    )),
+    receipt_json TEXT NOT NULL CHECK (json_valid(receipt_json)),
+    recorded_at_ms INTEGER NOT NULL CHECK (recorded_at_ms >= 0),
+    PRIMARY KEY (workspace_id, run_id),
+    FOREIGN KEY (workspace_id, run_id) REFERENCES runs(workspace_id, id) ON DELETE RESTRICT
+) STRICT;
+
+INSERT INTO receipts (workspace_id, run_id, version, outcome, receipt_json, recorded_at_ms)
+SELECT workspace_id, run_id, version, outcome, receipt_json, recorded_at_ms
+FROM receipts_v21;
+
+DROP TABLE receipts_v21;
+DROP TABLE runs_v21;
+
+CREATE TRIGGER runs_no_delete
+BEFORE DELETE ON runs
+BEGIN
+    SELECT RAISE(ABORT, 'Runs are immutable once opened');
+END;
+
+CREATE TRIGGER runs_single_terminal_transition
+BEFORE UPDATE ON runs
+WHEN OLD.state NOT IN ('preflighting', 'dispatching')
+  OR NEW.state NOT IN ('refused', 'verified', 'incomplete', 'applied', 'unconfirmed')
+  OR OLD.ended_at_ms IS NOT NULL
+  OR NEW.ended_at_ms IS NULL
+  OR NEW.id <> OLD.id
+  OR NEW.workspace_id <> OLD.workspace_id
+  OR NEW.project_id <> OLD.project_id
+  OR NEW.kind <> OLD.kind
+  OR NEW.repository_revision <> OLD.repository_revision
+  OR NEW.charter_revision <> OLD.charter_revision
+  OR NEW.started_at_ms <> OLD.started_at_ms
+  OR NEW.lease_expires_at_ms <> OLD.lease_expires_at_ms
+BEGIN
+    SELECT RAISE(ABORT, 'A Run advances once from its open state to a terminal state');
+END;
+
+CREATE TRIGGER receipts_no_update
+BEFORE UPDATE ON receipts
+BEGIN
+    SELECT RAISE(ABORT, 'Receipts are immutable');
+END;
+
+CREATE TRIGGER receipts_no_delete
+BEFORE DELETE ON receipts
+BEGIN
+    SELECT RAISE(ABORT, 'Receipts are immutable');
+END;
+
+-- Pause Work, as the store's own fact. BLUEPRINT:377-379 and AGENTS.md:128 make a paused
+-- Installation refuse new dispatches, and a Receipt line saying "pause not verified" does not make
+-- a forbidden dispatch permissible (gpt1). This is the minimum that makes the gate real: one
+-- singleton row an Owner Command sets. The rest of Pause -- interruption requests, Worker lease
+-- renewals, the tray and shortcut surfaces -- is not built and is not claimed.
+CREATE TABLE installation_pause (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    paused INTEGER NOT NULL CHECK (paused IN (0, 1)),
+    changed_at_ms INTEGER NOT NULL CHECK (changed_at_ms >= 0)
+) STRICT;
+
+INSERT INTO installation_pause (singleton, paused, changed_at_ms) VALUES (1, 0, 0);
 
 UPDATE schema_meta SET version = 22 WHERE singleton = 1 AND version = 20;

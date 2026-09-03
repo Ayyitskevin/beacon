@@ -48,7 +48,9 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
+use std::fs::OpenOptions;
 use std::io::Read;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -523,6 +525,112 @@ pub(crate) fn filter_drivers_from_config_output(stdout: &str) -> Vec<String> {
 }
 
 /// Construct the one production Git command shape used for untrusted trees.
+/// A repository this process has pinned: the directory it opened, and the identity of the
+/// directory it opened.
+///
+/// A kernel review redirected a mutation by renaming the source directory and installing an
+/// equivalent decoy at the same pathname between the gate that measured the repository and the act
+/// that changed it -- `-C <path>` re-resolves the name every time. So a caller that must measure and
+/// then act pins the directory once, carries this value, and re-checks it: `still_pinned` fails
+/// closed if the pathname now names a different directory, or none.
+///
+/// The identity is the device and inode of the opened directory, which is what "the same directory"
+/// means to the kernel; the retained descriptor is what keeps that identity from being reused
+/// underneath us while this value lives.
+#[derive(Debug)]
+pub(crate) struct PinnedRepository {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+    _directory: fs::File,
+}
+
+impl PinnedRepository {
+    /// Open `path` as a directory without following its final component, and pin what was opened.
+    pub(crate) fn open(path: &Path) -> Result<Self, WorktreeError> {
+        let path = fs::canonicalize(path).map_err(|_| WorktreeError::RepositoryUnreadable)?;
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        let directory = options
+            .open(&path)
+            .map_err(|_| WorktreeError::RepositoryUnreadable)?;
+        let metadata = directory
+            .metadata()
+            .map_err(|_| WorktreeError::RepositoryUnreadable)?;
+        if !metadata.is_dir() {
+            return Err(WorktreeError::RepositoryUnreadable);
+        }
+        // A directory with no `.git` is not a repository, and saying "the revision is missing"
+        // about one would be the wrong fact.
+        ObjectStore::open(&path).map_err(|_| WorktreeError::RepositoryUnreadable)?;
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            path,
+            _directory: directory,
+        })
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Does the pinned pathname still name the directory this value opened?
+    ///
+    /// Answered by device and inode rather than by the name, because the name is exactly what an
+    /// attacker or an ordinary `mv` can move. A pathname that no longer resolves, or that resolves
+    /// to a different directory, is not "the repository changed" -- it is a different repository,
+    /// and every measurement taken through the pinned value is void.
+    pub(crate) fn still_pinned(&self) -> bool {
+        let Ok(metadata) = fs::metadata(&self.path) else {
+            return false;
+        };
+        metadata.is_dir() && metadata.dev() == self.device && metadata.ino() == self.inode
+    }
+}
+
+/// A Git invocation that may not write.
+///
+/// The same hardening as [`hardened_git_command`], plus `GIT_OPTIONAL_LOCKS=0`. A kernel review
+/// measured `git status --porcelain` refreshing and rewriting `.git/index`: a gate that mutates the
+/// repository it is measuring cannot support a zero-mutation claim, and the optional-locks
+/// environment variable is what stops it.
+pub(crate) fn read_only_git_command(git: &Path, filter_drivers: &[String]) -> Command {
+    let mut command = Command::new(git);
+    apply_git_hardening(&mut command, filter_drivers);
+    command.env("GIT_OPTIONAL_LOCKS", "0");
+    command
+}
+
+/// Run one read-only Git invocation in a pinned repository, bounded.
+///
+/// The repository is entered by its pinned path and the pin is re-checked immediately afterwards,
+/// so a rename between the check and the read makes the answer void rather than wrong.
+pub(crate) fn read_pinned(
+    repository: &PinnedRepository,
+    arguments: &[&str],
+    budget: Duration,
+) -> Option<String> {
+    let filter_drivers = repository_filter_drivers(repository.path()).ok()?;
+    let mut command = read_only_git_command(Path::new(GIT), &filter_drivers);
+    command.arg("-C").arg(repository.path());
+    for argument in arguments {
+        command.arg(argument);
+    }
+    match run_git_bounded(command, budget) {
+        Bounded::Finished {
+            success: true,
+            stdout,
+        } if repository.still_pinned() => Some(stdout),
+        _ => None,
+    }
+}
+
+/// How long a read-only gate read may take before its answer is unknown.
+pub(crate) const READ_BUDGET: Duration = Duration::from_secs(10);
+
 pub(crate) fn hardened_git_command(git: &Path, filter_drivers: &[String]) -> Command {
     let mut command = Command::new(git);
     apply_git_hardening(&mut command, filter_drivers);
