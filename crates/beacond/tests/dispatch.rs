@@ -3176,3 +3176,85 @@ fn a_branch_that_moves_after_the_swap_is_not_pulled_back_by_the_checkout() {
         "the checkout moved the ref after the compare-and-swap"
     );
 }
+
+#[test]
+fn a_repository_declared_process_filter_does_not_run_during_the_landing() {
+    // The hardened Git command neutralizes every filter driver it can find in the repository's own
+    // configuration -- but it could only find drivers declared with `.smudge` or `.clean`. A driver
+    // declared with `filter.<name>.process` alone was invisible to the inventory and therefore left
+    // armed for the post-swap checkout, which is a repository-supplied program running on the host
+    // (gpt1). Nothing else about the hardening changed; the inventory did.
+    let fixture = admitted_mission("process-filter");
+    let mut repository = CopyRepository::create(&fixture.copies_root, "process-filter");
+    let sentinel = repository.path.join("process-filter-ran");
+    let filter = repository.path.join(".git/hostile-process-filter");
+    fs::write(
+        &filter,
+        format!("#!/bin/sh\n: > '{}'\nexit 0\n", sentinel.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&filter, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // The attributes are IN the pinned base tree, so the checkout after the swap is the invocation
+    // that would run the driver. Declared before the Candidate, or the head gate refuses first and
+    // this test proves nothing.
+    fs::write(
+        repository.path.join(".gitattributes"),
+        format!("{TARGET} filter=beacon-process\n"),
+    )
+    .unwrap();
+    CopyRepository::git(&repository.path, &["add", ".gitattributes"]);
+    CopyRepository::git(
+        &repository.path,
+        &["commit", "--quiet", "-m", "declare a process filter"],
+    );
+    repository.revision = CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]);
+    CopyRepository::git(
+        &repository.path,
+        &[
+            "config",
+            "filter.beacon-process.process",
+            &filter.to_string_lossy(),
+        ],
+    );
+    CopyRepository::git(
+        &repository.path,
+        &["config", "filter.beacon-process.required", "true"],
+    );
+
+    let (proposal_digest, _candidate) = fixture.candidate_for(
+        &repository,
+        "Apply the dispatched change to the library root.",
+        BASE_LIB_BYTES,
+    );
+    let ruling = fixture
+        .rulings
+        .rule_on_candidate(
+            &fixture.candidates.present(&proposal_digest).unwrap(),
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap();
+
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling.digest().value, &content_for(NEW_BYTES))
+        .unwrap();
+
+    assert_eq!(
+        receipt.outcome,
+        DispatchOutcome::Applied,
+        "the landing never ran, so the filter was never given the chance"
+    );
+    assert!(receipt.checkout_updated);
+    assert!(
+        !sentinel.exists(),
+        "a repository-declared process filter ran during the landing"
+    );
+    // And the bytes are the declared ones, not whatever a filter would have made of them.
+    assert_eq!(
+        fs::read(repository.path.join(TARGET)).unwrap(),
+        NEW_BYTES.to_vec()
+    );
+}
