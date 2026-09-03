@@ -328,6 +328,18 @@ impl SampleProjectService {
             return Err(SampleProjectError::UnsafeDestination);
         }
         copy_tree(&source, &destination)?;
+        // The act that makes the copy Beacon-made, recorded where a gate can read it. A dispatch
+        // asks this record whether Beacon created a repository; without it, "Beacon-made" would be
+        // a claim about a directory's location rather than about its origin.
+        self.with_authenticated_store(|connection, now| {
+            crate::dispatch::record_beacon_repository(
+                connection,
+                self.workspace_id,
+                &destination,
+                now,
+            )
+            .map_err(|_| SampleProjectError::InvalidStore)
+        })?;
         Ok(destination)
     }
 
