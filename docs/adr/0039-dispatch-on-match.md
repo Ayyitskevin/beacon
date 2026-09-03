@@ -429,14 +429,25 @@ hidden: a Ruling claimed here stays claimed even if that transaction then refuse
 because a claim returned on failure is not a claim.
 
 Two different mechanisms therefore guard two different things, and neither stands in for
-the other. **The claim makes dispatch of one Ruling happen once**: a second dispatcher
-loses the unique insert and is refused before it reaches the swap. **The compare-and-swap
-makes the ref update safe against any writer at all** — including ordinary history that is
-not a dispatch — by refusing unless the ref still holds exactly the revision the gates
-observed. Each has its own test, because a test of one is not evidence for the other: the
-concurrent-dispatcher test survives removing the swap's expected-old value, and the test
-that does not is one where a competing commit, not a competing dispatch, arrives in the
-window.
+the other. **The claim makes dispatch of one Ruling happen once**: a second dispatcher of
+the same Ruling loses the unique insert and is refused before it reaches the swap. **The
+compare-and-swap makes the ref update safe against every other writer** — a second Dispatch
+Command carrying a different Ruling, or ordinary history that is no dispatch at all — by
+refusing unless the ref still holds exactly the revision the gates observed.
+
+Each has its own test, because a test of one is not evidence for the other, and the
+mutation shows which is which: removing the swap's expected-old value leaves the
+same-Ruling concurrency test green and turns red the two tests where the swap is the only
+separator — two Dispatch Commands on two Rulings released together at the landing, and a
+competing commit arriving in the window.
+
+**A note on R9's wording, rather than a silent redefinition.** R9 says the double-dispatch
+race is closed by the compare-and-swap itself. For two dispatchers of *one* Ruling this
+build closes it earlier, at the claim, and it must: the claim is what survives a crash, and
+it has to be committed before the swap for that reason. The compare-and-swap remains the
+separator wherever two attempts can both reach it. If the Steward intends R9 literally for
+the same-Ruling case — the claim removed and CAS alone deciding — that is a different
+durability trade and it should be ruled explicitly, not assumed from this paragraph.
 
 **What "Beacon-made" is proved by, and what it is not.** The copy is created by Beacon and a
 descriptor is held on the created directory from the moment it exists, so the row records the
