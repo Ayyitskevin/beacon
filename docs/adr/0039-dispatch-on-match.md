@@ -74,8 +74,10 @@ W3 is a different claim, made precisely below.
   G11 the Installation is not paused
   G12 the supplied content is within the Proposal's own byte and file-size
       bounds, and hashes to the Candidate's post-image digests
-  G13 the Repository Binding names a local path Beacon itself recorded creating,
-      by device and inode -- not by pathname
+  G13 the Repository Binding names a local path Beacon itself recorded creating:
+      the pinned directory's device and inode carry a provenance row, AND the
+      repository still holds the token that row recorded, read back through the
+      pinned descriptor -- not by pathname, and not by identity alone
   G14 the Candidate's declared pre-images are the bytes the pinned base tree
       actually holds
   G15 LIVE: the repository's HEAD is a branch, equals the pinned base revision,
@@ -431,6 +433,21 @@ observed. Each has its own test, because a test of one is not evidence for the o
 concurrent-dispatcher test survives removing the swap's expected-old value, and the test
 that does not is one where a competing commit, not a competing dispatch, arrives in the
 window.
+
+**What "Beacon-made" is proved by, and what it is not.** The copy is created by Beacon and a
+descriptor is held on the created directory from the moment it exists, so the row records the
+identity of the directory Beacon made rather than of whatever a later pathname lookup returns.
+The row carries a device, an inode, and a **provenance token** Beacon generates and writes into
+the copy's own configuration; the gate re-reads that token through the pinned descriptor and
+requires it to equal the recorded one. Identity alone would not do: device and inode are reused
+after a deletion, so a row alone proves that a directory Beacon made once had those numbers.
+
+The limit, stated rather than implied: the token is a **bearer value**, readable by anyone who
+can read the copy. It defeats accidental reuse and an unrelated directory inheriting the
+identity. It does not defeat someone who can read the copy and place a directory of their own at
+the same device and inode — inside the disposable-copy scope, that is someone who already has
+write access to Beacon's own copies. A creation-time capability that cannot be read out of the
+tree is the stronger form, and it is not built.
 
 **Supervised only, and human-only by construction.** ADR 0004 gives Observe,
 Supervised, and Bounded; `BLUEPRINT.md:405-406` says Observe permits **no external
