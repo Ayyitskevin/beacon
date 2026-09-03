@@ -22,6 +22,15 @@ pub enum AutonomyProfile {
 }
 
 impl AutonomyProfile {
+    /// The inverse of [`AutonomyProfile::as_str`], for the columns that store it.
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "observe" => Some(Self::Observe),
+            "supervised" => Some(Self::Supervised),
+            _ => None,
+        }
+    }
+
     fn as_str(self) -> &'static str {
         match self {
             Self::Observe => "observe",
@@ -513,6 +522,42 @@ fn load_project(
         )?,
         created_at_ms: nonnegative_u64(created_at_ms)?,
     })
+}
+
+/// The autonomy profile of a Project's **current** Charter revision.
+///
+/// Owned here rather than joined by a consumer: "current" is this module's invariant -- the pointer
+/// on `projects` must name the terminal revision -- and a write-authorizing gate that assembled its
+/// own join would carry a second definition of it, which would drift the day this module's does
+/// (gpt1's P0 on dispatch).
+///
+/// `Ok(None)` means no such Project. A Charter revision the pointer names that does not exist, or
+/// one carrying a profile outside the closed vocabulary, is invalid state rather than a Project
+/// with no profile.
+pub(crate) fn current_autonomy_profile(
+    connection: &rusqlite::Connection,
+    workspace_id: Uuid,
+    project_id: Uuid,
+) -> Result<Option<AutonomyProfile>, ProjectError> {
+    let Some(revision) = current_charter_revision(connection, workspace_id, project_id)? else {
+        return Ok(None);
+    };
+    let profile: String = connection
+        .query_row(
+            "SELECT autonomy_profile FROM project_charter_revisions
+             WHERE workspace_id = ?1 AND project_id = ?2 AND revision = ?3",
+            params![
+                workspace_id.to_string(),
+                project_id.to_string(),
+                i64::from(revision)
+            ],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or(ProjectError::InvalidStore)?;
+    AutonomyProfile::from_str(&profile)
+        .map(Some)
+        .ok_or(ProjectError::InvalidStore)
 }
 
 pub(crate) fn current_charter_revision(
