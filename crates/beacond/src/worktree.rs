@@ -639,8 +639,9 @@ pub(crate) fn read_only_git_command(git: &Path, filter_drivers: &[String]) -> Co
 
 /// Run one read-only Git invocation in a pinned repository, bounded.
 ///
-/// The repository is entered by its pinned path and the pin is re-checked immediately afterwards,
-/// so a rename between the check and the read makes the answer void rather than wrong.
+/// The repository is entered through the descriptor it was pinned by -- never re-resolved from a
+/// pathname -- and the pin is re-checked immediately afterwards, so a rename between the check and
+/// the read makes the answer void rather than wrong.
 pub(crate) fn read_pinned(
     repository: &PinnedRepository,
     arguments: &[&str],

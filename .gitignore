@@ -20,3 +20,6 @@ node_modules/
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
+
+# Session scratch: gate logs and probes, never source.
+/scratchpad/

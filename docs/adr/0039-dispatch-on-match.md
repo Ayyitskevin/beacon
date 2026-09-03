@@ -22,8 +22,8 @@ Two Blueprint criteria bound that act from opposite sides. "Every mutation is
 attributable to an actor, Proposal, policy version, and Receipt" (`:905`) says
 what a dispatch must record. "A denied or stale Proposal causes zero repository
 mutation" (`:907`) says what it must not do, and a negative criterion is only
-closed by a mechanism that can be measured — which today it cannot be, because no
-effect-capable dispatch exists to measure.
+closed by a mechanism that can be measured. The gates were therefore built and proved before
+the landing existed, and those measurements are still the row-34 tests.
 
 **A Ruling names a Proposal; a Proposal carries no content.** Its declared
 mutations name a kind and a path and nothing else. Nothing in either record's
@@ -34,9 +34,11 @@ than only an act.
 
 ## Decision
 
-Dispatch is **one Operator-triggered Command with sixteen gates, one irreversible
-step, and a closed outcome vocabulary**, and it is the only act in Beacon that mutates a Git
-repository on the strength of a record. **In v1 that repository is a Beacon-made
+Dispatch is **one Command with sixteen gates, one irreversible step, and a closed outcome
+vocabulary**, and it is the only act in Beacon that mutates a Git repository on the strength of
+a record. It runs as the authenticated Operator and no transport exposes it; the named desktop
+Command that would make it Operator-*triggerable* is a condition on exposing it, stated under
+"Supervised only, and human-only by construction" below and not claimed here. **In v1 that repository is a Beacon-made
 disposable copy and nothing else**, enforced by a hard provenance gate: landing into
 a repository the Operator owns stays disabled, for the reasons in "Conditions on the
 landing slices" below. Everything this section says is scoped by that sentence.
