@@ -3135,3 +3135,44 @@ fn a_precondition_that_becomes_unmet_between_the_gates_and_the_swap_does_not_lan
         "a Proposal whose preconditions moved published a commit"
     );
 }
+
+#[test]
+fn a_branch_that_moves_after_the_swap_is_not_pulled_back_by_the_checkout() {
+    // The regression a kernel review probed on the real thing: `reset --hard` moves the current
+    // branch as well as the index and worktree, which would make the checkout a SECOND ref write
+    // after the one irreversible step -- silently overwriting whatever moved the branch in between.
+    //
+    // The unit test pinned the primitive; this one binds the production call site to the property,
+    // by moving the branch in exactly that window. Restoring `reset --hard` makes it red.
+    let fixture = admitted_mission("checkout-no-ref-write");
+    let (repository, ruling_digest) = fixture.approved("checkout-no-ref-write");
+    let head = repository.path.clone();
+    let later = Arc::new(Mutex::new(String::new()));
+    let recorded = Arc::clone(&later);
+
+    let dispatches = DispatchService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .with_failpoints(DispatchFailpoints {
+            before_checkout: Some(Arc::new(move || {
+                CopyRepository::git(
+                    &head,
+                    &["commit", "--quiet", "--allow-empty", "-m", "someone else"],
+                );
+                *recorded.lock().unwrap() = CopyRepository::git(&head, &["rev-parse", "HEAD"]);
+            })),
+            ..DispatchFailpoints::default()
+        });
+
+    let receipt = dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+    assert_eq!(receipt.outcome, DispatchOutcome::Applied);
+    assert!(receipt.checkout_updated);
+
+    let moved = later.lock().unwrap().clone();
+    assert_ne!(moved, receipt.resulting_revision.clone().unwrap());
+    assert_eq!(
+        CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]),
+        moved,
+        "the checkout moved the ref after the compare-and-swap"
+    );
+}

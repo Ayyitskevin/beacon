@@ -475,6 +475,9 @@ pub struct DispatchFailpoints {
     /// Inside the landing transaction, immediately after the swap and before anything about it is
     /// committed.
     pub after_swap: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Inside the landing transaction, after the swap was observed and before Beacon updates the
+    /// copy's working tree -- the window a checkout that moves the ref would overwrite.
+    pub before_checkout: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// One declared mutation's content, supplied by the caller at dispatch time.
@@ -1178,6 +1181,10 @@ impl DispatchService {
                 // SECOND unguarded ref write after the one irreversible step this act is supposed
                 // to have. This primitive writes the index and the working tree and leaves the ref
                 // exactly where the compare-and-swap put it.
+                #[cfg(debug_assertions)]
+                if let Some(hook) = self.failpoints.before_checkout.clone() {
+                    hook();
+                }
                 decided.checkout_updated = write_pinned(
                     &repository,
                     None,
