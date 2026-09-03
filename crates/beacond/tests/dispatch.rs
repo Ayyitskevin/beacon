@@ -26,11 +26,11 @@ use beacond::{
     AccessOrigin, AutonomyProfile, BeaconCapability, CandidateImages, CandidateService,
     DeclaredCheck, DispatchFailpoints, DispatchOutcome, DispatchService,
     LocalModelActivationService, LocalModelEndpoint, MissionDraft, MissionMemberDraft,
-    MissionService, MutationEffect, OperatorAccountService, OperatorSessionPhase, PauseService,
-    ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService,
+    MissionService, MutationEffect, NotVerified, OperatorAccountService, OperatorSessionPhase,
+    PauseService, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService,
     ProjectRepositoryService, ProjectService, ProposalService, ProviderFeature, RepositoryDraft,
-    RepositorySourceKind, ResidentConfigurationService, ResidentLifecycleService, RulingDecision,
-    RulingService, RulingSupersedes, SampleProjectService, SecretString,
+    RepositoryEffect, RepositorySourceKind, ResidentConfigurationService, ResidentLifecycleService,
+    RulingDecision, RulingService, RulingSupersedes, SampleProjectService, SecretString,
     StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig, Supervisor,
     SupervisorError, SuppliedContent, TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
     TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft, TeamService,
@@ -1387,7 +1387,7 @@ fn one_ruling_lands_once_and_a_second_attempt_is_spent() {
         .dispatch(&ruling_digest, &content_for(NEW_BYTES))
         .unwrap();
     assert_eq!(third.outcome, DispatchOutcome::AlreadyDispatched);
-    assert!(third.left_repository_byte_identical());
+    assert_eq!(third.repository_effect(), RepositoryEffect::ByteIdentical);
     assert_eq!(
         repository.snapshot(),
         restored,
@@ -2011,7 +2011,10 @@ fn a_swap_that_cannot_be_written_refuses_and_publishes_nothing() {
     assert_eq!(receipt.resulting_revision, None);
     // The commit was prepared, so the Receipt names it and does not claim byte identity.
     assert!(receipt.prepared_commit.is_some());
-    assert!(!receipt.left_repository_byte_identical());
+    assert_eq!(
+        receipt.repository_effect(),
+        RepositoryEffect::UnreferencedObjects
+    );
     // The branch did not move, and the working tree was not touched.
     assert_eq!(
         CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]),
@@ -2134,7 +2137,7 @@ fn content_beyond_the_proposals_own_bounds_is_refused_before_it_is_read() {
         )
         .unwrap();
     assert_eq!(receipt.outcome, DispatchOutcome::ContentOverBounds);
-    assert!(receipt.left_repository_byte_identical());
+    assert_eq!(receipt.repository_effect(), RepositoryEffect::ByteIdentical);
     assert_eq!(repository.snapshot(), before);
 
     // The aggregate ceiling, with a per-file bound that permits the same content: the two limits
@@ -2233,7 +2236,7 @@ fn a_candidate_describing_a_tree_that_is_not_there_is_refused_before_any_object_
     // Nothing was prepared, so the repository is byte-identical rather than carrying residue --
     // which is the improvement: the same defect used to be caught after objects existed.
     assert_eq!(receipt.prepared_commit, None);
-    assert!(receipt.left_repository_byte_identical());
+    assert_eq!(receipt.repository_effect(), RepositoryEffect::ByteIdentical);
     assert_eq!(
         CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]),
         head_before
@@ -2260,7 +2263,7 @@ fn a_corrupt_ruling_or_proposal_record_refuses_with_a_receipt_rather_than_an_err
         .dispatch(&ruling_digest, &content_for(NEW_BYTES))
         .unwrap();
     assert_eq!(receipt.outcome, DispatchOutcome::RulingUnreadable);
-    assert!(receipt.left_repository_byte_identical());
+    assert_eq!(receipt.repository_effect(), RepositoryEffect::ByteIdentical);
     assert_eq!(repository.snapshot(), before);
 
     // The Run reached a terminal state with a Receipt, which is what makes the refusal evidence.
@@ -3034,7 +3037,7 @@ fn a_modification_whose_declared_before_bytes_are_not_there_is_refused() {
 
     assert_eq!(receipt.outcome, DispatchOutcome::PreImageMismatch);
     assert_eq!(receipt.prepared_commit, None);
-    assert!(receipt.left_repository_byte_identical());
+    assert_eq!(receipt.repository_effect(), RepositoryEffect::ByteIdentical);
 }
 
 #[test]
@@ -3493,4 +3496,31 @@ fn a_branch_moved_between_the_gates_and_the_swap_is_not_clobbered() {
         fs::read(repository.path.join(TARGET)).unwrap(),
         NEW_BYTES.to_vec()
     );
+}
+
+#[test]
+fn a_reconstructed_receipt_that_cannot_name_its_residue_claims_no_byte_identity() {
+    // The state a boolean could not hold. This Receipt says the object residue is unknown -- the
+    // interruption fell before the claim, so whether anything was written is unrecorded -- and the
+    // same record reported the repository as provably byte-identical, because it had no prepared
+    // commit to point at (gpt2). Unknown is its own answer.
+    let fixture = admitted_mission("unknown-residue");
+    let (_repository, ruling_digest) = fixture.approved("unknown-residue");
+    fixture.dispatch_until_death(&ruling_digest, "before_reserve");
+    fixture.restart().unwrap();
+
+    let payload: String = fixture
+        .store
+        .connect()
+        .query_row("SELECT receipt_json FROM receipts", [], |row| row.get(0))
+        .unwrap();
+    let receipt: beacond::DispatchReceipt = serde_json::from_str(&payload).unwrap();
+    assert_eq!(receipt.prepared_commit, None);
+    assert!(
+        receipt
+            .not_verified
+            .iter()
+            .any(|entry| *entry == NotVerified::ObjectResidueUnknown)
+    );
+    assert_eq!(receipt.repository_effect(), RepositoryEffect::Unknown);
 }

@@ -71,7 +71,7 @@ pub use dispatch::DispatchFailpoints;
 pub use dispatch::{
     DispatchActor, DispatchError, DispatchOutcome, DispatchReceipt, DispatchService, GitStep,
     GitStepName, GitStepResult, MutationEffect, MutationRecord, NotVerified, PauseService,
-    SourceIdentity, SuppliedContent, UnresolvedRuns,
+    RepositoryEffect, SourceIdentity, SuppliedContent, UnresolvedRuns,
 };
 pub use local_model_activation::{
     LocalModelActivation, LocalModelActivationError, LocalModelActivationReview,
