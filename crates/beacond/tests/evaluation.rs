@@ -2024,12 +2024,17 @@ fn a_malformed_supersedes_digest_is_told_apart_from_one_that_names_nothing() {
     );
 }
 
-/// gpt2's E2: the relation and the byte tag must agree, and nothing proved it. This plants an
-/// otherwise-valid relation between two Evaluations whose bytes both say `supersedes = none`, so the
-/// only wrong fact in the store is the disagreement itself.
-#[test]
-fn a_relation_the_bytes_do_not_declare_is_refused_before_the_chain_is_walked() {
-    let fixture = admitted_mission("evaluation-relation-disagrees");
+/// Builds a store holding two Evaluations of one Proposal whose bytes BOTH say
+/// `supersedes = none`, joined by a supersession relation that is structurally valid in every way
+/// the relation's own constraints can see. Both are self-consistent and both are witnessed by their
+/// own exact-byte Event, so the only wrong fact in the store is the disagreement itself.
+///
+/// The Event matters: gpt2's final review found the startup assertion passing on its absence, so
+/// removing the relation check left it green and the startup half proved nothing.
+fn store_with_a_relation_the_bytes_do_not_declare(
+    label: &str,
+) -> (Fixture, EvaluationService, String) {
+    let fixture = admitted_mission(label);
     let record = fixture.record();
     let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
     let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
@@ -2038,7 +2043,7 @@ fn a_relation_the_bytes_do_not_declare_is_refused_before_the_chain_is_walked() {
         .unwrap();
 
     // A second Evaluation of the same Proposal whose bytes also say `none`: splice the rubric
-    // digest so it is a different record, and record no relation for it.
+    // digest so it is a different record.
     const RUBRIC_DIGEST_OFFSET: usize = 180;
     let mut bytes = first.canonical_bytes().to_vec();
     bytes[RUBRIC_DIGEST_OFFSET] ^= 0x01;
@@ -2072,7 +2077,29 @@ fn a_relation_the_bytes_do_not_declare_is_refused_before_the_chain_is_walked() {
             rusqlite::params![digest, first.digest().value],
         )
         .unwrap();
-    // Structurally valid in every way the relation's own constraints can see.
+    let event: String = connection
+        .query_row(
+            "SELECT payload_json FROM events WHERE kind = 'evaluation.recorded'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let event = event
+        .replace(first.digest().value.as_str(), &digest)
+        .replace(
+            &BASE64.encode(first.canonical_bytes()),
+            &BASE64.encode(&bytes),
+        );
+    connection
+        .execute(
+            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+             SELECT workspace_id, kind, ?1, occurred_at_ms FROM events
+             WHERE kind = 'evaluation.recorded' LIMIT 1",
+            [event],
+        )
+        .unwrap();
+    // The relation. With it present the chain is one path of two links with equal times, so every
+    // other startup rule is satisfied and only the relation-versus-bytes comparison can refuse.
     connection
         .execute(
             "INSERT INTO evaluation_supersessions (
@@ -2088,6 +2115,16 @@ fn a_relation_the_bytes_do_not_declare_is_refused_before_the_chain_is_walked() {
         .expect("the relation's constraints admit this row");
     drop(connection);
 
+    (fixture, evaluations, digest)
+}
+
+/// gpt2's E2, read half: the verified read refuses a relation the bytes do not declare, as exactly
+/// that and not as anything else.
+#[test]
+fn a_relation_the_bytes_do_not_declare_is_refused_at_the_read() {
+    let (_fixture, evaluations, digest) =
+        store_with_a_relation_the_bytes_do_not_declare("evaluation-relation-disagrees-read");
+
     let error = evaluations
         .get(&digest)
         .expect_err("a relation the bytes do not declare must be refused");
@@ -2098,11 +2135,19 @@ fn a_relation_the_bytes_do_not_declare_is_refused_before_the_chain_is_walked() {
         ),
         "refused for the wrong reason: {error:?}"
     );
-    // And from the other end: the predecessor's bytes say `none` and it is now superseded.
-    assert!(
-        evaluations.get(&first.digest().value).is_ok(),
-        "the predecessor's own record is unaffected"
-    );
+}
+
+/// gpt2's E2, startup half — a SEPARATE test on purpose.
+///
+/// When the read assertion and the startup assertion shared one test, removing the production check
+/// made the read assertion fail first and the startup assertion was never evaluated, so it could
+/// not be told from a store that refuses for some other reason. Standing alone, this one goes red
+/// on its own when the check is removed, which is what "load-bearing" has to mean.
+#[test]
+fn a_relation_the_bytes_do_not_declare_refuses_startup() {
+    let (fixture, _evaluations, _digest) =
+        store_with_a_relation_the_bytes_do_not_declare("evaluation-relation-disagrees-startup");
+
     assert!(
         Supervisor::bootstrap(StartupConfig {
             store_path: fixture.store.path.clone(),
