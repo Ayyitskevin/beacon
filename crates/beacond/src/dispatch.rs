@@ -1,10 +1,15 @@
 //! Dispatch-on-match: the gates (ADR 0039).
 //!
 //! Dispatch is the only act in Beacon that may mutate a Git repository on the strength of a record.
-//! **This build has no landing path**: every gate below runs, and the act that would apply a change
-//! does not exist here. That ordering is deliberate — BLUEPRINT `:907` says "a denied or stale
-//! Proposal causes zero repository mutation", and a negative criterion is proved most honestly by a
-//! version that cannot mutate anything at all, before the version that can.
+//! **The repository it may mutate is a Beacon-made disposable copy and nothing else**, enforced by a
+//! provenance gate against durable Beacon-recorded identity rather than by a pathname convention.
+//! Landing into a repository the Operator owns stays disabled (ADR 0039, "Conditions on the landing
+//! slices").
+//!
+//! The gates were built and proved before the landing, deliberately: BLUEPRINT `:907` says "a denied
+//! or stale Proposal causes zero repository mutation", and a negative criterion is proved most
+//! honestly by a version that cannot mutate anything at all, before the version that can. Those
+//! measurements are still the row-34 tests, now run against a build that has a landing path.
 //!
 //! # What the gates are, and why they run in this order
 //!
@@ -62,8 +67,8 @@ const COMMIT_AUTHOR_EMAIL: &str = "beacon@localhost";
 /// How a dispatch ended.
 ///
 /// A refusal names the gate that refused it, because an Operator reads a correction rather than a
-/// category. The three families never collapse: a gate said no, the act would have been admissible,
-/// or the act's result could not be established — and only the first two are reachable here.
+/// category. The three families never collapse: a gate said no, the act applied a change, or the
+/// act's result could not be established.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DispatchOutcome {
@@ -191,9 +196,8 @@ pub struct MutationRecord {
     pub pre_image: Option<String>,
     /// What it declares afterwards.
     pub post_image: Option<String>,
-    /// What this build did with it: nothing, because there is no landing path. Recorded per
-    /// mutation rather than once, so a later build that writes some and not others has a place to
-    /// say so.
+    /// What this dispatch did with it. Recorded per mutation rather than once, so an attempt that
+    /// wrote some and not others has a place to say so.
     pub effect: MutationEffect,
 }
 
