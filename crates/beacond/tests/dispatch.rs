@@ -3454,7 +3454,13 @@ fn a_branch_moved_between_the_gates_and_the_swap_is_not_clobbered() {
             before_landing: Some(Arc::new(move || {
                 CopyRepository::git(
                     &head,
-                    &["commit", "--quiet", "--allow-empty", "-m", "ordinary history"],
+                    &[
+                        "commit",
+                        "--quiet",
+                        "--allow-empty",
+                        "-m",
+                        "ordinary history",
+                    ],
                 );
                 *recorded.lock().unwrap() = CopyRepository::git(&head, &["rev-parse", "HEAD"]);
             })),
@@ -3474,5 +3480,8 @@ fn a_branch_moved_between_the_gates_and_the_swap_is_not_clobbered() {
         "the swap overwrote a commit that arrived after the head gate"
     );
     // The declared bytes never reached the working tree either.
-    assert_ne!(fs::read(repository.path.join(TARGET)).unwrap(), NEW_BYTES.to_vec());
+    assert_ne!(
+        fs::read(repository.path.join(TARGET)).unwrap(),
+        NEW_BYTES.to_vec()
+    );
 }

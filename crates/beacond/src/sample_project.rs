@@ -5,7 +5,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -328,13 +328,24 @@ impl SampleProjectService {
         if destination.exists() {
             return Err(SampleProjectError::UnsafeDestination);
         }
+        // The root is created here and opened immediately, so a descriptor is held on the
+        // directory Beacon made from the moment it exists. The copy then fills that directory, and
+        // the repository opened afterwards must have the identity captured at creation -- otherwise
+        // something replaced the pathname in between and this is not the directory Beacon created.
+        fs::create_dir(&destination)?;
+        let created = File::open(&destination)?;
+        let created_identity = {
+            let metadata = created.metadata()?;
+            (metadata.dev(), metadata.ino())
+        };
         copy_tree(&source, &destination)?;
 
-        // The copy is pinned by descriptor from here to the record, and the token is written and
-        // read back through that descriptor. Copying to a pathname and reopening the pathname
-        // afterwards left a window in which the directory recorded need not be the one created.
         let pinned = PinnedRepository::open(&destination)
             .map_err(|_| SampleProjectError::UnsafeDestination)?;
+        if pinned.identity() != created_identity {
+            return Err(SampleProjectError::UnsafeDestination);
+        }
+        drop(created);
         let token = Uuid::new_v4().to_string();
         write_pinned(
             &pinned,
@@ -629,8 +640,13 @@ impl SampleProjectService {
 /// No symlink is followed and none is recreated: a copy that reproduced a link would carry a
 /// reference out of the tree Beacon owns, and the whole point of the copy is that everything the
 /// dispatch path can reach is inside it.
+/// Copy `source` into `destination`, which the caller has already created.
+///
+/// The root is created by the caller rather than here, so the caller can hold a descriptor on the
+/// directory it created from the moment it exists: a copy that creates its own root leaves an
+/// interval between creating a pathname and opening it, and whatever is opened afterwards need not
+/// be what was created (gpt1).
 fn copy_tree(source: &Path, destination: &Path) -> Result<(), SampleProjectError> {
-    fs::create_dir(destination)?;
     for entry in fs::read_dir(source)? {
         let entry = entry?;
         let metadata = fs::symlink_metadata(entry.path())?;
@@ -638,6 +654,7 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), SampleProjectError
         if metadata.file_type().is_symlink() {
             return Err(SampleProjectError::TamperedInstallation);
         } else if metadata.is_dir() {
+            fs::create_dir(&target)?;
             copy_tree(&entry.path(), &target)?;
         } else if metadata.is_file() {
             fs::copy(entry.path(), &target)?;
