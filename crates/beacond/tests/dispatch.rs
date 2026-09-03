@@ -3823,6 +3823,134 @@ fn a_landing_nobody_observed_claims_no_unreferenced_objects() {
     );
 }
 
+/// The eleven tokens every Receipt carries, in the order ADR 0039 fixes.
+const ALWAYS_NOT_VERIFIED: &[&str] = &[
+    "execution_policy_constraint",
+    "sandbox_constraint",
+    "network_constraint",
+    "model_provider_constraint",
+    "command_allowlist_constraint",
+    "tool_allowlist_constraint",
+    "evaluations_constraint",
+    "non_author_evaluation_of_candidate",
+    "safety_snapshot",
+    "base_revision_reachability",
+    "declared_checks_against_result",
+];
+
+#[test]
+fn a_live_unobserved_landing_persists_no_residue_claim_either() {
+    // The same exclusion on the LIVE path. gpt2 named both sites; the reconstructed one is driven
+    // by the test below, and without this one deleting the live exclusion leaves the suite green.
+    //
+    // A live `LandingUnobserved` is what a dispatch writes when the swap happened and the
+    // observation afterwards could not answer. The repository is renamed out from under the
+    // attempt between the two, so `read_pinned` finds the pin broken and returns nothing -- the
+    // attempt holds a prepared commit and cannot say whether a ref names it, which is precisely
+    // when the affirmative residue token must not be written.
+    let fixture = admitted_mission("live-unobserved");
+    let (repository, ruling_digest) = fixture.approved("live-unobserved");
+    let moved = repository.path.with_file_name("moved-mid-dispatch");
+    let source = repository.path.clone();
+    let dispatches = DispatchService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .with_failpoints(DispatchFailpoints {
+            after_swap: Some(Arc::new(move || {
+                // After the ref moved, before the observation reads it back.
+                let _ = fs::rename(&source, &moved);
+            })),
+            ..DispatchFailpoints::default()
+        });
+
+    let receipt = dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+
+    assert_eq!(receipt.outcome, DispatchOutcome::LandingUnobserved);
+    assert!(
+        receipt.prepared_commit.is_some(),
+        "without a prepared commit the residue token would not be pushed anyway"
+    );
+
+    let payload: String = fixture
+        .store
+        .connect()
+        .query_row("SELECT receipt_json FROM receipts", [], |row| row.get(0))
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    let tokens: Vec<&str> = value["notVerified"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry.as_str().unwrap())
+        .collect();
+    assert!(
+        tokens.contains(&"landing_result_unknown"),
+        "the unknown is what this state has to say: {payload}"
+    );
+    assert!(
+        !tokens.contains(&"unreferenced_object_residue"),
+        "a live unobserved landing must not claim objects no ref names: {payload}"
+    );
+    assert_eq!(receipt.repository_effect(), RepositoryEffect::Unknown);
+}
+
+#[test]
+fn the_persisted_receipt_of_an_unobserved_landing_makes_no_residue_claim() {
+    // gpt2, s4f P1. `repository_effect()` normalizes this state to `Unknown`, but the RECORD still
+    // serialized `unreferenced_object_residue`, whose declared meaning is "Objects were written that
+    // no ref names". In this exact state that token is not merely unproven, it is false: the branch
+    // holds a descendant of the prepared commit, so a ref names it.
+    //
+    // A record must not say what the API refuses to say. This test reads the persisted bytes rather
+    // than calling `repository_effect()`, because the normalization is precisely what would hide the
+    // defect: the API answered `Unknown` while the stored vocabulary answered otherwise, and only
+    // the stored bytes are what another implementation, an export, or a later reader sees.
+    let fixture = admitted_mission("persisted-unobserved");
+    let (repository, ruling_digest) = fixture.approved("persisted-unobserved");
+    fixture.dispatch_until_death(&ruling_digest, "after_swap");
+    let (prepared, _branch) = fixture
+        .preparation()
+        .expect("the claim did not survive the crash");
+
+    fs::write(repository.path.join(TARGET), OTHER_BYTES).unwrap();
+    CopyRepository::git(&repository.path, &["add", TARGET]);
+    CopyRepository::git(&repository.path, &["commit", "-m", "a later commit"]);
+    let head = CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        CopyRepository::git(&repository.path, &["rev-parse", &format!("{head}~1")]),
+        prepared,
+        "the later commit must descend from the prepared one, or the residue token is not false"
+    );
+
+    fixture.restart().unwrap();
+
+    let payload: String = fixture
+        .store
+        .connect()
+        .query_row("SELECT receipt_json FROM receipts", [], |row| row.get(0))
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(value["outcome"], "landing_unobserved");
+    assert_eq!(value["preparedCommit"], prepared);
+
+    let tokens: Vec<&str> = value["notVerified"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry.as_str().unwrap())
+        .collect();
+    assert!(
+        !tokens.contains(&"unreferenced_object_residue"),
+        "the record claims objects no ref names, while a ref names them: {payload}"
+    );
+    // The whole vocabulary, in order: the unknown is what is persisted, and a future token that
+    // contradicted it would have to pass through here.
+    let mut expected: Vec<&str> = ALWAYS_NOT_VERIFIED.to_vec();
+    expected.push("landing_result_unknown");
+    expected.push("reconstructed_after_interruption");
+    assert_eq!(tokens, expected, "{payload}");
+}
+
 /// A second post-image, so two Rulings on one base prepare two different commits.
 const OTHER_BYTES: &[u8] = b"fn main() { /* the other dispatch */ }\n";
 

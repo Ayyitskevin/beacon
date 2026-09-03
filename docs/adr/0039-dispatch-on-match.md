@@ -750,6 +750,15 @@ notVerified      IN THIS ORDER, and every Receipt carries the first eleven:
                  reconstructed_after_interruption · object_residue_unknown
 ```
 
+`unreferenced_object_residue` asserts that objects exist **which no ref names**, so it is written
+only for an outcome that knows the ref did not move: a Receipt whose outcome is
+`landing_unobserved` never carries it, however a prepared commit it holds. That state is the one
+where the repository could not say whether a ref names the commit, and the branch may in fact hold
+a descendant of it — the token would be false rather than merely unproven (gpt2). What the state
+has to say is `landing_result_unknown`, which it already carries, and which is what
+`repositoryEffect` reads to answer `Unknown`. An implementation that emitted both would produce a
+record contradicting its own API.
+
 **Specimens.** Two vectors, built entirely from the fixed inputs below, so a second
 implementation compares bytes rather than prose. Both literals are in `dispatch::tests`
 (`the_applied_receipt_specimen_is_exactly_these_bytes`,
