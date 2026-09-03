@@ -17,8 +17,8 @@ use std::thread::{self, JoinHandle};
 use beacond::{
     AutonomyProfile, BeaconCapability, Conflicts, DeclaredCheck, EvaluationDraft, EvaluationError,
     EvaluationService, EvaluationSupersedes, Evaluator, Finding, FindingSeverity,
-    InconsistentEvaluation, LocalModelActivationService, LocalModelEndpoint, MissionDraft,
-    MissionMemberDraft, MissionService, OperatorAccountService, OperatorSessionPhase,
+    InconsistentEvaluation, LocalModelActivationService, LocalModelEndpoint, MalformedEvaluation,
+    MissionDraft, MissionMemberDraft, MissionService, OperatorAccountService, OperatorSessionPhase,
     ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService,
     ProjectRepositoryService, ProjectService, ProposalService, ProviderFeature, RepositoryDraft,
     RepositorySourceKind, ResidentConfigurationService, ResidentLifecycleService,
@@ -518,6 +518,29 @@ impl Fixture {
         }
     }
 
+    fn rebind_repository(
+        &self,
+        prior: u32,
+        source_kind: RepositorySourceKind,
+        source: &str,
+        base_revision: &str,
+    ) -> u32 {
+        ProjectRepositoryService::new(Arc::clone(&self.accounts), self.workspace_id)
+            .bind(
+                self.project_id,
+                1,
+                Some(prior),
+                RepositoryDraft {
+                    source_kind,
+                    source: source.to_owned(),
+                    base_revision: base_revision.to_owned(),
+                    declared_checks: declared_checks(),
+                },
+            )
+            .unwrap()
+            .revision
+    }
+
     fn count(&self, sql: &str) -> i64 {
         self.store
             .connect()
@@ -906,15 +929,39 @@ fn an_evaluator_who_authored_the_bound_proposal_is_refused_by_the_store() {
         )
     };
 
+    // SQLite says WHICH constraint refused, so the trigger's own rule is assertable rather than
+    // inferred from "an error happened". 1811 is SQLITE_CONSTRAINT_TRIGGER; 787 is
+    // SQLITE_CONSTRAINT_FOREIGNKEY.
+    let code = |result: rusqlite::Result<usize>| match result {
+        Err(rusqlite::Error::SqliteFailure(error, _)) => error.extended_code,
+        other => panic!("expected a constraint failure, got {other:?}"),
+    };
+
     // The author, under the configuration they authored with.
-    let refused = insert(
-        fixture.resident_id,
-        fixture.configuration_id,
-        &HEXLOWER.encode(&[0x01_u8; 32]),
+    assert_eq!(
+        code(insert(
+            fixture.resident_id,
+            fixture.configuration_id,
+            &HEXLOWER.encode(&[0x01_u8; 32]),
+        )),
+        1811,
+        "raw SQL did not hit the non-authorship trigger"
     );
-    assert!(
-        refused.is_err(),
-        "raw SQL recorded a self-evaluation: {refused:?}"
+
+    // gpt2's E1, and the correction it forced: the author under ANOTHER configuration. My C38
+    // report claimed the Resident-versus-pair distinction was unobservable at this layer, because
+    // the membership foreign key refuses the row either way. That was too strong -- the two
+    // refusals are told apart by their CAUSE. With the Resident-only trigger this is the trigger's
+    // refusal (1811); a pair-keyed trigger would let the row past and it would become the
+    // membership foreign key's (787).
+    assert_eq!(
+        code(insert(
+            fixture.resident_id,
+            fixture.other_configuration_id,
+            &HEXLOWER.encode(&[0x03_u8; 32]),
+        )),
+        1811,
+        "the trigger compares the configuration as well as the Resident"
     );
 
     // The positive control. Without it the trigger and a blanket refusal are indistinguishable.
@@ -1498,39 +1545,124 @@ fn superseding_any_link_but_the_current_tail_is_refused() {
 
 /// Time along the chain is non-decreasing, and EQUAL times are allowed: two records can land in the
 /// same millisecond, and refusing that would invent a precision the clock does not have.
+///
+/// gpt2's E4: the first version of this test moved only the projected `evaluated_at_ms`, so startup
+/// failed at column-versus-byte reconciliation and never reached the chain-time comparison —
+/// disabling that comparison left the test green. The successor below is built self-consistently
+/// instead: its bytes carry the earlier time AND declare the supersession, its digest is recomputed
+/// over those bytes, its column matches, and its Event carries them. The only wrong fact in the
+/// store is that the chain runs backwards.
 #[test]
 fn an_evaluated_time_earlier_than_the_link_it_supersedes_is_refused() {
     let fixture = admitted_mission("evaluation-chain-time");
     let record = fixture.record();
     let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
     let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
-
     let first = evaluations
         .record(evaluation_draft(&fixture, &proposal.digest().value))
         .unwrap();
-    let mut draft = evaluation_draft(&fixture, &proposal.digest().value);
-    draft.supersedes = EvaluationSupersedes::Evaluation(first.digest().value.clone());
-    let second = evaluations.record(draft).unwrap();
-    // The service clock supplies both, so the ordinary path cannot produce a decreasing chain.
-    assert!(second.payload().evaluated_at_ms >= first.payload().evaluated_at_ms);
 
-    // Move the FIRST link forward past its successor, so the chain decreases without any
-    // Evaluation's bytes being edited.
+    // The record ends with `supersedes` (one byte for `none`) and `evaluated_at_ms` (eight): nine
+    // bytes, per ADR 0038's field table. Replace the tail with `0x01` + the predecessor digest + an
+    // EARLIER time, and everything before it is byte-identical to a record the Command produced.
+    let tail = first.canonical_bytes().len() - 9;
+    assert_eq!(
+        first.canonical_bytes()[tail],
+        0x00,
+        "the field table does not put `supersedes = none` nine bytes from the end"
+    );
+    let earlier = first.payload().evaluated_at_ms - 1_000;
+    let mut bytes = first.canonical_bytes()[..tail].to_vec();
+    bytes.push(0x01);
+    bytes.extend_from_slice(
+        &HEXLOWER
+            .decode(first.digest().value.as_bytes())
+            .expect("the predecessor digest is canonical hex"),
+    );
+    bytes.extend_from_slice(&earlier.to_be_bytes());
+    let digest = HEXLOWER.encode(&sha256(&bytes));
+
     let connection = fixture.store.connect();
     connection
-        .execute_batch("DROP TRIGGER evaluations_no_update;")
+        .execute(
+            "INSERT INTO evaluations (
+                 workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+                 canonical_bytes, proposal_digest, proposal_digest_algorithm,
+                 proposal_digest_canonicalizer, mission_id, evaluator_resident_id,
+                 evaluator_configuration_id, rubric_id, rubric_version, rubric_canonicalizer,
+                 rubric_sha256, verdict, conflicts_declared, conflicts_text, rationale,
+                 evaluated_at_ms
+             )
+             SELECT workspace_id, digest_algorithm, digest_canonicalizer, ?1, ?2, proposal_digest,
+                    proposal_digest_algorithm, proposal_digest_canonicalizer, mission_id,
+                    evaluator_resident_id, evaluator_configuration_id, rubric_id, rubric_version,
+                    rubric_canonicalizer, rubric_sha256, verdict, conflicts_declared,
+                    conflicts_text, rationale, ?3
+             FROM evaluations WHERE digest_value = ?4",
+            rusqlite::params![
+                digest,
+                bytes,
+                i64::try_from(earlier).unwrap(),
+                first.digest().value
+            ],
+        )
         .unwrap();
     connection
         .execute(
-            "UPDATE evaluations SET evaluated_at_ms = ?1 WHERE digest_value = ?2",
+            "INSERT INTO evaluation_findings (workspace_id, evaluation_digest, ordinal, severity, summary)
+             SELECT workspace_id, ?1, ordinal, severity, summary FROM evaluation_findings
+             WHERE evaluation_digest = ?2",
+            rusqlite::params![digest, first.digest().value],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO evaluation_supersessions (
+                 workspace_id, proposal_digest, evaluation_digest, supersedes_evaluation_digest
+             ) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![
-                i64::try_from(second.payload().evaluated_at_ms + 1_000).unwrap(),
-                first.digest().value
+                fixture.workspace_id.to_string(),
+                proposal.digest().value,
+                digest,
+                first.digest().value,
+            ],
+        )
+        .unwrap();
+    let event: String = connection
+        .query_row(
+            "SELECT payload_json FROM events WHERE kind = 'evaluation.recorded'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let event = event
+        .replace(first.digest().value.as_str(), &digest)
+        .replace(
+            &BASE64.encode(first.canonical_bytes()),
+            &BASE64.encode(&bytes),
+        )
+        .replace(
+            &format!("\"evaluated_at_ms\":{}", first.payload().evaluated_at_ms),
+            &format!("\"evaluated_at_ms\":{earlier}"),
+        );
+    connection
+        .execute(
+            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+             VALUES (?1, 'evaluation.recorded', ?2, ?3)",
+            rusqlite::params![
+                fixture.workspace_id.to_string(),
+                event,
+                i64::try_from(earlier).unwrap()
             ],
         )
         .unwrap();
     drop(connection);
 
+    // Every other check passes: the read succeeds, so the only thing left is the chain.
+    assert!(
+        evaluations.get(&digest).is_ok(),
+        "the successor row is not self-consistent, so this test measures something else"
+    );
     assert!(
         Supervisor::bootstrap(StartupConfig {
             store_path: fixture.store.path.clone(),
@@ -1538,6 +1670,114 @@ fn an_evaluated_time_earlier_than_the_link_it_supersedes_is_refused() {
         })
         .is_err(),
         "startup accepted a chain whose times decrease"
+    );
+}
+
+/// The positive control for the same comparison: two links at the SAME millisecond are accepted,
+/// because refusing equal times would invent a precision the clock does not have. Without it, `<`
+/// and `<=` are indistinguishable.
+///
+/// Built exactly as the decreasing case is, with `equal` in place of `earlier` and no trigger
+/// surgery, so the two tests differ in one value and nothing else.
+#[test]
+fn two_links_recorded_in_the_same_millisecond_are_accepted() {
+    let fixture = admitted_mission("evaluation-chain-equal-time");
+    let record = fixture.record();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+    let first = evaluations
+        .record(evaluation_draft(&fixture, &proposal.digest().value))
+        .unwrap();
+
+    let equal = first.payload().evaluated_at_ms;
+    let tail = first.canonical_bytes().len() - 9;
+    let mut bytes = first.canonical_bytes()[..tail].to_vec();
+    bytes.push(0x01);
+    bytes.extend_from_slice(&HEXLOWER.decode(first.digest().value.as_bytes()).unwrap());
+    bytes.extend_from_slice(&equal.to_be_bytes());
+    let digest = HEXLOWER.encode(&sha256(&bytes));
+
+    let connection = fixture.store.connect();
+    connection
+        .execute(
+            "INSERT INTO evaluations (
+                 workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+                 canonical_bytes, proposal_digest, proposal_digest_algorithm,
+                 proposal_digest_canonicalizer, mission_id, evaluator_resident_id,
+                 evaluator_configuration_id, rubric_id, rubric_version, rubric_canonicalizer,
+                 rubric_sha256, verdict, conflicts_declared, conflicts_text, rationale,
+                 evaluated_at_ms
+             )
+             SELECT workspace_id, digest_algorithm, digest_canonicalizer, ?1, ?2, proposal_digest,
+                    proposal_digest_algorithm, proposal_digest_canonicalizer, mission_id,
+                    evaluator_resident_id, evaluator_configuration_id, rubric_id, rubric_version,
+                    rubric_canonicalizer, rubric_sha256, verdict, conflicts_declared,
+                    conflicts_text, rationale, evaluated_at_ms
+             FROM evaluations WHERE digest_value = ?3",
+            rusqlite::params![digest, bytes, first.digest().value],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO evaluation_findings (workspace_id, evaluation_digest, ordinal, severity, summary)
+             SELECT workspace_id, ?1, ordinal, severity, summary FROM evaluation_findings
+             WHERE evaluation_digest = ?2",
+            rusqlite::params![digest, first.digest().value],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO evaluation_supersessions (
+                 workspace_id, proposal_digest, evaluation_digest, supersedes_evaluation_digest
+             ) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                fixture.workspace_id.to_string(),
+                proposal.digest().value,
+                digest,
+                first.digest().value,
+            ],
+        )
+        .unwrap();
+    let event: String = connection
+        .query_row(
+            "SELECT payload_json FROM events WHERE kind = 'evaluation.recorded'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let event = event
+        .replace(first.digest().value.as_str(), &digest)
+        .replace(
+            &BASE64.encode(first.canonical_bytes()),
+            &BASE64.encode(&bytes),
+        );
+    connection
+        .execute(
+            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+             VALUES (?1, 'evaluation.recorded', ?2, ?3)",
+            rusqlite::params![
+                fixture.workspace_id.to_string(),
+                event,
+                i64::try_from(equal).unwrap()
+            ],
+        )
+        .unwrap();
+    drop(connection);
+
+    let successor = evaluations.get(&digest).expect("the equal-time link reads");
+    assert_eq!(successor.payload().evaluated_at_ms, equal);
+    assert_eq!(
+        successor.payload().evaluated_at_ms,
+        first.payload().evaluated_at_ms,
+        "the two links are not at the same millisecond, so this proves nothing"
+    );
+    assert!(
+        Supervisor::bootstrap(StartupConfig {
+            store_path: fixture.store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        })
+        .is_ok(),
+        "startup refused two links recorded in the same millisecond"
     );
 }
 
@@ -1714,10 +1954,304 @@ fn no_accessor_reports_force_or_acceptability_as_a_boolean() {
         offenders.is_empty(),
         "a public accessor answers with a boolean: {offenders:?}"
     );
+
+    // gpt2's E5: scanning accessors is not the contract. ADR 0038 says no boolean ANYWHERE on the
+    // type, and adding a private `current: bool` field left the accessor scan green. The struct
+    // body itself is read now, so a field is as visible as a method.
+    let start = source
+        .find("pub struct EvaluationForce {")
+        .expect("EvaluationForce is declared");
+    let body = &source[start..start + source[start..].find("\n}").expect("the struct closes")];
+    assert!(
+        !body.contains("bool"),
+        "EvaluationForce grew a boolean field: {body}"
+    );
     assert!(
         !source.contains("fn is_in_force")
             && !source.contains("fn is_acceptable")
             && !source.contains("fn is_current"),
         "an acceptability predicate was added"
+    );
+}
+
+/// gpt2's S1: a malformed digest and a well-formed one naming nothing are different mistakes, and
+/// the codec has had a distinct arm for the first all along. Querying the store with an unvalidated
+/// string reported both as "not recorded".
+#[test]
+fn a_malformed_supersedes_digest_is_told_apart_from_one_that_names_nothing() {
+    let fixture = admitted_mission("evaluation-supersedes-malformed");
+    let record = fixture.record();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+
+    let refuse = |digest: &str| {
+        let mut draft = evaluation_draft(&fixture, &proposal.digest().value);
+        draft.supersedes = EvaluationSupersedes::Evaluation(digest.to_owned());
+        evaluations.record(draft).expect_err("must be refused")
+    };
+
+    assert!(
+        matches!(
+            refuse("not-a-digest"),
+            EvaluationError::Malformed(MalformedEvaluation::SupersedesDigest)
+        ),
+        "a malformed digest was reported as merely absent"
+    );
+    // Uppercase is malformed too: HEXLOWER accepts only the canonical spelling, so two spellings of
+    // one digest can never both encode. `0xab` rather than `0x44` because the first probe I wrote
+    // encoded to digits only, so `to_uppercase` was a no-op and the assertion measured nothing.
+    let shouted = HEXLOWER.encode(&[0xab_u8; 32]).to_uppercase();
+    assert!(
+        shouted
+            .chars()
+            .any(|character| character.is_ascii_uppercase()),
+        "the probe is not actually uppercase"
+    );
+    assert!(
+        matches!(
+            refuse(&shouted),
+            EvaluationError::Malformed(MalformedEvaluation::SupersedesDigest)
+        ),
+        "an uppercase digest was not refused by the codec's rule"
+    );
+    // And the well-formed digest that names nothing keeps its own, different arm.
+    assert!(
+        matches!(
+            refuse(&HEXLOWER.encode(&[0x44_u8; 32])),
+            EvaluationError::Inconsistent(InconsistentEvaluation::SupersedesNotRecorded)
+        ),
+        "a well-formed absent digest lost its own refusal"
+    );
+}
+
+/// gpt2's E2: the relation and the byte tag must agree, and nothing proved it. This plants an
+/// otherwise-valid relation between two Evaluations whose bytes both say `supersedes = none`, so the
+/// only wrong fact in the store is the disagreement itself.
+#[test]
+fn a_relation_the_bytes_do_not_declare_is_refused_before_the_chain_is_walked() {
+    let fixture = admitted_mission("evaluation-relation-disagrees");
+    let record = fixture.record();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+    let first = evaluations
+        .record(evaluation_draft(&fixture, &proposal.digest().value))
+        .unwrap();
+
+    // A second Evaluation of the same Proposal whose bytes also say `none`: splice the rubric
+    // digest so it is a different record, and record no relation for it.
+    const RUBRIC_DIGEST_OFFSET: usize = 180;
+    let mut bytes = first.canonical_bytes().to_vec();
+    bytes[RUBRIC_DIGEST_OFFSET] ^= 0x01;
+    let digest = HEXLOWER.encode(&sha256(&bytes));
+    let rubric = HEXLOWER.encode(&bytes[RUBRIC_DIGEST_OFFSET..RUBRIC_DIGEST_OFFSET + 32]);
+    let connection = fixture.store.connect();
+    connection
+        .execute(
+            "INSERT INTO evaluations (
+                 workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+                 canonical_bytes, proposal_digest, proposal_digest_algorithm,
+                 proposal_digest_canonicalizer, mission_id, evaluator_resident_id,
+                 evaluator_configuration_id, rubric_id, rubric_version, rubric_canonicalizer,
+                 rubric_sha256, verdict, conflicts_declared, conflicts_text, rationale,
+                 evaluated_at_ms
+             )
+             SELECT workspace_id, digest_algorithm, digest_canonicalizer, ?1, ?2, proposal_digest,
+                    proposal_digest_algorithm, proposal_digest_canonicalizer, mission_id,
+                    evaluator_resident_id, evaluator_configuration_id, rubric_id, rubric_version,
+                    rubric_canonicalizer, ?3, verdict, conflicts_declared, conflicts_text,
+                    rationale, evaluated_at_ms
+             FROM evaluations WHERE digest_value = ?4",
+            rusqlite::params![digest, bytes, rubric, first.digest().value],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO evaluation_findings (workspace_id, evaluation_digest, ordinal, severity, summary)
+             SELECT workspace_id, ?1, ordinal, severity, summary FROM evaluation_findings
+             WHERE evaluation_digest = ?2",
+            rusqlite::params![digest, first.digest().value],
+        )
+        .unwrap();
+    // Structurally valid in every way the relation's own constraints can see.
+    connection
+        .execute(
+            "INSERT INTO evaluation_supersessions (
+                 workspace_id, proposal_digest, evaluation_digest, supersedes_evaluation_digest
+             ) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                fixture.workspace_id.to_string(),
+                proposal.digest().value,
+                digest,
+                first.digest().value,
+            ],
+        )
+        .expect("the relation's constraints admit this row");
+    drop(connection);
+
+    let error = evaluations
+        .get(&digest)
+        .expect_err("a relation the bytes do not declare must be refused");
+    assert!(
+        matches!(
+            error,
+            EvaluationError::Inconsistent(InconsistentEvaluation::SupersessionDisagreesWithBytes)
+        ),
+        "refused for the wrong reason: {error:?}"
+    );
+    // And from the other end: the predecessor's bytes say `none` and it is now superseded.
+    assert!(
+        evaluations.get(&first.digest().value).is_ok(),
+        "the predecessor's own record is unaffected"
+    );
+    assert!(
+        Supervisor::bootstrap(StartupConfig {
+            store_path: fixture.store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        })
+        .is_err(),
+        "startup accepted a relation the bytes do not declare"
+    );
+}
+
+/// gpt2's E3: both composite foreign keys are scoped by `(workspace_id, proposal_digest)`, and
+/// neither was proved. Each end is exercised on its own, so a weakened scope on either side is
+/// visible rather than masked by the other.
+#[test]
+fn each_composite_foreign_key_independently_refuses_a_cross_proposal_relation() {
+    let fixture = admitted_mission("evaluation-relation-scope");
+    let record = fixture.record();
+    let here = fixture.proposals.submit(&record.bytes()).unwrap();
+    let mut other_record = fixture.record();
+    other_record.summary = "A second Proposal, with its own Evaluation.".to_owned();
+    let elsewhere = fixture.proposals.submit(&other_record.bytes()).unwrap();
+
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+    let mine = evaluations
+        .record(evaluation_draft(&fixture, &here.digest().value))
+        .unwrap();
+    let theirs = evaluations
+        .record(evaluation_draft(&fixture, &elsewhere.digest().value))
+        .unwrap();
+
+    let connection = fixture.store.connect();
+    let link = |proposal: &str, successor: &str, predecessor: &str| {
+        connection.execute(
+            "INSERT INTO evaluation_supersessions (
+                 workspace_id, proposal_digest, evaluation_digest, supersedes_evaluation_digest
+             ) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                fixture.workspace_id.to_string(),
+                proposal,
+                successor,
+                predecessor
+            ],
+        )
+    };
+
+    // The SUCCESSOR key: the row is scoped to this Proposal and names an Evaluation of the other.
+    assert!(
+        link(
+            &here.digest().value,
+            &theirs.digest().value,
+            &mine.digest().value
+        )
+        .is_err(),
+        "the successor foreign key admitted another Proposal's Evaluation"
+    );
+    // The PREDECESSOR key: the same row the other way round.
+    assert!(
+        link(
+            &here.digest().value,
+            &mine.digest().value,
+            &theirs.digest().value
+        )
+        .is_err(),
+        "the predecessor foreign key admitted another Proposal's Evaluation"
+    );
+    // The positive control: both ends inside one Proposal is admitted by the keys, so the two
+    // refusals above are the scope and not the relation being unwritable.
+    const RUBRIC_DIGEST_OFFSET: usize = 180;
+    let mut bytes = mine.canonical_bytes().to_vec();
+    bytes[RUBRIC_DIGEST_OFFSET] ^= 0x01;
+    let sibling = HEXLOWER.encode(&sha256(&bytes));
+    let rubric = HEXLOWER.encode(&bytes[RUBRIC_DIGEST_OFFSET..RUBRIC_DIGEST_OFFSET + 32]);
+    connection
+        .execute(
+            "INSERT INTO evaluations (
+                 workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+                 canonical_bytes, proposal_digest, proposal_digest_algorithm,
+                 proposal_digest_canonicalizer, mission_id, evaluator_resident_id,
+                 evaluator_configuration_id, rubric_id, rubric_version, rubric_canonicalizer,
+                 rubric_sha256, verdict, conflicts_declared, conflicts_text, rationale,
+                 evaluated_at_ms
+             )
+             SELECT workspace_id, digest_algorithm, digest_canonicalizer, ?1, ?2, proposal_digest,
+                    proposal_digest_algorithm, proposal_digest_canonicalizer, mission_id,
+                    evaluator_resident_id, evaluator_configuration_id, rubric_id, rubric_version,
+                    rubric_canonicalizer, ?3, verdict, conflicts_declared, conflicts_text,
+                    rationale, evaluated_at_ms
+             FROM evaluations WHERE digest_value = ?4",
+            rusqlite::params![sibling, bytes, rubric, mine.digest().value],
+        )
+        .unwrap();
+    assert!(
+        link(&here.digest().value, &sibling, &mine.digest().value).is_ok(),
+        "the keys refuse a relation inside one Proposal too"
+    );
+}
+
+/// ADR 0038 promises that a Repository rebind keeping the same pinned commit reports only the
+/// revision as moved — one drift, not two — and `derive_force` implements that branch. gpt2's E5:
+/// no test reached it, so the branch and a version that always reported both were the same.
+#[test]
+fn a_rebind_keeping_the_same_pinned_commit_reports_only_the_revision_as_moved() {
+    let fixture = admitted_mission("evaluation-rebind-drift");
+    let record = fixture.record();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+    let evaluation = evaluations
+        .record(evaluation_draft(&fixture, &proposal.digest().value))
+        .unwrap();
+    assert!(evaluation.force().drift().is_empty());
+
+    // A new Repository revision at the SAME pinned commit.
+    fixture.rebind_repository(
+        1,
+        RepositorySourceKind::LocalPath,
+        "/home/operator/projects/sample-tracker-moved",
+        BASE_REVISION,
+    );
+
+    let drifted = evaluations.get(&evaluation.digest().value).unwrap();
+    assert_eq!(
+        drifted.force().drift(),
+        [UnmetPrecondition::RepositoryRevisionMoved],
+        "a rebind at the same commit reported the base as moved too"
+    );
+
+    // And a rebind that also moves the base reports both, so the branch above is a distinction and
+    // not a blanket answer.
+    fixture.rebind_repository(
+        2,
+        RepositorySourceKind::LocalPath,
+        "/home/operator/projects/sample-tracker-moved",
+        "b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3",
+    );
+    let drifted = evaluations.get(&evaluation.digest().value).unwrap();
+    assert_eq!(
+        drifted.force().drift(),
+        [
+            UnmetPrecondition::RepositoryRevisionMoved,
+            UnmetPrecondition::BaseRevisionMoved
+        ],
+        "a rebind that moved the base did not report both facts"
+    );
+    assert!(
+        Supervisor::bootstrap(StartupConfig {
+            store_path: fixture.store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        })
+        .is_ok(),
+        "drift failed startup"
     );
 }
