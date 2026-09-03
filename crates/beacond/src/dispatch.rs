@@ -1165,8 +1165,12 @@ impl DispatchService {
             });
             let observed =
                 read_pinned(&repository, &["rev-parse", "--verify", branch], READ_BUDGET);
+            // `Applied` is a claim about THIS attempt's swap, so the swap having succeeded is part
+            // of it. The commit is a deterministic function of its inputs, so a branch that already
+            // names it may have been moved there by something else -- and reporting that as this
+            // attempt's application would be a Receipt claiming an act it did not perform (gpt1).
             let outcome = match (swapped.is_some(), observed.as_deref().map(str::trim)) {
-                (_, Some(head)) if head == commit => DispatchOutcome::Applied,
+                (true, Some(head)) if head == commit => DispatchOutcome::Applied,
                 (_, Some(_)) => DispatchOutcome::LandingRefused,
                 (_, None) => DispatchOutcome::LandingUnobserved,
             };
@@ -2149,15 +2153,14 @@ fn verify_outcome_invariants(receipt: &DispatchReceipt) -> Result<(), DispatchEr
         }
         DispatchOutcome::LandingUnobserved => {
             receipt.resulting_revision.is_none()
-                && receipt.diff_digest.is_none()
                 && !receipt.checkout_updated
                 && names(NotVerified::LandingResultUnknown)
         }
         // Every other arm refused. Objects it wrote may survive -- that is what the residue token
-        // is for -- but nothing it prepared may be presented as a landing.
+        // is for, and a diff digest measured over a commit that was never published is still a
+        // measurement of that commit -- but nothing it prepared may be presented as a landing.
         _ => {
             receipt.resulting_revision.is_none()
-                && receipt.diff_digest.is_none()
                 && !receipt.checkout_updated
                 && names(NotVerified::ChangeNotApplied)
                 && (receipt.prepared_commit.is_none()
