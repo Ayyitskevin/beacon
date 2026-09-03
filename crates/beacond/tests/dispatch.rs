@@ -564,11 +564,24 @@ impl Fixture {
     /// trigger refuses startup for the wrong reason, and a recovery test would pass without ever
     /// reaching recovery.
     fn simulate_crash_after_swap(&self) {
+        self.without_run_triggers(
+            "DELETE FROM receipts;
+             DELETE FROM events WHERE kind = 'proposal.dispatched';
+             UPDATE runs SET state = 'dispatching', ended_at_ms = NULL
+             WHERE kind = 'proposal_dispatch';",
+        );
+    }
+
+    /// Run one batch with the Run, Receipt and preparation immutability triggers dropped, then put
+    /// them back -- because startup verifies the schema signature before any state, and a store
+    /// left short a trigger refuses startup for the wrong reason.
+    fn without_run_triggers(&self, batch: &str) {
         let connection = self.store.connect();
         let mut statement = connection
             .prepare(
                 "SELECT sql FROM sqlite_schema
-                 WHERE type = 'trigger' AND tbl_name IN ('receipts', 'runs')
+                 WHERE type = 'trigger'
+                   AND tbl_name IN ('receipts', 'runs', 'dispatch_preparations')
                  ORDER BY name",
             )
             .unwrap();
@@ -578,22 +591,33 @@ impl Fixture {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         drop(statement);
-        assert_eq!(triggers.len(), 4);
+        assert_eq!(triggers.len(), 6);
         connection
             .execute_batch(
                 "DROP TRIGGER receipts_no_update;
                  DROP TRIGGER receipts_no_delete;
                  DROP TRIGGER runs_no_delete;
                  DROP TRIGGER runs_single_terminal_transition;
-                 DELETE FROM receipts;
-                 DELETE FROM events WHERE kind = 'proposal.dispatched';
-                 UPDATE runs SET state = 'dispatching', ended_at_ms = NULL
-                 WHERE kind = 'proposal_dispatch';",
+                 DROP TRIGGER dispatch_preparations_no_update;
+                 DROP TRIGGER dispatch_preparations_no_delete;",
             )
             .unwrap();
+        connection.execute_batch(batch).unwrap();
         for trigger in triggers {
             connection.execute_batch(&trigger).unwrap();
         }
+    }
+
+    /// The state dying between `commit-tree` and the landing transaction leaves: a receiptless open
+    /// Run, and no preparation at all.
+    fn simulate_crash_before_landing(&self) {
+        self.without_run_triggers(
+            "DELETE FROM receipts;
+             DELETE FROM events WHERE kind = 'proposal.dispatched';
+             DELETE FROM dispatch_preparations;
+             UPDATE runs SET state = 'dispatching', ended_at_ms = NULL
+             WHERE kind = 'proposal_dispatch';",
+        );
     }
 
     /// Run `f` with the Candidate immutability triggers dropped, then put them back.
@@ -2365,4 +2389,52 @@ fn the_landing_transaction_holds_the_write_lock_across_the_swap() {
             "UPDATE installation_pause SET paused = 1, changed_at_ms = 1 WHERE singleton = 1",
         )
         .expect("the write is only blocked by the lock");
+}
+
+#[test]
+fn an_interruption_before_the_landing_transaction_is_terminal_and_names_its_unnameable_residue() {
+    // gpt1's other crash boundary. Between `commit-tree` and the landing transaction, objects exist
+    // and nothing has recorded what they are -- so the honest terminal record is that the result is
+    // unobserved AND that the residue cannot be named. A guess in either direction would be worse
+    // than the uncertainty.
+    let fixture = admitted_mission("interrupted-early");
+    let (repository, ruling_digest) = fixture.approved("interrupted-early");
+    let before = repository.snapshot();
+
+    fixture
+        .dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+    // Erase everything the landing transaction wrote, including the preparation: what remains is a
+    // receiptless open Run, which is exactly what dying before that transaction leaves.
+    fixture.simulate_crash_before_landing();
+
+    fixture
+        .restart()
+        .expect("startup finishes an attempt that never reached its landing transaction");
+
+    let (outcome, payload): (String, String) = fixture
+        .store
+        .connect()
+        .query_row("SELECT outcome, receipt_json FROM receipts", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(outcome, "landing_unobserved");
+    let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    let not_verified = value["notVerified"].as_array().unwrap();
+    assert!(
+        not_verified.iter().any(|e| e == "residue_cannot_be_named"),
+        "{payload}"
+    );
+    assert!(
+        not_verified
+            .iter()
+            .any(|e| e == "reconstructed_after_interruption"),
+        "{payload}"
+    );
+    // The repository moved, because the dispatch did land before the record was erased -- the point
+    // is that the store now says something terminal and truthful about an attempt it cannot fully
+    // account for.
+    assert_ne!(repository.snapshot(), before);
 }
