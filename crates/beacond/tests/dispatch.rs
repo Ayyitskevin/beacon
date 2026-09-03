@@ -3524,3 +3524,113 @@ fn a_reconstructed_receipt_that_cannot_name_its_residue_claims_no_byte_identity(
     );
     assert_eq!(receipt.repository_effect(), RepositoryEffect::Unknown);
 }
+
+/// A second post-image, so two Rulings on one base prepare two different commits.
+const OTHER_BYTES: &[u8] = b"fn main() { /* the other dispatch */ }\n";
+
+#[test]
+fn two_dispatch_commands_racing_one_branch_are_separated_by_the_compare_and_swap() {
+    // R9's property, with two Dispatch Commands rather than a Command and a raw writer.
+    //
+    // Two dispatchers of the SAME Ruling cannot exercise it: the one-use claim refuses the loser
+    // before it reaches the swap, which is why removing the expected-old value leaves that test
+    // green (gpt1). So these are two Rulings -- two Proposals, two Candidates, one repository
+    // revision, one base -- and neither claim blocks the other. Both reach the landing transaction
+    // together, and the compare-and-swap is the only thing that can separate them.
+    let fixture = admitted_mission("two-commands");
+    let repository = CopyRepository::create(&fixture.copies_root, "two-commands");
+    fixture.beacon_made(&repository);
+    let revision = fixture.rebind_repository(&repository);
+    let base = repository.revision.clone();
+
+    let ruled = |summary: &str, post: &[u8]| {
+        let mut record = fixture.proposal(summary);
+        record.mutations = vec![(MUTATION_MODIFY, TARGET.to_owned())];
+        record.repository_revision = revision;
+        record.base_revision = base.clone();
+        record.context_digest = sha256(BASE_LIB_BYTES);
+        let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+        fixture
+            .candidates
+            .record(&proposal.digest().value, &images_for(BASE_LIB_BYTES, post))
+            .unwrap();
+        fixture
+            .rulings
+            .rule_on_candidate(
+                &fixture
+                    .candidates
+                    .present(&proposal.digest().value)
+                    .unwrap(),
+                RulingDecision::Approve,
+                APPROVE_REASON,
+                RulingSupersedes::None,
+            )
+            .unwrap()
+            .digest()
+            .value
+            .clone()
+    };
+    let first = ruled(
+        "Apply the dispatched change to the library root.",
+        NEW_BYTES,
+    );
+    let second = ruled(
+        "Apply the other dispatched change to the root.",
+        OTHER_BYTES,
+    );
+
+    // The barrier sits inside the act, after each attempt has claimed its Ruling and before either
+    // opens its landing transaction: both have observed the same base and both are about to swap.
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let outcomes: Vec<DispatchOutcome> = std::thread::scope(|scope| {
+        let handles: Vec<_> = [(first.clone(), NEW_BYTES), (second.clone(), OTHER_BYTES)]
+            .into_iter()
+            .map(|(ruling, bytes)| {
+                let barrier = Arc::clone(&barrier);
+                let dispatches =
+                    DispatchService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+                        .with_failpoints(DispatchFailpoints {
+                            before_landing: Some(Arc::new(move || {
+                                barrier.wait();
+                            })),
+                            ..DispatchFailpoints::default()
+                        });
+                scope.spawn(move || dispatches.dispatch(&ruling, &content_for(bytes)))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap()
+                    .expect("a racing dispatcher failed instead of refusing")
+                    .outcome
+            })
+            .collect()
+    });
+
+    assert_eq!(outcomes.len(), 2);
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| **outcome == DispatchOutcome::Applied)
+            .count(),
+        1,
+        "two Dispatch Commands raced one branch and produced {outcomes:?}"
+    );
+    assert!(
+        outcomes.contains(&DispatchOutcome::LandingRefused),
+        "the loser was not refused by the swap: {outcomes:?}"
+    );
+
+    // One commit, not two, and the branch is exactly one ahead of the base.
+    let head = CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        CopyRepository::git(
+            &repository.path,
+            &["rev-list", "--count", &format!("{base}..{head}")]
+        ),
+        "1"
+    );
+}
