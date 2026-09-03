@@ -646,7 +646,10 @@ pub(crate) fn read_pinned(
     arguments: &[&str],
     budget: Duration,
 ) -> Option<String> {
-    let filter_drivers = repository_filter_drivers(repository.path()).ok()?;
+    // The filter inventory is read through the SAME pinned directory: reading it by pathname would
+    // let a swap decide which drivers the hardening neutralizes, before the write enters the
+    // original descriptor (gpt1).
+    let filter_drivers = pinned_filter_drivers(repository)?;
     let mut command = read_only_git_command(Path::new(GIT), &filter_drivers);
     repository.enter(&mut command);
     for argument in arguments {
@@ -683,7 +686,7 @@ pub(crate) fn write_pinned(
     stdin_bytes: Option<&[u8]>,
     budget: Duration,
 ) -> Option<String> {
-    let filter_drivers = repository_filter_drivers(repository.path()).ok()?;
+    let filter_drivers = pinned_filter_drivers(repository)?;
     let mut command = hardened_git_command(Path::new(GIT), &filter_drivers);
     if let Some(index) = index_file {
         command.env("GIT_INDEX_FILE", index);
@@ -709,6 +712,46 @@ pub(crate) fn write_pinned(
         } if repository.still_pinned() => Some(stdout),
         _ => None,
     }
+}
+
+/// Every filter driver a pinned repository's own configuration names, read through its descriptor.
+///
+/// The same data-only `config --file` read `repository_filter_drivers` performs, entered by
+/// descriptor rather than by `-C <path>`: a rename between the pin and this read would otherwise
+/// let a different repository decide what the hardening suppresses.
+fn pinned_filter_drivers(repository: &PinnedRepository) -> Option<Vec<String>> {
+    let mut command = closed_git_command(Path::new(GIT));
+    repository.enter(&mut command);
+    command
+        .arg("config")
+        .arg("--file")
+        .arg(".git/config")
+        .arg("--includes")
+        .arg("--name-only")
+        .arg("--list");
+    let Bounded::Finished { success, stdout } = run_git_bounded(command, READ_BUDGET) else {
+        return None;
+    };
+    if !success {
+        // No repository-local configuration is not a failure: it is an empty inventory.
+        return repository.still_pinned().then(Vec::new);
+    }
+    if !repository.still_pinned() {
+        return None;
+    }
+    Some(
+        stdout
+            .lines()
+            .filter_map(|line| {
+                line.strip_suffix(".smudge")
+                    .or_else(|| line.strip_suffix(".clean"))
+            })
+            .filter(|name| name.starts_with("filter."))
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+    )
 }
 
 /// Who Beacon says wrote a commit, and when.
@@ -880,7 +923,11 @@ mod tests {
 
     use uuid::Uuid;
 
-    use super::{CleanupOutcome, KeepReason, PinnedRepository, Worktree, status_holds};
+    use super::{
+        Bounded, CleanupOutcome, KeepReason, PinnedRepository, Worktree, run_git_bounded,
+        status_holds,
+    };
+    use std::process::Command;
 
     /// A temporary directory removed on drop.
     struct TempDir {
@@ -976,6 +1023,54 @@ mod tests {
             }
         );
         assert!(path.is_dir(), "the tree was kept, so it is still on disk");
+    }
+
+    #[test]
+    fn a_pinned_repository_is_entered_by_descriptor_and_not_by_its_pathname() {
+        // gpt1: replacing `enter` with `current_dir(path)` left both claimed guards green, because
+        // neither distinguished the two. This one does, without a race: the directory is renamed
+        // away AFTER the pin, so a child entering by pathname cannot start at all while a child
+        // entering by descriptor runs in the directory that was opened -- and reports its new name,
+        // which is how we know it is the same inode rather than a re-resolution.
+        let root = std::env::temp_dir().join(format!("beacon-enter-{}", Uuid::new_v4()));
+        let repository = root.join("repository");
+        let moved = root.join("moved");
+        fs::create_dir_all(repository.join(".git/objects")).unwrap();
+
+        let pinned = PinnedRepository::open(&repository).unwrap();
+        fs::rename(&repository, &moved).unwrap();
+        assert!(
+            !repository.exists(),
+            "the pathname must not resolve for this test to mean anything"
+        );
+
+        let mut command = Command::new("/bin/sh");
+        pinned.enter(&mut command);
+        command.arg("-c").arg("pwd");
+        let Bounded::Finished { success, stdout } =
+            run_git_bounded(command, Duration::from_secs(10))
+        else {
+            panic!("the child did not finish");
+        };
+        assert!(success, "a child entering by descriptor could not start");
+        assert_eq!(
+            fs::canonicalize(stdout.trim()).unwrap(),
+            fs::canonicalize(&moved).unwrap(),
+            "the child did not enter the directory that was pinned"
+        );
+
+        // The control: entering the same pathname the ordinary way cannot start at all.
+        let mut by_path = Command::new("/bin/sh");
+        by_path.current_dir(&repository).arg("-c").arg("pwd");
+        assert!(
+            matches!(
+                run_git_bounded(by_path, Duration::from_secs(10)),
+                Bounded::Failed
+            ),
+            "a child entering by pathname started after the rename"
+        );
+
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

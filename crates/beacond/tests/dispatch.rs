@@ -2486,3 +2486,69 @@ fn an_interruption_before_the_landing_transaction_is_terminal_and_names_its_unna
     // account for.
     assert_ne!(repository.snapshot(), before);
 }
+
+#[test]
+fn two_concurrent_dispatchers_produce_one_application_and_one_refusal() {
+    // gpt1's acceptance row: the committed test dispatched sequentially, so two dispatchers never
+    // observed the same base. Both do here, released together by a barrier -- no sleeps, and the
+    // outcome is deterministic in shape rather than in timing: the landing transaction holds the
+    // store's write lock across the swap, so one attempt lands and the other finds the authority
+    // spent when it reaches the same transaction.
+    let fixture = admitted_mission("concurrent");
+    let (repository, ruling_digest) = fixture.approved("concurrent");
+    let base = repository.revision.clone();
+
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let outcomes: Vec<DispatchOutcome> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                let dispatches =
+                    DispatchService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+                let ruling = ruling_digest.clone();
+                scope.spawn(move || {
+                    barrier.wait();
+                    dispatches
+                        .dispatch(&ruling, &content_for(NEW_BYTES))
+                        .map(|receipt| receipt.outcome)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|handle| handle.join().unwrap().ok())
+            .collect()
+    });
+
+    // Exactly one application. The other attempt is refused -- by the spend if it reached the
+    // landing transaction, by the head gate if it re-read the repository after the first landed.
+    let applied = outcomes
+        .iter()
+        .filter(|outcome| **outcome == DispatchOutcome::Applied)
+        .count();
+    assert_eq!(
+        applied, 1,
+        "two concurrent dispatchers produced {outcomes:?}"
+    );
+    assert!(
+        outcomes.iter().all(|outcome| matches!(
+            outcome,
+            DispatchOutcome::Applied
+                | DispatchOutcome::AlreadyDispatched
+                | DispatchOutcome::RepositoryHeadMoved
+        )),
+        "an unexpected outcome from a concurrent attempt: {outcomes:?}"
+    );
+
+    // And the repository advanced exactly once.
+    let head = CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]);
+    assert_ne!(head, base);
+    assert_eq!(
+        CopyRepository::git(
+            &repository.path,
+            &["rev-list", "--count", &format!("{base}..{head}")]
+        ),
+        "1",
+        "the branch advanced by more than one commit"
+    );
+}
