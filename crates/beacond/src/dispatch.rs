@@ -2589,14 +2589,12 @@ mod tests {
     /// Every value here is chosen, not measured: the UUIDs count up, the digests are constant, the
     /// times are 1 and 2. Two implementations that agree on the encoding produce these bytes.
     fn specimen(outcome: DispatchOutcome) -> DispatchReceipt {
+        // The two arms are not the same record with different values: a `RulingRefused` leaves the
+        // gate list at G3, so it has no Candidate, no repository, no profile and no objects, and a
+        // specimen that carried them would pin bytes this dispatch path cannot emit (gpt2). The
+        // members each arm leaves absent are asserted against a real Receipt of the same outcome in
+        // `tests/dispatch.rs`.
         let applied = outcome == DispatchOutcome::Applied;
-        let digest = |canonicalizer: &str| {
-            format!(
-                r#"{{"algorithm":"sha256","canonicalizer":"{canonicalizer}","value":"{}"}}"#,
-                "0".repeat(64)
-            )
-        };
-        let _ = digest;
         DispatchReceipt {
             version: 3,
             run_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap(),
@@ -2613,26 +2611,26 @@ mod tests {
                 canonicalizer: "beacon.proposal.v1".to_owned(),
                 value: "2".repeat(64),
             }),
-            candidate_digest: Some(CandidateDigest {
+            candidate_digest: applied.then(|| CandidateDigest {
                 algorithm: "sha256".to_owned(),
                 canonicalizer: "beacon.candidate.v1".to_owned(),
                 value: "3".repeat(64),
             }),
             outcome: outcome.clone(),
-            autonomy_profile: Some(AutonomyProfile::Supervised),
+            autonomy_profile: applied.then_some(AutonomyProfile::Supervised),
             charter_revision: 1,
             project_policy_revision: 1,
             repository_revision: 1,
-            source_kind: Some(RepositorySourceKind::LocalPath),
-            source: Some("/copies/sample-project-specimen".to_owned()),
-            source_identity: Some(SourceIdentity {
+            source_kind: applied.then_some(RepositorySourceKind::LocalPath),
+            source: applied.then(|| "/copies/sample-project-specimen".to_owned()),
+            source_identity: applied.then_some(SourceIdentity {
                 device: 66_306,
                 inode: 4_242,
             }),
-            branch: Some("refs/heads/main".to_owned()),
+            branch: applied.then(|| "refs/heads/main".to_owned()),
             pinned_base_revision: Some("4".repeat(40)),
             observed_head: applied.then(|| "5".repeat(40)),
-            prepared_commit: Some("5".repeat(40)),
+            prepared_commit: applied.then(|| "5".repeat(40)),
             resulting_revision: applied.then(|| "5".repeat(40)),
             diff_digest: applied.then(|| "6".repeat(64)),
             checkout_updated: applied,
@@ -2652,17 +2650,17 @@ mod tests {
             },
             model_invocations: 0,
             cost_usd_micros: 0,
-            per_mutation: vec![MutationRecord {
-                kind: MutationKind::ModifyFile,
-                path: "src/lib.rs".to_owned(),
-                pre_image: Some("7".repeat(64)),
-                post_image: Some("8".repeat(64)),
-                effect: if applied {
-                    MutationEffect::Written
-                } else {
-                    MutationEffect::NotAttempted
-                },
-            }],
+            per_mutation: if applied {
+                vec![MutationRecord {
+                    kind: MutationKind::ModifyFile,
+                    path: "src/lib.rs".to_owned(),
+                    pre_image: Some("7".repeat(64)),
+                    post_image: Some("8".repeat(64)),
+                    effect: MutationEffect::Written,
+                }]
+            } else {
+                Vec::new()
+            },
             started_at_ms: 1,
             ended_at_ms: 2,
             not_verified: vec![
@@ -2682,14 +2680,42 @@ mod tests {
             .chain(if applied {
                 Vec::new()
             } else {
-                vec![
-                    NotVerified::ChangeNotApplied,
-                    NotVerified::UnreferencedObjectResidue,
-                ]
+                vec![NotVerified::ChangeNotApplied]
             })
             .collect(),
         }
     }
+
+    /// The members a Receipt of this outcome leaves absent, in declaration order.
+    ///
+    /// The same list is asserted against a real Receipt of the same outcome in
+    /// `tests/dispatch.rs`, which is what ties a pinned vector to a producible record.
+    fn absent_members(receipt: &DispatchReceipt) -> Vec<String> {
+        let value: serde_json::Value = serde_json::to_value(receipt).unwrap();
+        let object = value.as_object().unwrap();
+        object
+            .iter()
+            .filter(|(_, value)| value.is_null())
+            .map(|(name, _)| name.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// The members a `RulingRefused` leaves absent, asserted here and against a real Receipt of
+    /// the same outcome in `tests/dispatch.rs`.
+    const REFUSED_ABSENT: &[&str] = &[
+        "autonomyProfile",
+        "branch",
+        "candidateDigest",
+        "diffDigest",
+        "observedHead",
+        "preparedCommit",
+        "resultingRevision",
+        "source",
+        "sourceIdentity",
+        "sourceKind",
+    ];
 
     #[test]
     fn the_applied_receipt_specimen_is_exactly_these_bytes() {
@@ -2705,21 +2731,29 @@ mod tests {
             "6d13ab8b7a003b679985758f61bf190f4c0ed538772c9b2e5c21b77d1ece069a"
         );
         assert_eq!(bytes, APPLIED_SPECIMEN);
-        // And it is a record this build could have written.
+        // An Applied establishes every fact, so nothing in it is absent -- and it is a record this
+        // build could have written.
+        assert!(absent_members(&specimen(DispatchOutcome::Applied)).is_empty());
         verify_outcome_invariants(&specimen(DispatchOutcome::Applied)).unwrap();
     }
 
     #[test]
     fn the_refused_receipt_specimen_is_exactly_these_bytes() {
-        // The same facts under a refusal: the same thirty members, with what the refusal did not
-        // establish carried as `null` rather than left out.
+        // The same thirty members, with everything the refusal did not reach carried as `null`. A
+        // `RulingRefused` leaves the gate list at G3, so this specimen has no Candidate, no
+        // repository, no profile and no objects: pinning bytes for a shape the dispatch path cannot
+        // produce would be a vector for a record that does not exist (gpt2).
         let bytes = serde_json::to_string(&specimen(DispatchOutcome::RulingRefused)).unwrap();
-        assert_eq!(bytes.len(), 1807);
+        assert_eq!(bytes.len(), 1301);
         assert_eq!(
             hex(&crate::proposal::sha256(bytes.as_bytes())),
-            "7cf470fac1f454aeaa4c0834710d7c04fef7004cafd869f22f96df37abd03a6f"
+            "76305395d931d8464ed38b6980ba6f8abb649014ca44899380c19e67546af8e3"
         );
         assert_eq!(bytes, REFUSED_SPECIMEN);
+        assert_eq!(
+            absent_members(&specimen(DispatchOutcome::RulingRefused)),
+            REFUSED_ABSENT
+        );
         verify_outcome_invariants(&specimen(DispatchOutcome::RulingRefused)).unwrap();
     }
 
@@ -2754,19 +2788,14 @@ mod tests {
         r#"t":{"algorithm":"sha256","canonicalizer":"beacon.ruling.v2","value":"111111111111111111111111111"#,
         r#"1111111111111111111111111111111111111"},"proposalDigest":{"algorithm":"sha256","canonicalizer":""#,
         r#"beacon.proposal.v1","value":"2222222222222222222222222222222222222222222222222222222222222222"},"#,
-        r#""candidateDigest":{"algorithm":"sha256","canonicalizer":"beacon.candidate.v1","value":"333333333"#,
-        r#"3333333333333333333333333333333333333333333333333333333"},"outcome":"ruling_refused","autonomyPr"#,
-        r#"ofile":"supervised","charterRevision":1,"projectPolicyRevision":1,"repositoryRevision":1,"source"#,
-        r#"Kind":"local_path","source":"/copies/sample-project-specimen","sourceIdentity":{"device":66306,""#,
-        r#"inode":4242},"branch":"refs/heads/main","pinnedBaseRevision":"4444444444444444444444444444444444"#,
-        r#"444444","observedHead":null,"preparedCommit":"5555555555555555555555555555555555555555","resulti"#,
-        r#"ngRevision":null,"diffDigest":null,"checkoutUpdated":false,"gitSteps":[],"modelInvocations":0,"c"#,
-        r#"ostUsdMicros":0,"perMutation":[{"kind":"modify_file","path":"src/lib.rs","preImage":"77777777777"#,
-        r#"77777777777777777777777777777777777777777777777777777","postImage":"8888888888888888888888888888"#,
-        r#"888888888888888888888888888888888888","effect":"not_attempted"}],"startedAtMs":1,"endedAtMs":2,""#,
-        r#"notVerified":["execution_policy_constraint","sandbox_constraint","network_constraint","model_pro"#,
-        r#"vider_constraint","command_allowlist_constraint","tool_allowlist_constraint","evaluations_constr"#,
-        r#"aint","non_author_evaluation_of_candidate","safety_snapshot","base_revision_reachability","decla"#,
-        r#"red_checks_against_result","change_not_applied","unreferenced_object_residue"]}"#
+        r#""candidateDigest":null,"outcome":"ruling_refused","autonomyProfile":null,"charterRevision":1,"pr"#,
+        r#"ojectPolicyRevision":1,"repositoryRevision":1,"sourceKind":null,"source":null,"sourceIdentity":n"#,
+        r#"ull,"branch":null,"pinnedBaseRevision":"4444444444444444444444444444444444444444","observedHead""#,
+        r#":null,"preparedCommit":null,"resultingRevision":null,"diffDigest":null,"checkoutUpdated":false,""#,
+        r#"gitSteps":[],"modelInvocations":0,"costUsdMicros":0,"perMutation":[],"startedAtMs":1,"endedAtMs""#,
+        r#":2,"notVerified":["execution_policy_constraint","sandbox_constraint","network_constraint","model"#,
+        r#"_provider_constraint","command_allowlist_constraint","tool_allowlist_constraint","evaluations_co"#,
+        r#"nstraint","non_author_evaluation_of_candidate","safety_snapshot","base_revision_reachability","d"#,
+        r#"eclared_checks_against_result","change_not_applied"]}"#
     );
 }

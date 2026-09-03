@@ -620,11 +620,16 @@ literals are in `dispatch::tests` (`the_applied_receipt_specimen_is_exactly_thes
 
 ```text
 applied         2048 bytes  sha256 6d13ab8b7a003b679985758f61bf190f4c0ed538772c9b2e5c21b77d1ece069a
-ruling_refused  1807 bytes  sha256 7cf470fac1f454aeaa4c0834710d7c04fef7004cafd869f22f96df37abd03a6f
+ruling_refused  1301 bytes  sha256 76305395d931d8464ed38b6980ba6f8abb649014ca44899380c19e67546af8e3
 ```
 
-Each specimen is also required to satisfy the invariants its arm owes, so a vector cannot be
-a record this build could not have written. Three further tests pin the member list of real
+The two arms are not one record with different values. A `RulingRefused` leaves the gate list
+at G3, so it has no Candidate, no repository, no autonomy profile and no objects: its specimen
+carries `candidateDigest`, `autonomyProfile`, `sourceKind`, `source`, `sourceIdentity`,
+`branch`, `observedHead`, `preparedCommit`, `resultingRevision` and `diffDigest` as `null`, and
+that exact absence list is asserted against a **real** refused Receipt as well as against the
+specimen. Each specimen must also satisfy the invariants its arm owes. A vector for a shape the
+dispatch path cannot emit would be a vector for nothing. Three further tests pin the member list of real
 Receipts in stored-byte order for the Applied, Refused and reconstructed arms
 (`crates/beacond/tests/dispatch.rs`) — read off the text, not out of a parsed map, which
 would assert alphabetical order and pass however the record were written. Reordering any two
