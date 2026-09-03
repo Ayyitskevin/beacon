@@ -32,8 +32,8 @@ than only an act.
 
 ## Decision
 
-Dispatch is **one Operator-triggered Command with twelve gates, one irreversible
-step, and three outcomes**, and it is the only act in Beacon that mutates a Git
+Dispatch is **one Operator-triggered Command with fifteen gates, one irreversible
+step, and a closed outcome vocabulary**, and it is the only act in Beacon that mutates a Git
 repository on the strength of a record. **In v1 that repository is a Beacon-made
 disposable copy and nothing else**, enforced by a hard provenance gate: landing into
 a repository the Operator owns stays disabled, for the reasons in "Conditions on the
@@ -76,11 +76,13 @@ A refusal after the commit step W3 is a different claim, made precisely below.
   G15 LIVE: the repository's HEAD is a branch, equals the pinned base revision,
       and its tree is clean
   ------------------------------------------------------------- no writes above
-  W1  a disposable worktree at the pinned base
-  W2  per-target writes, resolved beneath the worktree root with openat2 and
-      RESOLVE_BENEATH, never by joining a path
-  W3  stage exactly the declared targets; commit
-  W4  post-condition: base..commit touches exactly the declared set
+  W1  the pinned base tree read into a scratch index outside the repository
+  W2  one blob per mutation from `hash-object --stdin` with no path, then one
+      `update-index` entry each -- no checkout, no index of the repository's,
+      and no pathspec
+  W3  write-tree, then commit-tree
+  W4  post-condition: base..commit touches exactly the declared set, and every
+      blob in it holds the declared bytes
   ------------------------------------------------------------- still discardable
   L1  git update-ref <branch> <candidate> <pinned base>   << THE ONLY
                                                              IRREVERSIBLE STEP
@@ -413,10 +415,16 @@ negative tests proving the service is absent from Agent, MCP, schedule, and
 reconnect surfaces.
 
 **Pause Work gates dispatch.** `BLUEPRINT.md:377-379` and `:1193-1194` and
-`AGENTS.md:128` say a paused Installation rejects new dispatches. No pause state
-exists in `beacond` today, and recording "pause not verified" in a Receipt does not
-make a forbidden dispatch permissible. A live pause gate lands before the first
-applying slice; it is **not** one of the seven undeclared families below.
+`AGENTS.md:128` say a paused Installation rejects new dispatches, and recording
+"pause not verified" in a Receipt would not make a forbidden dispatch permissible. So
+this decision adds the minimum that makes the gate real: one Owner-set singleton, with
+`pause()` and `resume()` as **separate** Commands because they are not symmetric --
+Resume refuses while any Run is open or `unconfirmed`, naming them, or records what was
+explicitly accepted (`AGENTS.md:137`) -- each writing its own audit Event in the same
+transaction as the state change. The Blueprint's fuller Pause (bounded interruption
+requests to active Runs, Worker lease renewals, the tray and the global shortcut) is
+**not built and not claimed**. Pause is **not** one of the seven undeclared families
+below.
 
 **A Candidate is used to support a Ruling, so it is a Material Artifact.**
 `CONTEXT.md:199-201` defines one as an Artifact used to support a Ruling or authorize
@@ -565,9 +573,9 @@ itself, at dispatch time, from bytes.
   `BLUEPRINT:450-452` and `:723` stay open, and the paragraph above says what
   stands in for them and what it is not.
 - **Pause Work.** `BLUEPRINT:378` and `:1193` require a paused Workspace to reject
-  new dispatches. No pause state exists in `beacond`; dispatch is its first
-  consumer when it lands, and this is a named future gate rather than a silently
-  missing one.
+  new dispatches, and the singleton this decision adds is what the gate reads. What
+  remains unbuilt is the rest of Pause -- interruption requests, Worker lease renewals,
+  and the tray and shortcut surfaces -- and it is named here rather than implied.
 - **Evaluation citation.** A v1 Ruling does not cite an Evaluation, so dispatch
   cannot require one and must not pretend to. Named in every Receipt.
 - **Two mutations on one path.** Expressible in a Proposal, refused by a

@@ -307,9 +307,12 @@ pub enum NotVerified {
     LandingResultUnknown,
     /// Objects were written that no ref names.
     UnreferencedObjectResidue,
-    /// This Receipt was reconstructed at startup from the durable preparation record, after an
-    /// interruption. It establishes what the repository says now, not what the attempt observed.
+    /// This Receipt was reconstructed at startup after an interruption. It establishes what the
+    /// repository says now, not what the attempt observed.
     ReconstructedAfterInterruption,
+    /// The interruption fell between writing objects and persisting what they were, so unreferenced
+    /// objects exist and nothing in the store can name them.
+    ResidueCannotBeNamed,
 }
 
 /// The device and inode of a pinned repository.
@@ -1677,6 +1680,54 @@ pub(crate) fn finish_prepared_dispatches(connection: &Connection) -> Result<(), 
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
 
+    // The other crash boundary, which has no preparation to read: a process that died between
+    // `commit-tree` and the landing transaction left objects in the store whose identity was never
+    // persisted. Nothing can name them, and saying so is the only honest terminal record -- a
+    // guess in either direction would be worse than the uncertainty.
+    let mut statement = connection.prepare(
+        "SELECT workspace_id, id, project_id, started_at_ms FROM runs
+         WHERE kind = 'proposal_dispatch' AND state = 'dispatching'
+           AND NOT EXISTS (
+               SELECT 1 FROM receipts
+               WHERE receipts.workspace_id = runs.workspace_id AND receipts.run_id = runs.id
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM dispatch_preparations AS preparations
+               WHERE preparations.workspace_id = runs.workspace_id
+                 AND preparations.run_id = runs.id
+           )
+         ORDER BY started_at_ms, id",
+    )?;
+    let unprepared = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    for (workspace_id, run_id, project_id, started_at_ms) in unprepared {
+        let workspace_id =
+            Uuid::parse_str(&workspace_id).map_err(|_| DispatchError::InvalidStore)?;
+        let run_id = Uuid::parse_str(&run_id).map_err(|_| DispatchError::InvalidStore)?;
+        let project_id = Uuid::parse_str(&project_id).map_err(|_| DispatchError::InvalidStore)?;
+        let started_at_ms =
+            u64::try_from(started_at_ms).map_err(|_| DispatchError::InvalidStore)?;
+        let receipt = interrupted_receipt(
+            run_id,
+            workspace_id,
+            project_id,
+            started_at_ms,
+            DispatchOutcome::LandingUnobserved,
+            None,
+            true,
+        );
+        write_receipt(connection, workspace_id, run_id, &receipt)?;
+    }
+
     for prepared in rows {
         let workspace_id =
             Uuid::parse_str(&prepared.workspace_id).map_err(|_| DispatchError::InvalidStore)?;
@@ -1686,66 +1737,98 @@ pub(crate) fn finish_prepared_dispatches(connection: &Connection) -> Result<(), 
         let outcome = observe_landing(&prepared);
         let started_at_ms =
             u64::try_from(prepared.started_at_ms).map_err(|_| DispatchError::InvalidStore)?;
-        let receipt = DispatchReceipt {
-            version: 3,
+        let mut receipt = interrupted_receipt(
             run_id,
             workspace_id,
             project_id,
-            actor: DispatchActor::Owner,
-            ruling_digest: RulingDigest {
-                algorithm: "sha256".to_owned(),
-                canonicalizer: "beacon.ruling.v2".to_owned(),
-                value: ruling_of_preparation(connection, &prepared)?,
-            },
-            proposal_digest: None,
-            candidate_digest: None,
-            outcome: outcome.clone(),
-            autonomy_profile: None,
-            charter_revision: 0,
-            project_policy_revision: 0,
-            repository_revision: 0,
-            source_kind: Some(RepositorySourceKind::LocalPath),
-            source: Some(prepared.source.clone()),
-            source_identity: Some(SourceIdentity {
-                device: u64::try_from(prepared.device).unwrap_or(u64::MAX),
-                inode: u64::try_from(prepared.inode).unwrap_or(u64::MAX),
-            }),
-            branch: Some(prepared.branch.clone()),
-            pinned_base_revision: Some(prepared.pinned_base_revision.clone()),
-            observed_head: None,
-            prepared_commit: Some(prepared.prepared_commit.clone()),
-            resulting_revision: match outcome {
-                DispatchOutcome::Applied => Some(prepared.prepared_commit.clone()),
-                _ => None,
-            },
-            diff_digest: None,
-            checkout_updated: false,
-            git_steps: Vec::new(),
-            model_invocations: 0,
-            cost_usd_micros: 0,
-            per_mutation: Vec::new(),
             started_at_ms,
-            ended_at_ms: started_at_ms,
-            // Reconstructed from the durable preparation after an interruption, so it establishes
-            // strictly less than a Receipt written by the attempt itself, and says so.
-            not_verified: vec![
-                NotVerified::ExecutionPolicyConstraint,
-                NotVerified::SandboxConstraint,
-                NotVerified::NetworkConstraint,
-                NotVerified::ModelProviderConstraint,
-                NotVerified::CommandAllowlistConstraint,
-                NotVerified::ToolAllowlistConstraint,
-                NotVerified::EvaluationsConstraint,
-                NotVerified::NonAuthorEvaluationOfCandidate,
-                NotVerified::SafetySnapshot,
-                NotVerified::BaseRevisionReachability,
-                NotVerified::DeclaredChecksAgainstResult,
-                NotVerified::ReconstructedAfterInterruption,
-            ],
-        };
+            outcome.clone(),
+            Some(&prepared),
+            false,
+        );
+        receipt.ruling_digest.value = ruling_of_preparation(connection, &prepared)?;
         write_receipt(connection, workspace_id, run_id, &receipt)?;
     }
     Ok(())
+}
+
+/// A terminal Receipt reconstructed at startup from what survived an interruption.
+///
+/// It establishes strictly less than a Receipt the attempt would have written for itself, and says
+/// so in `not_verified` rather than looking like one.
+fn interrupted_receipt(
+    run_id: Uuid,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    started_at_ms: u64,
+    outcome: DispatchOutcome,
+    prepared: Option<&PreparedDispatch>,
+    residue_unnamed: bool,
+) -> DispatchReceipt {
+    let mut not_verified = vec![
+        NotVerified::ExecutionPolicyConstraint,
+        NotVerified::SandboxConstraint,
+        NotVerified::NetworkConstraint,
+        NotVerified::ModelProviderConstraint,
+        NotVerified::CommandAllowlistConstraint,
+        NotVerified::ToolAllowlistConstraint,
+        NotVerified::EvaluationsConstraint,
+        NotVerified::NonAuthorEvaluationOfCandidate,
+        NotVerified::SafetySnapshot,
+        NotVerified::BaseRevisionReachability,
+        NotVerified::DeclaredChecksAgainstResult,
+        NotVerified::ReconstructedAfterInterruption,
+    ];
+    if outcome != DispatchOutcome::Applied {
+        not_verified.push(NotVerified::UnreferencedObjectResidue);
+    }
+    if residue_unnamed {
+        // The interruption landed between writing objects and persisting what they were, so the
+        // residue exists and nothing can name it.
+        not_verified.push(NotVerified::ResidueCannotBeNamed);
+    }
+    DispatchReceipt {
+        version: 3,
+        run_id,
+        workspace_id,
+        project_id,
+        actor: DispatchActor::Owner,
+        ruling_digest: RulingDigest {
+            algorithm: "sha256".to_owned(),
+            canonicalizer: "beacon.ruling.v2".to_owned(),
+            value: "0".repeat(64),
+        },
+        proposal_digest: None,
+        candidate_digest: None,
+        outcome: outcome.clone(),
+        autonomy_profile: None,
+        charter_revision: 0,
+        project_policy_revision: 0,
+        repository_revision: 0,
+        source_kind: prepared.map(|_| RepositorySourceKind::LocalPath),
+        source: prepared.map(|prepared| prepared.source.clone()),
+        source_identity: prepared.map(|prepared| SourceIdentity {
+            device: u64::try_from(prepared.device).unwrap_or(u64::MAX),
+            inode: u64::try_from(prepared.inode).unwrap_or(u64::MAX),
+        }),
+        branch: prepared.map(|prepared| prepared.branch.clone()),
+        pinned_base_revision: prepared.map(|prepared| prepared.pinned_base_revision.clone()),
+        observed_head: None,
+        prepared_commit: prepared.map(|prepared| prepared.prepared_commit.clone()),
+        resulting_revision: match (&outcome, prepared) {
+            (DispatchOutcome::Applied, Some(prepared)) => Some(prepared.prepared_commit.clone()),
+            _ => None,
+        },
+        diff_digest: None,
+        checkout_updated: false,
+        git_steps: Vec::new(),
+        model_invocations: 0,
+        cost_usd_micros: 0,
+        per_mutation: Vec::new(),
+        started_at_ms,
+        ended_at_ms: started_at_ms,
+        not_verified,
+    }
 }
 
 struct PreparedDispatch {
