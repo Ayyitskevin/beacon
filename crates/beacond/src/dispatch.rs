@@ -435,13 +435,11 @@ impl From<serde_json::Error> for DispatchError {
 
 /// Owns the dispatch gates behind one deep interface.
 ///
-/// Constructed with the directory Beacon's own repository copies live under, because v1 dispatch
-/// reaches nothing else: the provenance gate is a containment check against that root, not a flag a
-/// row could carry.
+/// Takes no root and no path: which repositories a dispatch may reach is a fact the store holds,
+/// written by whatever act created them, and not a directory a caller names.
 pub struct DispatchService {
     accounts: Arc<OperatorAccountService>,
     workspace_id: Uuid,
-    copies_root: PathBuf,
 }
 
 /// One declared mutation's content, supplied by the caller at dispatch time.
@@ -455,15 +453,10 @@ pub struct SuppliedContent {
 }
 
 impl DispatchService {
-    pub fn new(
-        accounts: Arc<OperatorAccountService>,
-        workspace_id: Uuid,
-        copies_root: impl AsRef<Path>,
-    ) -> Self {
+    pub fn new(accounts: Arc<OperatorAccountService>, workspace_id: Uuid) -> Self {
         Self {
             accounts,
             workspace_id,
-            copies_root: copies_root.as_ref().to_owned(),
         }
     }
 
@@ -734,7 +727,7 @@ impl DispatchService {
         let Ok(repository) = PinnedRepository::open(Path::new(&binding.source)) else {
             return Ok(decided.refused(DispatchOutcome::SourceNotBeaconMade));
         };
-        if !self.is_beacon_made_copy(repository.path()) {
+        if !is_beacon_made(connection, self.workspace_id, &repository)? {
             return Ok(decided.refused(DispatchOutcome::SourceNotBeaconMade));
         }
 
@@ -1185,19 +1178,6 @@ impl DispatchService {
             Ok(())
         })
     }
-
-    /// Is this directory one of Beacon's own repository copies?
-    ///
-    /// Containment under the root Beacon creates copies in, compared after canonicalization, so a
-    /// symlink pointing into the root does not qualify a repository outside it. No stored flag: a
-    /// row saying "Beacon made this" would be a claim, and this is a fact about where the directory
-    /// is.
-    fn is_beacon_made_copy(&self, repository: &Path) -> bool {
-        let Ok(root) = std::fs::canonicalize(&self.copies_root) else {
-            return false;
-        };
-        repository.starts_with(&root) && repository != root
-    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1597,6 +1577,57 @@ fn swap_ref(
         None,
         WRITE_BUDGET,
     )
+}
+
+/// Did Beacon make this repository?
+///
+/// Read from the provenance record Beacon writes when it creates a copy, and matched on **device
+/// and inode**, not on the pathname it was created at: a path is what a rename moves, and a
+/// containment check against a caller-chosen directory proves only where a repository sits, never
+/// where it came from (gpt1). v1 dispatch reaches nothing Beacon did not make.
+fn is_beacon_made(
+    connection: &Connection,
+    workspace_id: Uuid,
+    repository: &PinnedRepository,
+) -> Result<bool, DispatchError> {
+    let (device, inode) = repository.identity();
+    let found: Option<i64> = connection
+        .query_row(
+            "SELECT 1 FROM beacon_repositories
+             WHERE workspace_id = ?1 AND device = ?2 AND inode = ?3",
+            params![
+                workspace_id.to_string(),
+                i64::try_from(device).unwrap_or(i64::MAX),
+                i64::try_from(inode).unwrap_or(i64::MAX),
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(found.is_some())
+}
+
+/// Record that Beacon created this repository, so a dispatch may reach it.
+pub(crate) fn record_beacon_repository(
+    connection: &Connection,
+    workspace_id: Uuid,
+    path: &Path,
+    now: i64,
+) -> Result<(), DispatchError> {
+    let repository = PinnedRepository::open(path).map_err(|_| DispatchError::InvalidStore)?;
+    let (device, inode) = repository.identity();
+    connection.execute(
+        "INSERT INTO beacon_repositories (
+             workspace_id, path, device, inode, origin, created_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, 'sample_project_copy', ?5)",
+        params![
+            workspace_id.to_string(),
+            repository.path().to_string_lossy(),
+            i64::try_from(device).unwrap_or(i64::MAX),
+            i64::try_from(inode).unwrap_or(i64::MAX),
+            now,
+        ],
+    )?;
+    Ok(())
 }
 
 /// Has this Ruling already been prepared for dispatch?
