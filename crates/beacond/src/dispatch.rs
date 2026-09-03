@@ -1642,6 +1642,18 @@ fn reverify_authority(
     if !ruling.force().drift().is_empty() {
         return Ok(Some(DispatchOutcome::RulingDrifted));
     }
+    // The Proposal's live readiness, through its owning module, exactly as G6-G7 read it. A kernel
+    // review pointed out that leaving it out made "the authority, re-read" an overstatement: a
+    // precondition that becomes unmet in the window -- a Resident deactivated, a Configuration
+    // changed -- is as much a reason to refuse as a supersession.
+    match verified_proposal_within(connection, workspace_id, &ruling.payload().proposal.value) {
+        Ok(Some(proposal)) => {
+            if !live_unmet(proposal.readiness().unmet()).is_empty() {
+                return Ok(Some(DispatchOutcome::ProposalNotReady));
+            }
+        }
+        Ok(None) | Err(_) => return Ok(Some(DispatchOutcome::ProposalDigestMismatch)),
+    }
     match current_autonomy_profile(connection, workspace_id, opened.project_id) {
         Ok(Some(AutonomyProfile::Supervised)) => {}
         _ => return Ok(Some(DispatchOutcome::AutonomyProfileRefuses)),
