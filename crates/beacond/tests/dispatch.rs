@@ -16,8 +16,9 @@ use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
@@ -593,35 +594,35 @@ impl Fixture {
         }
     }
 
-    /// Run one dispatch that dies at `failpoints`, the way a killed process dies.
+    /// Run one dispatch in a CHILD PROCESS that dies at `boundary`, without unwinding.
     ///
-    /// Nothing after the panic runs, and whatever store transaction was open is lost while every
-    /// external effect that already happened stays. Both reviews rejected the earlier tests for
-    /// arranging these states by deleting committed rows instead, which proves what reconciliation
-    /// does with a state nobody showed was reachable.
-    fn dispatch_interrupted(
-        &self,
-        ruling_digest: &str,
-        content: &[SuppliedContent],
-        failpoints: DispatchFailpoints,
-    ) {
-        let dispatches = DispatchService::new(Arc::clone(&self.accounts), self.workspace_id)
-            .with_failpoints(failpoints);
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            dispatches.dispatch(ruling_digest, content)
-        }));
-        std::panic::set_hook(previous);
-        assert!(
-            died.is_err(),
-            "the failpoint did not interrupt the dispatch"
+    /// The first version of this caught a panic in-process and called that a crash. gpt1 was right
+    /// to reject it: unwinding runs destructors -- the scratch index is removed, the SQLite
+    /// transaction is dropped in an orderly way -- and the same process then opened the store it
+    /// had just "crashed" with. `abort()` in a child runs no destructor, releases the database
+    /// lock the way a kill does, and leaves the parent to recover a store it did not have open.
+    fn dispatch_until_death(&self, ruling_digest: &str, boundary: &str) {
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "dispatch_child_that_dies_at_its_boundary",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD_BOUNDARY, boundary)
+            .env(CHILD_STORE, &self.store.path)
+            .env(CHILD_WORKSPACE, self.workspace_id.to_string())
+            .env(CHILD_RULING, ruling_digest)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("the test binary can run itself");
+        // SIGABRT, not an exit code: a process that ran its cleanup would exit, and this must not.
+        assert_eq!(
+            status.signal(),
+            Some(6),
+            "the child did not die at {boundary} (status {status:?})"
         );
-    }
-
-    /// A hook that dies where it is placed.
-    fn die() -> Arc<dyn Fn() + Send + Sync> {
-        Arc::new(|| panic!("simulated interruption"))
     }
 
     fn preparation(&self) -> Option<(String, String)> {
@@ -2403,14 +2404,7 @@ fn an_interruption_after_the_swap_is_finished_as_applied_at_startup() {
     let fixture = admitted_mission("killed-after-swap");
     let (repository, ruling_digest) = fixture.approved("killed-after-swap");
 
-    fixture.dispatch_interrupted(
-        &ruling_digest,
-        &content_for(NEW_BYTES),
-        DispatchFailpoints {
-            after_swap: Some(Fixture::die()),
-            ..DispatchFailpoints::default()
-        },
-    );
+    fixture.dispatch_until_death(&ruling_digest, "after_swap");
 
     // What a killed process actually left: a moved ref, a committed claim, no Receipt.
     let (prepared, _branch) = fixture
@@ -2467,14 +2461,7 @@ fn an_interruption_between_the_claim_and_the_swap_is_finished_as_refused() {
     let (repository, ruling_digest) = fixture.approved("killed-before-swap");
     let base = repository.revision.clone();
 
-    fixture.dispatch_interrupted(
-        &ruling_digest,
-        &content_for(NEW_BYTES),
-        DispatchFailpoints {
-            before_landing: Some(Fixture::die()),
-            ..DispatchFailpoints::default()
-        },
-    );
+    fixture.dispatch_until_death(&ruling_digest, "before_landing");
 
     let (prepared, _branch) = fixture
         .preparation()
@@ -2569,14 +2556,7 @@ fn an_interruption_before_the_claim_is_terminal_and_names_its_unnameable_residue
     let (repository, ruling_digest) = fixture.approved("killed-before-claim");
     let base = repository.revision.clone();
 
-    fixture.dispatch_interrupted(
-        &ruling_digest,
-        &content_for(NEW_BYTES),
-        DispatchFailpoints {
-            before_reserve: Some(Fixture::die()),
-            ..DispatchFailpoints::default()
-        },
-    );
+    fixture.dispatch_until_death(&ruling_digest, "before_reserve");
 
     assert!(fixture.preparation().is_none());
     assert_eq!(
@@ -2762,6 +2742,50 @@ const RECEIPT_MEMBERS: &[&str] = &[
 ///
 /// Read off the text rather than out of a parsed map: `serde_json`'s map is sorted, so parsing and
 /// reading its keys would assert alphabetical order and pass no matter how the record is written.
+/// How the parent tells the child which boundary to die at, and what to dispatch.
+const CHILD_BOUNDARY: &str = "BEACON_DISPATCH_CRASH_AT";
+const CHILD_STORE: &str = "BEACON_DISPATCH_CRASH_STORE";
+const CHILD_WORKSPACE: &str = "BEACON_DISPATCH_CRASH_WORKSPACE";
+const CHILD_RULING: &str = "BEACON_DISPATCH_CRASH_RULING";
+
+/// The child half of every crash test: dispatch, and die where the parent said.
+///
+/// A no-op in an ordinary run -- the parent re-executes this binary with the variables set.
+#[test]
+fn dispatch_child_that_dies_at_its_boundary() {
+    let Ok(boundary) = std::env::var(CHILD_BOUNDARY) else {
+        return;
+    };
+    let store = PathBuf::from(std::env::var(CHILD_STORE).unwrap());
+    let workspace_id = Uuid::parse_str(&std::env::var(CHILD_WORKSPACE).unwrap()).unwrap();
+    let ruling_digest = std::env::var(CHILD_RULING).unwrap();
+
+    // `abort()` raises SIGABRT: no unwinding, no destructors, no orderly transaction rollback.
+    let die: Arc<dyn Fn() + Send + Sync> = Arc::new(|| std::process::abort());
+    let failpoints = match boundary.as_str() {
+        "before_reserve" => DispatchFailpoints {
+            before_reserve: Some(die),
+            ..DispatchFailpoints::default()
+        },
+        "before_landing" => DispatchFailpoints {
+            before_landing: Some(die),
+            ..DispatchFailpoints::default()
+        },
+        "after_swap" => DispatchFailpoints {
+            after_swap: Some(die),
+            ..DispatchFailpoints::default()
+        },
+        other => panic!("unknown crash boundary {other}"),
+    };
+
+    let accounts = Fixture::other_session(&store);
+    let dispatches = DispatchService::new(accounts, workspace_id).with_failpoints(failpoints);
+    let _ = dispatches.dispatch(&ruling_digest, &content_for(NEW_BYTES));
+    // Reaching this line means the boundary was never hit, which the parent must not read as a
+    // crash: exit rather than return, so the parent sees a code instead of a signal.
+    std::process::exit(97);
+}
+
 /// The members a `RulingRefused` leaves absent, in sorted order.
 ///
 /// The same list is asserted against the pinned specimen in `dispatch::tests`. Together they are
@@ -2949,14 +2973,7 @@ fn a_refused_receipt_has_the_same_shape_with_the_facts_it_does_not_have_absent()
 fn a_reconstructed_receipt_has_the_same_shape_and_says_what_it_is() {
     let fixture = admitted_mission("receipt-reconstructed");
     let (_repository, ruling_digest) = fixture.approved("receipt-reconstructed");
-    fixture.dispatch_interrupted(
-        &ruling_digest,
-        &content_for(NEW_BYTES),
-        DispatchFailpoints {
-            after_swap: Some(Fixture::die()),
-            ..DispatchFailpoints::default()
-        },
-    );
+    fixture.dispatch_until_death(&ruling_digest, "after_swap");
     fixture.restart().unwrap();
 
     let stored: String = fixture
