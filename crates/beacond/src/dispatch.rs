@@ -403,7 +403,10 @@ pub enum GitStepName {
     RevParse,
     /// `status --porcelain --untracked-files=all`: the clean-tree gate.
     Status,
-    /// `cat-file blob`, one per declared mutation: the pre-image gate reading the base tree.
+    /// `config --get`: the provenance gate reading the token the repository carries.
+    Config,
+    /// `cat-file blob`: the pre-image gate reading the base tree, and the effect post-condition
+    /// reading the prepared commit's own blobs.
     CatFile,
     /// `update-ref <ref> <new> <old>`: the compare-and-swap.
     UpdateRef,
@@ -838,7 +841,7 @@ impl DispatchService {
         let Ok(repository) = PinnedRepository::open(Path::new(&binding.source)) else {
             return Ok(decided.refused(DispatchOutcome::SourceNotBeaconMade));
         };
-        if !is_beacon_made(connection, self.workspace_id, &repository)? {
+        if !is_beacon_made(connection, self.workspace_id, &repository, &mut decided)? {
             return Ok(decided.refused(DispatchOutcome::SourceNotBeaconMade));
         }
 
@@ -1320,16 +1323,25 @@ impl DispatchService {
 
         // And the bytes in the prepared commit's tree, which is what gets published -- not the
         // bytes on disk, which no longer matter and never entered the objects.
-        for record in &decided.per_mutation {
-            let Some(post) = &record.post_image else {
-                continue;
-            };
-            let path = format!("{commit}:{}", record.path);
-            let Some(blob) = read_pinned(repository, &["cat-file", "blob", &path], READ_BUDGET)
-            else {
+        let posts: Vec<(String, String)> = decided
+            .per_mutation
+            .iter()
+            .filter_map(|record| {
+                record
+                    .post_image
+                    .clone()
+                    .map(|post| (record.path.clone(), post))
+            })
+            .collect();
+        for (declared_path, post) in posts {
+            let path = format!("{commit}:{declared_path}");
+            let cat_file = ["cat-file", "blob", path.as_str()];
+            let blob = read_pinned(repository, &cat_file, READ_BUDGET);
+            decided.record_step(GitStepName::CatFile, &cat_file, blob.is_some());
+            let Some(blob) = blob else {
                 return Ok(false);
             };
-            if hex(&crate::proposal::sha256(blob.as_bytes())) != *post {
+            if hex(&crate::proposal::sha256(blob.as_bytes())) != post {
                 return Ok(false);
             }
         }
@@ -1808,6 +1820,7 @@ fn is_beacon_made(
     connection: &Connection,
     workspace_id: Uuid,
     repository: &PinnedRepository,
+    decided: &mut Decided,
 ) -> Result<bool, DispatchError> {
     let (device, inode) = repository.identity();
     let recorded: Option<String> = connection
@@ -1827,25 +1840,33 @@ fn is_beacon_made(
     };
     // The token, read from the repository itself through the pinned descriptor. Device and inode
     // are reusable after a deletion, so the row alone proves "a directory Beacon once made had
-    // these numbers" rather than "this is that directory" (gpt1).
-    Ok(read_provenance_token(repository).as_deref() == Some(recorded.as_str()))
+    // these numbers" rather than "this is that directory" (gpt1). The read is a gate's own Git
+    // invocation, so it is recorded like every other one.
+    let token = read_provenance_token(repository);
+    decided.record_step(
+        GitStepName::Config,
+        &provenance_token_arguments(),
+        token.is_some(),
+    );
+    Ok(token.as_deref() == Some(recorded.as_str()))
 }
 
 /// The provenance token this repository carries, read through the descriptor it was pinned by.
 pub(crate) fn read_provenance_token(repository: &PinnedRepository) -> Option<String> {
-    read_pinned(
-        repository,
-        &[
-            "config",
-            "--file",
-            ".git/config",
-            "--get",
-            PROVENANCE_TOKEN_KEY,
-        ],
-        READ_BUDGET,
-    )
-    .map(|value| value.trim().to_owned())
-    .filter(|value| !value.is_empty())
+    read_pinned(repository, &provenance_token_arguments(), READ_BUDGET)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+/// One owner for the invocation, so what the Receipt records cannot drift from what ran.
+fn provenance_token_arguments() -> [&'static str; 5] {
+    [
+        "config",
+        "--file",
+        ".git/config",
+        "--get",
+        PROVENANCE_TOKEN_KEY,
+    ]
 }
 
 /// Where a Beacon-made copy carries the token that says Beacon made it.
