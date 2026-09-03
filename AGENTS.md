@@ -283,9 +283,8 @@ dispatch of any kind.
 The Owner can then record a Ruling against one exact Proposal digest, copying the Charter, Policy,
 and Repository revisions and the pinned base revision it was decided under, append-only and with a
 reversal recorded as a new Ruling citing the prior one rather than as an edit; it is backend-only,
-it reports drift and supersession as facts rather than as a verdict, and it creates no execution
-authority, because a Ruling is evidence that a person decided and there is no dispatch to consume
-it. An authenticated Owner can also record one immutable Candidate per Proposal: the SHA-256 of
+and it reports drift and supersession as facts rather than as a verdict. A v1 Ruling still creates
+no execution authority: it names no bytes, so nothing can dispatch it. An authenticated Owner can also record one immutable Candidate per Proposal: the SHA-256 of
 each declared mutation's file bytes before and after, with the kind and path copied from the
 verified Proposal. It selects bytes, creates no authority, performs no repository action, and is
 refused if a second one is recorded for the same Proposal. A second Ruling grammar,

@@ -172,8 +172,8 @@ impl DispatchOutcome {
     /// The Run state this outcome terminates in. One owner for the mapping, as
     /// `PreflightOutcome::run_state` and `ExecutionSummary::run_state` are.
     ///
-    /// Everything this build can produce is a refusal in Run terms: `Admissible` says the act would
-    /// have been permitted and that nothing was done, which is not `applied`.
+    /// `Applied` is the one state that says a change reached a repository. `Admissible` does not:
+    /// it says the act would have been permitted and that nothing was done.
     pub(crate) fn run_state(&self) -> &'static str {
         match self {
             Self::Applied => "applied",
