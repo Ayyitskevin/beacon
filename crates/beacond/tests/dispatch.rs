@@ -852,6 +852,34 @@ impl Fixture {
         )
     }
 
+    /// [`Fixture::candidate_for`] whose Candidate declares a pre-image the base does not hold.
+    fn candidate_for_with_pre_image(
+        &self,
+        repository: &CopyRepository,
+        summary: &str,
+        declared_pre_image: &[u8],
+    ) -> (String, String) {
+        self.beacon_made(repository);
+        let revision = self.rebind_repository_at(repository, 1);
+        let mut record = self.proposal(summary);
+        record.mutations = vec![(MUTATION_MODIFY, TARGET.to_owned())];
+        record.repository_revision = revision;
+        record.base_revision = repository.revision.clone();
+        record.context_digest = sha256(BASE_LIB_BYTES);
+        let proposal = self.proposals.submit(&record.bytes()).unwrap();
+        let candidate = self
+            .candidates
+            .record(
+                &proposal.digest().value,
+                &images_for(declared_pre_image, NEW_BYTES),
+            )
+            .unwrap();
+        (
+            proposal.digest().value.clone(),
+            candidate.digest().value.clone(),
+        )
+    }
+
     /// [`Fixture::candidate_for`] at a Charter revision other than the first.
     fn candidate_at_charter(
         &self,
@@ -2093,11 +2121,11 @@ fn content_beyond_the_proposals_own_bounds_is_refused_before_it_is_read() {
 }
 
 #[test]
-fn a_commit_that_does_not_touch_exactly_the_declared_set_is_refused_and_not_published() {
-    // The W4 post-condition's own arrangement. A Candidate may declare a deletion of a path that is
-    // not there at the base -- nothing before this point reads the base tree, so nothing else can
-    // notice -- and the prepared commit then touches nothing while the declaration says it removes
-    // a file. The commit exists as objects and is never published.
+fn a_candidate_describing_a_tree_that_is_not_there_is_refused_before_any_object_is_written() {
+    // A Candidate may declare a deletion of a path the base revision does not hold. This used to
+    // reach the object writes and be caught by the effect post-condition -- after residue existed --
+    // because nothing before that read the base tree at all (gpt1). The pre-image gate reads it
+    // now, so the refusal costs the repository nothing.
     let fixture = admitted_mission("effect");
     let repository = CopyRepository::create(&fixture.copies_root, "effect");
     let absent = "src/never-there.rs";
@@ -2143,14 +2171,11 @@ fn a_commit_that_does_not_touch_exactly_the_declared_set_is_refused_and_not_publ
         )
         .unwrap();
 
-    assert_eq!(
-        receipt.outcome,
-        DispatchOutcome::EffectDoesNotMatchDeclaration
-    );
-    // A commit was prepared, so the Receipt names it and does not claim byte identity...
-    assert!(receipt.prepared_commit.is_some());
-    assert!(!receipt.left_repository_byte_identical());
-    // ...and nothing was published: the branch is where it was.
+    assert_eq!(receipt.outcome, DispatchOutcome::PreImageMismatch);
+    // Nothing was prepared, so the repository is byte-identical rather than carrying residue --
+    // which is the improvement: the same defect used to be caught after objects existed.
+    assert_eq!(receipt.prepared_commit, None);
+    assert!(receipt.left_repository_byte_identical());
     assert_eq!(
         CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]),
         head_before
