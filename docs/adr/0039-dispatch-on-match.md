@@ -455,8 +455,19 @@ ADR does not reuse that word for a Receipt outcome. Three distinct states:
 post-preparation refusal that names its residue; and `LandingUnobserved` for a
 Receipt that exists and whose Git result could not be established — which names the
 prepared commit, because the reservation record above persisted it before the act.
-A Run whose lease expires without any Receipt stays `unconfirmed`, and startup
-writes the Receipt that terminates it from that same durable record.
+A Run whose lease expires without any Receipt stays `unconfirmed` only until startup,
+which writes the Receipt that terminates it from that same durable record — asking the
+ref what became of the prepared commit, and recording `LandingUnobserved` naming that
+commit whenever the repository cannot be read or no longer has the identity that was
+pinned.
+
+**What startup does with a Receipt that already exists is narrower, deliberately.** It
+re-verifies the record: the stored bytes against the Event's bytes, the outcome against
+the Run state, the invariants that outcome arm owes, and the identity of the durable
+preparation the landing transaction wrote. It does **not** re-read the repository, and an
+`Applied` Receipt is not a claim that the branch still names that commit — `resulting_revision`
+is a landing-at-time fact. Ordinary history continues after a dispatch, and a Receipt whose
+truth expired at the next commit would be no evidence at all.
 
 ## The gap this decision proceeds past, in its own words
 
@@ -513,39 +524,89 @@ character boundary; the body is a blank line, then the three trailers, and nothi
 else. A summary that contains a line looking like `Beacon-Ruling: …` cannot produce a
 second trailer, and a test drives exactly that.
 
-## Receipt v3, and what is still owed
+## Receipt v3, encoded
 
-A non-author review built a Receipt specimen from the field list in this ADR's
-design and showed that reordering only its members produced different bytes for the
-same facts. The field list is not yet an encoding, and this section says what it will
-be before the slice that writes one lands.
+A non-author review built a Receipt specimen from an earlier field list and showed that
+reordering only its members produced different bytes for the same facts. A field list is
+not an encoding. This section is the encoding.
 
-Two facts first, because they bound the problem. Receipts in this store are **not
-digest-identified**: `PreflightReceipt` and `ExecutionReceipt` are serde JSON, and
-reconciliation replays them by deserializing. But it does not compare only values —
-`check_preflight::verify_run_event` requires the stored `receipt_json` and its Event
-payload to be **byte-identical** and their parsed values equal. So within an
-implementation the bytes are already pinned by the store; what is not pinned is a
-form two implementations would agree on.
+Two facts bound the problem. Receipts in this store are **not digest-identified**:
+`PreflightReceipt` and `ExecutionReceipt` are serde JSON, and reconciliation replays them
+by deserializing. But it does not compare only values — `check_preflight::verify_run_event`
+requires the stored `receipt_json` and its Event payload to be **byte-identical** and their
+parsed values equal. So within an implementation the bytes are already pinned by the store;
+what this section pins is a form two implementations agree on.
 
-Receipt v3 is therefore defined before slice 3: the exact struct, serde camelCase
-with `deny_unknown_fields`, declaration order fixed, every identity carried as a
-**full digest envelope** rather than a bare hex value (`diff_digest` becomes
-`candidate_digest` plus a separately measured diff digest, because a Candidate digest
-is not a diff digest), a closed `not_verified` token vocabulary in a fixed order, and
-one pinned specimen per outcome arm — `Refused`, `Applied`, `Unconfirmed`.
+**Encoding.** `serde_json` compact form (no insignificant whitespace), UTF-8, object
+members emitted in the declaration order below and never sorted, `camelCase` names,
+`deny_unknown_fields` on the way back in. Absence is `null`, never omission: a reader sees
+the same thirty members on every Receipt and distinguishes "measured zero" from "not
+established" by type, not by which keys are present. Numbers are JSON integers.
+Enumerations are `snake_case` strings drawn from closed vocabularies.
 
-It must also carry what the accepted Receipt contract requires
-(`BLUEPRINT.md:790-800`) or name each exception: the commands run and their exit
-statuses, the Evaluations and checks with their exact inputs, the sandbox version,
-and an explicit stop, interruption, or failure state. A kernel review added four
-more: the autonomy profile the dispatch ran under, the exact Git argv and a bounded
-result category for every attempted step (never dynamic stderr text), the pinned
-source identity and branch, and typed absence for every domain that genuinely has
-none. G12 additionally enforces the Proposal's own byte, file-size and time bounds
-before any caller-supplied content is read. A dispatch runs no Declared
-Check, so several of those are `Absent` with a reason rather than omitted — the
-distinction `Recorded` already exists to keep.
+| # | Member | Type | Absent when |
+|---|---|---|---|
+| 1 | `version` | integer, always `3` | never |
+| 2 | `runId` | UUID string | never |
+| 3 | `workspaceId` | UUID string | never |
+| 4 | `projectId` | UUID string | never |
+| 5 | `actor` | `"owner"` \| `"agent"` | never — derived, never accepted from a caller |
+| 6 | `rulingDigest` | digest envelope `{algorithm,value}` | never |
+| 7 | `proposalDigest` | digest envelope | the refusal was the Ruling itself |
+| 8 | `candidateDigest` | digest envelope | no Candidate could be read |
+| 9 | `outcome` | closed `DispatchOutcome` token | never |
+| 10 | `autonomyProfile` | `"supervised"` \| `"observe"` \| `"autonomous"` | the profile could not be proved |
+| 11 | `charterRevision` | integer | never — `0` before it is read |
+| 12 | `projectPolicyRevision` | integer | never — `0` before it is read |
+| 13 | `repositoryRevision` | integer | never — `0` before it is read |
+| 14 | `sourceKind` | closed `RepositorySourceKind` token | no binding was read |
+| 15 | `source` | string, the bound path | no binding was read |
+| 16 | `sourceIdentity` | `{device,inode}`, integers | the repository was never opened |
+| 17 | `branch` | full ref name, e.g. `refs/heads/main` | no branch was resolved |
+| 18 | `pinnedBaseRevision` | 40-hex string | the Proposal could not be read |
+| 19 | `observedHead` | 40-hex string | the head gate was never reached |
+| 20 | `preparedCommit` | 40-hex string | nothing was written to the object database |
+| 21 | `resultingRevision` | 40-hex string | the swap did not succeed, or was not observed |
+| 22 | `diffDigest` | 64-hex SHA-256 over the prepared commit's own name-status output | no commit was prepared, or the record was reconstructed rather than measured |
+| 23 | `checkoutUpdated` | boolean | never — `false` is a measured fact |
+| 24 | `gitSteps` | array of `{step,argv,result}` in attempt order | never — `[]` when none was attempted |
+| 25 | `modelInvocations` | integer | never — always `0` by construction |
+| 26 | `costUsdMicros` | integer | never — always `0` by construction |
+| 27 | `perMutation` | array of `{kind,path,preImageSha256,postImageSha256,effect}` in the Proposal's order | never — `[]` before a Candidate is read |
+| 28 | `startedAtMs` | integer | never |
+| 29 | `endedAtMs` | integer | never |
+| 30 | `notVerified` | array of closed `NotVerified` tokens, fixed order | never — the seven undeclarable families are on every Receipt |
+
+`gitSteps[].step` is a closed `GitStepName`; `argv` is the exact argument vector, which is
+fixed text this build chooses rather than anything a caller supplies; `result` is a bounded
+`GitStepResult` category and never dynamic stderr text, so two implementations that run the
+same steps write the same bytes.
+
+The contract carries what the accepted Receipt contract requires (`BLUEPRINT.md:790-800`)
+or names each exception. A dispatch runs no Declared Check, invokes no model, and consumes
+no sandbox: `modelInvocations` and `costUsdMicros` are therefore measured zeroes, and the
+commands, Evaluations, checks and sandbox version a Declared Check Receipt carries have no
+counterpart here — the absence is structural, not an omission, and `notVerified` names the
+Evaluation gap explicitly (`non_author_evaluation_of_candidate`). G12 enforces the
+Proposal's own byte, file-size and wall-clock bounds before any caller-supplied content is
+read; the wall-clock ceiling is re-checked inside the landing transaction.
+
+**Specimens.** One per outcome arm, pinned as executable tests rather than as prose, since
+prose specimens rot silently: `an_applied_receipt_has_the_published_shape`,
+`a_refused_receipt_has_the_same_shape_with_the_facts_it_does_not_have_absent`, and
+`a_reconstructed_receipt_has_the_same_shape_and_says_what_it_is`
+(`crates/beacond/tests/dispatch.rs`). Each asserts the full member list in stored-byte
+order — read off the text, not out of a parsed map, which would assert alphabetical order
+and pass however the record were written — and then the invariants its arm owes. Reordering
+any two members of the struct makes all three red.
+
+**What `resultingRevision` means.** It is a **landing-at-time** fact: the revision the
+branch named when this dispatch observed it, immediately after its own compare-and-swap.
+It is not a claim about the ref now. Ordinary history continues after a dispatch, and
+startup deliberately does not require the branch to still name that commit — a Receipt
+whose truth expired the moment someone made the next commit would be worthless as
+evidence. Startup re-verifies the record: bytes, Event, digests, outcome invariants, and
+the durable preparation. It does not re-read the repository.
 
 ## Persistence and reconciliation
 
