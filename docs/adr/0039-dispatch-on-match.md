@@ -793,9 +793,9 @@ notVerified    the first eleven tokens above, and for the refusal one more:
                  change_not_applied
 ```
 
-A specimen carries one `gitSteps` entry rather than a landing's real thirteen: the vector
+A specimen carries one `gitSteps` entry rather than a landing's real fifteen: the vector
 exists to pin the encoding, and one entry fixes the shape of the array, its member order and
-its tokens exactly as thirteen would.
+its tokens exactly as fifteen would.
 
 This block was checked the way it is meant to be used: both vectors were rebuilt from **this
 document alone**, in Python, importing nothing from Beacon, and both matched the pinned length
