@@ -2640,17 +2640,25 @@ fn two_concurrent_dispatchers_produce_one_application_and_one_refusal() {
                 let ruling = ruling_digest.clone();
                 scope.spawn(move || {
                     barrier.wait();
-                    dispatches
-                        .dispatch(&ruling, &content_for(NEW_BYTES))
-                        .map(|receipt| receipt.outcome)
+                    dispatches.dispatch(&ruling, &content_for(NEW_BYTES))
                 })
             })
             .collect();
         handles
             .into_iter()
-            .filter_map(|handle| handle.join().unwrap().ok())
+            .map(|handle| {
+                // Every thread's result, including an error: dropping the ones that failed let a
+                // mutant that made one dispatcher error out pass as "one Applied, all outcomes
+                // expected" (gpt1). A dispatch that could not answer is a fact about this race.
+                handle
+                    .join()
+                    .unwrap()
+                    .map(|receipt| receipt.outcome)
+                    .expect("a concurrent dispatcher failed instead of refusing")
+            })
             .collect()
     });
+    assert_eq!(outcomes.len(), 2, "a dispatcher produced no outcome at all");
 
     // Exactly one application. The other attempt is refused -- by the spend if it reached the
     // landing transaction, by the head gate if it re-read the repository after the first landed.
@@ -3257,4 +3265,51 @@ fn a_repository_declared_process_filter_does_not_run_during_the_landing() {
         fs::read(repository.path.join(TARGET)).unwrap(),
         NEW_BYTES.to_vec()
     );
+}
+
+#[test]
+fn a_swap_this_attempt_did_not_perform_is_not_reported_as_its_application() {
+    // The prepared commit is a deterministic function of its inputs, so a branch can come to name
+    // it without this attempt having put it there. The classifier compared the observed head with
+    // the prepared commit and called that `Applied` -- a Receipt claiming an act it did not perform
+    // (gpt1). It now requires this attempt's own compare-and-swap to have succeeded.
+    //
+    // Driven exactly: at the failpoint the claim is committed, so a second writer can read the
+    // commit this attempt is about to publish and publish it first.
+    let fixture = admitted_mission("not-my-swap");
+    let (repository, ruling_digest) = fixture.approved("not-my-swap");
+    let path = fixture.store.path.clone();
+    let head = repository.path.clone();
+
+    let dispatches = DispatchService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .with_failpoints(DispatchFailpoints {
+            before_landing: Some(Arc::new(move || {
+                let connection = Connection::open(&path).unwrap();
+                let prepared: String = connection
+                    .query_row(
+                        "SELECT prepared_commit FROM dispatch_preparations",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                CopyRepository::git(&head, &["update-ref", "refs/heads/main", &prepared]);
+            })),
+            ..DispatchFailpoints::default()
+        });
+
+    let receipt = dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+
+    assert_eq!(receipt.outcome, DispatchOutcome::LandingRefused);
+    assert_eq!(receipt.resulting_revision, None);
+    // The branch does name the prepared commit -- someone else put it there, and this Receipt does
+    // not claim otherwise.
+    assert_eq!(
+        CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]),
+        receipt.prepared_commit.clone().unwrap()
+    );
+    fixture
+        .restart()
+        .expect("a refusal that measured its prepared commit still replays");
 }
