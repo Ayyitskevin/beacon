@@ -3,6 +3,7 @@ name: CI
 on:
   push:
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
 
 permissions:
@@ -20,7 +21,53 @@ jobs:
     name: Beacon product
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      package_runner_labels: ${{ steps.package_bindings.outputs.runner_labels }}
+      package_container_options: ${{ steps.package_bindings.outputs.container_options }}
+      package_docker_host: ${{ steps.package_bindings.outputs.docker_host }}
     steps:
+      - name: Validate portable package bindings
+        id: package_bindings
+        if: >-
+          success() && (
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'pull_request' &&
+          contains(github.event.pull_request.labels.*.name, 'package'))
+          )
+        env:
+          PACKAGE_RUNNER_LABELS: ${{ vars.BEACON_PACKAGE_RUNNER_LABELS }}
+          PACKAGE_SOCKET: ${{ vars.BEACON_PACKAGE_SOCKET }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          
+          labels = json.loads(os.environ["PACKAGE_RUNNER_LABELS"])
+          socket = json.loads(os.environ["PACKAGE_SOCKET"])
+          if not isinstance(labels, list) or not all(
+              isinstance(label, str) and re.fullmatch(r"[A-Za-z0-9_.-]+", label)
+              for label in labels
+          ):
+              raise SystemExit("package runner labels must be a non-empty string list")
+          if not {"self-hosted", "linux", "x64"}.issubset(labels) or len(set(labels)) < 4:
+              raise SystemExit("package requires self-hosted/linux/x64 and a site-specific runner label")
+          if not isinstance(socket, dict) or set(socket) != {"source", "target"}:
+              raise SystemExit("package socket must name exactly source and target")
+          for path in socket.values():
+              if not isinstance(path, str) or not re.fullmatch(r"/[A-Za-z0-9_./-]+", path):
+                  raise SystemExit("package socket paths must be absolute, option-free paths")
+              if any(part in ("", ".", "..") for part in path.split("/")[1:]):
+                  raise SystemExit("package socket paths must have canonical components")
+          outputs = {
+              "runner_labels": json.dumps(labels, separators=(",", ":")),
+              "container_options": f"--volume {socket['source']}:{socket['target']}",
+              "docker_host": f"unix://{socket['target']}",
+          }
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
+              for key, value in outputs.items():
+                  stream.write(f"{key}={value}\n")
+          PY
       # Sources: https://github.com/actions/checkout/releases/tag/v7.0.1
       #          https://github.com/actions/setup-node/releases/tag/v7.0.0
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -59,18 +106,51 @@ jobs:
     needs: product
     # Source: https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idif
     if: >-
-      github.event_name == 'pull_request' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main')
-    # Pinned to 22.04, not ubuntu-latest. linuxdeploy bundles the host's GTK and
-    # WebKit libraries, so the build base sets the AppImage's glibc floor: built
-    # on 24.04 it needs GLIBC_2.39 and will not load on Debian 12 or Ubuntu
-    # 22.04. Built here it needs 2.35 and was observed launching on the three
-    # hosts that were measured -- Ubuntu 22.04, Debian 12, and Ubuntu 24.04.
-    # The product job stays on ubuntu-latest -- this is a packaging constraint,
-    # not a toolchain one.
-    runs-on: ubuntu-22.04
+      needs.product.result == 'success' && (
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request' &&
+      contains(github.event.pull_request.labels.*.name, 'package'))
+      )
+    runs-on: ${{ fromJSON(needs.product.outputs.package_runner_labels) }}
+    # node-a is Ubuntu 24.04/glibc 2.39. Keep the accepted 2.35 AppImage floor
+    # by running the package job in a digest-pinned Ubuntu 22.04 container.
+    # /example-work is the same absolute path on the host and in this container, so the
+    # nested clean-host Docker harness can bind its checked-out files safely.
+    container:
+      image: ubuntu:22.04@sha256:79676deb51ebb02885b0b9d33788e78a37cf1045ad79d1bb04c6a222c3556b3d
+      options: ${{ needs.product.outputs.package_container_options }}
+      env:
+        DOCKER_HOST: ${{ needs.product.outputs.package_docker_host }}
     timeout-minutes: 30
     steps:
+      - name: Install package-container prerequisites
+        # The job container runs as root. The host runner user has no sudo.
+        run: >-
+          apt-get update &&
+          apt-get install --no-install-recommends --yes
+          ca-certificates
+          curl
+          git
+          zstd
+          python3
+          docker.io
+          libwebkit2gtk-4.1-dev
+          build-essential
+          wget
+          file
+          libxdo-dev
+          libssl-dev
+          libayatana-appindicator3-dev
+          librsvg2-dev
+      - name: Install the pinned Rust toolchain
+        run: |
+          set -eu
+          rustup_url=https://static.rust-lang.org/rustup/archive/1.29.0/x86_64-unknown-linux-gnu/rustup-init
+          curl --fail --location --proto '=https' --tlsv1.2 --output /tmp/rustup-init "$rustup_url"
+          echo '4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10  /tmp/rustup-init' | sha256sum --check -
+          chmod 0755 /tmp/rustup-init
+          /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.97.1 --component clippy --component rustfmt
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       # Sources: https://github.com/actions/checkout/releases/tag/v7.0.1
       #          https://github.com/actions/setup-node/releases/tag/v7.0.0
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -93,20 +173,6 @@ jobs:
           key: package-cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
       - name: Select the pinned npm release
         run: npm install --global npm@10.9.8
-      - name: Install Tauri Linux prerequisites
-        # Source: https://v2.tauri.app/start/prerequisites/#linux
-        run: >-
-          sudo apt-get update &&
-          sudo apt-get install --no-install-recommends --yes
-          libwebkit2gtk-4.1-dev
-          build-essential
-          curl
-          wget
-          file
-          libxdo-dev
-          libssl-dev
-          libayatana-appindicator3-dev
-          librsvg2-dev
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci --ignore-scripts
