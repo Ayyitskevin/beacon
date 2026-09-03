@@ -43,9 +43,10 @@ landing slices" below. Everything this section says is scoped by that sentence.
 dispatch(ruling_digest, content) -> DispatchReceipt
 ```
 
-The gates run in this order, and the order is part of the decision: every refusal
-happens before anything is written — before a process is spawned, before a
-worktree exists, before one object enters the Operator's object database.
+The gates run in this order, and the order is part of the decision: **a refusal at
+any gate G1-G12 happens before anything is written** — before a process is spawned,
+before a worktree exists, before one object enters the repository's object database.
+A refusal after the commit step W3 is a different claim, made precisely below.
 
 ```text
   G1  Operator authenticated
@@ -111,8 +112,9 @@ record that asserted a target it never read would be inferring exactly what
 copying exists to stop. A caller supplies images, one per declared mutation, in
 the Proposal's own order.
 
-Two structural rules make the record authority-bearing rather than decorative,
-and both live in the store rather than in a Command that could be bypassed:
+**A Candidate selects bytes; it does not authorize them** — `beacon.ruling.v2`
+below does. Two rules make the selection determinate: one the Candidate store
+enforces, one dispatch applies later.
 
 - **One Candidate per Proposal**, enforced structurally by a unique index rather
   than by a Command that could be bypassed. Two sets of post-image digests would
@@ -326,6 +328,47 @@ tree and updates it after the CAS. A compare-and-swap into a repository the Oper
 checked out would leave their working tree showing the inverse of the applied change; that is a real
 problem, it belongs to the first slice that touches an Operator's own repository, and this ADR
 records it rather than claiming v1 solved it.
+
+## The exact canonical bytes of `beacon.ruling.v2`
+
+Two non-author reviewers built encoders from the previous draft's prose alone and both reported the
+same gap: "v1's payload plus the Candidate's full digest envelope" does not determine an identity.
+It does not say the magic, whether the envelope precedes or follows the Proposal's, whether a
+presence tag separates it, or which tokens it may carry — and each reading produces a different
+digest for the same facts. The table is therefore published, and a specimen is pinned.
+
+| # | field | encoding |
+|---|---|---|
+| 1 | magic | `beacon.ruling.v2\0`, 17 bytes — v1's magic with one digit changed |
+| 2 | Proposal digest value | 32 raw bytes |
+| 3 | Proposal digest algorithm | `u64` big-endian length, then UTF-8; must be `sha256` |
+| 4 | Proposal digest canonicalizer | `u64` length, then UTF-8; must be `beacon.proposal.v1` |
+| 5 | Candidate digest value | 32 raw bytes, **immediately after field 4**, with no presence tag |
+| 6 | Candidate digest algorithm | `u64` length, then UTF-8; must be `sha256` |
+| 7 | Candidate digest canonicalizer | `u64` length, then UTF-8; must be `beacon.candidate.v1` |
+| 8-11 | the four copied revisions | as ADR 0037: three `u32`, then the 40-character base revision |
+| 12-15 | decision, reason, decider, supersedes | exactly as ADR 0037 |
+| 16 | ruled at | `u64` big-endian milliseconds |
+
+Fields 5-7 are the whole difference. There is no presence tag: the grammar in the magic already says
+whether a Candidate is named, so a tag would be a second place to say one thing. Everything from
+field 8 on is v1's tail byte for byte, which is what makes "v2 is v1 plus one envelope" checkable
+rather than asserted — `the_two_grammars_differ_only_by_their_magic_and_the_candidate_envelope`
+checks it.
+
+**The pinned vector.** ADR 0037's published v1 specimen — Proposal digest
+`3b1f8c0e…9c1e`, revisions 1/2/3, base `a1b2…a1b2`, `approve`, the same reason string, `owner`, no
+predecessor, `ruled_at_ms = 1756800000000` — with ADR 0039's own Candidate vector
+`fb7c33826e705f1d91b1a607f089561d77d997e502385393ff4b44bbca1349d4` as fields 5-7, encodes to **307
+bytes**, SHA-256 `18133ea4f334f0282a08e1af4495354849c8725bf2c9d71d6187ee9899ec8264`. It was produced
+independently, in Python, importing no Beacon code, and is pinned as literal bytes in
+`crates/beacond/src/ruling.rs` — because a runtime-built expectation is not an identity pin: an
+encoder and a hand-built expected buffer can drift together and nothing outside the file would
+notice.
+
+**A known limitation, stated rather than discovered.** Two same-width fields transposed produce a
+different digest but the same length, so a byte count alone does not detect a transposition. The
+literal vector does.
 
 ## Conditions on the landing slices
 

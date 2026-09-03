@@ -18,16 +18,15 @@ use std::thread::{self, JoinHandle};
 
 use beacond::{
     AutonomyProfile, BeaconCapability, CandidateImages, CandidateService, DeclaredCheck,
-    InconsistentRuling, LocalModelActivationService, LocalModelEndpoint, MalformedRuling,
-    MissionDraft, MissionMemberDraft, MissionService, OperatorAccountService, OperatorSessionPhase,
-    ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService,
-    ProjectRepositoryService, ProjectService, ProposalService, ProviderFeature, RepositoryDraft,
-    RepositorySourceKind, ResidentConfigurationService, ResidentLifecycleService, RulingDecision,
-    RulingError, RulingGrammar, RulingService, RulingSupersedes, SecretString,
-    StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig, Supervisor,
-    SupervisorError, TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
-    TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft, TeamService,
-    TrackRecordEvidenceKind, TrackRecordRequirement,
+    LocalModelActivationService, LocalModelEndpoint, MissionDraft, MissionMemberDraft,
+    MissionService, OperatorAccountService, OperatorSessionPhase, ProjectCharterDraft,
+    ProjectDraft, ProjectPolicyDraft, ProjectPolicyService, ProjectRepositoryService,
+    ProjectService, ProposalService, ProviderFeature, RepositoryDraft, RepositorySourceKind,
+    ResidentConfigurationService, ResidentLifecycleService, RulingDecision, RulingError,
+    RulingGrammar, RulingService, RulingSupersedes, SecretString, StarterOrganizationService,
+    StarterResidentDraft, StarterRole, StartupConfig, Supervisor, SupervisorError, TeamDraft,
+    TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy,
+    TeamMemberDraft, TeamService, TrackRecordEvidenceKind, TrackRecordRequirement,
 };
 use data_encoding::HEXLOWER;
 use rusqlite::Connection;
@@ -535,20 +534,6 @@ impl Fixture {
     }
 }
 
-fn inconsistent(error: &RulingError) -> Option<InconsistentRuling> {
-    match error {
-        RulingError::Inconsistent(reason) => Some(*reason),
-        _ => None,
-    }
-}
-
-fn malformed(error: &RulingError) -> Option<MalformedRuling> {
-    match error {
-        RulingError::Malformed(reason) => Some(*reason),
-        _ => None,
-    }
-}
-
 // ---------------------------------------------------------------------------------------------
 // An independent encoder for beacon.ruling.v2
 // ---------------------------------------------------------------------------------------------
@@ -648,8 +633,7 @@ fn a_v2_ruling_names_the_exact_candidate_it_was_shown() {
     let ruling = fixture
         .rulings
         .rule_on_candidate(
-            &proposal_digest,
-            &candidate_digest,
+            &fixture.candidates.present(&proposal_digest).unwrap(),
             RulingDecision::Approve,
             APPROVE_REASON,
             RulingSupersedes::None,
@@ -733,93 +717,76 @@ fn a_v1_ruling_stays_valid_and_names_no_candidate() {
 }
 
 #[test]
-fn a_ruling_cannot_bind_a_candidate_the_proposal_does_not_have() {
-    let fixture = admitted_mission("wrong-candidate");
+fn a_ruling_can_only_be_recorded_for_a_change_that_was_presented() {
+    // gpt1's P0: "the Candidate the Operator was shown" was prose -- the Command took two digest
+    // strings, so anyone holding them could create authority over bytes nobody displayed. It now
+    // takes a `CandidatePresentation`, which only `CandidateService::present` produces. A caller
+    // cannot build one: its fields are private and it derives no `Deserialize`, so the compiler
+    // refuses the unshown call rather than the store refusing it afterwards.
+    let fixture = admitted_mission("presented");
     let (proposal_digest, candidate_digest) =
         fixture.proposal_with_candidate("Add a regression test for the invariant checker.");
-    // A second Proposal with its own Candidate, so both digests name real records.
+
+    // What the Operator is shown IS what the Ruling binds: the same Candidate identity, the same
+    // base revision, and one line per declared mutation carrying the exact bytes before and after.
+    let presentation = fixture.candidates.present(&proposal_digest).unwrap();
+    assert_eq!(presentation.candidate().value, candidate_digest);
+    assert_eq!(presentation.proposal().value, proposal_digest);
+    assert_eq!(presentation.pinned_base_revision(), BASE_REVISION);
+    assert_eq!(presentation.lines().len(), 3);
+    assert_eq!(presentation.lines()[0].path, "src/lib.rs");
+    assert_eq!(
+        presentation.lines()[0].post_image_sha256.as_deref(),
+        Some(HEXLOWER.encode(&[0x22; 32]).as_str())
+    );
+    assert_eq!(
+        presentation.lines()[1].post_image_sha256,
+        None,
+        "a deletion has no after"
+    );
+    assert_eq!(
+        presentation.lines()[2].pre_image_sha256,
+        None,
+        "a creation has no before"
+    );
+
+    let ruling = fixture
+        .rulings
+        .rule_on_candidate(
+            &presentation,
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap();
+    assert_eq!(ruling.candidate().unwrap().value, candidate_digest);
+
+    // A second Proposal has its own Candidate, and its presentation binds that one. There is no
+    // expressible call that crosses them.
     let (other_proposal, other_candidate) =
         fixture.proposal_with_candidate("Add a second regression test, for the other invariant.");
-    assert_ne!(candidate_digest, other_candidate);
-
-    // Naming the other Proposal's Candidate is refused: one Proposal has one Candidate, and this
-    // is not it.
-    let refusal = fixture
-        .rulings
-        .rule_on_candidate(
-            &proposal_digest,
-            &other_candidate,
-            RulingDecision::Approve,
-            APPROVE_REASON,
-            RulingSupersedes::None,
-        )
-        .unwrap_err();
-    assert_eq!(
-        inconsistent(&refusal),
-        Some(InconsistentRuling::CandidateDiffers)
-    );
-
-    // And a digest that names nothing at all is the same refusal, from the other direction.
-    let refusal = fixture
-        .rulings
-        .rule_on_candidate(
-            &proposal_digest,
-            &"c".repeat(64),
-            RulingDecision::Approve,
-            APPROVE_REASON,
-            RulingSupersedes::None,
-        )
-        .unwrap_err();
-    assert_eq!(
-        inconsistent(&refusal),
-        Some(InconsistentRuling::CandidateDiffers)
-    );
-
-    // A malformed digest is refused before the store is consulted.
-    let refusal = fixture
-        .rulings
-        .rule_on_candidate(
-            &proposal_digest,
-            "not-a-digest",
-            RulingDecision::Approve,
-            APPROVE_REASON,
-            RulingSupersedes::None,
-        )
-        .unwrap_err();
-    assert_eq!(
-        malformed(&refusal),
-        Some(MalformedRuling::CandidateDigestValue)
-    );
-
-    let _ = other_proposal;
-    assert_eq!(fixture.ruling_rows(), 0);
-    assert_eq!(fixture.ruling_events(), 0);
-    assert_eq!(fixture.candidate_bindings(), 0);
+    assert_ne!(other_candidate, candidate_digest);
+    let other = fixture.candidates.present(&other_proposal).unwrap();
+    assert_eq!(other.candidate().value, other_candidate);
 }
 
 #[test]
-fn a_proposal_with_no_candidate_cannot_be_ruled_under_v2() {
-    // The correction is to record a Candidate first, and the refusal says so rather than reporting
-    // the Proposal as missing.
+fn a_proposal_with_no_candidate_cannot_be_presented_and_so_cannot_be_ruled_under_v2() {
+    // The refusal moves to the door it belongs at: there is nothing to show, so there is nothing to
+    // rule on. The correction an Operator reads is "record a Candidate first".
     let fixture = admitted_mission("no-candidate");
     let proposal_digest = fixture.submit("Add a regression test for the invariant checker.");
 
-    let refusal = fixture
-        .rulings
-        .rule_on_candidate(
-            &proposal_digest,
-            &"d".repeat(64),
-            RulingDecision::Approve,
-            APPROVE_REASON,
-            RulingSupersedes::None,
-        )
-        .unwrap_err();
-
-    assert_eq!(
-        inconsistent(&refusal),
-        Some(InconsistentRuling::CandidateNotRecorded)
+    let refusal = fixture.candidates.present(&proposal_digest).unwrap_err();
+    assert!(
+        matches!(
+            refusal,
+            beacond::CandidateError::Inconsistent(beacond::InconsistentCandidate::NotRecorded)
+        ),
+        "{refusal:?}"
     );
     assert_eq!(fixture.ruling_rows(), 0);
+    assert_eq!(fixture.candidate_bindings(), 0);
 }
 
 #[test]
@@ -828,7 +795,7 @@ fn a_v2_ruling_supersedes_a_v1_one_and_the_force_reports_the_successors_own_gram
     // and is ruled again under the grammar that names one. The chain crosses grammars, and the
     // superseded Ruling must report its successor's envelope rather than its own.
     let fixture = admitted_mission("cross-grammar-chain");
-    let (proposal_digest, candidate_digest) =
+    let (proposal_digest, _candidate) =
         fixture.proposal_with_candidate("Add a regression test for the invariant checker.");
 
     let first = fixture
@@ -843,8 +810,7 @@ fn a_v2_ruling_supersedes_a_v1_one_and_the_force_reports_the_successors_own_gram
     let second = fixture
         .rulings
         .rule_on_candidate(
-            &proposal_digest,
-            &candidate_digest,
+            &fixture.candidates.present(&proposal_digest).unwrap(),
             RulingDecision::Approve,
             APPROVE_REASON,
             RulingSupersedes::Ruling(first.digest().value.clone()),
@@ -913,18 +879,19 @@ fn a_row_claiming_v2_over_v1_bytes_fails_startup() {
 
 #[test]
 fn unauthenticated_v2_recording_returns_only_the_account_refusal() {
-    // The Candidate digest is malformed too: an implementation that validated it before
-    // authenticating would hand an unauthenticated caller a validation oracle.
+    // The presentation is obtained while authenticated and used after the session locks: the
+    // account gate must refuse before any of the record work happens, so holding a valid
+    // presentation is not a way past it.
     let fixture = admitted_mission("v2-locked");
     let (proposal_digest, _) =
         fixture.proposal_with_candidate("Add a regression test for the invariant checker.");
+    let presentation = fixture.candidates.present(&proposal_digest).unwrap();
     fixture.accounts.lock().unwrap();
 
     let refusal = fixture
         .rulings
         .rule_on_candidate(
-            &proposal_digest,
-            "not-a-digest",
+            &presentation,
             RulingDecision::Approve,
             APPROVE_REASON,
             RulingSupersedes::None,

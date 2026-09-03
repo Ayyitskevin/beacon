@@ -34,7 +34,9 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::candidate::{CandidateDigest, InconsistentCandidate, verified_candidate_for_proposal};
+use crate::candidate::{
+    CandidateDigest, CandidatePresentation, InconsistentCandidate, verified_candidate_for_proposal,
+};
 use crate::operator_account::owner_account_exists;
 use crate::project_policy::policy_revision_facts;
 use crate::project_repository::latest_repository_for_preflight;
@@ -190,8 +192,10 @@ pub struct RulingV1 {
 
 /// A digest that carries its algorithm and canonicalizer identity, never a bare hex string.
 ///
-/// Distinct from `ProposalDigest` because a Ruling carries two identities and neither is inferred
-/// from the other: this one names the Ruling's own canonical bytes under `beacon.ruling.v1`.
+/// Distinct from `ProposalDigest` because a Ruling carries its own identity beside the ones it
+/// binds: this names the Ruling's own canonical bytes, under `beacon.ruling.v1` or
+/// `beacon.ruling.v2` -- which is exactly why the canonicalizer travels with the value rather than
+/// being assumed by a reader.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RulingDigest {
@@ -862,20 +866,22 @@ impl RulingService {
     /// invalidated by this grammar's arrival, and a Proposal becomes dispatchable by being ruled
     /// again under it.
     ///
-    /// The Candidate is not taken on trust: it is read back through its owning module's own proof
-    /// inside this transaction, and must be the one Candidate that Proposal has. A caller cannot
-    /// name another Proposal's change, and cannot name one that was never recorded.
+    /// The Candidate is not taken on trust, and neither is the claim that it was shown. The input
+    /// is a [`CandidatePresentation`], which only [`crate::CandidateService::present`] can produce:
+    /// a caller who merely knows two digests cannot reach this Command, so "the Operator ruled on
+    /// the change they were shown" is a property of the call path rather than a sentence in a doc
+    /// comment (gpt1's P0). The Candidate is then read back through its owning module's proof
+    /// inside this transaction and must still be the one that Proposal has.
     pub fn rule_on_candidate(
         &self,
-        proposal_digest: &str,
-        candidate_digest: &str,
+        presentation: &CandidatePresentation,
         decision: RulingDecision,
         reason: &str,
         supersedes: RulingSupersedes,
     ) -> Result<Ruling, RulingError> {
         self.record(
-            proposal_digest,
-            Some(candidate_digest),
+            &presentation.proposal().value.clone(),
+            Some(&presentation.candidate().value.clone()),
             decision,
             reason,
             supersedes,
@@ -1600,6 +1606,58 @@ fn columns_match(
         && stored.ruled_at_ms == payload.ruled_at_ms
 }
 
+/// One Ruling, proved from its own bytes **inside the caller's transaction**, with its force
+/// derived at that instant and its audit Event required.
+///
+/// `RulingService::get` opens its own store closure, so the `RulingForce` it returns is a fact
+/// about the moment of that call. A consumer that must decide inside one serialized transaction --
+/// dispatch -- cannot treat that as current, and must not read the tables itself. This is that
+/// consumer's reader: digest over the stored bytes, strict decode and re-encode, indexed columns
+/// and both relations against the parsed value, the supersession and drift facts, and exactly one
+/// `ruling.recorded` Event carrying these bytes.
+pub(crate) fn verified_ruling_within(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+) -> Result<Option<Ruling>, RulingError> {
+    let Some(stored) = load_stored(connection, workspace_id, digest_value)? else {
+        return Ok(None);
+    };
+    let ruling = verified_ruling(connection, stored)?;
+    let events: i64 = connection.query_row(
+        "SELECT count(*) FROM events
+         WHERE workspace_id = ?1 AND kind = 'ruling.recorded'
+           AND json_extract(payload_json, '$.ruling.digest.value') = ?2",
+        params![workspace_id.to_string(), digest_value],
+        |row| row.get(0),
+    )?;
+    if events != 1 {
+        return Err(RulingError::InvalidStore);
+    }
+    Ok(Some(ruling))
+}
+
+/// The `events.sequence` of the one Event that recorded a Ruling.
+///
+/// Sequence, never a timestamp: it is the store's own ordering primitive, so "the Candidate existed
+/// before the decision" needs no clock and cannot be defeated by two records in one millisecond.
+pub(crate) fn ruling_event_sequence(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+) -> Result<Option<i64>, RulingError> {
+    connection
+        .query_row(
+            "SELECT sequence FROM events
+             WHERE workspace_id = ?1 AND kind = 'ruling.recorded'
+               AND json_extract(payload_json, '$.ruling.digest.value') = ?2",
+            params![workspace_id.to_string(), digest_value],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(RulingError::Store)
+}
+
 // ---------------------------------------------------------------------------------------------
 // Startup reconciliation
 // ---------------------------------------------------------------------------------------------
@@ -1849,6 +1907,99 @@ mod tests {
             supersedes: RulingSupersedes::None,
             ruled_at_ms: 1_756_800_000_000,
         }
+    }
+
+    /// The Candidate a v2 fixture binds: ADR 0039's own pinned Candidate vector, so the two
+    /// published records name each other rather than each naming an invented digest.
+    const CANDIDATE: &str = "fb7c33826e705f1d91b1a607f089561d77d997e502385393ff4b44bbca1349d4";
+
+    fn v2_fixture() -> (RulingV1, CandidateDigest) {
+        (
+            fixture(),
+            CandidateDigest {
+                algorithm: CANDIDATE_DIGEST_ALGORITHM.to_owned(),
+                canonicalizer: CANDIDATE_CANONICALIZER.to_owned(),
+                value: CANDIDATE.to_owned(),
+            },
+        )
+    }
+
+    /// The published v2 identity vector, pinned as literals.
+    ///
+    /// Built independently from ADR 0039's field table by a non-author reviewer, in Python,
+    /// importing no Beacon code, and byte-identical to this encoder's output. Pinned because a
+    /// runtime-built expectation is not an identity pin: the branch's first v2 test rebuilt the
+    /// bytes in Rust from the same understanding the encoder has, so a coordinated change to both
+    /// would have stayed green -- the exact failure v1's literal exists to prevent.
+    const V2_FIXTURE_BYTES_HEX: &str = "626561636f6e2e72756c696e672e7632003b1f8c0e5d4a2b697f8e1d0c3a5b7e9d2f4a6c8e0b1d3f5a7c\
+         9e1b3d5f7a9c1e00000000000000067368613235360000000000000012626561636f6e2e70726f706f73\
+         616c2e7631fb7c33826e705f1d91b1a607f089561d77d997e502385393ff4b44bbca1349d40000000000\
+         0000067368613235360000000000000013626561636f6e2e63616e6469646174652e7631000000010000\
+         000200000003000000000000002861316232633364346535663661316232633364346535663661316232\
+         633364346535663661316232010000000000000042546865206465636c61726564206566666563747320\
+         7374617920696e7369646520746865205265706f7369746f727920616e64207370656e64206e6f746869\
+         6e672e0100000001990970a000";
+    const V2_FIXTURE_DIGEST: &str =
+        "18133ea4f334f0282a08e1af4495354849c8725bf2c9d71d6187ee9899ec8264";
+    const V2_FIXTURE_LENGTH: usize = 307;
+
+    fn v2_fixture_bytes() -> Vec<u8> {
+        HEXLOWER
+            .decode(V2_FIXTURE_BYTES_HEX.as_bytes())
+            .expect("the pinned vector is lowercase hexadecimal")
+    }
+
+    #[test]
+    fn the_v2_vector_is_exactly_these_bytes_and_this_digest() {
+        let (payload, candidate) = v2_fixture();
+        let bytes = v2_fixture_bytes();
+        assert_eq!(bytes.len(), V2_FIXTURE_LENGTH);
+        assert_eq!(encode_v2(&payload, &candidate).unwrap(), bytes);
+        assert_eq!(HEXLOWER.encode(&sha256(&bytes)), V2_FIXTURE_DIGEST);
+        // And the literal decodes back to the value it describes, so the vector pins the whole
+        // round trip rather than one direction of it.
+        assert_eq!(decode_any(&bytes).unwrap(), (payload, Some(candidate)));
+    }
+
+    #[test]
+    fn the_two_grammars_differ_only_by_their_magic_and_the_candidate_envelope() {
+        // The v2 record is the v1 record with one digit changed in the magic and one envelope
+        // inserted after the Proposal's -- nothing else moves. Both halves are asserted, because
+        // "v2 is v1 plus a field" is the whole compatibility claim and prose cannot hold it.
+        let (payload, candidate) = v2_fixture();
+        let v1 = encode(&payload).unwrap();
+        let v2 = encode_v2(&payload, &candidate).unwrap();
+        assert_eq!(v2.len(), v1.len() + 32 + (8 + 6) + (8 + 19));
+        assert_eq!(&v1[..MAGIC.len() - 2], &v2[..MAGIC.len() - 2]);
+        assert_eq!(&v1[MAGIC.len() - 2..MAGIC.len()], b"1\0");
+        assert_eq!(&v2[MAGIC.len() - 2..MAGIC.len()], b"2\0");
+
+        // The prefix through the Proposal envelope is identical...
+        let proposal_envelope = MAGIC.len() + 32 + (8 + 6) + (8 + 18);
+        assert_eq!(
+            &v1[MAGIC.len()..proposal_envelope],
+            &v2[MAGIC.len()..proposal_envelope]
+        );
+        // ...what v2 inserts there is exactly the Candidate's envelope, raw digest first...
+        let candidate_envelope = 32 + (8 + 6) + (8 + 19);
+        let inserted = &v2[proposal_envelope..proposal_envelope + candidate_envelope];
+        assert_eq!(
+            &inserted[..32],
+            HEXLOWER.decode(CANDIDATE.as_bytes()).unwrap()
+        );
+        assert!(inserted.ends_with(CANDIDATE_CANONICALIZER.as_bytes()));
+        // ...and everything after it is v1's tail, byte for byte.
+        assert_eq!(
+            &v1[proposal_envelope..],
+            &v2[proposal_envelope + candidate_envelope..]
+        );
+    }
+
+    #[test]
+    fn a_v1_decoder_refuses_v2_bytes_rather_than_narrowing_them() {
+        // A record that binds a Candidate must never be readable as one that does not: a consumer
+        // asking for v1 would otherwise get a Ruling whose authority it cannot see.
+        assert_eq!(decode(&v2_fixture_bytes()), Err(MalformedRuling::Magic));
     }
 
     #[test]
