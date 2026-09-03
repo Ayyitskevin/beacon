@@ -339,10 +339,14 @@ pub struct SourceIdentity {
 /// The Blueprint's Receipt contract requires the commands run and their results. Recorded as a
 /// closed vocabulary rather than as argv strings and stderr: a bounded category is what a later
 /// reader can act on, and dynamic error text is neither stable nor safe to replay.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GitStep {
     pub step: GitStepName,
+    /// The exact argument vector, as passed. Fixed text this build chooses plus the revisions and
+    /// declared paths of the request -- never a caller's free text, and never a stderr message,
+    /// which would make one implementation's Receipt undiffable against another's.
+    pub argv: Vec<String>,
     pub result: GitStepResult,
 }
 
@@ -942,56 +946,65 @@ impl DispatchService {
     ) -> Result<Result<String, DispatchOutcome>, DispatchError> {
         // W2: the base tree into a scratch index, then one entry per declared mutation. The
         // repository's own index is never opened.
-        if write_pinned(
+        //
+        // Every invocation below records itself as it is made, including the ones that fail: a
+        // Receipt that lists steps a loop assumed rather than steps that ran is not an attempted-
+        // command record (gpt1).
+        let read_tree = ["read-tree", base];
+        let read = write_pinned(
             repository,
             Some(scratch.path()),
             None,
-            &["read-tree", base],
+            &read_tree,
             None,
             WRITE_BUDGET,
-        )
-        .is_none()
-        {
+        );
+        decided.record_step(GitStepName::ReadTree, &read_tree, read.is_some());
+        if read.is_none() {
             return Ok(Err(DispatchOutcome::ObjectWriteFailed));
         }
-        decided.git_steps.push(GitStep {
-            step: GitStepName::ReadTree,
-            result: GitStepResult::Succeeded,
-        });
-        for (entry, supplied) in decided.per_mutation.iter().zip(content) {
-            let wrote = match (&entry.kind, &supplied.bytes) {
-                (MutationKind::DeleteFile, _) => write_pinned(
-                    repository,
-                    Some(scratch.path()),
-                    None,
-                    &["update-index", "--force-remove", "--", &entry.path],
-                    None,
-                    WRITE_BUDGET,
-                )
-                .is_some(),
-                (_, Some(bytes)) => {
-                    // `--no-filters` is the whole point: the blob is the supplied bytes, whatever
-                    // `.gitattributes` would have done to them on the way in.
-                    let Some(blob) = write_pinned(
-                        repository,
-                        None,
-                        None,
-                        &blob_arguments(),
-                        Some(bytes),
-                        WRITE_BUDGET,
-                    ) else {
-                        return Ok(Err(DispatchOutcome::ObjectWriteFailed));
-                    };
-                    let cacheinfo = format!("100644,{},{}", blob.trim(), entry.path);
-                    write_pinned(
+        let entries: Vec<(MutationKind, String)> = decided
+            .per_mutation
+            .iter()
+            .map(|record| (record.kind, record.path.clone()))
+            .collect();
+        for ((kind, path), supplied) in entries.iter().zip(content) {
+            let wrote = match (kind, &supplied.bytes) {
+                (MutationKind::DeleteFile, _) => {
+                    let remove = ["update-index", "--force-remove", "--", path.as_str()];
+                    let done = write_pinned(
                         repository,
                         Some(scratch.path()),
                         None,
-                        &["update-index", "--add", "--cacheinfo", &cacheinfo],
+                        &remove,
                         None,
                         WRITE_BUDGET,
-                    )
-                    .is_some()
+                    );
+                    decided.record_step(GitStepName::UpdateIndex, &remove, done.is_some());
+                    done.is_some()
+                }
+                (_, Some(bytes)) => {
+                    // `--no-filters` is the whole point: the blob is the supplied bytes, whatever
+                    // `.gitattributes` would have done to them on the way in.
+                    let hash = blob_arguments();
+                    let blob =
+                        write_pinned(repository, None, None, &hash, Some(bytes), WRITE_BUDGET);
+                    decided.record_step(GitStepName::HashObject, &hash, blob.is_some());
+                    let Some(blob) = blob else {
+                        return Ok(Err(DispatchOutcome::ObjectWriteFailed));
+                    };
+                    let cacheinfo = format!("100644,{},{}", blob.trim(), path);
+                    let add = ["update-index", "--add", "--cacheinfo", cacheinfo.as_str()];
+                    let done = write_pinned(
+                        repository,
+                        Some(scratch.path()),
+                        None,
+                        &add,
+                        None,
+                        WRITE_BUDGET,
+                    );
+                    decided.record_step(GitStepName::UpdateIndex, &add, done.is_some());
+                    done.is_some()
                 }
                 (_, None) => false,
             };
@@ -1002,14 +1015,17 @@ impl DispatchService {
 
         // W3: the tree and the commit. The identity and the time are fixed by the caller, so the
         // resulting revision is a function of its inputs rather than of the clock.
-        let Some(tree) = write_pinned(
+        let write_tree = ["write-tree"];
+        let tree = write_pinned(
             repository,
             Some(scratch.path()),
             None,
-            &["write-tree"],
+            &write_tree,
             None,
             WRITE_BUDGET,
-        ) else {
+        );
+        decided.record_step(GitStepName::WriteTree, &write_tree, tree.is_some());
+        let Some(tree) = tree else {
             return Ok(Err(DispatchOutcome::ObjectWriteFailed));
         };
         let identity = GitIdentity {
@@ -1018,29 +1034,28 @@ impl DispatchService {
             date: format!("{} +0000", opened.started_at_ms / 1_000),
         };
         let message = commit_message(decided);
-        let Some(commit) = write_pinned(
+        let commit_tree = [
+            "commit-tree",
+            tree.trim(),
+            "-p",
+            base,
+            "-m",
+            message.as_str(),
+        ];
+        let commit = write_pinned(
             repository,
             None,
             Some(&identity),
-            &["commit-tree", tree.trim(), "-p", base, "-m", &message],
+            &commit_tree,
             None,
             WRITE_BUDGET,
-        ) else {
+        );
+        decided.record_step(GitStepName::CommitTree, &commit_tree, commit.is_some());
+        let Some(commit) = commit else {
             return Ok(Err(DispatchOutcome::ObjectWriteFailed));
         };
         let commit = commit.trim().to_owned();
         decided.prepared_commit = Some(commit.clone());
-        for step in [
-            GitStepName::HashObject,
-            GitStepName::UpdateIndex,
-            GitStepName::WriteTree,
-            GitStepName::CommitTree,
-        ] {
-            decided.git_steps.push(GitStep {
-                step,
-                result: GitStepResult::Succeeded,
-            });
-        }
 
         // W4: the prepared commit touches exactly the declared set, and every blob in it hashes to
         // what the Candidate declared. NUL-delimited, because a declared path may contain a
@@ -1155,14 +1170,11 @@ impl DispatchService {
                 // exactly this transaction, which is why the claim above is not in it.
                 hook();
             }
-            decided.git_steps.push(GitStep {
-                step: GitStepName::UpdateRef,
-                result: if swapped.is_some() {
-                    GitStepResult::Succeeded
-                } else {
-                    GitStepResult::Refused
-                },
-            });
+            decided.record_step(
+                GitStepName::UpdateRef,
+                &["update-ref", branch, commit, base],
+                swapped.is_some(),
+            );
             let observed =
                 read_pinned(&repository, &["rev-parse", "--verify", branch], READ_BUDGET);
             // `Applied` is a claim about THIS attempt's swap, so the swap having succeeded is part
@@ -1198,14 +1210,12 @@ impl DispatchService {
                     WRITE_BUDGET,
                 )
                 .is_some();
-                decided.git_steps.push(GitStep {
-                    step: GitStepName::ReadTreeCheckout,
-                    result: if decided.checkout_updated {
-                        GitStepResult::Succeeded
-                    } else {
-                        GitStepResult::Refused
-                    },
-                });
+                let updated = decided.checkout_updated;
+                decided.record_step(
+                    GitStepName::ReadTreeCheckout,
+                    &["read-tree", "-u", "--reset", commit],
+                    updated,
+                );
                 for record in &mut decided.per_mutation {
                     record.effect = match record.kind {
                         MutationKind::DeleteFile => MutationEffect::Removed,
@@ -1234,11 +1244,10 @@ impl DispatchService {
         commit: &str,
         decided: &mut Decided,
     ) -> Result<bool, DispatchError> {
-        let Some(diff) = read_pinned(
-            repository,
-            &["diff", "--name-status", "-z", base, commit],
-            READ_BUDGET,
-        ) else {
+        let diff_arguments = ["diff", "--name-status", "-z", base, commit];
+        let diff = read_pinned(repository, &diff_arguments, READ_BUDGET);
+        decided.record_step(GitStepName::DiffNameStatus, &diff_arguments, diff.is_some());
+        let Some(diff) = diff else {
             return Ok(false);
         };
         // The measured diff digest: SHA-256 over what the commit actually changed, which is a
@@ -1261,10 +1270,6 @@ impl DispatchService {
             }
         }
         decided.diff_digest = Some(measured);
-        decided.git_steps.push(GitStep {
-            step: GitStepName::DiffNameStatus,
-            result: GitStepResult::Succeeded,
-        });
 
         // And the bytes in the prepared commit's tree, which is what gets published -- not the
         // bytes on disk, which no longer matter and never entered the objects.
@@ -1288,6 +1293,21 @@ impl DispatchService {
 // ---------------------------------------------------------------------------------------------
 // Deciding and recording
 // ---------------------------------------------------------------------------------------------
+
+impl Decided {
+    /// Record one Git invocation, as it is made.
+    fn record_step(&mut self, step: GitStepName, argv: &[&str], succeeded: bool) {
+        self.git_steps.push(GitStep {
+            step,
+            argv: argv.iter().map(|argument| (*argument).to_owned()).collect(),
+            result: if succeeded {
+                GitStepResult::Succeeded
+            } else {
+                GitStepResult::Refused
+            },
+        });
+    }
+}
 
 /// A Git index outside the repository, removed when the landing ends.
 ///
@@ -2563,4 +2583,190 @@ mod tests {
 
         std::fs::remove_dir_all(&root).unwrap();
     }
+
+    /// A Receipt built entirely from fixed inputs, so a second implementation can compare bytes.
+    ///
+    /// Every value here is chosen, not measured: the UUIDs count up, the digests are constant, the
+    /// times are 1 and 2. Two implementations that agree on the encoding produce these bytes.
+    fn specimen(outcome: DispatchOutcome) -> DispatchReceipt {
+        let applied = outcome == DispatchOutcome::Applied;
+        let digest = |canonicalizer: &str| {
+            format!(
+                r#"{{"algorithm":"sha256","canonicalizer":"{canonicalizer}","value":"{}"}}"#,
+                "0".repeat(64)
+            )
+        };
+        let _ = digest;
+        DispatchReceipt {
+            version: 3,
+            run_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap(),
+            workspace_id: Uuid::parse_str("00000000-0000-4000-8000-000000000002").unwrap(),
+            project_id: Uuid::parse_str("00000000-0000-4000-8000-000000000003").unwrap(),
+            actor: DispatchActor::Owner,
+            ruling_digest: RulingDigest {
+                algorithm: "sha256".to_owned(),
+                canonicalizer: "beacon.ruling.v2".to_owned(),
+                value: "1".repeat(64),
+            },
+            proposal_digest: Some(ProposalDigest {
+                algorithm: "sha256".to_owned(),
+                canonicalizer: "beacon.proposal.v1".to_owned(),
+                value: "2".repeat(64),
+            }),
+            candidate_digest: Some(CandidateDigest {
+                algorithm: "sha256".to_owned(),
+                canonicalizer: "beacon.candidate.v1".to_owned(),
+                value: "3".repeat(64),
+            }),
+            outcome: outcome.clone(),
+            autonomy_profile: Some(AutonomyProfile::Supervised),
+            charter_revision: 1,
+            project_policy_revision: 1,
+            repository_revision: 1,
+            source_kind: Some(RepositorySourceKind::LocalPath),
+            source: Some("/copies/sample-project-specimen".to_owned()),
+            source_identity: Some(SourceIdentity {
+                device: 66_306,
+                inode: 4_242,
+            }),
+            branch: Some("refs/heads/main".to_owned()),
+            pinned_base_revision: Some("4".repeat(40)),
+            observed_head: applied.then(|| "5".repeat(40)),
+            prepared_commit: Some("5".repeat(40)),
+            resulting_revision: applied.then(|| "5".repeat(40)),
+            diff_digest: applied.then(|| "6".repeat(64)),
+            checkout_updated: applied,
+            git_steps: if applied {
+                vec![GitStep {
+                    step: GitStepName::UpdateRef,
+                    argv: vec![
+                        "update-ref".to_owned(),
+                        "refs/heads/main".to_owned(),
+                        "5".repeat(40),
+                        "4".repeat(40),
+                    ],
+                    result: GitStepResult::Succeeded,
+                }]
+            } else {
+                Vec::new()
+            },
+            model_invocations: 0,
+            cost_usd_micros: 0,
+            per_mutation: vec![MutationRecord {
+                kind: MutationKind::ModifyFile,
+                path: "src/lib.rs".to_owned(),
+                pre_image: Some("7".repeat(64)),
+                post_image: Some("8".repeat(64)),
+                effect: if applied {
+                    MutationEffect::Written
+                } else {
+                    MutationEffect::NotAttempted
+                },
+            }],
+            started_at_ms: 1,
+            ended_at_ms: 2,
+            not_verified: vec![
+                NotVerified::ExecutionPolicyConstraint,
+                NotVerified::SandboxConstraint,
+                NotVerified::NetworkConstraint,
+                NotVerified::ModelProviderConstraint,
+                NotVerified::CommandAllowlistConstraint,
+                NotVerified::ToolAllowlistConstraint,
+                NotVerified::EvaluationsConstraint,
+                NotVerified::NonAuthorEvaluationOfCandidate,
+                NotVerified::SafetySnapshot,
+                NotVerified::BaseRevisionReachability,
+                NotVerified::DeclaredChecksAgainstResult,
+            ]
+            .into_iter()
+            .chain(if applied {
+                Vec::new()
+            } else {
+                vec![
+                    NotVerified::ChangeNotApplied,
+                    NotVerified::UnreferencedObjectResidue,
+                ]
+            })
+            .collect(),
+        }
+    }
+
+    #[test]
+    fn the_applied_receipt_specimen_is_exactly_these_bytes() {
+        // The vector a second implementation matches against. A cross-lab review built a Receipt
+        // from the ADR's field list and produced different bytes for the same facts, which is what
+        // happens when a record has a field list instead of an encoding: member order, the shape of
+        // a digest envelope, and whether an absent fact is `null` or missing are all decisions, and
+        // this is where they are pinned.
+        let bytes = serde_json::to_string(&specimen(DispatchOutcome::Applied)).unwrap();
+        assert_eq!(bytes.len(), 2048);
+        assert_eq!(
+            hex(&crate::proposal::sha256(bytes.as_bytes())),
+            "6d13ab8b7a003b679985758f61bf190f4c0ed538772c9b2e5c21b77d1ece069a"
+        );
+        assert_eq!(bytes, APPLIED_SPECIMEN);
+        // And it is a record this build could have written.
+        verify_outcome_invariants(&specimen(DispatchOutcome::Applied)).unwrap();
+    }
+
+    #[test]
+    fn the_refused_receipt_specimen_is_exactly_these_bytes() {
+        // The same facts under a refusal: the same thirty members, with what the refusal did not
+        // establish carried as `null` rather than left out.
+        let bytes = serde_json::to_string(&specimen(DispatchOutcome::RulingRefused)).unwrap();
+        assert_eq!(bytes.len(), 1807);
+        assert_eq!(
+            hex(&crate::proposal::sha256(bytes.as_bytes())),
+            "7cf470fac1f454aeaa4c0834710d7c04fef7004cafd869f22f96df37abd03a6f"
+        );
+        assert_eq!(bytes, REFUSED_SPECIMEN);
+        verify_outcome_invariants(&specimen(DispatchOutcome::RulingRefused)).unwrap();
+    }
+
+    const APPLIED_SPECIMEN: &str = concat!(
+        r#"{"version":3,"runId":"00000000-0000-4000-8000-000000000001","workspaceId":"00000000-0000-4000-80"#,
+        r#"00-000000000002","projectId":"00000000-0000-4000-8000-000000000003","actor":"owner","rulingDiges"#,
+        r#"t":{"algorithm":"sha256","canonicalizer":"beacon.ruling.v2","value":"111111111111111111111111111"#,
+        r#"1111111111111111111111111111111111111"},"proposalDigest":{"algorithm":"sha256","canonicalizer":""#,
+        r#"beacon.proposal.v1","value":"2222222222222222222222222222222222222222222222222222222222222222"},"#,
+        r#""candidateDigest":{"algorithm":"sha256","canonicalizer":"beacon.candidate.v1","value":"333333333"#,
+        r#"3333333333333333333333333333333333333333333333333333333"},"outcome":"applied","autonomyProfile":"#,
+        r#""supervised","charterRevision":1,"projectPolicyRevision":1,"repositoryRevision":1,"sourceKind":""#,
+        r#"local_path","source":"/copies/sample-project-specimen","sourceIdentity":{"device":66306,"inode":"#,
+        r#"4242},"branch":"refs/heads/main","pinnedBaseRevision":"4444444444444444444444444444444444444444""#,
+        r#","observedHead":"5555555555555555555555555555555555555555","preparedCommit":"5555555555555555555"#,
+        r#"555555555555555555555","resultingRevision":"5555555555555555555555555555555555555555","diffDiges"#,
+        r#"t":"6666666666666666666666666666666666666666666666666666666666666666","checkoutUpdated":true,"gi"#,
+        r#"tSteps":[{"step":"update_ref","argv":["update-ref","refs/heads/main","55555555555555555555555555"#,
+        r#"55555555555555","4444444444444444444444444444444444444444"],"result":"succeeded"}],"modelInvocat"#,
+        r#"ions":0,"costUsdMicros":0,"perMutation":[{"kind":"modify_file","path":"src/lib.rs","preImage":"7"#,
+        r#"777777777777777777777777777777777777777777777777777777777777777","postImage":"888888888888888888"#,
+        r#"8888888888888888888888888888888888888888888888","effect":"written"}],"startedAtMs":1,"endedAtMs""#,
+        r#":2,"notVerified":["execution_policy_constraint","sandbox_constraint","network_constraint","model"#,
+        r#"_provider_constraint","command_allowlist_constraint","tool_allowlist_constraint","evaluations_co"#,
+        r#"nstraint","non_author_evaluation_of_candidate","safety_snapshot","base_revision_reachability","d"#,
+        r#"eclared_checks_against_result"]}"#
+    );
+
+    const REFUSED_SPECIMEN: &str = concat!(
+        r#"{"version":3,"runId":"00000000-0000-4000-8000-000000000001","workspaceId":"00000000-0000-4000-80"#,
+        r#"00-000000000002","projectId":"00000000-0000-4000-8000-000000000003","actor":"owner","rulingDiges"#,
+        r#"t":{"algorithm":"sha256","canonicalizer":"beacon.ruling.v2","value":"111111111111111111111111111"#,
+        r#"1111111111111111111111111111111111111"},"proposalDigest":{"algorithm":"sha256","canonicalizer":""#,
+        r#"beacon.proposal.v1","value":"2222222222222222222222222222222222222222222222222222222222222222"},"#,
+        r#""candidateDigest":{"algorithm":"sha256","canonicalizer":"beacon.candidate.v1","value":"333333333"#,
+        r#"3333333333333333333333333333333333333333333333333333333"},"outcome":"ruling_refused","autonomyPr"#,
+        r#"ofile":"supervised","charterRevision":1,"projectPolicyRevision":1,"repositoryRevision":1,"source"#,
+        r#"Kind":"local_path","source":"/copies/sample-project-specimen","sourceIdentity":{"device":66306,""#,
+        r#"inode":4242},"branch":"refs/heads/main","pinnedBaseRevision":"4444444444444444444444444444444444"#,
+        r#"444444","observedHead":null,"preparedCommit":"5555555555555555555555555555555555555555","resulti"#,
+        r#"ngRevision":null,"diffDigest":null,"checkoutUpdated":false,"gitSteps":[],"modelInvocations":0,"c"#,
+        r#"ostUsdMicros":0,"perMutation":[{"kind":"modify_file","path":"src/lib.rs","preImage":"77777777777"#,
+        r#"77777777777777777777777777777777777777777777777777777","postImage":"8888888888888888888888888888"#,
+        r#"888888888888888888888888888888888888","effect":"not_attempted"}],"startedAtMs":1,"endedAtMs":2,""#,
+        r#"notVerified":["execution_policy_constraint","sandbox_constraint","network_constraint","model_pro"#,
+        r#"vider_constraint","command_allowlist_constraint","tool_allowlist_constraint","evaluations_constr"#,
+        r#"aint","non_author_evaluation_of_candidate","safety_snapshot","base_revision_reachability","decla"#,
+        r#"red_checks_against_result","change_not_applied","unreferenced_object_residue"]}"#
+    );
 }

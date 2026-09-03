@@ -564,12 +564,12 @@ Enumerations are `snake_case` strings drawn from closed vocabularies.
 | 2 | `runId` | UUID string | never |
 | 3 | `workspaceId` | UUID string | never |
 | 4 | `projectId` | UUID string | never |
-| 5 | `actor` | `"owner"` \| `"agent"` | never — derived, never accepted from a caller |
-| 6 | `rulingDigest` | digest envelope `{algorithm,value}` | never |
+| 5 | `actor` | `"owner"`, the only arm the vocabulary has | never — derived, never accepted from a caller |
+| 6 | `rulingDigest` | digest envelope `{algorithm,canonicalizer,value}` | never |
 | 7 | `proposalDigest` | digest envelope | the refusal was the Ruling itself |
 | 8 | `candidateDigest` | digest envelope | no Candidate could be read |
 | 9 | `outcome` | closed `DispatchOutcome` token | never |
-| 10 | `autonomyProfile` | `"supervised"` \| `"observe"` \| `"autonomous"` | the profile could not be proved |
+| 10 | `autonomyProfile` | `"observe"` \| `"supervised"` — Bounded is deferred and has no token | the profile could not be proved |
 | 11 | `charterRevision` | integer | never — `0` before it is read |
 | 12 | `projectPolicyRevision` | integer | never — `0` before it is read |
 | 13 | `repositoryRevision` | integer | never — `0` before it is read |
@@ -586,15 +586,21 @@ Enumerations are `snake_case` strings drawn from closed vocabularies.
 | 24 | `gitSteps` | array of `{step,argv,result}` in attempt order | never — `[]` when none was attempted |
 | 25 | `modelInvocations` | integer | never — always `0` by construction |
 | 26 | `costUsdMicros` | integer | never — always `0` by construction |
-| 27 | `perMutation` | array of `{kind,path,preImageSha256,postImageSha256,effect}` in the Proposal's order | never — `[]` before a Candidate is read |
+| 27 | `perMutation` | array of `{kind,path,preImage,postImage,effect}` in the Proposal's order | never — `[]` before a Candidate is read |
 | 28 | `startedAtMs` | integer | never |
 | 29 | `endedAtMs` | integer | never |
 | 30 | `notVerified` | array of closed `NotVerified` tokens, fixed order | never — the seven undeclarable families are on every Receipt |
 
-`gitSteps[].step` is a closed `GitStepName`; `argv` is the exact argument vector, which is
-fixed text this build chooses rather than anything a caller supplies; `result` is a bounded
-`GitStepResult` category and never dynamic stderr text, so two implementations that run the
-same steps write the same bytes.
+Every digest envelope in this record — `rulingDigest`, `proposalDigest`, `candidateDigest` —
+is the same three-member shape this store uses everywhere: `algorithm`, `canonicalizer`,
+`value`. A digest without the grammar that produced it names bytes without saying what they
+were bytes of.
+
+`gitSteps` is one entry per invocation actually made, in the order they were made, including
+the ones that failed: `step` is a closed `GitStepName`, `argv` is the exact argument vector
+(fixed text this build chooses plus the revisions and declared paths of the request — never a
+caller's free text), and `result` is a bounded `GitStepResult` category, never dynamic stderr
+text, so two implementations that run the same steps write the same bytes.
 
 The contract carries what the accepted Receipt contract requires (`BLUEPRINT.md:790-800`)
 or names each exception. A dispatch runs no Declared Check, invokes no model, and consumes
@@ -605,14 +611,22 @@ Evaluation gap explicitly (`non_author_evaluation_of_candidate`). G12 enforces t
 Proposal's own byte, file-size and wall-clock bounds before any caller-supplied content is
 read; the wall-clock ceiling is re-checked inside the landing transaction.
 
-**Specimens.** One per outcome arm, pinned as executable tests rather than as prose, since
-prose specimens rot silently: `an_applied_receipt_has_the_published_shape`,
-`a_refused_receipt_has_the_same_shape_with_the_facts_it_does_not_have_absent`, and
-`a_reconstructed_receipt_has_the_same_shape_and_says_what_it_is`
-(`crates/beacond/tests/dispatch.rs`). Each asserts the full member list in stored-byte
-order — read off the text, not out of a parsed map, which would assert alphabetical order
-and pass however the record were written — and then the invariants its arm owes. Reordering
-any two members of the struct makes all three red.
+**Specimens.** Two vectors, built entirely from fixed inputs — UUIDs that count up, constant
+digests, times 1 and 2 — so a second implementation compares bytes rather than prose. Both
+literals are in `dispatch::tests` (`the_applied_receipt_specimen_is_exactly_these_bytes`,
+`the_refused_receipt_specimen_is_exactly_these_bytes`) together with their lengths and digests:
+
+```text
+applied         2048 bytes  sha256 6d13ab8b7a003b679985758f61bf190f4c0ed538772c9b2e5c21b77d1ece069a
+ruling_refused  1807 bytes  sha256 7cf470fac1f454aeaa4c0834710d7c04fef7004cafd869f22f96df37abd03a6f
+```
+
+Each specimen is also required to satisfy the invariants its arm owes, so a vector cannot be
+a record this build could not have written. Three further tests pin the member list of real
+Receipts in stored-byte order for the Applied, Refused and reconstructed arms
+(`crates/beacond/tests/dispatch.rs`) — read off the text, not out of a parsed map, which
+would assert alphabetical order and pass however the record were written. Reordering any two
+members of the struct makes all five red.
 
 **What `resultingRevision` means.** It is a **landing-at-time** fact: the revision the
 branch named when this dispatch observed it, immediately after its own compare-and-swap.
