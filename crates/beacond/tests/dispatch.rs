@@ -28,11 +28,11 @@ use beacond::{
     OperatorSessionPhase, PauseService, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft,
     ProjectPolicyService, ProjectRepositoryService, ProjectService, ProposalService,
     ProviderFeature, RepositoryDraft, RepositorySourceKind, ResidentConfigurationService,
-    ResidentLifecycleService, RulingDecision, RulingService, RulingSupersedes, SecretString,
-    StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig, Supervisor,
-    SupervisorError, SuppliedContent, TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
-    TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft, TeamService,
-    TrackRecordEvidenceKind, TrackRecordRequirement,
+    ResidentLifecycleService, RulingDecision, RulingService, RulingSupersedes,
+    SampleProjectService, SecretString, StarterOrganizationService, StarterResidentDraft,
+    StarterRole, StartupConfig, Supervisor, SupervisorError, SuppliedContent, TeamDraft,
+    TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy,
+    TeamMemberDraft, TeamService, TrackRecordEvidenceKind, TrackRecordRequirement,
 };
 use data_encoding::HEXLOWER;
 use rusqlite::Connection;
@@ -96,6 +96,11 @@ struct ProposalRecord {
     /// readable context does not hold, so a fixture with a patterned digest never reaches the live
     /// repository gates at all.
     context_digest: [u8; 32],
+    /// The path the declared readable context names, which is the path the fixtures modify.
+    context_path: String,
+    /// The Proposal's own declared bounds, which G12 applies to supplied content.
+    file_size_bytes: u64,
+    output_bytes: u64,
     /// `(kind tag, target)` in the caller's intended order. The grammar stores target paths
     /// ascending and the mutation list in this order, so a record whose two orders differ is what
     /// proves a Candidate follows the mutations rather than the sorted paths.
@@ -147,7 +152,7 @@ impl ProposalRecord {
         out.push(0x02);
         let mut entries = Vec::new();
         push_count(&mut entries, 1);
-        push_string(&mut entries, "src/lib.rs");
+        push_string(&mut entries, &self.context_path);
         entries.extend_from_slice(&self.context_digest);
         out.extend_from_slice(&entries);
         out.extend_from_slice(&sha256(&entries));
@@ -182,7 +187,14 @@ impl ProposalRecord {
 
         // Seven constraint families, each `not_declared`.
         out.extend_from_slice(&[0x01; 7]);
-        for bound in [300_000_u64, 240, 2 << 30, 256 << 20, 1 << 20, 0] {
+        for bound in [
+            300_000_u64,
+            240,
+            2 << 30,
+            self.file_size_bytes,
+            self.output_bytes,
+            0,
+        ] {
             out.extend_from_slice(&bound.to_be_bytes());
         }
         out.push(0x01);
@@ -495,6 +507,9 @@ impl Fixture {
             policy_revision: 1,
             base_revision: BASE_REVISION.to_owned(),
             context_digest: [0x66; 32],
+            context_path: "src/lib.rs".to_owned(),
+            file_size_bytes: 256 << 20,
+            output_bytes: 1 << 20,
             mutations: default_mutations(),
         }
     }
@@ -1044,58 +1059,148 @@ fn row_34_superseded_ruling_leaves_every_repository_byte_identical() {
 // ---------------------------------------------------------------------------------------------
 
 #[test]
-fn every_gate_holding_is_admissible_and_still_applies_nothing() {
-    // The positive control without which every refusal above passes against a function that always
-    // refuses -- and the honest statement of what this build is: the gates hold, and nothing
-    // happens, because the act does not exist yet.
-    let fixture = admitted_mission("admissible");
-    let (repository, ruling_digest) = fixture.approved("admissible");
+fn every_gate_holding_lands_the_declared_change_and_nothing_else() {
+    // The positive control without which every refusal is satisfied by a function that always
+    // refuses -- and the first end-to-end proof that a Ruling can move a branch.
+    let fixture = admitted_mission("applied");
+    let (repository, ruling_digest) = fixture.approved("applied");
+    let base = repository.revision.clone();
 
-    let before = repository.snapshot();
     let receipt = fixture
         .dispatches
         .dispatch(&ruling_digest, &content_for(NEW_BYTES))
         .unwrap();
 
-    assert_eq!(receipt.outcome, DispatchOutcome::Admissible);
+    assert_eq!(receipt.outcome, DispatchOutcome::Applied);
+    let landed = receipt
+        .resulting_revision
+        .clone()
+        .expect("an applied dispatch names the revision it produced");
+    assert_eq!(receipt.prepared_commit.as_deref(), Some(landed.as_str()));
+    assert_ne!(landed, base);
+
+    // The branch names the prepared commit, and its parent is the base the Ruling pinned.
     assert_eq!(
-        repository.snapshot(),
-        before,
-        "an admissible dispatch changed the repository"
+        CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]),
+        landed
+    );
+    assert_eq!(
+        CopyRepository::git(&repository.path, &["rev-parse", &format!("{landed}^")]),
+        base
     );
 
-    // The Receipt is a measurement of what held, and of what was not established.
-    assert_eq!(receipt.version, 3);
-    assert_eq!(receipt.autonomy_profile, Some(AutonomyProfile::Supervised));
-    assert_eq!(
-        receipt.observed_head.as_deref(),
-        Some(repository.revision.as_str())
+    // The change is in the OBJECTS: the blob the commit names holds exactly the declared bytes.
+    let blob = CopyRepository::git(
+        &repository.path,
+        &["cat-file", "blob", &format!("{landed}:{TARGET}")],
     );
-    assert_eq!(receipt.per_mutation.len(), 1);
-    assert_eq!(receipt.per_mutation[0].path, TARGET);
-    assert_eq!(receipt.per_mutation[0].effect, MutationEffect::NotAttempted);
-    assert!(receipt.candidate_digest.is_some());
+    assert_eq!(blob.as_bytes(), NEW_BYTES.trim_ascii_end());
+    // ...and the commit touches exactly the declared set.
+    assert_eq!(
+        CopyRepository::git(&repository.path, &["diff", "--name-status", &base, &landed]),
+        format!("M\t{TARGET}")
+    );
+
+    // Beacon owns this checkout, so it is not left stale.
+    assert!(receipt.checkout_updated);
+    assert_eq!(fs::read(repository.path.join(TARGET)).unwrap(), NEW_BYTES);
+    assert!(
+        CopyRepository::git(&repository.path, &["status", "--porcelain"]).is_empty(),
+        "the copy's working tree is not clean after a landing"
+    );
+
+    // The Receipt is the record: actor, both identities, the mutation's effect, and what was not
+    // established -- including the seven families ADR 0034 leaves undeclarable.
+    assert_eq!(receipt.version, 3);
+    assert_eq!(receipt.per_mutation[0].effect, MutationEffect::Written);
+    assert_eq!(receipt.autonomy_profile, Some(AutonomyProfile::Supervised));
+    // The seven undeclared constraint families are named on every Receipt, in the closed
+    // vocabulary, so no record of a dispatch can be read as having checked them.
+    for family in [
+        beacond::NotVerified::ExecutionPolicyConstraint,
+        beacond::NotVerified::SandboxConstraint,
+        beacond::NotVerified::NetworkConstraint,
+        beacond::NotVerified::ModelProviderConstraint,
+        beacond::NotVerified::CommandAllowlistConstraint,
+        beacond::NotVerified::ToolAllowlistConstraint,
+        beacond::NotVerified::EvaluationsConstraint,
+    ] {
+        assert!(receipt.not_verified.contains(&family), "{family:?}");
+    }
     assert!(
         receipt
             .not_verified
-            .iter()
-            .any(|entry| entry.contains("no landing path")),
-        "the Receipt does not say the change was not applied: {:?}",
-        receipt.not_verified
+            .contains(&beacond::NotVerified::NonAuthorEvaluationOfCandidate)
     );
-    // The seven undeclared constraint families are named on every Receipt, so no record of a
-    // dispatch can be read as having checked them.
+
+    // The commit message carries the authority chain into Git itself, and carries nothing else.
+    let message = CopyRepository::git(&repository.path, &["log", "-1", "--format=%B", &landed]);
+    assert!(
+        message.contains(&format!("Beacon-Ruling: {ruling_digest}")),
+        "{message}"
+    );
+    assert!(message.contains("Beacon-Proposal: "), "{message}");
+    assert!(message.contains("Beacon-Candidate: "), "{message}");
     assert_eq!(
-        receipt
-            .not_verified
-            .iter()
-            .filter(|entry| entry.contains("not declarable in Proposal v1"))
-            .count(),
-        7
+        CopyRepository::git(
+            &repository.path,
+            &["log", "-1", "--format=%an <%ae>", &landed]
+        ),
+        "Beacon <beacon@localhost>"
     );
+
     fixture
         .restart()
-        .expect("a recorded dispatch survives a restart");
+        .expect("an applied dispatch survives a restart");
+}
+
+#[test]
+fn one_ruling_lands_once_and_a_second_attempt_is_spent() {
+    // gpt1's probe: two dispatchers that both observed the base both succeed under a fast-forward
+    // merge, the second reporting the branch already current. The compare-and-swap is what makes
+    // application exactly once, and the preparation record is what makes a repeat attempt refuse
+    // rather than race.
+    let fixture = admitted_mission("once");
+    let (repository, ruling_digest) = fixture.approved("once");
+
+    let first = fixture
+        .dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+    assert_eq!(first.outcome, DispatchOutcome::Applied);
+    let after_first = repository.snapshot();
+
+    // The head has moved, so the second attempt refuses at the live gate before anything else.
+    let second = fixture
+        .dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+    assert_eq!(second.outcome, DispatchOutcome::RepositoryHeadMoved);
+    assert_eq!(
+        repository.snapshot(),
+        after_first,
+        "the second attempt changed the repository"
+    );
+
+    // And with the branch put back by hand -- so every live gate passes again -- the authority is
+    // still spent. Without this the head gate would be doing the work and "one Ruling, one
+    // application" would be an accident of arithmetic.
+    CopyRepository::git(
+        &repository.path,
+        &["reset", "--hard", "--quiet", &repository.revision],
+    );
+    let restored = repository.snapshot();
+    let third = fixture
+        .dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+    assert_eq!(third.outcome, DispatchOutcome::AlreadyDispatched);
+    assert!(third.left_repository_byte_identical());
+    assert_eq!(
+        repository.snapshot(),
+        restored,
+        "a spent authority still wrote to the repository"
+    );
 }
 
 #[test]
@@ -1137,7 +1242,7 @@ fn dispatch_refuses_while_the_installation_is_paused() {
     let (repository, ruling_digest) = fixture.approved("observe-and-pause");
     let before = repository.snapshot();
 
-    fixture.pause.set_paused(true).unwrap();
+    fixture.pause.pause().unwrap();
     let receipt = fixture
         .dispatches
         .dispatch(&ruling_digest, &content_for(NEW_BYTES))
@@ -1145,14 +1250,14 @@ fn dispatch_refuses_while_the_installation_is_paused() {
     assert_eq!(receipt.outcome, DispatchOutcome::InstallationPaused);
     assert_eq!(repository.snapshot(), before);
 
-    fixture.pause.set_paused(false).unwrap();
+    fixture.pause.resume().unwrap();
     assert_eq!(
         fixture
             .dispatches
             .dispatch(&ruling_digest, &content_for(NEW_BYTES))
             .unwrap()
             .outcome,
-        DispatchOutcome::Admissible,
+        DispatchOutcome::Applied,
         "resuming did not restore the previous answer"
     );
 }
@@ -1320,6 +1425,11 @@ fn a_gate_read_does_not_write_to_the_repository_it_measures() {
     let fixture = admitted_mission("read-only");
     let (repository, ruling_digest) = fixture.approved("read-only");
 
+    // The dispatch must REFUSE, or the landing's own writes would drown the one byte this test is
+    // about. An untracked file makes the cleanliness gate refuse -- after the status read that
+    // would rewrite the index.
+    fs::write(repository.path.join("scratch.txt"), "notes\n").unwrap();
+
     // The arrangement matters: Git rewrites the index when a tracked file's stat information no
     // longer matches what the index recorded. Writing the same bytes back is not enough -- the
     // timestamp can land in the same tick -- so the modification time is moved an hour into the
@@ -1344,10 +1454,748 @@ fn a_gate_read_does_not_write_to_the_repository_it_measures() {
         .dispatch(&ruling_digest, &content_for(NEW_BYTES))
         .unwrap();
 
-    assert_eq!(receipt.outcome, DispatchOutcome::Admissible);
+    assert_eq!(receipt.outcome, DispatchOutcome::SourceDirty);
     assert_eq!(
         repository.snapshot(),
         before,
         "a gate read wrote to the repository it was measuring"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The rows gpt1's kernel table marked FAIL
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn a_repository_swapped_for_a_decoy_at_the_same_path_receives_nothing() {
+    // gpt1's probe: `git -C <path>` re-resolves the name every time, so renaming the measured
+    // directory and installing an equivalent decoy at the same pathname redirected the mutation --
+    // the decoy advanced and the real repository stayed at base. The repository is pinned by device
+    // and inode now, and the pin is re-checked after every invocation.
+    let fixture = admitted_mission("path-swap");
+    let (repository, ruling_digest) = fixture.approved("path-swap");
+    let original = repository.path.clone();
+    let moved = fixture.copies_root.join("copy-path-swap-moved");
+
+    // A decoy that is a real repository of its own. Its head is its own commit, so the head gate
+    // judges the directory that is actually there rather than the one that was measured -- and
+    // `PinnedRepository::still_pinned` is what makes a swap DURING an attempt void, proved
+    // deterministically in `worktree`'s own tests rather than by racing this one.
+    fs::rename(&original, &moved).unwrap();
+    let decoy = CopyRepository::create(&fixture.copies_root, "path-swap-decoy");
+    fs::write(decoy.path.join("decoy.txt"), "decoy\n").unwrap();
+    CopyRepository::git(&decoy.path, &["add", "-A"]);
+    CopyRepository::git(&decoy.path, &["commit", "--quiet", "-m", "decoy"]);
+    fs::rename(&decoy.path, &original).unwrap();
+    let decoy_before = raw_repository_snapshot(&original);
+    let real_before = raw_repository_snapshot(&moved);
+
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+
+    // The decoy's head is a different commit, so the head gate refuses it -- and whatever the
+    // refusal, neither repository may move.
+    assert_ne!(receipt.outcome, DispatchOutcome::Applied);
+    assert_eq!(
+        raw_repository_snapshot(&original),
+        decoy_before,
+        "the decoy at the pinned pathname was written to"
+    );
+    assert_eq!(
+        raw_repository_snapshot(&moved),
+        real_before,
+        "the repository that was measured was written to"
+    );
+}
+
+#[test]
+fn candidate_bytes_enter_the_objects_unchanged_by_attribute_conversion() {
+    // gpt1's probe: with `.gitattributes` saying `*.txt text eol=lf`, Git's BUILT-IN conversion --
+    // no external filter, so the filter-driver hardening never sees it -- turned CRLF Candidate
+    // bytes into an LF blob with a different SHA-256, while `diff --name-status` still reported the
+    // declared modification. Objects are written with `hash-object --no-filters` now, so the
+    // declared bytes ARE the object bytes.
+    let fixture = admitted_mission("normalization");
+    let repository = CopyRepository::create(&fixture.copies_root, "normalization");
+    fs::write(
+        repository.path.join(".gitattributes"),
+        "*.txt text eol=lf\n",
+    )
+    .unwrap();
+    fs::write(repository.path.join("notes.txt"), "one\n").unwrap();
+    CopyRepository::git(&repository.path, &["add", "-A"]);
+    CopyRepository::git(&repository.path, &["commit", "--quiet", "-m", "attributes"]);
+    let repository = CopyRepository {
+        revision: CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]),
+        path: repository.path,
+    };
+
+    // A Candidate whose after-bytes carry CRLF, which the attribute would normalize away.
+    let crlf: &[u8] = b"one\r\ntwo\r\n";
+    let revision = fixture.rebind_repository(&repository);
+    let mut record = fixture.proposal("Rewrite the notes with Windows line endings.");
+    record.mutations = vec![(MUTATION_MODIFY, "notes.txt".to_owned())];
+    record.repository_revision = revision;
+    record.base_revision = repository.revision.clone();
+    record.context_digest = sha256(b"one\n");
+    record.context_path = "notes.txt".to_owned();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    fixture
+        .candidates
+        .record(
+            &proposal.digest().value,
+            &[CandidateImages {
+                pre_image_sha256: Some(sha256(b"one\n")),
+                post_image_sha256: Some(sha256(crlf)),
+            }],
+        )
+        .unwrap();
+    let ruling = fixture
+        .rulings
+        .rule_on_candidate(
+            &fixture
+                .candidates
+                .present(&proposal.digest().value)
+                .unwrap(),
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap();
+
+    let receipt = fixture
+        .dispatches
+        .dispatch(
+            &ruling.digest().value,
+            &[SuppliedContent {
+                path: "notes.txt".to_owned(),
+                bytes: Some(crlf.to_vec()),
+            }],
+        )
+        .unwrap();
+
+    assert_eq!(receipt.outcome, DispatchOutcome::Applied);
+    let landed = receipt.resulting_revision.clone().unwrap();
+    // The blob in the published commit is the declared bytes, carriage returns and all.
+    let blob = Command::new("git")
+        .args(["cat-file", "blob", &format!("{landed}:notes.txt")])
+        .current_dir(&repository.path)
+        .output()
+        .unwrap();
+    assert_eq!(
+        blob.stdout, crlf,
+        "attribute conversion reached the objects"
+    );
+}
+
+#[test]
+fn a_declared_path_carrying_pathspec_magic_touches_only_itself() {
+    // gpt1's probe: `git add -- ':(glob)*.txt'` staged a second, undeclared file, because `--` ends
+    // option parsing and does not disable pathspec magic. No pathspec is passed at all now -- the
+    // tree is built from the base plus one `update-index --cacheinfo` per declared mutation -- and
+    // every invocation carries `--literal-pathspecs`.
+    let fixture = admitted_mission("pathspec");
+    let repository = CopyRepository::create(&fixture.copies_root, "pathspec");
+    let magic = ":(glob)*.txt";
+    fs::write(repository.path.join(magic), "magic\n").unwrap();
+    fs::write(repository.path.join("victim.txt"), "victim\n").unwrap();
+    CopyRepository::git(&repository.path, &["add", "-A"]);
+    CopyRepository::git(&repository.path, &["commit", "--quiet", "-m", "magic"]);
+    let repository = CopyRepository {
+        revision: CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]),
+        path: repository.path,
+    };
+
+    let revision = fixture.rebind_repository(&repository);
+    let mut record = fixture.proposal("Rewrite the file whose name is pathspec magic.");
+    record.mutations = vec![(MUTATION_MODIFY, magic.to_owned())];
+    record.repository_revision = revision;
+    record.base_revision = repository.revision.clone();
+    record.context_digest = sha256(b"magic\n");
+    record.context_path = magic.to_owned();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    fixture
+        .candidates
+        .record(
+            &proposal.digest().value,
+            &[CandidateImages {
+                pre_image_sha256: Some(sha256(b"magic\n")),
+                post_image_sha256: Some(sha256(b"rewritten\n")),
+            }],
+        )
+        .unwrap();
+    let ruling = fixture
+        .rulings
+        .rule_on_candidate(
+            &fixture
+                .candidates
+                .present(&proposal.digest().value)
+                .unwrap(),
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap();
+
+    let receipt = fixture
+        .dispatches
+        .dispatch(
+            &ruling.digest().value,
+            &[SuppliedContent {
+                path: magic.to_owned(),
+                bytes: Some(b"rewritten\n".to_vec()),
+            }],
+        )
+        .unwrap();
+
+    assert_eq!(receipt.outcome, DispatchOutcome::Applied);
+    let landed = receipt.resulting_revision.clone().unwrap();
+    // Exactly one path changed, and it is the declared one.
+    let diff = Command::new("git")
+        .args(["diff", "--name-only", "-z", &repository.revision, &landed])
+        .current_dir(&repository.path)
+        .output()
+        .unwrap();
+    let changed: Vec<&str> = std::str::from_utf8(&diff.stdout)
+        .unwrap()
+        .split('\0')
+        .filter(|part| !part.is_empty())
+        .collect();
+    assert_eq!(
+        changed,
+        vec![magic],
+        "a pathspec expanded past its declaration"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The walking skeleton
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn the_first_end_to_end_loop_applies_one_canned_change_to_a_sample_project_copy() {
+    // Proposal -> Candidate -> Ruling v2 -> dispatch -> Applied, with a canned diff, no Agent and
+    // no model. This is BLUEPRINT's Alpha steps 9-12 for the first time: the Operator's decision
+    // names exact bytes, and those exact bytes reach the Repository through one act that records
+    // what it did.
+    //
+    // The bundled Sample Project is never the target: its own verifier requires `refs/heads/main`
+    // to hold the frozen revision, so a dispatch would make its installation read as tampered.
+    // Beacon copies it, and the copy is what v1 dispatch is allowed to reach.
+    let fixture = admitted_mission("skeleton");
+    let samples = SampleProjectService::new(
+        Arc::clone(&fixture.accounts),
+        fixture.workspace_id,
+        &fixture.store.path,
+    )
+    .unwrap();
+    samples.install().unwrap();
+    let copy = samples
+        .copy_for_dispatch(&fixture.copies_root, "skeleton")
+        .unwrap();
+
+    // The canned change: one file in the sample tracker, rewritten.
+    let target = "README.md";
+    let before = fs::read(copy.join(target)).expect("the sample project has a README");
+    let after = b"# Task Tracker\n\nDispatched by Beacon.\n".to_vec();
+    assert_ne!(before, after);
+
+    let repository = CopyRepository {
+        revision: CopyRepository::git(&copy, &["rev-parse", "HEAD"]),
+        path: copy.clone(),
+    };
+    let revision = fixture.rebind_repository(&repository);
+    let mut record = fixture.proposal("Rewrite the task tracker's README.");
+    record.mutations = vec![(MUTATION_MODIFY, target.to_owned())];
+    record.repository_revision = revision;
+    record.base_revision = repository.revision.clone();
+    record.context_digest = sha256(&before);
+    record.context_path = target.to_owned();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+
+    fixture
+        .candidates
+        .record(
+            &proposal.digest().value,
+            &[CandidateImages {
+                pre_image_sha256: Some(sha256(&before)),
+                post_image_sha256: Some(sha256(&after)),
+            }],
+        )
+        .unwrap();
+
+    // The Operator is shown the exact change, and rules on what they were shown.
+    let presentation = fixture
+        .candidates
+        .present(&proposal.digest().value)
+        .unwrap();
+    assert_eq!(presentation.lines().len(), 1);
+    assert_eq!(presentation.lines()[0].path, target);
+    let ruling = fixture
+        .rulings
+        .rule_on_candidate(
+            &presentation,
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap();
+
+    let receipt = fixture
+        .dispatches
+        .dispatch(
+            &ruling.digest().value,
+            &[SuppliedContent {
+                path: target.to_owned(),
+                bytes: Some(after.clone()),
+            }],
+        )
+        .unwrap();
+
+    assert_eq!(receipt.outcome, DispatchOutcome::Applied);
+    let landed = receipt.resulting_revision.clone().unwrap();
+    assert_eq!(receipt.ruling_digest.value, ruling.digest().value);
+    assert_eq!(
+        receipt.proposal_digest.as_ref().unwrap().value,
+        proposal.digest().value
+    );
+    assert_eq!(receipt.per_mutation[0].effect, MutationEffect::Written);
+
+    // The Repository holds the change, in its objects and in Beacon's own checkout.
+    assert_eq!(CopyRepository::git(&copy, &["rev-parse", "HEAD"]), landed);
+    assert_eq!(fs::read(copy.join(target)).unwrap(), after);
+    assert_eq!(
+        CopyRepository::git(
+            &copy,
+            &["diff", "--name-status", &repository.revision, &landed]
+        ),
+        format!("M\t{target}")
+    );
+
+    // And the bundled Sample Project is untouched: still frozen, still verifying.
+    assert!(
+        matches!(
+            samples.status().unwrap(),
+            beacond::SampleProjectStatus::Installed { .. }
+        ),
+        "dispatching into the copy disturbed the bundled Sample Project"
+    );
+
+    fixture
+        .restart()
+        .expect("the whole loop survives a restart");
+}
+
+#[test]
+fn a_swap_that_cannot_be_written_refuses_and_publishes_nothing() {
+    // The compare-and-swap's own failure path, driven deterministically: the refs directory is made
+    // unwritable, so `update-ref` cannot move the branch. The outcome must be a refusal that names
+    // the branch as unmoved -- not `Applied`, and not a claim of an unobserved landing when the ref
+    // can be read and plainly still holds the base.
+    let fixture = admitted_mission("cas-refused");
+    let (repository, ruling_digest) = fixture.approved("cas-refused");
+    let base = repository.revision.clone();
+
+    let heads = repository.path.join(".git/refs/heads");
+    let original = fs::metadata(&heads).unwrap().permissions().mode();
+    fs::set_permissions(&heads, fs::Permissions::from_mode(0o500)).unwrap();
+
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+
+    fs::set_permissions(&heads, fs::Permissions::from_mode(original)).unwrap();
+
+    assert_eq!(receipt.outcome, DispatchOutcome::LandingRefused);
+    assert_eq!(receipt.resulting_revision, None);
+    // The commit was prepared, so the Receipt names it and does not claim byte identity.
+    assert!(receipt.prepared_commit.is_some());
+    assert!(!receipt.left_repository_byte_identical());
+    // The branch did not move, and the working tree was not touched.
+    assert_eq!(
+        CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]),
+        base
+    );
+    assert_eq!(
+        fs::read(repository.path.join(TARGET)).unwrap(),
+        b"fn main() {}\n"
+    );
+}
+
+#[test]
+fn a_landed_dispatch_replays_from_its_own_receipt_after_a_restart() {
+    // The Receipt, the Event and the Run's terminal state are one record checked three ways: the
+    // Event payload and the stored Receipt must be byte-identical AND equal as values, and the Run
+    // must be in the state the outcome maps to. Startup deliberately re-derives nothing about the
+    // repository -- a Receipt records what was true then, and later history is not corruption.
+    let fixture = admitted_mission("replay");
+    let (repository, ruling_digest) = fixture.approved("replay");
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+    assert_eq!(receipt.outcome, DispatchOutcome::Applied);
+
+    fixture
+        .restart()
+        .expect("an applied dispatch survives a restart");
+
+    // The repository moving on afterwards is ordinary history, not a broken store.
+    CopyRepository::git(
+        &repository.path,
+        &["commit", "--quiet", "--allow-empty", "-m", "later"],
+    );
+    fixture
+        .restart()
+        .expect("later history in the Repository is not store corruption");
+
+    // But the Receipt and its Event must still agree with each other.
+    fixture.tamper(
+        "UPDATE events SET payload_json = json_set(payload_json, '$.outcome', 'admissible')
+         WHERE kind = 'proposal.dispatched'",
+    );
+    assert!(
+        matches!(
+            fixture.restart(),
+            Err(SupervisorError::DispatchEventMismatch(_))
+        ),
+        "an Event that disagrees with its Receipt started"
+    );
+}
+
+#[test]
+fn a_dispatch_run_state_matches_its_receipt_outcome() {
+    // `check_preflight::verify_run_state` owns cardinality for every Run kind, so a dispatch Run
+    // whose state does not match its Receipt is caught there rather than by a second walk.
+    let fixture = admitted_mission("run-state");
+    let (_repository, ruling_digest) = fixture.approved("run-state");
+    fixture
+        .dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+
+    let state: String = fixture
+        .store
+        .connect()
+        .query_row(
+            "SELECT state FROM runs WHERE kind = 'proposal_dispatch'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "applied");
+}
+
+#[test]
+fn content_beyond_the_proposals_own_bounds_is_refused_before_it_is_read() {
+    // gpt1's P1: deleting the file-size bound left the whole target green, because no test reached
+    // `ContentOverBounds`. Three bounds now, each with its own arrangement, so a deletion of any
+    // one of them is red on its own rather than covered by the others.
+    let fixture = admitted_mission("bounds");
+    let repository = CopyRepository::create(&fixture.copies_root, "bounds");
+
+    // A Proposal whose declared file-size bound is small, and content one byte over it.
+    let big = vec![b'x'; 4_096];
+    let mut record = fixture.proposal("Rewrite the library root with a large file.");
+    record.mutations = vec![(MUTATION_MODIFY, TARGET.to_owned())];
+    record.repository_revision = fixture.rebind_repository(&repository);
+    record.base_revision = repository.revision.clone();
+    record.context_digest = sha256(BASE_LIB_BYTES);
+    record.file_size_bytes = 4_095;
+    record.output_bytes = 1 << 20;
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    fixture
+        .candidates
+        .record(&proposal.digest().value, &images_for(BASE_LIB_BYTES, &big))
+        .unwrap();
+    let ruling = fixture
+        .rulings
+        .rule_on_candidate(
+            &fixture
+                .candidates
+                .present(&proposal.digest().value)
+                .unwrap(),
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap();
+
+    let before = repository.snapshot();
+    let receipt = fixture
+        .dispatches
+        .dispatch(
+            &ruling.digest().value,
+            &[SuppliedContent {
+                path: TARGET.to_owned(),
+                bytes: Some(big.clone()),
+            }],
+        )
+        .unwrap();
+    assert_eq!(receipt.outcome, DispatchOutcome::ContentOverBounds);
+    assert!(receipt.left_repository_byte_identical());
+    assert_eq!(repository.snapshot(), before);
+
+    // The aggregate ceiling, with a per-file bound that permits the same content: the two limits
+    // are different facts and a refusal must not depend on which one the fixture happened to cross.
+    let fixture = admitted_mission("bounds-total");
+    let repository = CopyRepository::create(&fixture.copies_root, "bounds-total");
+    let mut record = fixture.proposal("Rewrite the library root within the file bound.");
+    record.mutations = vec![(MUTATION_MODIFY, TARGET.to_owned())];
+    record.repository_revision = fixture.rebind_repository(&repository);
+    record.base_revision = repository.revision.clone();
+    record.context_digest = sha256(BASE_LIB_BYTES);
+    record.file_size_bytes = 1 << 20;
+    record.output_bytes = 4_095;
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    fixture
+        .candidates
+        .record(&proposal.digest().value, &images_for(BASE_LIB_BYTES, &big))
+        .unwrap();
+    let ruling = fixture
+        .rulings
+        .rule_on_candidate(
+            &fixture
+                .candidates
+                .present(&proposal.digest().value)
+                .unwrap(),
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap();
+    let receipt = fixture
+        .dispatches
+        .dispatch(
+            &ruling.digest().value,
+            &[SuppliedContent {
+                path: TARGET.to_owned(),
+                bytes: Some(big),
+            }],
+        )
+        .unwrap();
+    assert_eq!(receipt.outcome, DispatchOutcome::ContentOverBounds);
+}
+
+#[test]
+fn a_commit_that_does_not_touch_exactly_the_declared_set_is_refused_and_not_published() {
+    // The W4 post-condition's own arrangement. A Candidate may declare a deletion of a path that is
+    // not there at the base -- nothing before this point reads the base tree, so nothing else can
+    // notice -- and the prepared commit then touches nothing while the declaration says it removes
+    // a file. The commit exists as objects and is never published.
+    let fixture = admitted_mission("effect");
+    let repository = CopyRepository::create(&fixture.copies_root, "effect");
+    let absent = "src/never-there.rs";
+
+    let mut record = fixture.proposal("Delete a file that is not in the tree.");
+    record.mutations = vec![(MUTATION_DELETE, absent.to_owned())];
+    record.repository_revision = fixture.rebind_repository(&repository);
+    record.base_revision = repository.revision.clone();
+    record.context_digest = sha256(BASE_LIB_BYTES);
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    fixture
+        .candidates
+        .record(
+            &proposal.digest().value,
+            &[CandidateImages {
+                pre_image_sha256: Some(sha256(b"whatever it would have held\n")),
+                post_image_sha256: None,
+            }],
+        )
+        .unwrap();
+    let ruling = fixture
+        .rulings
+        .rule_on_candidate(
+            &fixture
+                .candidates
+                .present(&proposal.digest().value)
+                .unwrap(),
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap();
+
+    let head_before = CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]);
+    let receipt = fixture
+        .dispatches
+        .dispatch(
+            &ruling.digest().value,
+            &[SuppliedContent {
+                path: absent.to_owned(),
+                bytes: None,
+            }],
+        )
+        .unwrap();
+
+    assert_eq!(
+        receipt.outcome,
+        DispatchOutcome::EffectDoesNotMatchDeclaration
+    );
+    // A commit was prepared, so the Receipt names it and does not claim byte identity...
+    assert!(receipt.prepared_commit.is_some());
+    assert!(!receipt.left_repository_byte_identical());
+    // ...and nothing was published: the branch is where it was.
+    assert_eq!(
+        CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]),
+        head_before
+    );
+    assert_eq!(receipt.resulting_revision, None);
+}
+
+#[test]
+fn a_corrupt_ruling_or_proposal_record_refuses_with_a_receipt_rather_than_an_error() {
+    // gpt1's P0: a Run is opened before the gates run, so an owning-reader failure that escaped as
+    // an error left the Run nonterminal with no Receipt -- and `RulingUnreadable` and
+    // `ProposalDigestMismatch` covered only "absent", never the corrupt states they are named for.
+    let fixture = admitted_mission("corrupt");
+    let (repository, ruling_digest) = fixture.approved("corrupt");
+    let before = repository.snapshot();
+
+    // A Ruling whose audit Event no longer says what its bytes say.
+    fixture.tamper(
+        "UPDATE events SET payload_json = json_set(payload_json, '$.ruling.actor', 'resident')
+         WHERE kind = 'ruling.recorded'",
+    );
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+    assert_eq!(receipt.outcome, DispatchOutcome::RulingUnreadable);
+    assert!(receipt.left_repository_byte_identical());
+    assert_eq!(repository.snapshot(), before);
+
+    // The Run reached a terminal state with a Receipt, which is what makes the refusal evidence.
+    let terminal: i64 = fixture
+        .count("SELECT count(*) FROM runs WHERE kind = 'proposal_dispatch' AND state = 'refused'");
+    assert_eq!(terminal, 1);
+    assert_eq!(
+        fixture.count("SELECT count(*) FROM receipts"),
+        1,
+        "a refusal left no Receipt"
+    );
+}
+
+#[test]
+fn a_proposal_whose_event_disagrees_with_its_row_is_refused() {
+    let fixture = admitted_mission("corrupt-proposal");
+    let (repository, ruling_digest) = fixture.approved("corrupt-proposal");
+    let before = repository.snapshot();
+
+    fixture.tamper(
+        "UPDATE events SET payload_json = json_set(payload_json, '$.proposal.actor', 'resident')
+         WHERE kind = 'proposal.submitted'",
+    );
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+
+    assert_eq!(receipt.outcome, DispatchOutcome::ProposalDigestMismatch);
+    assert_eq!(repository.snapshot(), before);
+}
+
+#[test]
+fn resume_refuses_while_a_run_is_unresolved_and_records_what_was_accepted() {
+    // AGENTS.md:128-137 makes Resume conditional: every stopping or unconfirmed Run is reviewed and
+    // either resolved or explicitly accepted. A single `set_paused(false)` made that transition
+    // representable in one call with no Event (gpt1's P0).
+    let fixture = admitted_mission("resume");
+    fixture.pause.pause().unwrap();
+    assert!(fixture.pause.is_paused().unwrap());
+
+    // An open Run, planted the way a crash would leave one.
+    fixture.tamper(&format!(
+        "INSERT INTO runs (
+             workspace_id, id, project_id, kind, repository_revision, charter_revision,
+             state, lease_expires_at_ms, started_at_ms, ended_at_ms
+         ) VALUES ('{}', '{}', '{}', 'proposal_dispatch', 1, 1, 'unconfirmed', 1, 1, 2)",
+        fixture.workspace_id,
+        Uuid::new_v4(),
+        fixture.project_id,
+    ));
+
+    let refusal = fixture.pause.resume().unwrap_err();
+    assert!(
+        matches!(refusal, beacond::DispatchError::UnresolvedRuns(ref unresolved)
+            if unresolved.run_ids.len() == 1),
+        "{refusal:?}"
+    );
+    assert!(
+        fixture.pause.is_paused().unwrap(),
+        "a refused Resume changed the state"
+    );
+
+    // Accepting the uncertainty is permitted, and is recorded with the Runs it covered.
+    fixture
+        .pause
+        .resume_accepting_unresolved("The Run predates this machine; its effects were inspected.")
+        .unwrap();
+    assert!(!fixture.pause.is_paused().unwrap());
+
+    let payload: String = fixture
+        .store
+        .connect()
+        .query_row(
+            "SELECT payload_json FROM events WHERE kind = 'installation.resumed'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(value["paused"], false);
+    assert_eq!(
+        value["acceptedUnresolved"]["runIds"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        value["acceptedUnresolved"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("inspected")
+    );
+    fixture
+        .restart()
+        .expect("a paused-and-resumed store starts");
+}
+
+#[test]
+fn a_request_with_several_faults_is_refused_by_the_earliest_gate() {
+    // The published order is part of the decision, so which refusal a multi-fault request gets is
+    // a fact to pin rather than an artifact of reading order (gpt1). Here the Ruling is refused AND
+    // the Installation is paused AND the content is wrong: the earliest gate wins.
+    let fixture = admitted_mission("precedence");
+    let repository = CopyRepository::create(&fixture.copies_root, "precedence");
+    let (proposal_digest, _candidate) = fixture.candidate_for(
+        &repository,
+        "Apply the dispatched change to the library root.",
+        BASE_LIB_BYTES,
+    );
+    let refused = fixture
+        .rulings
+        .rule_on_candidate(
+            &fixture.candidates.present(&proposal_digest).unwrap(),
+            RulingDecision::Refuse,
+            "Not this change.",
+            RulingSupersedes::None,
+        )
+        .unwrap();
+    fixture.pause.pause().unwrap();
+
+    let receipt = fixture
+        .dispatches
+        .dispatch(&refused.digest().value, &content_for(b"wrong bytes\n"))
+        .unwrap();
+
+    assert_eq!(
+        receipt.outcome,
+        DispatchOutcome::RulingRefused,
+        "a later gate reported the refusal for a request that fails an earlier one"
     );
 }
