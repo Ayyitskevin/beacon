@@ -248,6 +248,8 @@ pub enum InconsistentCandidate {
     AlreadyRecorded,
     /// The caller supplied a different number of images than the Proposal declared mutations.
     EntryCountMismatch,
+    /// The Proposal has no Candidate, so there is nothing to present.
+    NotRecorded,
 }
 
 impl InconsistentCandidate {
@@ -258,6 +260,7 @@ impl InconsistentCandidate {
             Self::EntryCountMismatch => {
                 "the images do not match the Proposal's declared mutations one for one"
             }
+            Self::NotRecorded => "that Proposal has no Candidate to present",
         }
     }
 }
@@ -676,6 +679,55 @@ fn decode(input: &[u8]) -> Result<CandidateV1, MalformedCandidate> {
     })
 }
 
+/// What an Operator is shown before ruling: the exact change, and the identity of the record that
+/// carries it.
+///
+/// **This type is the authority precondition, made structural.** R8 requires the Ruling surface to
+/// present the exact diff plus the Candidate's identity before the Operator rules; a Command that
+/// accepted two digest strings could be called by anyone who knows them, and "was it shown?" would
+/// be prose. Every field here is private, there is no public constructor and no `Deserialize`, so
+/// the only way to hold one is to have asked [`CandidateService::present`] for it — which reads the
+/// Candidate through its own proof and renders what it holds.
+///
+/// It does not prove a human looked. Nothing can. It proves the decision was made through the
+/// surface that presents the change, rather than beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidatePresentation {
+    proposal: ProposalDigest,
+    candidate: CandidateDigest,
+    pinned_base_revision: String,
+    lines: Vec<PresentedMutation>,
+}
+
+/// One declared mutation as an Operator reads it: what it does, to which path, and the exact bytes
+/// before and after as their digests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresentedMutation {
+    pub kind: MutationKind,
+    pub path: String,
+    pub pre_image_sha256: Option<String>,
+    pub post_image_sha256: Option<String>,
+}
+
+impl CandidatePresentation {
+    pub fn proposal(&self) -> &ProposalDigest {
+        &self.proposal
+    }
+
+    pub fn candidate(&self) -> &CandidateDigest {
+        &self.candidate
+    }
+
+    pub fn pinned_base_revision(&self) -> &str {
+        &self.pinned_base_revision
+    }
+
+    /// The change, one line per declared mutation, in the Proposal's own order.
+    pub fn lines(&self) -> &[PresentedMutation] {
+        &self.lines
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // The service
 // ---------------------------------------------------------------------------------------------
@@ -790,6 +842,24 @@ impl CandidateService {
             let candidate = verified_candidate(stored)?;
             transaction.commit()?;
             Ok(candidate)
+        })
+    }
+
+    /// Render the Proposal's Candidate for a decision.
+    ///
+    /// The Candidate is read through the same proof a dispatch will use, so what is presented is
+    /// what is recorded rather than a convenience view assembled beside it. The returned value is
+    /// the input `RulingService::rule_on_candidate` requires.
+    pub fn present(&self, proposal_digest: &str) -> Result<CandidatePresentation, CandidateError> {
+        self.accounts.with_authenticated_store(|connection, _now| {
+            let Some(candidate) =
+                verified_candidate_for_proposal(connection, self.workspace_id, proposal_digest)?
+            else {
+                return Err(CandidateError::Inconsistent(
+                    InconsistentCandidate::NotRecorded,
+                ));
+            };
+            Ok(present_candidate(&candidate))
         })
     }
 
@@ -1040,6 +1110,44 @@ fn require_one_event(
     }
 }
 
+/// Exactly one Event names this Candidate **and that Event verifies**: its actor, its time, its
+/// envelope, and its canonical bytes, through the same function startup replay uses.
+fn require_verified_event(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+) -> Result<(), CandidateError> {
+    require_one_event(connection, workspace_id, digest_value)?;
+    let (payload_json, occurred_at_ms) = connection.query_row(
+        "SELECT payload_json, occurred_at_ms FROM events
+         WHERE workspace_id = ?1 AND kind = 'proposal.candidate_recorded'
+           AND json_extract(payload_json, '$.candidate.digest.value') = ?2",
+        params![workspace_id.to_string(), digest_value],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+    )?;
+    let occurred_at_ms = u64::try_from(occurred_at_ms).map_err(|_| CandidateError::InvalidStore)?;
+    verify_candidate_event(connection, workspace_id, occurred_at_ms, &payload_json)
+}
+
+/// The `events.sequence` of the one Event that recorded a Candidate. See
+/// [`crate::ruling::ruling_event_sequence`] for why sequence rather than time.
+pub(crate) fn candidate_event_sequence(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+) -> Result<Option<i64>, CandidateError> {
+    connection
+        .query_row(
+            "SELECT sequence FROM events
+             WHERE workspace_id = ?1 AND kind = 'proposal.candidate_recorded'
+               AND json_extract(payload_json, '$.candidate.digest.value') = ?2",
+            params![workspace_id.to_string(), digest_value],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(CandidateError::Store)
+}
+
 /// The one Candidate for a Proposal, proved from bytes **inside the caller's transaction**.
 ///
 /// This exists because a snapshot is not a fact about the moment it is used. `CandidateService`
@@ -1071,11 +1179,36 @@ pub(crate) fn verified_candidate_for_proposal(
     };
     let digest_value = stored.digest_value.clone();
     let candidate = verified_candidate(stored)?;
-    require_one_event(connection, workspace_id, &digest_value)?;
+    // The owning Event verifier, against the exact row -- not a count of matching digests. A probe
+    // changed only `$.candidate.actor` to a value the closed vocabulary does not have and this
+    // reader still handed the Candidate out, because counting rows proves a row exists and nothing
+    // about what it says (gpt1).
+    require_verified_event(connection, workspace_id, &digest_value)?;
     if !agrees_with_proposal(&facts, candidate.payload()) {
         return Err(CandidateError::InvalidStore);
     }
     Ok(Some(candidate))
+}
+
+/// Render one verified Candidate. `pub(crate)` so the Ruling service can build the same value from
+/// the record it just proved, rather than re-reading it through a second path.
+pub(crate) fn present_candidate(candidate: &Candidate) -> CandidatePresentation {
+    CandidatePresentation {
+        proposal: candidate.payload().proposal.clone(),
+        candidate: candidate.digest().clone(),
+        pinned_base_revision: candidate.payload().pinned_base_revision.clone(),
+        lines: candidate
+            .payload()
+            .entries
+            .iter()
+            .map(|entry| PresentedMutation {
+                kind: entry.kind,
+                path: entry.path.clone(),
+                pre_image_sha256: entry.pre_image_sha256.as_ref().map(|v| HEXLOWER.encode(v)),
+                post_image_sha256: entry.post_image_sha256.as_ref().map(|v| HEXLOWER.encode(v)),
+            })
+            .collect(),
+    }
 }
 
 /// The copy rule: a Candidate's entries are the Proposal's declared mutations, in order, at the
@@ -1137,21 +1270,12 @@ pub(crate) fn verify_candidate_state(connection: &Connection) -> Result<(), Cand
         require_one_event(connection, workspace_id, digest_value)?;
     }
 
-    // The whole-table count, kept as defence in depth with its limit stated: an Event naming a
-    // digest no row carries is refused BEFORE this by `verify_candidate_event`, which the startup
-    // replay runs over every event row, so no test can reach this line today
-    // (`an_event_whose_digest_names_no_candidate_is_refused_by_the_replay` proves which guard
-    // actually fires). It stays because it is the only check that compares the two populations
-    // rather than one record at a time -- the day a kind is added to the SQL vocabulary and not to
-    // the replay's enum, this is what notices.
-    let total_events: i64 = connection.query_row(
-        "SELECT count(*) FROM events WHERE kind = 'proposal.candidate_recorded'",
-        [],
-        |row| row.get(0),
-    )?;
-    if usize::try_from(total_events) != Ok(rows.len()) {
-        return Err(CandidateError::InvalidStore);
-    }
+    // No whole-table population comparison here, deliberately. An Event naming a digest no row
+    // carries is refused by `verify_candidate_event` during the startup replay, which walks every
+    // event row -- so a second count could not be reached by any store this code can produce, and
+    // a guard nothing can exercise is a claim rather than a check (gpt1, twice).
+    // `an_event_whose_digest_names_no_candidate_is_refused_by_the_replay` pins the guard that does
+    // the work.
     Ok(())
 }
 
