@@ -18,24 +18,25 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use beacond::{
     AutonomyProfile, BeaconCapability, CandidateImages, CandidateService, DeclaredCheck,
-    DispatchOutcome, DispatchService, LocalModelActivationService, LocalModelEndpoint,
-    MissionDraft, MissionMemberDraft, MissionService, MutationEffect, OperatorAccountService,
-    OperatorSessionPhase, PauseService, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft,
-    ProjectPolicyService, ProjectRepositoryService, ProjectService, ProposalService,
-    ProviderFeature, RepositoryDraft, RepositorySourceKind, ResidentConfigurationService,
-    ResidentLifecycleService, RulingDecision, RulingService, RulingSupersedes,
-    SampleProjectService, SecretString, StarterOrganizationService, StarterResidentDraft,
-    StarterRole, StartupConfig, Supervisor, SupervisorError, SuppliedContent, TeamDraft,
-    TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy,
-    TeamMemberDraft, TeamService, TrackRecordEvidenceKind, TrackRecordRequirement,
+    DispatchFailpoints, DispatchOutcome, DispatchService, LocalModelActivationService,
+    LocalModelEndpoint, MissionDraft, MissionMemberDraft, MissionService, MutationEffect,
+    OperatorAccountService, OperatorSessionPhase, PauseService, ProjectCharterDraft, ProjectDraft,
+    ProjectPolicyDraft, ProjectPolicyService, ProjectRepositoryService, ProjectService,
+    ProposalService, ProviderFeature, RepositoryDraft, RepositorySourceKind,
+    ResidentConfigurationService, ResidentLifecycleService, RulingDecision, RulingService,
+    RulingSupersedes, SampleProjectService, SecretString, StarterOrganizationService,
+    StarterResidentDraft, StarterRole, StartupConfig, Supervisor, SupervisorError, SuppliedContent,
+    TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule,
+    TeamLeadSelectionPolicy, TeamMemberDraft, TeamService, TrackRecordEvidenceKind,
+    TrackRecordRequirement,
 };
 use data_encoding::HEXLOWER;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -556,22 +557,6 @@ impl Fixture {
         });
     }
 
-    /// Simulate the state a crash between the swap and the Receipt leaves behind: a preparation
-    /// exists, the Run is still open, and nothing terminal was recorded.
-    ///
-    /// The Receipt and Run triggers are dropped for the deletion and put back immediately, because
-    /// startup verifies the schema signature before it verifies any state -- a store left short a
-    /// trigger refuses startup for the wrong reason, and a recovery test would pass without ever
-    /// reaching recovery.
-    fn simulate_crash_after_swap(&self) {
-        self.without_run_triggers(
-            "DELETE FROM receipts;
-             DELETE FROM events WHERE kind = 'proposal.dispatched';
-             UPDATE runs SET state = 'dispatching', ended_at_ms = NULL
-             WHERE kind = 'proposal_dispatch';",
-        );
-    }
-
     /// Run one batch with the Run, Receipt and preparation immutability triggers dropped, then put
     /// them back -- because startup verifies the schema signature before any state, and a store
     /// left short a trigger refuses startup for the wrong reason.
@@ -608,16 +593,47 @@ impl Fixture {
         }
     }
 
-    /// The state dying between `commit-tree` and the landing transaction leaves: a receiptless open
-    /// Run, and no preparation at all.
-    fn simulate_crash_before_landing(&self) {
-        self.without_run_triggers(
-            "DELETE FROM receipts;
-             DELETE FROM events WHERE kind = 'proposal.dispatched';
-             DELETE FROM dispatch_preparations;
-             UPDATE runs SET state = 'dispatching', ended_at_ms = NULL
-             WHERE kind = 'proposal_dispatch';",
+    /// Run one dispatch that dies at `failpoints`, the way a killed process dies.
+    ///
+    /// Nothing after the panic runs, and whatever store transaction was open is lost while every
+    /// external effect that already happened stays. Both reviews rejected the earlier tests for
+    /// arranging these states by deleting committed rows instead, which proves what reconciliation
+    /// does with a state nobody showed was reachable.
+    fn dispatch_interrupted(
+        &self,
+        ruling_digest: &str,
+        content: &[SuppliedContent],
+        failpoints: DispatchFailpoints,
+    ) {
+        let dispatches = DispatchService::new(Arc::clone(&self.accounts), self.workspace_id)
+            .with_failpoints(failpoints);
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            dispatches.dispatch(ruling_digest, content)
+        }));
+        std::panic::set_hook(previous);
+        assert!(
+            died.is_err(),
+            "the failpoint did not interrupt the dispatch"
         );
+    }
+
+    /// A hook that dies where it is placed.
+    fn die() -> Arc<dyn Fn() + Send + Sync> {
+        Arc::new(|| panic!("simulated interruption"))
+    }
+
+    fn preparation(&self) -> Option<(String, String)> {
+        self.store
+            .connect()
+            .query_row(
+                "SELECT prepared_commit, branch FROM dispatch_preparations",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .unwrap()
     }
 
     /// Run `f` with the Candidate immutability triggers dropped, then put them back.
@@ -2338,32 +2354,38 @@ fn a_request_with_several_faults_is_refused_by_the_earliest_gate() {
 }
 
 #[test]
-fn an_interrupted_dispatch_is_finished_from_its_preparation_at_startup() {
-    // gpt2's P0: the preparation record was written durably before the swap and never read, so a
-    // process that died between the swap and the Receipt left a branch permanently moved with
-    // Beacon recording nothing terminal. AGENTS.md:154 admits no exception.
-    //
-    // The crash is simulated where it matters -- a preparation exists, the ref has moved to the
-    // prepared commit, and no Receipt was written -- and startup must produce the truthful one.
-    let fixture = admitted_mission("interrupted");
-    let (repository, ruling_digest) = fixture.approved("interrupted");
-    let base = repository.revision.clone();
+fn an_interruption_after_the_swap_is_finished_as_applied_at_startup() {
+    // The L1/R1 boundary, driven rather than arranged: the process dies immediately after
+    // `update-ref` and before anything about it is committed. The ref has moved; the landing
+    // transaction is lost. What survives is the claim, which is committed BEFORE the swap for
+    // exactly this reason -- and startup must turn it into the truthful terminal Receipt.
+    let fixture = admitted_mission("killed-after-swap");
+    let (repository, ruling_digest) = fixture.approved("killed-after-swap");
 
-    // Land normally, then remove the Receipt, the Event and the terminal state: what remains is
-    // exactly the state a crash after the swap leaves behind.
-    let receipt = fixture
-        .dispatches
-        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
-        .unwrap();
-    assert_eq!(receipt.outcome, DispatchOutcome::Applied);
-    let landed = receipt.resulting_revision.clone().unwrap();
-    fixture.simulate_crash_after_swap();
+    fixture.dispatch_interrupted(
+        &ruling_digest,
+        &content_for(NEW_BYTES),
+        DispatchFailpoints {
+            after_swap: Some(Fixture::die()),
+            ..DispatchFailpoints::default()
+        },
+    );
+
+    // What a killed process actually left: a moved ref, a committed claim, no Receipt.
+    let (prepared, _branch) = fixture
+        .preparation()
+        .expect("the claim did not survive the crash");
+    assert_eq!(
+        CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]),
+        prepared,
+        "the swap did not happen, so this test proves nothing about recovery"
+    );
+    assert_eq!(fixture.count("SELECT count(*) FROM receipts"), 0);
 
     fixture
         .restart()
         .expect("startup finishes the interrupted attempt");
 
-    // The truth, recorded: the branch names the prepared commit, so the attempt applied.
     let (outcome, payload): (String, String) = fixture
         .store
         .connect()
@@ -2373,10 +2395,8 @@ fn an_interrupted_dispatch_is_finished_from_its_preparation_at_startup() {
         .unwrap();
     assert_eq!(outcome, "applied");
     let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
-    assert_eq!(value["resultingRevision"], landed);
-    assert_eq!(value["preparedCommit"], landed);
-    // And it says it was reconstructed, because it establishes less than the attempt's own Receipt
-    // would have.
+    assert_eq!(value["resultingRevision"], prepared);
+    assert_eq!(value["preparedCommit"], prepared);
     assert!(
         value["notVerified"]
             .as_array()
@@ -2395,38 +2415,155 @@ fn an_interrupted_dispatch_is_finished_from_its_preparation_at_startup() {
         )
         .unwrap();
     assert_eq!(state, "applied");
-    let _ = base;
 }
 
 #[test]
-fn an_interrupted_dispatch_whose_swap_never_happened_is_finished_as_refused() {
-    // The other side of the same recovery: the preparation exists, the branch is still at the base,
-    // so the swap did not happen. "Refused" is a fact read off the ref, not a guess -- and the
-    // distinction from `Applied` is the whole reason the preparation record persists the commit.
-    let fixture = admitted_mission("interrupted-refused");
-    let (repository, ruling_digest) = fixture.approved("interrupted-refused");
+fn an_interruption_between_the_claim_and_the_swap_is_finished_as_refused() {
+    // The same boundary one step earlier: the claim is committed and the swap never ran. "Refused"
+    // is read off the ref, not guessed -- and telling it from the case above is the whole reason
+    // the claim persists the commit it was about to publish.
+    let fixture = admitted_mission("killed-before-swap");
+    let (repository, ruling_digest) = fixture.approved("killed-before-swap");
     let base = repository.revision.clone();
 
-    let receipt = fixture
-        .dispatches
-        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
-        .unwrap();
-    assert_eq!(receipt.outcome, DispatchOutcome::Applied);
-    // Put the branch back and erase the record: now the store believes an attempt was prepared and
-    // the repository says it never landed.
-    CopyRepository::git(&repository.path, &["reset", "--hard", "--quiet", &base]);
-    fixture.simulate_crash_after_swap();
+    fixture.dispatch_interrupted(
+        &ruling_digest,
+        &content_for(NEW_BYTES),
+        DispatchFailpoints {
+            before_landing: Some(Fixture::die()),
+            ..DispatchFailpoints::default()
+        },
+    );
+
+    let (prepared, _branch) = fixture
+        .preparation()
+        .expect("the claim did not survive the crash");
+    assert_eq!(
+        CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]),
+        base,
+        "the branch moved before the landing transaction"
+    );
+    assert_ne!(prepared, base);
 
     fixture
         .restart()
         .expect("startup finishes the interrupted attempt");
 
-    let outcome: String = fixture
+    let (outcome, payload): (String, String) = fixture
         .store
         .connect()
-        .query_row("SELECT outcome FROM receipts", [], |row| row.get(0))
+        .query_row("SELECT outcome, receipt_json FROM receipts", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
         .unwrap();
     assert_eq!(outcome, "landing_refused");
+    let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    // It names the objects it left, because the claim persisted what they were.
+    assert_eq!(value["preparedCommit"], prepared);
+    assert!(
+        value["notVerified"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry == "unreferenced_object_residue"),
+        "{payload}"
+    );
+}
+
+#[test]
+fn the_claim_is_committed_before_the_swap_and_a_second_connection_can_read_it() {
+    // Why the claim is not inside the landing transaction. At this point the objects exist, the
+    // claim is committed, and the ref has not moved -- so a reader that is not this process can
+    // already name the commit an interruption would strand. Inside the landing transaction the row
+    // would be invisible until after the swap, which is the window a crash falls into.
+    let fixture = admitted_mission("durable-claim");
+    let (repository, ruling_digest) = fixture.approved("durable-claim");
+    let base = repository.revision.clone();
+    let path = fixture.store.path.clone();
+    let observed: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let seen = Arc::clone(&observed);
+    let head = repository.path.clone();
+    let at_base = Arc::new(Mutex::new(false));
+    let still_at_base = Arc::clone(&at_base);
+
+    let dispatches = DispatchService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .with_failpoints(DispatchFailpoints {
+            before_landing: Some(Arc::new(move || {
+                let connection = Connection::open(&path).unwrap();
+                *seen.lock().unwrap() = connection
+                    .query_row(
+                        "SELECT prepared_commit FROM dispatch_preparations",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                    .unwrap();
+                *still_at_base.lock().unwrap() =
+                    CopyRepository::git(&head, &["rev-parse", "HEAD"]) == base;
+            })),
+            ..DispatchFailpoints::default()
+        });
+
+    let receipt = dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+    assert_eq!(receipt.outcome, DispatchOutcome::Applied);
+    assert_eq!(
+        observed.lock().unwrap().as_deref(),
+        receipt.prepared_commit.as_deref(),
+        "the claim was not committed before the swap"
+    );
+    assert!(
+        *at_base.lock().unwrap(),
+        "the ref had already moved when the claim was read"
+    );
+}
+
+#[test]
+fn an_interruption_before_the_claim_is_terminal_and_names_its_unnameable_residue() {
+    // The earliest boundary: objects exist and nothing has recorded what they are. The honest
+    // terminal record is that the result is unobserved AND that the residue cannot be named. A
+    // guess in either direction would be worse than the uncertainty.
+    let fixture = admitted_mission("killed-before-claim");
+    let (repository, ruling_digest) = fixture.approved("killed-before-claim");
+    let base = repository.revision.clone();
+
+    fixture.dispatch_interrupted(
+        &ruling_digest,
+        &content_for(NEW_BYTES),
+        DispatchFailpoints {
+            before_reserve: Some(Fixture::die()),
+            ..DispatchFailpoints::default()
+        },
+    );
+
+    assert!(fixture.preparation().is_none());
+    assert_eq!(
+        CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]),
+        base
+    );
+
+    fixture
+        .restart()
+        .expect("startup finishes an attempt that never reached its claim");
+
+    let (outcome, payload): (String, String) = fixture
+        .store
+        .connect()
+        .query_row("SELECT outcome, receipt_json FROM receipts", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(outcome, "landing_unobserved");
+    let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    let not_verified = value["notVerified"].as_array().unwrap();
+    assert!(
+        not_verified
+            .iter()
+            .any(|entry| entry == "residue_cannot_be_named"),
+        "{payload}"
+    );
+    assert!(value["preparedCommit"].is_null());
 }
 
 #[test]
@@ -2462,54 +2599,6 @@ fn the_landing_transaction_holds_the_write_lock_across_the_swap() {
             "UPDATE installation_pause SET paused = 1, changed_at_ms = 1 WHERE singleton = 1",
         )
         .expect("the write is only blocked by the lock");
-}
-
-#[test]
-fn an_interruption_before_the_landing_transaction_is_terminal_and_names_its_unnameable_residue() {
-    // gpt1's other crash boundary. Between `commit-tree` and the landing transaction, objects exist
-    // and nothing has recorded what they are -- so the honest terminal record is that the result is
-    // unobserved AND that the residue cannot be named. A guess in either direction would be worse
-    // than the uncertainty.
-    let fixture = admitted_mission("interrupted-early");
-    let (repository, ruling_digest) = fixture.approved("interrupted-early");
-    let before = repository.snapshot();
-
-    fixture
-        .dispatches
-        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
-        .unwrap();
-    // Erase everything the landing transaction wrote, including the preparation: what remains is a
-    // receiptless open Run, which is exactly what dying before that transaction leaves.
-    fixture.simulate_crash_before_landing();
-
-    fixture
-        .restart()
-        .expect("startup finishes an attempt that never reached its landing transaction");
-
-    let (outcome, payload): (String, String) = fixture
-        .store
-        .connect()
-        .query_row("SELECT outcome, receipt_json FROM receipts", [], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })
-        .unwrap();
-    assert_eq!(outcome, "landing_unobserved");
-    let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
-    let not_verified = value["notVerified"].as_array().unwrap();
-    assert!(
-        not_verified.iter().any(|e| e == "residue_cannot_be_named"),
-        "{payload}"
-    );
-    assert!(
-        not_verified
-            .iter()
-            .any(|e| e == "reconstructed_after_interruption"),
-        "{payload}"
-    );
-    // The repository moved, because the dispatch did land before the record was erased -- the point
-    // is that the store now says something terminal and truthful about an attempt it cannot fully
-    // account for.
-    assert_ne!(repository.snapshot(), before);
 }
 
 #[test]
@@ -2780,11 +2869,14 @@ fn a_refused_receipt_has_the_same_shape_with_the_facts_it_does_not_have_absent()
 fn a_reconstructed_receipt_has_the_same_shape_and_says_what_it_is() {
     let fixture = admitted_mission("receipt-reconstructed");
     let (_repository, ruling_digest) = fixture.approved("receipt-reconstructed");
-    fixture
-        .dispatches
-        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
-        .unwrap();
-    fixture.simulate_crash_after_swap();
+    fixture.dispatch_interrupted(
+        &ruling_digest,
+        &content_for(NEW_BYTES),
+        DispatchFailpoints {
+            after_swap: Some(Fixture::die()),
+            ..DispatchFailpoints::default()
+        },
+    );
     fixture.restart().unwrap();
 
     let stored: String = fixture

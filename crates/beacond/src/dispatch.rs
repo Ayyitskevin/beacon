@@ -451,6 +451,30 @@ impl From<serde_json::Error> for DispatchError {
 pub struct DispatchService {
     accounts: Arc<OperatorAccountService>,
     workspace_id: Uuid,
+    #[cfg(debug_assertions)]
+    failpoints: DispatchFailpoints,
+}
+
+/// Places a test can stop this act dead, to reproduce a crash image rather than synthesize one.
+///
+/// Two reviews rejected the recovery evidence for the same reason: the tests deleted committed
+/// records to arrange a state, which proves what reconciliation does with a state nobody showed was
+/// reachable. A hook that panics inside the act leaves exactly what a killed process leaves -- the
+/// external Git effects that already happened, the store transactions that had already committed,
+/// and nothing of the one that was open.
+///
+/// Compiled out of release builds entirely: the field, the calls and this type do not exist there.
+#[cfg(debug_assertions)]
+#[derive(Default, Clone)]
+#[doc(hidden)]
+pub struct DispatchFailpoints {
+    /// After the objects exist, before the Ruling is claimed.
+    pub before_reserve: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// After the claim is committed, before the landing transaction opens.
+    pub before_landing: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Inside the landing transaction, immediately after the swap and before anything about it is
+    /// committed.
+    pub after_swap: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// One declared mutation's content, supplied by the caller at dispatch time.
@@ -468,7 +492,18 @@ impl DispatchService {
         Self {
             accounts,
             workspace_id,
+            #[cfg(debug_assertions)]
+            failpoints: DispatchFailpoints::default(),
         }
+    }
+
+    /// The same service, interruptible at the points above. Debug builds only.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_failpoints(mut self, failpoints: DispatchFailpoints) -> Self {
+        self.failpoints = failpoints;
+        self
     }
 
     /// Run every gate for one Ruling and record what they decided.
@@ -855,6 +890,28 @@ impl DispatchService {
             Err(outcome) => return Ok(outcome),
         };
 
+        // The claim, and the durable record of what is about to be published -- committed BEFORE
+        // the swap, in its own transaction.
+        //
+        // The swap is an EXTERNAL effect, and a store transaction that spans it does not survive a
+        // crash the way the ref does: both reviews found that a process killed after `update-ref`
+        // rolls the preparation back and leaves a moved ref that nothing in the store can explain.
+        // So the intent is committed first and the linearized transaction follows (Fable's ruling
+        // of 2026-09-02). The cost is stated rather than hidden: a Ruling claimed here stays
+        // claimed even if the landing transaction then refuses it, because a claim that is returned
+        // on failure is not a claim.
+        #[cfg(debug_assertions)]
+        if let Some(hook) = self.failpoints.before_reserve.clone() {
+            hook();
+        }
+        if let Some(outcome) = self.reserve(opened, decided, &branch, &base, &commit)? {
+            return Ok(outcome);
+        }
+        #[cfg(debug_assertions)]
+        if let Some(hook) = self.failpoints.before_landing.clone() {
+            hook();
+        }
+
         // Everything from here is ONE write transaction, and the Git swap happens inside it.
         //
         // A cross-lab review found the window this closes: the gates committed, then objects were
@@ -999,6 +1056,55 @@ impl DispatchService {
         Ok(Ok(commit))
     }
 
+    /// Claim the Ruling and record what is about to be published, in its own committed transaction.
+    ///
+    /// `Some(outcome)` means the claim was already taken, which is the refusal the caller returns.
+    fn reserve(
+        &self,
+        opened: &OpenRun,
+        decided: &Decided,
+        branch: &str,
+        base: &str,
+        commit: &str,
+    ) -> Result<Option<DispatchOutcome>, DispatchError> {
+        let repository = decided
+            .repository
+            .as_ref()
+            .ok_or(DispatchError::InvalidStore)?;
+        let (device, inode) = repository.identity();
+        let source = repository.path().to_string_lossy().into_owned();
+        self.accounts.with_authenticated_store(|connection, now| {
+            let claimed = connection.execute(
+                "INSERT INTO dispatch_preparations (
+                     workspace_id, run_id, ruling_digest, source, source_device, source_inode,
+                     branch, pinned_base_revision, prepared_commit, prepared_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    self.workspace_id.to_string(),
+                    opened.run_id.to_string(),
+                    opened.ruling_digest.as_str(),
+                    source.as_str(),
+                    i64::try_from(device).unwrap_or(i64::MAX),
+                    i64::try_from(inode).unwrap_or(i64::MAX),
+                    branch,
+                    base,
+                    commit,
+                    now,
+                ],
+            );
+            match claimed {
+                Ok(_) => Ok(None),
+                Err(rusqlite::Error::SqliteFailure(failure, _))
+                    if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+                        || failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY =>
+                {
+                    Ok(Some(DispatchOutcome::AlreadyDispatched))
+                }
+                Err(error) => Err(DispatchError::Store(error)),
+            }
+        })
+    }
+
     /// The irreversible step and its record, under one write lock.
     #[allow(clippy::too_many_lines)]
     fn land_within(
@@ -1015,8 +1121,6 @@ impl DispatchService {
             .repository
             .take()
             .ok_or(DispatchError::InvalidStore)?;
-        let (device, inode) = repository.identity();
-        let source = repository.path().to_string_lossy().into_owned();
         let outcome = self.accounts.with_authenticated_store(|connection, now| {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1039,41 +1143,15 @@ impl DispatchService {
                 return Ok(refusal);
             }
 
-            // The spend, and the durable record of what is about to be published. Reconciliation
-            // reads this to finish an attempt that never got to write its own Receipt.
-            let reserved = transaction.execute(
-                "INSERT INTO dispatch_preparations (
-                     workspace_id, run_id, ruling_digest, source, source_device, source_inode,
-                     branch, pinned_base_revision, prepared_commit, prepared_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![
-                    self.workspace_id.to_string(),
-                    opened.run_id.to_string(),
-                    opened.ruling_digest.as_str(),
-                    source.as_str(),
-                    i64::try_from(device).unwrap_or(i64::MAX),
-                    i64::try_from(inode).unwrap_or(i64::MAX),
-                    branch,
-                    base,
-                    commit,
-                    now,
-                ],
-            );
-            match reserved {
-                Ok(_) => {}
-                Err(rusqlite::Error::SqliteFailure(failure, _))
-                    if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
-                        || failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY =>
-                {
-                    transaction.commit()?;
-                    return Ok(DispatchOutcome::AlreadyDispatched);
-                }
-                Err(error) => return Err(DispatchError::Store(error)),
-            }
-
             // L1, inside the lock. `update-ref <ref> <new> <old>` fails unless the ref still holds
             // exactly the value the gates observed -- which a fast-forward merge does not check.
             let swapped = swap_ref(&repository, branch, commit, base);
+            #[cfg(debug_assertions)]
+            if let Some(hook) = self.failpoints.after_swap.clone() {
+                // The ref has moved and nothing about it is committed. An interruption here loses
+                // exactly this transaction, which is why the claim above is not in it.
+                hook();
+            }
             decided.git_steps.push(GitStep {
                 step: GitStepName::UpdateRef,
                 result: if swapped.is_some() {

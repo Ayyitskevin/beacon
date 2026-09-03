@@ -65,6 +65,9 @@ pub use candidate::{
     Candidate, CandidateDigest, CandidateEntry, CandidateError, CandidateImages, CandidateService,
     CandidateV1, InconsistentCandidate, MalformedCandidate,
 };
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub use dispatch::DispatchFailpoints;
 pub use dispatch::{
     DispatchActor, DispatchError, DispatchOutcome, DispatchReceipt, DispatchService, GitStep,
     GitStepName, GitStepResult, MutationEffect, MutationRecord, NotVerified, PauseService,
