@@ -290,10 +290,28 @@ each declared mutation's file bytes before and after, with the kind and path cop
 verified Proposal. It selects bytes, creates no authority, performs no repository action, and is
 refused if a second one is recorded for the same Proposal. A second Ruling grammar,
 `beacon.ruling.v2`, records a decision that names the Candidate it was shown: it is recorded only
-through a presentation of that exact change, v1 Rulings remain valid and simply name no Candidate,
-and neither grammar dispatches anything, because no dispatch exists.
+through a presentation of that exact change, and v1 Rulings remain valid, simply naming no Candidate
+and therefore never dispatchable.
+
+Dispatch-on-match exists, and it is the only act that mutates a Git repository on the strength of a
+record. **The repository it can reach is a Beacon-made disposable copy and nothing else**: a
+provenance gate refuses any source Beacon did not record itself creating, so landing into a
+repository the Operator owns remains impossible in this build. It runs sixteen refusal-only gates,
+requires an approved `beacon.ruling.v2` that is neither superseded nor drifted, requires the
+Project's autonomy profile to be Supervised, refuses while the Installation is paused, and refuses a
+Ruling that has already been dispatched. Its one irreversible step is a ref compare-and-swap against
+the exact base the gates observed, performed inside a single write transaction that re-verifies the
+authority, claims the Ruling, swaps the ref, and writes the Receipt, Event and terminal Run state
+together. Every dispatch Receipt names the seven constraint families ADR 0034 leaves undeclarable in
+Proposal v1, so no record of an applied change can be read as having checked them.
+
+No transport surface reaches it: an inventory test with a positive control proves the local
+transport has no dispatch, pause or resume arm, and no desktop Command exists yet. Until one does,
+dispatch is reachable only in-process, and that Command — with its own capability and `actor: owner`
+derived at the boundary — is a condition on exposing it, not something this checkpoint has.
 
 Resident-issued Team formation, Conversations, Gates, Evaluations, model Invocations,
 Cloud Link, passkeys, active agent work, and a downloadable installer do not exist yet. Nothing an
 Agent authored has ever been executed: the only commands Beacon runs are the Declared Checks an
-Owner bound by hand. Do not describe this checkpoint as a usable Alpha.
+Owner bound by hand, and the only bytes it has ever published are ones an Owner ruled on and Beacon
+put into a copy it made itself. Do not describe this checkpoint as a usable Alpha.

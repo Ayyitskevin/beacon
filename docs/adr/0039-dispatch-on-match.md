@@ -10,8 +10,10 @@ one exact Proposal, and creates no execution authority either. Preflight
 (ADR 0027) establishes whether execution would be admissible and then refuses to
 execute; a disposable worktree (ADR 0030) provides a tree; a Landlock ruleset
 (ADR 0029) and a descriptor-bound working directory (ADR 0032) bound what runs
-inside it. Nothing in that chain mutates the Operator's Repository, and the
-Blueprint's Alpha flow needs exactly one act that does: "Allow dispatches the
+inside it. Nothing in that chain mutates a Git repository at all, and the
+Blueprint's Alpha flow needs exactly one act that does — in v1, as the Decision below
+scopes it, reaching only a Beacon-made disposable copy and never the Operator's own
+repository: "Allow dispatches the
 prepared Proposal only if its digest and base revision still match"
 (`docs/BLUEPRINT.md:826`), followed by "Execution applies the bounded local change
 and emits a complete Receipt" (`:827`).
@@ -32,7 +34,7 @@ than only an act.
 
 ## Decision
 
-Dispatch is **one Operator-triggered Command with fifteen gates, one irreversible
+Dispatch is **one Operator-triggered Command with sixteen gates, one irreversible
 step, and a closed outcome vocabulary**, and it is the only act in Beacon that mutates a Git
 repository on the strength of a record. **In v1 that repository is a Beacon-made
 disposable copy and nothing else**, enforced by a hard provenance gate: landing into
@@ -49,10 +51,10 @@ repository it never opened; the content check sits with the record gates for the
 request with several faults is therefore refused by the earliest gate in this list, and multi-fault
 precedence is pinned by test rather than left to reading order.
 
-Every refusal at any of these gates: **a refusal at
-any gate G1-G12 happens before anything is written** — before a process is spawned,
-before a worktree exists, before one object enters the repository's object database.
-A refusal after the commit step W3 is a different claim, made precisely below.
+Every refusal at any of these gates: **a refusal at any gate G1-G16 happens before
+anything is written** — before one object enters the repository's object database, and
+before the transaction that could publish anything opens. A refusal after the commit step
+W3 is a different claim, made precisely below.
 
 ```text
   G1  Operator authenticated
@@ -68,13 +70,15 @@ A refusal after the commit step W3 is a different claim, made precisely below.
       declared mutations, in the Proposal's order
   G10 the Project's autonomy profile is Supervised
   G11 the Installation is not paused
-  G12 this Ruling has not already been dispatched
-  G13 the supplied content is within the Proposal's own byte bounds, and hashes
-      to the Candidate's post-image digests
-  G14 the Repository Binding names a local path, and that path is inside
-      Beacon's own copies root
+  G12 the supplied content is within the Proposal's own byte and file-size
+      bounds, and hashes to the Candidate's post-image digests
+  G13 the Repository Binding names a local path Beacon itself recorded creating,
+      by device and inode -- not by pathname
+  G14 the Candidate's declared pre-images are the bytes the pinned base tree
+      actually holds
   G15 LIVE: the repository's HEAD is a branch, equals the pinned base revision,
       and its tree is clean
+  G16 this Ruling has not already been dispatched
   ------------------------------------------------------------- no writes above
   W1  the pinned base tree read into a scratch index outside the repository
   W2  one blob per mutation from `hash-object --stdin` with no path, then one
@@ -88,7 +92,7 @@ A refusal after the commit step W3 is a different claim, made precisely below.
                                                              IRREVERSIBLE STEP
 ```
 
-`Refused` is a fact about the request. A refusal at any gate G1-G12 leaves the
+`Refused` is a fact about the request. A refusal at any gate G1-G16 leaves the
 repository byte-identical, which is the strong claim and the one row 34 needs; a
 refusal after W3 leaves the source refs and working tree unchanged and **may leave
 unreachable objects**, which the Receipt names. `Applied` names the resulting
@@ -398,21 +402,25 @@ used. Dispatch never assembles authority by joining tables.
 
 **Authority linearizes at one point.** Nothing in the gate list stops a Ruling from
 being superseded, or a policy or binding from moving, between G4/G5 and L1. A final
-re-read without serialization narrows that window rather than closing it. The
-landing slice defines one linearization rule: the tail and drift re-check, the
-uniqueness claim, the ref update, and the Receipt write are serialized per Proposal
-in one write transaction, and a deterministic two-connection test drives both the
-supersession race and the drift race.
+re-read without serialization narrows that window rather than closing it. So one
+`BEGIN IMMEDIATE` transaction holds the store's write lock — which serializes more than
+per Proposal, and is therefore stronger than the rule requires — across the Proposal's
+wall-clock ceiling, the full authority re-verification (Ruling proof, approve, not
+superseded, no drift, Supervised, not paused), the uniqueness claim, the ref
+compare-and-swap, and the Receipt, Event and terminal Run state. A dispatch that is
+superseded, drifted, paused or demoted in that window is refused at the last moment it
+could be, and a deterministic two-connection test drives both races.
 
 **Supervised only, and human-only by construction.** ADR 0004 gives Observe,
 Supervised, and Bounded; `BLUEPRINT.md:405-406` says Observe permits **no external
 mutation**. v1 dispatch requires Supervised, refuses under Observe, and defers
-Bounded. Authentication proves an account, not a
-human, so the Command boundary is where "human-triggered" becomes executable: one
-named desktop Command with its own capability, `actor: owner` **derived at that
-boundary and never accepted from a caller**, an inventory of every registration, and
-negative tests proving the service is absent from Agent, MCP, schedule, and
-reconnect surfaces.
+Bounded. Authentication proves an account, not a human, so the Command boundary is where
+"human-triggered" becomes executable. **What is built is the negative half**: `actor: owner`
+is derived inside the service and never accepted from a caller, and an inventory test with
+a positive control proves the transport has no dispatch, pause or resume arm — dispatch is
+reachable only in-process. **The positive half is a condition, not a claim**: one named
+desktop Command with its own capability must exist before dispatch is exposed to anything
+outside the crate, and this ADR does not assert that it does.
 
 **Pause Work gates dispatch.** `BLUEPRINT.md:377-379` and `:1193-1194` and
 `AGENTS.md:128` say a paused Installation rejects new dispatches, and recording
@@ -483,15 +491,18 @@ says dispatch is not conceivable yet.
 The compensating conditions, each of which is a fact about the code rather than
 an intention:
 
-- Every dispatch is triggered by an authenticated Operator Command. No Agent,
-  model, scheduler, or background task can reach it, and v1 has no code path that
-  could — the actor vocabulary is a single closed arm for exactly that reason.
+- Every dispatch runs as an authenticated Operator, derived at the boundary. No Agent,
+  model, scheduler, or background task can reach it: no transport exposes it, proved by
+  an inventory test with a positive control, and the actor vocabulary is a single closed
+  arm for exactly that reason.
 - Every dispatch Receipt names all seven families in its `not_verified` list, so
   no record of an applied change can be read as having checked them.
-- The act has exactly one irreversible step, and it is a fast-forward from a
-  commit the Operator's own branch currently names, so the prior state stays
-  reachable by object name and is recorded as `base_revision`. That is not a
-  Safety Snapshot (`BLUEPRINT:450-452`), and this ADR does not claim it is.
+- The act has exactly one irreversible step: a compare-and-swap of one ref against the
+  exact revision the gates observed, in a repository Beacon made and pinned by descriptor.
+  (An earlier draft said "fast-forward"; a kernel review showed a fast-forward merge does
+  not check that the ref still holds the observed value, and R9 withdrew it.) The prior
+  state stays reachable by object name and is recorded as `pinned_base_revision`. That is
+  not a Safety Snapshot (`BLUEPRINT:450-452`), and this ADR does not claim it is.
 - Dispatch is gated on the Project's readable-context comparison having *agreed*.
   A context that could not be verified refuses, carrying its reason.
 
@@ -501,10 +512,13 @@ outcomes, the four binding-drift arms, `ResidentLifecycleChanged`,
 that a readable context was declared at all — and records the other seven as an
 open gap rather than silently treating "unmet" as "unimportant".
 
-## What Beacon writes into the Operator's history
+## What Beacon writes into the history it creates
 
-A dispatch commit is permanent, public-facing bytes in someone else's
-repository. This ADR proposes: author and committer `Beacon <beacon@localhost>`;
+In v1 that history is a Beacon-made disposable copy's, not the Operator's. The identity is
+nevertheless decided now rather than when the scope widens, because it is not retroactive:
+every commit already minted keeps the identity it was minted with, and a dispatch commit is
+permanent bytes that may later be read, cherry-picked or pushed by a person. This ADR
+proposes: author and committer `Beacon <beacon@localhost>`;
 committer time equal to the Run's start, so the resulting revision is a function
 of its inputs rather than of the clock; the Proposal's summary as the subject;
 and the trailers `Beacon-Proposal:`, `Beacon-Ruling:`, `Beacon-Candidate:`, which
@@ -514,7 +528,7 @@ put criterion `:905`'s attribution chain inside Git itself.
 repository that is not a Beacon-made copy.** A rename afterwards is not
 retroactive: every commit already minted keeps the old identity.
 
-## What Beacon writes into the Operator's history, encoded unambiguously
+## How that commit message is encoded, unambiguously
 
 A Proposal summary may contain newlines and tabs (ADR 0034 permits both), so using it
 verbatim above the authority trailers would let a summary forge trailer-shaped lines.
