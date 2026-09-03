@@ -49,7 +49,9 @@ CREATE TABLE events (
         'proposal.submitted',
         'ruling.recorded',
         'proposal.candidate_recorded',
-        'proposal.dispatched'
+        'proposal.dispatched',
+        'installation.paused',
+        'installation.resumed'
     )),
     payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
     occurred_at_ms INTEGER NOT NULL CHECK (occurred_at_ms >= 0)
@@ -388,8 +390,14 @@ CREATE TABLE receipts (
         'source_dirty',
         'autonomy_profile_refuses',
         'installation_paused',
+        'already_dispatched',
         'admissible',
         'applied',
+        -- After preparation. These may leave objects no ref names, which is why they are not
+        -- `refused`: the repository is not byte-identical afterwards and the Receipt says so.
+        'object_write_failed',
+        'effect_does_not_match_declaration',
+        'landing_refused',
         'landing_unobserved'
     )),
     receipt_json TEXT NOT NULL CHECK (json_valid(receipt_json)),
@@ -439,6 +447,57 @@ CREATE TRIGGER receipts_no_delete
 BEFORE DELETE ON receipts
 BEGIN
     SELECT RAISE(ABORT, 'Receipts are immutable');
+END;
+
+-- What a dispatch prepared, written BEFORE the irreversible step.
+--
+-- Two jobs, and only the second is about races. It records the exact commit an attempt was about to
+-- publish, so an attempt whose result was never established can name the commit to inspect -- a
+-- worktree and an in-memory Candidate are not recovery state (gpt1). And its unique index spends
+-- the authority: one preparation per Ruling, so a second dispatch of one decision cannot even
+-- prepare, and an uncertain attempt stays spent until the Operator resolves it. The compare-and-swap
+-- is what makes application exactly once (R9); this is what makes a repeat attempt refuse rather
+-- than race.
+CREATE TABLE dispatch_preparations (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+    run_id TEXT NOT NULL,
+    ruling_digest TEXT NOT NULL CHECK (
+        length(ruling_digest) = 64
+        AND ruling_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    source TEXT NOT NULL CHECK (length(source) BETWEEN 1 AND 4096),
+    -- The device and inode of the directory the gates measured. A pathname is what a rename moves;
+    -- this is what "the same repository" means to the kernel (gpt1's path-swap probe).
+    source_device INTEGER NOT NULL,
+    source_inode INTEGER NOT NULL,
+    branch TEXT NOT NULL CHECK (length(branch) BETWEEN 1 AND 512),
+    pinned_base_revision TEXT NOT NULL CHECK (
+        length(pinned_base_revision) = 40
+        AND pinned_base_revision NOT GLOB '*[^0-9a-f]*'
+    ),
+    prepared_commit TEXT NOT NULL CHECK (
+        length(prepared_commit) = 40
+        AND prepared_commit NOT GLOB '*[^0-9a-f]*'
+    ),
+    prepared_at_ms INTEGER NOT NULL CHECK (prepared_at_ms >= 0),
+    PRIMARY KEY (workspace_id, run_id),
+    FOREIGN KEY (workspace_id, run_id) REFERENCES runs(workspace_id, id) ON DELETE RESTRICT
+) STRICT;
+
+-- One preparation per Ruling, ever.
+CREATE UNIQUE INDEX dispatch_preparations_one_per_ruling
+ON dispatch_preparations (workspace_id, ruling_digest);
+
+CREATE TRIGGER dispatch_preparations_no_update
+BEFORE UPDATE ON dispatch_preparations
+BEGIN
+    SELECT RAISE(ABORT, 'Dispatch preparations are immutable');
+END;
+
+CREATE TRIGGER dispatch_preparations_no_delete
+BEFORE DELETE ON dispatch_preparations
+BEGIN
+    SELECT RAISE(ABORT, 'Dispatch preparations are immutable');
 END;
 
 -- Pause Work, as the store's own fact. BLUEPRINT:377-379 and AGENTS.md:128 make a paused

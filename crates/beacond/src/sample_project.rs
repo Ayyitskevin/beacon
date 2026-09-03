@@ -127,6 +127,9 @@ pub struct SampleProjectInstallResult {
 #[derive(Debug)]
 pub enum SampleProjectError {
     Account(OperatorAccountError),
+    /// A copy was asked for before the Sample Project was installed. Distinct from a tampered
+    /// installation: there is nothing to copy rather than something wrong with what is there.
+    NotInstalled,
     UnsafeDestination,
     BundleMismatch,
     MaterializationFailed,
@@ -141,6 +144,7 @@ impl fmt::Display for SampleProjectError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Account(error) => write!(formatter, "operator account refused: {error}"),
+            Self::NotInstalled => write!(formatter, "the Sample Project is not installed"),
             Self::UnsafeDestination => write!(formatter, "Sample Project destination is unsafe"),
             Self::BundleMismatch => {
                 write!(formatter, "Sample Project bundle digest does not match")
@@ -292,6 +296,39 @@ impl SampleProjectService {
                 installation,
             })
         })
+    }
+
+    /// Copy the installed Sample Project into a directory Beacon owns, and return where it went.
+    ///
+    /// The v1 dispatch path reaches **only Beacon-made copies** (R8): a Candidate that authorizes an
+    /// effect is a Material Artifact and v1 has no non-author Evaluation of one, so the blast radius
+    /// is bounded by construction. This is the act that makes a copy Beacon-made -- the provenance
+    /// gate then asks where the directory is, not what a row claims about it.
+    ///
+    /// The installation is verified first, so a tampered tree is not what gets copied, and the
+    /// bundled Sample Project itself is never the dispatch target: its own verifier requires
+    /// `refs/heads/main` to hold the frozen revision, and a dispatch would move it.
+    pub fn copy_for_dispatch(
+        &self,
+        copies_root: impl AsRef<Path>,
+        label: &str,
+    ) -> Result<PathBuf, SampleProjectError> {
+        let bundle_digest = self.verified_bundle_digest()?;
+        let installation = self.with_authenticated_store(|connection, _now| {
+            load_installation(connection, self.workspace_id)?
+                .ok_or(SampleProjectError::NotInstalled)
+        })?;
+        self.verify_installation(&installation, &bundle_digest)?;
+        let source = self.repository_path();
+
+        let root = copies_root.as_ref();
+        fs::create_dir_all(root)?;
+        let destination = root.join(format!("sample-project-{label}"));
+        if destination.exists() {
+            return Err(SampleProjectError::UnsafeDestination);
+        }
+        copy_tree(&source, &destination)?;
+        Ok(destination)
     }
 
     fn with_authenticated_store<T>(
@@ -551,6 +588,32 @@ impl SampleProjectService {
         self.test_store_path = Some(store_path.as_ref().to_owned());
         self
     }
+}
+
+/// Copy one directory tree, refusing anything that is not a directory or a regular file.
+///
+/// No symlink is followed and none is recreated: a copy that reproduced a link would carry a
+/// reference out of the tree Beacon owns, and the whole point of the copy is that everything the
+/// dispatch path can reach is inside it.
+fn copy_tree(source: &Path, destination: &Path) -> Result<(), SampleProjectError> {
+    fs::create_dir(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        let target = destination.join(entry.file_name());
+        if metadata.file_type().is_symlink() {
+            return Err(SampleProjectError::TamperedInstallation);
+        } else if metadata.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else if metadata.is_file() {
+            fs::copy(entry.path(), &target)?;
+            let mode = metadata.permissions().mode();
+            fs::set_permissions(&target, fs::Permissions::from_mode(mode))?;
+        } else {
+            return Err(SampleProjectError::TamperedInstallation);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

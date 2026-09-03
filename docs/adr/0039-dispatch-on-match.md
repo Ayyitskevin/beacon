@@ -43,7 +43,13 @@ landing slices" below. Everything this section says is scoped by that sentence.
 dispatch(ruling_digest, content) -> DispatchReceipt
 ```
 
-The gates run in this order, and the order is part of the decision: **a refusal at
+The gates run in this order, and the order is part of the decision. Everything the store can answer
+runs before anything the filesystem must, so a refusal costs no I/O and cannot be attributed to a
+repository it never opened; the content check sits with the record gates for the same reason. A
+request with several faults is therefore refused by the earliest gate in this list, and multi-fault
+precedence is pinned by test rather than left to reading order.
+
+Every refusal at any of these gates: **a refusal at
 any gate G1-G12 happens before anything is written** — before a process is spawned,
 before a worktree exists, before one object enters the repository's object database.
 A refusal after the commit step W3 is a different claim, made precisely below.
@@ -60,10 +66,15 @@ A refusal after the commit step W3 is a different claim, made precisely below.
       sequence than the Ruling
   G9  the Candidate binds the same base revision and exactly the Proposal's
       declared mutations, in the Proposal's order
-  G10 the Repository Binding names a local path
-  G11 LIVE: the repository's HEAD is a branch, equals the pinned base revision,
+  G10 the Project's autonomy profile is Supervised
+  G11 the Installation is not paused
+  G12 this Ruling has not already been dispatched
+  G13 the supplied content is within the Proposal's own byte bounds, and hashes
+      to the Candidate's post-image digests
+  G14 the Repository Binding names a local path, and that path is inside
+      Beacon's own copies root
+  G15 LIVE: the repository's HEAD is a branch, equals the pinned base revision,
       and its tree is clean
-  G12 the supplied content hashes to the Candidate's post-image digests
   ------------------------------------------------------------- no writes above
   W1  a disposable worktree at the pinned base
   W2  per-target writes, resolved beneath the worktree root with openat2 and

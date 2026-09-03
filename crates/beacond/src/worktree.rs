@@ -51,6 +51,7 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -542,7 +543,7 @@ pub(crate) struct PinnedRepository {
     path: PathBuf,
     device: u64,
     inode: u64,
-    _directory: fs::File,
+    directory: fs::File,
 }
 
 impl PinnedRepository {
@@ -569,12 +570,44 @@ impl PinnedRepository {
             device: metadata.dev(),
             inode: metadata.ino(),
             path,
-            _directory: directory,
+            directory,
         })
     }
 
     pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Enter this repository in a child process **by descriptor**.
+    ///
+    /// `fchdir` in `pre_exec` runs after the fork and before the exec, so the child's working
+    /// directory is the directory this value opened -- not whatever the pathname resolves to when
+    /// the child starts. A kernel review swapped a decoy in for the duration of a Git invocation
+    /// and restored the original before the post-check, which a pathname-entering command cannot
+    /// notice; entering by descriptor means there is no pathname resolution left to race.
+    ///
+    /// The descriptor is `O_CLOEXEC`, which is correct: `fchdir` happens before the exec that would
+    /// close it.
+    pub(crate) fn enter(&self, command: &mut Command) {
+        use std::os::fd::AsRawFd;
+        let fd = self.directory.as_raw_fd();
+        // SAFETY: `fchdir` is async-signal-safe, touches only this child's working directory, and
+        // the descriptor outlives the spawn because `self` is borrowed for the call.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::fchdir(fd) == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            });
+        }
+    }
+
+    /// The device and inode this value opened. Recorded with a dispatch so a later reader can ask
+    /// whether the repository it is looking at is the one that was written to.
+    pub(crate) fn identity(&self) -> (u64, u64) {
+        (self.device, self.inode)
     }
 
     /// Does the pinned pathname still name the directory this value opened?
@@ -615,7 +648,7 @@ pub(crate) fn read_pinned(
 ) -> Option<String> {
     let filter_drivers = repository_filter_drivers(repository.path()).ok()?;
     let mut command = read_only_git_command(Path::new(GIT), &filter_drivers);
-    command.arg("-C").arg(repository.path());
+    repository.enter(&mut command);
     for argument in arguments {
         command.arg(argument);
     }
@@ -627,6 +660,72 @@ pub(crate) fn read_pinned(
         _ => None,
     }
 }
+
+/// Run one **mutating** Git invocation in a pinned repository, bounded, with optional stdin.
+///
+/// The mutating half of the split gpt1's probes forced: gate reads carry `GIT_OPTIONAL_LOCKS=0`
+/// because a read that rewrites `.git/index` cannot support a zero-mutation claim, and these
+/// invocations are the ones allowed to write. Everything else is the same hardened shape -- no
+/// hooks, no filters, no fsmonitor, no protocols, no credential helper, a closed environment.
+///
+/// `index_file` points Git at a scratch index outside the repository, so `read-tree`,
+/// `update-index` and `write-tree` build a tree without touching the repository's own index or its
+/// working tree. `--literal-pathspecs` is passed to every invocation because a Proposal path may
+/// begin with `:` and pathspec magic is not something a declared path opts into.
+///
+/// The pin is re-checked after the child exits: a rename between the check and the write makes the
+/// result void rather than wrong.
+pub(crate) fn write_pinned(
+    repository: &PinnedRepository,
+    index_file: Option<&Path>,
+    identity: Option<&GitIdentity>,
+    arguments: &[&str],
+    stdin_bytes: Option<&[u8]>,
+    budget: Duration,
+) -> Option<String> {
+    let filter_drivers = repository_filter_drivers(repository.path()).ok()?;
+    let mut command = hardened_git_command(Path::new(GIT), &filter_drivers);
+    if let Some(index) = index_file {
+        command.env("GIT_INDEX_FILE", index);
+    }
+    if let Some(identity) = identity {
+        command
+            .env("GIT_AUTHOR_NAME", &identity.name)
+            .env("GIT_AUTHOR_EMAIL", &identity.email)
+            .env("GIT_AUTHOR_DATE", &identity.date)
+            .env("GIT_COMMITTER_NAME", &identity.name)
+            .env("GIT_COMMITTER_EMAIL", &identity.email)
+            .env("GIT_COMMITTER_DATE", &identity.date);
+    }
+    repository.enter(&mut command);
+    command.arg("--literal-pathspecs");
+    for argument in arguments {
+        command.arg(argument);
+    }
+    match run_git_bounded_with_stdin(command, stdin_bytes, budget) {
+        Bounded::Finished {
+            success: true,
+            stdout,
+        } if repository.still_pinned() => Some(stdout),
+        _ => None,
+    }
+}
+
+/// Who Beacon says wrote a commit, and when.
+///
+/// Fixed by the caller rather than read from the environment, so the resulting revision is a
+/// function of its inputs: two dispatches of one Candidate onto one base produce one commit id.
+#[derive(Debug, Clone)]
+pub(crate) struct GitIdentity {
+    pub(crate) name: String,
+    pub(crate) email: String,
+    /// A Git date string. `<unix seconds> +0000` is the form this uses.
+    pub(crate) date: String,
+}
+
+/// How long a mutating Git invocation may take. Longer than a read: writing objects and updating a
+/// checkout is real work.
+pub(crate) const WRITE_BUDGET: Duration = Duration::from_secs(60);
 
 /// How long a read-only gate read may take before its answer is unknown.
 pub(crate) const READ_BUDGET: Duration = Duration::from_secs(10);
@@ -697,14 +796,49 @@ fn configure_closed_git_environment(command: &mut Command) {
 /// `worktree add`, `status`, and `worktree remove` invocations spawn no
 /// long-lived processes, while process-group interruption belongs to whichever
 /// layer runs repository-declared programs.
-fn run_git_bounded(mut command: Command, budget: Duration) -> Bounded {
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+fn run_git_bounded(command: Command, budget: Duration) -> Bounded {
+    run_git_bounded_with_stdin(command, None, budget)
+}
+
+/// [`run_git_bounded`], with bytes to feed the child.
+///
+/// The write happens before the wait loop and the pipe is closed immediately after, because a child
+/// reading standard input to EOF -- `hash-object --stdin` is exactly that -- never exits while the
+/// pipe is open, and would be reported as a timeout it did not have.
+fn run_git_bounded_with_stdin(
+    mut command: Command,
+    stdin_bytes: Option<&[u8]>,
+    budget: Duration,
+) -> Bounded {
+    if stdin_bytes.is_some() {
+        command.stdin(Stdio::piped());
+    }
+    run_git_bounded_inner(command, stdin_bytes, budget)
+}
+
+fn run_git_bounded_inner(
+    mut command: Command,
+    stdin_bytes: Option<&[u8]>,
+    budget: Duration,
+) -> Bounded {
+    if stdin_bytes.is_none() {
+        command.stdin(Stdio::null());
+    }
+    command.stdout(Stdio::piped()).stderr(Stdio::null());
     let Ok(mut child) = command.spawn() else {
         return Bounded::Failed;
     };
+    if let Some(bytes) = stdin_bytes {
+        let Some(mut pipe) = child.stdin.take() else {
+            let _ = child.kill();
+            return Bounded::Failed;
+        };
+        if std::io::Write::write_all(&mut pipe, bytes).is_err() {
+            let _ = child.kill();
+            return Bounded::Failed;
+        }
+        drop(pipe);
+    }
     let started = Instant::now();
     let status = loop {
         match child.try_wait() {
@@ -746,7 +880,7 @@ mod tests {
 
     use uuid::Uuid;
 
-    use super::{CleanupOutcome, KeepReason, Worktree, status_holds};
+    use super::{CleanupOutcome, KeepReason, PinnedRepository, Worktree, status_holds};
 
     /// A temporary directory removed on drop.
     struct TempDir {
@@ -842,5 +976,45 @@ mod tests {
             }
         );
         assert!(path.is_dir(), "the tree was kept, so it is still on disk");
+    }
+
+    #[test]
+    fn a_pinned_repository_notices_a_rename_and_a_decoy_at_its_pathname() {
+        // gpt1's path-swap probe, as a deterministic unit test rather than a race. `git -C <path>`
+        // re-resolves the name on every invocation, so a directory renamed away and replaced by an
+        // equivalent one redirects everything that follows. The pin is device and inode, which is
+        // what "the same directory" means to the kernel.
+        let root = std::env::temp_dir().join(format!("beacon-pin-{}", Uuid::new_v4()));
+        let repository = root.join("repository");
+        let elsewhere = root.join("moved");
+        fs::create_dir_all(repository.join(".git/objects")).unwrap();
+        fs::create_dir_all(root.join("decoy/.git/objects")).unwrap();
+
+        let pinned = PinnedRepository::open(&repository).expect("a directory with .git is a store");
+        assert!(
+            pinned.still_pinned(),
+            "a untouched repository is not pinned"
+        );
+
+        // Renamed away: the pathname resolves to nothing.
+        fs::rename(&repository, &elsewhere).unwrap();
+        assert!(
+            !pinned.still_pinned(),
+            "a renamed repository still read as pinned"
+        );
+
+        // And renamed away with an equivalent repository put in its place: the pathname resolves,
+        // and to the wrong directory.
+        fs::rename(root.join("decoy"), &repository).unwrap();
+        assert!(
+            !pinned.still_pinned(),
+            "a decoy at the pinned pathname read as the repository that was measured"
+        );
+
+        // The original, wherever it now lives, is still the directory that was pinned.
+        let moved = PinnedRepository::open(&elsewhere).unwrap();
+        assert_eq!(moved.identity(), pinned.identity());
+
+        fs::remove_dir_all(&root).unwrap();
     }
 }
