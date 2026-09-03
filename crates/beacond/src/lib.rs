@@ -127,6 +127,9 @@ pub use ruling::{
     InconsistentRuling, MalformedRuling, Ruling, RulingDecider, RulingDecision, RulingDigest,
     RulingError, RulingForce, RulingGrammar, RulingService, RulingSupersedes, RulingV1,
 };
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub use sample_project::CopyFailpoints;
 pub use sample_project::{
     SAMPLE_PROJECT_BUNDLE_VERSION, SampleProjectDigest, SampleProjectError,
     SampleProjectInstallOutcome, SampleProjectInstallResult, SampleProjectInstallation,

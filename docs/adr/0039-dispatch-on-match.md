@@ -455,10 +455,36 @@ durability trade and it should be ruled explicitly, not assumed from this paragr
 through the copies-root descriptor — `mkdirat` then `openat` on one component, no resolution of
 the parent chain, no symlink to follow — and everything after that uses the descriptor, so the
 row records the identity of the directory Beacon made rather than of whatever a later pathname
-lookup returns. POSIX offers no `O_CREAT` for a directory, so a window between those two calls
-remains: it is one syscall wide, it cannot be reached by resolving a pathname differently, and
-exploiting it needs write access to Beacon's own copies root — which is also what it takes to
-read the provenance token below. That residual is stated rather than claimed away.
+lookup returns. POSIX offers no `O_CREAT` for a directory, so the window between those two calls
+is real and cannot be removed. Holding the parent descriptor removed ancestor retargeting; it
+never bound the child inode, and a review replaced the final component inside that window — the
+`openat` answered with the replacement, which then received a provenance token and was recorded
+as Beacon-created.
+
+What the build does instead is state the property it can actually establish, which is not
+atomicity:
+
+* **The window cannot be aimed at.** The directory is created under a staging component carrying
+  a fresh UUID and is renamed to its published name only after the checks below pass, so a
+  substitution cannot be prepared against a name it can predict.
+* **A substitution inside the window is detected before any provenance exists.** The inode
+  `mkdirat` produced is read back through the parent descriptor *before* the window opens, and
+  the opened descriptor is refused unless it is that inode. The refusal happens before the tree
+  is copied, before a token is generated, and before a `beacon_repositories` row is written.
+* **The published name refers to that inode at the moment it is published**, re-checked
+  immediately before the `renameat`.
+* The mode is set with `fchmod` on the descriptor rather than `fchmodat` on the name, which
+  removes the second of the two pathname operations the function used to perform.
+
+Three committed tests hold those apart, because one scenario cannot: a substitution left in
+place proves the inode is captured before the window (reading it afterwards makes both
+comparisons compare the impostor with itself and the copy succeeds); a substitution undone
+before the name check proves the descriptor comparison; a substitution introduced after the open
+proves the name check. Each mutant kills exactly one test. What remains untested by
+construction is unpredictability itself — a predictable staging name is not observable from
+inside the process, and it is a cost to an attacker rather than a property a test can assert.
+Exploiting what is left needs write access to Beacon's own copies root, which is also what it
+takes to read the provenance token below. That residual is stated rather than claimed away.
 The row carries a device, an inode, and a **provenance token** Beacon generates and writes into
 the copy's own configuration; the gate re-reads that token through the pinned descriptor and
 requires it to equal the recorded one. Identity alone would not do: device and inode are reused
