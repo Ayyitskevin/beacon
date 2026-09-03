@@ -657,9 +657,10 @@ is the same three-member shape this store uses everywhere: `algorithm`, `canonic
 were bytes of.
 
 `gitSteps` is one entry per Git invocation **dispatch makes on its own behalf**, in the order
-it made them, including the ones that did not succeed: the pre-image reads, the three live gate
-reads, the object writes, the effect post-condition, the swap, the observation of what the swap
-produced, and the checkout. `step` is a closed `GitStepName`; `argv` is the exact argument
+it made them, including the ones that did not succeed: the provenance token read, the pre-image
+reads, the three live gate reads, the object writes, the effect post-condition's diff and its
+re-read of each blob in the prepared commit, the swap, the observation of what the swap
+produced, and the checkout. A landing that changes one file records fifteen. `step` is a closed `GitStepName`; `argv` is the exact argument
 vector dispatch passes; `result` is a bounded `GitStepResult`, never dynamic stderr text, so two
 implementations that run the same steps write the same bytes.
 
@@ -705,7 +706,7 @@ autonomyProfile  observe · supervised
 sourceKind       local_path
 gitSteps[].step  read_tree · hash_object · update_index · write_tree · commit_tree ·
                  diff_name_status · symbolic_ref · rev_parse · status · cat_file ·
-                 update_ref · read_tree_checkout
+                 config · update_ref · read_tree_checkout
 gitSteps[].result   succeeded · did_not_succeed
 perMutation[].kind  create_file · modify_file · delete_file
 perMutation[].effect not_attempted · written · removed
