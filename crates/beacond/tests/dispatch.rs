@@ -3764,6 +3764,65 @@ fn a_reconstructed_receipt_that_cannot_name_its_residue_claims_no_byte_identity(
     assert_eq!(receipt.repository_effect(), RepositoryEffect::Unknown);
 }
 
+#[test]
+fn a_landing_nobody_observed_claims_no_unreferenced_objects() {
+    // The other half of the defect the four-arm `repository_effect` was introduced to fix (gpt2).
+    // `ObjectResidueUnknown` was mapped to `Unknown`; every other non-Applied Receipt carrying a
+    // prepared commit fell through to `UnreferencedObjects`, whose contract asserts that objects
+    // exist which no ref names.
+    //
+    // A reconstructed `LandingUnobserved` carries `LandingResultUnknown` for exactly the reason
+    // that assertion cannot be made: the repository could not say what became of the commit. Here
+    // the branch holds a DESCENDANT of the prepared commit, so the commit is reachable and named by
+    // history -- `UnreferencedObjects` is not merely unproven, it is false.
+    let fixture = admitted_mission("landing-unobserved");
+    let (repository, ruling_digest) = fixture.approved("landing-unobserved");
+    fixture.dispatch_until_death(&ruling_digest, "after_swap");
+
+    let (prepared, _branch) = fixture
+        .preparation()
+        .expect("the claim did not survive the crash");
+    assert_eq!(
+        CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]),
+        prepared,
+        "the swap did not happen, so this test proves nothing"
+    );
+
+    // Later history descending from the prepared commit: the branch no longer equals it and no
+    // longer equals the pinned base, which is what startup reads as "unobserved".
+    fs::write(repository.path.join(TARGET), OTHER_BYTES).unwrap();
+    CopyRepository::git(&repository.path, &["add", TARGET]);
+    CopyRepository::git(&repository.path, &["commit", "-m", "a later commit"]);
+    let head = CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]);
+    assert_ne!(head, prepared);
+    assert_eq!(
+        CopyRepository::git(&repository.path, &["rev-parse", &format!("{head}~1")]),
+        prepared,
+        "the later commit must descend from the prepared one"
+    );
+
+    fixture.restart().unwrap();
+
+    let payload: String = fixture
+        .store
+        .connect()
+        .query_row("SELECT receipt_json FROM receipts", [], |row| row.get(0))
+        .unwrap();
+    let receipt: beacond::DispatchReceipt = serde_json::from_str(&payload).unwrap();
+    assert_eq!(receipt.outcome, DispatchOutcome::LandingUnobserved);
+    assert_eq!(receipt.prepared_commit.as_deref(), Some(prepared.as_str()));
+    assert!(
+        receipt
+            .not_verified
+            .contains(&NotVerified::LandingResultUnknown)
+    );
+    assert_eq!(
+        receipt.repository_effect(),
+        RepositoryEffect::Unknown,
+        "a landing nobody observed cannot assert that objects exist which no ref names"
+    );
+}
+
 /// A second post-image, so two Rulings on one base prepare two different commits.
 const OTHER_BYTES: &[u8] = b"fn main() { /* the other dispatch */ }\n";
 
