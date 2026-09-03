@@ -37,14 +37,27 @@ use uuid::Uuid;
 
 use crate::candidate::{candidate_event_sequence, verified_candidate_for_proposal};
 use crate::operator_account::{OperatorAccountError, OperatorAccountService};
+use crate::project::current_autonomy_profile;
 use crate::project_repository::{PreflightBinding, repository_for_preflight_at};
-use crate::proposal::{MutationKind, ProposalDigest, UnmetPrecondition, verified_proposal_within};
-use crate::ruling::{RulingDecision, RulingDigest, ruling_event_sequence, verified_ruling_within};
-use crate::worktree::{PinnedRepository, READ_BUDGET, read_pinned};
+use crate::proposal::{
+    MutationKind, ProposalDigest, UnmetPrecondition, proposal_row_scope, verified_proposal_within,
+};
+use crate::ruling::{
+    RulingDecision, RulingDigest, ruling_event_sequence, ruling_row_scope, verified_ruling_within,
+};
+use crate::worktree::{
+    GitIdentity, PinnedRepository, READ_BUDGET, WRITE_BUDGET, read_pinned, write_pinned,
+};
 use crate::{AutonomyProfile, CandidateDigest, RepositorySourceKind};
 
-/// A dispatch Run's lease. It performs no execution and no landing in this build, so it is short.
+/// A dispatch Run's lease.
 const LEASE_MS: u64 = 60_000;
+
+/// Who Beacon says wrote a dispatched commit. Permanent, public-facing bytes in someone else's
+/// repository: ADR 0039 asks the Product Steward to confirm this identity before any dispatch into
+/// a repository that is not a Beacon-made copy.
+const COMMIT_AUTHOR_NAME: &str = "Beacon";
+const COMMIT_AUTHOR_EMAIL: &str = "beacon@localhost";
 
 /// How a dispatch ended.
 ///
@@ -89,12 +102,29 @@ pub enum DispatchOutcome {
     AutonomyProfileRefuses,
     /// The Installation is paused.
     InstallationPaused,
-    /// Every gate held. Nothing was applied, because this build has no landing path.
+    /// This Ruling has already been dispatched. One decision authorizes one application: an attempt
+    /// whose result was never established stays spent until the Operator resolves it, rather than
+    /// being retried into a repeat effect.
+    AlreadyDispatched,
+    /// Every gate held and the act was not attempted.
     ///
-    /// The same shape as `PreflightOutcome::Verified`: it reports that the act would be admissible,
-    /// never that it happened. When landing ships, this outcome stops being emitted and stays in
-    /// the vocabulary so recorded Receipts remain decodable.
+    /// Emitted by the build that had no landing path. Retained so recorded Receipts remain
+    /// decodable; new dispatches do not emit it.
     Admissible,
+    /// An object, tree or commit could not be written. **After preparation**: the repository is not
+    /// byte-identical, because objects already written are reachable from no ref.
+    ObjectWriteFailed,
+    /// The prepared commit does not touch exactly the declared set, or a blob in it does not hash
+    /// to what the Candidate declared. Refused rather than published, with the same residue.
+    EffectDoesNotMatchDeclaration,
+    /// The compare-and-swap refused: the branch no longer held the pinned base at the moment of the
+    /// swap. Nothing was published; the prepared objects remain unreferenced.
+    LandingRefused,
+    /// The swap's result could not be established. The Receipt names the prepared commit, and the
+    /// preparation record persisted it before the attempt so this is answerable afterwards.
+    LandingUnobserved,
+    /// The branch now names the prepared commit, verified after the swap.
+    Applied,
 }
 
 impl DispatchOutcome {
@@ -117,7 +147,13 @@ impl DispatchOutcome {
             Self::SourceDirty => "source_dirty",
             Self::AutonomyProfileRefuses => "autonomy_profile_refuses",
             Self::InstallationPaused => "installation_paused",
+            Self::AlreadyDispatched => "already_dispatched",
             Self::Admissible => "admissible",
+            Self::ObjectWriteFailed => "object_write_failed",
+            Self::EffectDoesNotMatchDeclaration => "effect_does_not_match_declaration",
+            Self::LandingRefused => "landing_refused",
+            Self::LandingUnobserved => "landing_unobserved",
+            Self::Applied => "applied",
         }
     }
 
@@ -127,12 +163,14 @@ impl DispatchOutcome {
     /// Everything this build can produce is a refusal in Run terms: `Admissible` says the act would
     /// have been permitted and that nothing was done, which is not `applied`.
     pub(crate) fn run_state(&self) -> &'static str {
-        "refused"
-    }
-
-    /// Did every gate hold?
-    fn admissible(&self) -> bool {
-        matches!(self, Self::Admissible)
+        match self {
+            Self::Applied => "applied",
+            // Everything else is a Run that did not apply a change. `LandingUnobserved` is a
+            // terminal Receipt whose Git result is unknown -- which is not `unconfirmed`: ADR 0031
+            // reserves that for a lease that expired with NO Receipt, and reusing the word would
+            // make two different facts one.
+            _ => "refused",
+        }
     }
 }
 
@@ -155,8 +193,13 @@ pub struct MutationRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MutationEffect {
-    /// Verified against the supplied content and not written: this build has no landing path.
+    /// Verified against the supplied content and not written.
     NotAttempted,
+    /// Written into the prepared commit, and the blob in that commit's tree hashes to what the
+    /// Candidate declared. A fact about objects, never about a checkout.
+    Written,
+    /// Removed in the prepared commit: the path resolves to nothing there.
+    Removed,
 }
 
 /// The record of one dispatch.
@@ -188,14 +231,69 @@ pub struct DispatchReceipt {
     /// and are recorded separately.
     pub pinned_base_revision: Option<String>,
     pub observed_head: Option<String>,
+    /// The commit this dispatch prepared, present from the moment it exists -- including when the
+    /// landing's result could not be established, which is the case it exists for.
+    pub prepared_commit: Option<String>,
+    /// The revision the branch names afterwards, when that was verified.
+    pub resulting_revision: Option<String>,
+    /// Whether Beacon updated the copy's working tree after the swap. A separately observable step,
+    /// recorded separately.
+    pub checkout_updated: bool,
     /// One row per declared mutation, in the Proposal's order. Empty when the refusal came before
     /// the Candidate could be read.
     pub per_mutation: Vec<MutationRecord>,
     pub started_at_ms: u64,
     pub ended_at_ms: u64,
-    /// Everything this dispatch did not establish. A Receipt that cannot say what it failed to
-    /// check is not evidence (ADR 0027).
-    pub not_verified: Vec<String>,
+    /// Everything this dispatch did not establish, as a **closed vocabulary in a fixed order**. A
+    /// Receipt that cannot say what it failed to check is not evidence (ADR 0027), and free-form
+    /// strings cannot be checked by a reader or by reconciliation (gpt1).
+    pub not_verified: Vec<NotVerified>,
+}
+
+impl DispatchReceipt {
+    /// Was the repository byte-identical afterwards?
+    ///
+    /// Read off the evidence rather than inferred from the outcome: objects are written exactly
+    /// when a commit was prepared, so a Receipt with no prepared commit is one that refused before
+    /// anything reached the object database. A Receipt WITH one may have left objects no ref names,
+    /// which is the weaker claim and the one gpt1 required be stated separately.
+    pub fn left_repository_byte_identical(&self) -> bool {
+        self.prepared_commit.is_none()
+    }
+}
+
+/// What a dispatch could not establish. Closed, ordered, and the same set on every Receipt except
+/// for the arms that describe one attempt's own outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotVerified {
+    /// The seven families ADR 0034 leaves undeclarable in Proposal v1. One arm each, because an
+    /// Operator reading a Receipt should see which contract is missing, not a count.
+    ExecutionPolicyConstraint,
+    SandboxConstraint,
+    NetworkConstraint,
+    ModelProviderConstraint,
+    CommandAllowlistConstraint,
+    ToolAllowlistConstraint,
+    EvaluationsConstraint,
+    /// No Ruling grammar cites an Evaluation, so no dispatch can claim a non-author one.
+    NonAuthorEvaluationOfCandidate,
+    /// No snapshot mechanism exists (`BLUEPRINT.md:450-452`).
+    SafetySnapshot,
+    /// The object store answers presence, not reachability from a ref.
+    BaseRevisionReachability,
+    /// The Declared Checks were not run against the applied change: that is its own Run.
+    DeclaredChecksAgainstResult,
+    /// A revision the Ruling copied has moved; the Receipt's drift list says which.
+    RulingBindingsMoved,
+    /// A live precondition of the Proposal does not hold.
+    ProposalPreconditions,
+    /// The change was not applied.
+    ChangeNotApplied,
+    /// Whether the branch moved could not be established; `prepared_commit` names what to inspect.
+    LandingResultUnknown,
+    /// Objects were written that no ref names.
+    UnreferencedObjectResidue,
 }
 
 /// The authenticated command actor, which for a dispatch is always the Owner.
@@ -213,6 +311,8 @@ pub enum DispatchActor {
 #[derive(Debug)]
 pub enum DispatchError {
     Account(OperatorAccountError),
+    /// Resume was refused: these Runs have not been resolved or explicitly accepted.
+    UnresolvedRuns(UnresolvedRuns),
     /// No Ruling in this Workspace has that digest.
     RulingNotFound,
     /// The Ruling names a Proposal this Workspace does not have, which is a broken store rather
@@ -226,6 +326,11 @@ impl std::fmt::Display for DispatchError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Account(error) => write!(formatter, "operator account refused: {error}"),
+            Self::UnresolvedRuns(unresolved) => write!(
+                formatter,
+                "{} Run(s) are unresolved; resolve them or accept their uncertainty",
+                unresolved.run_ids.len()
+            ),
             Self::RulingNotFound => write!(formatter, "no Ruling has that digest"),
             Self::InvalidStore => write!(formatter, "dispatch state is invalid"),
             Self::Store(error) => write!(formatter, "dispatch store failed: {error}"),
@@ -294,15 +399,21 @@ impl DispatchService {
 
     /// Run every gate for one Ruling and record what they decided.
     ///
-    /// **Applies nothing.** The act this build gates does not exist yet, so the best outcome
-    /// reachable is `Admissible`: every gate held, and the repository is untouched either way.
+    /// The gates, then the act. A refusal at any gate leaves the repository byte-identical; a
+    /// refusal after the commit step leaves the refs and working tree unchanged and may leave
+    /// objects no ref names, which the Receipt says.
     pub fn dispatch(
         &self,
         ruling_digest: &str,
         content: &[SuppliedContent],
     ) -> Result<DispatchReceipt, DispatchError> {
         let opened = self.open_run(ruling_digest)?;
-        let decided = self.decide(&opened, content)?;
+        let mut decided = self.decide(&opened, content)?;
+        // Only a decision that held reaches the act. Everything above this line left the repository
+        // byte-identical; everything below may not, and says which.
+        if decided.outcome == Some(DispatchOutcome::Admissible) {
+            decided.outcome = Some(self.land(&opened, &mut decided, content)?);
+        }
         self.close(opened, decided)
     }
 
@@ -315,23 +426,24 @@ impl DispatchService {
             let started_at_ms = u64::try_from(now).map_err(|_| DispatchError::InvalidStore)?;
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let Some(ruling) =
-                verified_ruling_within(&transaction, self.workspace_id, ruling_digest)
+            // Same reasoning for the Ruling: `ruling_row_scope` reads the columns the Run row
+            // needs. Whether those bytes prove is the first gate's question, and it must be
+            // answerable with a Receipt.
+            let Some((proposal_digest, bindings)) =
+                ruling_row_scope(&transaction, self.workspace_id, ruling_digest)
                     .map_err(|_| DispatchError::InvalidStore)?
             else {
                 return Err(DispatchError::RulingNotFound);
             };
-            let bindings = ruling.payload().bindings.clone();
-            let Some(proposal) = verified_proposal_within(
-                &transaction,
-                self.workspace_id,
-                &ruling.payload().proposal.value,
-            )
-            .map_err(|_| DispatchError::InvalidStore)?
+            // The Run row's own columns come from the Proposal's indexed row, NOT from a proof: a
+            // record too corrupt to prove must still reach the gate that refuses it, and a Run that
+            // never opened cannot carry a Receipt saying why (gpt1's P0).
+            let Some((project_id, _)) =
+                proposal_row_scope(&transaction, self.workspace_id, &proposal_digest)
+                    .map_err(|_| DispatchError::InvalidStore)?
             else {
                 return Err(DispatchError::InvalidStore);
             };
-            let project_id = proposal.payload().scope.project_id;
             let run_id = Uuid::new_v4();
             transaction.execute(
                 "INSERT INTO runs (
@@ -390,12 +502,17 @@ impl DispatchService {
 
         // G2: the Ruling, proved from its own bytes, with its force derived now and its Event
         // required. A snapshot taken before this transaction would be a fact about another moment.
-        let Some(ruling) =
-            verified_ruling_within(connection, self.workspace_id, &opened.ruling_digest)
-                .map_err(|_| DispatchError::InvalidStore)?
-        else {
-            return Ok(decided.refused(DispatchOutcome::RulingUnreadable));
-        };
+        // A Ruling that cannot be proved is a REFUSAL, not an error: the Run is already open, and
+        // an error path would leave it nonterminal with no Receipt -- which AGENTS.md:154 forbids
+        // and which would make "every gate refuses with evidence" false for exactly the states the
+        // gate is named for (gpt1's P0).
+        let ruling =
+            match verified_ruling_within(connection, self.workspace_id, &opened.ruling_digest) {
+                Ok(Some(ruling)) => ruling,
+                Ok(None) | Err(_) => {
+                    return Ok(decided.refused(DispatchOutcome::RulingUnreadable));
+                }
+            };
         decided.ruling_digest = Some(ruling.digest().clone());
         decided.proposal_digest = Some(ruling.payload().proposal.clone());
         decided.bindings = Some(ruling.payload().bindings.clone());
@@ -418,12 +535,14 @@ impl DispatchService {
         // readiness. A digest comparison alone would be a weaker rule than `ProposalService::get`
         // applies, and readiness is the part a dispatch must not skip.
         let proposal_digest = ruling.payload().proposal.value.clone();
-        let Some(proposal) =
-            verified_proposal_within(connection, self.workspace_id, &proposal_digest)
-                .map_err(|_| DispatchError::InvalidStore)?
-        else {
-            return Ok(decided.refused(DispatchOutcome::ProposalDigestMismatch));
-        };
+        let proposal =
+            match verified_proposal_within(connection, self.workspace_id, &proposal_digest) {
+                Ok(Some(proposal)) => proposal,
+                Ok(None) | Err(_) => {
+                    return Ok(decided.refused(DispatchOutcome::ProposalDigestMismatch));
+                }
+            };
+        decided.summary = proposal.payload().intent.summary.clone();
         let unmet = live_unmet(proposal.readiness().unmet());
         if !unmet.is_empty() {
             decided.unmet = unmet;
@@ -438,23 +557,24 @@ impl DispatchService {
             return Ok(decided.refused(DispatchOutcome::CandidateAbsent));
         };
         decided.candidate_digest = Some(named.clone());
-        let Some(candidate) =
-            verified_candidate_for_proposal(connection, self.workspace_id, &proposal_digest)
-                .map_err(|_| DispatchError::InvalidStore)?
-        else {
-            return Ok(decided.refused(DispatchOutcome::CandidateAbsent));
+        let candidate = match verified_candidate_for_proposal(
+            connection,
+            self.workspace_id,
+            &proposal_digest,
+        ) {
+            Ok(Some(candidate)) => candidate,
+            Ok(None) => return Ok(decided.refused(DispatchOutcome::CandidateAbsent)),
+            Err(_) => return Ok(decided.refused(DispatchOutcome::CandidateMismatch)),
         };
         if candidate.digest() != &named {
             return Ok(decided.refused(DispatchOutcome::CandidateMismatch));
         }
-        let candidate_sequence =
-            candidate_event_sequence(connection, self.workspace_id, &named.value)
-                .map_err(|_| DispatchError::InvalidStore)?
-                .ok_or(DispatchError::InvalidStore)?;
-        let ruling_sequence =
-            ruling_event_sequence(connection, self.workspace_id, &opened.ruling_digest)
-                .map_err(|_| DispatchError::InvalidStore)?
-                .ok_or(DispatchError::InvalidStore)?;
+        let (Ok(Some(candidate_sequence)), Ok(Some(ruling_sequence))) = (
+            candidate_event_sequence(connection, self.workspace_id, &named.value),
+            ruling_event_sequence(connection, self.workspace_id, &opened.ruling_digest),
+        ) else {
+            return Ok(decided.refused(DispatchOutcome::CandidateMismatch));
+        };
         if candidate_sequence >= ruling_sequence {
             // Recorded at or after the decision. The Ruling cannot have been shown bytes that did
             // not exist when it was made, whatever its own digest says about them.
@@ -476,8 +596,13 @@ impl DispatchService {
         // The autonomy gate. ADR 0004 gives Observe, Supervised and Bounded; BLUEPRINT:405-406 says
         // Observe permits no external mutation, so Observe refuses here rather than being recorded
         // as a limitation.
-        let profile = current_autonomy_profile(connection, self.workspace_id, opened.project_id)?
-            .ok_or(DispatchError::InvalidStore)?;
+        // Through the Project module's own reader: "current Charter revision" is its invariant, and
+        // a gate that authorizes a write must not carry a second definition of it (gpt1).
+        let Ok(Some(profile)) =
+            current_autonomy_profile(connection, self.workspace_id, opened.project_id)
+        else {
+            return Ok(decided.refused(DispatchOutcome::AutonomyProfileRefuses));
+        };
         decided.autonomy_profile = Some(profile);
         if profile != AutonomyProfile::Supervised {
             return Ok(decided.refused(DispatchOutcome::AutonomyProfileRefuses));
@@ -492,12 +617,26 @@ impl DispatchService {
         // G12: the supplied content, against what the Candidate declares -- and against the
         // Proposal's own bounds first, so a caller cannot make Beacon read more than the Proposal
         // said it would write.
-        let file_size_bytes = proposal.payload().bounds.file_size_bytes;
-        if content
+        // The Proposal's own bounds, applied BEFORE its content is read for anything else: a
+        // caller may not make Beacon carry more than the Proposal said it would write. Three
+        // separate limits, so a refusal says which one was crossed rather than "too big".
+        let bounds = proposal.payload().bounds;
+        let over_file = content
             .iter()
             .filter_map(|supplied| supplied.bytes.as_ref())
-            .any(|bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX) > file_size_bytes)
-        {
+            .any(|bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX) > bounds.file_size_bytes);
+        let total: u64 = content
+            .iter()
+            .filter_map(|supplied| supplied.bytes.as_ref())
+            .map(|bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+            .fold(0, u64::saturating_add);
+        // The aggregate is the Proposal's own output ceiling: everything this dispatch writes,
+        // together, is an effect of the Run and is bounded by what the Run declared.
+        let over_total = total > bounds.output_bytes;
+        // Deliberately no count bound here: a supplied list longer than the declaration is a
+        // MISMATCH with what was authorized, not a resource ceiling, and `content_matches` below
+        // refuses it as one. Each refusal means one thing.
+        if over_file || over_total {
             return Ok(decided.refused(DispatchOutcome::ContentOverBounds));
         }
         if !content_matches(candidate.payload().entries.as_slice(), content) {
@@ -505,15 +644,13 @@ impl DispatchService {
         }
 
         // G10: the Binding, at the exact revision the Ruling copied.
-        let Some(binding) = repository_for_preflight_at(
+        let Ok(Some(binding)) = repository_for_preflight_at(
             connection,
             self.workspace_id,
             opened.project_id,
             ruling.payload().bindings.repository_revision,
             ruling.payload().bindings.charter_revision,
-        )
-        .map_err(|_| DispatchError::InvalidStore)?
-        else {
+        ) else {
             return Ok(decided.refused(DispatchOutcome::RulingDrifted));
         };
         decided.binding = Some(binding.clone());
@@ -567,7 +704,289 @@ impl DispatchService {
             return Ok(decided.refused(DispatchOutcome::SourceDirty));
         }
 
+        // One decision, one application. Checked here so the ordinary repeat costs the repository
+        // nothing; the unique index below is what closes the race, because a check and an insert
+        // are two moments.
+        if already_prepared(connection, self.workspace_id, &opened.ruling_digest)? {
+            return Ok(decided.refused(DispatchOutcome::AlreadyDispatched));
+        }
+
+        decided.repository = Some(repository);
+        decided.branch = Some(branch.trim().to_owned());
         Ok(decided.held())
+    }
+
+    /// Build the change as OBJECTS, publish it with a compare-and-swap, and update the copy.
+    ///
+    /// Nothing here passes through a checkout or an index the repository owns. Blobs are written
+    /// with `hash-object --no-filters`, the tree is built in a scratch index outside the
+    /// repository, and the commit is `commit-tree` -- so Git's built-in `text eol=lf` conversion,
+    /// which a kernel review measured changing CRLF Candidate bytes into an LF blob while
+    /// `diff --name-status` still reported the declared modification, has no path into the store.
+    /// The declared bytes ARE the object bytes, and the post-condition is a fact about the commit.
+    fn land(
+        &self,
+        opened: &OpenRun,
+        decided: &mut Decided,
+        content: &[SuppliedContent],
+    ) -> Result<DispatchOutcome, DispatchError> {
+        let repository = decided
+            .repository
+            .as_ref()
+            .ok_or(DispatchError::InvalidStore)?;
+        let base = decided
+            .bindings
+            .as_ref()
+            .ok_or(DispatchError::InvalidStore)?
+            .pinned_base_revision
+            .clone();
+        let branch = decided.branch.clone().ok_or(DispatchError::InvalidStore)?;
+        let scratch = ScratchIndex::new();
+
+        // W2: the base tree into a scratch index, then one entry per declared mutation. The
+        // repository's own index is never opened.
+        if write_pinned(
+            repository,
+            Some(scratch.path()),
+            None,
+            &["read-tree", &base],
+            None,
+            WRITE_BUDGET,
+        )
+        .is_none()
+        {
+            return Ok(DispatchOutcome::ObjectWriteFailed);
+        }
+        for (entry, supplied) in decided.per_mutation.iter().zip(content) {
+            let wrote = match (&entry.kind, &supplied.bytes) {
+                (MutationKind::DeleteFile, _) => write_pinned(
+                    repository,
+                    Some(scratch.path()),
+                    None,
+                    &["update-index", "--force-remove", "--", &entry.path],
+                    None,
+                    WRITE_BUDGET,
+                )
+                .is_some(),
+                (_, Some(bytes)) => {
+                    // `--no-filters` is the whole point: the blob is the supplied bytes, whatever
+                    // `.gitattributes` would have done to them on the way in.
+                    let Some(blob) = write_pinned(
+                        repository,
+                        None,
+                        None,
+                        &blob_arguments(),
+                        Some(bytes),
+                        WRITE_BUDGET,
+                    ) else {
+                        return Ok(DispatchOutcome::ObjectWriteFailed);
+                    };
+                    let cacheinfo = format!("100644,{},{}", blob.trim(), entry.path);
+                    write_pinned(
+                        repository,
+                        Some(scratch.path()),
+                        None,
+                        &["update-index", "--add", "--cacheinfo", &cacheinfo],
+                        None,
+                        WRITE_BUDGET,
+                    )
+                    .is_some()
+                }
+                (_, None) => false,
+            };
+            if !wrote {
+                return Ok(DispatchOutcome::ObjectWriteFailed);
+            }
+        }
+
+        // W3: the tree and the commit. The identity and the time are fixed by the caller, so the
+        // resulting revision is a function of its inputs rather than of the clock.
+        let Some(tree) = write_pinned(
+            repository,
+            Some(scratch.path()),
+            None,
+            &["write-tree"],
+            None,
+            WRITE_BUDGET,
+        ) else {
+            return Ok(DispatchOutcome::ObjectWriteFailed);
+        };
+        let identity = GitIdentity {
+            name: COMMIT_AUTHOR_NAME.to_owned(),
+            email: COMMIT_AUTHOR_EMAIL.to_owned(),
+            date: format!("{} +0000", opened.started_at_ms / 1_000),
+        };
+        let message = commit_message(decided);
+        let Some(commit) = write_pinned(
+            repository,
+            None,
+            Some(&identity),
+            &["commit-tree", tree.trim(), "-p", &base, "-m", &message],
+            None,
+            WRITE_BUDGET,
+        ) else {
+            return Ok(DispatchOutcome::ObjectWriteFailed);
+        };
+        let commit = commit.trim().to_owned();
+        decided.prepared_commit = Some(commit.clone());
+
+        // W4: the prepared commit touches exactly the declared set, and every blob in it hashes to
+        // what the Candidate declared. NUL-delimited, because a declared path may contain a
+        // newline.
+        match self.effect_matches(repository, &base, &commit, decided) {
+            Ok(true) => {}
+            Ok(false) => return Ok(DispatchOutcome::EffectDoesNotMatchDeclaration),
+            Err(error) => return Err(error),
+        }
+
+        // The reservation, before the irreversible step: one preparation per Ruling, ever, and a
+        // durable record of the exact commit an unobserved attempt was about to publish. A
+        // uniqueness violation here is the race the gate above cannot close, and it is a refusal
+        // rather than an error -- the Run still ends with a Receipt (AGENTS.md:154).
+        match self.reserve(opened, decided, &branch, &base, &commit) {
+            Ok(()) => {}
+            Err(DispatchError::Store(rusqlite::Error::SqliteFailure(failure, _)))
+                if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+                    || failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY =>
+            {
+                return Ok(DispatchOutcome::AlreadyDispatched);
+            }
+            Err(error) => return Err(error),
+        }
+
+        // L1: the compare-and-swap. `update-ref <ref> <new> <old>` fails unless the ref still holds
+        // exactly the value the gates observed -- which a fast-forward merge does not check: a
+        // branch moved BACK to an ancestor still fast-forwards, and two dispatchers that both
+        // observed the base both succeed (gpt1's probes, R9).
+        let landed = swap_ref(repository, &branch, &commit, &base);
+        if landed.is_none() {
+            // Refused or unestablished. Which one is answerable by reading the ref, and the answer
+            // is a fact rather than an assumption either way.
+            return Ok(
+                match read_pinned(repository, &["rev-parse", "--verify", &branch], READ_BUDGET) {
+                    Some(head) if head.trim() == commit => DispatchOutcome::Applied,
+                    Some(head) if head.trim() == base => DispatchOutcome::LandingRefused,
+                    Some(_) => DispatchOutcome::LandingRefused,
+                    None => DispatchOutcome::LandingUnobserved,
+                },
+            );
+        }
+        let Some(head) = read_pinned(repository, &["rev-parse", "--verify", &branch], READ_BUDGET)
+        else {
+            return Ok(DispatchOutcome::LandingUnobserved);
+        };
+        if head.trim() != commit {
+            return Ok(DispatchOutcome::LandingUnobserved);
+        }
+        decided.observed_head = Some(commit.clone());
+
+        // The copy's working tree, updated after the swap. Beacon owns this checkout -- v1 lands
+        // nowhere else -- so leaving it showing the previous revision would be Beacon knowingly
+        // leaving its own tree stale. It is a separately observable step and is not described as
+        // atomic with the ref.
+        decided.checkout_updated = write_pinned(
+            repository,
+            None,
+            None,
+            &["reset", "--hard", "--quiet", &commit],
+            None,
+            WRITE_BUDGET,
+        )
+        .is_some();
+
+        for record in &mut decided.per_mutation {
+            record.effect = match record.kind {
+                MutationKind::DeleteFile => MutationEffect::Removed,
+                _ => MutationEffect::Written,
+            };
+        }
+        Ok(DispatchOutcome::Applied)
+    }
+
+    /// Does `base..commit` touch exactly the declared set, and do its blobs hold the declared bytes?
+    fn effect_matches(
+        &self,
+        repository: &PinnedRepository,
+        base: &str,
+        commit: &str,
+        decided: &Decided,
+    ) -> Result<bool, DispatchError> {
+        let Some(diff) = read_pinned(
+            repository,
+            &["diff", "--name-status", "-z", base, commit],
+            READ_BUDGET,
+        ) else {
+            return Ok(false);
+        };
+        // `-z` output is NUL-delimited status/path pairs, so a path containing a newline is read
+        // correctly rather than splitting a record in half.
+        let fields: Vec<&str> = diff.split('\0').filter(|part| !part.is_empty()).collect();
+        if fields.len() != decided.per_mutation.len() * 2 {
+            return Ok(false);
+        }
+        for (record, pair) in decided.per_mutation.iter().zip(fields.chunks(2)) {
+            let expected_status = match record.kind {
+                MutationKind::CreateFile => "A",
+                MutationKind::ModifyFile => "M",
+                MutationKind::DeleteFile => "D",
+            };
+            if pair[0] != expected_status || pair[1] != record.path {
+                return Ok(false);
+            }
+        }
+        // And the bytes in the prepared commit's tree, which is what gets published -- not the
+        // bytes on disk, which no longer matter and never entered the objects.
+        for record in &decided.per_mutation {
+            let Some(post) = &record.post_image else {
+                continue;
+            };
+            let path = format!("{commit}:{}", record.path);
+            let Some(blob) = read_pinned(repository, &["cat-file", "blob", &path], READ_BUDGET)
+            else {
+                return Ok(false);
+            };
+            if hex(&crate::proposal::sha256(blob.as_bytes())) != *post {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Spend the authority and persist the prepared commit, before anything irreversible.
+    fn reserve(
+        &self,
+        opened: &OpenRun,
+        decided: &Decided,
+        branch: &str,
+        base: &str,
+        commit: &str,
+    ) -> Result<(), DispatchError> {
+        let repository = decided
+            .repository
+            .as_ref()
+            .ok_or(DispatchError::InvalidStore)?;
+        let (device, inode) = repository.identity();
+        self.accounts.with_authenticated_store(|connection, now| {
+            connection.execute(
+                "INSERT INTO dispatch_preparations (
+                     workspace_id, run_id, ruling_digest, source, source_device, source_inode,
+                     branch, pinned_base_revision, prepared_commit, prepared_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    self.workspace_id.to_string(),
+                    opened.run_id.to_string(),
+                    opened.ruling_digest.as_str(),
+                    repository.path().to_string_lossy(),
+                    i64::try_from(device).unwrap_or(i64::MAX),
+                    i64::try_from(inode).unwrap_or(i64::MAX),
+                    branch,
+                    base,
+                    commit,
+                    now,
+                ],
+            )?;
+            Ok(())
+        })
     }
 
     /// Is this directory one of Beacon's own repository copies?
@@ -587,6 +1006,71 @@ impl DispatchService {
 // ---------------------------------------------------------------------------------------------
 // Deciding and recording
 // ---------------------------------------------------------------------------------------------
+
+/// A Git index outside the repository, removed when the landing ends.
+///
+/// The tree is built here rather than in `.git/index`, so a dispatch that fails leaves the
+/// repository's own index exactly as it found it -- and a gate read, which does not write, cannot
+/// be confused with this, which does.
+struct ScratchIndex {
+    path: PathBuf,
+}
+
+impl ScratchIndex {
+    fn new() -> Self {
+        Self {
+            path: std::env::temp_dir().join(format!("beacon-dispatch-index-{}", Uuid::new_v4())),
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for ScratchIndex {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// The commit message, built rather than concatenated.
+///
+/// A Proposal summary may contain newlines and tabs (ADR 0034 permits both), so pasting it above
+/// the trailers would let a summary forge a `Beacon-Ruling:` line. The subject is the summary's
+/// first line with control characters removed and a bounded length; the trailers follow one blank
+/// line and nothing else does.
+fn commit_message(decided: &Decided) -> String {
+    let subject: String = decided
+        .summary
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(MAX_SUBJECT_SCALARS)
+        .collect();
+    let subject = subject.trim();
+    let subject = if subject.is_empty() {
+        "Beacon dispatched a Proposal"
+    } else {
+        subject
+    };
+    let mut message = format!("{subject}\n\n");
+    if let Some(proposal) = &decided.proposal_digest {
+        message.push_str(&format!("Beacon-Proposal: {}\n", proposal.value));
+    }
+    if let Some(ruling) = &decided.ruling_digest {
+        message.push_str(&format!("Beacon-Ruling: {}\n", ruling.value));
+    }
+    if let Some(candidate) = &decided.candidate_digest {
+        message.push_str(&format!("Beacon-Candidate: {}\n", candidate.value));
+    }
+    message
+}
+
+/// The subject line's ceiling, in characters.
+const MAX_SUBJECT_SCALARS: usize = 120;
 
 struct OpenRun {
     run_id: Uuid,
@@ -610,6 +1094,12 @@ struct Decided {
     per_mutation: Vec<MutationRecord>,
     drift: Vec<UnmetPrecondition>,
     unmet: Vec<UnmetPrecondition>,
+    /// The repository the gates measured, pinned by identity for the whole attempt.
+    repository: Option<PinnedRepository>,
+    branch: Option<String>,
+    summary: String,
+    prepared_commit: Option<String>,
+    checkout_updated: bool,
 }
 
 impl Decided {
@@ -660,6 +1150,12 @@ impl DispatchService {
                     .map(|binding| binding.source.clone()),
                 pinned_base_revision: bindings.map(|b| b.pinned_base_revision),
                 observed_head: decided.observed_head.clone(),
+                prepared_commit: decided.prepared_commit.clone(),
+                resulting_revision: match outcome {
+                    DispatchOutcome::Applied => decided.prepared_commit.clone(),
+                    _ => None,
+                },
+                checkout_updated: decided.checkout_updated,
                 per_mutation: decided.per_mutation.clone(),
                 started_at_ms: opened.started_at_ms,
                 ended_at_ms,
@@ -709,37 +1205,33 @@ impl DispatchService {
 /// must resolve before dispatch is conceivable and ADR 0039 proceeds anyway under stated
 /// conditions -- so no record of a dispatch can be read as having checked them. The rest names what
 /// this build has not built.
-fn not_verified(outcome: &DispatchOutcome, decided: &Decided) -> Vec<String> {
+fn not_verified(outcome: &DispatchOutcome, decided: &Decided) -> Vec<NotVerified> {
     let mut names = vec![
-        "execution policy constraint family (not declarable in Proposal v1)".to_owned(),
-        "sandbox constraint family (not declarable in Proposal v1)".to_owned(),
-        "network constraint family (not declarable in Proposal v1)".to_owned(),
-        "model provider constraint family (not declarable in Proposal v1)".to_owned(),
-        "command allowlist constraint family (not declarable in Proposal v1)".to_owned(),
-        "tool allowlist constraint family (not declarable in Proposal v1)".to_owned(),
-        "evaluations constraint family (not declarable in Proposal v1)".to_owned(),
-        "non-author Evaluation of the Candidate (no Evaluation citation in Ruling v2)".to_owned(),
-        "Safety Snapshot before a high-impact dispatch (no snapshot mechanism exists)".to_owned(),
-        "base revision reachability from a ref (object presence verified only)".to_owned(),
-        "the change was not applied: this build has no landing path".to_owned(),
+        NotVerified::ExecutionPolicyConstraint,
+        NotVerified::SandboxConstraint,
+        NotVerified::NetworkConstraint,
+        NotVerified::ModelProviderConstraint,
+        NotVerified::CommandAllowlistConstraint,
+        NotVerified::ToolAllowlistConstraint,
+        NotVerified::EvaluationsConstraint,
+        NotVerified::NonAuthorEvaluationOfCandidate,
+        NotVerified::SafetySnapshot,
+        NotVerified::BaseRevisionReachability,
+        NotVerified::DeclaredChecksAgainstResult,
     ];
     if !decided.drift.is_empty() {
-        names.push(format!(
-            "the Ruling's copied revisions have moved: {:?}",
-            decided.drift
-        ));
+        names.push(NotVerified::RulingBindingsMoved);
     }
     if !decided.unmet.is_empty() {
-        names.push(format!(
-            "live Proposal preconditions do not hold: {:?}",
-            decided.unmet
-        ));
+        names.push(NotVerified::ProposalPreconditions);
     }
-    if !outcome.admissible() {
-        names.push(format!(
-            "every gate after {} was not reached",
-            outcome.as_str()
-        ));
+    match outcome {
+        DispatchOutcome::Applied => {}
+        DispatchOutcome::LandingUnobserved => names.push(NotVerified::LandingResultUnknown),
+        _ => names.push(NotVerified::ChangeNotApplied),
+    }
+    if decided.prepared_commit.is_some() && *outcome != DispatchOutcome::Applied {
+        names.push(NotVerified::UnreferencedObjectResidue);
     }
     names
 }
@@ -795,30 +1287,57 @@ fn hex(value: &[u8; 32]) -> String {
     data_encoding::HEXLOWER.encode(value)
 }
 
-/// The Project's autonomy profile at its current Charter revision.
-fn current_autonomy_profile(
+/// How a Candidate's bytes become a blob.
+///
+/// **The protection is the absence of `--path`.** Git looks up `.gitattributes` by pathname, so a
+/// blob hashed from standard input with no path has nothing to match and cannot be converted --
+/// which is why `git hash-object` documents `--no-filters` as implied for stdin unless `--path` is
+/// given, and refuses the two flags together outright. `--no-filters` stays as the explicit
+/// statement of intent; adding `--path` here would silently restore the conversion a kernel review
+/// measured turning CRLF Candidate bytes into an LF blob, and `the_blob_invocation_names_no_path`
+/// is what makes that regression fail rather than pass quietly.
+fn blob_arguments() -> [&'static str; 6] {
+    ["hash-object", "-w", "-t", "blob", "--no-filters", "--stdin"]
+}
+
+/// Move `branch` from exactly `expected` to `commit`, or fail.
+///
+/// `update-ref <ref> <new> <old>` is a compare-and-swap: Git refuses unless the ref currently holds
+/// `old`. That is the property a fast-forward merge does NOT have -- a branch moved back to an
+/// ancestor still fast-forwards, and two dispatchers that both observed the base both succeed -- so
+/// the old value is not optional here, and
+/// `a_swap_refuses_unless_the_ref_still_holds_the_expected_value` is what keeps it from being
+/// dropped.
+fn swap_ref(
+    repository: &PinnedRepository,
+    branch: &str,
+    commit: &str,
+    expected: &str,
+) -> Option<String> {
+    write_pinned(
+        repository,
+        None,
+        None,
+        &["update-ref", branch, commit, expected],
+        None,
+        WRITE_BUDGET,
+    )
+}
+
+/// Has this Ruling already been prepared for dispatch?
+fn already_prepared(
     connection: &Connection,
     workspace_id: Uuid,
-    project_id: Uuid,
-) -> Result<Option<AutonomyProfile>, DispatchError> {
-    let value: Option<String> = connection
+    ruling_digest: &str,
+) -> Result<bool, DispatchError> {
+    let existing: Option<i64> = connection
         .query_row(
-            "SELECT revisions.autonomy_profile
-             FROM project_charter_revisions AS revisions
-             JOIN projects ON projects.workspace_id = revisions.workspace_id
-                          AND projects.id = revisions.project_id
-                          AND projects.current_charter_revision = revisions.revision
-             WHERE revisions.workspace_id = ?1 AND revisions.project_id = ?2",
-            params![workspace_id.to_string(), project_id.to_string()],
-            |row| row.get::<_, String>(0),
+            "SELECT 1 FROM dispatch_preparations WHERE workspace_id = ?1 AND ruling_digest = ?2",
+            params![workspace_id.to_string(), ruling_digest],
+            |row| row.get(0),
         )
         .optional()?;
-    Ok(match value.as_deref() {
-        Some("observe") => Some(AutonomyProfile::Observe),
-        Some("supervised") => Some(AutonomyProfile::Supervised),
-        Some(_) => return Err(DispatchError::InvalidStore),
-        None => None,
-    })
+    Ok(existing.is_some())
 }
 
 /// Is the Installation paused?
@@ -909,12 +1428,42 @@ const _: () = ();
 /// Recording "pause not verified" in a Receipt would not make a forbidden dispatch permissible, so
 /// the gate is real and this is the state it reads.
 ///
+/// **Pause and Resume are separate Commands, not one boolean.** They are not symmetric:
+/// `AGENTS.md:128-137` makes Resume conditional on every stopping or unconfirmed Run having been
+/// reviewed and either resolved or explicitly accepted, and a `set_paused(false)` made that
+/// forbidden transition representable in one call with no Event (gpt1's P0). Each records its own
+/// audit Event in the same transaction as the state change.
+///
 /// **What this is not.** Pause in the Blueprint also sends bounded interruption requests to active
 /// Runs, refuses Worker lease renewals, and is reachable from the tray and a global shortcut. None
-/// of that is built, and none of it is claimed here: this is one Owner-set flag and the one gate
-/// that consumes it.
+/// of that is built, and none of it is claimed here.
 pub struct PauseService {
     accounts: Arc<OperatorAccountService>,
+}
+
+/// Why a Resume was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedRuns {
+    /// The Runs that have not reached a terminal state, or reached `unconfirmed`.
+    pub run_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PauseChangedPayload {
+    paused: bool,
+    /// Present only on a Resume that accepted uncertainty, carrying the Operator's stated reason
+    /// and the Runs it covered -- so "explicitly accepts its uncertainty" is a record rather than a
+    /// silence.
+    accepted_unresolved: Option<AcceptedUnresolved>,
+    changed_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AcceptedUnresolved {
+    reason: String,
+    run_ids: Vec<Uuid>,
 }
 
 impl PauseService {
@@ -927,15 +1476,197 @@ impl PauseService {
             .with_authenticated_store(|connection, _now| installation_is_paused(connection))
     }
 
-    /// Pause or resume the Installation.
-    pub fn set_paused(&self, paused: bool) -> Result<(), DispatchError> {
+    /// Pause the Installation. Always permitted: stopping is the safe direction.
+    pub fn pause(&self) -> Result<(), DispatchError> {
+        self.accounts
+            .with_authenticated_store(|connection, now| self.set(connection, now, true, None))
+    }
+
+    /// Resume, if every Run has been resolved.
+    ///
+    /// Refuses while any Run is still open or `unconfirmed`, and names them: an Operator who has
+    /// not looked at an uncertain Run has not resolved it, and Resume is where that is enforced.
+    pub fn resume(&self) -> Result<(), DispatchError> {
         self.accounts.with_authenticated_store(|connection, now| {
-            let changed_at_ms = now;
-            connection.execute(
-                "UPDATE installation_pause SET paused = ?1, changed_at_ms = ?2 WHERE singleton = 1",
-                params![i64::from(paused), changed_at_ms],
-            )?;
-            Ok(())
+            let unresolved = unresolved_runs(connection)?;
+            if !unresolved.is_empty() {
+                return Err(DispatchError::UnresolvedRuns(UnresolvedRuns {
+                    run_ids: unresolved,
+                }));
+            }
+            self.set(connection, now, false, None)
         })
+    }
+
+    /// Resume, accepting the uncertainty of Runs that could not be resolved.
+    ///
+    /// The other half of `AGENTS.md:137`: an Operator may proceed, and what they accepted is
+    /// recorded with their reason rather than inferred from the fact that they proceeded.
+    pub fn resume_accepting_unresolved(&self, reason: &str) -> Result<(), DispatchError> {
+        self.accounts.with_authenticated_store(|connection, now| {
+            let run_ids = unresolved_runs(connection)?;
+            self.set(
+                connection,
+                now,
+                false,
+                Some(AcceptedUnresolved {
+                    reason: reason.to_owned(),
+                    run_ids,
+                }),
+            )
+        })
+    }
+
+    /// The state change and its Event, in one transaction.
+    fn set(
+        &self,
+        connection: &Connection,
+        now: i64,
+        paused: bool,
+        accepted: Option<AcceptedUnresolved>,
+    ) -> Result<(), DispatchError> {
+        let changed_at_ms = u64::try_from(now).map_err(|_| DispatchError::InvalidStore)?;
+        let payload = serde_json::to_string(&PauseChangedPayload {
+            paused,
+            accepted_unresolved: accepted,
+            changed_at_ms,
+        })?;
+        let workspace: String = connection.query_row(
+            "SELECT id FROM workspaces ORDER BY created_at_ms, id LIMIT 1",
+            [],
+            |row| row.get(0),
+        )?;
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute(
+            "UPDATE installation_pause SET paused = ?1, changed_at_ms = ?2 WHERE singleton = 1",
+            params![i64::from(paused), now],
+        )?;
+        transaction.execute(
+            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                workspace,
+                if paused {
+                    "installation.paused"
+                } else {
+                    "installation.resumed"
+                },
+                payload,
+                now
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+}
+
+/// Replay one Pause or Resume Event: it must decode, and its recorded state and time must agree
+/// with the kind it was stored under and when it happened.
+///
+/// The store holds one current flag rather than a history, so this proves the Event is a
+/// well-formed record of a transition -- not that the transition is still in effect, which is a
+/// different question with a different answer as soon as the next one happens.
+pub(crate) fn verify_pause_event(
+    paused: bool,
+    occurred_at_ms: u64,
+    payload_json: &str,
+) -> Result<(), DispatchError> {
+    let payload: PauseChangedPayload = serde_json::from_str(payload_json)?;
+    if payload.paused != paused || payload.changed_at_ms != occurred_at_ms {
+        return Err(DispatchError::InvalidStore);
+    }
+    // Only a Resume may carry an acceptance, because only a Resume has uncertainty to accept.
+    if payload.paused && payload.accepted_unresolved.is_some() {
+        return Err(DispatchError::InvalidStore);
+    }
+    Ok(())
+}
+
+/// Every Run that has not reached a terminal state, or reached one that says its effects are
+/// unknown.
+fn unresolved_runs(connection: &Connection) -> Result<Vec<Uuid>, DispatchError> {
+    let mut statement = connection.prepare(
+        "SELECT id FROM runs
+         WHERE state IN ('preflighting', 'dispatching', 'unconfirmed')
+         ORDER BY started_at_ms, id",
+    )?;
+    let ids = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    ids.into_iter()
+        .map(|id| Uuid::parse_str(&id).map_err(|_| DispatchError::InvalidStore))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    fn git(path: &Path, arguments: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(arguments)
+            .current_dir(path)
+            .env("GIT_AUTHOR_NAME", "Beacon Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "Beacon Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+            .output()
+            .expect("git is available in the test environment");
+        assert!(output.status.success(), "git {arguments:?} failed");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    #[test]
+    fn the_blob_invocation_names_no_path() {
+        // The whole of the attribute-conversion protection, asserted where it can regress. Git
+        // matches `.gitattributes` by pathname, so a stdin blob with no path cannot be converted;
+        // adding `--path` would restore the conversion AND make Git refuse `--no-filters`, so this
+        // is the shape that must not drift.
+        let arguments = blob_arguments();
+        assert!(arguments.contains(&"--stdin"));
+        assert!(arguments.contains(&"--no-filters"));
+        assert!(
+            !arguments.contains(&"--path"),
+            "naming a path would let .gitattributes rewrite Candidate bytes"
+        );
+    }
+
+    #[test]
+    fn a_swap_refuses_unless_the_ref_still_holds_the_expected_value() {
+        // The landing primitive's whole contract, and the one gpt1's probes disproved for
+        // `merge --ff-only`: moving the branch BACK to an ancestor still fast-forwards, and two
+        // dispatchers that both observed the base both succeed. A compare-and-swap does neither.
+        let root = std::env::temp_dir().join(format!("beacon-swap-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        git(&root, &["init", "--quiet", "--initial-branch=main"]);
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "--quiet", "-m", "one"]);
+        let first = git(&root, &["rev-parse", "HEAD"]);
+        std::fs::write(root.join("a.txt"), "two\n").unwrap();
+        git(&root, &["commit", "--quiet", "-am", "two"]);
+        let second = git(&root, &["rev-parse", "HEAD"]);
+        std::fs::write(root.join("a.txt"), "three\n").unwrap();
+        git(&root, &["commit", "--quiet", "-am", "three"]);
+        let third = git(&root, &["rev-parse", "HEAD"]);
+
+        let repository = PinnedRepository::open(&root).unwrap();
+        let branch = "refs/heads/main";
+
+        // The ref holds `third`. A swap expecting `first` -- the ancestor case that a fast-forward
+        // merge accepts -- must refuse, and must leave the ref exactly where it was.
+        assert!(
+            swap_ref(&repository, branch, &second, &first).is_none(),
+            "a swap expecting a stale value succeeded"
+        );
+        assert_eq!(git(&root, &["rev-parse", "HEAD"]), third);
+
+        // And the positive control: expecting what the ref actually holds moves it.
+        assert!(swap_ref(&repository, branch, &second, &third).is_some());
+        assert_eq!(git(&root, &["rev-parse", branch]), second);
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

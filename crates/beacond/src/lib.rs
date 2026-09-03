@@ -67,7 +67,7 @@ pub use candidate::{
 };
 pub use dispatch::{
     DispatchActor, DispatchError, DispatchOutcome, DispatchReceipt, DispatchService,
-    MutationEffect, MutationRecord, PauseService, SuppliedContent,
+    MutationEffect, MutationRecord, NotVerified, PauseService, SuppliedContent, UnresolvedRuns,
 };
 pub use local_model_activation::{
     LocalModelActivation, LocalModelActivationError, LocalModelActivationReview,
@@ -260,6 +260,7 @@ pub enum SupervisorError {
     CandidateEventMismatch(i64),
     CandidateStateMismatch,
     DispatchEventMismatch(i64),
+    PauseEventMismatch(i64),
     SchemaMismatch,
     UnsupportedSchemaVersion(i64),
     IntegrityCheckFailed(String),
@@ -429,6 +430,10 @@ impl fmt::Display for SupervisorError {
             Self::DispatchEventMismatch(sequence) => write!(
                 formatter,
                 "Event sequence {sequence} does not match its stored dispatch Receipt"
+            ),
+            Self::PauseEventMismatch(sequence) => write!(
+                formatter,
+                "Event sequence {sequence} is not a well-formed Pause record"
             ),
 
             Self::SchemaMismatch => {
@@ -1136,6 +1141,8 @@ enum PersistedEventKind {
     RulingRecorded,
     ProposalCandidateRecorded,
     ProposalDispatched,
+    InstallationPaused,
+    InstallationResumed,
 }
 
 impl PersistedEventKind {
@@ -1165,6 +1172,8 @@ impl PersistedEventKind {
             Self::RulingRecorded => "ruling.recorded",
             Self::ProposalCandidateRecorded => "proposal.candidate_recorded",
             Self::ProposalDispatched => "proposal.dispatched",
+            Self::InstallationPaused => "installation.paused",
+            Self::InstallationResumed => "installation.resumed",
         }
     }
 
@@ -1194,6 +1203,8 @@ impl PersistedEventKind {
             "ruling.recorded" => Ok(Self::RulingRecorded),
             "proposal.candidate_recorded" => Ok(Self::ProposalCandidateRecorded),
             "proposal.dispatched" => Ok(Self::ProposalDispatched),
+            "installation.paused" => Ok(Self::InstallationPaused),
+            "installation.resumed" => Ok(Self::InstallationResumed),
             _ => Err(SupervisorError::InvalidEventKind(value)),
         }
     }
@@ -1411,6 +1422,14 @@ fn verify_persisted_events(connection: &Connection) -> Result<u64, SupervisorErr
                     &payload_json,
                 )
                 .map_err(|_| SupervisorError::CandidateEventMismatch(sequence))?;
+            }
+            PersistedEventKind::InstallationPaused | PersistedEventKind::InstallationResumed => {
+                dispatch::verify_pause_event(
+                    matches!(kind, PersistedEventKind::InstallationPaused),
+                    occurred_at_ms,
+                    &payload_json,
+                )
+                .map_err(|_| SupervisorError::PauseEventMismatch(sequence))?;
             }
             PersistedEventKind::ProposalDispatched => {
                 dispatch::verify_dispatch_event(
