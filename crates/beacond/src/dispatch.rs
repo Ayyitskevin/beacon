@@ -321,9 +321,13 @@ pub enum NotVerified {
     /// This Receipt was reconstructed at startup after an interruption. It establishes what the
     /// repository says now, not what the attempt observed.
     ReconstructedAfterInterruption,
-    /// The interruption fell between writing objects and persisting what they were, so unreferenced
-    /// objects exist and nothing in the store can name them.
-    ResidueCannotBeNamed,
+    /// The interruption fell before the claim, so **whether** this attempt left unreferenced
+    /// objects is unknown, and if it did, nothing in the store can name them.
+    ///
+    /// Not "residue exists and cannot be named": the same durable state -- an open Run with no
+    /// claim -- is left by a death after the Run opened and before a single object was written,
+    /// and asserting residue there would be claiming a fact nobody measured (gpt2).
+    ObjectResidueUnknown,
 }
 
 /// The device and inode of a pinned repository.
@@ -2044,9 +2048,9 @@ fn interrupted_receipt(
     }
     not_verified.push(NotVerified::ReconstructedAfterInterruption);
     if residue_unnamed {
-        // The interruption landed between writing objects and persisting what they were, so the
-        // residue exists and nothing can name it.
-        not_verified.push(NotVerified::ResidueCannotBeNamed);
+        // The interruption landed before the claim: whether any object was written is unknown,
+        // and if one was, nothing can name it.
+        not_verified.push(NotVerified::ObjectResidueUnknown);
     }
     DispatchReceipt {
         version: 3,
@@ -2249,10 +2253,10 @@ fn verify_outcome_invariants(receipt: &DispatchReceipt) -> Result<(), DispatchEr
     }
 }
 
-/// Check a Receipt against the durable preparation its own landing transaction wrote.
+/// Check a Receipt against the durable claim the attempt committed before its swap.
 ///
-/// The preparation is the independent record: it is inserted inside the transaction that performs
-/// the swap, before the swap, and is never rewritten. So the arms that claim the swap ran must have
+/// The claim is the independent record: it is committed in its own transaction, before the one
+/// that performs the swap, and is never rewritten. So the arms that claim the swap ran must have
 /// one, and it must name the same commit, branch, base and repository identity. This re-derives
 /// nothing about the repository -- later history is ordinary work, and `resulting_revision` is a
 /// landing-at-time fact rather than a claim about the ref now.
