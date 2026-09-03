@@ -227,6 +227,11 @@ pub struct DispatchReceipt {
     pub repository_revision: u32,
     pub source_kind: Option<RepositorySourceKind>,
     pub source: Option<String>,
+    /// The device and inode of the directory the gates measured and the swap entered. A pathname is
+    /// what a rename moves; this is what "the same repository" means to the kernel.
+    pub source_identity: Option<SourceIdentity>,
+    /// The ref the swap targeted.
+    pub branch: Option<String>,
     /// The base revision the Ruling pinned, and the head observed live. They are different facts
     /// and are recorded separately.
     pub pinned_base_revision: Option<String>,
@@ -236,9 +241,17 @@ pub struct DispatchReceipt {
     pub prepared_commit: Option<String>,
     /// The revision the branch names afterwards, when that was verified.
     pub resulting_revision: Option<String>,
+    /// SHA-256 over the prepared commit's own name-status output -- a measured diff digest, which
+    /// a Candidate digest is not.
+    pub diff_digest: Option<String>,
     /// Whether Beacon updated the copy's working tree after the swap. A separately observable step,
     /// recorded separately.
     pub checkout_updated: bool,
+    /// Every Git invocation this dispatch attempted, in order, with a bounded result.
+    pub git_steps: Vec<GitStep>,
+    /// Measured zeroes: a dispatch runs no Declared Check and invokes no model, by construction.
+    pub model_invocations: u32,
+    pub cost_usd_micros: u64,
     /// One row per declared mutation, in the Proposal's order. Empty when the refusal came before
     /// the Candidate could be read.
     pub per_mutation: Vec<MutationRecord>,
@@ -294,6 +307,60 @@ pub enum NotVerified {
     LandingResultUnknown,
     /// Objects were written that no ref names.
     UnreferencedObjectResidue,
+    /// This Receipt was reconstructed at startup from the durable preparation record, after an
+    /// interruption. It establishes what the repository says now, not what the attempt observed.
+    ReconstructedAfterInterruption,
+}
+
+/// The device and inode of a pinned repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SourceIdentity {
+    pub device: u64,
+    pub inode: u64,
+}
+
+/// One Git invocation a dispatch attempted, and how it ended.
+///
+/// The Blueprint's Receipt contract requires the commands run and their results. Recorded as a
+/// closed vocabulary rather than as argv strings and stderr: a bounded category is what a later
+/// reader can act on, and dynamic error text is neither stable nor safe to replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitStep {
+    pub step: GitStepName,
+    pub result: GitStepResult,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitStepName {
+    /// `read-tree` of the pinned base into a scratch index.
+    ReadTree,
+    /// `hash-object --stdin`, one per written mutation.
+    HashObject,
+    /// `update-index`, one per declared mutation.
+    UpdateIndex,
+    /// `write-tree`.
+    WriteTree,
+    /// `commit-tree`.
+    CommitTree,
+    /// `diff --name-status -z`, the effect post-condition.
+    DiffNameStatus,
+    /// `update-ref <ref> <new> <old>`: the compare-and-swap.
+    UpdateRef,
+    /// `read-tree -u --reset` on Beacon's own copy, after the swap: index and working tree only,
+    /// never the ref.
+    ReadTreeCheckout,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitStepResult {
+    Succeeded,
+    /// Git ran and did not do it. For the swap this is the ref no longer holding the expected
+    /// value; it is never "we could not tell".
+    Refused,
 }
 
 /// The authenticated command actor, which for a dispatch is always the Owner.
@@ -711,6 +778,10 @@ impl DispatchService {
             return Ok(decided.refused(DispatchOutcome::AlreadyDispatched));
         }
 
+        decided.source_identity = {
+            let (device, inode) = repository.identity();
+            Some(SourceIdentity { device, inode })
+        };
         decided.repository = Some(repository);
         decided.branch = Some(branch.trim().to_owned());
         Ok(decided.held())
@@ -730,9 +801,12 @@ impl DispatchService {
         decided: &mut Decided,
         content: &[SuppliedContent],
     ) -> Result<DispatchOutcome, DispatchError> {
+        // Taken for the preparation, put back before the landing transaction: the same value
+        // cannot be borrowed while `decided` is also written to, and every step here records what
+        // it did.
         let repository = decided
             .repository
-            .as_ref()
+            .take()
             .ok_or(DispatchError::InvalidStore)?;
         let base = decided
             .bindings
@@ -742,21 +816,56 @@ impl DispatchService {
             .clone();
         let branch = decided.branch.clone().ok_or(DispatchError::InvalidStore)?;
         let scratch = ScratchIndex::new();
+        let prepared = self.prepare(&repository, opened, decided, content, &base, &scratch);
+        decided.repository = Some(repository);
+        let commit = match prepared? {
+            Ok(commit) => commit,
+            Err(outcome) => return Ok(outcome),
+        };
 
+        // Everything from here is ONE write transaction, and the Git swap happens inside it.
+        //
+        // A cross-lab review found the window this closes: the gates committed, then objects were
+        // prepared, then the reservation opened its own transaction, then the swap ran, then the
+        // Receipt opened a third. A Ruling superseded anywhere in that sequence still landed,
+        // because the compare-and-swap protects the Git ref and knows nothing about authority.
+        //
+        // Holding the store's write lock across the swap is what serializes them: a competing
+        // Ruling, Policy publication, Charter revision or Pause is a write, and cannot commit while
+        // this transaction is open. So the authority re-read inside it is not a narrower window --
+        // it is the last word, and nothing can change underneath it before the ref moves.
+        self.land_within(opened, decided, &branch, &base, &commit)
+    }
+
+    /// Write the change as objects and prove it, without publishing anything.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        &self,
+        repository: &PinnedRepository,
+        opened: &OpenRun,
+        decided: &mut Decided,
+        content: &[SuppliedContent],
+        base: &str,
+        scratch: &ScratchIndex,
+    ) -> Result<Result<String, DispatchOutcome>, DispatchError> {
         // W2: the base tree into a scratch index, then one entry per declared mutation. The
         // repository's own index is never opened.
         if write_pinned(
             repository,
             Some(scratch.path()),
             None,
-            &["read-tree", &base],
+            &["read-tree", base],
             None,
             WRITE_BUDGET,
         )
         .is_none()
         {
-            return Ok(DispatchOutcome::ObjectWriteFailed);
+            return Ok(Err(DispatchOutcome::ObjectWriteFailed));
         }
+        decided.git_steps.push(GitStep {
+            step: GitStepName::ReadTree,
+            result: GitStepResult::Succeeded,
+        });
         for (entry, supplied) in decided.per_mutation.iter().zip(content) {
             let wrote = match (&entry.kind, &supplied.bytes) {
                 (MutationKind::DeleteFile, _) => write_pinned(
@@ -779,7 +888,7 @@ impl DispatchService {
                         Some(bytes),
                         WRITE_BUDGET,
                     ) else {
-                        return Ok(DispatchOutcome::ObjectWriteFailed);
+                        return Ok(Err(DispatchOutcome::ObjectWriteFailed));
                     };
                     let cacheinfo = format!("100644,{},{}", blob.trim(), entry.path);
                     write_pinned(
@@ -795,7 +904,7 @@ impl DispatchService {
                 (_, None) => false,
             };
             if !wrote {
-                return Ok(DispatchOutcome::ObjectWriteFailed);
+                return Ok(Err(DispatchOutcome::ObjectWriteFailed));
             }
         }
 
@@ -809,7 +918,7 @@ impl DispatchService {
             None,
             WRITE_BUDGET,
         ) else {
-            return Ok(DispatchOutcome::ObjectWriteFailed);
+            return Ok(Err(DispatchOutcome::ObjectWriteFailed));
         };
         let identity = GitIdentity {
             name: COMMIT_AUTHOR_NAME.to_owned(),
@@ -821,86 +930,162 @@ impl DispatchService {
             repository,
             None,
             Some(&identity),
-            &["commit-tree", tree.trim(), "-p", &base, "-m", &message],
+            &["commit-tree", tree.trim(), "-p", base, "-m", &message],
             None,
             WRITE_BUDGET,
         ) else {
-            return Ok(DispatchOutcome::ObjectWriteFailed);
+            return Ok(Err(DispatchOutcome::ObjectWriteFailed));
         };
         let commit = commit.trim().to_owned();
         decided.prepared_commit = Some(commit.clone());
+        for step in [
+            GitStepName::HashObject,
+            GitStepName::UpdateIndex,
+            GitStepName::WriteTree,
+            GitStepName::CommitTree,
+        ] {
+            decided.git_steps.push(GitStep {
+                step,
+                result: GitStepResult::Succeeded,
+            });
+        }
 
         // W4: the prepared commit touches exactly the declared set, and every blob in it hashes to
         // what the Candidate declared. NUL-delimited, because a declared path may contain a
         // newline.
-        match self.effect_matches(repository, &base, &commit, decided) {
+        match self.effect_matches(repository, base, &commit, decided) {
             Ok(true) => {}
-            Ok(false) => return Ok(DispatchOutcome::EffectDoesNotMatchDeclaration),
+            Ok(false) => return Ok(Err(DispatchOutcome::EffectDoesNotMatchDeclaration)),
             Err(error) => return Err(error),
         }
+        Ok(Ok(commit))
+    }
 
-        // The reservation, before the irreversible step: one preparation per Ruling, ever, and a
-        // durable record of the exact commit an unobserved attempt was about to publish. A
-        // uniqueness violation here is the race the gate above cannot close, and it is a refusal
-        // rather than an error -- the Run still ends with a Receipt (AGENTS.md:154).
-        match self.reserve(opened, decided, &branch, &base, &commit) {
-            Ok(()) => {}
-            Err(DispatchError::Store(rusqlite::Error::SqliteFailure(failure, _)))
-                if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
-                    || failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY =>
-            {
-                return Ok(DispatchOutcome::AlreadyDispatched);
+    /// The irreversible step and its record, under one write lock.
+    #[allow(clippy::too_many_lines)]
+    fn land_within(
+        &self,
+        opened: &OpenRun,
+        decided: &mut Decided,
+        branch: &str,
+        base: &str,
+        commit: &str,
+    ) -> Result<DispatchOutcome, DispatchError> {
+        // The pinned repository is taken out of `decided` for the duration: the closure below
+        // needs it and needs to write to `decided`, and the same value cannot be both.
+        let repository = decided
+            .repository
+            .take()
+            .ok_or(DispatchError::InvalidStore)?;
+        let (device, inode) = repository.identity();
+        let source = repository.path().to_string_lossy().into_owned();
+        let outcome = self.accounts.with_authenticated_store(|connection, now| {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+            // The authority, re-read at the last moment it can be read: the same owning-module
+            // proof the gates ran, plus the two live gates that are not about the record.
+            if let Some(refusal) = reverify_authority(&transaction, self.workspace_id, opened)? {
+                transaction.commit()?;
+                return Ok(refusal);
             }
-            Err(error) => return Err(error),
-        }
 
-        // L1: the compare-and-swap. `update-ref <ref> <new> <old>` fails unless the ref still holds
-        // exactly the value the gates observed -- which a fast-forward merge does not check: a
-        // branch moved BACK to an ancestor still fast-forwards, and two dispatchers that both
-        // observed the base both succeed (gpt1's probes, R9).
-        let landed = swap_ref(repository, &branch, &commit, &base);
-        if landed.is_none() {
-            // Refused or unestablished. Which one is answerable by reading the ref, and the answer
-            // is a fact rather than an assumption either way.
-            return Ok(
-                match read_pinned(repository, &["rev-parse", "--verify", &branch], READ_BUDGET) {
-                    Some(head) if head.trim() == commit => DispatchOutcome::Applied,
-                    Some(head) if head.trim() == base => DispatchOutcome::LandingRefused,
-                    Some(_) => DispatchOutcome::LandingRefused,
-                    None => DispatchOutcome::LandingUnobserved,
-                },
+            // The spend, and the durable record of what is about to be published. Reconciliation
+            // reads this to finish an attempt that never got to write its own Receipt.
+            let reserved = transaction.execute(
+                "INSERT INTO dispatch_preparations (
+                     workspace_id, run_id, ruling_digest, source, source_device, source_inode,
+                     branch, pinned_base_revision, prepared_commit, prepared_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    self.workspace_id.to_string(),
+                    opened.run_id.to_string(),
+                    opened.ruling_digest.as_str(),
+                    source.as_str(),
+                    i64::try_from(device).unwrap_or(i64::MAX),
+                    i64::try_from(inode).unwrap_or(i64::MAX),
+                    branch,
+                    base,
+                    commit,
+                    now,
+                ],
             );
-        }
-        let Some(head) = read_pinned(repository, &["rev-parse", "--verify", &branch], READ_BUDGET)
-        else {
-            return Ok(DispatchOutcome::LandingUnobserved);
-        };
-        if head.trim() != commit {
-            return Ok(DispatchOutcome::LandingUnobserved);
-        }
-        decided.observed_head = Some(commit.clone());
+            match reserved {
+                Ok(_) => {}
+                Err(rusqlite::Error::SqliteFailure(failure, _))
+                    if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+                        || failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY =>
+                {
+                    transaction.commit()?;
+                    return Ok(DispatchOutcome::AlreadyDispatched);
+                }
+                Err(error) => return Err(DispatchError::Store(error)),
+            }
 
-        // The copy's working tree, updated after the swap. Beacon owns this checkout -- v1 lands
-        // nowhere else -- so leaving it showing the previous revision would be Beacon knowingly
-        // leaving its own tree stale. It is a separately observable step and is not described as
-        // atomic with the ref.
-        decided.checkout_updated = write_pinned(
-            repository,
-            None,
-            None,
-            &["reset", "--hard", "--quiet", &commit],
-            None,
-            WRITE_BUDGET,
-        )
-        .is_some();
-
-        for record in &mut decided.per_mutation {
-            record.effect = match record.kind {
-                MutationKind::DeleteFile => MutationEffect::Removed,
-                _ => MutationEffect::Written,
+            // L1, inside the lock. `update-ref <ref> <new> <old>` fails unless the ref still holds
+            // exactly the value the gates observed -- which a fast-forward merge does not check.
+            let swapped = swap_ref(&repository, branch, commit, base);
+            decided.git_steps.push(GitStep {
+                step: GitStepName::UpdateRef,
+                result: if swapped.is_some() {
+                    GitStepResult::Succeeded
+                } else {
+                    GitStepResult::Refused
+                },
+            });
+            let observed =
+                read_pinned(&repository, &["rev-parse", "--verify", branch], READ_BUDGET);
+            let outcome = match (swapped.is_some(), observed.as_deref().map(str::trim)) {
+                (_, Some(head)) if head == commit => DispatchOutcome::Applied,
+                (_, Some(_)) => DispatchOutcome::LandingRefused,
+                (_, None) => DispatchOutcome::LandingUnobserved,
             };
-        }
-        Ok(DispatchOutcome::Applied)
+            if outcome == DispatchOutcome::Applied {
+                decided.observed_head = Some(commit.to_owned());
+                // Beacon owns this checkout -- v1 lands nowhere else -- so leaving it showing the
+                // previous revision would be Beacon knowingly leaving its own tree stale.
+                //
+                // `read-tree -u --reset`, NOT `reset --hard`: a kernel review probed the latter and
+                // found it moves the current branch as well as the index and worktree, so a branch
+                // that moved after the swap was silently pulled back. That made the checkout a
+                // SECOND unguarded ref write after the one irreversible step this act is supposed
+                // to have. This primitive writes the index and the working tree and leaves the ref
+                // exactly where the compare-and-swap put it.
+                decided.checkout_updated = write_pinned(
+                    &repository,
+                    None,
+                    None,
+                    &["read-tree", "-u", "--reset", commit],
+                    None,
+                    WRITE_BUDGET,
+                )
+                .is_some();
+                decided.git_steps.push(GitStep {
+                    step: GitStepName::ReadTreeCheckout,
+                    result: if decided.checkout_updated {
+                        GitStepResult::Succeeded
+                    } else {
+                        GitStepResult::Refused
+                    },
+                });
+                for record in &mut decided.per_mutation {
+                    record.effect = match record.kind {
+                        MutationKind::DeleteFile => MutationEffect::Removed,
+                        _ => MutationEffect::Written,
+                    };
+                }
+            }
+
+            // The Receipt, the Event and the Run's terminal state -- in this same transaction, so
+            // the record of what happened commits with the decision that let it happen.
+            let receipt = self.build_receipt(opened, decided, &outcome, now)?;
+            write_receipt(&transaction, self.workspace_id, opened.run_id, &receipt)?;
+            transaction.commit()?;
+            decided.receipt = Some(receipt);
+            Ok(outcome)
+        });
+        decided.repository = Some(repository);
+        outcome
     }
 
     /// Does `base..commit` touch exactly the declared set, and do its blobs hold the declared bytes?
@@ -909,7 +1094,7 @@ impl DispatchService {
         repository: &PinnedRepository,
         base: &str,
         commit: &str,
-        decided: &Decided,
+        decided: &mut Decided,
     ) -> Result<bool, DispatchError> {
         let Some(diff) = read_pinned(
             repository,
@@ -918,6 +1103,9 @@ impl DispatchService {
         ) else {
             return Ok(false);
         };
+        // The measured diff digest: SHA-256 over what the commit actually changed, which is a
+        // different fact from the Candidate's digest and is recorded as one.
+        let measured = hex(&crate::proposal::sha256(diff.as_bytes()));
         // `-z` output is NUL-delimited status/path pairs, so a path containing a newline is read
         // correctly rather than splitting a record in half.
         let fields: Vec<&str> = diff.split('\0').filter(|part| !part.is_empty()).collect();
@@ -934,6 +1122,12 @@ impl DispatchService {
                 return Ok(false);
             }
         }
+        decided.diff_digest = Some(measured);
+        decided.git_steps.push(GitStep {
+            step: GitStepName::DiffNameStatus,
+            result: GitStepResult::Succeeded,
+        });
+
         // And the bytes in the prepared commit's tree, which is what gets published -- not the
         // bytes on disk, which no longer matter and never entered the objects.
         for record in &decided.per_mutation {
@@ -1100,6 +1294,12 @@ struct Decided {
     summary: String,
     prepared_commit: Option<String>,
     checkout_updated: bool,
+    git_steps: Vec<GitStep>,
+    source_identity: Option<SourceIdentity>,
+    /// SHA-256 over the commit's own NUL-delimited name-status output: a measured diff digest,
+    /// which a Candidate digest is not.
+    diff_digest: Option<String>,
+    receipt: Option<DispatchReceipt>,
 }
 
 impl Decided {
@@ -1115,88 +1315,127 @@ impl Decided {
 }
 
 impl DispatchService {
+    /// Build the Receipt for one decided attempt. Pure: it writes nothing, so the landing
+    /// transaction and the refusal path produce the same record from the same facts.
+    fn build_receipt(
+        &self,
+        opened: &OpenRun,
+        decided: &Decided,
+        outcome: &DispatchOutcome,
+        now: i64,
+    ) -> Result<DispatchReceipt, DispatchError> {
+        let ended_at_ms = u64::try_from(now)
+            .map_err(|_| DispatchError::InvalidStore)?
+            .max(opened.started_at_ms);
+        let bindings = decided.bindings.clone();
+        Ok(DispatchReceipt {
+            version: 3,
+            run_id: opened.run_id,
+            workspace_id: self.workspace_id,
+            project_id: opened.project_id,
+            actor: DispatchActor::Owner,
+            ruling_digest: decided
+                .ruling_digest
+                .clone()
+                .unwrap_or_else(|| RulingDigest {
+                    algorithm: "sha256".to_owned(),
+                    canonicalizer: "beacon.ruling.v1".to_owned(),
+                    value: opened.ruling_digest.clone(),
+                }),
+            proposal_digest: decided.proposal_digest.clone(),
+            candidate_digest: decided.candidate_digest.clone(),
+            outcome: outcome.clone(),
+            autonomy_profile: decided.autonomy_profile,
+            charter_revision: bindings.as_ref().map_or(0, |b| b.charter_revision),
+            project_policy_revision: bindings.as_ref().map_or(0, |b| b.project_policy_revision),
+            repository_revision: bindings.as_ref().map_or(0, |b| b.repository_revision),
+            source_kind: decided.binding.as_ref().map(|binding| binding.source_kind),
+            source: decided
+                .binding
+                .as_ref()
+                .map(|binding| binding.source.clone()),
+            source_identity: decided.source_identity,
+            branch: decided.branch.clone(),
+            pinned_base_revision: bindings.map(|b| b.pinned_base_revision),
+            observed_head: decided.observed_head.clone(),
+            prepared_commit: decided.prepared_commit.clone(),
+            resulting_revision: match outcome {
+                DispatchOutcome::Applied => decided.prepared_commit.clone(),
+                _ => None,
+            },
+            diff_digest: decided.diff_digest.clone(),
+            checkout_updated: decided.checkout_updated,
+            git_steps: decided.git_steps.clone(),
+            /// No Declared Check ran and no model was invoked, so these are measured zeroes rather
+            /// than absences: dispatch performs neither by construction.
+            model_invocations: 0,
+            cost_usd_micros: 0,
+            per_mutation: decided.per_mutation.clone(),
+            started_at_ms: opened.started_at_ms,
+            ended_at_ms,
+            not_verified: not_verified(outcome, decided),
+        })
+    }
+
+    /// Record a refusal that never reached the landing transaction.
     fn close(&self, opened: OpenRun, decided: Decided) -> Result<DispatchReceipt, DispatchError> {
+        // A landing already wrote its own Receipt inside its transaction; returning that one is
+        // what keeps a dispatch to exactly one Receipt.
+        if let Some(receipt) = decided.receipt.clone() {
+            return Ok(receipt);
+        }
         self.accounts.with_authenticated_store(|connection, now| {
-            let ended_at_ms = u64::try_from(now)
-                .map_err(|_| DispatchError::InvalidStore)?
-                .max(opened.started_at_ms);
             let outcome = decided.outcome.clone().ok_or(DispatchError::InvalidStore)?;
-            let bindings = decided.bindings.clone();
-            let receipt = DispatchReceipt {
-                version: 3,
-                run_id: opened.run_id,
-                workspace_id: self.workspace_id,
-                project_id: opened.project_id,
-                actor: DispatchActor::Owner,
-                ruling_digest: decided
-                    .ruling_digest
-                    .clone()
-                    .unwrap_or_else(|| RulingDigest {
-                        algorithm: "sha256".to_owned(),
-                        canonicalizer: "beacon.ruling.v1".to_owned(),
-                        value: opened.ruling_digest.clone(),
-                    }),
-                proposal_digest: decided.proposal_digest.clone(),
-                candidate_digest: decided.candidate_digest.clone(),
-                outcome: outcome.clone(),
-                autonomy_profile: decided.autonomy_profile,
-                charter_revision: bindings.as_ref().map_or(0, |b| b.charter_revision),
-                project_policy_revision: bindings.as_ref().map_or(0, |b| b.project_policy_revision),
-                repository_revision: bindings.as_ref().map_or(0, |b| b.repository_revision),
-                source_kind: decided.binding.as_ref().map(|binding| binding.source_kind),
-                source: decided
-                    .binding
-                    .as_ref()
-                    .map(|binding| binding.source.clone()),
-                pinned_base_revision: bindings.map(|b| b.pinned_base_revision),
-                observed_head: decided.observed_head.clone(),
-                prepared_commit: decided.prepared_commit.clone(),
-                resulting_revision: match outcome {
-                    DispatchOutcome::Applied => decided.prepared_commit.clone(),
-                    _ => None,
-                },
-                checkout_updated: decided.checkout_updated,
-                per_mutation: decided.per_mutation.clone(),
-                started_at_ms: opened.started_at_ms,
-                ended_at_ms,
-                not_verified: not_verified(&outcome, &decided),
-            };
-            let payload = serde_json::to_string(&receipt)?;
+            let receipt = self.build_receipt(&opened, &decided, &outcome, now)?;
             let transaction = connection.transaction()?;
-            transaction.execute(
-                "UPDATE runs SET state = ?3, ended_at_ms = ?4 WHERE workspace_id = ?1 AND id = ?2",
-                params![
-                    self.workspace_id.to_string(),
-                    opened.run_id.to_string(),
-                    outcome.run_state(),
-                    i64::try_from(ended_at_ms).map_err(|_| DispatchError::InvalidStore)?,
-                ],
-            )?;
-            transaction.execute(
-                "INSERT INTO receipts (
-                     workspace_id, run_id, version, outcome, receipt_json, recorded_at_ms
-                 ) VALUES (?1, ?2, 3, ?3, ?4, ?5)",
-                params![
-                    self.workspace_id.to_string(),
-                    opened.run_id.to_string(),
-                    outcome.as_str(),
-                    payload.as_str(),
-                    i64::try_from(ended_at_ms).map_err(|_| DispatchError::InvalidStore)?,
-                ],
-            )?;
-            transaction.execute(
-                "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-                 VALUES (?1, 'proposal.dispatched', ?2, ?3)",
-                params![
-                    self.workspace_id.to_string(),
-                    payload.as_str(),
-                    i64::try_from(ended_at_ms).map_err(|_| DispatchError::InvalidStore)?,
-                ],
-            )?;
+            write_receipt(&transaction, self.workspace_id, opened.run_id, &receipt)?;
             transaction.commit()?;
             Ok(receipt)
         })
     }
+}
+
+/// The Run's terminal state, its Receipt and its audit Event, together.
+///
+/// One function, so a landing and a refusal cannot come to disagree about what recording an
+/// attempt means -- and so the whole record is one statement in whichever transaction the caller
+/// is holding.
+fn write_receipt(
+    connection: &Connection,
+    workspace_id: Uuid,
+    run_id: Uuid,
+    receipt: &DispatchReceipt,
+) -> Result<(), DispatchError> {
+    let payload = serde_json::to_string(receipt)?;
+    let ended_at_ms =
+        i64::try_from(receipt.ended_at_ms).map_err(|_| DispatchError::InvalidStore)?;
+    connection.execute(
+        "UPDATE runs SET state = ?3, ended_at_ms = ?4 WHERE workspace_id = ?1 AND id = ?2",
+        params![
+            workspace_id.to_string(),
+            run_id.to_string(),
+            receipt.outcome.run_state(),
+            ended_at_ms,
+        ],
+    )?;
+    connection.execute(
+        "INSERT INTO receipts (
+             workspace_id, run_id, version, outcome, receipt_json, recorded_at_ms
+         ) VALUES (?1, ?2, 3, ?3, ?4, ?5)",
+        params![
+            workspace_id.to_string(),
+            run_id.to_string(),
+            receipt.outcome.as_str(),
+            payload.as_str(),
+            ended_at_ms,
+        ],
+    )?;
+    connection.execute(
+        "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+         VALUES (?1, 'proposal.dispatched', ?2, ?3)",
+        params![workspace_id.to_string(), payload.as_str(), ended_at_ms],
+    )?;
+    Ok(())
 }
 
 /// Everything a dispatch in this build did not establish.
@@ -1300,6 +1539,39 @@ fn blob_arguments() -> [&'static str; 6] {
     ["hash-object", "-w", "-t", "blob", "--no-filters", "--stdin"]
 }
 
+/// The authority, re-read at the last moment before the irreversible step.
+///
+/// Returns the refusal if anything that permitted this dispatch has stopped permitting it. Called
+/// inside the landing transaction, so nothing it reads can change before the ref moves: a competing
+/// Ruling, Policy publication, Charter revision or Pause is a write, and the write lock is held.
+fn reverify_authority(
+    connection: &Connection,
+    workspace_id: Uuid,
+    opened: &OpenRun,
+) -> Result<Option<DispatchOutcome>, DispatchError> {
+    let ruling = match verified_ruling_within(connection, workspace_id, &opened.ruling_digest) {
+        Ok(Some(ruling)) => ruling,
+        Ok(None) | Err(_) => return Ok(Some(DispatchOutcome::RulingUnreadable)),
+    };
+    if ruling.payload().decision != RulingDecision::Approve {
+        return Ok(Some(DispatchOutcome::RulingRefused));
+    }
+    if ruling.force().superseded_by().is_some() {
+        return Ok(Some(DispatchOutcome::RulingSuperseded));
+    }
+    if !ruling.force().drift().is_empty() {
+        return Ok(Some(DispatchOutcome::RulingDrifted));
+    }
+    match current_autonomy_profile(connection, workspace_id, opened.project_id) {
+        Ok(Some(AutonomyProfile::Supervised)) => {}
+        _ => return Ok(Some(DispatchOutcome::AutonomyProfileRefuses)),
+    }
+    if installation_is_paused(connection)? {
+        return Ok(Some(DispatchOutcome::InstallationPaused));
+    }
+    Ok(None)
+}
+
 /// Move `branch` from exactly `expected` to `commit`, or fail.
 ///
 /// `update-ref <ref> <new> <old>` is a compare-and-swap: Git refuses unless the ref currently holds
@@ -1353,6 +1625,183 @@ pub(crate) fn installation_is_paused(connection: &Connection) -> Result<bool, Di
 // ---------------------------------------------------------------------------------------------
 // Startup reconciliation
 // ---------------------------------------------------------------------------------------------
+
+/// Finish every dispatch attempt that never wrote its own Receipt.
+///
+/// A cross-lab review found the hole this closes: the preparation record was written durably before
+/// the swap and then never read, so a process that died between the swap and the Receipt could
+/// leave a branch permanently moved with Beacon recording nothing terminal. `AGENTS.md:154` admits
+/// no exception, and a Run that changed a repository and cannot say so is the worst shape a Receipt
+/// can be missing from.
+///
+/// This is the one place startup reads a repository, and the distinction matters: it does not
+/// re-judge a finished Receipt -- later history is ordinary work, not corruption -- it resolves an
+/// attempt that is still open, by asking the ref what became of the commit the preparation named.
+///
+/// Runs the reconciliation cannot resolve stay open with the truth recorded: an unreadable
+/// repository, or one whose identity no longer matches what was pinned, yields `LandingUnobserved`
+/// naming the prepared commit, never a guess in either direction.
+pub(crate) fn finish_prepared_dispatches(connection: &Connection) -> Result<(), DispatchError> {
+    let mut statement = connection.prepare(
+        "SELECT preparations.workspace_id, preparations.run_id, preparations.source,
+                preparations.source_device, preparations.source_inode, preparations.branch,
+                preparations.pinned_base_revision, preparations.prepared_commit,
+                runs.project_id, runs.started_at_ms, runs.charter_revision,
+                runs.repository_revision
+         FROM dispatch_preparations AS preparations
+         JOIN runs ON runs.workspace_id = preparations.workspace_id
+                  AND runs.id = preparations.run_id
+         WHERE runs.kind = 'proposal_dispatch'
+           AND NOT EXISTS (
+               SELECT 1 FROM receipts
+               WHERE receipts.workspace_id = preparations.workspace_id
+                 AND receipts.run_id = preparations.run_id
+           )
+         ORDER BY preparations.prepared_at_ms, preparations.run_id",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(PreparedDispatch {
+                workspace_id: row.get::<_, String>(0)?,
+                run_id: row.get::<_, String>(1)?,
+                source: row.get::<_, String>(2)?,
+                device: row.get::<_, i64>(3)?,
+                inode: row.get::<_, i64>(4)?,
+                branch: row.get::<_, String>(5)?,
+                pinned_base_revision: row.get::<_, String>(6)?,
+                prepared_commit: row.get::<_, String>(7)?,
+                project_id: row.get::<_, String>(8)?,
+                started_at_ms: row.get::<_, i64>(9)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+
+    for prepared in rows {
+        let workspace_id =
+            Uuid::parse_str(&prepared.workspace_id).map_err(|_| DispatchError::InvalidStore)?;
+        let run_id = Uuid::parse_str(&prepared.run_id).map_err(|_| DispatchError::InvalidStore)?;
+        let project_id =
+            Uuid::parse_str(&prepared.project_id).map_err(|_| DispatchError::InvalidStore)?;
+        let outcome = observe_landing(&prepared);
+        let started_at_ms =
+            u64::try_from(prepared.started_at_ms).map_err(|_| DispatchError::InvalidStore)?;
+        let receipt = DispatchReceipt {
+            version: 3,
+            run_id,
+            workspace_id,
+            project_id,
+            actor: DispatchActor::Owner,
+            ruling_digest: RulingDigest {
+                algorithm: "sha256".to_owned(),
+                canonicalizer: "beacon.ruling.v2".to_owned(),
+                value: ruling_of_preparation(connection, &prepared)?,
+            },
+            proposal_digest: None,
+            candidate_digest: None,
+            outcome: outcome.clone(),
+            autonomy_profile: None,
+            charter_revision: 0,
+            project_policy_revision: 0,
+            repository_revision: 0,
+            source_kind: Some(RepositorySourceKind::LocalPath),
+            source: Some(prepared.source.clone()),
+            source_identity: Some(SourceIdentity {
+                device: u64::try_from(prepared.device).unwrap_or(u64::MAX),
+                inode: u64::try_from(prepared.inode).unwrap_or(u64::MAX),
+            }),
+            branch: Some(prepared.branch.clone()),
+            pinned_base_revision: Some(prepared.pinned_base_revision.clone()),
+            observed_head: None,
+            prepared_commit: Some(prepared.prepared_commit.clone()),
+            resulting_revision: match outcome {
+                DispatchOutcome::Applied => Some(prepared.prepared_commit.clone()),
+                _ => None,
+            },
+            diff_digest: None,
+            checkout_updated: false,
+            git_steps: Vec::new(),
+            model_invocations: 0,
+            cost_usd_micros: 0,
+            per_mutation: Vec::new(),
+            started_at_ms,
+            ended_at_ms: started_at_ms,
+            // Reconstructed from the durable preparation after an interruption, so it establishes
+            // strictly less than a Receipt written by the attempt itself, and says so.
+            not_verified: vec![
+                NotVerified::ExecutionPolicyConstraint,
+                NotVerified::SandboxConstraint,
+                NotVerified::NetworkConstraint,
+                NotVerified::ModelProviderConstraint,
+                NotVerified::CommandAllowlistConstraint,
+                NotVerified::ToolAllowlistConstraint,
+                NotVerified::EvaluationsConstraint,
+                NotVerified::NonAuthorEvaluationOfCandidate,
+                NotVerified::SafetySnapshot,
+                NotVerified::BaseRevisionReachability,
+                NotVerified::DeclaredChecksAgainstResult,
+                NotVerified::ReconstructedAfterInterruption,
+            ],
+        };
+        write_receipt(connection, workspace_id, run_id, &receipt)?;
+    }
+    Ok(())
+}
+
+struct PreparedDispatch {
+    workspace_id: String,
+    run_id: String,
+    source: String,
+    device: i64,
+    inode: i64,
+    branch: String,
+    pinned_base_revision: String,
+    prepared_commit: String,
+    project_id: String,
+    started_at_ms: i64,
+}
+
+/// What became of a prepared commit, asked of the repository itself.
+fn observe_landing(prepared: &PreparedDispatch) -> DispatchOutcome {
+    let Ok(repository) = PinnedRepository::open(Path::new(&prepared.source)) else {
+        return DispatchOutcome::LandingUnobserved;
+    };
+    let (device, inode) = repository.identity();
+    // The identity the attempt pinned, or nothing: a directory that now has a different identity is
+    // a different repository, and reading its ref would answer a question about the wrong tree.
+    if i64::try_from(device).unwrap_or(i64::MAX) != prepared.device
+        || i64::try_from(inode).unwrap_or(i64::MAX) != prepared.inode
+    {
+        return DispatchOutcome::LandingUnobserved;
+    }
+    match read_pinned(
+        &repository,
+        &["rev-parse", "--verify", &prepared.branch],
+        READ_BUDGET,
+    ) {
+        Some(head) if head.trim() == prepared.prepared_commit => DispatchOutcome::Applied,
+        Some(head) if head.trim() == prepared.pinned_base_revision => {
+            DispatchOutcome::LandingRefused
+        }
+        // The branch holds something else entirely: the attempt may have landed and been moved
+        // afterwards, or never landed. That is exactly what "unobserved" means.
+        Some(_) | None => DispatchOutcome::LandingUnobserved,
+    }
+}
+
+fn ruling_of_preparation(
+    connection: &Connection,
+    prepared: &PreparedDispatch,
+) -> Result<String, DispatchError> {
+    connection
+        .query_row(
+            "SELECT ruling_digest FROM dispatch_preparations
+             WHERE workspace_id = ?1 AND run_id = ?2",
+            params![prepared.workspace_id, prepared.run_id],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(DispatchError::Store)
+}
 
 /// Replay one `proposal.dispatched` Event against its stored Receipt.
 ///
@@ -1631,6 +2080,48 @@ mod tests {
             !arguments.contains(&"--path"),
             "naming a path would let .gitattributes rewrite Candidate bytes"
         );
+    }
+
+    #[test]
+    fn the_checkout_step_updates_the_tree_without_moving_the_ref() {
+        // A kernel review probed `reset --hard` after a successful swap and found it moves the
+        // current branch too: a branch that moved after the compare-and-swap was pulled back, which
+        // made the checkout a SECOND unguarded ref write. This pins the primitive that does not.
+        let root = std::env::temp_dir().join(format!("beacon-checkout-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        git(&root, &["init", "--quiet", "--initial-branch=main"]);
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "--quiet", "-m", "one"]);
+        let first = git(&root, &["rev-parse", "HEAD"]);
+        std::fs::write(root.join("a.txt"), "two\n").unwrap();
+        git(&root, &["commit", "--quiet", "-am", "two"]);
+        let second = git(&root, &["rev-parse", "HEAD"]);
+        git(&root, &["update-ref", "refs/heads/main", &first]);
+
+        let repository = PinnedRepository::open(&root).unwrap();
+        assert!(
+            write_pinned(
+                &repository,
+                None,
+                None,
+                &["read-tree", "-u", "--reset", &second],
+                None,
+                WRITE_BUDGET,
+            )
+            .is_some()
+        );
+
+        // The tree holds the later revision's content...
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "two\n"
+        );
+        // ...and the branch is exactly where it was left.
+        assert_eq!(git(&root, &["rev-parse", "HEAD"]), first);
+        assert_ne!(first, second);
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

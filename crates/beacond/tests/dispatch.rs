@@ -556,6 +556,46 @@ impl Fixture {
         });
     }
 
+    /// Simulate the state a crash between the swap and the Receipt leaves behind: a preparation
+    /// exists, the Run is still open, and nothing terminal was recorded.
+    ///
+    /// The Receipt and Run triggers are dropped for the deletion and put back immediately, because
+    /// startup verifies the schema signature before it verifies any state -- a store left short a
+    /// trigger refuses startup for the wrong reason, and a recovery test would pass without ever
+    /// reaching recovery.
+    fn simulate_crash_after_swap(&self) {
+        let connection = self.store.connect();
+        let mut statement = connection
+            .prepare(
+                "SELECT sql FROM sqlite_schema
+                 WHERE type = 'trigger' AND tbl_name IN ('receipts', 'runs')
+                 ORDER BY name",
+            )
+            .unwrap();
+        let triggers = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        drop(statement);
+        assert_eq!(triggers.len(), 4);
+        connection
+            .execute_batch(
+                "DROP TRIGGER receipts_no_update;
+                 DROP TRIGGER receipts_no_delete;
+                 DROP TRIGGER runs_no_delete;
+                 DROP TRIGGER runs_single_terminal_transition;
+                 DELETE FROM receipts;
+                 DELETE FROM events WHERE kind = 'proposal.dispatched';
+                 UPDATE runs SET state = 'dispatching', ended_at_ms = NULL
+                 WHERE kind = 'proposal_dispatch';",
+            )
+            .unwrap();
+        for trigger in triggers {
+            connection.execute_batch(&trigger).unwrap();
+        }
+    }
+
     /// Run `f` with the Candidate immutability triggers dropped, then put them back.
     ///
     /// Restoring them is not tidiness: startup verifies the schema signature before it verifies
@@ -2198,4 +2238,131 @@ fn a_request_with_several_faults_is_refused_by_the_earliest_gate() {
         DispatchOutcome::RulingRefused,
         "a later gate reported the refusal for a request that fails an earlier one"
     );
+}
+
+#[test]
+fn an_interrupted_dispatch_is_finished_from_its_preparation_at_startup() {
+    // gpt2's P0: the preparation record was written durably before the swap and never read, so a
+    // process that died between the swap and the Receipt left a branch permanently moved with
+    // Beacon recording nothing terminal. AGENTS.md:154 admits no exception.
+    //
+    // The crash is simulated where it matters -- a preparation exists, the ref has moved to the
+    // prepared commit, and no Receipt was written -- and startup must produce the truthful one.
+    let fixture = admitted_mission("interrupted");
+    let (repository, ruling_digest) = fixture.approved("interrupted");
+    let base = repository.revision.clone();
+
+    // Land normally, then remove the Receipt, the Event and the terminal state: what remains is
+    // exactly the state a crash after the swap leaves behind.
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+    assert_eq!(receipt.outcome, DispatchOutcome::Applied);
+    let landed = receipt.resulting_revision.clone().unwrap();
+    fixture.simulate_crash_after_swap();
+
+    fixture
+        .restart()
+        .expect("startup finishes the interrupted attempt");
+
+    // The truth, recorded: the branch names the prepared commit, so the attempt applied.
+    let (outcome, payload): (String, String) = fixture
+        .store
+        .connect()
+        .query_row("SELECT outcome, receipt_json FROM receipts", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(outcome, "applied");
+    let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(value["resultingRevision"], landed);
+    assert_eq!(value["preparedCommit"], landed);
+    // And it says it was reconstructed, because it establishes less than the attempt's own Receipt
+    // would have.
+    assert!(
+        value["notVerified"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry == "reconstructed_after_interruption"),
+        "{payload}"
+    );
+    let state: String = fixture
+        .store
+        .connect()
+        .query_row(
+            "SELECT state FROM runs WHERE kind = 'proposal_dispatch'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "applied");
+    let _ = base;
+}
+
+#[test]
+fn an_interrupted_dispatch_whose_swap_never_happened_is_finished_as_refused() {
+    // The other side of the same recovery: the preparation exists, the branch is still at the base,
+    // so the swap did not happen. "Refused" is a fact read off the ref, not a guess -- and the
+    // distinction from `Applied` is the whole reason the preparation record persists the commit.
+    let fixture = admitted_mission("interrupted-refused");
+    let (repository, ruling_digest) = fixture.approved("interrupted-refused");
+    let base = repository.revision.clone();
+
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+    assert_eq!(receipt.outcome, DispatchOutcome::Applied);
+    // Put the branch back and erase the record: now the store believes an attempt was prepared and
+    // the repository says it never landed.
+    CopyRepository::git(&repository.path, &["reset", "--hard", "--quiet", &base]);
+    fixture.simulate_crash_after_swap();
+
+    fixture
+        .restart()
+        .expect("startup finishes the interrupted attempt");
+
+    let outcome: String = fixture
+        .store
+        .connect()
+        .query_row("SELECT outcome FROM receipts", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(outcome, "landing_refused");
+}
+
+#[test]
+fn the_landing_transaction_holds_the_write_lock_across_the_swap() {
+    // gpt2's P0 on linearization: the authority that permits a landing must not be released before
+    // the irreversible step. It is re-read inside the landing transaction, and that transaction
+    // holds the store's write lock across the swap -- so a competing Ruling, Policy publication or
+    // Pause cannot commit in the window. This proves the lock is what it claims: while an immediate
+    // transaction is open on one connection, a second connection cannot write.
+    let fixture = admitted_mission("linearization");
+    let holder = fixture.store.connect();
+    holder
+        .busy_timeout(std::time::Duration::from_millis(0))
+        .unwrap();
+    let other = fixture.store.connect();
+    other
+        .busy_timeout(std::time::Duration::from_millis(0))
+        .unwrap();
+
+    holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let blocked = other.execute_batch(
+        "UPDATE installation_pause SET paused = 1, changed_at_ms = 1 WHERE singleton = 1",
+    );
+    assert!(
+        blocked.is_err(),
+        "a second writer committed while a landing transaction was open"
+    );
+    holder.execute_batch("ROLLBACK").unwrap();
+
+    // The control: with no transaction open, the same write succeeds.
+    other
+        .execute_batch(
+            "UPDATE installation_pause SET paused = 1, changed_at_ms = 1 WHERE singleton = 1",
+        )
+        .expect("the write is only blocked by the lock");
 }

@@ -66,8 +66,9 @@ pub use candidate::{
     CandidateV1, InconsistentCandidate, MalformedCandidate,
 };
 pub use dispatch::{
-    DispatchActor, DispatchError, DispatchOutcome, DispatchReceipt, DispatchService,
-    MutationEffect, MutationRecord, NotVerified, PauseService, SuppliedContent, UnresolvedRuns,
+    DispatchActor, DispatchError, DispatchOutcome, DispatchReceipt, DispatchService, GitStep,
+    GitStepName, GitStepResult, MutationEffect, MutationRecord, NotVerified, PauseService,
+    SourceIdentity, SuppliedContent, UnresolvedRuns,
 };
 pub use local_model_activation::{
     LocalModelActivation, LocalModelActivationError, LocalModelActivationReview,
@@ -260,6 +261,7 @@ pub enum SupervisorError {
     CandidateEventMismatch(i64),
     CandidateStateMismatch,
     DispatchEventMismatch(i64),
+    DispatchStateMismatch,
     PauseEventMismatch(i64),
     SchemaMismatch,
     UnsupportedSchemaVersion(i64),
@@ -430,6 +432,10 @@ impl fmt::Display for SupervisorError {
             Self::DispatchEventMismatch(sequence) => write!(
                 formatter,
                 "Event sequence {sequence} does not match its stored dispatch Receipt"
+            ),
+            Self::DispatchStateMismatch => write!(
+                formatter,
+                "an interrupted dispatch could not be finished from its preparation record"
             ),
             Self::PauseEventMismatch(sequence) => write!(
                 formatter,
@@ -1257,6 +1263,11 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     // declared effects and re-verifies them against that Proposal's own bytes.
     candidate::verify_candidate_state(connection)
         .map_err(|_| SupervisorError::CandidateStateMismatch)?;
+    // Before the Run-state check, because it is what turns an interrupted dispatch into a Run
+    // that HAS a terminal Receipt: an attempt that prepared a commit and never recorded what
+    // became of it is finished here, from its durable preparation and the repository's own ref.
+    dispatch::finish_prepared_dispatches(connection)
+        .map_err(|_| SupervisorError::DispatchStateMismatch)?;
     // A Run whose lease expired without a terminal Receipt becomes unconfirmed
     // here. Lease expiry is what proves that state; the Run is never removed.
     check_preflight::verify_run_state(connection).map_err(|_| SupervisorError::RunStateMismatch)?;
