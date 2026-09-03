@@ -1,0 +1,868 @@
+gate: team/opus-dispatch @ c29fef4
+All checks passed!
+  ok    ruff check
+62 files already formatted
+  ok    ruff format
+........................................................................ [ 16%]
+........................................................................ [ 32%]
+........................................................................ [ 49%]
+........................................................................ [ 65%]
+........................................................................ [ 82%]
+........................................................................ [ 98%]
+.....                                                                    [100%]
+437 passed in 2.28s
+  ok    pytest
+
+added 209 packages, and audited 210 packages in 6s
+
+29 packages are looking for funding
+  run `npm fund` for details
+
+found 0 vulnerabilities
+  ok    npm clean install
+
+> beacon-desktop@0.1.0 test
+> vitest run
+
+
+ RUN  v4.1.11 /home/kevin-lee/ai-workspace/claude/beacon-opus-dispatch/apps/desktop
+
+
+ Test Files  6 passed (6)
+      Tests  126 passed (126)
+   Start at  20:52:07
+   Duration  8.01s (transform 791ms, setup 305ms, import 1.53s, tests 7.66s, environment 2.10s)
+
+  ok    desktop tests
+
+> beacon-desktop@0.1.0 build
+> tsc -b && vite build
+
+vite v8.2.2 building client environment for production...
+transforming...
+✓ 2143 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   0.46 kB │ gzip:   0.29 kB
+dist/assets/index-D5Z0rBAs.css    0.73 kB │ gzip:   0.45 kB
+dist/assets/index-CmmFfs7v.js   524.04 kB │ gzip: 137.62 kB
+
+✓ built in 638ms
+[plugin builtin:vite-reporter] 
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rolldownOptions.output.codeSplitting to improve chunking: https://rolldown.rs/reference/OutputOptions.codeSplitting
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+  ok    desktop build
+
+> beacon-desktop@0.1.0 tauri
+> tauri build --no-bundle
+
+        Info Looking up installed tauri packages to check mismatched versions...
+     Running beforeBuildCommand `../../scripts/stage-sidecar && npm run build`
+   Compiling beacond v0.1.0 (/home/kevin-lee/ai-workspace/claude/beacon-opus-dispatch/crates/beacond)
+    Finished `release` profile [optimized] target(s) in 14.13s
+
+> beacon-desktop@0.1.0 build
+> tsc -b && vite build
+
+vite v8.2.2 building client environment for production...
+transforming...
+✓ 2143 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   0.46 kB │ gzip:   0.29 kB
+dist/assets/index-D5Z0rBAs.css    0.73 kB │ gzip:   0.45 kB
+dist/assets/index-CmmFfs7v.js   524.04 kB │ gzip: 137.62 kB
+
+✓ built in 525ms
+[plugin builtin:vite-reporter] 
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rolldownOptions.output.codeSplitting to improve chunking: https://rolldown.rs/reference/OutputOptions.codeSplitting
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+   Compiling beacond v0.1.0 (/home/kevin-lee/ai-workspace/claude/beacon-opus-dispatch/crates/beacond)
+   Compiling beacon-desktop v0.1.0 (/home/kevin-lee/ai-workspace/claude/beacon-opus-dispatch/apps/desktop/src-tauri)
+    Finished `release` profile [optimized] target(s) in 28.43s
+       Built application at: /home/kevin-lee/ai-workspace/claude/beacon-opus-dispatch/target/release/beacon-desktop
+  ok    Tauri build
+    Finished `release` profile [optimized] target(s) in 0.05s
+  ok    stage sidecar
+  ok    cargo fmt
+    Checking beacond v0.1.0 (/home/kevin-lee/ai-workspace/claude/beacon-opus-dispatch/crates/beacond)
+   Compiling beacon-desktop v0.1.0 (/home/kevin-lee/ai-workspace/claude/beacon-opus-dispatch/apps/desktop/src-tauri)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.23s
+  ok    cargo clippy
+   Compiling beacond v0.1.0 (/home/kevin-lee/ai-workspace/claude/beacon-opus-dispatch/crates/beacond)
+   Compiling beacon-desktop v0.1.0 (/home/kevin-lee/ai-workspace/claude/beacon-opus-dispatch/apps/desktop/src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.23s
+     Running unittests src/lib.rs (target/debug/deps/beacon_desktop-e607e179ce4c5860)
+
+running 19 tests
+test tests::capability_output_is_explicit_about_the_missing_native_passkey_adapter ... ok
+test tests::app_data_directory_is_owner_only ... ok
+test tests::legacy_app_data_migration_refuses_a_symlink_source ... ok
+test tests::legacy_app_data_migration_refuses_a_running_supervisor ... ok
+test tests::main_window_capability_grants_every_registered_account_command ... ok
+test tests::no_registered_command_can_ship_without_its_permission ... ok
+test tests::legacy_app_data_migration_refuses_ambiguous_dual_directories ... ok
+test tests::legacy_app_data_moves_once_and_keeps_the_existing_store ... ok
+test tests::signed_out_status_exposes_no_workspace_data_or_operator_command ... ok
+test tests::repository_refusals_reach_the_interface_under_their_own_code ... ok
+test tests::policy_refusals_reach_the_interface_under_their_own_code ... ok
+test tests::command_adapter_returns_the_recovery_key_once_then_an_exact_unlocked_status ... ok
+test tests::mission_refusals_reach_the_interface_under_their_own_code ... ok
+test tests::preflight_refusals_reach_the_interface_under_their_own_code ... ok
+test tests::command_adapter_binds_and_reads_project_repository_without_opening_it ... ok
+test tests::command_adapter_publishes_and_reads_project_policy_without_selecting_a_lead ... ok
+test tests::command_adapter_creates_and_reads_an_exact_project_charter ... ok
+test tests::command_adapter_returns_and_accepts_the_closed_starter_roster ... ok
+test tests::command_adapter_installs_and_reports_the_opt_in_sample_project ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.31s
+
+     Running unittests src/main.rs (target/debug/deps/beacon_desktop-b3b285f1f51ca9b1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/beacond-f87dd371c2875ca6)
+
+running 221 tests
+test candidate::tests::a_candidate_with_no_entries_is_refused ... ok
+test candidate::tests::a_declared_count_is_bounded_before_the_loop_reads_anything ... ok
+test candidate::tests::a_modification_that_changes_nothing_is_refused ... ok
+test candidate::tests::a_delete_carries_no_post_image_and_a_create_carries_no_pre_image ... ok
+test candidate::tests::a_path_that_is_not_repository_relative_is_refused ... ok
+test candidate::tests::an_uppercase_digest_or_base_revision_is_refused_rather_than_folded ... ok
+test candidate::tests::a_proposal_digest_naming_another_canonicalizer_is_refused ... ok
+test candidate::tests::a_known_fixture_reproduces_its_digest_from_the_bytes_alone ... ok
+test candidate::tests::an_unassigned_tag_is_refused_in_every_closed_position ... ok
+test candidate::tests::decode_then_encode_is_the_identity_for_every_mutation_kind ... ok
+test candidate::tests::the_record_starts_with_the_canonicalizer_magic ... ok
+test candidate::tests::two_entries_naming_one_path_are_refused ... ok
+test candidate::tests::the_cross_lab_vector_reproduces_byte_for_byte ... ok
+test candidate::tests::trailing_bytes_and_truncation_are_different_refusals ... ok
+test declared_checks::tests::top_level_value_extraction_preserves_exact_nested_bytes ... ok
+test check_preflight::tests::run_event_replay_preserves_sqlite_errors_as_store_failures ... ok
+test declared_checks::tests::not_admissible_requires_a_refusing_preflight ... ok
+test dispatch::tests::the_blob_invocation_names_no_path ... ok
+test declared_checks::tests::every_cleanup_keep_reason_retains_its_exact_ordered_gap ... ok
+test git_object_store::tests::a_directory_sorts_as_though_its_name_ended_in_a_slash ... ok
+test declared_checks::tests::observation_failure_is_incomplete ... ok
+test declared_checks::tests::dispatched_v2_receipts_require_verified_preflight_evidence ... ok
+test git_object_store::tests::a_tree_that_is_truncated_unordered_or_wrongly_moded_is_refused ... ok
+test git_object_store::tests::a_tree_naming_one_path_twice_is_refused_whatever_the_modes ... ok
+test declared_checks::tests::every_preflight_outcome_retains_each_unestablished_execution_stage ... ok
+test git_object_store::tests::a_missing_path_is_refused ... ok
+test git_object_store::tests::a_dangling_gitdir_file_is_refused ... ok
+test git_object_store::tests::a_directory_that_is_not_a_repository_is_refused ... ok
+test candidate::tests::every_single_byte_of_the_fixture_is_load_bearing ... ok
+test declared_checks::tests::versioned_decoders_are_recursively_closed ... ok
+test git_object_store::tests::a_malformed_revision_is_refused ... ok
+test git_object_store::tests::a_bound_that_excludes_an_object_on_the_path_is_a_refusal_not_an_absence ... ok
+test git_object_store::tests::a_loose_object_is_present ... ok
+test git_object_store::tests::an_io_failure_after_the_budget_expires_is_elapsed_not_a_broken_repository ... ok
+test git_object_store::tests::an_object_larger_than_the_callers_bound_is_a_refusal_not_a_broken_object ... ok
+test git_object_store::tests::a_deadline_that_expires_mid_read_is_not_published_as_an_outcome ... ok
+test git_object_store::tests::a_malformed_or_over_deep_path_is_refused_before_the_walk_trusts_it ... ok
+test git_object_store::tests::an_object_that_does_not_hash_to_its_own_name_is_refused ... ok
+test git_object_store::tests::a_nested_path_resolves_to_the_exact_file_bytes ... ok
+test git_object_store::tests::a_path_not_in_the_tree_is_absent_and_a_path_through_a_file_is_too ... ok
+test git_object_store::tests::a_directory_entry_is_matched_on_its_raw_mode_not_its_printed_one ... ok
+test git_object_store::tests::an_elapsed_deadline_is_an_error_and_never_one_of_the_four_outcomes ... ok
+test git_object_store::tests::a_loose_commit_is_read_and_names_its_own_type ... ok
+test git_object_store::tests::the_object_size_parser_refuses_padding_signs_and_overflow ... ok
+test git_object_store::tests::a_tampered_tree_on_the_path_is_refused_by_its_own_name ... ok
+test git_object_store::tests::a_name_that_is_not_forty_hex_characters_is_refused_before_any_read ... ok
+test git_object_store::tests::a_symlinked_loose_object_is_refused_rather_than_followed ... ok
+test git_object_store::tests::a_commits_headers_must_end_at_a_blank_line_and_not_merely_run_out ... ok
+test git_object_store::tests::an_object_missing_mid_walk_is_not_loose_rather_than_absent ... ok
+test local_transport::tests::the_surface_inventory_would_notice_a_dispatch_arm ... ok
+test git_object_store::tests::a_commit_is_validated_as_a_commit_and_not_merely_authenticated ... ok
+test local_transport::tests::no_transport_command_can_reach_dispatch_or_pause ... ok
+test platform_session::tests::active_screen_probe_is_unavailable_when_session_lock_fails ... ok
+test git_object_store::tests::a_walk_whose_deadline_expires_mid_traversal_publishes_nothing ... ok
+test git_object_store::tests::a_symlink_cannot_impersonate_a_loose_object ... ok
+test platform_session::tests::only_an_active_platform_signal_requests_a_lock ... ok
+test platform_session::tests::screen_monitor_rechecks_provider_state_when_availability_changes ... ok
+test proposal::tests::a_buffered_mismatch_is_discarded_by_every_way_the_walk_can_stop ... ok
+test proposal::tests::a_check_run_that_names_no_declared_check_is_refused ... ok
+test proposal::tests::a_declared_check_without_a_run_is_accepted ... ok
+test proposal::tests::a_bound_descriptor_decodes_but_is_never_accepted_by_submission ... ok
+test proposal::tests::a_budget_with_time_left_gets_past_the_entry_check ... ok
+test proposal::tests::a_declared_count_that_cannot_fit_is_refused_before_any_entry_is_read ... ok
+test proposal::tests::a_trailing_byte_is_refused ... ok
+test proposal::tests::a_mismatched_context_manifest_is_refused ... ok
+test proposal::tests::a_known_fixture_reproduces_its_digest_from_the_bytes_alone ... ok
+test proposal::tests::an_elapsed_deadline_reaches_the_object_store_and_comes_back_as_elapsed ... ok
+test proposal::tests::an_elapsed_budget_stops_the_comparison_before_it_touches_the_store ... ok
+test git_object_store::tests::bytes_after_the_stream_and_a_header_that_lies_are_both_malformed ... ok
+test proposal::tests::an_unsorted_readable_context_entry_list_is_refused ... ok
+test git_object_store::tests::an_object_that_is_not_loose_is_not_reported_as_absent_or_broken ... ok
+test proposal::tests::decode_then_encode_is_the_identity ... ok
+test git_object_store::tests::an_object_that_inflates_past_the_bound_is_a_refusal_not_a_broken_object ... ok
+test proposal::tests::empty_targets_mutations_runs_and_checks_are_accepted ... ok
+test proposal::tests::a_truncated_record_is_refused ... ok
+test proposal::tests::every_mutation_names_a_target_and_every_target_is_mutated ... ok
+test proposal::tests::every_bound_is_encoded_and_zero_is_a_legal_value ... ok
+test proposal::tests::every_object_store_failure_maps_to_its_own_reported_state ... ok
+test git_object_store::tests::an_unknown_object_type_is_refused_rather_than_carried ... ok
+test proposal::tests::mutation_order_is_the_callers_and_carries_identity ... ok
+test proposal::tests::each_identity_bearing_field_changes_the_digest ... ok
+test proposal::tests::human_text_must_be_trimmed_bounded_and_free_of_control_characters ... ok
+test proposal::tests::paths_are_not_unicode_normalized_or_case_folded ... ok
+test proposal::tests::not_declared_and_declared_empty_have_different_bytes_and_digests ... ok
+test proposal::tests::the_record_starts_with_the_canonicalizer_magic ... ok
+test proposal::tests::the_pinned_base_revision_is_lowercase_hexadecimal_text ... ok
+test git_object_store::tests::an_unreadable_pack_directory_is_an_error_not_absence ... ok
+test proposal::tests::unsorted_or_duplicate_targets_are_refused_rather_than_sorted ... ok
+test proposal::tests::unsorted_check_runs_and_declared_checks_are_refused ... ok
+test recent_receipts::tests::the_production_statement_selects_no_receipt_payload ... ok
+test proposal::tests::paths_are_refused_rather_than_normalized ... ok
+test ruling::tests::a_reordering_the_grammar_can_see_is_refused ... ok
+test ruling::tests::a_trailing_byte_is_refused ... ok
+test ruling::tests::a_v1_decoder_refuses_v2_bytes_rather_than_narrowing_them ... ok
+test ruling::tests::absence_is_a_value_so_the_two_supersedes_states_have_different_identities ... ok
+test ruling::tests::an_unassigned_tag_is_refused_in_every_closed_position ... ok
+test ruling::tests::digests_and_the_base_revision_are_refused_rather_than_case_folded ... ok
+test ruling::tests::decode_then_encode_is_the_identity ... ok
+test ruling::tests::hostile_stored_bytes_carrying_an_uppercase_base_revision_are_refused_by_the_decoder ... ok
+test ruling::tests::each_identity_bearing_field_changes_the_digest ... ok
+test ruling::tests::only_a_sha256_beacon_proposal_v1_envelope_is_accepted ... ok
+test ruling::tests::the_encoder_produces_the_published_identity_vector ... ok
+test ruling::tests::the_published_identity_vector_reproduces_its_digest_with_no_encoder ... ok
+test ruling::tests::the_largest_legal_record_fits_the_stores_envelope ... ok
+test ruling::tests::the_record_starts_with_the_seventeen_byte_canonicalizer_magic ... ok
+test ruling::tests::the_two_grammars_differ_only_by_their_magic_and_the_candidate_envelope ... ok
+test ruling::tests::the_reason_must_be_trimmed_bounded_and_free_of_control_characters ... ok
+test ruling::tests::a_truncated_record_is_refused ... ok
+test ruling::tests::two_same_width_values_swapped_are_a_different_record_rather_than_a_refusal ... ok
+test ruling::tests::the_v2_vector_is_exactly_these_bytes_and_this_digest ... ok
+test git_object_store::tests::the_walk_stops_at_its_deadline_rather_than_answering ... ok
+test sample_project::tests::available_status_uses_the_exact_camel_case_wire_shape ... ok
+test ruling::tests::every_single_byte_of_the_fixture_is_load_bearing ... ok
+test sample_project::tests::bundle_v1_identity_is_permanent_and_future_bundles_are_additive ... ok
+test git_object_store::tests::the_aggregate_budget_is_charged_by_every_object_and_is_its_own_refusal ... ok
+test proposal::tests::an_unassigned_tag_is_refused_in_every_closed_position ... ok
+test git_object_store::tests::a_symlink_is_not_followed_and_is_not_reported_as_a_file ... ok
+test git_object_store::tests::an_unreachable_object_is_still_present ... ok
+test git_object_store::tests::a_worktree_gitdir_file_is_followed_once ... ok
+test git_object_store::tests::every_object_type_is_read_as_the_type_it_is ... ok
+test proposal::tests::every_single_byte_of_the_fixture_is_load_bearing ... ok
+test git_object_store::tests::an_elapsed_budget_is_not_a_negative_answer ... ok
+test git_object_store::tests::a_packed_repository_yields_not_loose_rather_than_absent ... ok
+test git_object_store::tests::a_packed_object_is_not_loose_and_the_reader_says_only_that ... ok
+test git_object_store::tests::a_pack_index_without_its_matching_pack_is_refused ... ok
+test git_object_store::tests::an_object_only_in_a_pack_is_present ... ok
+test git_object_store::tests::a_corrupt_pack_index_is_refused_rather_than_answered ... ok
+test git_object_store::tests::an_absent_object_is_absent_in_both_layouts ... ok
+test git_object_store::tests::names_unsorted_within_one_fanout_bucket_are_refused ... ok
+test git_object_store::tests::pack_contents_must_match_the_claimed_checksum ... ok
+test git_object_store::tests::pack_index_contents_must_match_their_own_checksum ... ok
+test git_object_store::tests::the_post_index_read_deadline_precedes_parsing ... ok
+test git_object_store::tests::crc_rows_must_match_packed_object_bytes ... ok
+test sandbox::probe::tests::interpret_decodes_every_observation_bit_shape ... ok
+test sandbox::probe::tests::interpret_keeps_setup_and_unknown_statuses_out_of_the_bit_protocol ... ok
+test sandbox::landlock::tests::borrowed_worktree_anchor_keeps_identity_and_remains_live ... ok
+test git_object_store::tests::a_pack_index_missing_crc_offsets_and_trailer_is_refused ... ok
+test sandbox::worktree_launcher::tests::every_resolver_errno_has_a_stable_fail_closed_category ... ok
+test sandbox::worktree_launcher::tests::relative_internal_symlinks_work_but_absolute_and_magic_targets_are_refused ... ok
+test sandbox::worktree_launcher::tests::resolver_uses_the_exact_accepted_flags ... ok
+test sandbox::tests::deletion_after_selection_cannot_run_in_a_replacement_directory ... ok
+test dispatch::tests::a_swap_refuses_unless_the_ref_still_holds_the_expected_value ... ok
+test sandbox::tests::a_concurrent_swap_cannot_retarget_a_selected_working_directory ... ok
+test sample_project::tests::publication_never_resolves_names_from_at_fdcwd ... ok
+test tests::a_recorded_ruling_refuses_update_and_delete ... ok
+test tests::empty_workspace_name_is_refused_before_a_store_is_created ... ok
+test tests::a_ruling_for_an_unknown_proposal_is_refused_by_the_store ... ok
+test recent_receipts::tests::the_production_statement_walks_the_workspace_index_and_sorts_nothing ... ok
+test tests::bootstrap_makes_the_store_owner_only ... ok
+test tests::bootstrap_creates_one_empty_workspace_and_reports_a_healthy_store ... ok
+test tests::migration_0022_carries_existing_v1_rulings_across_the_table_rebuild ... ok
+test tests::concurrent_bootstrap_creates_exactly_one_workspace_and_event ... ok
+test operator_account::tests::status_expires_an_idle_session_without_treating_the_check_as_activity ... ok
+test proposal::tests::an_exhausted_aggregate_budget_is_the_reason_an_operator_reads ... ok
+test operator_account::tests::shortening_the_policy_below_elapsed_activity_locks_the_current_session ... ok
+test operator_account::tests::malformed_stored_password_hash_fails_closed_as_processing_error ... ok
+test tests::oversized_or_control_character_names_are_refused_before_store_creation ... ok
+test tests::event_payload_workspace_must_match_its_persisted_scope ... ok
+test local_transport::tests::sample_project_query_and_command_are_authenticated_over_local_transport ... ok
+test tests::event_payload_rejects_unknown_fields ... ok
+test tests::same_version_malformed_schema_is_refused_without_mutation ... ok
+test tests::sqlite_internal_prefix_filter_treats_underscore_literally ... ok
+test sample_project::tests::adopting_an_exact_orphan_executes_no_program_from_its_tree ... ok
+test tests::foreign_key_corruption_is_refused_instead_of_reported_ready ... ok
+test tests::migration_eighteen_advances_the_version_only_from_seventeen ... ok
+test tests::migration_nineteen_advances_the_version_only_from_eighteen ... ok
+test tests::injection_shaped_workspace_name_is_stored_as_data ... ok
+test sample_project::tests::ancestor_swap_before_git_cannot_execute_attacker_filter_or_redirect_cleanup ... ok
+test tests::sql_schema_independently_enforces_workspace_name_length ... ok
+test tests::the_version_guard_alone_refuses_a_structurally_ready_store_that_is_not_stamped_eighteen ... ok
+test tests::unexpected_view_is_refused_without_creating_application_tables ... ok
+test tests::restart_reuses_the_workspace_without_replaying_creation ... ok
+test tests::store_rejects_an_event_without_workspace_scope ... ok
+test tests::unsupported_schema_version_fails_closed ... ok
+test sample_project::tests::bundle_mismatch_fails_before_staging_or_database_publication ... ok
+test tests::startup_rejects_preflight_event_bytes_that_differ_from_receipt_bytes ... ok
+test sample_project::tests::authenticated_operator_installs_an_inert_supervised_sample_project ... ok
+test tests::startup_rejects_preflight_sql_version_that_disagrees_with_v1_json ... ok
+test tests::startup_rejects_preflight_sql_outcome_that_disagrees_with_v1_json ... ok
+test tests::version_eight_store_preserves_existing_events_when_adding_resident_configuration ... ok
+test tests::startup_rejects_refused_preflight_evidence_with_verified_run_state ... ok
+test tests::startup_rejects_verified_preflight_evidence_with_refused_run_state ... ok
+test sample_project::tests::database_publication_failure_leaves_only_an_exact_adoptable_orphan ... ok
+test sample_project::tests::git_environment_drops_ambient_repository_redirection ... ok
+test tests::populated_version_fourteen_store_preserves_run_and_receipt_bytes ... ok
+test worktree::tests::a_check_program_that_cannot_start_is_a_failure_and_never_a_clean_answer ... ok
+test worktree::tests::a_check_that_errors_is_a_failure_and_never_a_clean_answer ... ok
+test worktree::tests::a_check_that_never_finishes_is_a_timeout_and_never_a_clean_answer ... ok
+test worktree::tests::a_pinned_repository_notices_a_rename_and_a_decoy_at_its_pathname ... ok
+test worktree::tests::the_hold_is_rechecked_after_the_slow_check_returns ... ok
+test tests::version_one_store_migrates_transactionally_without_replacing_workspace_state ... ok
+test tests::version_four_store_adds_projects_without_replacing_existing_state ... ok
+test tests::version_five_store_adds_revision_events_without_replacing_project_state ... ok
+test tests::migration_seventeen_rolls_back_exactly_before_forward_startup ... ok
+test tests::migration_eighteen_rolls_back_exactly_before_forward_startup ... ok
+test tests::version_two_store_migrates_account_and_security_history_with_default_policy ... ok
+test sample_project::tests::git_failure_cleans_partial_staging_and_publishes_no_database_state ... ok
+test tests::version_six_store_adds_the_empty_activation_ledger_without_replacing_workspace_state ... ok
+test tests::version_seven_store_adds_resident_lifecycle_without_replacing_admission ... ok
+test tests::migration_nineteen_rolls_back_exactly_before_forward_startup ... ok
+test tests::version_nine_store_preserves_event_bytes_when_adding_empty_team_state ... ok
+test tests::version_eleven_store_preserves_event_bytes_when_adding_empty_project_policy_state ... ok
+test sample_project::tests::install_refuses_a_workspace_root_swapped_for_a_private_symlink ... ok
+test sample_project::tests::installed_repository_tamper_fails_status_closed ... ok
+test sample_project::tests::orphan_with_rewritten_expected_object_is_refused ... ok
+test sample_project::tests::orphan_with_rewritten_index_checksum_is_refused ... ok
+test sample_project::tests::orphan_with_trailing_bytes_after_expected_object_is_refused ... ok
+test sample_project::tests::orphan_with_truncated_expected_object_is_refused ... ok
+test sample_project::tests::orphaned_repository_with_a_different_commit_is_refused ... ok
+test sample_project::tests::post_sync_ancestor_swap_publishes_only_beneath_held_workspace ... ok
+test tests::version_thirteen_store_preserves_event_bytes_when_adding_empty_run_state ... ok
+test tests::version_twelve_store_preserves_event_bytes_when_adding_empty_project_repository_state ... ok
+test sample_project::tests::repository_tree_sync_failure_cleans_staging_before_publication ... ok
+test tests::version_eighteen_store_preserves_event_bytes_and_adds_empty_ruling_state ... ok
+test sample_project::tests::sample_project_git_never_runs_repository_hooks_or_filter_drivers ... ok
+test sample_project::tests::status_and_install_refuse_an_unauthenticated_operator_without_filesystem_effects ... ok
+test sample_project::tests::symlinked_managed_root_is_refused_without_touching_its_target ... ok
+test sample_project::tests::startup_reconciliation_refuses_missing_installation_event ... ok
+test tests::version_sixteen_store_preserves_event_bytes_and_adds_empty_sample_state ... ok
+test tests::version_seventeen_store_preserves_event_bytes_and_adds_empty_proposal_state ... ok
+test sample_project::tests::repeat_install_is_explicitly_idempotent_and_revision_is_deterministic ... ok
+
+test result: ok. 221 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.66s
+
+     Running unittests src/main.rs (target/debug/deps/beacond-4009aeefa37e6533)
+
+running 3 tests
+test tests::serve_requires_every_private_runtime_path ... ok
+test tests::parser_uses_safe_local_bootstrap_defaults ... ok
+test tests::parser_rejects_unknown_options ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/bounded_execution.rs (target/debug/deps/bounded_execution-fdfa868e6191e039)
+
+running 13 tests
+test an_interrupted_outcome_rejects_a_smuggled_field ... ok
+test a_command_runs_and_reports_its_exit_code ... ok
+test a_missing_program_never_started_rather_than_exited ... ok
+test a_nonzero_exit_is_reported_not_hidden ... ok
+test a_write_outside_the_working_directory_is_refused_while_inside_succeeds ... ok
+test output_beyond_the_ceiling_is_truncated_and_the_record_admits_it ... ok
+test the_environment_is_cleared_so_a_run_inherits_no_credential ... ok
+test a_ceiling_cannot_be_forged_by_the_run_itself ... ok
+test an_interrupt_stops_a_run_and_is_distinguished_from_a_ceiling ... ok
+test a_stopped_run_still_reports_what_it_printed_before_it_hung ... ok
+test a_real_cpu_ceiling_reaches_bounded_rather_than_signalled ... ok
+test a_run_that_never_ends_is_stopped_by_the_wall_clock_and_says_so ... ok
+test a_detached_descendant_holding_the_pipe_cannot_outlast_the_ceiling ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.02s
+
+     Running tests/candidate.rs (target/debug/deps/candidate-dc53efa180c7e1c2)
+
+running 20 tests
+test images_that_do_not_match_the_proposals_mutations_write_nothing ... ok
+test a_candidate_for_a_proposal_this_workspace_never_recorded_is_refused ... ok
+test the_entries_follow_the_proposals_mutation_order_and_not_its_sorted_paths ... ok
+test no_candidate_yet_and_no_such_proposal_are_different_answers ... ok
+test a_candidate_read_for_use_proves_the_copy_rule_too ... ok
+test unauthenticated_recording_returns_only_the_account_refusal ... ok
+test a_candidate_names_the_exact_proposal_and_base_it_was_built_against ... ok
+test a_second_candidate_for_one_proposal_is_refused_by_the_store ... ok
+test recording_a_candidate_creates_no_run_receipt_worktree_or_external_effect ... ok
+test the_audit_event_carries_the_exact_bytes_as_padded_base64_and_the_owner_actor ... ok
+test a_recorded_candidate_survives_a_restart ... ok
+test a_candidate_read_for_use_verifies_its_event_rather_than_counting_it ... ok
+test a_candidate_read_for_use_proves_its_event_pairing_too ... ok
+test a_row_that_disagrees_with_its_own_bytes_fails_startup ... ok
+test a_candidate_larger_than_the_envelope_is_refused_by_the_codec_not_by_the_store ... ok
+test an_event_whose_digest_names_no_candidate_is_refused_by_the_replay ... ok
+test a_candidate_whose_entries_no_longer_match_its_proposal_fails_startup ... ok
+test a_row_whose_bytes_were_swapped_for_another_valid_candidate_fails_startup ... ok
+test an_event_naming_no_candidate_fails_startup ... ok
+test a_candidate_without_its_event_fails_startup ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.98s
+
+     Running tests/check_preflight.rs (target/debug/deps/check_preflight-f240314299f1cf08)
+
+running 17 tests
+test a_dangling_gitdir_file_is_unreadable ... ok
+test a_receipt_round_trips_and_rejects_an_unknown_field ... ok
+test a_working_directory_that_does_not_exist_is_an_error_not_an_escape ... ok
+test a_source_that_is_not_a_repository_is_unreadable ... ok
+test republishing_the_charter_leaves_the_binding_stale ... ok
+test a_corrupt_pack_index_fails_rather_than_answering_no ... ok
+test binding_refuses_a_lexical_escape_before_preflight_ever_sees_it ... ok
+test a_project_without_a_binding_has_nothing_to_preflight ... ok
+test a_base_revision_only_in_a_pack_still_satisfies_the_step ... ok
+test a_base_revision_absent_from_the_object_store_is_refused ... ok
+test a_lexically_clean_working_directory_that_resolves_outside_is_an_escape ... ok
+test receipts_are_immutable_and_runs_advance_only_once ... ok
+test a_git_url_is_unsupported_and_no_filesystem_read_is_attempted ... ok
+test a_binding_that_satisfies_every_step_is_admissible_when_the_sandbox_is_proven ... ok
+test preflight_finishes_against_its_pinned_binding_and_the_next_run_pins_the_new_one ... ok
+test an_expired_lease_leaves_the_run_unconfirmed_rather_than_absent ... ok
+test startup_reconciles_every_preflight_identity_field_with_its_run_row ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.51s
+
+     Running tests/cli.rs (target/debug/deps/cli-2be4ee6792be992f)
+
+running 2 tests
+test command_errors_are_clear_and_do_not_contain_template_artifacts ... ok
+test help_is_successful_and_printed_without_template_artifacts ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/declared_checks.rs (target/debug/deps/declared_checks-53575e6778508858)
+
+running 24 tests
+test an_inadmissible_preflight_refuses_before_anything_runs ... ok
+test a_check_may_write_inside_its_worktree_and_not_outside_it ... ok
+test every_declared_check_runs_in_its_own_declared_directory ... ok
+test a_prior_check_cannot_redirect_the_next_cwd_and_later_checks_continue ... ok
+test a_failing_check_completes_the_run_without_claiming_success ... ok
+test a_committed_relative_symlink_cannot_escape_the_execution_worktree ... ok
+test all_not_started_records_use_the_same_incomplete_summary ... ok
+test an_unavailable_worktree_refuses_with_fixed_uncertainty_and_no_execution_evidence ... ok
+test execution_uses_its_pinned_binding_and_the_next_run_pins_the_new_one ... ok
+test kept_worktree_reasons_are_recorded_exactly_after_check_uncertainty ... ok
+test relative_internal_symlinks_run_while_absolute_targets_refuse ... ok
+test a_declared_check_runs_in_a_worktree_at_the_pinned_revision ... ok
+test every_positive_terminal_outcome_keeps_completed_distinct_from_success ... ok
+test execution_uses_its_pinned_charter_and_the_next_run_pins_the_new_one ... ok
+test the_execution_event_replays_against_its_stored_receipt ... ok
+test a_missing_executable_makes_the_run_incomplete_without_stopping_dispatch ... ok
+test startup_rejects_execution_when_its_nested_preflight_differs_from_stored_evidence ... ok
+test startup_rejects_execution_relabelled_as_preflight_without_a_preflight_event ... ok
+test startup_refuses_execution_only_state_on_a_preflight_run ... ok
+test migration_preserves_real_v1_bytes_through_rollback_and_forward_startup ... ok
+test startup_replay_requires_not_admissible_to_carry_a_refusing_preflight ... ok
+test startup_requires_exactly_one_execution_event_for_every_terminal_execution ... ok
+test output_incomplete_and_truncated_are_independent_observations ... ok
+test startup_fails_closed_when_execution_representations_disagree ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.91s
+
+     Running tests/dispatch.rs (target/debug/deps/dispatch-719c536add4bc071)
+
+running 27 tests
+test the_snapshot_notices_one_changed_byte_of_index_object_or_worktree_metadata ... ok
+test a_repository_outside_beacons_own_copies_is_refused ... ok
+test row_34_superseded_ruling_leaves_every_repository_byte_identical ... ok
+test a_request_with_several_faults_is_refused_by_the_earliest_gate ... ok
+test a_v1_ruling_is_not_dispatchable_because_it_names_no_bytes ... ok
+test row_34_drifted_ruling_leaves_every_repository_byte_identical ... ok
+test a_swap_that_cannot_be_written_refuses_and_publishes_nothing ... ok
+test a_commit_that_does_not_touch_exactly_the_declared_set_is_refused_and_not_published ... ok
+test row_34_denied_ruling_leaves_every_repository_byte_identical ... ok
+test a_declared_path_carrying_pathspec_magic_touches_only_itself ... ok
+test candidate_bytes_enter_the_objects_unchanged_by_attribute_conversion ... ok
+test content_that_does_not_hash_to_the_candidate_is_refused_before_anything_is_read ... ok
+test a_repository_swapped_for_a_decoy_at_the_same_path_receives_nothing ... ok
+test dispatch_refuses_under_observe ... ok
+test a_gate_read_does_not_write_to_the_repository_it_measures ... ok
+test row_34_stale_head_leaves_every_repository_byte_identical ... ok
+test a_dispatch_run_state_matches_its_receipt_outcome ... ok
+test a_dirty_or_detached_source_is_refused ... ok
+test dispatch_refuses_while_the_installation_is_paused ... ok
+test one_ruling_lands_once_and_a_second_attempt_is_spent ... ok
+test a_proposal_whose_event_disagrees_with_its_row_is_refused ... ok
+test a_corrupt_ruling_or_proposal_record_refuses_with_a_receipt_rather_than_an_error ... ok
+test every_gate_holding_lands_the_declared_change_and_nothing_else ... ok
+test resume_refuses_while_a_run_is_unresolved_and_records_what_was_accepted ... ok
+test the_first_end_to_end_loop_applies_one_canned_change_to_a_sample_project_copy ... ok
+test a_landed_dispatch_replays_from_its_own_receipt_after_a_restart ... ok
+test content_beyond_the_proposals_own_bounds_is_refused_before_it_is_read ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.84s
+
+     Running tests/local_model_activation.rs (target/debug/deps/local_model_activation-350c33e747fa6c85)
+
+running 6 tests
+test inspection_fails_closed_when_the_installed_digest_changes_mid_review ... ok
+test activation_refuses_a_review_when_provider_features_change ... ok
+test owner_inspects_an_exact_model_without_activating_or_invoking_it ... ok
+test concurrent_activation_of_one_resource_records_exactly_one_active_decision ... ok
+test owner_activates_a_reviewed_subset_and_can_deactivate_without_the_provider ... ok
+test restart_refuses_an_activation_decision_without_its_exact_event ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.62s
+
+     Running tests/local_transport.rs (target/debug/deps/local_transport-e08223544fd64ba6)
+
+running 17 tests
+test token_file_is_private_and_stable ... ok
+test a_second_supervisor_cannot_replace_the_live_servers_socket ... ok
+test a_different_capability_token_is_rejected_without_changing_session_state ... ok
+test authenticated_client_discards_the_starter_organization_over_the_real_socket ... ok
+test recent_receipts_are_workspace_scoped_bounded_and_authenticated_over_the_local_transport ... ok
+test authenticated_client_discovers_inactive_local_models_over_both_real_transports ... ok
+test authenticated_client_binds_project_repository_over_the_real_socket ... ok
+test authenticated_client_publishes_project_policy_over_the_real_socket ... ok
+test authenticated_client_configures_and_clears_a_resident_over_the_real_socket ... ok
+test a_store_that_disagrees_with_itself_reaches_the_wire_as_preflight_unavailable ... ok
+test authenticated_client_reviews_activates_and_deactivates_an_exact_local_model ... ok
+test authenticated_client_decides_the_starter_organization_over_the_real_socket ... ok
+test authenticated_client_controls_resident_lifecycle_over_the_real_socket ... ok
+test an_incomplete_unauthenticated_request_cannot_stall_the_supervisor ... ok
+test authenticated_client_forms_a_team_and_admits_a_mission_over_the_real_socket ... ok
+test authenticated_client_completes_account_flow_without_owning_the_store ... ok
+test authenticated_client_creates_and_reads_projects_over_the_real_socket ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.91s
+
+     Running tests/mission.rs (target/debug/deps/mission-1ec772380c0b073a)
+
+running 7 tests
+test schema_ten_migrates_without_rewriting_events_or_the_team_roster_guard ... ok
+test concurrent_accepted_admissions_create_distinct_immutable_missions ... ok
+test schema_rejects_a_mission_member_outside_the_owning_team ... ok
+test admission_evidence_stays_fixed_when_resident_configuration_changes ... ok
+test mission_state_is_immutable_and_tampered_events_fail_startup ... ok
+test mission_admission_refuses_invalid_stale_or_ineligible_inputs_without_writes ... ok
+test operator_admits_a_finite_mission_from_exact_current_team_evidence ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.81s
+
+     Running tests/operator_account.rs (target/debug/deps/operator_account-0e45777bf7435e52)
+
+running 9 tests
+test setup_requires_recovery_confirmation_before_writing_an_account ... ok
+test password_fallback_is_refused_for_remote_access ... ok
+test password_rules_accept_unicode_and_spaces_but_reject_bad_boundaries ... ok
+test platform_lock_and_suspend_events_lock_without_ever_unlocking_the_owner ... ok
+test session_timeout_change_requires_an_unlocked_owner_and_enforces_closed_bounds ... ok
+test session_timeout_defaults_to_thirty_minutes_and_persists_owner_changes ... ok
+test enrollment_stores_verifiers_only_and_a_restart_returns_locked ... ok
+test recovery_rotates_the_key_and_password_atomically ... ok
+test repeated_password_failures_are_throttled_and_success_clears_the_counter ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.69s
+
+     Running tests/project_policy.rs (target/debug/deps/project_policy-c81a38dd6a1f5312)
+
+running 9 tests
+test policy_revision_is_stale_safe_and_charter_changes_require_republication ... ok
+test concurrent_publications_from_the_same_revision_commit_exactly_once ... ok
+test invalid_or_stale_policy_drafts_are_refused_without_partial_state ... ok
+test policy_commands_authenticate_before_reading_or_validating_arguments ... ok
+test operator_publishes_first_policy_revision_bound_to_current_charter ... ok
+test only_the_latest_policy_revision_can_apply_to_the_current_charter ... ok
+test restart_refuses_a_policy_event_whose_evidence_no_longer_matches_state ... ok
+test restart_refuses_policy_state_without_its_exact_event ... ok
+test restart_refuses_noncanonical_project_policy_state ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.61s
+
+     Running tests/project_repository.rs (target/debug/deps/project_repository-b7eb6f6b0660cffb)
+
+running 11 tests
+test a_git_url_binding_is_accepted_without_contacting_the_remote ... ok
+test invalid_repository_drafts_are_refused_without_partial_state ... ok
+test declared_checks_are_stored_in_canonical_name_order ... ok
+test repository_commands_authenticate_before_reading_or_validating_arguments ... ok
+test operator_binds_first_repository_revision_to_the_current_charter ... ok
+test concurrent_bindings_from_the_same_revision_commit_exactly_once ... ok
+test only_the_latest_repository_revision_can_apply_to_the_current_charter ... ok
+test repository_revision_is_stale_safe_and_charter_changes_require_rebinding ... ok
+test restart_refuses_repository_state_without_its_exact_event ... ok
+test restart_refuses_a_repository_event_whose_evidence_no_longer_matches_state ... ok
+test restart_refuses_noncanonical_project_repository_state ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.97s
+
+     Running tests/projects.rs (target/debug/deps/projects-d56098d81e3f1814)
+
+running 14 tests
+test invalid_project_or_charter_input_is_refused_without_partial_state ... ok
+test restart_refuses_a_charter_revision_without_its_exact_event ... ok
+test restart_refuses_a_charter_revision_event_bound_to_the_wrong_predecessor ... ok
+test owner_can_choose_observe_and_unknown_project_ids_fail_closed ... ok
+test concurrent_revisions_from_the_same_base_commit_exactly_once ... ok
+test project_commands_require_an_active_owner_session ... ok
+test stale_or_unchanged_charter_revisions_are_refused_without_partial_state ... ok
+test restart_refuses_project_state_without_its_creation_event ... ok
+test owner_creates_and_reads_an_immutable_first_charter ... ok
+test restart_refuses_a_current_charter_pointer_behind_the_terminal_revision ... ok
+test restart_refuses_a_creation_event_with_a_different_timestamp ... ok
+test owner_appends_an_immutable_charter_revision_and_advances_current_intent_atomically ... ok
+test restart_refuses_a_discontinuous_charter_history ... ok
+test restart_refuses_project_update_time_that_does_not_match_current_intent ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.58s
+
+     Running tests/proposal.rs (target/debug/deps/proposal-d5fa999c1c23e360)
+
+running 43 tests
+test a_new_repository_revision_with_the_same_base_reports_only_the_revision_as_moved ... ok
+test get_refuses_a_digest_that_names_nothing_and_list_is_scoped_to_its_mission ... ok
+test malformed_bytes_are_refused_with_neither_row_nor_event ... ok
+test an_oversize_slice_is_refused_before_it_is_parsed ... ok
+test a_declared_context_over_an_unopenable_store_is_not_verified_as_unreadable ... ok
+test an_object_store_inspection_that_errors_is_reported_as_failed_not_absent ... ok
+test a_fresh_v1_proposal_reports_exactly_its_undeclared_preconditions ... ok
+test an_owner_submits_one_proposal_bound_to_the_exact_bytes_it_named ... ok
+test a_git_indirection_chain_is_reported_as_unreadable_not_as_a_failed_inspection ... ok
+test an_object_in_no_storage_at_all_is_an_inspection_failure_not_a_packed_object ... ok
+test a_pinned_revision_absent_from_a_real_object_store_is_reported_as_absent_not_unavailable ... ok
+test a_mismatch_found_before_an_unreadable_entry_is_discarded_rather_than_published ... ok
+test proposal_rows_refuse_update_and_delete ... ok
+test a_declared_entry_that_holds_at_the_pinned_revision_adds_no_readiness_item ... ok
+test a_declared_path_absent_at_the_pinned_revision_is_a_mismatch_not_an_inspection_failure ... ok
+test a_declared_entry_that_does_not_hold_at_the_pinned_revision_is_a_mismatch_naming_it ... ok
+test a_declaration_that_fits_the_aggregate_budget_is_read_and_reported_as_agreement ... ok
+test a_second_admitted_member_may_request_its_own_proposal ... ok
+test a_git_url_repository_reports_that_there_is_nothing_local_to_compare ... ok
+test a_not_declared_context_reports_only_that_it_is_undeclared ... ok
+test a_packed_repository_is_not_verified_rather_than_mismatched ... ok
+test identical_resubmission_returns_the_original_record_and_writes_no_second_event ... ok
+test a_declared_check_argument_longer_than_an_invented_cap_is_accepted_when_it_matches_a_real_binding ... ok
+test not_declared_and_declared_empty_are_two_proposals_not_one ... ok
+test a_mission_from_another_project_in_the_same_workspace_is_refused ... ok
+test a_tampered_context_manifest_is_rejected_by_get_list_and_startup ... ok
+test startup_refuses_a_differently_encoded_event_payload ... ok
+test a_new_charter_revision_makes_get_report_a_moved_binding_and_startup_still_succeeds ... ok
+test a_stored_digest_that_does_not_name_its_bytes_is_refused_not_matched ... ok
+test startup_refuses_a_duplicate_proposal_event ... ok
+test a_truthful_store_starts_and_reconciles ... ok
+test startup_and_get_refuse_a_stored_bound_constraint ... ok
+test startup_refuses_a_missing_event_on_one_proposal_balanced_by_a_duplicate_on_another ... ok
+test startup_refuses_an_event_whose_bytes_are_not_the_stored_bytes ... ok
+test the_audit_event_carries_the_exact_bytes_as_padded_base64_and_the_owner_actor ... ok
+test structurally_inconsistent_references_write_neither_row_nor_event ... ok
+test unauthenticated_submission_of_oversize_malformed_bytes_returns_only_the_account_refusal ... ok
+test submission_creates_no_run_receipt_worktree_or_external_effect ... ok
+test startup_refuses_when_the_owner_account_is_gone ... ok
+test startup_refuses_a_proposal_without_its_event ... ok
+test startup_refuses_an_orphan_proposal_event ... ok
+test startup_refuses_an_indexed_column_that_disagrees_with_the_bytes ... ok
+test startup_refuses_altered_proposal_bytes ... ok
+
+test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.52s
+
+     Running tests/recent_receipts.rs (target/debug/deps/recent_receipts-c120faf3695589d1)
+
+running 15 tests
+test an_outcome_outside_its_kinds_closed_set_is_refused ... ok
+test a_project_without_receipts_contributes_nothing_and_breaks_nothing ... ok
+test a_terminal_run_without_a_receipt_is_an_inconsistent_store ... ok
+test a_live_run_that_already_ended_is_an_inconsistent_store ... ok
+test an_outcome_that_disagrees_with_its_run_state_is_refused ... ok
+test a_window_larger_than_the_maximum_is_clamped_and_says_so ... ok
+test an_unconfirmed_run_without_an_end_is_an_inconsistent_store ... ok
+test a_receipt_attached_to_a_nonterminal_run_is_an_inconsistent_store ... ok
+test mixed_kinds_are_ordered_by_one_key_not_grouped_by_kind ... ok
+test a_run_without_a_receipt_is_counted_never_rendered_as_one ... ok
+test a_version_its_kind_never_writes_is_refused ... ok
+test the_returned_row_does_not_change_as_the_receipt_body_grows ... ok
+test an_inconsistent_run_outside_the_window_does_not_fail_the_reading ... ok
+test receiptless_runs_are_counted_from_the_same_window_as_the_rows ... ok
+test the_window_is_applied_by_the_daemon_not_the_caller ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.06s
+
+     Running tests/resident_configuration.rs (target/debug/deps/resident_configuration-ce8af1b1f24320db)
+
+running 10 tests
+test clear_and_reconfigure_are_explicit_stale_safe_append_only_decisions ... ok
+test invalid_targets_capabilities_and_locked_sessions_fail_without_writing ... ok
+test startup_refuses_capabilities_added_outside_the_operator_decision ... ok
+test model_requires_approved_completion_before_it_can_configure_an_agent ... ok
+test retired_residents_refuse_new_configuration_decisions_but_keep_history_visible ... ok
+test concurrent_initial_configuration_has_one_winner ... ok
+test operator_configures_an_active_resident_for_future_team_eligibility_without_execution ... ok
+test deactivation_and_reactivation_never_resurrect_the_old_binding ... ok
+test lifecycle_changes_eligibility_without_rewriting_configuration ... ok
+test startup_refuses_missing_or_tampered_configuration_events ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.70s
+
+     Running tests/resident_lifecycle.rs (target/debug/deps/resident_lifecycle-b10c9a0a8b14bbe8)
+
+running 5 tests
+test retirement_can_close_an_inactive_identity_and_is_permanent ... ok
+test concurrent_activation_has_one_winner_and_one_stale_command ... ok
+test locked_unknown_and_illegal_commands_fail_without_a_decision ... ok
+test operator_controls_the_full_resident_lifecycle_without_rewriting_admission ... ok
+test startup_refuses_tampered_current_state_or_missing_lifecycle_event ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.93s
+
+     Running tests/resource_discovery.rs (target/debug/deps/resource_discovery-14998a69d1f0188a)
+
+running 4 tests
+test authenticated_discovery_reads_and_normalizes_the_real_ollama_http_shape ... ok
+test a_session_that_locks_during_http_withholds_the_discovery_result ... ok
+test endpoint_and_session_boundaries_precede_discovery ... ok
+test discovery_fails_closed_across_the_real_http_response_matrix ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.93s
+
+     Running tests/ruling.rs (target/debug/deps/ruling-c9ee2aec6c94cd6d)
+
+running 53 tests
+test ruling_on_a_digest_that_names_no_proposal_writes_neither_row_nor_event ... ok
+test a_ruling_event_that_does_not_match_its_row_refuses_startup ... ok
+test each_composite_foreign_key_independently_refuses_a_cross_proposal_relation ... ok
+test a_supersession_row_that_disagrees_with_the_bytes_is_refused ... ok
+test an_owner_records_one_ruling_bound_to_the_exact_proposal_it_named ... ok
+test a_new_repository_revision_with_the_same_base_reports_only_the_revision_as_moved ... ok
+test a_proposal_outside_this_services_workspace_is_not_found ... ok
+test a_first_ruling_that_cites_an_unrecorded_digest_is_refused_as_unrecorded ... ok
+test a_moved_policy_revision_is_named_alone ... ok
+test a_fresh_ruling_reports_neither_drift_nor_supersession ... ok
+test a_later_ruling_that_cites_nothing_is_refused_as_not_the_tail ... ok
+test get_refuses_a_digest_that_names_nothing_and_list_separates_unknown_from_undecided ... ok
+test a_malformed_reason_or_digest_writes_neither_row_nor_event ... ok
+test any_decision_may_follow_any_decision_and_every_link_carries_its_own_reason ... ok
+test a_ruling_can_be_both_superseded_and_drifted_and_says_so ... ok
+test ruling_rows_refuse_update_and_delete ... ok
+test a_forked_chain_has_no_last_link_and_is_refused ... ok
+test a_rebind_that_moves_the_pinned_commit_names_both_facts ... ok
+test citing_another_proposals_ruling_is_refused_as_that_and_not_as_unrecorded ... ok
+test citing_a_link_that_is_no_longer_the_tail_is_refused ... ok
+test a_supersession_cycle_has_no_first_link_and_is_refused ... ok
+test a_row_wearing_another_rulings_digest_is_refused_by_the_digest_it_claims ... ok
+test a_stored_ruling_that_does_not_name_its_bytes_is_refused_by_every_read ... ok
+test an_indexed_column_that_disagrees_with_the_bytes_is_refused ... ok
+test recording_a_ruling_creates_no_run_receipt_worktree_or_external_effect ... ok
+test startup_refuses_a_differently_encoded_event_payload ... ok
+test a_moved_charter_is_named_alone_and_the_record_does_not_change ... ok
+test a_second_ruling_supersedes_the_first_and_both_remain_readable ... ok
+test a_truthful_store_starts_and_reconciles ... ok
+test a_drifted_chain_still_starts_and_stays_readable ... ok
+test a_ruling_time_earlier_than_the_tail_it_cites_is_refused_when_recorded ... ok
+test a_competing_writer_cannot_hand_the_tail_read_a_stale_answer ... ok
+test startup_refuses_a_duplicate_ruling_event ... ok
+test startup_refuses_a_forked_chain ... ok
+test startup_refuses_a_ruling_time_that_goes_backwards_along_the_chain ... ok
+test startup_refuses_a_ruling_whose_owner_account_is_gone ... ok
+test the_copied_revisions_are_the_proposals_not_the_current_ones ... ok
+test unauthenticated_recording_returns_only_the_account_refusal ... ok
+test the_bound_proposal_envelope_is_copied_from_the_proposal_not_rebuilt_from_constants ... ok
+test the_store_refuses_a_second_predecessor_and_a_second_supersession ... ok
+test startup_refuses_copies_that_disagree_with_the_bound_proposal ... ok
+test startup_refuses_an_event_whose_time_disagrees_with_its_row ... ok
+test the_audit_event_carries_the_exact_bytes_as_padded_base64_and_the_owner_actor ... ok
+test startup_refuses_an_event_recorded_under_another_workspace ... ok
+test startup_refuses_a_ruling_without_its_event ... ok
+test startup_refuses_an_orphan_ruling_event ... ok
+test startup_refuses_an_event_naming_an_actor_this_version_has_no_arm_for ... ok
+test startup_refuses_two_events_for_one_ruling_and_none_for_another ... ok
+test startup_refuses_altered_ruling_bytes ... ok
+test startup_refuses_a_supersession_relation_that_disagrees_with_the_bytes ... ok
+test startup_refuses_an_indexed_column_that_disagrees_with_the_bytes ... ok
+test startup_refuses_a_supersession_cycle ... ok
+test the_store_refuses_a_ruling_row_whose_digest_envelopes_are_not_this_versions ... ok
+
+test result: ok. 53 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 26.94s
+
+     Running tests/ruling_v2.rs (target/debug/deps/ruling_v2-44e185177ad788c0)
+
+running 7 tests
+test a_proposal_with_no_candidate_cannot_be_presented_and_so_cannot_be_ruled_under_v2 ... ok
+test unauthenticated_v2_recording_returns_only_the_account_refusal ... ok
+test a_v2_ruling_names_the_exact_candidate_it_was_shown ... ok
+test a_ruling_can_only_be_recorded_for_a_change_that_was_presented ... ok
+test a_v1_ruling_stays_valid_and_names_no_candidate ... ok
+test a_v2_ruling_supersedes_a_v1_one_and_the_force_reports_the_successors_own_grammar ... ok
+test a_row_claiming_v2_over_v1_bytes_fails_startup ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.49s
+
+     Running tests/sandbox.rs (target/debug/deps/sandbox-b9c77ea3ea3cdeb7)
+
+running 8 tests
+test a_probe_that_never_reported_is_not_a_probe_that_reported_failure ... ok
+test a_receipt_version_is_recorded_for_every_capability ... ok
+test filesystem_only_never_admits_execution ... ok
+test an_unknown_field_is_rejected_even_on_a_variant_that_carries_none ... ok
+test public_detection_preserves_the_real_probe_child_observations ... ok
+test this_host_enforces_and_names_the_abi_it_proved ... ok
+test enforcement_is_observed_rather_than_assumed ... ok
+test the_supervisor_is_never_restricted_by_detecting ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/starter_organization.rs (target/debug/deps/starter_organization-4111d1afa915531e)
+
+running 6 tests
+test owner_discards_the_proposal_without_creating_a_resident ... ok
+test fresh_workspace_proposes_three_residents_and_keeps_researcher_available ... ok
+test concurrent_owner_decisions_commit_exactly_once ... ok
+test invalid_edits_leave_the_proposal_undecided ... ok
+test restart_refuses_a_decision_whose_audit_event_is_missing ... ok
+test owner_accepts_an_edited_roster_as_inactive_residents_once ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.60s
+
+     Running tests/team.rs (target/debug/deps/team-38be3164337b19b6)
+
+running 5 tests
+test team_formation_refuses_ambiguous_or_ineligible_inputs_without_partial_writes ... ok
+test concurrent_accepted_formations_are_distinct_immutable_teams ... ok
+test formation_proof_stays_fixed_while_current_member_eligibility_changes ... ok
+test operator_forms_a_project_team_from_exact_eligible_configurations ... ok
+test locked_sessions_and_tampered_formation_events_fail_closed ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.55s
+
+     Running tests/worktree.rs (target/debug/deps/worktree-8c2353e052754394)
+
+running 21 tests
+test a_cleanup_outcome_round_trips_and_refuses_anything_it_does_not_know ... ok
+test a_missing_source_is_refused_as_unreadable ... ok
+test a_source_that_is_not_a_repository_is_refused_as_unreadable ... ok
+test a_revision_that_is_not_pinned_is_refused_before_git_runs ... ok
+test a_worktree_dropped_without_close_stays_on_disk ... ok
+test a_tree_that_lost_its_worktree_marker_is_kept_rather_than_deleted ... ok
+test a_revision_absent_from_the_repository_is_refused ... ok
+test a_tree_that_resolves_outside_its_scratch_root_is_kept ... ok
+test a_status_check_that_cannot_answer_keeps_the_worktree ... ok
+test a_modified_tracked_file_keeps_the_worktree_on_disk ... ok
+test a_modification_and_untracked_content_are_reported_together ... ok
+test untracked_content_keeps_the_worktree_on_disk ... ok
+test operator_configuration_cannot_hide_untracked_work_from_the_gate ... ok
+test a_clean_worktree_is_removed_and_takes_its_scratch_root_with_it ... ok
+test a_locked_worktree_is_kept_because_git_refuses_to_remove_it ... ok
+test repository_process_filters_do_not_run_during_worktree_creation ... ok
+test repository_programs_do_not_run_during_worktree_creation_or_cleanup ... ok
+test a_worktree_is_created_outside_the_repository_at_the_pinned_revision ... ok
+test included_repository_smudge_filters_do_not_run_during_worktree_creation ... ok
+test linked_worktree_clean_filters_do_not_run_during_cleanup ... ok
+test repository_smudge_filters_do_not_run_during_worktree_creation ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+  ok    cargo test
+   Compiling beacon-desktop v0.1.0 (/home/kevin-lee/ai-workspace/claude/beacon-opus-dispatch/apps/desktop/src-tauri)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.74s
+  ok    cargo build
+gate: all checks passed.
+GATE_EXIT=0

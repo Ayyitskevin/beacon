@@ -2577,3 +2577,326 @@ fn two_concurrent_dispatchers_produce_one_application_and_one_refusal() {
         "the branch advanced by more than one commit"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// Receipt v3's published shape
+// ---------------------------------------------------------------------------------------------
+
+/// Every member the contract names, in declaration order.
+///
+/// Pinned as a literal list rather than derived from the type, so adding, removing or reordering a
+/// member is a decision someone makes here rather than a silent change to a record other
+/// implementations and later readers depend on (gpt2, gpt1).
+const RECEIPT_MEMBERS: &[&str] = &[
+    "version",
+    "runId",
+    "workspaceId",
+    "projectId",
+    "actor",
+    "rulingDigest",
+    "proposalDigest",
+    "candidateDigest",
+    "outcome",
+    "autonomyProfile",
+    "charterRevision",
+    "projectPolicyRevision",
+    "repositoryRevision",
+    "sourceKind",
+    "source",
+    "sourceIdentity",
+    "branch",
+    "pinnedBaseRevision",
+    "observedHead",
+    "preparedCommit",
+    "resultingRevision",
+    "diffDigest",
+    "checkoutUpdated",
+    "gitSteps",
+    "modelInvocations",
+    "costUsdMicros",
+    "perMutation",
+    "startedAtMs",
+    "endedAtMs",
+    "notVerified",
+];
+
+/// The top-level member names in the order the stored bytes carry them.
+///
+/// Read off the text rather than out of a parsed map: `serde_json`'s map is sorted, so parsing and
+/// reading its keys would assert alphabetical order and pass no matter how the record is written.
+fn receipt_members(payload: &str) -> Vec<String> {
+    let bytes = payload.as_bytes();
+    let mut members = Vec::new();
+    let mut depth = 0usize;
+    let mut expecting_key = false;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' | b'[' => {
+                depth += 1;
+                expecting_key = depth == 1;
+                index += 1;
+            }
+            b'}' | b']' => {
+                depth -= 1;
+                index += 1;
+            }
+            b'"' => {
+                let start = index + 1;
+                let mut end = start;
+                while bytes[end] != b'"' {
+                    if bytes[end] == b'\\' {
+                        end += 1;
+                    }
+                    end += 1;
+                }
+                if depth == 1 && expecting_key {
+                    members.push(payload[start..end].to_owned());
+                    expecting_key = false;
+                }
+                index = end + 1;
+            }
+            b',' => {
+                expecting_key = depth == 1;
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    members
+}
+
+#[test]
+fn an_applied_receipt_has_the_published_shape() {
+    let fixture = admitted_mission("receipt-applied");
+    let (_repository, ruling_digest) = fixture.approved("receipt-applied");
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+    assert_eq!(receipt.outcome, DispatchOutcome::Applied);
+
+    let stored: String = fixture
+        .store
+        .connect()
+        .query_row("SELECT receipt_json FROM receipts", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(receipt_members(&stored), RECEIPT_MEMBERS);
+
+    // The measurements an Applied Receipt must carry, each one a fact this dispatch established.
+    let value: serde_json::Value = serde_json::from_str(&stored).unwrap();
+    assert_eq!(value["version"], 3);
+    assert_eq!(value["actor"], "owner");
+    assert_eq!(value["outcome"], "applied");
+    assert_eq!(value["autonomyProfile"], "supervised");
+    assert!(value["sourceIdentity"]["inode"].as_u64().unwrap() > 0);
+    assert_eq!(value["branch"], "refs/heads/main");
+    assert!(value["diffDigest"].is_string(), "no measured diff digest");
+    assert_eq!(value["checkoutUpdated"], true);
+    assert_eq!(value["modelInvocations"], 0);
+    assert_eq!(value["costUsdMicros"], 0);
+    assert_eq!(value["perMutation"][0]["effect"], "written");
+    // Every Git step it attempted, in order, with a bounded result.
+    let steps: Vec<&str> = value["gitSteps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|step| step["step"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        steps,
+        vec![
+            "read_tree",
+            "hash_object",
+            "update_index",
+            "write_tree",
+            "commit_tree",
+            "diff_name_status",
+            "update_ref",
+            "read_tree_checkout",
+        ]
+    );
+    assert!(
+        value["gitSteps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|step| step["result"] == "succeeded")
+    );
+}
+
+#[test]
+fn a_refused_receipt_has_the_same_shape_with_the_facts_it_does_not_have_absent() {
+    // The same members, so a reader parses one record and not three. What a refusal did not
+    // establish is `null`, which is a typed absence rather than a zero standing in for a fact.
+    let fixture = admitted_mission("receipt-refused");
+    let repository = CopyRepository::create(&fixture.copies_root, "receipt-refused");
+    let (proposal_digest, candidate_digest) = fixture.candidate_for(
+        &repository,
+        "Apply the dispatched change to the library root.",
+        BASE_LIB_BYTES,
+    );
+    let ruling = fixture
+        .rulings
+        .rule_on_candidate(
+            &fixture.candidates.present(&proposal_digest).unwrap(),
+            RulingDecision::Refuse,
+            "Not this change.",
+            RulingSupersedes::None,
+        )
+        .unwrap();
+    let _ = candidate_digest;
+
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling.digest().value, &content_for(NEW_BYTES))
+        .unwrap();
+    assert_eq!(receipt.outcome, DispatchOutcome::RulingRefused);
+
+    let stored: String = fixture
+        .store
+        .connect()
+        .query_row("SELECT receipt_json FROM receipts", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(receipt_members(&stored), RECEIPT_MEMBERS);
+    let value: serde_json::Value = serde_json::from_str(&stored).unwrap();
+    assert_eq!(value["outcome"], "ruling_refused");
+    assert!(value["preparedCommit"].is_null());
+    assert!(value["resultingRevision"].is_null());
+    assert!(value["diffDigest"].is_null());
+    assert!(value["observedHead"].is_null());
+    assert_eq!(value["checkoutUpdated"], false);
+    assert_eq!(value["gitSteps"].as_array().unwrap().len(), 0);
+    assert!(
+        value["notVerified"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry == "change_not_applied")
+    );
+}
+
+#[test]
+fn a_reconstructed_receipt_has_the_same_shape_and_says_what_it_is() {
+    let fixture = admitted_mission("receipt-reconstructed");
+    let (_repository, ruling_digest) = fixture.approved("receipt-reconstructed");
+    fixture
+        .dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+    fixture.simulate_crash_after_swap();
+    fixture.restart().unwrap();
+
+    let stored: String = fixture
+        .store
+        .connect()
+        .query_row("SELECT receipt_json FROM receipts", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(receipt_members(&stored), RECEIPT_MEMBERS);
+    let value: serde_json::Value = serde_json::from_str(&stored).unwrap();
+    assert_eq!(value["outcome"], "applied");
+    // It carries no Git steps and no diff digest, because it did not run them: it read the ref.
+    assert_eq!(value["gitSteps"].as_array().unwrap().len(), 0);
+    assert!(value["diffDigest"].is_null());
+    assert!(
+        value["notVerified"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry == "reconstructed_after_interruption")
+    );
+}
+
+#[test]
+fn a_modification_whose_declared_before_bytes_are_not_there_is_refused() {
+    // The deletion arm above proves the gate reads the base tree. This is the modification arm:
+    // the path is there, the bytes under it are not the ones the Candidate says it measured, so
+    // the Ruling approved a change to a file the Operator was never shown.
+    let fixture = admitted_mission("stale-pre-image");
+    let repository = CopyRepository::create(&fixture.copies_root, "stale-pre-image");
+    let (proposal_digest, _) = fixture.candidate_for_with_pre_image(
+        &repository,
+        "Modify the library root from bytes it no longer holds.",
+        b"what the file held some time ago\n",
+    );
+    let ruling = fixture
+        .rulings
+        .rule_on_candidate(
+            &fixture.candidates.present(&proposal_digest).unwrap(),
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap();
+
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling.digest().value, &content_for(NEW_BYTES))
+        .unwrap();
+
+    assert_eq!(receipt.outcome, DispatchOutcome::PreImageMismatch);
+    assert_eq!(receipt.prepared_commit, None);
+    assert!(receipt.left_repository_byte_identical());
+}
+
+#[test]
+fn an_applied_receipt_that_does_not_match_its_durable_preparation_is_refused_at_startup() {
+    // Byte equality between a Receipt and its Event proves the two copies agree; it does not prove
+    // either is true. The durable preparation is the independent record of what this dispatch was
+    // about to publish, written inside the landing transaction before the swap, so a stored
+    // `Applied` that names a different commit is a claim nothing in this build could have written.
+    let fixture = admitted_mission("false-applied");
+    let (_repository, ruling_digest) = fixture.approved("false-applied");
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+    assert_eq!(receipt.outcome, DispatchOutcome::Applied);
+    let landed = receipt.resulting_revision.clone().unwrap();
+    let forged = "0123456789abcdef0123456789abcdef01234567";
+
+    // The repository is untouched: the lie is entirely in the record, and both copies of it are
+    // rewritten together so byte equality still holds.
+    fixture.without_run_triggers(&format!(
+        "UPDATE receipts SET receipt_json = replace(receipt_json, '{landed}', '{forged}');
+         UPDATE events SET payload_json = replace(payload_json, '{landed}', '{forged}')
+         WHERE kind = 'proposal.dispatched';"
+    ));
+
+    assert!(
+        matches!(
+            fixture.restart(),
+            Err(SupervisorError::DispatchEventMismatch(_))
+        ),
+        "startup accepted an Applied Receipt its own preparation contradicts"
+    );
+}
+
+#[test]
+fn an_applied_receipt_that_names_no_landing_is_refused_at_startup() {
+    // The other half: a record that contradicts itself rather than its preparation. Both copies are
+    // rewritten the same way, so byte equality still holds and only the arm's own invariant is left
+    // to catch it.
+    let fixture = admitted_mission("incoherent-applied");
+    let (_repository, ruling_digest) = fixture.approved("incoherent-applied");
+    fixture
+        .dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+
+    fixture.without_run_triggers(
+        "UPDATE receipts
+            SET receipt_json = json_set(receipt_json, '$.resultingRevision', NULL);
+         UPDATE events
+            SET payload_json = json_set(payload_json, '$.resultingRevision', NULL)
+          WHERE kind = 'proposal.dispatched';",
+    );
+
+    assert!(
+        matches!(
+            fixture.restart(),
+            Err(SupervisorError::DispatchEventMismatch(_))
+        ),
+        "startup accepted an Applied Receipt that names no landing"
+    );
+}
