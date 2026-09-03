@@ -102,6 +102,11 @@ pub enum DispatchOutcome {
     AutonomyProfileRefuses,
     /// The Installation is paused.
     InstallationPaused,
+    /// A declared pre-image is not what the pinned base revision holds: the Candidate describes a
+    /// tree that is not there.
+    PreImageMismatch,
+    /// The attempt exceeded the wall-clock bound the Proposal itself declared.
+    WallClockExceeded,
     /// This Ruling has already been dispatched. One decision authorizes one application: an attempt
     /// whose result was never established stays spent until the Operator resolves it, rather than
     /// being retried into a repeat effect.
@@ -147,6 +152,8 @@ impl DispatchOutcome {
             Self::SourceDirty => "source_dirty",
             Self::AutonomyProfileRefuses => "autonomy_profile_refuses",
             Self::InstallationPaused => "installation_paused",
+            Self::PreImageMismatch => "pre_image_mismatch",
+            Self::WallClockExceeded => "wall_clock_exceeded",
             Self::AlreadyDispatched => "already_dispatched",
             Self::Admissible => "admissible",
             Self::ObjectWriteFailed => "object_write_failed",
@@ -507,6 +514,14 @@ impl DispatchService {
             else {
                 return Err(DispatchError::InvalidStore);
             };
+            // The declared wall-clock ceiling, read from the Proposal's own bytes. A record too
+            // corrupt to prove yields the smallest ceiling rather than none: the gates refuse it in
+            // a moment either way, and an unbounded attempt is never the safe default.
+            let wall_clock_ms =
+                verified_proposal_within(&transaction, self.workspace_id, &proposal_digest)
+                    .ok()
+                    .flatten()
+                    .map_or(0, |proposal| proposal.payload().bounds.wall_clock_ms);
             let run_id = Uuid::new_v4();
             transaction.execute(
                 "INSERT INTO runs (
@@ -530,6 +545,7 @@ impl DispatchService {
                 project_id,
                 ruling_digest: ruling_digest.to_owned(),
                 started_at_ms,
+                wall_clock_ms,
             })
         })
     }
@@ -729,6 +745,22 @@ impl DispatchService {
         };
         if !is_beacon_made(connection, self.workspace_id, &repository)? {
             return Ok(decided.refused(DispatchOutcome::SourceNotBeaconMade));
+        }
+
+        // The declared pre-images, against the pinned base tree itself. Nothing before this read
+        // the repository's contents, so a Candidate claiming a file held bytes it never held --
+        // including a deletion of a path that is not there -- would otherwise reach the object
+        // writes and be caught only by the effect post-condition, after residue exists (gpt1).
+        //
+        // Checked before the head gate so it costs one read of a tree that is about to be read
+        // anyway, and refused as its own reason rather than as a content mismatch: the supplied
+        // content is not what disagrees.
+        if !pre_images_hold(
+            &repository,
+            ruling.payload().bindings.pinned_base_revision.as_str(),
+            &decided.per_mutation,
+        ) {
+            return Ok(decided.refused(DispatchOutcome::PreImageMismatch));
         }
 
         // G11: the live repository, read through the pinned directory with a read-only Git shape.
@@ -949,6 +981,12 @@ impl DispatchService {
         // W4: the prepared commit touches exactly the declared set, and every blob in it hashes to
         // what the Candidate declared. NUL-delimited, because a declared path may contain a
         // newline.
+        //
+        // With pre-images verified against the base tree before any object was written, a
+        // declaration that disagrees with the repository is refused earlier and this check has no
+        // reachable arrangement left. It stays because it is the only thing that would notice Git
+        // itself producing something other than what was asked for -- and because ADR 0039 makes
+        // the post-condition a fact about objects, which is a claim that needs a check behind it.
         match self.effect_matches(repository, base, &commit, decided) {
             Ok(true) => {}
             Ok(false) => return Ok(Err(DispatchOutcome::EffectDoesNotMatchDeclaration)),
@@ -978,6 +1016,17 @@ impl DispatchService {
         let outcome = self.accounts.with_authenticated_store(|connection, now| {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+            // The Proposal's own wall-clock bound, applied to the attempt that is about to become
+            // irreversible: a Run may not exceed the ceiling its Proposal declared, and preparation
+            // is the part that can take real time.
+            let elapsed = u64::try_from(now)
+                .unwrap_or(u64::MAX)
+                .saturating_sub(opened.started_at_ms);
+            if elapsed > opened.wall_clock_ms {
+                transaction.commit()?;
+                return Ok(DispatchOutcome::WallClockExceeded);
+            }
 
             // The authority, re-read at the last moment it can be read: the same owning-module
             // proof the gates ran, plus the two live gates that are not about the record.
@@ -1254,6 +1303,9 @@ struct OpenRun {
     project_id: Uuid,
     ruling_digest: String,
     started_at_ms: u64,
+    /// The Proposal's declared wall-clock ceiling, carried from the Run's opening so the landing
+    /// can hold the attempt to it.
+    wall_clock_ms: u64,
 }
 
 /// What the gates established, accumulated as they run so a Receipt can name the last thing that
@@ -1577,6 +1629,31 @@ fn swap_ref(
         None,
         WRITE_BUDGET,
     )
+}
+
+/// Does every declared pre-image match what the pinned base revision actually holds?
+///
+/// A create must find nothing at its path; a modify or a delete must find a blob whose bytes hash
+/// to the declared pre-image. Read from the base TREE, not from the working tree: the tree is what
+/// the change will be applied to.
+fn pre_images_hold(
+    repository: &PinnedRepository,
+    base: &str,
+    per_mutation: &[MutationRecord],
+) -> bool {
+    per_mutation.iter().all(|record| {
+        let path = format!("{base}:{}", record.path);
+        let blob = read_pinned(repository, &["cat-file", "blob", &path], READ_BUDGET);
+        match (&record.pre_image, blob) {
+            // Declared absent, and absent: `cat-file` fails for a path the tree does not hold.
+            (None, None) => true,
+            (None, Some(_)) => false,
+            (Some(_), None) => false,
+            (Some(declared), Some(bytes)) => {
+                hex(&crate::proposal::sha256(bytes.as_bytes())) == *declared
+            }
+        }
+    })
 }
 
 /// Did Beacon make this repository?

@@ -391,6 +391,8 @@ CREATE TABLE receipts (
         'autonomy_profile_refuses',
         'installation_paused',
         'already_dispatched',
+        'pre_image_mismatch',
+        'wall_clock_exceeded',
         'admissible',
         'applied',
         -- After preparation. These may leave objects no ref names, which is why they are not
