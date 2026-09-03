@@ -232,14 +232,14 @@ END;
 -- on the pair would let an author re-evaluate their own Proposal by changing configuration, which
 -- is the dodge this trigger exists to close.
 --
--- gpt2's E1 asked why a trigger comparing the (Resident, configuration) PAIR passes every test.
--- It is unobservable at THIS layer, and the reason is one line up in 0011:
--- `mission_admission_members` is UNIQUE (workspace_id, mission_id, resident_id), so a Resident
--- appears at most once per Mission and the configuration is a function of the Resident there. A
--- pair-keyed trigger and a Resident-keyed trigger therefore refuse exactly the same rows, because
--- the membership foreign key has already refused every row where they would differ. The trigger is
--- written on the Resident because that is the rule; the layer where the distinction is observable,
--- and load-bearing, is the Command.
+-- A pair-keyed trigger refuses the same ROWS -- `mission_admission_members` is
+-- UNIQUE (workspace_id, mission_id, resident_id), so a Resident appears at most once per Mission
+-- and the membership foreign key already refuses every row where the two keyings would differ --
+-- but it does NOT refuse them for the same REASON, and SQLite says which. The author under another
+-- configuration is refused here as SQLITE_CONSTRAINT_TRIGGER (1811); under a pair-keyed trigger the
+-- row reaches the membership key and is refused as SQLITE_CONSTRAINT_FOREIGNKEY (787).
+-- `an_evaluator_who_authored_the_bound_proposal_is_refused_by_the_store` asserts the code, so this
+-- rule is load-bearing at this layer and not only at the Command.
 --
 -- This is one of the two layers. It proves what SQL can prove -- that the stored projection does
 -- not name the author -- and the verified read and startup reconciliation prove the other half,
