@@ -1498,6 +1498,13 @@ impl EvaluationService {
                 MalformedEvaluation::ProposalDigestValue,
             )
             .map_err(EvaluationError::Malformed)?;
+            // Validated BEFORE any store lookup. Querying an unvalidated string and reporting
+            // "not recorded" collapses a malformed identity into an absent one -- two different
+            // mistakes, and the codec already has a distinct arm for the first.
+            if let EvaluationSupersedes::Evaluation(digest) = &draft.supersedes {
+                digest_bytes(digest, MalformedEvaluation::SupersedesDigest)
+                    .map_err(EvaluationError::Malformed)?;
+            }
             let evaluated_at_ms = u64::try_from(now).map_err(|_| EvaluationError::InvalidStore)?;
 
             let transaction =
