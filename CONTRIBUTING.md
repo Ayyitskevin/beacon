@@ -35,7 +35,11 @@ The Rust toolchain is pinned in `rust-toolchain.toml` and installs itself via ru
 stage that needs Python refuses to run without `.venv`, on purpose: importing another checkout's
 copy is a false green this repository has actually hit. `scripts/gate rust` and `scripts/gate
 desktop` are exempt, because they use none of it — so those two do run in a checkout that has no
-`.venv`, and `scripts/gate all` does not. Without the Linux development libraries and build tools
+`.venv`, and `scripts/gate all` does not. `scripts/gate --no-venv all` runs exactly those two
+exempt stages and prints one line per skipped stage naming it and why, so a review worktree does not
+pay for a `.venv` it will not use; naming a Python stage together with `--no-venv` is refused rather
+than skipped, and a run that skipped anything says so instead of reporting a full pass. Without the
+Linux development libraries and build tools
 above, the native Tauri compile and link steps in the desktop and Rust gates fail before Beacon can
 be built.
 
