@@ -1624,17 +1624,43 @@ pub(crate) fn verified_ruling_within(
         return Ok(None);
     };
     let ruling = verified_ruling(connection, stored)?;
-    let events: i64 = connection.query_row(
-        "SELECT count(*) FROM events
+    // The owning Event verifier against the exact row, not a count of matching digests: counting
+    // proves a row exists and nothing about what it says, so an Event whose actor, time or bytes
+    // are false would pass (gpt1's P0, the same defect the Candidate reader had).
+    let (payload_json, occurred_at_ms) = connection.query_row(
+        "SELECT payload_json, occurred_at_ms FROM events
          WHERE workspace_id = ?1 AND kind = 'ruling.recorded'
            AND json_extract(payload_json, '$.ruling.digest.value') = ?2",
         params![workspace_id.to_string(), digest_value],
-        |row| row.get(0),
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
     )?;
-    if events != 1 {
-        return Err(RulingError::InvalidStore);
-    }
+    let occurred_at_ms = u64::try_from(occurred_at_ms).map_err(|_| RulingError::InvalidStore)?;
+    verify_ruling_event(connection, workspace_id, occurred_at_ms, &payload_json)?;
     Ok(Some(ruling))
+}
+
+/// Which Proposal and revisions a stored Ruling is indexed under.
+///
+/// **Not an authority read**, exactly as `proposal_row_scope` is not: it returns the row's columns
+/// without proving them, so that opening a Run row cannot fail in a way that denies the gates the
+/// chance to refuse with evidence.
+pub(crate) fn ruling_row_scope(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+) -> Result<Option<(String, ProposalBindings)>, RulingError> {
+    let Some(stored) = load_stored(connection, workspace_id, digest_value)? else {
+        return Ok(None);
+    };
+    Ok(Some((
+        stored.proposal_digest,
+        ProposalBindings {
+            charter_revision: stored.charter_revision,
+            project_policy_revision: stored.project_policy_revision,
+            repository_revision: stored.repository_revision,
+            pinned_base_revision: stored.pinned_base_revision,
+        },
+    )))
 }
 
 /// The `events.sequence` of the one Event that recorded a Ruling.
