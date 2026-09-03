@@ -365,6 +365,14 @@ pub enum GitStepName {
     CommitTree,
     /// `diff --name-status -z`, the effect post-condition.
     DiffNameStatus,
+    /// `symbolic-ref --quiet HEAD`: the live head gate's first read.
+    SymbolicRef,
+    /// `rev-parse --verify`: the head the gates measured, and the head observed after the swap.
+    RevParse,
+    /// `status --porcelain --untracked-files=all`: the clean-tree gate.
+    Status,
+    /// `cat-file blob`, one per declared mutation: the pre-image gate reading the base tree.
+    CatFile,
     /// `update-ref <ref> <new> <old>`: the compare-and-swap.
     UpdateRef,
     /// `read-tree -u --reset` on Beacon's own copy, after the swap: index and working tree only,
@@ -376,9 +384,14 @@ pub enum GitStepName {
 #[serde(rename_all = "snake_case")]
 pub enum GitStepResult {
     Succeeded,
-    /// Git ran and did not do it. For the swap this is the ref no longer holding the expected
-    /// value; it is never "we could not tell".
-    Refused,
+    /// The invocation did not succeed.
+    ///
+    /// Two arms and no more, deliberately and with the cost stated: the bounded runner reports a
+    /// non-zero exit, a timeout, a failure to spawn and a repository that stopped being the pinned
+    /// one as one absent answer, so a Receipt that named a cause here would be naming one it was
+    /// never told (gpt1 asked for finer categories; giving them names without evidence would be
+    /// worse than this). For the swap it means the ref no longer held the expected value.
+    DidNotSucceed,
 }
 
 /// The authenticated command actor, which for a dispatch is always the Owner.
@@ -805,29 +818,27 @@ impl DispatchService {
         // Checked before the head gate so it costs one read of a tree that is about to be read
         // anyway, and refused as its own reason rather than as a content mismatch: the supplied
         // content is not what disagrees.
-        if !pre_images_hold(
-            &repository,
-            ruling.payload().bindings.pinned_base_revision.as_str(),
-            &decided.per_mutation,
-        ) {
+        let pinned_base = ruling.payload().bindings.pinned_base_revision.clone();
+        if !pre_images_hold(&repository, &pinned_base, &mut decided) {
             return Ok(decided.refused(DispatchOutcome::PreImageMismatch));
         }
 
         // G11: the live repository, read through the pinned directory with a read-only Git shape.
         // Nothing here may write: `git status` rewrites `.git/index` without GIT_OPTIONAL_LOCKS=0,
         // and a gate that mutates what it measures cannot support a zero-mutation claim.
-        let Some(branch) = read_pinned(
-            &repository,
-            &["symbolic-ref", "--quiet", "HEAD"],
-            READ_BUDGET,
-        ) else {
+        let symbolic_ref = ["symbolic-ref", "--quiet", "HEAD"];
+        let branch = read_pinned(&repository, &symbolic_ref, READ_BUDGET);
+        decided.record_step(GitStepName::SymbolicRef, &symbolic_ref, branch.is_some());
+        let Some(branch) = branch else {
             return Ok(decided.refused(DispatchOutcome::SourceDetached));
         };
         if branch.trim().is_empty() {
             return Ok(decided.refused(DispatchOutcome::SourceDetached));
         }
-        let Some(head) = read_pinned(&repository, &["rev-parse", "--verify", "HEAD"], READ_BUDGET)
-        else {
+        let rev_parse = ["rev-parse", "--verify", "HEAD"];
+        let head = read_pinned(&repository, &rev_parse, READ_BUDGET);
+        decided.record_step(GitStepName::RevParse, &rev_parse, head.is_some());
+        let Some(head) = head else {
             return Ok(decided.refused(DispatchOutcome::RepositoryHeadMoved));
         };
         let head = head.trim().to_owned();
@@ -838,11 +849,10 @@ impl DispatchService {
             // the repository knows it.
             return Ok(decided.refused(DispatchOutcome::RepositoryHeadMoved));
         }
-        let Some(status) = read_pinned(
-            &repository,
-            &["status", "--porcelain", "--untracked-files=all"],
-            READ_BUDGET,
-        ) else {
+        let status_arguments = ["status", "--porcelain", "--untracked-files=all"];
+        let status = read_pinned(&repository, &status_arguments, READ_BUDGET);
+        decided.record_step(GitStepName::Status, &status_arguments, status.is_some());
+        let Some(status) = status else {
             return Ok(decided.refused(DispatchOutcome::SourceDirty));
         };
         if !status.trim().is_empty() {
@@ -1179,8 +1189,9 @@ impl DispatchService {
                 &["update-ref", branch, commit, base],
                 swapped.is_some(),
             );
-            let observed =
-                read_pinned(&repository, &["rev-parse", "--verify", branch], READ_BUDGET);
+            let observe = ["rev-parse", "--verify", branch];
+            let observed = read_pinned(&repository, &observe, READ_BUDGET);
+            decided.record_step(GitStepName::RevParse, &observe, observed.is_some());
             // `Applied` is a claim about THIS attempt's swap, so the swap having succeeded is part
             // of it. The commit is a deterministic function of its inputs, so a branch that already
             // names it may have been moved there by something else -- and reporting that as this
@@ -1307,7 +1318,7 @@ impl Decided {
             result: if succeeded {
                 GitStepResult::Succeeded
             } else {
-                GitStepResult::Refused
+                GitStepResult::DidNotSucceed
             },
         });
     }
@@ -1728,24 +1739,31 @@ fn swap_ref(
 /// A create must find nothing at its path; a modify or a delete must find a blob whose bytes hash
 /// to the declared pre-image. Read from the base TREE, not from the working tree: the tree is what
 /// the change will be applied to.
-fn pre_images_hold(
-    repository: &PinnedRepository,
-    base: &str,
-    per_mutation: &[MutationRecord],
-) -> bool {
-    per_mutation.iter().all(|record| {
-        let path = format!("{base}:{}", record.path);
-        let blob = read_pinned(repository, &["cat-file", "blob", &path], READ_BUDGET);
-        match (&record.pre_image, blob) {
+fn pre_images_hold(repository: &PinnedRepository, base: &str, decided: &mut Decided) -> bool {
+    let records: Vec<(Option<String>, String)> = decided
+        .per_mutation
+        .iter()
+        .map(|record| (record.pre_image.clone(), record.path.clone()))
+        .collect();
+    let mut held = true;
+    for (declared_pre_image, declared_path) in records {
+        let path = format!("{base}:{declared_path}");
+        let cat_file = ["cat-file", "blob", path.as_str()];
+        let blob = read_pinned(repository, &cat_file, READ_BUDGET);
+        decided.record_step(GitStepName::CatFile, &cat_file, blob.is_some());
+        let record_holds = match (&declared_pre_image, blob) {
             // Declared absent, and absent: `cat-file` fails for a path the tree does not hold.
             (None, None) => true,
-            (None, Some(_)) => false,
-            (Some(_), None) => false,
+            (None, Some(_)) | (Some(_), None) => false,
             (Some(declared), Some(bytes)) => {
                 hex(&crate::proposal::sha256(bytes.as_bytes())) == *declared
             }
-        }
-    })
+        };
+        // Every declared path is read, not just the ones up to the first disagreement, so the
+        // Receipt's step list is the invocations this dispatch made rather than a prefix of them.
+        held = held && record_holds;
+    }
+    held
 }
 
 /// Did Beacon make this repository?

@@ -2893,9 +2893,16 @@ fn an_applied_receipt_has_the_published_shape() {
         .iter()
         .map(|step| step["step"].as_str().unwrap())
         .collect();
+    // Every invocation this dispatch made on its own behalf, in the order it made them: the
+    // pre-image read, the three live gate reads, the object writes, the post-condition, the swap,
+    // the observation of what the swap produced, and the checkout.
     assert_eq!(
         steps,
         vec![
+            "cat_file",
+            "symbolic_ref",
+            "rev_parse",
+            "status",
             "read_tree",
             "hash_object",
             "update_index",
@@ -2903,6 +2910,7 @@ fn an_applied_receipt_has_the_published_shape() {
             "commit_tree",
             "diff_name_status",
             "update_ref",
+            "rev_parse",
             "read_tree_checkout",
         ]
     );
