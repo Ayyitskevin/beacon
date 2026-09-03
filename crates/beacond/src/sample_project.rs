@@ -198,6 +198,8 @@ pub struct SampleProjectService {
     git_program: OsString,
     expected_bundle_digest: String,
     sync_repository_tree: fn(&Path) -> std::io::Result<()>,
+    #[cfg(debug_assertions)]
+    copy_failpoints: CopyFailpoints,
     #[cfg(test)]
     before_workspace_open: fn(&Path) -> std::io::Result<()>,
     #[cfg(test)]
@@ -205,6 +207,14 @@ pub struct SampleProjectService {
 }
 
 impl SampleProjectService {
+    /// Install synchronization points inside `copy_for_dispatch`. Debug builds only.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn with_copy_failpoints(mut self, failpoints: CopyFailpoints) -> Self {
+        self.copy_failpoints = failpoints;
+        self
+    }
+
     pub fn new(
         accounts: Arc<OperatorAccountService>,
         workspace_id: Uuid,
@@ -226,6 +236,8 @@ impl SampleProjectService {
             git_program: OsString::from("git"),
             expected_bundle_digest: EXPECTED_BUNDLE_DIGEST.to_owned(),
             sync_repository_tree: sync_directory_tree,
+            #[cfg(debug_assertions)]
+            copy_failpoints: CopyFailpoints::default(),
             #[cfg(test)]
             before_workspace_open: no_op_path_hook,
             #[cfg(test)]
@@ -327,22 +339,30 @@ impl SampleProjectService {
         let name = format!("sample-project-{label}");
         let destination = root.join(&name);
 
-        // The copy's root is created and opened THROUGH the copies-root descriptor: `mkdirat` then
-        // `openat` on a single component, with no pathname resolution of the parent chain and no
-        // symlink to follow. The previous version created the directory by pathname and opened that
-        // pathname in the next operation, and a review replaced the empty directory in exactly that
-        // interval -- so the copy was made into a directory Beacon had not created.
+        // The copy's root is created and opened THROUGH the copies-root descriptor, with no
+        // pathname resolution of the parent chain and no symlink to follow. POSIX has no `O_CREAT`
+        // for a directory, so `mkdirat` and `openat` are two syscalls and an interval exists
+        // between them; the previous version held the parent descriptor, which removed ancestor
+        // retargeting but never bound the child inode, and a review replaced the final component in
+        // exactly that interval -- `openat` answered with the replacement, which then received a
+        // provenance token and was recorded as Beacon-created.
         //
-        // What this does NOT do is make creation and opening one operation: POSIX has no `O_CREAT`
-        // for a directory, so a window between `mkdirat` and `openat` remains. Its residual is
-        // stated in ADR 0039 rather than claimed away; exploiting it needs write access to Beacon's
-        // own copies root, which is also what it takes to defeat the provenance token.
+        // `create_dispatch_copy_root` does not close the interval. It makes the interval unaimable
+        // and the substitution detectable: the directory is made under a name the caller cannot
+        // predict, the inode `mkdirat` produced is captured before the window opens, and the
+        // descriptor is refused unless it is that inode -- before any provenance is recorded.
         let mut options = OpenOptions::new();
         options
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
         let root_directory = options.open(root)?;
-        let created = create_private_directory_at(&root_directory, OsStr::new(name.as_str()))?;
+        let created = create_dispatch_copy_root(
+            &root_directory,
+            OsStr::new(name.as_str()),
+            root,
+            #[cfg(debug_assertions)]
+            &self.copy_failpoints,
+        )?;
         let created_identity = {
             let metadata = created.metadata()?;
             (metadata.dev(), metadata.ino())
@@ -1441,27 +1461,207 @@ fn create_private_directory_at(parent: &File, name: &OsStr) -> Result<File, Samp
     if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
         return Err(std::io::Error::last_os_error().into());
     }
-    // Keep the exact no-symlink chmod rule explicit even though mkdirat's mode
-    // already makes a newly created directory private.
-    if unsafe {
-        libc::fchmodat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            0o700,
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    } != 0
-    {
+    let directory = match open_directory_at(parent, name.as_c_str()) {
+        Ok(directory) => directory,
+        Err(error) => {
+            unsafe {
+                libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR);
+            }
+            return Err(error.into());
+        }
+    };
+    // The mode is set on the DESCRIPTOR, not on the name. `fchmodat` re-resolved the component and
+    // was the second of the two pathname operations in this function; `fchmod` cannot be pointed at
+    // anything but the directory already opened (gpt1, C35 item 1).
+    if unsafe { libc::fchmod(directory.as_raw_fd(), 0o700) } != 0 {
         let error = std::io::Error::last_os_error();
         unsafe {
             libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR);
         }
         return Err(error.into());
     }
-    let directory = open_directory_at(parent, name.as_c_str())?;
     let metadata = directory.metadata()?;
     if !metadata.is_dir() || metadata.permissions().mode() & 0o077 != 0 {
         return Err(SampleProjectError::UnsafeDestination);
+    }
+    Ok(directory)
+}
+
+/// Synchronization points inside the dispatch copy's creation. Debug builds only.
+///
+/// Held per service, the way [`crate::DispatchFailpoints`] is, rather than in a global: the tests
+/// share one process, and a global was overwritten by whichever test set it last -- four tests that
+/// each passed alone failed together.
+///
+/// This is gpt1's probe boundary made permanent. The interval between creating the directory and
+/// opening it is unreachable from any test the tree can express -- every run of it so far has been a
+/// reviewer's temporary patch, which is why a hole this old had no committed test.
+///
+/// There are TWO points because the function makes two different claims, and one point could only
+/// ever exercise both at once. `before_open` moves the substitution into the create-to-open window,
+/// where only the DESCRIPTOR comparison can see it; `after_open` moves it after the descriptor is
+/// held, where only the NAME comparison can. With a single point both checks fire together and
+/// deleting either one leaves the test green -- measured, not assumed.
+///
+/// Each hook receives the staging directory's path so a test can act on its own copy and leave every
+/// other test's alone; the tests run in one process.
+#[cfg(debug_assertions)]
+type CopyHook = Arc<dyn Fn(&Path) + Send + Sync>;
+
+#[cfg(debug_assertions)]
+#[derive(Clone, Default)]
+#[doc(hidden)]
+pub struct CopyFailpoints {
+    /// Between `mkdirat` and `openat`: the window gpt1's probe found.
+    pub before_open: Option<CopyHook>,
+    /// After `openat`, before the staging name is checked and published.
+    pub after_open: Option<CopyHook>,
+}
+
+#[cfg(debug_assertions)]
+fn copy_failpoint(hook: &Option<CopyHook>, path: &Path) {
+    if let Some(hook) = hook {
+        hook(path);
+    }
+}
+
+fn file_identity(file: &File) -> Result<(u64, u64), SampleProjectError> {
+    let metadata = file.metadata()?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+/// `fstatat(parent, name, AT_SYMLINK_NOFOLLOW)` as a device+inode pair.
+fn identity_at(parent: &File, name: &CStr) -> std::io::Result<(u64, u64)> {
+    let mut status = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `parent` and `name` remain live for the call, and `status` is written only on success.
+    let result = unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            status.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let status = unsafe { status.assume_init() };
+    Ok((status.st_dev, status.st_ino))
+}
+
+/// Create the dispatch copy's root, prove the descriptor is the directory we made, and only then
+/// publish it under `name`.
+///
+/// The property this establishes is narrower than "creation and opening are one operation", which
+/// POSIX cannot give for a directory, and it is stated as what it is in ADR 0039:
+///
+///   * the interval cannot be **aimed at** -- the directory is made under a name carrying a fresh
+///     UUID, so a substitution cannot be prepared against a name it can predict;
+///   * a substitution inside the interval is **detected before any provenance is recorded** -- the
+///     inode `mkdirat` produced is captured through the parent descriptor before the window opens,
+///     and the opened descriptor is refused unless it is that inode;
+///   * the published name refers to that same inode at the moment it is published.
+///
+/// A witness file written through the descriptor was in the plan and is not here: no test could
+/// make its absence fail. Anything that substitutes the directory changes the inode, so the
+/// comparisons below fire first, and a check that cannot fail is a sentence rather than a guard.
+///
+/// Every failure after `mkdirat` removes the child rather than leaving a directory behind that a
+/// later run might adopt.
+fn create_dispatch_copy_root(
+    parent: &File,
+    name: &OsStr,
+    parent_path: &Path,
+    #[cfg(debug_assertions)] failpoints: &CopyFailpoints,
+) -> Result<File, SampleProjectError> {
+    let published = directory_component(name)?;
+    // Unpredictable, so the window cannot be aimed at: an attacker who cannot name the component
+    // cannot prepare a replacement for it.
+    let staging_name = OsString::from(format!(
+        ".{}.{}",
+        name.to_string_lossy(),
+        Uuid::new_v4().simple()
+    ));
+    let staging = directory_component(&staging_name)?;
+
+    // SAFETY: `parent` and `staging` remain live for the syscall and `staging` is a single
+    // NUL-terminated component. Mode 0700 is never broadened by umask.
+    if unsafe { libc::mkdirat(parent.as_raw_fd(), staging.as_ptr(), 0o700) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    let outcome = publish_dispatch_copy_root(
+        parent,
+        &staging,
+        &published,
+        parent_path,
+        #[cfg(debug_assertions)]
+        failpoints,
+    );
+    if outcome.is_err() {
+        // SAFETY: single component under the parent descriptor; AT_REMOVEDIR removes only an empty
+        // directory, so a substitution that brought contents with it is left for a human to see.
+        unsafe {
+            libc::unlinkat(parent.as_raw_fd(), staging.as_ptr(), libc::AT_REMOVEDIR);
+        }
+    }
+    outcome
+}
+
+fn publish_dispatch_copy_root(
+    parent: &File,
+    staging: &CStr,
+    published: &CStr,
+    parent_path: &Path,
+    #[cfg(debug_assertions)] failpoints: &CopyFailpoints,
+) -> Result<File, SampleProjectError> {
+    // Captured BEFORE the window opens: this is the inode `mkdirat` produced, and it is the only
+    // thing that can tell the directory we made from one substituted for it.
+    let created_identity = identity_at(parent, staging)?;
+
+    #[cfg(debug_assertions)]
+    let staging_path = parent_path.join(Path::new(OsStr::from_bytes(staging.to_bytes())));
+    #[cfg(not(debug_assertions))]
+    let _ = parent_path;
+    #[cfg(debug_assertions)]
+    copy_failpoint(&failpoints.before_open, &staging_path);
+
+    let directory = open_directory_at(parent, staging)?;
+
+    // The descriptor must BE the directory we created. A replacement installed in the interval is
+    // refused here -- before the copy is written into it, before a provenance token is generated,
+    // and before any `beacon_repositories` row exists.
+    if file_identity(&directory)? != created_identity {
+        return Err(SampleProjectError::UnsafeDestination);
+    }
+
+    #[cfg(debug_assertions)]
+    copy_failpoint(&failpoints.after_open, &staging_path);
+
+    // The mode is set on the descriptor, never on a name.
+    if unsafe { libc::fchmod(directory.as_raw_fd(), 0o700) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let metadata = directory.metadata()?;
+    if !metadata.is_dir() || metadata.permissions().mode() & 0o077 != 0 {
+        return Err(SampleProjectError::UnsafeDestination);
+    }
+
+    // The name still refers to the inode we verified, at the moment it is published.
+    if identity_at(parent, staging)? != created_identity {
+        return Err(SampleProjectError::UnsafeDestination);
+    }
+    // SAFETY: both are single components under the same parent descriptor.
+    if unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            staging.as_ptr(),
+            parent.as_raw_fd(),
+            published.as_ptr(),
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error().into());
     }
     Ok(directory)
 }
