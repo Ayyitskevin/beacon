@@ -2762,6 +2762,34 @@ const RECEIPT_MEMBERS: &[&str] = &[
 ///
 /// Read off the text rather than out of a parsed map: `serde_json`'s map is sorted, so parsing and
 /// reading its keys would assert alphabetical order and pass no matter how the record is written.
+/// The members a `RulingRefused` leaves absent, in sorted order.
+///
+/// The same list is asserted against the pinned specimen in `dispatch::tests`. Together they are
+/// what ties a published vector to a record this dispatch path can actually produce: the specimen
+/// is not a hand-built shape that happens to serialize, it is the shape a real refusal has (gpt2).
+const REFUSED_ABSENT: &[&str] = &[
+    "autonomyProfile",
+    "branch",
+    "candidateDigest",
+    "diffDigest",
+    "observedHead",
+    "preparedCommit",
+    "resultingRevision",
+    "source",
+    "sourceIdentity",
+    "sourceKind",
+];
+
+/// The members of `payload` whose value is `null`, sorted.
+fn absent_members(payload: &str) -> Vec<String> {
+    let value: serde_json::Map<String, serde_json::Value> = serde_json::from_str(payload).unwrap();
+    value
+        .iter()
+        .filter(|(_, value)| value.is_null())
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
 fn receipt_members(payload: &str) -> Vec<String> {
     let bytes = payload.as_bytes();
     let mut members = Vec::new();
@@ -2897,6 +2925,9 @@ fn a_refused_receipt_has_the_same_shape_with_the_facts_it_does_not_have_absent()
         .query_row("SELECT receipt_json FROM receipts", [], |row| row.get(0))
         .unwrap();
     assert_eq!(receipt_members(&stored), RECEIPT_MEMBERS);
+    // The shape the pinned specimen claims to be: exactly these members absent, no more and no
+    // fewer. A vector for a shape production cannot emit is a vector for nothing.
+    assert_eq!(absent_members(&stored), REFUSED_ABSENT);
     let value: serde_json::Value = serde_json::from_str(&stored).unwrap();
     assert_eq!(value["outcome"], "ruling_refused");
     assert!(value["preparedCommit"].is_null());
