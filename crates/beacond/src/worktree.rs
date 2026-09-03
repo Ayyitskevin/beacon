@@ -728,6 +728,7 @@ fn pinned_filter_drivers(repository: &PinnedRepository) -> Option<Vec<String>> {
         .arg(".git/config")
         .arg("--includes")
         .arg("--name-only")
+        .arg("--null")
         .arg("--list");
     let Bounded::Finished { success, stdout } = run_git_bounded(command, READ_BUDGET) else {
         return None;
@@ -739,19 +740,11 @@ fn pinned_filter_drivers(repository: &PinnedRepository) -> Option<Vec<String>> {
     if !repository.still_pinned() {
         return None;
     }
-    Some(
-        stdout
-            .lines()
-            .filter_map(|line| {
-                line.strip_suffix(".smudge")
-                    .or_else(|| line.strip_suffix(".clean"))
-            })
-            .filter(|name| name.starts_with("filter."))
-            .map(str::to_owned)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect(),
-    )
+    // The shared parser, not a second one: this inventory used to recognize only `.smudge` and
+    // `.clean`, so a driver declared with `filter.<name>.process` alone was never discovered and
+    // therefore never neutralized -- reopening the repository-supplied execution boundary the
+    // hardened command exists to close (gpt1). One parser, one definition of what a driver is.
+    Some(filter_drivers_from_config_output(&stdout))
 }
 
 /// Who Beacon says wrote a commit, and when.
