@@ -461,11 +461,15 @@ pub struct DispatchService {
 
 /// Places a test can stop this act dead, to reproduce a crash image rather than synthesize one.
 ///
-/// Two reviews rejected the recovery evidence for the same reason: the tests deleted committed
-/// records to arrange a state, which proves what reconciliation does with a state nobody showed was
-/// reachable. A hook that panics inside the act leaves exactly what a killed process leaves -- the
-/// external Git effects that already happened, the store transactions that had already committed,
-/// and nothing of the one that was open.
+/// Two reviews rejected the recovery evidence twice, for two different reasons. The first version
+/// deleted committed records to arrange a state, which proves what reconciliation does with a state
+/// nobody showed was reachable. The second panicked in-process and caught the unwind, which runs
+/// every destructor a kill does not: the scratch index removed, the open transaction dropped in an
+/// orderly way, and the same process then opening the store it had just "crashed" with.
+///
+/// So the hooks carry no policy of their own. The tests run the act in a CHILD process and abort it
+/// here -- no unwinding, no destructors, the database lock released the way a kill releases it --
+/// and the parent recovers a store it never had open.
 ///
 /// Compiled out of release builds entirely: the field, the calls and this type do not exist there.
 #[cfg(debug_assertions)]
@@ -1166,8 +1170,8 @@ impl DispatchService {
             let swapped = swap_ref(&repository, branch, commit, base);
             #[cfg(debug_assertions)]
             if let Some(hook) = self.failpoints.after_swap.clone() {
-                // The ref has moved and nothing about it is committed. An interruption here loses
-                // exactly this transaction, which is why the claim above is not in it.
+                // The ref has moved and nothing about it is committed. A death here loses exactly
+                // this transaction, which is why the claim above is not in it.
                 hook();
             }
             decided.record_step(
