@@ -314,14 +314,16 @@ to a path and every Git child re-enters it by name, so renaming the directory an
 equivalent decoy at the same pathname redirected the mutation: the decoy advanced, the real
 repository stayed at base. Dispatch pins the repository once, retains its descriptor and identity
 for the whole Run, enters it by descriptor, and fails closed if the name stops resolving to the
-pinned identity. Deterministic swaps between the head check and the worktree, and between the head
-check and the landing, are required tests.
+pinned identity. Deterministic swaps are required tests: between the head check and
+the landing, and — the arrangement that actually distinguishes descriptor entry from pathname
+entry — swapped in for the duration of one invocation and swapped back, which the pin check
+cannot see because it looks before and after.
 
 **Gate reads may not write.** `git status --porcelain` refreshes and rewrites `.git/index`, so the
 head-and-cleanliness gate mutated the repository it was measuring — and the design's own
 five-part fingerprint could not see it. Git hardening is split: a **read-only** variant carrying
-`GIT_OPTIONAL_LOCKS=0` for every gate read, and the mutating variant for the worktree and the
-landing.
+`GIT_OPTIONAL_LOCKS=0` for every gate read, and the mutating variant for the object writes and
+the landing.
 
 **Zero mutation is measured over raw bytes.** The fingerprint is replaced by
 `raw_repository_snapshot(root)`: a recursive walk of the whole repository root that runs no Git,
@@ -505,8 +507,8 @@ arm for exactly this — and until the Safety Snapshot requirement
 (`BLUEPRINT.md:450-452`) is met. Accepting this ADR accepts that scope and no more.
 
 **What a refusal preserves, stated precisely.** "Byte-identical" is true of a refusal
-before W3 and false after it: a commit written into a worktree leaves objects in the
-shared object database that no ref names. The claim this ADR makes, and the one its
+before W3 and false after it: the blobs, tree and commit built by the object plumbing are in
+the repository's object database, and after a refusal no ref names them. The claim this ADR makes, and the one its
 tests measure, is therefore in two parts: **every refusal leaves the source refs and
 the working tree unchanged**, and a refusal after W3 **may leave unreachable objects,
 which the Receipt names**. The zero-mutation tests measure refs, the working tree,
@@ -870,9 +872,12 @@ The dispatch act (later slices, each proved before the next opens):
 - the branch moved **backward** to an ancestor after the head check does not land —
   the case that kills both a deleted head gate and the belief that a fast-forward
   merge is an exact-base compare-and-swap;
-- a decoy repository installed at the pinned pathname between the head check and the
-  worktree, and again between the head check and the landing, does not receive the
-  mutation;
+- a decoy repository at the pinned pathname does not receive the mutation, in each of the
+  three arrangements that mean different things: installed **before** the attempt, where the
+  head gate refuses it; installed **between the gates and the landing**, where the pin check
+  refuses the write; and swapped in **for the duration of one invocation** and swapped back,
+  which is the only one that tells descriptor entry apart from pathname entry — and the only
+  one under which `current_dir(path)` is red;
 - a Candidate path carrying pathspec magic stages only itself;
 - a Candidate whose bytes would be normalized on the way into the tree refuses,
   because post-image digests are compared against the prepared commit's blobs;
@@ -884,7 +889,8 @@ The dispatch act (later slices, each proved before the next opens):
 - a moved repository head refuses **even though every stored record still
   agrees**, which is the only test that fails if G11 is deleted;
 - content that does not hash to the Candidate refuses before any write;
-- a target that escapes the worktree refuses before anything is published;
+- a target that escapes the repository never reaches a dispatch at all: it is
+  unrepresentable in a Proposal, so no Candidate carries it and no Ruling names it;
 - an effect wider than the declaration refuses rather than publishing;
 - an in-force approval applies exactly once, and the second attempt refuses;
 - the applied commit contains exactly the declared mutations.
