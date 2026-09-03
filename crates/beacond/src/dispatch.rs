@@ -300,9 +300,20 @@ impl DispatchReceipt {
     /// when a commit was prepared, so a Receipt with no prepared commit and nothing unknown is one
     /// that refused before anything reached the object database.
     pub fn repository_effect(&self) -> RepositoryEffect {
+        // Two tokens say the record cannot answer, and both must reach the same arm.
+        // `ObjectResidueUnknown`: the interruption fell before the claim, so whether anything was
+        // written is unrecorded. `LandingResultUnknown`: the repository could not say what became
+        // of the prepared commit -- which is precisely when `UnreferencedObjects` must not be
+        // claimed, because its contract asserts that objects exist which no ref names, and a branch
+        // holding a descendant of that commit makes the assertion false rather than unproven
+        // (gpt2). Closing one reachable unknown state and leaving the other was the same defect
+        // this method was introduced to fix.
         if self
             .not_verified
             .contains(&NotVerified::ObjectResidueUnknown)
+            || self
+                .not_verified
+                .contains(&NotVerified::LandingResultUnknown)
         {
             return RepositoryEffect::Unknown;
         }
