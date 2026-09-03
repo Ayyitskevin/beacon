@@ -665,15 +665,97 @@ Evaluation gap explicitly (`non_author_evaluation_of_candidate`). G12 enforces t
 Proposal's own byte, file-size and wall-clock bounds before any caller-supplied content is
 read; the wall-clock ceiling is re-checked inside the landing transaction.
 
-**Specimens.** Two vectors, built entirely from fixed inputs — UUIDs that count up, constant
-digests, times 1 and 2 — so a second implementation compares bytes rather than prose. Both
-literals are in `dispatch::tests` (`the_applied_receipt_specimen_is_exactly_these_bytes`,
+**Widths and forms.** A UUID is the canonical lowercase 8-4-4-4-12 form. A revision is 40
+lowercase hexadecimal characters; a SHA-256 digest value is 64. A branch is a full ref name
+(`refs/heads/main`), never a short one. Times are integer milliseconds. `device` and `inode`
+are unsigned integers. Nothing is case-folded on the way in or out: an uppercase digest is
+refused rather than normalized.
+
+**Every closed vocabulary in this record, enumerated.** A row that says "closed" without its
+tokens is not a specification anyone can encode against:
+
+```text
+actor            owner
+outcome          ruling_unreadable · ruling_refused · ruling_superseded · ruling_drifted ·
+                 proposal_digest_mismatch · proposal_not_ready · candidate_absent ·
+                 candidate_mismatch · content_digest_mismatch · content_over_bounds ·
+                 source_not_local · source_not_beacon_made · repository_head_moved ·
+                 source_detached · source_dirty · autonomy_profile_refuses ·
+                 installation_paused · pre_image_mismatch · wall_clock_exceeded ·
+                 already_dispatched · admissible · object_write_failed ·
+                 effect_does_not_match_declaration · landing_refused · landing_unobserved ·
+                 applied
+autonomyProfile  observe · supervised
+sourceKind       local_path
+gitSteps[].step  read_tree · hash_object · update_index · write_tree · commit_tree ·
+                 diff_name_status · symbolic_ref · rev_parse · status · cat_file ·
+                 update_ref · read_tree_checkout
+gitSteps[].result   succeeded · did_not_succeed
+perMutation[].kind  create_file · modify_file · delete_file
+perMutation[].effect not_attempted · written · removed
+notVerified      IN THIS ORDER, and every Receipt carries the first eleven:
+                 execution_policy_constraint · sandbox_constraint · network_constraint ·
+                 model_provider_constraint · command_allowlist_constraint ·
+                 tool_allowlist_constraint · evaluations_constraint ·
+                 non_author_evaluation_of_candidate · safety_snapshot ·
+                 base_revision_reachability · declared_checks_against_result ·
+                 then, when they apply, in this order:
+                 ruling_bindings_moved · proposal_preconditions · change_not_applied ·
+                 landing_result_unknown · unreferenced_object_residue ·
+                 reconstructed_after_interruption · object_residue_unknown
+```
+
+**Specimens.** Two vectors, built entirely from the fixed inputs below, so a second
+implementation compares bytes rather than prose. Both literals are in `dispatch::tests`
+(`the_applied_receipt_specimen_is_exactly_these_bytes`,
 `the_refused_receipt_specimen_is_exactly_these_bytes`) together with their lengths and digests:
 
 ```text
 applied         2048 bytes  sha256 6d13ab8b7a003b679985758f61bf190f4c0ed538772c9b2e5c21b77d1ece069a
 ruling_refused  1301 bytes  sha256 76305395d931d8464ed38b6980ba6f8abb649014ca44899380c19e67546af8e3
 ```
+
+The inputs, in full, so the bytes can be rebuilt from this document alone:
+
+```text
+runId          00000000-0000-4000-8000-000000000001
+workspaceId    00000000-0000-4000-8000-000000000002
+projectId      00000000-0000-4000-8000-000000000003
+actor          owner
+rulingDigest   sha256 · beacon.ruling.v2    · "1" x 64
+proposalDigest sha256 · beacon.proposal.v1  · "2" x 64
+candidateDigest sha256 · beacon.candidate.v1 · "3" x 64   (applied only; null when refused)
+charterRevision, projectPolicyRevision, repositoryRevision   1, 1, 1
+sourceKind     local_path                                  (applied only)
+source         /copies/sample-project-specimen             (applied only)
+sourceIdentity device 66306, inode 4242                    (applied only)
+branch         refs/heads/main                             (applied only)
+pinnedBaseRevision  "4" x 40
+observedHead / preparedCommit / resultingRevision  "5" x 40 (applied; refused has all three null)
+diffDigest     "6" x 64                                    (applied only)
+checkoutUpdated true (applied) / false (refused)
+gitSteps       applied: exactly one entry --
+                 step update_ref,
+                 argv ["update-ref", "refs/heads/main", "5" x 40, "4" x 40],
+                 result succeeded
+               refused: []
+modelInvocations, costUsdMicros   0, 0
+perMutation    applied: one entry -- kind modify_file, path src/lib.rs,
+                 preImage "7" x 64, postImage "8" x 64, effect written
+               refused: []
+startedAtMs, endedAtMs            1, 2
+notVerified    the first eleven tokens above, and for the refusal one more:
+                 change_not_applied
+```
+
+A specimen carries one `gitSteps` entry rather than a landing's real thirteen: the vector
+exists to pin the encoding, and one entry fixes the shape of the array, its member order and
+its tokens exactly as thirteen would.
+
+This block was checked the way it is meant to be used: both vectors were rebuilt from **this
+document alone**, in Python, importing nothing from Beacon, and both matched the pinned length
+and digest. If a future edit to the encoding does not also land here, that rebuild stops
+matching — which is the point of publishing it.
 
 The two arms are not one record with different values. A `RulingRefused` leaves the gate list
 at G3, so it has no Candidate, no repository, no autonomy profile and no objects: its specimen
