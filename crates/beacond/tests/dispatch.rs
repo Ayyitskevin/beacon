@@ -476,7 +476,7 @@ fn admitted_mission(label: &str) -> Fixture {
         proposals: ProposalService::new(Arc::clone(&accounts), workspace_id),
         candidates: CandidateService::new(Arc::clone(&accounts), workspace_id),
         rulings: RulingService::new(Arc::clone(&accounts), workspace_id),
-        dispatches: DispatchService::new(Arc::clone(&accounts), workspace_id, &copies_root),
+        dispatches: DispatchService::new(Arc::clone(&accounts), workspace_id),
         pause: PauseService::new(Arc::clone(&accounts)),
         copies_root,
         store,
@@ -760,6 +760,9 @@ impl CopyRepository {
     }
 
     /// One commit holding the file every Candidate in this file modifies.
+    ///
+    /// Provenance is NOT recorded here: `Fixture::beacon_made` is what records it, so a test that
+    /// forgets is a test whose dispatch refuses -- and one test forgets on purpose.
     fn create(root: &Path, label: &str) -> Self {
         let path = root.join(format!("copy-{label}"));
         fs::create_dir_all(path.join("src")).unwrap();
@@ -820,7 +823,19 @@ impl Fixture {
         summary: &str,
         base_bytes: &[u8],
     ) -> (String, String) {
-        let revision = self.rebind_repository(repository);
+        self.beacon_made(repository);
+        self.candidate_for_unrecorded(repository, summary, base_bytes)
+    }
+
+    /// [`Fixture::candidate_for`] without recording provenance, for the test that proves a
+    /// repository Beacon did not make is refused.
+    fn candidate_for_unrecorded(
+        &self,
+        repository: &CopyRepository,
+        summary: &str,
+        base_bytes: &[u8],
+    ) -> (String, String) {
+        let revision = self.rebind_repository_at(repository, 1);
         let mut record = self.proposal(summary);
         record.mutations = vec![(MUTATION_MODIFY, TARGET.to_owned())];
         record.repository_revision = revision;
@@ -845,6 +860,7 @@ impl Fixture {
         base_bytes: &[u8],
         charter_revision: u32,
     ) -> (String, String) {
+        self.beacon_made(repository);
         let revision = self.rebind_repository_at(repository, charter_revision);
         let mut record = self.proposal(summary);
         record.mutations = vec![(MUTATION_MODIFY, TARGET.to_owned())];
@@ -864,8 +880,34 @@ impl Fixture {
         )
     }
 
+    /// Record that Beacon made this repository, the way `copy_for_dispatch` does.
+    ///
+    /// Written through the store directly because the only production act that creates a copy is
+    /// the Sample Project's, and these fixtures need arbitrary repositories -- but the gate they
+    /// pass is the real one, reading the real record by device and inode.
+    fn beacon_made(&self, repository: &CopyRepository) {
+        let metadata = fs::metadata(&repository.path).unwrap();
+        self.store
+            .connect()
+            .execute(
+                "INSERT OR IGNORE INTO beacon_repositories (
+                     workspace_id, path, device, inode, origin, created_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, 'sample_project_copy', 1)",
+                rusqlite::params![
+                    self.workspace_id.to_string(),
+                    fs::canonicalize(&repository.path)
+                        .unwrap()
+                        .to_string_lossy(),
+                    metadata.dev() as i64,
+                    metadata.ino() as i64,
+                ],
+            )
+            .unwrap();
+    }
+
     /// Bind the Project to this repository at its current head, returning the new revision.
     fn rebind_repository(&self, repository: &CopyRepository) -> u32 {
+        self.beacon_made(repository);
         self.rebind_repository_at(repository, 1)
     }
 
@@ -1384,15 +1426,21 @@ fn dispatch_refuses_under_observe() {
 }
 
 #[test]
-fn a_repository_outside_beacons_own_copies_is_refused() {
+fn a_repository_beacon_did_not_make_is_refused() {
     // v1 reaches only repositories Beacon made. The blast radius is bounded by construction, not by
     // intent: a Candidate that authorizes an effect is a Material Artifact and v1 has no non-author
     // Evaluation of one (R8).
+    //
+    // The gate used to ask whether a path sat under a directory the CALLER named, so any repository
+    // placed there qualified (gpt1). It asks the store now, by device and inode, and only the act
+    // that creates a copy writes that record.
     let fixture = admitted_mission("provenance");
     let elsewhere = std::env::temp_dir().join(format!("beacon-not-a-copy-{}", Uuid::new_v4()));
     fs::create_dir_all(&elsewhere).unwrap();
     let repository = CopyRepository::create(&elsewhere, "outside");
-    let (proposal_digest, _candidate) = fixture.candidate_for(
+    // Deliberately NOT recorded as Beacon-made. Where the repository sits is irrelevant now: what
+    // the gate asks is whether Beacon created it.
+    let (proposal_digest, _candidate) = fixture.candidate_for_unrecorded(
         &repository,
         "Apply the dispatched change to the library root.",
         BASE_LIB_BYTES,

@@ -500,6 +500,28 @@ BEGIN
     SELECT RAISE(ABORT, 'Dispatch preparations are immutable');
 END;
 
+-- Repositories Beacon made, and may therefore dispatch into.
+--
+-- The provenance gate used to ask only whether a path was under a directory the caller chose, so
+-- any repository placed there qualified and the caller chose the root (gpt1). Origin is a fact
+-- about who created a directory, and only Beacon can record that it did. The device and inode are
+-- stored beside the path because a pathname is what a rename moves.
+CREATE TABLE beacon_repositories (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+    path TEXT NOT NULL CHECK (length(path) BETWEEN 1 AND 4096),
+    device INTEGER NOT NULL,
+    inode INTEGER NOT NULL,
+    origin TEXT NOT NULL CHECK (origin = 'sample_project_copy'),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (workspace_id, path)
+) STRICT;
+
+CREATE TRIGGER beacon_repositories_no_update
+BEFORE UPDATE ON beacon_repositories
+BEGIN
+    SELECT RAISE(ABORT, 'Beacon repository provenance is immutable');
+END;
+
 -- Pause Work, as the store's own fact. BLUEPRINT:377-379 and AGENTS.md:128 make a paused
 -- Installation refuse new dispatches, and a Receipt line saying "pause not verified" does not make
 -- a forbidden dispatch permissible (gpt1). This is the minimum that makes the gate real: one

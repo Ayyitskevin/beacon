@@ -247,6 +247,8 @@ fn downgrade_execution_schema_to_v15(store_path: &Path) {
             "BEGIN IMMEDIATE;
              -- Migration 0022's records come off innermost first: the Ruling/Candidate binding
              -- references both rulings and candidates, and candidates references proposals.
+             DROP TRIGGER beacon_repositories_no_update;
+             DROP TABLE beacon_repositories;
              DROP TRIGGER dispatch_preparations_no_update;
              DROP TRIGGER dispatch_preparations_no_delete;
              DROP INDEX dispatch_preparations_one_per_ruling;
