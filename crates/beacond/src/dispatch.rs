@@ -274,15 +274,43 @@ pub struct DispatchReceipt {
     pub not_verified: Vec<NotVerified>,
 }
 
+/// What a Receipt can say about the repository it names, afterwards.
+///
+/// Four arms because there are four states, and the fourth is why this is not a boolean: a Receipt
+/// reconstructed from an interruption that never reached its claim knows neither what was written
+/// nor whether anything was. A boolean collapsed that into "byte-identical", so a record that
+/// explicitly says the object residue is unknown reported proven byte identity at the same time
+/// (gpt2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepositoryEffect {
+    /// Nothing was written: the refusal came before anything reached the object database.
+    ByteIdentical,
+    /// Objects exist that no ref names. The refs and working tree are unchanged.
+    UnreferencedObjects,
+    /// A commit was published: the branch names it.
+    Published,
+    /// The record cannot say. Nothing here is a claim about the repository.
+    Unknown,
+}
+
 impl DispatchReceipt {
-    /// Was the repository byte-identical afterwards?
+    /// What this Receipt can say about the repository afterwards.
     ///
     /// Read off the evidence rather than inferred from the outcome: objects are written exactly
-    /// when a commit was prepared, so a Receipt with no prepared commit is one that refused before
-    /// anything reached the object database. A Receipt WITH one may have left objects no ref names,
-    /// which is the weaker claim and the one gpt1 required be stated separately.
-    pub fn left_repository_byte_identical(&self) -> bool {
-        self.prepared_commit.is_none()
+    /// when a commit was prepared, so a Receipt with no prepared commit and nothing unknown is one
+    /// that refused before anything reached the object database.
+    pub fn repository_effect(&self) -> RepositoryEffect {
+        if self
+            .not_verified
+            .contains(&NotVerified::ObjectResidueUnknown)
+        {
+            return RepositoryEffect::Unknown;
+        }
+        match (&self.outcome, &self.prepared_commit) {
+            (DispatchOutcome::Applied, _) => RepositoryEffect::Published,
+            (_, None) => RepositoryEffect::ByteIdentical,
+            (_, Some(_)) => RepositoryEffect::UnreferencedObjects,
+        }
     }
 }
 
