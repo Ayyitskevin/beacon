@@ -107,6 +107,20 @@ pub enum CollectorRefusal {
     /// The collector will not pick a line and will not add across units, so this is a refusal rather
     /// than an arithmetic decision made where nobody can see it. See the report's seam note.
     SpendUnitsNotSingular { units: usize },
+    /// A delivered Artifact's own bytes place it outside this Outcome: another Mission, or no
+    /// Mission scope at all.
+    ///
+    /// This aborts the collection rather than dropping the Artifact from the list or marking it
+    /// `broken`. A document delivered under a different Mission is not weaker evidence for this
+    /// one -- it is evidence the completion's own bytes are wrong about what it delivered, and a
+    /// manifest that rendered the rest would be a document nobody could tell was incomplete.
+    ArtifactOutOfScope {
+        id: String,
+        /// What the Artifact's own bytes declare. `None` is `context = none`, which is a different
+        /// sentence from "a different Mission" and is kept as one.
+        declared_mission: Option<Uuid>,
+        expected_mission: Uuid,
+    },
 }
 
 impl fmt::Display for CollectorRefusal {
@@ -154,6 +168,22 @@ impl fmt::Display for CollectorRefusal {
                 "the measured spend record carries {units} units and a manifest spend reference \
                  holds one"
             ),
+            Self::ArtifactOutOfScope {
+                id,
+                declared_mission,
+                expected_mission,
+            } => match declared_mission {
+                Some(declared) => write!(
+                    formatter,
+                    "the delivered Artifact {id} declares Mission {declared}, and this Outcome is \
+                     about Mission {expected_mission}"
+                ),
+                None => write!(
+                    formatter,
+                    "the delivered Artifact {id} declares no Mission scope, so nothing places it \
+                     in Mission {expected_mission}"
+                ),
+            },
         }
     }
 }
@@ -626,18 +656,25 @@ impl<'a> Collector<'a> {
         // Empty is `Absent`: the domain says the Mission delivered nothing. Never an empty
         // `Verified` list, which says the same thing in a word that means something else.
         //
-        // Non-empty is a REFUSAL, because no Artifact entity exists to verify the reference
-        // against. "We cannot read them yet" is a fact about this daemon; "there were none" is a
-        // fact about the Mission, and an Outcome would render the second as true.
+        // Non-empty is now READ, one digest at a time, through the Artifact module's own verified
+        // reader -- and a digest that does not resolve, or resolves to a record scoped elsewhere,
+        // ABORTS the collection. It never becomes a shorter list or a `broken` entry: the
+        // completion's bytes said the Mission delivered these documents, and a manifest rendering
+        // some of them is a document nobody could tell was incomplete.
         //
-        // Measured, and it corrects what this comment used to claim: `NoArtifactEntity` is enforced
-        // on the WRITE path only (`record_completion`), never in `verified_completion_within`. A
-        // stored delivery reads back as a valid completion, so this arm is the only thing between
-        // one and a rendered document -- not a formality guarding an unreachable case.
+        // Worth keeping visible: `NoArtifactEntity` is enforced on the WRITE path only
+        // (`record_completion`), never in `verified_completion_within`. A stored delivery reads
+        // back as a valid completion, so this arm is the only thing between one and a rendered
+        // document.
         let delivered_artifacts = if record.delivered_artifacts.is_empty() {
             OutcomeState::Absent("the completion delivered no Artifacts".to_owned())
         } else {
-            return Err(CollectorRefusal::NotYetAvailable(MissingReader::Artifact));
+            let mut delivered = Vec::with_capacity(record.delivered_artifacts.len());
+            for cited in &record.delivered_artifacts {
+                let collected = self.artifact(&HEXLOWER.encode(cited), record.mission_id)?;
+                delivered.push(collected.digest_value);
+            }
+            OutcomeState::Verified(delivered)
         };
 
         Ok(CollectedCompletion {
@@ -1016,13 +1053,83 @@ impl<'a> Collector<'a> {
         Ok(())
     }
 
-    /// The Artifact entity reader, which does not exist yet.
+    /// One delivered Artifact, through `artifact::verified_artifact_within` -- the reader
+    /// `ArtifactService::get` wraps.
     ///
-    /// The last of the skeleton's four seams. kimi's `ArtifactV1` record is on `main`; its **store**
-    /// is not, so there is nothing to read a delivered Artifact through and this stays a typed
-    /// refusal rather than becoming a digest the collector passes along unverified.
-    pub fn artifact(&self) -> Result<CollectedDigest, CollectorRefusal> {
-        Err(CollectorRefusal::NotYetAvailable(MissingReader::Artifact))
+    /// The last of the skeleton's four seams, and the store it waited for is on `main` (#63). The
+    /// owning module re-parses the canonical bytes, recomputes the digest and compares every
+    /// projection column, so this does **not** verify a second way: it reads through the owner and
+    /// then checks the two things the owner cannot know -- that the record is in THIS Workspace and
+    /// scoped to THIS Mission.
+    ///
+    /// The value collected is the **exact cited digest**. R12.10's tail belongs to a read-time
+    /// surface (`ArtifactService::list_supersession_tail`, and the Evaluation arm's
+    /// `subject_superseded_by`); an Outcome cites the bytes the Mission delivered, and resolving
+    /// that to a later version would make the document say something the completion never did.
+    pub fn artifact(
+        &self,
+        digest_value: &str,
+        mission_id: Uuid,
+    ) -> Result<CollectedDigest, CollectorRefusal> {
+        let record = match crate::artifact::verified_artifact_within(
+            self.connection,
+            self.workspace_id,
+            digest_value,
+        ) {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+                return Err(CollectorRefusal::Absent {
+                    kind: "artifact",
+                    id: digest_value.to_owned(),
+                });
+            }
+            Err(error) => {
+                return Err(CollectorRefusal::Unverified {
+                    kind: "artifact",
+                    reason: error.to_string(),
+                });
+            }
+        };
+
+        // The Workspace comes from the DECODED BYTES, not from the query predicate that found the
+        // row: a filter says which rows were looked at, and this says whose the record is.
+        if record.payload().workspace_id != self.workspace_id {
+            return Err(CollectorRefusal::Unverified {
+                kind: "artifact",
+                reason: "the record's own bytes name another Workspace".to_owned(),
+            });
+        }
+        match record.payload().context {
+            crate::artifact::ArtifactContext::Mission {
+                mission_id: declared,
+                ..
+            } if declared == mission_id => {}
+            crate::artifact::ArtifactContext::Mission {
+                mission_id: declared,
+                ..
+            } => {
+                return Err(CollectorRefusal::ArtifactOutOfScope {
+                    id: digest_value.to_owned(),
+                    declared_mission: Some(declared),
+                    expected_mission: mission_id,
+                });
+            }
+            crate::artifact::ArtifactContext::None => {
+                return Err(CollectorRefusal::ArtifactOutOfScope {
+                    id: digest_value.to_owned(),
+                    declared_mission: None,
+                    expected_mission: mission_id,
+                });
+            }
+        }
+
+        Ok(CollectedDigest {
+            kind: SourceKind::Artifact,
+            workspace_id: self.workspace_id,
+            // From the verified value, never from the caller's string: the reader is what proved
+            // this digest names these bytes.
+            digest_value: record.digest().value.clone(),
+        })
     }
 }
 
