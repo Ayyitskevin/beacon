@@ -556,6 +556,55 @@ impl Admitted {
         }
     }
 
+    /// A Run and its Receipt, seeded directly -- and deliberately with **no run Event**, which is
+    /// what makes it unpositionable against a cut.
+    fn seeded_receipt(&self) -> Uuid {
+        let run_id = Uuid::new_v4();
+        let connection = self.connection();
+        connection
+            .execute(
+                "INSERT INTO project_repository_revisions (
+                     workspace_id, project_id, revision, charter_revision, source_kind, source,
+                     base_revision, declared_checks_json, author_kind, authored_at_ms
+                 ) VALUES (?1, ?2, 1, ?3, 'local_path', '/private/beacon/repo',
+                           '0123456789012345678901234567890123456789',
+                           '[{\"name\":\"unit\"}]', 'operator', 0)",
+                params![
+                    self.store.workspace_id.to_string(),
+                    self.project.id.to_string(),
+                    self.project.charter.revision
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO runs (
+                     workspace_id, id, project_id, kind, repository_revision, charter_revision,
+                     state, lease_expires_at_ms, started_at_ms, ended_at_ms
+                 ) VALUES (?1, ?2, ?3, 'check_preflight', 1, ?4, 'verified', 0, 10, 11)",
+                params![
+                    self.store.workspace_id.to_string(),
+                    run_id.to_string(),
+                    self.project.id.to_string(),
+                    self.project.charter.revision
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO receipts (
+                     workspace_id, run_id, version, outcome, receipt_json, recorded_at_ms
+                 ) VALUES (?1, ?2, 1, 'verified', ?3, 11)",
+                params![
+                    self.store.workspace_id.to_string(),
+                    run_id.to_string(),
+                    receipt_body(self.store.workspace_id, self.project.id, run_id),
+                ],
+            )
+            .unwrap();
+        run_id
+    }
+
     fn record(&self, record: &MissionCompletionV1) -> String {
         let mut connection = self.connection();
         record_completion(&mut connection, record).expect("the completion is written")
@@ -1326,6 +1375,35 @@ fn collector_refuses_unmeasured_spend_and_preserves_declared_coverage() {
     );
 }
 
+/// The appendix bit is the record's, in both directions.
+///
+/// `collector_reads_each_source_through_its_owning_verified_reader` proves a High classification
+/// collects as `true`. This proves an Ordinary one collects as `false` -- the half that makes the
+/// bit a read rather than a constant, and the half a hard-coded `true` would pass.
+#[test]
+fn the_appendix_bit_is_read_from_the_classification_in_both_directions() {
+    for (impact, expected) in [(ImpactLevel::High, true), (ImpactLevel::Ordinary, false)] {
+        let fixture = admitted(
+            &format!("appendix-{}", if expected { "high" } else { "ordinary" }),
+            vec!["Gates pass".to_owned()],
+        );
+        let classification = fixture.classify(impact);
+        let connection = fixture.connection();
+        let collected = Collector::new(&connection, fixture.store.workspace_id)
+            .collect(&CollectionRequest {
+                classification_digest: Some(classification.digest().unwrap().value),
+                ..CollectionRequest::default()
+            })
+            .expect("the classification verifies")
+            .classification
+            .expect("it is collected");
+        assert_eq!(
+            collected.policy_high_impact, expected,
+            "the appendix bit does not follow the record's own impact level"
+        );
+    }
+}
+
 /// §7 slice 2. What the completion delivered and what it left unfinished, reconciled against the
 /// completion's own condition set.
 ///
@@ -1515,6 +1593,46 @@ fn collector_freezes_all_sources_at_completion_event_boundary() {
         })
         .expect("the classification is at or before the cut");
     assert!(collected.classification.unwrap().policy_high_impact);
+
+    // The third state, and the reason it is not folded into either of the other two: a Receipt row
+    // whose run has no Event cannot be placed relative to the cut at all. "The log does not account
+    // for it" is not "it arrived late" and not "it is not there", and a freeze that cannot be
+    // evaluated must not be assumed to pass.
+    let seeded = admitted("boundary-unpositioned", vec!["Gates pass".to_owned()]);
+    let run_id = seeded.seeded_receipt();
+    let seeded_boundary = newest_event(&seeded.store);
+    let seeded_completion = seeded.completion(
+        seeded_boundary,
+        vec![ConditionOutcome::Met],
+        SpendReference::NotMeasured("no ledger was read".to_owned()),
+    );
+    let seeded_digest = seeded.record(&seeded_completion);
+    let seeded_connection = seeded.connection();
+    let seeded_collector = Collector::new(&seeded_connection, seeded.store.workspace_id);
+
+    // With no completion there is no cut, so the same Receipt collects.
+    seeded_collector
+        .collect(&CollectionRequest {
+            receipt_run_uuids: vec![run_id],
+            ..CollectionRequest::default()
+        })
+        .expect("with no completion there is no cut to place it against");
+
+    // With one, it is refused -- and as its own third state, not as absence or lateness.
+    match seeded_collector
+        .collect(&CollectionRequest {
+            completion_digest: Some(seeded_digest),
+            receipt_run_uuids: vec![run_id],
+            ..CollectionRequest::default()
+        })
+        .expect_err("no Event places this Receipt")
+    {
+        CollectorRefusal::Unpositioned { kind, id } => {
+            assert_eq!(kind, "receipt");
+            assert_eq!(id, run_id.hyphenated().to_string());
+        }
+        other => panic!("expected an unpositioned refusal, got {other}"),
+    }
 
     // And the cut is the stored number: a second completion at a later boundary, over the same
     // store, takes the same spend record. Same store, same spend, different answer -- which is only
