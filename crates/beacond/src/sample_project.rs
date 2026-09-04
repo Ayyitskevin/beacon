@@ -369,7 +369,9 @@ impl SampleProjectService {
             let metadata = created.metadata()?;
             (metadata.dev(), metadata.ino())
         };
-        copy_tree(&source, &destination)?;
+        // Into the descriptor `create_dispatch_copy_root` returned -- which follows the inode
+        // through the publishing rename -- rather than into whatever `destination` names by now.
+        copy_tree_into(&source, &created)?;
 
         let pinned = PinnedRepository::open(&destination)
             .map_err(|_| SampleProjectError::UnsafeDestination)?;
@@ -385,7 +387,8 @@ impl SampleProjectService {
             &[
                 "config",
                 "--file",
-                ".git/config",
+                // Through the pinned Git-directory descriptor, like every other read of this file.
+                &PinnedRepository::git_dir_child_path("config"),
                 crate::dispatch::PROVENANCE_TOKEN_KEY,
                 &token,
             ],
@@ -666,30 +669,71 @@ impl SampleProjectService {
     }
 }
 
-/// Copy one directory tree, refusing anything that is not a directory or a regular file.
+/// Copy one directory tree INTO an already-opened destination directory.
 ///
 /// No symlink is followed and none is recreated: a copy that reproduced a link would carry a
 /// reference out of the tree Beacon owns, and the whole point of the copy is that everything the
 /// dispatch path can reach is inside it.
-/// Copy `source` into `destination`, which the caller has already created and opened.
 ///
-/// The root is the caller's to create because the caller holds a descriptor on it: a copy that
-/// created its own root left an interval between creating a pathname and opening it, and whatever
-/// was opened afterwards need not have been what was created (gpt1).
-fn copy_tree(source: &Path, destination: &Path) -> Result<(), SampleProjectError> {
+/// **Every write goes through `destination`, never through its pathname.** The earlier version took
+/// the destination as a `Path` and used `fs::create_dir`/`fs::copy`, so the whole tree was written
+/// by name and the identity comparison that followed was a post-hoc detector rather than a
+/// preventer: a cold review moved Beacon's published child aside, put a directory at the published
+/// name whose `README.md` was a symlink pointing outside the copies root, and the copy overwrote
+/// that victim before anything noticed. `copy_for_dispatch` already holds a descriptor on the
+/// directory it made; this walks down from it with `mkdirat` and `openat`, so a replacement at the
+/// published name is a directory nothing writes into.
+///
+/// `O_NOFOLLOW` refuses a symlink at a destination name and `O_EXCL` refuses an existing entry, so
+/// a pre-planted file is a refusal rather than a target. The source is still read by pathname --
+/// it is Beacon's own verified installation, and the tampering check above owns it.
+fn copy_tree_into(source: &Path, destination: &File) -> Result<(), SampleProjectError> {
     for entry in fs::read_dir(source)? {
         let entry = entry?;
         let metadata = fs::symlink_metadata(entry.path())?;
-        let target = destination.join(entry.file_name());
+        // A NUL in a filename cannot reach a syscall, and a name that is `.` or `..` would walk out
+        // of the descriptor this function is bound to.
+        let name = entry.file_name();
+        if name.as_bytes() == b"." || name.as_bytes() == b".." {
+            return Err(SampleProjectError::TamperedInstallation);
+        }
+        let name =
+            CString::new(name.as_bytes()).map_err(|_| SampleProjectError::TamperedInstallation)?;
         if metadata.file_type().is_symlink() {
             return Err(SampleProjectError::TamperedInstallation);
         } else if metadata.is_dir() {
-            fs::create_dir(&target)?;
-            copy_tree(&entry.path(), &target)?;
+            // SAFETY: `destination` is an open directory descriptor for the duration of the call
+            // and `name` is a NUL-terminated single component.
+            if unsafe { libc::mkdirat(destination.as_raw_fd(), name.as_ptr(), 0o755) } != 0 {
+                return Err(SampleProjectError::Io(std::io::Error::last_os_error()));
+            }
+            let child = open_directory_at(destination, &name)?;
+            copy_tree_into(&entry.path(), &child)?;
         } else if metadata.is_file() {
-            fs::copy(entry.path(), &target)?;
             let mode = metadata.permissions().mode();
-            fs::set_permissions(&target, fs::Permissions::from_mode(mode))?;
+            // SAFETY: as above; `O_EXCL` means this call is the one that creates the entry.
+            let raw = unsafe {
+                libc::openat(
+                    destination.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_WRONLY
+                        | libc::O_CREAT
+                        | libc::O_EXCL
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC,
+                    libc::c_uint::from(u16::try_from(mode & 0o7777).unwrap_or(0o644)),
+                )
+            };
+            if raw < 0 {
+                return Err(SampleProjectError::Io(std::io::Error::last_os_error()));
+            }
+            // SAFETY: `raw` is a fresh descriptor this call owns.
+            let mut target = unsafe { File::from_raw_fd(raw) };
+            let mut input = File::open(entry.path())?;
+            std::io::copy(&mut input, &mut target)?;
+            // `fchmod` on the descriptor, not `chmod` on the name: the mode is set on the file this
+            // call created, whatever the name resolves to by now.
+            target.set_permissions(fs::Permissions::from_mode(mode))?;
         } else {
             return Err(SampleProjectError::TamperedInstallation);
         }
