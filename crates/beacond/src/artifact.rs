@@ -1486,7 +1486,7 @@ pub(crate) fn verify_artifact_state(connection: &Connection) -> Result<(), Artif
         let mut current = successor.clone();
         while let Some(next) = links
             .iter()
-            .find(|link| &link.1 == &current && &link.0 == workspace)
+            .find(|link| link.1 == current && &link.0 == workspace)
             .map(|link| link.2.clone())
         {
             if !walked.insert(current.clone()) {

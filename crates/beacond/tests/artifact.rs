@@ -391,11 +391,11 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use beacond::{
-    ArtifactActor, ArtifactError, ArtifactService, AutonomyProfile, BeaconCapability,
-    InconsistentArtifact, LocalModelActivationService, LocalModelEndpoint, MissionDraft,
-    MissionMemberDraft, MissionService, OperatorAccountService, OperatorSessionPhase,
-    ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService, ProjectService,
-    ProviderFeature, ResidentConfigurationService, ResidentLifecycleService, SecretString,
+    ArtifactError, ArtifactService, AutonomyProfile, BeaconCapability, InconsistentArtifact,
+    LocalModelActivationService, LocalModelEndpoint, MissionDraft, MissionMemberDraft,
+    MissionService, OperatorAccountService, OperatorSessionPhase, ProjectCharterDraft,
+    ProjectDraft, ProjectPolicyDraft, ProjectPolicyService, ProjectService, ProviderFeature,
+    ResidentConfigurationService, ResidentLifecycleService, SecretString,
     StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig, Supervisor,
     SupervisorError, TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
     TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft, TeamService,
@@ -742,7 +742,7 @@ fn recording_writes_one_row_one_event_and_its_cursor_in_one_transaction() {
         event_sequence as u64,
         "the cursor is the paired Event's own sequence"
     );
-    assert_eq!(artifact.payload().recorded_at_ms > 0, true);
+    assert!(artifact.payload().recorded_at_ms > 0);
     assert_eq!(artifact.content(), DOC_MARKDOWN);
 }
 
