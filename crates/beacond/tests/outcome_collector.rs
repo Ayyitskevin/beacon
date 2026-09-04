@@ -2486,3 +2486,112 @@ fn delivered_artifacts_collect_as_verified_digests() {
         other => panic!("the delivery did not collect as verified: {other:?}"),
     }
 }
+/// The decoy: the completion's bytes name a digest nothing stored, while a correct Artifact of the
+/// same Mission sits beside it.
+///
+/// The collection ABORTS. It does not drop the unresolvable entry and render the rest, which would
+/// be a document nobody could tell was incomplete, and it does not mark it `broken`, which would be
+/// honest-looking evidence about a document that does not exist.
+#[test]
+fn a_delivered_digest_that_names_nothing_refuses_the_whole_collection() {
+    let fixture = admitted("delivered-artifact-decoy", vec!["Gates pass".to_owned()]);
+    let real = fixture.record_mission_artifact(b"# Outcome\n\nA document that does exist.\n");
+    let boundary = newest_event(&fixture.store);
+    let mut present = [0_u8; 32];
+    present.copy_from_slice(&HEXLOWER.decode(real.digest().value.as_bytes()).unwrap());
+    let mut delivered = vec![present, [0x5c_u8; 32]];
+    delivered.sort_unstable();
+    let digest = store_completion_with_delivery(&fixture, boundary, delivered);
+
+    let connection = fixture.connection();
+    assert_eq!(
+        Collector::new(&connection, fixture.store.workspace_id)
+            .collect(&CollectionRequest {
+                completion_digest: Some(digest),
+                ..CollectionRequest::default()
+            })
+            .expect_err("one unresolvable delivery refuses the whole collection"),
+        CollectorRefusal::Absent {
+            kind: "artifact",
+            id: HEXLOWER.encode(&[0x5c_u8; 32]),
+        }
+    );
+}
+
+/// An Artifact that exists, verifies, and belongs to a DIFFERENT Mission is refused by name.
+///
+/// The owning reader cannot catch this: the record is perfectly valid, and only the Outcome knows
+/// which Mission it is about. `context = none` is kept as a different sentence from "a different
+/// Mission", because "nothing places it here" and "it is placed elsewhere" are different facts.
+#[test]
+fn a_delivered_artifact_scoped_to_another_mission_is_refused() {
+    let fixture = admitted("delivered-artifact-scope", vec!["Gates pass".to_owned()]);
+    let member = &fixture.mission.members[0];
+    let artifacts = ArtifactService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id);
+    let unscoped = artifacts
+        .record(
+            ArtifactKind::OutcomeDocument,
+            b"# Outcome\n\nA Workspace-scoped document.\n",
+            ArtifactContext::None,
+            member.resident_id,
+            member.admission_configuration_id,
+            None,
+        )
+        .expect("a Workspace-scoped Artifact is a valid Artifact");
+
+    let connection = fixture.connection();
+    let collector = Collector::new(&connection, fixture.store.workspace_id);
+    assert_eq!(
+        collector
+            .artifact(&unscoped.digest().value, fixture.mission.id)
+            .expect_err("nothing places it in this Mission"),
+        CollectorRefusal::ArtifactOutOfScope {
+            id: unscoped.digest().value.clone(),
+            declared_mission: None,
+            expected_mission: fixture.mission.id,
+        }
+    );
+
+    // ...and one scoped to a real, different Mission names that Mission in the refusal.
+    let elsewhere = Uuid::new_v4();
+    let scoped = fixture.record_mission_artifact(b"# Outcome\n\nThis Mission's document.\n");
+    assert_eq!(
+        collector
+            .artifact(&scoped.digest().value, elsewhere)
+            .expect_err("it belongs to another Mission"),
+        CollectorRefusal::ArtifactOutOfScope {
+            id: scoped.digest().value.clone(),
+            declared_mission: Some(fixture.mission.id),
+            expected_mission: elsewhere,
+        }
+    );
+    // The control: the same Artifact, asked for by its own Mission, collects.
+    assert_eq!(
+        collector
+            .artifact(&scoped.digest().value, fixture.mission.id)
+            .expect("its own Mission")
+            .digest_value,
+        scoped.digest().value
+    );
+}
+
+/// An empty delivery stays `Absent`: a statement about the Mission, not about the daemon.
+#[test]
+fn an_empty_delivery_is_absent_and_never_an_empty_verified_list() {
+    let fixture = admitted("delivered-artifacts-empty", vec!["Gates pass".to_owned()]);
+    let boundary = newest_event(&fixture.store);
+    let digest = store_completion_with_delivery(&fixture, boundary, vec![]);
+
+    let connection = fixture.connection();
+    let collected = Collector::new(&connection, fixture.store.workspace_id)
+        .collect(&CollectionRequest {
+            completion_digest: Some(digest),
+            ..CollectionRequest::default()
+        })
+        .expect("a completion that delivered nothing collects");
+    let completion = collected.completion.expect("the completion collected");
+    match &completion.delivered_artifacts {
+        OutcomeState::Absent(reason) => assert!(reason.contains("no Artifacts")),
+        other => panic!("delivering nothing is not an absence: {other:?}"),
+    }
+}
