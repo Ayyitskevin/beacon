@@ -23,6 +23,7 @@ mod git_object_store;
 mod local_model_activation;
 mod mission;
 mod mission_completion;
+mod mission_completion_store;
 mod mission_impact;
 mod operator_account;
 mod outcome;
@@ -110,6 +111,10 @@ pub use mission_completion::{
     CompletionSupersedes, ConditionOutcome, ConditionResultRecord, MalformedCompletion,
     MissionCompletionV1, NarrativeItem, SpendReference, SupportKind, SupportRef, UncertaintyKind,
     UnfinishedKind,
+};
+pub use mission_completion_store::{
+    CompletionReadRefusal, declared_conditions_digest, record_completion,
+    verified_completion_within,
 };
 pub use mission_impact::{
     CANONICALIZER as MISSION_IMPACT_CANONICALIZER, ClassificationActor, ClassificationBasis,
@@ -335,6 +340,8 @@ pub enum SupervisorError {
     DispatchEventMismatch(i64),
     DispatchStateMismatch,
     EvaluationStateMismatch,
+    MissionCompletionEventMismatch(i64),
+    MissionCompletionStateMismatch,
     PauseEventMismatch(i64),
     SchemaMismatch,
     UnsupportedSchemaVersion(i64),
@@ -488,6 +495,13 @@ impl fmt::Display for SupervisorError {
                 formatter,
                 "Event sequence {sequence} does not match its stored Evaluation bytes"
             ),
+            Self::MissionCompletionEventMismatch(sequence) => write!(
+                formatter,
+                "mission completion event {sequence} does not match its stored record"
+            ),
+            Self::MissionCompletionStateMismatch => {
+                formatter.write_str("stored mission completions do not verify")
+            }
             Self::EvaluationStateMismatch => {
                 write!(
                     formatter,
@@ -929,6 +943,7 @@ enum PersistedEventKind {
     InstallationPaused,
     InstallationResumed,
     EvaluationRecorded,
+    MissionCompleted,
 }
 
 impl PersistedEventKind {
@@ -961,6 +976,7 @@ impl PersistedEventKind {
             Self::InstallationPaused => "installation.paused",
             Self::InstallationResumed => "installation.resumed",
             Self::EvaluationRecorded => "evaluation.recorded",
+            Self::MissionCompleted => "mission.completed",
         }
     }
 
@@ -993,6 +1009,7 @@ impl PersistedEventKind {
             "installation.paused" => Ok(Self::InstallationPaused),
             "installation.resumed" => Ok(Self::InstallationResumed),
             "evaluation.recorded" => Ok(Self::EvaluationRecorded),
+            "mission.completed" => Ok(Self::MissionCompleted),
             _ => Err(SupervisorError::InvalidEventKind(value)),
         }
     }
@@ -1063,6 +1080,10 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
         .map_err(|_| SupervisorError::ResidentConfigurationStateMismatch)?;
     team::verify_team_state(connection).map_err(|_| SupervisorError::TeamStateMismatch)?;
     mission::verify_mission_state(connection).map_err(|_| SupervisorError::MissionStateMismatch)?;
+    // After Mission state, because every completion re-derives its conditions from the Mission's own
+    // rows and its boundary from the Mission's admission Event.
+    mission_completion_store::verify_completion_state(connection)
+        .map_err(|_| SupervisorError::MissionCompletionStateMismatch)?;
 
     Ok(StoreDiagnostics {
         status: DiagnosticStatus::Ready,
@@ -1208,6 +1229,14 @@ fn verify_persisted_events(connection: &Connection) -> Result<u64, SupervisorErr
                     &payload_json,
                 )
                 .map_err(|_| SupervisorError::EvaluationEventMismatch(sequence))?;
+            }
+            PersistedEventKind::MissionCompleted => {
+                mission_completion_store::verify_completion_event(
+                    connection,
+                    workspace_id,
+                    &payload_json,
+                )
+                .map_err(|_| SupervisorError::MissionCompletionEventMismatch(sequence))?;
             }
             PersistedEventKind::RulingRecorded => {
                 ruling::verify_ruling_event(
