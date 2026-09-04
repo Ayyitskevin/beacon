@@ -3165,6 +3165,58 @@ fn an_applied_receipt_has_the_published_shape() {
             .iter()
             .all(|step| step["result"] == "succeeded")
     );
+
+    // The two invocations whose argv used to be written twice -- once to run and once to record --
+    // asserted in FULL, because the half that mattered was the half a prefix assertion stopped
+    // before. Dropping the old value from `update-ref` turns a compare-and-swap into a plain
+    // update; a Receipt that still spelled four arguments while three ran would be a record of an
+    // act nobody performed (Fable).
+    let argv_of = |name: &str| -> Vec<String> {
+        value["gitSteps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| step["step"] == name)
+            .unwrap_or_else(|| panic!("no {name} step in the recorded list"))["argv"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|argument| argument.as_str().unwrap().to_owned())
+            .collect()
+    };
+    let branch = value["branch"].as_str().unwrap();
+    let prepared = value["preparedCommit"].as_str().unwrap();
+    let base = value["pinnedBaseRevision"].as_str().unwrap();
+    assert_eq!(
+        argv_of("update_ref"),
+        vec!["update-ref", branch, prepared, base],
+        "the recorded swap is not the compare-and-swap that ran"
+    );
+    assert_eq!(
+        argv_of("read_tree_checkout"),
+        vec!["read-tree", "-u", "--reset", prepared],
+        "the recorded checkout is not the invocation that ran"
+    );
+
+    // The other twelve steps build their argv once and hand the same binding to the call and to
+    // the record, so a drift is not expressible there. What IS expressible at every site is a
+    // record naming one command while another ran, so each step's argv is held to the Git
+    // subcommand its name denotes. This is the coarse half of the property; the full argv is
+    // asserted above for the two sites where the argv was written twice.
+    for step in value["gitSteps"].as_array().unwrap() {
+        let name = step["step"].as_str().unwrap();
+        let expected = match name {
+            "diff_name_status" => "diff",
+            "read_tree_checkout" => "read-tree",
+            other => &other.replace('_', "-"),
+        };
+        assert_eq!(
+            step["argv"][0].as_str().unwrap(),
+            expected,
+            "the {name} step records a {:?} invocation",
+            step["argv"][0]
+        );
+    }
 }
 
 #[test]
