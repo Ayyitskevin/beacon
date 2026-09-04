@@ -24,7 +24,10 @@ import subprocess
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-SCRIPTS = ("gate", "stage-sidecar")
+# `desktop-tests` is here for the same reason `stage-sidecar` is: `gate` calls it by a
+# repo-relative path, so a checkout without it fails the desktop stage with "No such
+# file or directory" -- which is what this fixture caught when it was added.
+SCRIPTS = ("gate", "stage-sidecar", "desktop-tests")
 FAILING_BUILD = "build --release -p beacond"
 STALE_BINARY = b"a supervisor left behind by an earlier build\n"
 
