@@ -967,6 +967,8 @@ enum PersistedEventKind {
     InstallationResumed,
     EvaluationRecorded,
     MissionCompleted,
+    SpendMeasured,
+    MissionImpactClassified,
     ArtifactRecorded,
 }
 
@@ -1001,6 +1003,8 @@ impl PersistedEventKind {
             Self::InstallationResumed => "installation.resumed",
             Self::EvaluationRecorded => "evaluation.recorded",
             Self::MissionCompleted => "mission.completed",
+            Self::SpendMeasured => "spend.measured",
+            Self::MissionImpactClassified => "mission.impact_classified",
             Self::ArtifactRecorded => "artifact.recorded",
         }
     }
@@ -1035,6 +1039,8 @@ impl PersistedEventKind {
             "installation.resumed" => Ok(Self::InstallationResumed),
             "evaluation.recorded" => Ok(Self::EvaluationRecorded),
             "mission.completed" => Ok(Self::MissionCompleted),
+            "spend.measured" => Ok(Self::SpendMeasured),
+            "mission.impact_classified" => Ok(Self::MissionImpactClassified),
             "artifact.recorded" => Ok(Self::ArtifactRecorded),
             _ => Err(SupervisorError::InvalidEventKind(value)),
         }
@@ -1268,6 +1274,15 @@ fn verify_persisted_events(connection: &Connection) -> Result<u64, SupervisorErr
                 )
                 .map_err(|_| SupervisorError::MissionCompletionEventMismatch(sequence))?;
             }
+            // These two arms verify NOTHING beyond admission: the spend and classification
+            // modules have no replay or startup-state verification yet (that is their lane's
+            // follow-on, not this one's). The arms exist because the alternative was worse:
+            // 0025 admitted both kinds into the events CHECK without teaching the replay
+            // vocabulary to parse them, so a store holding either Event refused every
+            // subsequent startup with InvalidEventKind -- proven on main at 7b19355 by
+            // inserting one 'spend.measured' row and re-bootstrapping.
+            PersistedEventKind::SpendMeasured => {}
+            PersistedEventKind::MissionImpactClassified => {}
             PersistedEventKind::ArtifactRecorded => {
                 artifact::verify_artifact_event(
                     connection,
