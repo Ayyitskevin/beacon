@@ -1351,7 +1351,7 @@ END;",
 
 #[test]
 fn a_store_at_the_previous_version_migrates_forward_and_reconciles() {
-    // The ladder arm: a store declared at 23 must reach 26 and pass reconciliation. The migration
+    // The ladder step: a store declared at 26 must reach 27 and pass reconciliation. The migration
     // list is read from the directory, not copied, so the test cannot drift from the files.
     let store = TestStore::new("artifact-ladder");
     let migrations_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
@@ -1362,12 +1362,13 @@ fn a_store_at_the_previous_version_migrates_forward_and_reconciles() {
         .collect();
     files.sort();
     // The fixture is the store at this stack's parent version: every migration up to it, none
-    // past it. The tripwire fires when the parent moves (the 0024/0025 lanes landing), which is
-    // when this fixture must be regenerated -- never silently re-based.
-    files.retain(|name| name[..4].parse::<u32>().unwrap() <= 23);
+    // past it. The tripwire fires when the parent moves (a later lane landing first), which is
+    // when this fixture must be regenerated -- never silently re-based. The parent is 0026: the
+    // completion store landed first and this lane renumbered at its final rebase.
+    files.retain(|name| name[..4].parse::<u32>().unwrap() <= 26);
     assert_eq!(
         files.last().map(|name| &name[..4]),
-        Some("0023"),
+        Some("0026"),
         "the fixture's parent moved"
     );
     {
@@ -1388,7 +1389,7 @@ fn a_store_at_the_previous_version_migrates_forward_and_reconciles() {
             )
             .unwrap();
         assert_eq!(
-            version, 23,
+            version, 26,
             "the fixture is not a store at the previous version"
         );
     }
@@ -1405,7 +1406,7 @@ fn a_store_at_the_previous_version_migrates_forward_and_reconciles() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(version, 26, "the ladder did not reach the current version");
+    assert_eq!(version, 27, "the ladder did not reach the current version");
     connection
         .query_row("SELECT count(*) FROM artifacts", [], |row| {
             row.get::<_, i64>(0)
