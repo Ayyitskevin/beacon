@@ -850,16 +850,20 @@ fn require_token(value: &str) -> Result<(), MalformedOutcome> {
 
 /// Narrative text: prose a reader is meant to read, rendered as CommonMark blocks.
 ///
-/// LF is structure and is preserved; TAB is content and is preserved. Every other control
-/// character is refused, and each refusal names itself: "empty", "padded", "too long" and
-/// "carries a control character" are four different faults and one name for all four tells a
+/// LF is structure and TAB is content; both are preserved into the emitted bytes. Every other
+/// control character is refused, and each refusal names itself: "empty", "padded", "too long" and
+/// "carries a control character" are four different faults, and one name for all four tells a
 /// caller nothing about which it hit.
+///
+/// The whitespace rule is one property, applied per line: **anything the renderer would collapse is
+/// refused, so a stored value and its document correspond one to one.** A leading space is stripped
+/// by CommonMark; trailing whitespace of any kind is forbidden by the byte rules; a leading or
+/// trailing blank line renders identically to its absence. A leading TAB is none of those -- it
+/// survives into the bytes -- so it is accepted, which is what ADR 0040 already said and what this
+/// function previously contradicted by testing `trim()` first.
 fn require_narrative_text(value: &str) -> Result<(), MalformedOutcome> {
     if value.is_empty() {
         return Err(MalformedOutcome::EmptyText);
-    }
-    if value.trim() != value {
-        return Err(MalformedOutcome::UntrimmedText);
     }
     if value.chars().count() > MAX_TEXT_SCALARS {
         return Err(MalformedOutcome::TextTooLong);
@@ -869,6 +873,21 @@ fn require_narrative_text(value: &str) -> Result<(), MalformedOutcome> {
         .any(|character| character.is_control() && character != '\n' && character != '\t')
     {
         return Err(MalformedOutcome::ControlCharacter);
+    }
+
+    let mut lines = value.split('\n').peekable();
+    let mut first = true;
+    while let Some(line) = lines.next() {
+        let last = lines.peek().is_none();
+        // An empty first or last line is a leading or trailing newline, which renders identically
+        // to its absence. Interior blank lines are paragraph breaks and are kept, one for one.
+        if (first || last) && line.is_empty() {
+            return Err(MalformedOutcome::UntrimmedText);
+        }
+        if line.starts_with(' ') || line.ends_with(char::is_whitespace) {
+            return Err(MalformedOutcome::UntrimmedText);
+        }
+        first = false;
     }
     Ok(())
 }
@@ -1955,9 +1974,6 @@ fn narrative_lines(value: &str, escape: Escaper) -> Vec<String> {
         if paragraph.is_empty() {
             return;
         }
-        if !out.is_empty() {
-            out.push(String::new());
-        }
         let last = paragraph.len() - 1;
         for (index, line) in paragraph.iter().enumerate() {
             out.push(if index == last {
@@ -1973,7 +1989,10 @@ fn narrative_lines(value: &str, escape: Escaper) -> Vec<String> {
     let mut paragraph = Vec::new();
     for line in value.split('\n') {
         if line.is_empty() {
+            // One emitted blank line per stored blank line. Collapsing a run of them would make two
+            // stored values one document, which is the alteration this renderer refuses to make.
             flush(&mut paragraph, &mut out);
+            out.push(String::new());
         } else {
             paragraph.push(escape(line));
         }

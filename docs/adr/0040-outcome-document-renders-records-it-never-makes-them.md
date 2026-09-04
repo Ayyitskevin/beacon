@@ -184,12 +184,21 @@ field name.
 
 **Narrative text** -- success-condition statements, unfinished-work items, uncertainty items --
 is prose a reader is meant to read, and it renders as CommonMark blocks. LF is structure and is
-preserved: a run of blank lines is a paragraph break, and every other newline is a hard line
-break written as a trailing backslash, because the byte rules forbid the two trailing spaces
-CommonMark's other hard break uses. TAB is content and is preserved; a leading TAB may render as
-indentation, which is a rendering effect of a value Beacon was told to keep, not an alteration of
-it. Every line passes through the versioned escaping function first, so no stored value becomes
-structure.
+preserved: a blank line is a paragraph break and a run of them is kept one for one, and every
+other newline is a hard line break written as a trailing backslash, because the byte rules forbid
+the two trailing spaces CommonMark's other hard break uses. TAB is content and is preserved,
+wherever it sits; a leading TAB may render as indentation, which is a rendering effect of a value
+Beacon was told to keep, not an alteration of it. Every line passes through the versioned escaping
+function first, so no stored value becomes structure.
+
+The whitespace rule is one property applied per line: **anything the renderer would collapse is
+refused, so a stored value and its document correspond one to one.** A line may not begin with a
+space, because CommonMark strips it. A line may not end with whitespace of any kind, because the
+byte rules forbid trailing whitespace. The first and last lines may not be blank, because a leading
+or trailing newline renders identically to its absence. A leading TAB is none of those things -- it
+survives into the emitted bytes -- so it is accepted, and refusing it would contradict the sentence
+above. Every one of those refusals is `untrimmed_text`, and the name covers whitespace the document
+cannot carry rather than whitespace `trim()` would remove.
 
 For that to work the prose has to sit in a block position, so a condition's statement is a
 paragraph under its `### 2.N` heading rather than a bullet, and each narrative item gets its own
