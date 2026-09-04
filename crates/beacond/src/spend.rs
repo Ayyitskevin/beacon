@@ -15,9 +15,11 @@
 //! attributable, digest-identified statement rather than an absence.
 //!
 //! Slice 1 is pure. No database, no service, no event, no migration: those are slice 2. The
-//! Outcome Document's `SpendRef` (PR #54, `crates/beacond/src/outcome.rs`) is the consumer seam --
-//! it cites `(workspace_id, spend_id, version, digest)` per R15 -- and this slice does not touch
-//! it.
+//! Outcome Document's `SpendRef` (`crates/beacond/src/outcome.rs`) is the consumer seam -- it cites
+//! `(workspace_id, spend_id, version, digest)` per R15 -- and this slice does not touch it. That
+//! type still carries a mandatory `amount_minor`, so an `unmeasured` record, which *is* verified,
+//! can today only be cited as `not_evaluated`, throwing away its identity and digest. Correcting
+//! that is a `beacon.outcome.manifest.v1` change and is fold-round work, not this module's.
 
 use std::cmp::Ordering;
 use std::fmt;
