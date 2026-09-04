@@ -2696,55 +2696,114 @@ fn a_second_configuration_of_the_accountable_resident_is_still_that_resident() {
     );
 }
 
-/// Bullet 7. The truthful forbidden row: drop the trigger, write what the Command refuses, restore
-/// the trigger, and let startup find it.
+/// Bullet 7, and the store half of bullet 3. The truthful forbidden row: bytes and columns that
+/// AGREE with each other and name the author as the evaluator.
 ///
-/// The store is left holding a row nothing should have written and a schema signature that still
-/// matches, which is the only honest way to test what reconciliation is FOR.
+/// The first version of this test spliced only the evaluator COLUMN, which `columns_match` catches
+/// first -- so it went green whether or not the non-authorship re-derivation existed. My own mutant
+/// table found that (M5 was killed by the Proposal-arm test, never by this one). The row below is
+/// built from re-encoded bytes, so every other check passes and the re-derivation is the only thing
+/// left that can refuse it.
 #[test]
 fn an_artifact_subject_evaluation_written_past_the_command_refuses_startup() {
     let fixture = admitted_mission("artifact-forbidden-row");
     let artifact = fixture.record_artifact(b"# Outcome\n\nAuthored by the first Resident.\n");
     let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
-    let recorded = evaluations
+    let honest = evaluations
         .record(fixture.artifact_evaluation_draft(&artifact.digest().value))
         .expect("the honest Evaluation records");
 
-    // Splice the AUTHOR into the evaluator column of a stored Artifact-subject Evaluation. The
-    // Command refuses it, the trigger refuses it on insert, and neither runs on an UPDATE -- so
-    // only the read-time re-derivation is left, at every read and at startup.
+    // The same record with the AUTHOR as evaluator, encoded by the codec -- which has no opinion
+    // about authorship, and should not: it cannot see the Artifact.
+    let mut payload = honest.payload().clone();
+    payload.evaluator = Evaluator {
+        resident_id: fixture.resident_id,
+        configuration_id: fixture.configuration_id,
+    };
+    let bytes = payload
+        .canonical_bytes()
+        .expect("the forbidden payload encodes");
+    let digest = HEXLOWER.encode(&Sha256::digest(&bytes));
+
     let connection = fixture.store.connect();
-    connection
-        .execute_batch("DROP TRIGGER evaluations_no_update;")
-        .unwrap();
-    connection
-        .execute(
-            "UPDATE evaluations SET evaluator_resident_id = ?1, evaluator_configuration_id = ?2
-             WHERE digest_value = ?3",
+    let insert = |connection: &Connection| {
+        connection.execute(
+            "INSERT INTO evaluations (
+                 workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+                 canonical_bytes, subject_kind, subject_digest,
+                 artifact_digest, artifact_digest_algorithm, artifact_digest_canonicalizer,
+                 artifact_project_id, mission_id, evaluator_resident_id,
+                 evaluator_configuration_id, rubric_id, rubric_version, rubric_canonicalizer,
+                 rubric_sha256, verdict, conflicts_declared, conflicts_text, rationale,
+                 evaluated_at_ms
+             ) SELECT workspace_id, digest_algorithm, digest_canonicalizer, ?1, ?2,
+                      subject_kind, subject_digest, artifact_digest, artifact_digest_algorithm,
+                      artifact_digest_canonicalizer, artifact_project_id, mission_id, ?3, ?4,
+                      rubric_id, rubric_version, rubric_canonicalizer, rubric_sha256, verdict,
+                      conflicts_declared, conflicts_text, rationale, evaluated_at_ms
+                FROM evaluations WHERE digest_value = ?5",
             rusqlite::params![
+                digest,
+                bytes,
                 fixture.resident_id.to_string(),
                 fixture.configuration_id.to_string(),
-                recorded.digest().value
+                honest.digest().value
             ],
         )
-        .expect("the store admits the splice: no INSERT trigger runs on an UPDATE");
+    };
+
+    // The STORE refuses it first, by its own trigger, and says which rule refused.
+    let refused = insert(&connection).expect_err("the trigger admits the author as evaluator");
+    assert!(
+        refused
+            .to_string()
+            .contains("accountable Resident of the subject Artifact"),
+        "refused by something other than the non-authorship trigger: {refused}"
+    );
+
+    // With that one trigger down -- and every other check intact -- the row lands, and the
+    // re-derivation from the BYTES is the only thing left to catch it.
     connection
-        .execute_batch(
-            "CREATE TRIGGER evaluations_no_update
-             BEFORE UPDATE ON evaluations
-             BEGIN
-                 SELECT RAISE(ABORT, 'Evaluations are immutable');
-             END;",
-        )
+        .execute_batch("DROP TRIGGER evaluations_evaluator_is_not_the_artifact_author;")
         .unwrap();
+    insert(&connection).expect("with the trigger down the row is storable");
     drop(connection);
 
+    let error = evaluations
+        .get(&digest)
+        .expect_err("the read accepted an Evaluation whose evaluator authored the Artifact");
     assert!(
-        Supervisor::bootstrap(StartupConfig {
-            store_path: fixture.store.path.clone(),
-            initial_workspace_name: "Ignored".to_owned(),
-        })
-        .is_err(),
-        "startup accepted an Evaluation whose evaluator authored the subject Artifact"
+        matches!(
+            error,
+            EvaluationError::Inconsistent(InconsistentEvaluation::EvaluatorAuthoredTheArtifact)
+        ),
+        "refused for the wrong reason: {error}"
+    );
+
+    // And the trigger keys on the RESIDENT, asserted against its own text.
+    //
+    // This one is a text assertion because the discriminating row cannot be built: to tell
+    // "keyed on the Resident" from "keyed on the Configuration" behaviourally you need an
+    // evaluator who shares one and not the other, and the roster foreign key
+    // `(workspace, mission, resident, configuration)` refuses every such row before any trigger
+    // runs. So the property is pinned where it lives. (My mutant table found this: M9 flips the
+    // trigger to the configuration column and every behavioural test stays green.)
+    let connection = fixture.store.connect();
+    let trigger: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'trigger' AND name = 'evaluations_evaluator_is_not_the_artifact_author'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the trigger exists");
+    assert!(
+        trigger.contains("artifacts.accountable_resident_id = NEW.evaluator_resident_id"),
+        "the non-authorship trigger no longer keys on the Resident: {trigger}"
+    );
+    assert!(
+        !trigger.contains("accountable_configuration_id"),
+        "the non-authorship trigger reads a configuration: an author who reconfigures is still \
+         the author"
     );
 }
