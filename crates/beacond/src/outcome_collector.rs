@@ -778,16 +778,18 @@ impl<'a> Collector<'a> {
             self.at_or_before("classification", digest_value, cut)?;
         }
 
-        // R13.7: the bit is not read and copied. `recheck_copied_bit` takes the value the manifest
-        // will carry and refuses if the record disagrees, so there is no path from here to a
-        // high-impact bit that was never checked against the record it is attributed to.
+        // R13.7, and what this slice can and cannot honour of it.
+        //
+        // The bit is produced by `appendix_is_mandatory()` ON the verified record, which is already
+        // the shape R13.7 asks for: there is no `is_high_impact(mission_id)` and no way to obtain
+        // the bit without holding the record whose identity the manifest must cite beside it.
+        //
+        // What is NOT here is the re-check at `prepare`. `recheck_copied_bit` compares a copied bit
+        // against the record, and the only bit this function has is one it just derived from that
+        // same record -- so calling it here would be a tautology that no mutation can falsify, and
+        // an unfalsifiable check is worse than none because it reads as coverage. The re-check
+        // belongs where a bit is actually copied from somewhere else, which is slice 3's `prepare`.
         let policy_high_impact = record.payload().appendix_is_mandatory();
-        record
-            .recheck_copied_bit(policy_high_impact)
-            .map_err(|error| CollectorRefusal::Unverified {
-                kind: "classification",
-                reason: error.to_string(),
-            })?;
 
         let payload = record.payload();
         Ok(CollectedClassification {
