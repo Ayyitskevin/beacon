@@ -878,6 +878,11 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V24)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
+                // The arms every store that exists actually takes. Adding a migration without an
+                // arm for its immediate predecessor leaves the previous ladder intact -- an older
+                // store chains through and looks fine -- while every store already at the last
+                // shipped version refuses startup as `UnsupportedSchemaVersion`.
+                //
                 // 21 has no arm because 21 never shipped: this slice's migration was renumbered
                 // to 24 at its rebase and Evaluation's from 21 to 23, so no store can be at 21.
                 // 22 and 23 CAN exist -- a store bootstrapped between the dispatch and Evaluation
