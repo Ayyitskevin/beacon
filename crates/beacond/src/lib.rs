@@ -21,6 +21,7 @@ mod evaluation;
 mod git_object_store;
 mod local_model_activation;
 mod mission;
+mod mission_impact;
 mod operator_account;
 mod outcome;
 mod platform_session;
@@ -97,6 +98,11 @@ pub use local_model_activation::{
 pub use mission::{
     MissionAdmissionActor, MissionDraft, MissionError, MissionLifecycle, MissionMemberDraft,
     MissionMemberView, MissionService, MissionView,
+};
+pub use mission_impact::{
+    CANONICALIZER as MISSION_IMPACT_CANONICALIZER, ClassificationActor, ClassificationBasis,
+    ClassificationDigest, ClassificationSupersedes, ImpactLevel, MalformedClassification,
+    MissionImpactClassificationV1, PolicyRevisionRef,
 };
 pub use operator_account::{
     AccessOrigin, OperatorAccountError, OperatorAccountService, OperatorSessionPhase,
