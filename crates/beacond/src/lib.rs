@@ -937,7 +937,7 @@ struct WorkspaceCreatedPayload {
     name: String,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PersistedEventKind {
     WorkspaceCreated,
     StarterOrganizationAccepted,
@@ -4111,6 +4111,141 @@ mod tests {
             Supervisor::bootstrap(config(&store.path, "Personal")),
             Err(SupervisorError::UnsupportedSchemaVersion(v)) if v == between
         ));
+    }
+
+    /// The #60 P2: every replayable Event kind still inserts, after the NEWEST migration.
+    ///
+    /// A migration that rebuilds the closed `events.kind` CHECK can drop a kind, and the row that
+    /// used it goes with it (PR #50). `the_event_kind_rebuild_carries_every_kind_and_its_rows`
+    /// proves one migration carried its parent's list; this proves the thing a reader actually
+    /// wants to know -- that the schema a store ends at admits every kind the daemon can replay --
+    /// and it does so **by itself**, with no dispatch suite and no service, so a dropped kind names
+    /// the variant it dropped.
+    ///
+    /// Two statements of one list, reconciled here so they cannot drift. `EVERY_KIND` is what the
+    /// test inserts; `declaration_index` is an EXHAUSTIVE match, so a new variant does not compile
+    /// until it has an arm -- and the assertions below then fail unless it is in `EVERY_KIND` too.
+    /// Without the second half a variant could be added to the enum and silently never tested.
+    #[test]
+    fn every_persisted_event_kind_inserts_into_events_after_the_newest_migration() {
+        const EVERY_KIND: &[super::PersistedEventKind] = &[
+            super::PersistedEventKind::WorkspaceCreated,
+            super::PersistedEventKind::StarterOrganizationAccepted,
+            super::PersistedEventKind::StarterOrganizationDiscarded,
+            super::PersistedEventKind::ProjectCreated,
+            super::PersistedEventKind::ProjectCharterRevised,
+            super::PersistedEventKind::ProjectPolicyPublished,
+            super::PersistedEventKind::ProjectRepositoryBound,
+            super::PersistedEventKind::LocalModelActivated,
+            super::PersistedEventKind::LocalModelDeactivated,
+            super::PersistedEventKind::ResidentActivated,
+            super::PersistedEventKind::ResidentSuspended,
+            super::PersistedEventKind::ResidentReactivated,
+            super::PersistedEventKind::ResidentRetired,
+            super::PersistedEventKind::ResidentConfigurationSet,
+            super::PersistedEventKind::ResidentConfigurationCleared,
+            super::PersistedEventKind::TeamFormed,
+            super::PersistedEventKind::MissionAdmitted,
+            super::PersistedEventKind::RunPreflighted,
+            super::PersistedEventKind::RunExecuted,
+            super::PersistedEventKind::SampleProjectInstalled,
+            super::PersistedEventKind::ProposalSubmitted,
+            super::PersistedEventKind::RulingRecorded,
+            super::PersistedEventKind::ProposalCandidateRecorded,
+            super::PersistedEventKind::ProposalDispatched,
+            super::PersistedEventKind::InstallationPaused,
+            super::PersistedEventKind::InstallationResumed,
+            super::PersistedEventKind::EvaluationRecorded,
+            super::PersistedEventKind::MissionCompleted,
+            super::PersistedEventKind::SpendMeasured,
+            super::PersistedEventKind::MissionImpactClassified,
+            super::PersistedEventKind::ArtifactRecorded,
+        ];
+        fn declaration_index(kind: super::PersistedEventKind) -> usize {
+            match kind {
+                super::PersistedEventKind::WorkspaceCreated => 0,
+                super::PersistedEventKind::StarterOrganizationAccepted => 1,
+                super::PersistedEventKind::StarterOrganizationDiscarded => 2,
+                super::PersistedEventKind::ProjectCreated => 3,
+                super::PersistedEventKind::ProjectCharterRevised => 4,
+                super::PersistedEventKind::ProjectPolicyPublished => 5,
+                super::PersistedEventKind::ProjectRepositoryBound => 6,
+                super::PersistedEventKind::LocalModelActivated => 7,
+                super::PersistedEventKind::LocalModelDeactivated => 8,
+                super::PersistedEventKind::ResidentActivated => 9,
+                super::PersistedEventKind::ResidentSuspended => 10,
+                super::PersistedEventKind::ResidentReactivated => 11,
+                super::PersistedEventKind::ResidentRetired => 12,
+                super::PersistedEventKind::ResidentConfigurationSet => 13,
+                super::PersistedEventKind::ResidentConfigurationCleared => 14,
+                super::PersistedEventKind::TeamFormed => 15,
+                super::PersistedEventKind::MissionAdmitted => 16,
+                super::PersistedEventKind::RunPreflighted => 17,
+                super::PersistedEventKind::RunExecuted => 18,
+                super::PersistedEventKind::SampleProjectInstalled => 19,
+                super::PersistedEventKind::ProposalSubmitted => 20,
+                super::PersistedEventKind::RulingRecorded => 21,
+                super::PersistedEventKind::ProposalCandidateRecorded => 22,
+                super::PersistedEventKind::ProposalDispatched => 23,
+                super::PersistedEventKind::InstallationPaused => 24,
+                super::PersistedEventKind::InstallationResumed => 25,
+                super::PersistedEventKind::EvaluationRecorded => 26,
+                super::PersistedEventKind::MissionCompleted => 27,
+                super::PersistedEventKind::SpendMeasured => 28,
+                super::PersistedEventKind::MissionImpactClassified => 29,
+                super::PersistedEventKind::ArtifactRecorded => 30,
+            }
+        }
+
+        let mut indices: Vec<usize> = EVERY_KIND.iter().copied().map(declaration_index).collect();
+        let listed = indices.len();
+        indices.sort_unstable();
+        indices.dedup();
+        assert_eq!(indices.len(), listed, "EVERY_KIND names a variant twice");
+        assert_eq!(
+            indices,
+            (0..listed).collect::<Vec<_>>(),
+            "EVERY_KIND is not the enum's declaration order"
+        );
+        assert_eq!(
+            indices.last().copied(),
+            Some(listed - 1),
+            "a variant has an arm above the end of EVERY_KIND -- it was added to the enum and not \
+             to the list this test inserts"
+        );
+
+        let connection = Connection::open_in_memory().unwrap();
+        super::apply_every_migration(&connection).unwrap();
+        super::verify_schema(&connection, SCHEMA_VERSION)
+            .expect("the ladder must produce the current schema");
+        let workspace = Uuid::new_v4().to_string();
+        connection
+            .execute(
+                "INSERT INTO workspaces (id, name, created_at_ms) VALUES (?1, 'Personal', 1)",
+                rusqlite::params![workspace],
+            )
+            .unwrap();
+
+        for (offset, kind) in EVERY_KIND.iter().enumerate() {
+            connection
+                .execute(
+                    "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+                     VALUES (?1, ?2, json_object('workspace_id', ?1), ?3)",
+                    rusqlite::params![workspace, kind.as_str(), offset as i64],
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "schema {SCHEMA_VERSION} refuses the Event kind `{}`: {error}",
+                        kind.as_str()
+                    )
+                });
+            // ...and it reads back as the variant it was written as, so a kind the CHECK admits but
+            // `parse` does not is a failure here rather than at replay.
+            assert_eq!(
+                super::PersistedEventKind::parse(kind.as_str().to_owned()).unwrap(),
+                *kind
+            );
+        }
     }
 
     /// Reads the Event kinds a migration's CHECK constraint admits, out of its own SQL.
