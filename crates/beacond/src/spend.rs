@@ -137,6 +137,10 @@ impl SpendOrigin {
 /// The unit is stored exactly as measured -- never case-folded, never normalized (R13.6). `USD` and
 /// `usd` are two units, for the reason ADR 0034 refuses to fold a pinned base revision: folding a
 /// stored identity is a transformation nobody asked for.
+///
+/// `amount_minor` is **never negative** (R17). The wire type stays `i64` because narrowing it would
+/// be a canonicalizer change and would buy nothing the domain check does not already give: the sign
+/// is refused as a value, not erased from the grammar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpendLine {
     pub unit: String,
@@ -334,6 +338,9 @@ pub enum MalformedSpend {
     UnitNotUnique,
     /// Lines not in canonical code-point order by unit.
     UnitOrder,
+    /// A negative amount. A credit, refund or reversal is a later record kind with its own
+    /// identity, never a sign bit on a measurement (R17).
+    NegativeAmount,
     /// A `measured` or `partially_measured` arm with no lines: a zero that names no unit.
     NoLines,
     TooManyLines,
@@ -369,6 +376,7 @@ impl MalformedSpend {
             Self::UnitCharset => "unit_charset",
             Self::UnitNotUnique => "unit_not_unique",
             Self::UnitOrder => "unit_order",
+            Self::NegativeAmount => "negative_amount",
             Self::NoLines => "no_lines",
             Self::TooManyLines => "too_many_lines",
             Self::MinorUnitsExponent => "minor_units_exponent",
@@ -489,6 +497,13 @@ fn require_totals(totals: &SpendTotals) -> Result<(), MalformedSpend> {
         require_unit(&line.unit)?;
         if line.minor_units_exponent > MAX_MINOR_UNITS_EXPONENT {
             return Err(MalformedSpend::MinorUnitsExponent);
+        }
+        // R17: a measurement has no sign. A credit, refund or reversal is a later record kind with
+        // its own identity, and putting one here as a negative line would let a Mission render
+        // cheaper than free -- and would net against a positive line, which is arithmetic no ledger
+        // performed. The check is per line because there is no total to net against.
+        if line.amount_minor < 0 {
+            return Err(MalformedSpend::NegativeAmount);
         }
     }
     for window in totals.lines.windows(2) {
