@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Measured spend v1: the amount lives inside the measurement
