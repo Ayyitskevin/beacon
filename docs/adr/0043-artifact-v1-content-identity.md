@@ -86,7 +86,7 @@ Field rules the table cannot carry:
 - **`supersedes`** names the predecessor's record digest. Corrections are new Artifacts, never
   edits: store triggers will refuse update and delete, and the chain rules (cite the current tail,
   one predecessor each, superseded at most once, chain order never timestamp order) are ADR
-  0037/0038's, arriving with the store in slice 2.
+  0037/0038's, arriving with the supersession relation in slice 4.
 - **The record's own total bound is 4,096 bytes** (R16/A7's surviving number). The field table
   admits at most ~260, so the envelope is defensive; it is stated anyway, because a grammar whose
   per-field limits admit a size the store refuses turns a fact about the bytes into a database
