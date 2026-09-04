@@ -4643,7 +4643,9 @@ mod tests {
         // And every kind the table now accepts is one the replay path can name.
         for kind in &widened_kinds {
             PersistedEventKind::parse(kind.clone()).unwrap_or_else(|_| {
-                panic!("the rebuilt events table accepts a kind the replay path cannot parse: {kind}")
+                panic!(
+                    "the rebuilt events table accepts a kind the replay path cannot parse: {kind}"
+                )
             });
         }
 
@@ -4731,9 +4733,11 @@ mod tests {
             "the rebuild did not carry every event row"
         );
         let version: i64 = connection
-            .query_row("SELECT version FROM schema_meta WHERE singleton = 1", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT version FROM schema_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(version, 27);
         // The widened vocabulary is what the rebuild was for.
@@ -4754,7 +4758,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(triggers, 2, "the rebuild did not restore the roster triggers");
+        assert_eq!(
+            triggers, 2,
+            "the rebuild did not restore the roster triggers"
+        );
     }
 
     #[test]
@@ -4790,16 +4797,16 @@ mod tests {
         ];
         let version = |connection: &Connection| {
             connection
-                .query_row("SELECT version FROM schema_meta WHERE singleton = 1", [], |row| {
-                    row.get::<_, i64>(0)
-                })
+                .query_row(
+                    "SELECT version FROM schema_meta WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
                 .unwrap()
         };
 
         let early = Connection::open_in_memory().unwrap();
-        early
-            .pragma_update(None, "foreign_keys", "OFF")
-            .unwrap();
+        early.pragma_update(None, "foreign_keys", "OFF").unwrap();
         for migration in through_v25 {
             early.execute_batch(migration).unwrap();
         }
@@ -4812,9 +4819,7 @@ mod tests {
         );
 
         let current = Connection::open_in_memory().unwrap();
-        current
-            .pragma_update(None, "foreign_keys", "OFF")
-            .unwrap();
+        current.pragma_update(None, "foreign_keys", "OFF").unwrap();
         for migration in through_v25 {
             current.execute_batch(migration).unwrap();
         }

@@ -673,7 +673,11 @@ impl fmt::Display for ArtifactError {
             Self::Account(error) => write!(formatter, "operator account refused: {error}"),
             Self::Malformed(reason) => write!(formatter, "{reason}"),
             Self::Inconsistent(reason) => {
-                write!(formatter, "Artifact references are inconsistent: {}", reason.reason())
+                write!(
+                    formatter,
+                    "Artifact references are inconsistent: {}",
+                    reason.reason()
+                )
             }
             Self::NotFound => write!(formatter, "no Artifact in this Workspace has that digest"),
             Self::DigestCollision => write!(
@@ -850,7 +854,10 @@ fn columns_match(stored: &StoredArtifact, payload: &ArtifactV1) -> bool {
         && stored.context_mission_id == context_mission_id
         && stored.has_predecessor == payload.supersedes.is_some()
         && stored.supersedes_digest.as_deref()
-            == payload.supersedes.map(|digest| HEXLOWER.encode(&digest)).as_deref()
+            == payload
+                .supersedes
+                .map(|digest| HEXLOWER.encode(&digest))
+                .as_deref()
         && stored.recorded_at_ms == payload.recorded_at_ms
 }
 
@@ -913,13 +920,16 @@ fn paired_event_sequence(
            AND json_extract(payload_json, '$.artifact.digest.value') = ?2",
     )?;
     let rows = statement
-        .query_map(params![stored.workspace_id.to_string(), stored.digest_value], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        })?
+        .query_map(
+            params![stored.workspace_id.to_string(), stored.digest_value],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     if rows.len() != 1 {
@@ -1057,30 +1067,28 @@ fn validate_references(
         return inconsistent(InconsistentArtifact::WorkspaceScope);
     }
 
-    let resident_exists: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM agents WHERE workspace_id = ?1 AND id = ?2)",
-            params![
-                workspace_id.to_string(),
-                payload.accountable_resident_id.to_string()
-            ],
-            |row| row.get(0),
-        )?;
+    let resident_exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agents WHERE workspace_id = ?1 AND id = ?2)",
+        params![
+            workspace_id.to_string(),
+            payload.accountable_resident_id.to_string()
+        ],
+        |row| row.get(0),
+    )?;
     if !resident_exists {
         return inconsistent(InconsistentArtifact::ResidentNotFound);
     }
-    let configuration_exists: bool = connection
-        .query_row(
-            "SELECT EXISTS(
+    let configuration_exists: bool = connection.query_row(
+        "SELECT EXISTS(
                  SELECT 1 FROM resident_configuration_decisions
                  WHERE workspace_id = ?1 AND resident_id = ?2 AND id = ?3)",
-            params![
-                workspace_id.to_string(),
-                payload.accountable_resident_id.to_string(),
-                payload.accountable_configuration_id.to_string()
-            ],
-            |row| row.get(0),
-        )?;
+        params![
+            workspace_id.to_string(),
+            payload.accountable_resident_id.to_string(),
+            payload.accountable_configuration_id.to_string()
+        ],
+        |row| row.get(0),
+    )?;
     if !configuration_exists {
         return inconsistent(InconsistentArtifact::ConfigurationNotFound);
     }
@@ -1137,14 +1145,13 @@ fn validate_supersession(
     if payload.recorded_at_ms < predecessor_payload.recorded_at_ms {
         return inconsistent(InconsistentArtifact::TimeRegresses);
     }
-    let already_superseded: bool = connection
-        .query_row(
-            "SELECT EXISTS(
+    let already_superseded: bool = connection.query_row(
+        "SELECT EXISTS(
                  SELECT 1 FROM artifact_supersessions
                  WHERE workspace_id = ?1 AND supersedes_digest = ?2)",
-            params![workspace_id.to_string(), predecessor_hex],
-            |row| row.get(0),
-        )?;
+        params![workspace_id.to_string(), predecessor_hex],
+        |row| row.get(0),
+    )?;
     if already_superseded {
         return inconsistent(InconsistentArtifact::NotTheCurrentTail);
     }
@@ -1336,8 +1343,9 @@ impl ArtifactService {
             };
             let digest_value = stored.digest_value.clone();
             insert_artifact(&transaction, &stored, &content_digest)?;
-            let verified = verified_artifact_within(&transaction, self.workspace_id, &digest_value)?
-                .ok_or(ArtifactError::InvalidStore)?;
+            let verified =
+                verified_artifact_within(&transaction, self.workspace_id, &digest_value)?
+                    .ok_or(ArtifactError::InvalidStore)?;
             transaction.commit()?;
             Ok(verified)
         })
@@ -1445,9 +1453,7 @@ pub(crate) fn verify_artifact_state(connection: &Connection) -> Result<(), Artif
          FROM artifact_supersessions ORDER BY workspace_id, artifact_digest",
     )?;
     let links: Vec<(String, String, String)> = statement
-        .query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     let mut superseded_once: std::collections::HashSet<(String, String)> =
