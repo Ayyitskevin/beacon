@@ -435,7 +435,7 @@ describe("Beacon desktop shell", () => {
     await user.click(screen.getByRole("button", { name: "Unlock Beacon" }));
 
     expect(await screen.findByRole("heading", { name: "Briefing" })).toBeVisible();
-    expect(screen.getByText("Opened Briefing from the Beacon link.")).toBeVisible();
+    expect(await screen.findByText("Opened Briefing from the Beacon link.")).toBeVisible();
   });
 
   it("shows a saved Project link as not evaluated while Projects load, then opens it", async () => {
