@@ -621,10 +621,19 @@ impl<'a> Collector<'a> {
             "uncertainty",
         )?;
 
-        // A delivered Artifact cannot reach here: the completion's own reader refuses one while no
-        // Artifact entity exists to verify it against. So this is `Absent` — the domain says there
-        // is none — and never an empty `Verified` list, which would say the same thing in a word
-        // that means something else.
+        // Two different sentences, and the difference is the whole point of this arm.
+        //
+        // Empty is `Absent`: the domain says the Mission delivered nothing. Never an empty
+        // `Verified` list, which says the same thing in a word that means something else.
+        //
+        // Non-empty is a REFUSAL, because no Artifact entity exists to verify the reference
+        // against. "We cannot read them yet" is a fact about this daemon; "there were none" is a
+        // fact about the Mission, and an Outcome would render the second as true.
+        //
+        // Measured, and it corrects what this comment used to claim: `NoArtifactEntity` is enforced
+        // on the WRITE path only (`record_completion`), never in `verified_completion_within`. A
+        // stored delivery reads back as a valid completion, so this arm is the only thing between
+        // one and a rendered document -- not a formality guarding an unreachable case.
         let delivered_artifacts = if record.delivered_artifacts.is_empty() {
             OutcomeState::Absent("the completion delivered no Artifacts".to_owned())
         } else {
@@ -719,9 +728,13 @@ impl<'a> Collector<'a> {
             SpendMeasurement::Broken(reason) => OutcomeState::Broken(reason.clone()),
             SpendMeasurement::Measured(totals) | SpendMeasurement::PartiallyMeasured(totals, _) => {
                 match totals.lines.as_slice() {
-                    [] => {
-                        OutcomeState::Absent("the measurement counted no priced lines".to_owned())
-                    }
+                    // Unreachable by construction -- `MeasuredSpendV1`'s encoder refuses a counted
+                    // measurement with no lines (`MalformedSpend::NoLines`), so no verified record
+                    // can carry one. It REFUSES rather than reporting absence: reaching it means
+                    // the store holds something its own codec says cannot exist, and corruption
+                    // aborts rather than becoming an honest domain row (design §5 rule 6). An
+                    // `Absent` here would turn "this cannot be" into "there was none".
+                    [] => return Err(CollectorRefusal::SpendUnitsNotSingular { units: 0 }),
                     [line] => OutcomeState::Verified(SpendAmount {
                         unit: line.unit.clone(),
                         amount_minor: line.amount_minor,

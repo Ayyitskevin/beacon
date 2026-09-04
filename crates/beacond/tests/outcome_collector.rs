@@ -1375,6 +1375,154 @@ fn collector_refuses_unmeasured_spend_and_preserves_declared_coverage() {
     );
 }
 
+/// C49. A completion that DID deliver Artifacts is a typed refusal, never "there were none".
+///
+/// Fable's mutant on C48: forcing `delivered_artifacts.is_empty()` to `true` left all fifteen
+/// collector tests green, because no test ever handed the collector a completion with a delivery.
+/// The arm nothing exercised is the one that separates **"we cannot read them yet"** from **"there
+/// were none"** — and the second is a claim an Outcome would render as fact.
+///
+/// The row is inserted directly, and that is the finding underneath the finding: `NoArtifactEntity`
+/// is enforced on the WRITE path only (`record_completion`), never in `verified_completion_within`.
+/// A stored delivery therefore reads back as a perfectly valid completion, and this arm of the
+/// collector is the only thing between it and a rendered document.
+#[test]
+fn a_completion_that_delivered_artifacts_is_refused_rather_than_reported_as_delivering_none() {
+    let fixture = admitted("delivered-artifact", vec!["Gates pass".to_owned()]);
+    let boundary = newest_event(&fixture.store);
+    let mut record = fixture.completion(
+        boundary,
+        vec![ConditionOutcome::Met],
+        SpendReference::NotMeasured("no ledger was read".to_owned()),
+    );
+    record.delivered_artifacts = vec![[7_u8; 32]];
+
+    // The write path refuses it -- which is why no test had one, and why the read path has to be
+    // proved separately rather than assumed to be unreachable.
+    let mut connection = fixture.connection();
+    record_completion(&mut connection, &record)
+        .expect_err("the write path refuses a delivery nothing can verify");
+
+    let bytes = record.canonical_bytes().unwrap();
+    let digest = sha256_hex(&bytes);
+    let member = &fixture.mission.members[0];
+    connection
+        .execute(
+            "INSERT INTO mission_completions (
+                 workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+                 canonical_bytes, completion_id, mission_id, project_id, accountable_resident_id,
+                 accountable_configuration_id, boundary_event_seq, disposition, completed_at_ms
+             ) VALUES (?1, 'sha256', 'beacon.mission_completion.v1', ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                       ?9, 'concluded', 9000)",
+            params![
+                fixture.store.workspace_id.to_string(),
+                digest,
+                bytes,
+                record.completion_id.to_string(),
+                fixture.mission.id.to_string(),
+                fixture.mission.project_id.to_string(),
+                member.resident_id.to_string(),
+                member.admission_configuration_id.to_string(),
+                i64::try_from(boundary).unwrap(),
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO mission_completion_conditions (
+                 workspace_id, completion_digest, mission_id, condition_ordinal, outcome
+             ) VALUES (?1, ?2, ?3, 0, 'met')",
+            params![
+                fixture.store.workspace_id.to_string(),
+                digest,
+                fixture.mission.id.to_string(),
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+             VALUES (?1, 'mission.completed', ?2, 9000)",
+            params![
+                fixture.store.workspace_id.to_string(),
+                serde_json::json!({
+                    "workspaceId": fixture.store.workspace_id.to_string(),
+                    "missionId": fixture.mission.id.to_string(),
+                    "completionId": record.completion_id.to_string(),
+                    "digestValue": digest,
+                    "canonicalBytesBase64": data_encoding::BASE64.encode(&bytes),
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+
+    // The owning reader accepts it: `NoArtifactEntity` is a write-path rule, not a read-path one.
+    // Asserted rather than assumed, because if that ever changes this test stops proving the
+    // collector's arm and silently becomes a test of the reader instead.
+    let read =
+        beacond::verified_completion_within(&connection, fixture.store.workspace_id, &digest)
+            .expect("the reader has no delivered-Artifact rule");
+    assert_eq!(read.delivered_artifacts, vec![[7_u8; 32]]);
+
+    // ...and the collector refuses, by name. Not `Absent`, which would say the Mission delivered
+    // nothing -- a sentence about the world rather than about this daemon's capabilities.
+    assert_eq!(
+        Collector::new(&connection, fixture.store.workspace_id)
+            .collect(&CollectionRequest {
+                completion_digest: Some(digest),
+                ..CollectionRequest::default()
+            })
+            .expect_err("no Artifact entity exists to verify the delivery against"),
+        CollectorRefusal::NotYetAvailable(MissingReader::Artifact)
+    );
+}
+
+/// C49, the second `Absent(` arm — and it was reporting absence for a state that cannot exist.
+///
+/// The grep Fable asked for turned up exactly two `Absent(` arms in the collector. This was the
+/// other one: a counted measurement with an empty line list became
+/// `Absent("counted no priced lines")`. Measured here says the codec cannot even build that record
+/// — `MeasuredSpendV1::canonical_bytes` refuses it as `NoLines`, so no verified record reaches the
+/// arm. An unreachable arm that answers "there was none" is the same collapse in a quieter place,
+/// so it refuses now instead.
+#[test]
+fn a_counted_measurement_with_no_priced_lines_cannot_be_built_at_all() {
+    let fixture = admitted("no-priced-lines", vec!["Gates pass".to_owned()]);
+    let mut record = MeasuredSpendV1 {
+        workspace_id: fixture.store.workspace_id,
+        mission_id: fixture.mission.id,
+        spend_id: Uuid::new_v4(),
+        version: 1,
+        origin: SpendOrigin::DaemonLedger,
+        measured_at_ms: 1_788_400_000_000,
+        coverage_from_event_seq: 1,
+        coverage_to_event_seq: newest_event(&fixture.store),
+        measurement: SpendMeasurement::Measured(SpendTotals {
+            counted_units: 0,
+            lines: vec![],
+        }),
+        supersedes: SpendSupersedes::None,
+    };
+    record
+        .canonical_bytes()
+        .expect_err("a counted measurement with no lines is not a record");
+
+    // ...and one line is, which is what makes the refusal above a fact about the empty case rather
+    // than about this fixture.
+    record.measurement = SpendMeasurement::Measured(SpendTotals {
+        counted_units: 1,
+        lines: vec![SpendLine {
+            unit: "USD".to_owned(),
+            amount_minor: 1,
+            minor_units_exponent: 2,
+        }],
+    });
+    record
+        .canonical_bytes()
+        .expect("one priced line is a record");
+}
+
 /// The appendix bit is the record's, in both directions.
 ///
 /// `collector_reads_each_source_through_its_owning_verified_reader` proves a High classification
