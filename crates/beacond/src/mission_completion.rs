@@ -299,6 +299,21 @@ pub enum UnfinishedKind {
     BlockedDependency,
 }
 
+impl UnfinishedKind {
+    /// The lowercase token this kind renders as -- the one in the record's own field table.
+    ///
+    /// It lives here rather than in a consumer because the vocabulary is this record's (R13.3): a
+    /// second module spelling these four words is how two spellings of one kind begin.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ConditionNotMet => "condition_not_met",
+            Self::DeferredScope => "deferred_scope",
+            Self::KnownDefect => "known_defect",
+            Self::BlockedDependency => "blocked_dependency",
+        }
+    }
+}
+
 /// What the Team could not establish.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UncertaintyKind {
@@ -306,6 +321,18 @@ pub enum UncertaintyKind {
     UnmeasuredQuantity,
     ConflictingEvidence,
     OutsideScopeOfChecks,
+}
+
+impl UncertaintyKind {
+    /// The lowercase token this kind renders as -- the one in the record's own field table.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UnverifiedClaim => "unverified_claim",
+            Self::UnmeasuredQuantity => "unmeasured_quantity",
+            Self::ConflictingEvidence => "conflicting_evidence",
+            Self::OutsideScopeOfChecks => "outside_scope_of_checks",
+        }
+    }
 }
 
 /// One narrative item. The `kind` is the machine-readable part; the `summary` is **never parsed**.
