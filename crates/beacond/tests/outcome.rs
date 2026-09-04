@@ -1100,12 +1100,23 @@ fn outcome_sort_uses_canonical_lowercase_code_point_order_not_locale_or_database
         "the renderer sorted by a collation rather than by code point"
     );
 
-    // The canonical bytes agree with the document, and the ordinal is still the primary key.
+    // The canonical bytes agree with the document. kimi P2-2: the previous form of this assertion
+    // searched for a NUL-terminated key in a length-prefixed grammar, so its first disjunct was
+    // always true and the whole assertion could not fail. Locate each condition's exact encoded
+    // entry -- ordinal, length prefix, id -- and compare positions.
     let bytes = manifest.canonical_bytes().expect("encodes");
-    let text_bytes = String::from_utf8_lossy(&bytes);
+    let encoded = |ordinal: u32, id: &str| {
+        let mut entry = ordinal.to_be_bytes().to_vec();
+        entry.extend_from_slice(&(id.len() as u64).to_be_bytes());
+        entry.extend_from_slice(id.as_bytes());
+        bytes
+            .windows(entry.len())
+            .position(|window| window == entry.as_slice())
+            .unwrap_or_else(|| panic!("the entry for {id} is in the canonical bytes"))
+    };
     assert!(
-        text_bytes.find("a-z").expect("present") < text_bytes.find("ab\u{0}").unwrap_or(usize::MAX)
-            || text_bytes.find("a-z").expect("present") < text_bytes.rfind("ab").expect("present")
+        encoded(1, "a-z") < encoded(1, "ab"),
+        "the canonical bytes ordered `ab` before `a-z`, which is collation order, not code point"
     );
 
     // A key that is not already canonical lowercase is refused rather than folded: folding would
@@ -1239,6 +1250,35 @@ fn outcome_manifest_canonical_bytes_follow_adr_0034_0037_strict_round_trip_rules
     assert_eq!(
         OutcomeManifestV1::from_canonical_bytes(&swapped).expect_err("refuses"),
         MalformedOutcome::NonCanonicalOrder
+    );
+
+    // kimi P2-1: a hostile declared count is refused by arithmetic against the remaining input,
+    // before the first entry is read. Order is observable: the first entry here is itself
+    // malformed, so a decoder that reads entries before checking the count reports the entry's
+    // refusal instead of `Truncated`.
+    let mut hostile = manifest.clone();
+    hostile.unfinished_work = OutcomeState::Verified(vec![NarrativeRef {
+        ordinal: 1,
+        item_id: "uw-a".to_owned(),
+    }]);
+    let hostile_bytes = hostile.canonical_bytes().expect("encodes");
+    let mut entry = 1_u32.to_be_bytes().to_vec();
+    entry.extend_from_slice(&4_u64.to_be_bytes());
+    entry.extend_from_slice(b"uw-a");
+    let entry_start = hostile_bytes
+        .windows(entry.len())
+        .position(|window| window == entry.as_slice())
+        .expect("the unfinished-work entry is in the bytes");
+    let mut inflated = hostile_bytes.clone();
+    // The declared count sits immediately before its first entry.
+    inflated[entry_start - 4..entry_start].copy_from_slice(&4_096_u32.to_be_bytes());
+    // Corrupt that first entry's id, so a decoder that reads entries before checking the count
+    // reports `Token` rather than `Truncated`.
+    inflated[entry_start + 12] = b'U';
+    assert_eq!(
+        OutcomeManifestV1::from_canonical_bytes(&inflated).expect_err("refuses"),
+        MalformedOutcome::Truncated,
+        "the declared count was trusted and the first entry was read before it was checked"
     );
 
     // A manifest with no declared success conditions is refused, not rendered empty.
@@ -1642,16 +1682,23 @@ fn outcome_renderer_does_not_embed_its_own_content_digest() {
     let bytes = manifest.canonical_bytes().expect("encodes");
     let manifest_digest = sha256_hex(&bytes);
     assert!(document.contains(&format!("manifest_digest: {manifest_digest}")));
+    // kimi P2-3: the previous form kept only 64-character lines, so it dropped the final short
+    // chunk and `starts_with` still passed. Take the fenced block whole and compare it exactly.
     let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-    let embedded: String = document
-        .lines()
-        .filter(|line| line.len() == 64 && line.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .collect::<Vec<_>>()
-        .join("");
+    let fence = document
+        .split("\n```\n")
+        .nth(1)
+        .expect("the manifest proof is fenced");
+    let embedded: String = fence.lines().collect::<Vec<_>>().join("");
     assert!(
-        hex.starts_with(&embedded) && !embedded.is_empty(),
+        embedded.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "the fenced manifest proof is not hexadecimal"
+    );
+    assert_eq!(
+        embedded, hex,
         "the appendix did not embed the exact canonical manifest bytes"
     );
+    assert_eq!(embedded.len(), bytes.len() * 2);
 }
 
 // ---------------------------------------------------------------------------------------------
