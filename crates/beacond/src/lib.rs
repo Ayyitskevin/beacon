@@ -136,8 +136,10 @@ pub use outcome::{
     VerifiedArtifact, VerifiedSources, VerifiedText, compare_canonical_keys, render,
 };
 pub use outcome_collector::{
-    CollectedDigest, CollectedSources, CollectionRequest, Collector, CollectorRefusal,
-    MissingReader, OUTCOME_RECEIPT_CHECKSUM_LABEL,
+    CollectedClassification, CollectedCompletion, CollectedCondition, CollectedDigest,
+    CollectedNarrative, CollectedSources, CollectedSpend, CollectionRequest, Collector,
+    CollectorRefusal, MissingReader, OUTCOME_RECEIPT_CHECKSUM_LABEL, SpendAmount,
+    positionable_sources,
 };
 pub use platform_session::{
     PlatformMonitorState, PlatformSessionMonitor, PlatformSessionMonitorStatus,
