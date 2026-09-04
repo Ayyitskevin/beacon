@@ -36,10 +36,10 @@ use data_encoding::{BASE64, HEXLOWER};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use uuid::Uuid;
 
+use crate::artifact::ArtifactDigest;
 use crate::proposal::{
     ProposalDigest, UnmetPrecondition, is_human_text, proposal_binding_facts, sha256,
 };
-use crate::artifact::ArtifactDigest;
 use crate::{OperatorAccountError, OperatorAccountService, ProposalError};
 
 /// The canonicalizer identity. Existing v1 bytes are never reinterpreted under v2 rules, and
@@ -438,7 +438,9 @@ impl fmt::Display for MalformedEvaluation {
             Self::ProposalDigestEnvelope => {
                 "the Proposal digest algorithm or canonicalizer is not the one v1 evaluates"
             }
-            Self::ArtifactDigestValue => "the Artifact record digest is not 64 lowercase hex characters",
+            Self::ArtifactDigestValue => {
+                "the Artifact record digest is not 64 lowercase hex characters"
+            }
             Self::ArtifactDigestEnvelope => {
                 "the Artifact digest algorithm or canonicalizer is not beacon.artifact.v1"
             }
@@ -1522,8 +1524,7 @@ fn columns_match(row: &StoredRow, payload: &EvaluationV1) -> bool {
         row.proposal_digest == subject.value
             && row.proposal_digest_algorithm == subject.algorithm
             && row.proposal_digest_canonicalizer == subject.canonicalizer
-    })
-        && row.evaluator_resident_id == payload.evaluator.resident_id.to_string()
+    }) && row.evaluator_resident_id == payload.evaluator.resident_id.to_string()
         && row.evaluator_configuration_id == payload.evaluator.configuration_id.to_string()
         && row.rubric_id == payload.rubric.id
         && row.rubric_version == payload.rubric.version
@@ -1963,7 +1964,10 @@ pub(crate) fn verify_evaluation_event(
     let evaluation = verified_evaluation(connection, workspace_id, row)?;
     if evaluation.payload.evaluated_at_ms != occurred_at_ms
         || Some(recorded.proposal_digest.as_str())
-            != evaluation.payload.proposal_subject().map(|s| s.value.as_str())
+            != evaluation
+                .payload
+                .proposal_subject()
+                .map(|s| s.value.as_str())
         || recorded.verdict != evaluation.payload.verdict.as_str()
     {
         return Err(EvaluationError::InvalidStore);
@@ -2041,6 +2045,225 @@ mod tests {
     const PUBLISHED_VECTOR_DIGEST: &str =
         "dab418e0866b19f6536615a9fe8374b88034107ccbbdb769cf07515fbb516683";
     const PUBLISHED_VECTOR_BASE64: &str = "YmVhY29uLmV2YWx1YXRpb24udjEAAQABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fAAAAAAAAAAZzaGEyNTYAAAAAAAAAEmJlYWNvbi5wcm9wb3NhbC52MRAhMkNUZXaHmKm6y9zt/g//7t3Mu6qZiHdmVUQzIhEAAAAAAAAAABJzZWN1cml0eS1yZXZpZXctdjEAAAAHAAAAAAAAABBiZWFjb24ucnVicmljLnYxICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8AAAACABEiM0RVZneImaq7zN3u//7cuph2VDIQASNFZ4mrze8EAAAAAgEAAAAAAAAAE0F1dGhvcnNoaXAgY29uZmxpY3QDAAAAAAAAAA1DaGVja3MgcGFzc2VkAQAAAAAAAAAaU2FtZSBsYWIgbGluZWFnZSBkaXNjbG9zZWQAAAAAAAAANEluZGVwZW5kZW50IGV2YWx1YXRvciByZXZpZXdlZCBleGFjdCBwcm9wb3NhbCBieXRlcy4BQEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8BAgMEBQYHCA==";
+
+    /// The Artifact-subject payload the published arm vector below covers.
+    ///
+    /// Every field from 6 on is the SAME VALUE as the Proposal-subject vector wherever the two can
+    /// be the same, so `the_artifact_arm_changes_no_field_past_field_5` compares two encodings that
+    /// differ only in the union.
+    fn artifact_vector_payload() -> EvaluationV1 {
+        EvaluationV1 {
+            subject: EvaluationSubject::Artifact(ArtifactSubject {
+                digest: ArtifactDigest {
+                    algorithm: DIGEST_ALGORITHM.to_owned(),
+                    canonicalizer: ARTIFACT_CANONICALIZER.to_owned(),
+                    value: HEXLOWER.encode(&core::array::from_fn::<u8, 32, _>(|index| {
+                        0x80 + index as u8
+                    })),
+                },
+                project_id: Uuid::from_bytes([0x11; 16]),
+                mission_id: Uuid::from_bytes([0x22; 16]),
+            }),
+            evaluator: Evaluator {
+                resident_id: Uuid::from_bytes([
+                    0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc,
+                    0xdd, 0xee, 0xff,
+                ]),
+                configuration_id: Uuid::from_bytes([
+                    0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89,
+                    0xab, 0xcd, 0xef,
+                ]),
+            },
+            rubric: RubricDeclaration {
+                id: "security-review-v1".to_owned(),
+                version: 7,
+                canonicalizer: "beacon.rubric.v1".to_owned(),
+                sha256: HEXLOWER.encode(&core::array::from_fn::<u8, 32, _>(|index| {
+                    0x20 + index as u8
+                })),
+            },
+            cited_runs: vec![],
+            verdict: Verdict::RevisionRequested,
+            findings: vec![Finding {
+                severity: FindingSeverity::Blocking,
+                summary: "Authorship conflict".to_owned(),
+            }],
+            conflicts: Conflicts::None,
+            rationale: "Independent evaluator reviewed the artifact record.".to_owned(),
+            supersedes: EvaluationSupersedes::None,
+            evaluated_at_ms: 0x0102_0304_0506_0708,
+        }
+    }
+
+    const ARTIFACT_VECTOR_BYTES: usize = 350;
+    const ARTIFACT_VECTOR_DIGEST: &str =
+        "95429c03f224b726929e40d0fbe92a5c7fa18a7558b27b9f2d05958036fa298c";
+    const ARTIFACT_VECTOR_BASE64: &str = "YmVhY29uLmV2YWx1YXRpb24udjEAA4CBgoOEhYaHiImKi4yNjo+QkZKTlJWWl5iZmpucnZ6fAAAAAAAAAAZzaGEyNTYAAAAAAAAAEmJlYWNvbi5hcnRpZmFjdC52MREREREREREREREREREREREiIiIiIiIiIiIiIiIiIiIiABEiM0RVZneImaq7zN3u/wEjRWeJq83vASNFZ4mrze8AAAAAAAAAEnNlY3VyaXR5LXJldmlldy12MQAAAAcAAAAAAAAAEGJlYWNvbi5ydWJyaWMudjEgISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+PwAAAAACAAAAAQEAAAAAAAAAE0F1dGhvcnNoaXAgY29uZmxpY3QAAAAAAAAAADNJbmRlcGVuZGVudCBldmFsdWF0b3IgcmV2aWV3ZWQgdGhlIGFydGlmYWN0IHJlY29yZC4AAQIDBAUGBwg=";
+
+    /// Slice E1, bullet 1. The arm's frozen identity vector.
+    ///
+    /// **Provenance, stated honestly.** These 350 bytes were assembled from ADR 0038's field table
+    /// plus the amendment's arm rows, in a separate script, WITHOUT calling this encoder -- so a
+    /// layout change fails here rather than silently redefining the vector. But that assembler and
+    /// this encoder have the SAME AUTHOR, which the amendment's build rule (b) says the vector must
+    /// not: it asks for a non-author seat to build it from the amended table before the encoder
+    /// exists. That is the one thing this slice cannot supply about itself, and it is the first
+    /// thing to ask of the review.
+    #[test]
+    fn an_artifact_subject_fixture_reproduces_its_published_digest() {
+        let bytes = encode(&artifact_vector_payload()).expect("the arm vector encodes");
+        assert_eq!(bytes.len(), ARTIFACT_VECTOR_BYTES, "byte count moved");
+        assert_eq!(
+            BASE64.encode(&bytes),
+            ARTIFACT_VECTOR_BASE64,
+            "the encoder no longer reproduces the published Artifact-subject vector"
+        );
+        assert_eq!(HEXLOWER.encode(&sha256(&bytes)), ARTIFACT_VECTOR_DIGEST);
+        assert_eq!(decode(&bytes), Ok(artifact_vector_payload()));
+
+        // The subject byte is where the table says it is, and it is the registry's value.
+        assert_eq!(bytes[MAGIC.len()], 0x03);
+    }
+
+    /// Slice E1, bullet 2. The test that makes "v1 keeps its identity" a fact rather than a claim.
+    ///
+    /// It duplicates the assertions of `a_known_evaluation_fixture_reproduces_its_published_digest`
+    /// on purpose: that test pins the vector, and THIS one says what the arm must not do to it. A
+    /// reader deleting the arm's tests should have to read this name to delete this guarantee.
+    #[test]
+    fn the_proposal_subject_vector_is_byte_identical_after_the_arm_lands() {
+        let bytes = encode(&published_vector_payload()).expect("the v1 vector still encodes");
+        assert_eq!(bytes.len(), PUBLISHED_VECTOR_BYTES);
+        assert_eq!(BASE64.encode(&bytes), PUBLISHED_VECTOR_BASE64);
+        assert_eq!(HEXLOWER.encode(&sha256(&bytes)), PUBLISHED_VECTOR_DIGEST);
+        // The arm added a tag VALUE, not a field: field 2 is still one byte, and it still reads
+        // 0x01 for a Proposal subject.
+        assert_eq!(bytes[MAGIC.len()], TAG_SUBJECT_PROPOSAL);
+    }
+
+    /// Slice E1, bullet 3. `0x02` is reserved for the Candidate arm and `0x04`+ are unassigned;
+    /// both are refused, and neither falls through to `proposal`.
+    ///
+    /// The `0x04+` half is what the ADR amendment's build rule (c) owes: with `0x03` assigned, the
+    /// `0x02` flip is no longer the boundary case for "the vocabulary is closed".
+    #[test]
+    fn an_unassigned_subject_tag_is_still_refused() {
+        let bytes = encode(&published_vector_payload()).unwrap();
+        for tag in [0x00_u8, 0x02, 0x04, 0x05, 0x7f, 0xff] {
+            let mut tampered = bytes.clone();
+            tampered[MAGIC.len()] = tag;
+            assert_eq!(
+                decode(&tampered),
+                Err(MalformedEvaluation::Subject),
+                "subject tag {tag:#04x} was not refused"
+            );
+        }
+        // ...and the two assigned values are not refused, so the loop above is discriminating.
+        for (tag, payload) in [
+            (TAG_SUBJECT_PROPOSAL, published_vector_payload()),
+            (TAG_SUBJECT_ARTIFACT, artifact_vector_payload()),
+        ] {
+            let encoded = encode(&payload).unwrap();
+            assert_eq!(encoded[MAGIC.len()], tag);
+            assert!(decode(&encoded).is_ok());
+        }
+    }
+
+    /// Slice E1, bullet 4. The envelope is closed PER ARM, in both directions.
+    ///
+    /// The tag and the canonicalizer token are two spellings of one fact. A store column cannot see
+    /// them disagree; the grammar can, and it is the grammar that the digest covers.
+    #[test]
+    fn an_artifact_subject_may_not_name_a_proposal_or_candidate_canonicalizer() {
+        for wrong in [
+            "beacon.proposal.v1",
+            "beacon.candidate.v1",
+            "beacon.artifact.v2",
+            "",
+        ] {
+            let mut payload = artifact_vector_payload();
+            match &mut payload.subject {
+                EvaluationSubject::Artifact(subject) => {
+                    subject.digest.canonicalizer = wrong.to_owned()
+                }
+                EvaluationSubject::Proposal(_) => {
+                    unreachable!("the fixture is an Artifact subject")
+                }
+            }
+            assert_eq!(
+                encode(&payload),
+                Err(MalformedEvaluation::ArtifactDigestEnvelope),
+                "an Artifact arm naming {wrong:?} was encoded"
+            );
+        }
+
+        // The converse: arm 0x01 may not name the Artifact canonicalizer.
+        let mut payload = published_vector_payload();
+        payload.subject = EvaluationSubject::Proposal(ProposalDigest {
+            canonicalizer: ARTIFACT_CANONICALIZER.to_owned(),
+            ..proposal_subject_of(&payload).clone()
+        });
+        assert_eq!(
+            encode(&payload),
+            Err(MalformedEvaluation::ProposalDigestEnvelope)
+        );
+
+        // And the refusal survives the round trip: bytes that carry the wrong pairing are refused
+        // on the way IN as well, because a store is not the only thing that can hand over bytes.
+        let mut bytes = encode(&artifact_vector_payload()).unwrap();
+        bytes[MAGIC.len()] = TAG_SUBJECT_PROPOSAL;
+        assert_eq!(
+            decode(&bytes),
+            Err(MalformedEvaluation::ProposalDigestEnvelope)
+        );
+    }
+
+    /// Slice E1, bullet 5. The arms of the union may differ in width; nothing after the union may.
+    ///
+    /// Both encodings are built from payloads whose fields 6-20 are equal, and the tails are
+    /// compared byte for byte from the end of each arm's own subject block. The Artifact arm is
+    /// exactly 32 bytes wider -- two UUIDs -- and that is the whole difference.
+    #[test]
+    fn the_artifact_arm_changes_no_field_past_field_5() {
+        let mut proposal_payload = published_vector_payload();
+        let artifact_payload = artifact_vector_payload();
+        // Make fields 6-20 identical; only the union differs.
+        proposal_payload.evaluator = artifact_payload.evaluator;
+        proposal_payload.rubric = artifact_payload.rubric.clone();
+        proposal_payload.cited_runs = artifact_payload.cited_runs.clone();
+        proposal_payload.verdict = artifact_payload.verdict;
+        proposal_payload.findings = artifact_payload.findings.clone();
+        proposal_payload.conflicts = artifact_payload.conflicts.clone();
+        proposal_payload.rationale = artifact_payload.rationale.clone();
+        proposal_payload.supersedes = artifact_payload.supersedes.clone();
+        proposal_payload.evaluated_at_ms = artifact_payload.evaluated_at_ms;
+
+        let proposal_bytes = encode(&proposal_payload).unwrap();
+        let artifact_bytes = encode(&artifact_payload).unwrap();
+
+        // Each arm's subject block: tag + 32 raw digest bytes + two length-prefixed strings, plus
+        // the Artifact arm's two UUIDs.
+        let envelope = |canonicalizer: &str| {
+            MAGIC.len() + 1 + 32 + (8 + "sha256".len()) + (8 + canonicalizer.len())
+        };
+        let proposal_tail = envelope(PROPOSAL_CANONICALIZER);
+        let artifact_tail = envelope(ARTIFACT_CANONICALIZER) + 16 + 16;
+        assert_eq!(
+            artifact_bytes.len() - artifact_tail,
+            proposal_bytes.len() - proposal_tail,
+            "the two tails are not the same length"
+        );
+        assert_eq!(
+            &artifact_bytes[artifact_tail..],
+            &proposal_bytes[proposal_tail..],
+            "the arm changed a field past field 5"
+        );
+        // Both canonicalizer tokens are 18 bytes, so the arm's ENTIRE width difference is the
+        // scope it carries: two UUIDs, 32 bytes. (I wrote 28 here first; the two witnesses
+        // disagreed and the encoder was right.)
+        assert_eq!(PROPOSAL_CANONICALIZER.len(), ARTIFACT_CANONICALIZER.len());
+        assert_eq!(artifact_tail - proposal_tail, 32, "the arm's width moved");
+    }
 
     #[test]
     fn a_known_evaluation_fixture_reproduces_its_published_digest() {
