@@ -168,10 +168,7 @@ pub use proposal::{
     ProposalScope, ProposalService, ProposalV1, ReadableContext, RollbackStrategy,
     UnmetPrecondition,
 };
-pub use publication_seam::{
-    CandidateArtifactDigest, CitedEvaluationDigest, PublicationCandidacy, PublicationSeamRefusal,
-    publication_candidacy,
-};
+pub use publication_seam::{PublicationCandidacy, PublicationSeamRefusal, publication_candidacy};
 pub use resident_configuration::{
     BeaconCapability, BeaconCapabilityDescriptor, ResidentConfiguration,
     ResidentConfigurationBinding, ResidentConfigurationError, ResidentConfigurationService,
