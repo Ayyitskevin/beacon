@@ -305,7 +305,7 @@ fn operator_admits_a_finite_mission_from_exact_current_team_evidence() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 26);
+    assert_eq!(report.diagnostics.schema_version, 27);
 }
 
 #[test]
@@ -656,7 +656,7 @@ fn schema_ten_migrates_without_rewriting_events_or_the_team_roster_guard() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 26);
+    assert_eq!(report.diagnostics.schema_version, 27);
     let connection = Connection::open(&path).unwrap();
     let after = connection
         .query_row(
@@ -1065,7 +1065,7 @@ fn a_store_at_the_previous_schema_version_migrates_and_keeps_its_condition_rows(
         initial_workspace_name: "Ignored".to_owned(),
     })
     .expect("a store at the previous schema version must migrate");
-    assert_eq!(report.diagnostics.schema_version, 26);
+    assert_eq!(report.diagnostics.schema_version, 27);
 
     assert_eq!(
         condition_rows(&store.path, mission.id),
