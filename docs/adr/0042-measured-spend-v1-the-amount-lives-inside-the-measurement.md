@@ -219,6 +219,22 @@ No store, no service, no `spend.measured` event, no migration, no verified reade
 collector integration. Migration numbers are taken at rebase, never reserved: `main` is at 0020 and
 several lanes are queued behind it.
 
+## Slice 2-A adds the store
+
+`measured_spend` (canonical bytes, digest as primary key, projection columns, immutability
+triggers), `MeasuredSpendService::{record, get, for_mission}`, the `spend.measured` event, and
+`verified_spend_within` / `verified_spend_for_citation`.
+
+**The migration number is provisional.** The Mission-completion lane holds 0024 and this holds
+**0025**, and *whichever lands second renumbers at its final rebase*. On this branch the ladder steps
+23 → 25, because 0024 belongs to a parallel lane and no store on this branch can be at 24 — the shape
+`main` already carries for 20 → 22.
+
+0025 rebuilds the closed `events.kind` CHECK to add `spend.measured`, which is the one place a
+migration can silently delete history (PR #50). The kind list is copied from 0023's rather than
+retyped, and a test plants one Event of every kind a v23 store could hold and looks for all of them
+afterwards.
+
 `measured_by` is **not** a field, and the design that proposed it was wrong. With no Operator UUID in
 the singleton account model — the reason `RulingDecider` has one arm — a `measured_by` would carry no
 information `origin` does not already carry, and two fields that must always agree are two spellings
