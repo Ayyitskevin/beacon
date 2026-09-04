@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Record a non-author Resident's verdict about one exact Proposal digest
