@@ -39,6 +39,7 @@ use uuid::Uuid;
 use crate::proposal::{
     ProposalDigest, UnmetPrecondition, is_human_text, proposal_binding_facts, sha256,
 };
+use crate::artifact::ArtifactDigest;
 use crate::{OperatorAccountError, OperatorAccountService, ProposalError};
 
 /// The canonicalizer identity. Existing v1 bytes are never reinterpreted under v2 rules, and
@@ -53,6 +54,10 @@ const DIGEST_ALGORITHM: &str = "sha256";
 /// evaluated under are refused by the codec rather than only by a column constraint.
 const PROPOSAL_DIGEST_ALGORITHM: &str = "sha256";
 const PROPOSAL_CANONICALIZER: &str = "beacon.proposal.v1";
+/// The Artifact arm's canonicalizer token. It is the Artifact RECORD's canonicalizer, imported
+/// from the module that owns it (R13.3): a second spelling here could drift from the grammar the
+/// digest actually covers.
+const ARTIFACT_CANONICALIZER: &str = crate::artifact::CANONICALIZER;
 
 /// The literal ASCII magic that starts every record, including its terminating NUL: 21 bytes.
 const MAGIC: &[u8] = b"beacon.evaluation.v1\0";
@@ -79,6 +84,11 @@ const DIGEST_HEX_CHARS: usize = 64;
 // One-byte tags. Assigned explicitly and never renumbered. `conflicts` and `supersedes` are the two
 // positions where 0x00 is assigned, because absence is a value in both and must encode as one.
 const TAG_SUBJECT_PROPOSAL: u8 = 0x01;
+/// `0x02` stays RESERVED AND REFUSED for the Candidate arm; `0x03` is the Artifact arm, and
+/// `0x04` and above are unassigned and refused (ADR 0038's 2026-09-04 amendment, the tag registry).
+/// Assigning a reserved position does not take a new canonicalizer -- no existing record's byte
+/// layout moves -- which is the rule that lets `beacon.evaluation.v1` survive this arm.
+const TAG_SUBJECT_ARTIFACT: u8 = 0x03;
 const TAG_VERDICT_MEETS: u8 = 0x01;
 const TAG_VERDICT_REVISION_REQUESTED: u8 = 0x02;
 const TAG_VERDICT_DOES_NOT_MEET: u8 = 0x03;
@@ -241,10 +251,71 @@ pub struct Evaluator {
     pub configuration_id: Uuid,
 }
 
+/// What one Evaluation is about: field 2's tagged union.
+///
+/// The tag and the canonicalizer token are two spellings of one fact, so the codec refuses a pair
+/// that disagrees in either direction -- an Artifact arm naming `beacon.proposal.v1`, and a
+/// Proposal arm naming `beacon.artifact.v1`. A column cannot enforce that; the grammar can.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvaluationSubject {
+    /// `0x01`: a Proposal, by the content digest of its canonical bytes. The v1 arm, unmoved.
+    Proposal(ProposalDigest),
+    /// `0x03`: an **Artifact record** digest, with the Mission scope that record declares.
+    Artifact(ArtifactSubject),
+}
+
+impl EvaluationV1 {
+    /// The Proposal this Evaluation binds, if it binds one.
+    ///
+    /// Slice E2 gives the Artifact arm its own columns. Until it lands, every store path calls this
+    /// and refuses an Artifact subject BY NAME rather than writing a row whose subject columns do
+    /// not exist: a seam, not a stub that silently records the wrong thing.
+    pub fn proposal_subject(&self) -> Option<&ProposalDigest> {
+        match &self.subject {
+            EvaluationSubject::Proposal(digest) => Some(digest),
+            EvaluationSubject::Artifact(_) => None,
+        }
+    }
+}
+
+impl EvaluationSubject {
+    /// The subject's own digest value, whichever arm it is. For the one thing both arms share.
+    pub fn digest_value(&self) -> &str {
+        match self {
+            Self::Proposal(digest) => &digest.value,
+            Self::Artifact(subject) => &subject.digest.value,
+        }
+    }
+
+    /// The tag byte this arm encodes as -- the registry value, not a position in a match.
+    pub fn tag(&self) -> u8 {
+        match self {
+            Self::Proposal(_) => TAG_SUBJECT_PROPOSAL,
+            Self::Artifact(_) => TAG_SUBJECT_ARTIFACT,
+        }
+    }
+}
+
+/// The Artifact arm: the record digest, and the scope copied from that record's own bytes.
+///
+/// `project_id` and `mission_id` are **copied from the subject Artifact's canonical bytes**, never
+/// supplied beside them: an Evaluation that asserted its own Mission would let the weaker party
+/// make the claim the roster check depends on (design §4). Every write re-derives them against the
+/// Artifact and refuses a mismatch; this type only carries what the bytes say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactSubject {
+    /// The **record** digest (SHA-256 over `beacon.artifact.v1` canonical bytes), never the bare
+    /// content digest: criterion 26 adjudicates author versus evaluator, and the author lives in
+    /// the record.
+    pub digest: ArtifactDigest,
+    pub project_id: Uuid,
+    pub mission_id: Uuid,
+}
+
 /// The immutable v1 payload, in canonical field order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvaluationV1 {
-    pub proposal: ProposalDigest,
+    pub subject: EvaluationSubject,
     pub evaluator: Evaluator,
     pub rubric: RubricDeclaration,
     pub cited_runs: Vec<Uuid>,
@@ -334,6 +405,8 @@ pub enum MalformedEvaluation {
     Subject,
     ProposalDigestValue,
     ProposalDigestEnvelope,
+    ArtifactDigestValue,
+    ArtifactDigestEnvelope,
     RubricId,
     RubricVersion,
     RubricCanonicalizer,
@@ -364,6 +437,10 @@ impl fmt::Display for MalformedEvaluation {
             Self::ProposalDigestValue => "the Proposal digest is not 64 lowercase hex characters",
             Self::ProposalDigestEnvelope => {
                 "the Proposal digest algorithm or canonicalizer is not the one v1 evaluates"
+            }
+            Self::ArtifactDigestValue => "the Artifact record digest is not 64 lowercase hex characters",
+            Self::ArtifactDigestEnvelope => {
+                "the Artifact digest algorithm or canonicalizer is not beacon.artifact.v1"
             }
             Self::RubricId => "the rubric id is empty or over its limit",
             Self::RubricVersion => "the rubric version is below one",
@@ -450,6 +527,10 @@ pub enum EvaluationError {
     Inconsistent(InconsistentEvaluation),
     NotFound,
     InvalidStore,
+    /// The bytes are a valid Evaluation of a subject this store cannot hold yet. The Artifact arm's
+    /// columns arrive with its migration (slice E2); until then the codec accepts the record and
+    /// the store refuses it by name, which is a seam rather than a silent wrong row.
+    SubjectNotStorable,
     Store(rusqlite::Error),
 }
 
@@ -463,6 +544,9 @@ impl fmt::Display for EvaluationError {
             }
             Self::NotFound => formatter.write_str("no Evaluation has that digest"),
             Self::InvalidStore => formatter.write_str("the store holds a value Beacon cannot read"),
+            Self::SubjectNotStorable => {
+                formatter.write_str("this store cannot hold an Evaluation of that subject kind yet")
+            }
             Self::Store(error) => write!(formatter, "{error}"),
         }
     }
@@ -678,19 +762,43 @@ fn digest_bytes(
 fn encode(payload: &EvaluationV1) -> Result<Vec<u8>, MalformedEvaluation> {
     let mut encoder = Encoder::new();
 
-    // 2-5: the subject, and the bound Proposal's identity copied whole.
-    encoder.tag(TAG_SUBJECT_PROPOSAL);
-    if payload.proposal.algorithm != PROPOSAL_DIGEST_ALGORITHM
-        || payload.proposal.canonicalizer != PROPOSAL_CANONICALIZER
-    {
-        return Err(MalformedEvaluation::ProposalDigestEnvelope);
+    // 2-5: the subject. One tag, then that arm's payload -- and the envelope is closed PER ARM,
+    // here in the grammar rather than in a column, because the tag and the canonicalizer token are
+    // two spellings of one fact and a store cannot see when they disagree.
+    encoder.tag(payload.subject.tag());
+    match &payload.subject {
+        EvaluationSubject::Proposal(digest) => {
+            if digest.algorithm != PROPOSAL_DIGEST_ALGORITHM
+                || digest.canonicalizer != PROPOSAL_CANONICALIZER
+            {
+                return Err(MalformedEvaluation::ProposalDigestEnvelope);
+            }
+            encoder.sha256(&digest_bytes(
+                &digest.value,
+                MalformedEvaluation::ProposalDigestValue,
+            )?);
+            encoder.string(&digest.algorithm, MAX_DESCRIPTOR_TOKEN_BYTES)?;
+            encoder.string(&digest.canonicalizer, MAX_DESCRIPTOR_TOKEN_BYTES)?;
+        }
+        EvaluationSubject::Artifact(subject) => {
+            if subject.digest.algorithm != PROPOSAL_DIGEST_ALGORITHM
+                || subject.digest.canonicalizer != ARTIFACT_CANONICALIZER
+            {
+                return Err(MalformedEvaluation::ArtifactDigestEnvelope);
+            }
+            encoder.sha256(&digest_bytes(
+                &subject.digest.value,
+                MalformedEvaluation::ArtifactDigestValue,
+            )?);
+            encoder.string(&subject.digest.algorithm, MAX_DESCRIPTOR_TOKEN_BYTES)?;
+            encoder.string(&subject.digest.canonicalizer, MAX_DESCRIPTOR_TOKEN_BYTES)?;
+            // The scope, copied from the subject Artifact's own bytes. Fields 6-20 begin after it,
+            // identical in position, width and bound for both arms -- the arms of a tagged union
+            // may differ in width, and everything past the union does not.
+            encoder.uuid(&subject.project_id);
+            encoder.uuid(&subject.mission_id);
+        }
     }
-    encoder.sha256(&digest_bytes(
-        &payload.proposal.value,
-        MalformedEvaluation::ProposalDigestValue,
-    )?);
-    encoder.string(&payload.proposal.algorithm, MAX_DESCRIPTOR_TOKEN_BYTES)?;
-    encoder.string(&payload.proposal.canonicalizer, MAX_DESCRIPTOR_TOKEN_BYTES)?;
 
     // 6-7: the evaluator, as a Resident under one exact configuration.
     encoder.uuid(&payload.evaluator.resident_id);
@@ -804,15 +912,42 @@ fn decode(input: &[u8]) -> Result<EvaluationV1, MalformedEvaluation> {
     let mut decoder = Decoder::new(input);
     decoder.magic()?;
 
-    if decoder.tag()? != TAG_SUBJECT_PROPOSAL {
-        return Err(MalformedEvaluation::Subject);
-    }
-    let proposal_value = HEXLOWER.encode(&decoder.sha256()?);
-    let algorithm = decoder.string(MAX_DESCRIPTOR_TOKEN_BYTES)?;
-    let canonicalizer = decoder.string(MAX_DESCRIPTOR_TOKEN_BYTES)?;
-    if algorithm != PROPOSAL_DIGEST_ALGORITHM || canonicalizer != PROPOSAL_CANONICALIZER {
-        return Err(MalformedEvaluation::ProposalDigestEnvelope);
-    }
+    // An unassigned tag is refused rather than defaulted: `0x02` is the Candidate arm's reserved
+    // position and `0x04`+ are unassigned, and a decoder that fell through to `proposal` would read
+    // some future arm's bytes as a Proposal Evaluation.
+    let subject = match decoder.tag()? {
+        TAG_SUBJECT_PROPOSAL => {
+            let value = HEXLOWER.encode(&decoder.sha256()?);
+            let algorithm = decoder.string(MAX_DESCRIPTOR_TOKEN_BYTES)?;
+            let canonicalizer = decoder.string(MAX_DESCRIPTOR_TOKEN_BYTES)?;
+            if algorithm != PROPOSAL_DIGEST_ALGORITHM || canonicalizer != PROPOSAL_CANONICALIZER {
+                return Err(MalformedEvaluation::ProposalDigestEnvelope);
+            }
+            EvaluationSubject::Proposal(ProposalDigest {
+                algorithm,
+                canonicalizer,
+                value,
+            })
+        }
+        TAG_SUBJECT_ARTIFACT => {
+            let value = HEXLOWER.encode(&decoder.sha256()?);
+            let algorithm = decoder.string(MAX_DESCRIPTOR_TOKEN_BYTES)?;
+            let canonicalizer = decoder.string(MAX_DESCRIPTOR_TOKEN_BYTES)?;
+            if algorithm != PROPOSAL_DIGEST_ALGORITHM || canonicalizer != ARTIFACT_CANONICALIZER {
+                return Err(MalformedEvaluation::ArtifactDigestEnvelope);
+            }
+            EvaluationSubject::Artifact(ArtifactSubject {
+                digest: ArtifactDigest {
+                    algorithm,
+                    canonicalizer,
+                    value,
+                },
+                project_id: decoder.uuid()?,
+                mission_id: decoder.uuid()?,
+            })
+        }
+        _ => return Err(MalformedEvaluation::Subject),
+    };
 
     let evaluator = Evaluator {
         resident_id: decoder.uuid()?,
@@ -897,11 +1032,7 @@ fn decode(input: &[u8]) -> Result<EvaluationV1, MalformedEvaluation> {
     decoder.finish()?;
 
     Ok(EvaluationV1 {
-        proposal: ProposalDigest {
-            algorithm,
-            canonicalizer,
-            value: proposal_value,
-        },
+        subject,
         evaluator,
         rubric: RubricDeclaration {
             id: rubric_id,
@@ -970,6 +1101,10 @@ fn insert_evaluation(
         Conflicts::None => (0_i64, None),
         Conflicts::Declared(text) => (1_i64, Some(text.clone())),
     };
+    let subject = stored
+        .payload
+        .proposal_subject()
+        .ok_or(EvaluationError::SubjectNotStorable)?;
     connection.execute(
         "INSERT INTO evaluations (
              workspace_id, digest_algorithm, digest_canonicalizer, digest_value, canonical_bytes,
@@ -987,9 +1122,9 @@ fn insert_evaluation(
             CANONICALIZER,
             stored.digest_value,
             stored.canonical_bytes,
-            stored.payload.proposal.value,
-            stored.payload.proposal.algorithm,
-            stored.payload.proposal.canonicalizer,
+            subject.value,
+            subject.algorithm,
+            subject.canonicalizer,
             stored.mission_id.to_string(),
             stored.payload.evaluator.resident_id.to_string(),
             stored.payload.evaluator.configuration_id.to_string(),
@@ -1038,7 +1173,12 @@ fn insert_evaluation(
                 value: stored.digest_value.clone(),
             },
             canonical_bytes_base64: BASE64.encode(&stored.canonical_bytes),
-            proposal_digest: stored.payload.proposal.value.clone(),
+            proposal_digest: stored
+                .payload
+                .proposal_subject()
+                .ok_or(EvaluationError::SubjectNotStorable)?
+                .value
+                .clone(),
             verdict: stored.payload.verdict.as_str().to_owned(),
             evaluated_at_ms: stored.payload.evaluated_at_ms,
         },
@@ -1150,14 +1290,17 @@ fn verified_evaluation(
             InconsistentEvaluation::ColumnDisagreesWithBytes,
         ));
     }
-    let Some(facts) = proposal_binding_facts(connection, workspace_id, &payload.proposal.value)
+    let subject = payload
+        .proposal_subject()
+        .ok_or(EvaluationError::SubjectNotStorable)?;
+    let Some(facts) = proposal_binding_facts(connection, workspace_id, &subject.value)
         .map_err(map_proposal_error)?
     else {
         return Err(EvaluationError::Inconsistent(
             InconsistentEvaluation::ProposalNotFound,
         ));
     };
-    if facts.digest != payload.proposal {
+    if &facts.digest != subject {
         return Err(EvaluationError::Inconsistent(
             InconsistentEvaluation::ProposalEnvelopeDisagrees,
         ));
@@ -1375,9 +1518,11 @@ fn columns_match(row: &StoredRow, payload: &EvaluationV1) -> bool {
         Conflicts::None => (0_i64, None),
         Conflicts::Declared(value) => (1_i64, Some(value.as_str())),
     };
-    row.proposal_digest == payload.proposal.value
-        && row.proposal_digest_algorithm == payload.proposal.algorithm
-        && row.proposal_digest_canonicalizer == payload.proposal.canonicalizer
+    payload.proposal_subject().is_some_and(|subject| {
+        row.proposal_digest == subject.value
+            && row.proposal_digest_algorithm == subject.algorithm
+            && row.proposal_digest_canonicalizer == subject.canonicalizer
+    })
         && row.evaluator_resident_id == payload.evaluator.resident_id.to_string()
         && row.evaluator_configuration_id == payload.evaluator.configuration_id.to_string()
         && row.rubric_id == payload.rubric.id
@@ -1585,7 +1730,7 @@ impl EvaluationService {
             let payload = EvaluationV1 {
                 // COPIED from the verified Proposal, never rebuilt from this module's constants:
                 // equality is not provenance.
-                proposal: facts.digest,
+                subject: EvaluationSubject::Proposal(facts.digest),
                 evaluator: draft.evaluator,
                 rubric: draft.rubric,
                 cited_runs,
@@ -1817,7 +1962,8 @@ pub(crate) fn verify_evaluation_event(
     }
     let evaluation = verified_evaluation(connection, workspace_id, row)?;
     if evaluation.payload.evaluated_at_ms != occurred_at_ms
-        || recorded.proposal_digest != evaluation.payload.proposal.value
+        || Some(recorded.proposal_digest.as_str())
+            != evaluation.payload.proposal_subject().map(|s| s.value.as_str())
         || recorded.verdict != evaluation.payload.verdict.as_str()
     {
         return Err(EvaluationError::InvalidStore);
@@ -1835,13 +1981,22 @@ mod tests {
     /// through coreutils. That is the only order in which a vector proves anything: the grammar
     /// was written down, an independent reader encoded it, and this encoder is measured against
     /// what they produced.
+    /// The Proposal arm of a payload the test built as one. Panics otherwise, which is what a test
+    /// helper should do when its fixture is not the shape it was written for.
+    fn proposal_subject_of(payload: &EvaluationV1) -> &ProposalDigest {
+        match &payload.subject {
+            EvaluationSubject::Proposal(digest) => digest,
+            EvaluationSubject::Artifact(_) => panic!("this fixture is a Proposal subject"),
+        }
+    }
+
     fn published_vector_payload() -> EvaluationV1 {
         EvaluationV1 {
-            proposal: ProposalDigest {
+            subject: EvaluationSubject::Proposal(ProposalDigest {
                 algorithm: DIGEST_ALGORITHM.to_owned(),
                 canonicalizer: PROPOSAL_CANONICALIZER.to_owned(),
                 value: HEXLOWER.encode(&core::array::from_fn::<u8, 32, _>(|index| index as u8)),
-            },
+            }),
             evaluator: Evaluator {
                 resident_id: Uuid::parse_str("10213243-5465-7687-98a9-bacbdcedfe0f").unwrap(),
                 configuration_id: Uuid::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").unwrap(),
@@ -1914,7 +2069,10 @@ mod tests {
 
         let mut variants: Vec<(&str, EvaluationV1)> = Vec::new();
         let mut v = base.clone();
-        v.proposal.value = HEXLOWER.encode(&[0x11_u8; 32]);
+        v.subject = EvaluationSubject::Proposal(ProposalDigest {
+            value: HEXLOWER.encode(&[0x11_u8; 32]),
+            ..proposal_subject_of(&base).clone()
+        });
         variants.push(("proposal digest", v));
         let mut v = base.clone();
         v.evaluator.resident_id = Uuid::nil();
@@ -2139,14 +2297,20 @@ mod tests {
     #[test]
     fn the_copied_proposal_envelope_is_closed_in_the_bytes() {
         let mut payload = published_vector_payload();
-        payload.proposal.canonicalizer = "beacon.proposal.v2".to_owned();
+        payload.subject = EvaluationSubject::Proposal(ProposalDigest {
+            canonicalizer: "beacon.proposal.v2".to_owned(),
+            ..proposal_subject_of(&payload).clone()
+        });
         assert_eq!(
             encode(&payload),
             Err(MalformedEvaluation::ProposalDigestEnvelope)
         );
 
         let mut payload = published_vector_payload();
-        payload.proposal.algorithm = "sha512".to_owned();
+        payload.subject = EvaluationSubject::Proposal(ProposalDigest {
+            algorithm: "sha512".to_owned(),
+            ..proposal_subject_of(&payload).clone()
+        });
         assert_eq!(
             encode(&payload),
             Err(MalformedEvaluation::ProposalDigestEnvelope)
