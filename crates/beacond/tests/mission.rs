@@ -1193,7 +1193,10 @@ fn a_gap_a_duplicate_and_an_ordinal_past_the_end_are_three_distinguishable_refus
     let boundary = admitted_sequence(&store, mission.id);
 
     // A gap: one result for two declared conditions. The record encodes -- ordinals are dense from
-    // zero within it -- and the reader refuses, because only the Mission knows there are two.
+    // zero within it -- and the reader refuses, because only the Mission knows there are two. The
+    // WRITE refuses now too: `record_completion` reads the record back through that reader inside
+    // its transaction, so a gap never reaches the store. (It used to be storable and then
+    // unreadable, which told a caller the write had succeeded.)
     let short = completion_for(
         &store,
         &mission,
@@ -1204,14 +1207,25 @@ fn a_gap_a_duplicate_and_an_ordinal_past_the_end_are_three_distinguishable_refus
     connection
         .pragma_update(None, "foreign_keys", "ON")
         .unwrap();
-    let digest = beacond::record_completion(&mut connection, &short).unwrap();
     assert_eq!(
-        beacond::verified_completion_within(&connection, store.workspace_id, &digest),
+        beacond::record_completion(&mut connection, &short),
         Err(beacond::CompletionReadRefusal::ConditionsNotExactlyOnce {
             declared: 2,
             stored: 1
         })
     );
+
+    // The positive control the other two shapes attach to: a record that names both conditions.
+    let whole = completion_for(
+        &store,
+        &mission,
+        boundary,
+        vec![
+            beacond::ConditionOutcome::Met,
+            beacond::ConditionOutcome::NotMet,
+        ],
+    );
+    let digest = beacond::record_completion(&mut connection, &whole).expect("it is accepted");
 
     // A duplicate ordinal: refused by the primary key, before any reader sees it.
     let duplicate = connection.execute(
@@ -1302,9 +1316,8 @@ fn a_boundary_before_the_missions_admission_is_refused() {
     connection
         .pragma_update(None, "foreign_keys", "ON")
         .unwrap();
-    let digest = beacond::record_completion(&mut connection, &record).unwrap();
     assert_eq!(
-        beacond::verified_completion_within(&connection, store.workspace_id, &digest),
+        beacond::record_completion(&mut connection, &record),
         Err(beacond::CompletionReadRefusal::BoundaryOutOfRange)
     );
 }
@@ -1328,9 +1341,8 @@ fn a_boundary_at_or_after_the_completions_own_event_is_refused() {
     connection
         .pragma_update(None, "foreign_keys", "ON")
         .unwrap();
-    let digest = beacond::record_completion(&mut connection, &record).unwrap();
     assert_eq!(
-        beacond::verified_completion_within(&connection, store.workspace_id, &digest),
+        beacond::record_completion(&mut connection, &record),
         Err(beacond::CompletionReadRefusal::BoundaryOutOfRange)
     );
 }
