@@ -1207,6 +1207,22 @@ fn outcome_manifest_canonical_bytes_follow_adr_0034_0037_strict_round_trip_rules
         MalformedOutcome::DigestEnvelope
     );
 
+    // gpt2's M24: the digest envelope's canonicalizer is a validated token, not free text. Without
+    // that validation an uppercase or punctuated spelling encodes, and two spellings of one
+    // canonicalizer become two identities.
+    let mut folded_canonicalizer = manifest.clone();
+    folded_canonicalizer.mission.digest.canonicalizer = "Beacon.Mission.V1".to_owned();
+    assert_eq!(
+        folded_canonicalizer.canonical_bytes().expect_err("refuses"),
+        MalformedOutcome::DigestEnvelope
+    );
+    let mut spaced_canonicalizer = manifest.clone();
+    spaced_canonicalizer.mission.digest.canonicalizer = "beacon mission v1".to_owned();
+    assert_eq!(
+        spaced_canonicalizer.canonical_bytes().expect_err("refuses"),
+        MalformedOutcome::DigestEnvelope
+    );
+
     let mut wrong_canonicalizer = manifest.clone();
     wrong_canonicalizer.canonicalizer_version = "beacon.outcome.manifest.v2".to_owned();
     assert_eq!(
