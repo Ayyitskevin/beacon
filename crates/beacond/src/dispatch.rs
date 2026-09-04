@@ -51,7 +51,8 @@ use crate::ruling::{
     RulingDecision, RulingDigest, ruling_event_sequence, ruling_row_scope, verified_ruling_within,
 };
 use crate::worktree::{
-    GitIdentity, PinnedRepository, READ_BUDGET, WRITE_BUDGET, read_pinned, write_pinned,
+    GitIdentity, PinnedRepository, READ_BUDGET, WRITE_BUDGET, read_pinned, read_pinned_bytes,
+    write_pinned,
 };
 use crate::{AutonomyProfile, CandidateDigest, RepositorySourceKind};
 
@@ -1381,12 +1382,12 @@ impl DispatchService {
         for (declared_path, post) in posts {
             let path = format!("{commit}:{declared_path}");
             let cat_file = ["cat-file", "blob", path.as_str()];
-            let blob = read_pinned(repository, &cat_file, READ_BUDGET);
+            let blob = read_pinned_bytes(repository, &cat_file, READ_BUDGET);
             decided.record_step(GitStepName::CatFile, &cat_file, blob.is_some());
             let Some(blob) = blob else {
                 return Ok(false);
             };
-            if hex(&crate::proposal::sha256(blob.as_bytes())) != post {
+            if hex(&crate::proposal::sha256(&blob)) != post {
                 return Ok(false);
             }
         }
@@ -1873,15 +1874,13 @@ fn pre_images_hold(repository: &PinnedRepository, base: &str, decided: &mut Deci
     for (declared_pre_image, declared_path) in records {
         let path = format!("{base}:{declared_path}");
         let cat_file = ["cat-file", "blob", path.as_str()];
-        let blob = read_pinned(repository, &cat_file, READ_BUDGET);
+        let blob = read_pinned_bytes(repository, &cat_file, READ_BUDGET);
         decided.record_step(GitStepName::CatFile, &cat_file, blob.is_some());
         let record_holds = match (&declared_pre_image, blob) {
             // Declared absent, and absent: `cat-file` fails for a path the tree does not hold.
             (None, None) => true,
             (None, Some(_)) | (Some(_), None) => false,
-            (Some(declared), Some(bytes)) => {
-                hex(&crate::proposal::sha256(bytes.as_bytes())) == *declared
-            }
+            (Some(declared), Some(bytes)) => hex(&crate::proposal::sha256(&bytes)) == *declared,
         };
         // Every declared path is read, not just the ones up to the first disagreement, so the
         // Receipt's step list is the invocations this dispatch made rather than a prefix of them.
