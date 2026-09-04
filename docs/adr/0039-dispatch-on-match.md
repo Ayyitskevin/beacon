@@ -443,13 +443,17 @@ same-Ruling concurrency test green and turns red the two tests where the swap is
 separator — two Dispatch Commands on two Rulings released together at the landing, and a
 competing commit arriving in the window.
 
-**A note on R9's wording, rather than a silent redefinition.** R9 says the double-dispatch
-race is closed by the compare-and-swap itself. For two dispatchers of *one* Ruling this
-build closes it earlier, at the claim, and it must: the claim is what survives a crash, and
-it has to be committed before the swap for that reason. The compare-and-swap remains the
-separator wherever two attempts can both reach it. If the Steward intends R9 literally for
-the same-Ruling case — the claim removed and CAS alone deciding — that is a different
-durability trade and it should be ruled explicitly, not assumed from this paragraph.
+**Both separators are required, and neither substitutes for the other.** R9 said the
+double-dispatch race is closed by the compare-and-swap; FABLE-RULINGS R10 (2026-09-03)
+refines that without reversing it, and this is the rule the build implements. Two attempts
+on **one** Ruling are separated by the one-use claim, which is committed before the swap
+because the claim is what survives a crash — a swap that ran with nothing durable recording
+it leaves a moved ref the store cannot explain. Two attempts that both **reach** the swap —
+two Dispatch Commands on two Rulings over one base, or any path that bypasses the claim —
+are separated by the compare-and-swap. The compare-and-swap remains the irreversible step
+and the only Git-side separator; the claim is an authority-side one and closes nothing about
+the ref. Removing either leaves a race the other does not cover, which is why each has its
+own test below rather than one test standing for both.
 
 **What "Beacon-made" is proved by, and what it is not.** The copy's root is created and opened
 through the copies-root descriptor — `mkdirat` then `openat` on one component, no resolution of
@@ -564,6 +568,18 @@ claim the attempt committed before its swap. It does **not** re-read the reposit
 `Applied` Receipt is not a claim that the branch still names that commit — `resulting_revision`
 is a landing-at-time fact. Ordinary history continues after a dispatch, and a Receipt whose
 truth expired at the next commit would be no evidence at all.
+
+**Startup never re-reads the repository to validate a finished Receipt** — the rule, not an
+implementation detail, per FABLE-RULINGS R11 (2026-09-03), which withdrew the proposal that
+startup refuse when the ref no longer names an `Applied` Receipt's commit. Refusing on that
+would encode a false invariant: in the disposable-copy scope every later dispatch advances the
+same ref, so the ref *not* naming the recorded commit is the ordinary state after the second
+landing. Whether the ref still names, descends from, or has diverged from the recorded commit
+is a **read-time** question and is outside v1; if a consumer needs the answer it arrives as new
+vocabulary through its own ADR, never as a startup refusal. The one repository read startup does
+perform belongs to the other case entirely — a Run with **no** terminal Receipt, where the ref is
+asked what became of a prepared commit in order to write the Receipt that terminates it — and
+even there a mismatch is recorded as `LandingUnobserved` rather than refused.
 
 ## The gap this decision proceeds past, in its own words
 
@@ -829,7 +845,9 @@ It is not a claim about the ref now. Ordinary history continues after a dispatch
 startup deliberately does not require the branch to still name that commit — a Receipt
 whose truth expired the moment someone made the next commit would be worthless as
 evidence. Startup re-verifies the record: bytes, Event, digests, outcome invariants, and
-the durable preparation. It does not re-read the repository.
+the durable preparation. It does not re-read the repository — FABLE-RULINGS R11 (2026-09-03)
+withdrew the startup ref-mismatch refusal that was open here, and the question of what the ref
+names now is a read-time one this ADR does not answer.
 
 ## Persistence and reconciliation
 
