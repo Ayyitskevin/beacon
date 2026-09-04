@@ -99,8 +99,15 @@ W3 is a different claim, made precisely below.
 `Refused` is a fact about the request. A refusal at any gate G1-G16 leaves the
 repository byte-identical, which is the strong claim and the one row 34 needs; a
 refusal after W3 leaves the source refs and working tree unchanged and **may leave
-unreachable objects**, which the Receipt names. `Applied` names the resulting
-revision, verified after the fact. `LandingUnobserved` means the swap produced no
+unreachable objects**, which the Receipt names. `Applied` is a fact about **the swap this attempt
+performed**: `resultingRevision` is what that swap installed, and `observedHead` records what the
+branch held when the attempt looked afterwards, which may already be something else. It was
+originally a fact about the observation, so a competing writer moving the branch in that window
+turned a landing this attempt had performed into `LandingRefused` — whose published meaning is that
+the change was not published. It was. A Receipt that under-reports a mutation Beacon made is the one
+direction a record must never take (sol1). A swap that returned zero and a branch that could not be
+read afterwards is still `LandingUnobserved`: it does not become an application by being unreadable.
+`LandingUnobserved` means the swap produced no
 establishable result: the Receipt names the commit to check **when the claim recorded one**,
 and when the interruption fell before the claim it says instead that any object residue is
 unknown — because the same durable state is left by a death before a single object was
@@ -319,6 +326,21 @@ the landing, and — the arrangement that actually distinguishes descriptor entr
 entry — swapped in for the duration of one invocation and swapped back, which the pin check
 cannot see because it looks before and after.
 
+**And the Git directory inside it is pinned too, which the first version of this was not.**
+Entering by descriptor fixes which directory the child *starts in*; it says nothing about which
+repository the child *finds* there, because every Git child discovers `.git` by name. A cold review
+swapped only `repo/.git` — the root's inode, pathname and contents untouched — and the objects and
+the ref update landed in the replacement while the Receipt said `Applied` about the directory
+Beacon pinned. So `.git` is opened through the root descriptor at pin time (`O_DIRECTORY` and
+`O_NOFOLLOW`, which refuse a gitfile and a symlink rather than following a name out of the pinned
+directory), held for the life of the pin, and named to every child as `GIT_DIR=/proc/self/fd/<n>`;
+with `GIT_DIR` set and no `GIT_WORK_TREE`, Git takes the working directory as the work tree, and
+that is the descriptor already installed. No read of `.git/config` resolves a pathname either — the
+filter-driver inventory decides which drivers the hardening suppresses, and a swap must not get to
+choose. The pin check compares **both** identities, so a persistent swap is a refusal: a Receipt
+records `source` as a pathname, and a truthful landing described by a lying reference is worse than
+none.
+
 **Gate reads may not write.** `git status --porcelain` refreshes and rewrites `.git/index`, so the
 head-and-cleanliness gate mutated the repository it was measuring — and the design's own
 five-part fingerprint could not see it. Git hardening is split: a **read-only** variant carrying
@@ -349,6 +371,21 @@ checkout: blobs are written with `hash-object --no-filters`, and the tree and co
 from them. The post-condition "`base..commit` touches exactly the declared set, byte for byte" is
 then a fact about **objects**, which is what gets published, and pathspec magic never arises because
 no pathspec is passed.
+
+**...and read from the literal object graph, which is a second condition and was missing.** A
+repository can rewrite what its objects *are* without touching a byte any gate reads:
+`.git/refs/replace/*` substitutes one object for another, `.git/info/grafts` rewrites parentage,
+and `.git/shallow` truncates it. A cold review installed a replacement whose tree carried an
+undeclared path, and the post-condition — reading through the replaced view — reported only the
+declared one while the published commit carried both. The claim above is a fact about objects only
+when the reader is looking at the objects, so the closed environment sets `GIT_NO_REPLACE_OBJECTS`,
+`GIT_GRAFT_FILE` and `GIT_SHALLOW_FILE` for every child. A genuinely shallow or grafted repository
+therefore looks incomplete and its reads fail, which is the fail-closed direction.
+
+Blob content is also carried as **bytes** end to end. A Candidate holds `Vec<u8>` and neither
+ADR 0034 nor this decision narrows a declared file to UTF-8; decoding the post-condition's
+`cat-file blob` output as text refused a binary change Beacon had already written correctly, and
+left named object residue behind. "Exact bytes" is not a claim a text decoder can carry.
 
 **The checkout is Beacon's, in v1 only.** Inside the disposable-copy scope Beacon owns the working
 tree and updates it after the CAS. A compare-and-swap into a repository the Operator also has
@@ -457,9 +494,15 @@ own test below rather than one test standing for both.
 
 **What "Beacon-made" is proved by, and what it is not.** The copy's root is created and opened
 through the copies-root descriptor — `mkdirat` then `openat` on one component, no resolution of
-the parent chain, no symlink to follow — and everything after that uses the descriptor, so the
-row records the identity of the directory Beacon made rather than of whatever a later pathname
-lookup returns. POSIX offers no `O_CREAT` for a directory, so the window between those two calls
+the parent chain, no symlink to follow — and every write into it goes through that descriptor:
+`mkdirat` and `openat` per entry, `O_NOFOLLOW` and `O_EXCL` on each, `fchmod` on the descriptor
+rather than `chmod` on the name. An earlier version of this sentence said "everything after that
+uses the descriptor" while the tree was in fact copied by pathname, which made the identity
+comparison that followed a detector rather than a preventer: a cold review moved Beacon's published
+child aside, put a directory at the published name whose child was a symlink out of the copies root,
+and the copy overwrote the target before anything noticed. Returning `UnsafeDestination` afterwards
+does not un-write it. The row records the identity of the directory Beacon made rather than of
+whatever a later pathname lookup returns. POSIX offers no `O_CREAT` for a directory, so the window between those two calls
 is real and cannot be removed. Holding the parent descriptor removed ancestor retargeting; it
 never bound the child inode, and a review replaced the final component inside that window — the
 `openat` answered with the replacement, which then received a provenance token and was recorded
@@ -766,14 +809,27 @@ notVerified      IN THIS ORDER, and every Receipt carries the first eleven:
                  reconstructed_after_interruption · object_residue_unknown
 ```
 
-`unreferenced_object_residue` asserts that objects exist **which no ref names**, so it is written
-only for an outcome that knows the ref did not move: a Receipt whose outcome is
-`landing_unobserved` never carries it, however a prepared commit it holds. That state is the one
-where the repository could not say whether a ref names the commit, and the branch may in fact hold
-a descendant of it — the token would be false rather than merely unproven (gpt2). What the state
-has to say is `landing_result_unknown`, which it already carries, and which is what
-`repositoryEffect` reads to answer `Unknown`. An implementation that emitted both would produce a
-record contradicting its own API.
+`unreferenced_object_residue` asserts that objects exist **which no ref names**, and that is a fact
+about a ref, never about an outcome. It is written from **what the branch was observed to hold**:
+named the prepared commit, named something else, or could not be read. Only the middle one
+establishes the claim.
+
+Deriving it from the outcome instead asserted it in states where a ref demonstrably named the
+objects. Two reviews found two of them: a `landing_unobserved` Receipt whose branch may hold a
+descendant of the prepared commit (gpt2), and an attempt whose compare-and-swap *lost* to a
+competing writer that published this exact commit — a ref named it, and the record said none did
+(sol1). `repositoryEffect` reads the token now rather than re-deriving the same claim from the
+record's shape, which was the identical defect one level up. What an unobservable landing has to
+say is `landing_result_unknown`, which it already carries, and which is what `repositoryEffect`
+reads to answer `Unknown`.
+
+Two states this vocabulary still cannot name, recorded rather than reported as something false.
+**Objects a ref reaches by someone else's act**: not byte-identical, not published by this attempt,
+not unreferenced — `repositoryEffect` answers `Unknown`, which is the arm that makes no false
+statement. And **a claim bounded by one ref**: `RefNamesSomethingElse` establishes that *the branch
+this attempt observed* does not name the prepared commit, not that no ref anywhere reaches it. A
+descendant on that branch would, and closing that needs a reachability read whose cost is a ruling,
+because it tightens what the published token means.
 
 **Specimens.** Two vectors, built entirely from the fixed inputs below, so a second
 implementation compares bytes rather than prose. Both literals are in `dispatch::tests`
