@@ -1077,3 +1077,446 @@ fn a_store_at_the_previous_schema_version_migrates_and_keeps_its_condition_rows(
         "the backfill did not reproduce the Mission's declaration order"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// Migration 0027 — the completion store, its Event, and the verified reader.
+//
+// One test per bullet of `A-opus-mission-completion-design.md` §12 slice 3.
+// ---------------------------------------------------------------------------------------------
+
+fn completion_for(
+    store: &TestStore,
+    mission: &beacond::MissionView,
+    boundary: u64,
+    outcomes: Vec<beacond::ConditionOutcome>,
+) -> beacond::MissionCompletionV1 {
+    let member = &mission.members[0];
+    beacond::MissionCompletionV1 {
+        workspace_id: store.workspace_id,
+        project_id: mission.project_id,
+        mission_id: mission.id,
+        completion_id: Uuid::new_v4(),
+        actor: beacond::CompletionActor::Operator,
+        accountable_resident_id: member.resident_id,
+        accountable_resident_configuration_id: member.admission_configuration_id,
+        boundary_event_seq: boundary,
+        disposition: beacond::CompletionDisposition::Concluded,
+        declared_conditions_sha256: beacond::declared_conditions_digest(
+            &mission.success_conditions,
+        ),
+        condition_results: outcomes
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, outcome)| beacond::ConditionResultRecord {
+                ordinal: u32::try_from(ordinal).unwrap(),
+                outcome,
+                support: vec![],
+                note: None,
+            })
+            .collect(),
+        delivered_artifacts: vec![],
+        unfinished_work: vec![],
+        uncertainty: vec![],
+        spend: beacond::SpendReference::NotMeasured("no spend record exists".to_owned()),
+        supersedes: beacond::CompletionSupersedes::None,
+        summary: "One reviewed feature shipped.".to_owned(),
+        completed_at_ms: 9_000,
+    }
+}
+
+/// The Mission's admission Event sequence -- the floor a completion's boundary must be at or above.
+fn admitted_sequence(store: &TestStore, mission_id: Uuid) -> u64 {
+    Connection::open(&store.path)
+        .unwrap()
+        .query_row(
+            "SELECT min(sequence) FROM events WHERE kind = 'mission.admitted'
+               AND json_extract(payload_json, '$.mission.id') = ?1",
+            [mission_id.to_string()],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|sequence| u64::try_from(sequence).unwrap())
+        .unwrap()
+}
+
+#[test]
+fn a_completion_naming_every_declared_condition_exactly_once_is_accepted() {
+    // Bullet 1, and the positive control every refusal below is measured against.
+    let store = TestStore::new("completion-accepted");
+    let accounts = enrolled_accounts(&store);
+    let mission = admit_with_conditions(
+        &store,
+        &accounts,
+        vec!["Gates pass".to_owned(), "Evidence filed".to_owned()],
+    );
+    let boundary = admitted_sequence(&store, mission.id);
+    let record = completion_for(
+        &store,
+        &mission,
+        boundary,
+        vec![
+            beacond::ConditionOutcome::Met,
+            beacond::ConditionOutcome::AssessmentInconclusive,
+        ],
+    );
+
+    let mut connection = Connection::open(&store.path).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .unwrap();
+    let digest = beacond::record_completion(&mut connection, &record).expect("it is accepted");
+    assert_eq!(
+        beacond::verified_completion_within(&connection, store.workspace_id, &digest).unwrap(),
+        record
+    );
+    drop(connection);
+
+    // ...and it survives a restart, which is the only proof the store holds what it claims.
+    Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .expect("startup verifies the completion");
+}
+
+#[test]
+fn a_gap_a_duplicate_and_an_ordinal_past_the_end_are_three_distinguishable_refusals() {
+    // Bullet 2 and bullet 3. A duplicate and an ordinal past the end are refused by the STORE -- the
+    // primary key and the foreign key to `mission_success_conditions` -- and a gap by the reader's
+    // count. Three shapes, three mechanisms, and the errors tell them apart.
+    let store = TestStore::new("completion-ordinals");
+    let accounts = enrolled_accounts(&store);
+    let mission = admit_with_conditions(
+        &store,
+        &accounts,
+        vec!["Gates pass".to_owned(), "Evidence filed".to_owned()],
+    );
+    let boundary = admitted_sequence(&store, mission.id);
+
+    // A gap: one result for two declared conditions. The record encodes -- ordinals are dense from
+    // zero within it -- and the reader refuses, because only the Mission knows there are two.
+    let short = completion_for(
+        &store,
+        &mission,
+        boundary,
+        vec![beacond::ConditionOutcome::Met],
+    );
+    let mut connection = Connection::open(&store.path).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .unwrap();
+    let digest = beacond::record_completion(&mut connection, &short).unwrap();
+    assert_eq!(
+        beacond::verified_completion_within(&connection, store.workspace_id, &digest),
+        Err(beacond::CompletionReadRefusal::ConditionsNotExactlyOnce {
+            declared: 2,
+            stored: 1
+        })
+    );
+
+    // A duplicate ordinal: refused by the primary key, before any reader sees it.
+    let duplicate = connection.execute(
+        "INSERT INTO mission_completion_conditions
+             (workspace_id, completion_digest, mission_id, condition_ordinal, outcome)
+         VALUES (?1, ?2, ?3, 0, 'met')",
+        rusqlite::params![
+            store.workspace_id.to_string(),
+            digest,
+            mission.id.to_string()
+        ],
+    );
+    assert!(duplicate.is_err(), "a duplicate ordinal was stored");
+
+    // An ordinal past the end of the Mission's declaration: refused by the foreign key to
+    // `mission_success_conditions`, which is why that table exists.
+    let past_the_end = connection.execute(
+        "INSERT INTO mission_completion_conditions
+             (workspace_id, completion_digest, mission_id, condition_ordinal, outcome)
+         VALUES (?1, ?2, ?3, 7, 'met')",
+        rusqlite::params![
+            store.workspace_id.to_string(),
+            digest,
+            mission.id.to_string()
+        ],
+    );
+    assert!(
+        past_the_end.is_err(),
+        "an ordinal the Mission never declared was stored"
+    );
+}
+
+#[test]
+fn a_completion_about_a_tampered_mission_is_refused_even_with_a_complete_ordinal_set() {
+    // Bullet 5, and the scenario the exactly-once check cannot see: the ordinal set is complete and
+    // the CONDITIONS moved. Two checks, two scenarios, neither masking the other.
+    let store = TestStore::new("completion-tampered");
+    let accounts = enrolled_accounts(&store);
+    let mission = admit_with_conditions(&store, &accounts, vec!["Gates pass".to_owned()]);
+    let boundary = admitted_sequence(&store, mission.id);
+    let record = completion_for(
+        &store,
+        &mission,
+        boundary,
+        vec![beacond::ConditionOutcome::Met],
+    );
+
+    let mut connection = Connection::open(&store.path).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .unwrap();
+    let digest = beacond::record_completion(&mut connection, &record).unwrap();
+    assert!(beacond::verified_completion_within(&connection, store.workspace_id, &digest).is_ok());
+
+    // Rewrite the Mission's condition text under the completion. The trigger comes off and goes back
+    // on from its own stored SQL, so only the row changes.
+    let trigger: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name = 'mission_success_conditions_no_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute_batch(
+            "DROP TRIGGER mission_success_conditions_no_update;
+             UPDATE mission_success_conditions SET text = 'something else entirely';",
+        )
+        .unwrap();
+    connection.execute_batch(&trigger).unwrap();
+
+    assert_eq!(
+        beacond::verified_completion_within(&connection, store.workspace_id, &digest),
+        Err(beacond::CompletionReadRefusal::DeclaredConditionsMoved),
+        "the ordinal set is still complete, so only the digest can see this"
+    );
+}
+
+#[test]
+fn a_boundary_before_the_missions_admission_is_refused() {
+    // Bullet 6, first scenario: a completion cannot claim a cut before its own Mission existed.
+    let store = TestStore::new("completion-boundary-low");
+    let accounts = enrolled_accounts(&store);
+    let mission = admit_with_conditions(&store, &accounts, vec!["Gates pass".to_owned()]);
+    let record = completion_for(&store, &mission, 0, vec![beacond::ConditionOutcome::Met]);
+
+    let mut connection = Connection::open(&store.path).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .unwrap();
+    let digest = beacond::record_completion(&mut connection, &record).unwrap();
+    assert_eq!(
+        beacond::verified_completion_within(&connection, store.workspace_id, &digest),
+        Err(beacond::CompletionReadRefusal::BoundaryOutOfRange)
+    );
+}
+
+#[test]
+fn a_boundary_at_or_after_the_completions_own_event_is_refused() {
+    // Bullet 6, second scenario, and a different mechanism from the first: the record's own Event
+    // must land strictly after the cut it reports at. A caller cannot satisfy this by choosing a
+    // number, because the sequence is the store's to assign -- so the test picks one past it.
+    let store = TestStore::new("completion-boundary-high");
+    let accounts = enrolled_accounts(&store);
+    let mission = admit_with_conditions(&store, &accounts, vec!["Gates pass".to_owned()]);
+    let record = completion_for(
+        &store,
+        &mission,
+        u64::from(u32::MAX),
+        vec![beacond::ConditionOutcome::Met],
+    );
+
+    let mut connection = Connection::open(&store.path).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .unwrap();
+    let digest = beacond::record_completion(&mut connection, &record).unwrap();
+    assert_eq!(
+        beacond::verified_completion_within(&connection, store.workspace_id, &digest),
+        Err(beacond::CompletionReadRefusal::BoundaryOutOfRange)
+    );
+}
+
+#[test]
+fn a_cross_workspace_read_is_a_refusal_and_not_an_empty_result() {
+    // Bullet 7. "Not yours" and "not there" are different answers, and a scoped query that returns
+    // nothing tells a caller the wrong thing about their own store.
+    let store = TestStore::new("completion-cross-workspace");
+    let accounts = enrolled_accounts(&store);
+    let mission = admit_with_conditions(&store, &accounts, vec!["Gates pass".to_owned()]);
+    let boundary = admitted_sequence(&store, mission.id);
+    let record = completion_for(
+        &store,
+        &mission,
+        boundary,
+        vec![beacond::ConditionOutcome::Met],
+    );
+
+    let mut connection = Connection::open(&store.path).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .unwrap();
+    let digest = beacond::record_completion(&mut connection, &record).unwrap();
+
+    assert_eq!(
+        beacond::verified_completion_within(&connection, Uuid::new_v4(), &digest),
+        Err(beacond::CompletionReadRefusal::CrossWorkspace)
+    );
+    assert_eq!(
+        beacond::verified_completion_within(&connection, store.workspace_id, &"0".repeat(64)),
+        Err(beacond::CompletionReadRefusal::Absent),
+        "and a digest nobody stored is Absent, which is the other answer"
+    );
+}
+
+#[test]
+fn an_accountable_resident_not_on_the_admission_roster_is_refused_by_the_store() {
+    // Bullet 8. Accountability is structural, not asserted: the composite foreign key requires the
+    // Resident to be an admitted member of THIS Mission under the exact configuration named.
+    let store = TestStore::new("completion-roster");
+    let accounts = enrolled_accounts(&store);
+    let mission = admit_with_conditions(&store, &accounts, vec!["Gates pass".to_owned()]);
+    let boundary = admitted_sequence(&store, mission.id);
+    let mut record = completion_for(
+        &store,
+        &mission,
+        boundary,
+        vec![beacond::ConditionOutcome::Met],
+    );
+    record.accountable_resident_id = Uuid::new_v4();
+
+    let mut connection = Connection::open(&store.path).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .unwrap();
+    assert!(
+        beacond::record_completion(&mut connection, &record).is_err(),
+        "a completion named a Resident this Mission never admitted"
+    );
+}
+
+#[test]
+fn a_delivered_artifact_is_refused_while_no_artifact_entity_exists() {
+    // Bullet 9. The reference's SHAPE is settled (R16: the Artifact record's digest); its referent
+    // is not. Storing a digest nothing can verify would be exactly the dangling claim the record's
+    // vocabulary refuses to have a literal for, so the refusal names what is missing.
+    let store = TestStore::new("completion-artifact");
+    let accounts = enrolled_accounts(&store);
+    let mission = admit_with_conditions(&store, &accounts, vec!["Gates pass".to_owned()]);
+    let boundary = admitted_sequence(&store, mission.id);
+    let mut record = completion_for(
+        &store,
+        &mission,
+        boundary,
+        vec![beacond::ConditionOutcome::Met],
+    );
+    record.delivered_artifacts = vec![[0x22; 32]];
+
+    let mut connection = Connection::open(&store.path).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .unwrap();
+    assert_eq!(
+        beacond::record_completion(&mut connection, &record),
+        Err(beacond::CompletionReadRefusal::NoArtifactEntity)
+    );
+}
+
+#[test]
+fn a_row_that_disagrees_with_its_own_bytes_fails_the_reader_and_fails_startup() {
+    // Bullet 4. The indexed columns are a projection of the bytes, and a projection that can drift
+    // from its source is a second place to be wrong about what a completion says.
+    let store = TestStore::new("completion-column-drift");
+    let accounts = enrolled_accounts(&store);
+    let mission = admit_with_conditions(&store, &accounts, vec!["Gates pass".to_owned()]);
+    let boundary = admitted_sequence(&store, mission.id);
+    let record = completion_for(
+        &store,
+        &mission,
+        boundary,
+        vec![beacond::ConditionOutcome::Met],
+    );
+
+    let mut connection = Connection::open(&store.path).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .unwrap();
+    let digest = beacond::record_completion(&mut connection, &record).unwrap();
+
+    let trigger: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name = 'mission_completions_no_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute_batch(
+            "DROP TRIGGER mission_completions_no_update;
+             UPDATE mission_completions SET disposition = 'abandoned';",
+        )
+        .unwrap();
+    connection.execute_batch(&trigger).unwrap();
+
+    assert_eq!(
+        beacond::verified_completion_within(&connection, store.workspace_id, &digest),
+        Err(beacond::CompletionReadRefusal::ColumnDisagrees(
+            "disposition"
+        ))
+    );
+    drop(connection);
+
+    assert!(matches!(
+        Supervisor::bootstrap(StartupConfig {
+            store_path: store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        }),
+        Err(beacond::SupervisorError::MissionCompletionStateMismatch)
+    ));
+}
+
+#[test]
+fn an_orphan_completion_event_fails_startup() {
+    // Bullet 11. Exactly one `mission.completed` Event per completion: an Event naming no record is
+    // as much a lie about the ledger as a record with no Event.
+    let store = TestStore::new("completion-orphan-event");
+    let accounts = enrolled_accounts(&store);
+    let mission = admit_with_conditions(&store, &accounts, vec!["Gates pass".to_owned()]);
+    let boundary = admitted_sequence(&store, mission.id);
+    let record = completion_for(
+        &store,
+        &mission,
+        boundary,
+        vec![beacond::ConditionOutcome::Met],
+    );
+
+    let mut connection = Connection::open(&store.path).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .unwrap();
+    let digest = beacond::record_completion(&mut connection, &record).unwrap();
+    let payload = json!({
+        "workspaceId": store.workspace_id,
+        "missionId": mission.id,
+        "completionId": Uuid::new_v4(),
+        "digestValue": "0".repeat(64),
+        "canonicalBytesBase64": "",
+    })
+    .to_string();
+    connection
+        .execute(
+            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+             VALUES (?1, 'mission.completed', ?2, 9001)",
+            rusqlite::params![store.workspace_id.to_string(), payload],
+        )
+        .unwrap();
+    assert!(!digest.is_empty());
+    drop(connection);
+
+    assert!(
+        Supervisor::bootstrap(StartupConfig {
+            store_path: store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        })
+        .is_err(),
+        "an orphan completion event passed startup"
+    );
+}
