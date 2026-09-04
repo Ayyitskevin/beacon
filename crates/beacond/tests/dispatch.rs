@@ -2159,6 +2159,65 @@ fn a_published_copy_name_cannot_redirect_writes_before_the_descriptor_is_reopene
     );
 }
 
+#[test]
+fn a_symlink_planted_inside_beacons_own_copy_is_refused_rather_than_followed() {
+    // The second witness, and the one sol1's probe cannot be: after the descriptor fix, its
+    // arrangement is answered by copying through the descriptor, so `O_NOFOLLOW`/`O_EXCL` on each
+    // entry survives every mutant it can see. Here the plant is INSIDE the directory Beacon
+    // published and still holds -- which an attacker who can rename in the copies root can also do
+    // -- so the descriptor is no defence and only the open flags are.
+    //
+    // Without them the copy writes through the link and the victim outside the copies root gets the
+    // bundled README; with them the entry already exists and is not a regular file, and the copy
+    // refuses.
+    let fixture = admitted_mission("copy-plant-inside");
+    let samples = SampleProjectService::new(
+        Arc::clone(&fixture.accounts),
+        fixture.workspace_id,
+        &fixture.store.path,
+    )
+    .unwrap();
+    samples.install().unwrap();
+
+    let victim = fixture
+        .copies_root
+        .parent()
+        .unwrap()
+        .join(format!("dispatch-copy-victim-inside-{}.md", Uuid::new_v4()));
+    fs::write(&victim, b"operator bytes\n").unwrap();
+    let victim_for_hook = victim.clone();
+    let fired = Arc::new(Mutex::new(false));
+    let observed = Arc::clone(&fired);
+    let samples = samples.with_copy_failpoints(CopyFailpoints {
+        after_publish: Some(Arc::new(move |published: &Path| {
+            let mut seen = observed.lock().unwrap();
+            if *seen {
+                return;
+            }
+            std::os::unix::fs::symlink(&victim_for_hook, published.join("README.md")).unwrap();
+            *seen = true;
+        })),
+        ..CopyFailpoints::default()
+    });
+
+    let outcome = samples.copy_for_dispatch(&fixture.copies_root, "plant-inside");
+    let victim_bytes = fs::read(&victim).unwrap();
+    let _ = fs::remove_file(&victim);
+
+    assert!(
+        *fired.lock().unwrap(),
+        "the post-publication seam was not reached"
+    );
+    assert!(
+        outcome.is_err(),
+        "a copy over a planted symlink inside Beacon's own directory succeeded"
+    );
+    assert_eq!(
+        victim_bytes, b"operator bytes\n",
+        "the copy followed a symlink planted inside the directory it holds"
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // The walking skeleton
 // ---------------------------------------------------------------------------------------------
