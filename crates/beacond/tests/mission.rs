@@ -1520,3 +1520,57 @@ fn an_orphan_completion_event_fails_startup() {
         "an orphan completion event passed startup"
     );
 }
+
+#[test]
+fn a_row_whose_bytes_no_longer_hash_to_its_digest_is_refused() {
+    // Bullet 4's other half, and the scenario only the digest recomputation can see: every indexed
+    // column still agrees with the bytes, and the BYTES are not the ones the digest names. The
+    // mutation table found this untested -- removing the recomputation left every test green,
+    // because the column comparison catches a different tampering.
+    let store = TestStore::new("completion-digest-drift");
+    let accounts = enrolled_accounts(&store);
+    let mission = admit_with_conditions(&store, &accounts, vec!["Gates pass".to_owned()]);
+    let boundary = admitted_sequence(&store, mission.id);
+    let record = completion_for(
+        &store,
+        &mission,
+        boundary,
+        vec![beacond::ConditionOutcome::Met],
+    );
+
+    let mut connection = Connection::open(&store.path).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .unwrap();
+    let digest = beacond::record_completion(&mut connection, &record).unwrap();
+
+    // A second record that differs only in its summary: legal bytes, every column of the stored row
+    // still true of them, and a digest that names the first record's bytes rather than these.
+    let mut other = record.clone();
+    other.summary = "A different summary entirely.".to_owned();
+    let other_bytes = other.canonical_bytes().unwrap();
+
+    let trigger: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name = 'mission_completions_no_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute_batch("DROP TRIGGER mission_completions_no_update;")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE mission_completions SET canonical_bytes = ?1 WHERE digest_value = ?2",
+            rusqlite::params![other_bytes, digest],
+        )
+        .unwrap();
+    connection.execute_batch(&trigger).unwrap();
+
+    assert_eq!(
+        beacond::verified_completion_within(&connection, store.workspace_id, &digest),
+        Err(beacond::CompletionReadRefusal::BytesDisagree),
+        "identity is a computation over the bytes, not the column beside them"
+    );
+}
