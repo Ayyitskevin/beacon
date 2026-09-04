@@ -2761,6 +2761,33 @@ fn an_artifact_subject_evaluation_written_past_the_command_refuses_startup() {
         "refused by something other than the non-authorship trigger: {refused}"
     );
 
+    // The trigger keys on the RESIDENT, asserted against its own text -- read BEFORE the drop
+    // below, because a test that reads a trigger it has already dropped asserts nothing.
+    //
+    // This one is a text assertion because the discriminating row cannot be built: to tell
+    // "keyed on the Resident" from "keyed on the Configuration" behaviourally you need an
+    // evaluator who shares one and not the other, and the roster foreign key
+    // `(workspace, mission, resident, configuration)` refuses every such row before any trigger
+    // runs. So the property is pinned where it lives. (My mutant table found this: M9 flips the
+    // trigger to the configuration column and every behavioural test stays green.)
+    let trigger: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'trigger' AND name = 'evaluations_evaluator_is_not_the_artifact_author'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the trigger exists");
+    assert!(
+        trigger.contains("artifacts.accountable_resident_id = NEW.evaluator_resident_id"),
+        "the non-authorship trigger no longer keys on the Resident: {trigger}"
+    );
+    assert!(
+        !trigger.contains("accountable_configuration_id"),
+        "the non-authorship trigger reads a configuration: an author who reconfigures is still \
+         the author"
+    );
+
     // With that one trigger down -- and every other check intact -- the row lands, and the
     // re-derivation from the BYTES is the only thing left to catch it.
     connection
@@ -2778,32 +2805,5 @@ fn an_artifact_subject_evaluation_written_past_the_command_refuses_startup() {
             EvaluationError::Inconsistent(InconsistentEvaluation::EvaluatorAuthoredTheArtifact)
         ),
         "refused for the wrong reason: {error}"
-    );
-
-    // And the trigger keys on the RESIDENT, asserted against its own text.
-    //
-    // This one is a text assertion because the discriminating row cannot be built: to tell
-    // "keyed on the Resident" from "keyed on the Configuration" behaviourally you need an
-    // evaluator who shares one and not the other, and the roster foreign key
-    // `(workspace, mission, resident, configuration)` refuses every such row before any trigger
-    // runs. So the property is pinned where it lives. (My mutant table found this: M9 flips the
-    // trigger to the configuration column and every behavioural test stays green.)
-    let connection = fixture.store.connect();
-    let trigger: String = connection
-        .query_row(
-            "SELECT sql FROM sqlite_master
-             WHERE type = 'trigger' AND name = 'evaluations_evaluator_is_not_the_artifact_author'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("the trigger exists");
-    assert!(
-        trigger.contains("artifacts.accountable_resident_id = NEW.evaluator_resident_id"),
-        "the non-authorship trigger no longer keys on the Resident: {trigger}"
-    );
-    assert!(
-        !trigger.contains("accountable_configuration_id"),
-        "the non-authorship trigger reads a configuration: an author who reconfigures is still \
-         the author"
     );
 }
