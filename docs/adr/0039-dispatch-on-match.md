@@ -747,7 +747,10 @@ were bytes of.
 it made them, including the ones that did not succeed: the provenance token read, the pre-image
 reads, the three live gate reads, the object writes, the effect post-condition's diff and its
 re-read of each blob in the prepared commit, the swap, the observation of what the swap
-produced, and the checkout. A landing that changes one file records fifteen. `step` is a closed `GitStepName`; `argv` is the exact argument
+produced, and the checkout. A landing that changes one file records fifteen. A **refusal whose
+observed tip is not the prepared commit** records one more, `merge_base` — the reachability read
+that earns the residue token (R14) — which is why the count belongs to the landing path and not to
+every Receipt. `step` is a closed `GitStepName`; `argv` is the exact argument
 vector dispatch passes; `result` is a bounded `GitStepResult`, never dynamic stderr text, so two
 implementations that run the same steps write the same bytes.
 
@@ -758,7 +761,11 @@ before each invocation are constant machinery, identical for every step of every
 listing them would bury the arguments that differ. **`result` has two arms**: the bounded runner
 reports a non-zero exit, a timeout, a failure to spawn, and a repository that stopped being the
 pinned one as one absent answer, so naming a cause here would be naming one this code was never
-told.
+told. `merge_base` is the one step whose `result` means "the read answered" rather than "the
+command exited zero", because exit 1 *is* its answer — recorded as succeeded, since filing the
+finding's own evidence as a failure would be the same collapse the step exists to avoid. The
+reachability read itself uses a runner that returns the exit code, so "no" and "could not tell"
+never arrive as one value.
 
 The contract carries what the accepted Receipt contract requires (`BLUEPRINT.md:790-800`)
 or names each exception. A dispatch runs no Declared Check, invokes no model, and consumes
@@ -809,27 +816,31 @@ notVerified      IN THIS ORDER, and every Receipt carries the first eleven:
                  reconstructed_after_interruption · object_residue_unknown
 ```
 
-`unreferenced_object_residue` asserts that objects exist **which no ref names**, and that is a fact
-about a ref, never about an outcome. It is written from **what the branch was observed to hold**:
-named the prepared commit, named something else, or could not be read. Only the middle one
-establishes the claim.
+`unreferenced_object_residue` means **the branch this attempt observed does not reach the prepared
+commit** — no more, and it is *earned* rather than asserted. The answer comes from a bounded
+`merge-base --is-ancestor <prepared> <observed>` read through the pinned repository: the observed tip
+being the prepared commit or a descendant of it reaches it and makes no residue claim; a read that
+answers "no" is the claim; a branch that could not be read, or a read that could not answer, is
+`landing_result_unknown` and never residue. **Claims about refs this attempt did not observe are
+outside the definition**, stated here rather than admitted after the fact.
 
-Deriving it from the outcome instead asserted it in states where a ref demonstrably named the
-objects. Two reviews found two of them: a `landing_unobserved` Receipt whose branch may hold a
-descendant of the prepared commit (gpt2), and an attempt whose compare-and-swap *lost* to a
-competing writer that published this exact commit — a ref named it, and the record said none did
-(sol1). `repositoryEffect` reads the token now rather than re-deriving the same claim from the
-record's shape, which was the identical defect one level up. What an unobservable landing has to
-say is `landing_result_unknown`, which it already carries, and which is what `repositoryEffect`
-reads to answer `Unknown`.
+Three reviews walked this down one arm at a time, and each arm was a claim the record could not
+support. Deriving it from the **outcome** asserted it wherever a commit was prepared and the outcome
+was not `Applied`, including a `landing_unobserved` Receipt whose branch may hold a descendant
+(gpt2) and an attempt whose compare-and-swap *lost* to a competing writer that published this exact
+commit — a ref named it and the record said none did (sol1). Deriving it from **tip inequality**
+fixed those and kept the same mistake one step smaller: a branch holding a descendant of the
+prepared commit reaches it, so the objects are named, and the record still said they were not (sol1,
+on the fix). Tip equality is not reachability, and only one of them is the question. FABLE-RULINGS
+R14 ruled the read, and the token now says exactly what the read gives.
 
-Two states this vocabulary still cannot name, recorded rather than reported as something false.
-**Objects a ref reaches by someone else's act**: not byte-identical, not published by this attempt,
-not unreferenced — `repositoryEffect` answers `Unknown`, which is the arm that makes no false
-statement. And **a claim bounded by one ref**: `RefNamesSomethingElse` establishes that *the branch
-this attempt observed* does not name the prepared commit, not that no ref anywhere reaches it. A
-descendant on that branch would, and closing that needs a reachability read whose cost is a ruling,
-because it tightens what the published token means.
+`repositoryEffect` reads the token rather than re-deriving the same claim from the record's shape,
+which was the identical defect one level up.
+
+One state this vocabulary still cannot name, recorded rather than reported as something false:
+**objects a ref reaches by someone else's act** — not byte-identical, not published by this attempt,
+not unreferenced. `repositoryEffect` answers `Unknown`, the arm that makes no false statement.
+Naming it properly is a vocabulary change this ADR does not make on its own.
 
 **Specimens.** Two vectors, built entirely from the fixed inputs below, so a second
 implementation compares bytes rather than prose. Both literals are in `dispatch::tests`
