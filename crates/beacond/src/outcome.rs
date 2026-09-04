@@ -2458,6 +2458,9 @@ fn render_appendix(
                 .cloned()
                 .collect::<Vec<_>>();
             rows = sorted(&rows, source_ref_key);
+            // One object cited twice is one row: the appendix reports objects, and the
+            // census it must agree with counts objects too.
+            rows.dedup_by(|left, right| source_ref_key(left) == source_ref_key(right));
             for reference in &rows {
                 document.line(&format!(
                     "| `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | {} | `verified at boundary event {boundary}` |",
