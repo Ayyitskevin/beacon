@@ -305,7 +305,7 @@ fn operator_admits_a_finite_mission_from_exact_current_team_evidence() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 25);
+    assert_eq!(report.diagnostics.schema_version, 26);
 }
 
 #[test]
@@ -656,7 +656,7 @@ fn schema_ten_migrates_without_rewriting_events_or_the_team_roster_guard() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 25);
+    assert_eq!(report.diagnostics.schema_version, 26);
     let connection = Connection::open(&path).unwrap();
     let after = connection
         .query_row(
@@ -978,8 +978,10 @@ fn the_condition_migration_adds_triggers_and_rewrites_none() {
     }
 }
 
-/// Migration 0025 rebuilds the closed Event-kind table to add two kinds. A rollback that drops only
-/// its two tables leaves that rebuilt table behind, and the store then matches no schema version.
+/// Migrations 0025 and 0026 each rebuild the closed Event-kind table -- 0025 to add two kinds, 0026
+/// to add `mission.completed`. A rollback that drops only their tables leaves the rebuilt table
+/// behind, and the store then matches no schema version. Restoring 0023's definition takes both
+/// rebuilds off at once, which is what a rollback to 23 needs.
 ///
 /// The definition and the two Event-keyed roster triggers are read out of 0023's own text rather
 /// than retyped: a rollback that retyped them would be testing the test.
@@ -1014,7 +1016,7 @@ fn restore_pre_0025_events(connection: &Connection) {
 }
 
 #[test]
-fn the_backfill_gives_existing_missions_their_condition_rows_in_order() {
+fn a_store_at_the_previous_schema_version_migrates_and_keeps_its_condition_rows() {
     // Bullet 1's other half, and the only test that exercises the BACKFILL rather than the write
     // path. Every other slice-1 test admits its Mission after the migration, so the rows it checks
     // came from `insert_admission`; this one takes a store that already has a Mission, drops the
@@ -1035,10 +1037,17 @@ fn the_backfill_gives_existing_missions_their_condition_rows_in_order() {
     let connection = Connection::open(&store.path).unwrap();
     connection
         .execute_batch(
-            // Newest migration first. 0025 REBUILT the closed `events` table to add two kinds, so
-            // dropping its two tables is not enough -- the rebuilt definition has to come off too
-            // or the store no longer matches schema 23.
-            "DROP TRIGGER mission_impact_classifications_no_update;
+            // Newest migration first. 0026 and 0025 BOTH rebuilt the closed `events` table -- 0026
+            // to add `mission.completed`, 0025 to add two kinds -- so dropping their tables is not
+            // enough: the rebuilt definition has to come off too or the store no longer matches
+            // schema 23.
+            "DROP TRIGGER mission_completion_conditions_no_update;
+             DROP TRIGGER mission_completion_conditions_no_delete;
+             DROP TABLE mission_completion_conditions;
+             DROP TRIGGER mission_completions_no_update;
+             DROP TRIGGER mission_completions_no_delete;
+             DROP TABLE mission_completions;
+             DROP TRIGGER mission_impact_classifications_no_update;
              DROP TRIGGER mission_impact_classifications_no_delete;
              DROP TABLE mission_impact_classifications;
              DROP TRIGGER measured_spend_no_update;
@@ -1056,7 +1065,7 @@ fn the_backfill_gives_existing_missions_their_condition_rows_in_order() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .expect("a store at the previous schema version must migrate");
-    assert_eq!(report.diagnostics.schema_version, 25);
+    assert_eq!(report.diagnostics.schema_version, 26);
 
     assert_eq!(
         condition_rows(&store.path, mission.id),
