@@ -826,6 +826,36 @@ fn tampered_content_is_refused_at_read_and_at_startup() {
 }
 
 #[test]
+fn a_tampered_event_content_digest_envelope_refuses_startup() {
+    let fixture = admitted_mission("artifact-event-content-envelope");
+    let artifact = fixture.record_doc(DOC_MARKDOWN);
+    let connection = fixture.store.connect();
+    let changed = connection
+        .execute(
+            "UPDATE events
+             SET payload_json = json_set(
+                 payload_json,
+                 '$.artifact.contentDigest.algorithm', 'md5',
+                 '$.artifact.contentDigest.canonicalizer', 'attacker'
+             )
+             WHERE kind = 'artifact.recorded'
+               AND json_extract(payload_json, '$.artifact.digest.value') = ?1",
+            rusqlite::params![artifact.digest().value],
+        )
+        .unwrap();
+    assert_eq!(changed, 1, "the probe did not alter the paired Event");
+    drop(connection);
+
+    assert!(
+        matches!(
+            fixture.restart(),
+            Err(SupervisorError::ArtifactEventMismatch(_))
+        ),
+        "startup accepted an Event whose content-digest algorithm and canonicalizer were forged"
+    );
+}
+
+#[test]
 fn missing_duplicate_orphaned_or_differently_encoded_event_evidence_refuses_startup() {
     // Missing: the row with no Event.
     let fixture = admitted_mission("artifact-event-missing");
@@ -1266,7 +1296,7 @@ fn update_and_delete_against_a_recorded_artifact_are_refused_by_the_store() {
     assert!(
         connection
             .execute(
-                "UPDATE artifacts SET media_type = 'text/plain' WHERE digest_value = ?1",
+                "UPDATE artifacts SET content_bytes = content_bytes + 1 WHERE digest_value = ?1",
                 rusqlite::params![artifact.digest().value],
             )
             .is_err(),
