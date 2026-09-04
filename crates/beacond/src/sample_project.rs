@@ -363,6 +363,8 @@ impl SampleProjectService {
             #[cfg(debug_assertions)]
             &self.copy_failpoints,
         )?;
+        #[cfg(debug_assertions)]
+        copy_failpoint(&self.copy_failpoints.after_publish, &destination);
         let created_identity = {
             let metadata = created.metadata()?;
             (metadata.dev(), metadata.ino())
@@ -1516,6 +1518,8 @@ pub struct CopyFailpoints {
     pub before_open: Option<CopyHook>,
     /// After `openat`, before the staging name is checked and published.
     pub after_open: Option<CopyHook>,
+    /// After the verified child is published, before the tree is copied by pathname.
+    pub after_publish: Option<CopyHook>,
 }
 
 #[cfg(debug_assertions)]

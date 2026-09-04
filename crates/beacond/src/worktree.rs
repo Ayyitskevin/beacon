@@ -846,14 +846,50 @@ fn closed_git_command(git: &Path) -> Command {
     command
 }
 
+/// The environment every Git child of this crate runs under.
+///
+/// `env_clear` first, so what follows is the whole environment rather than an amendment to the
+/// operator's.
+///
+/// **The last three close the repository's own view of its objects.** A repository can rewrite what
+/// its objects *are* without touching a single byte a gate reads: `.git/refs/replace/*` substitutes
+/// one object for another, `.git/info/grafts` rewrites parentage, and `.git/shallow` truncates it.
+/// All three live inside the repository under measurement, so a gate that honours them is measuring
+/// the repository's account of itself. A cold review published the counterexample for the first:
+/// with a replacement installed, `diff --name-status base commit` reported only the declared path
+/// while the literal graph carried an undeclared one, and dispatch applied it. Each neutralizer was
+/// measured against the installed Git before it was written down, and the closed-environment test
+/// pins the exact key set so a fourth knob of this class is a deliberate addition rather than a
+/// silent omission.
+///
+/// A genuinely shallow or grafted repository therefore looks incomplete to Beacon and its reads
+/// fail rather than succeed against a rewritten graph. That is the fail-closed direction.
 fn configure_closed_git_environment(command: &mut Command) {
     command
         .env_clear()
         .env("PATH", GIT_PATH)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_TERMINAL_PROMPT", "0");
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_GRAFT_FILE", "/dev/null")
+        .env("GIT_SHALLOW_FILE", "/dev/null");
 }
+
+/// The keys [`configure_closed_git_environment`] sets, and the only ones a Git child receives.
+///
+/// Named here rather than only inside the builder so a test can assert the whole set: an omission
+/// from this list is what the replacement-ref counterexample was.
+#[cfg(test)]
+const CLOSED_GIT_ENVIRONMENT_KEYS: [&str; 7] = [
+    "PATH",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_TERMINAL_PROMPT",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_GRAFT_FILE",
+    "GIT_SHALLOW_FILE",
+];
 
 /// Run one Git invocation with a deadline.
 ///
@@ -952,8 +988,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        Bounded, CleanupOutcome, KeepReason, PinnedRepository, Worktree, run_git_bounded,
-        status_holds,
+        Bounded, CLOSED_GIT_ENVIRONMENT_KEYS, CleanupOutcome, KeepReason, PinnedRepository,
+        READ_BUDGET, Worktree, closed_git_command, configure_closed_git_environment,
+        run_git_bounded, status_holds,
     };
     use std::process::Command;
 
@@ -997,6 +1034,144 @@ mod tests {
             scratch_root,
             path,
         }
+    }
+
+    /// Build a repository with three commits and return `(root, first, second, third)`.
+    fn three_commits(label: &str) -> (TempDir, String, String, String) {
+        let root = TempDir::new(label);
+        let at = |arguments: &[&str]| -> String {
+            let output = Command::new("git")
+                .args(arguments)
+                .current_dir(&root.path)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {arguments:?} failed");
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        at(&["init", "--quiet", "--initial-branch=main", "."]);
+        at(&["config", "user.email", "beacon@localhost"]);
+        at(&["config", "user.name", "Beacon"]);
+        for content in ["one\n", "two\n", "three\n"] {
+            fs::write(root.path.join("a.txt"), content).unwrap();
+            at(&["add", "-A"]);
+            at(&["commit", "--quiet", "-m", content.trim()]);
+        }
+        let third = at(&["rev-parse", "HEAD"]);
+        let second = at(&["rev-parse", "HEAD~1"]);
+        let first = at(&["rev-parse", "HEAD~2"]);
+        (root, first, second, third)
+    }
+
+    /// Run one argument list under the closed environment, from `root`, and return stdout.
+    fn closed(root: &Path, arguments: &[&str]) -> String {
+        let mut command = closed_git_command(Path::new("/usr/bin/git"));
+        command.args(arguments).current_dir(root);
+        match run_git_bounded(command, READ_BUDGET) {
+            Bounded::Finished { success, stdout } => {
+                assert!(success, "closed git {arguments:?} failed");
+                stdout.trim().to_owned()
+            }
+            _ => panic!("closed git {arguments:?} did not finish"),
+        }
+    }
+
+    #[test]
+    fn the_closed_environment_is_exactly_these_keys() {
+        // The whole environment a Git child receives, asserted as a set rather than checked one key
+        // at a time. A cold review found `GIT_NO_REPLACE_OBJECTS` missing from it, and a missing key
+        // is invisible to every test that only asserts the keys it remembers. Adding a fourth
+        // object-view knob without adding it here is now a failing test rather than an omission.
+        let mut command = Command::new("/usr/bin/git");
+        configure_closed_git_environment(&mut command);
+        let mut observed: Vec<String> = command
+            .get_envs()
+            .map(|(key, value)| {
+                assert!(value.is_some(), "{key:?} was cleared rather than set");
+                key.to_string_lossy().into_owned()
+            })
+            .collect();
+        observed.sort();
+        let mut expected: Vec<String> = CLOSED_GIT_ENVIRONMENT_KEYS
+            .iter()
+            .map(|key| (*key).to_owned())
+            .collect();
+        expected.sort();
+        assert_eq!(observed, expected);
+    }
+
+    #[test]
+    fn the_closed_environment_reads_the_literal_object_graph() {
+        // Three ways a repository rewrites what its own objects ARE, each measured against the
+        // installed Git before it was written down. Every one of them lives inside the repository
+        // under measurement, so a gate that honours them is reading the repository's account of
+        // itself rather than its bytes. The ambient half of each pair is the control: without it, a
+        // neutralizer that did nothing would pass.
+        let (root, first, second, third) = three_commits("object-view");
+        let ambient = |arguments: &[&str]| -> String {
+            let output = Command::new("git")
+                .args(arguments)
+                .current_dir(&root.path)
+                .output()
+                .unwrap();
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        let run = |arguments: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(arguments)
+                    .current_dir(&root.path)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success(),
+                "git {arguments:?} failed"
+            );
+        };
+
+        // 1. A replacement ref substitutes one object for another.
+        run(&["replace", "-f", &first, &third]);
+        assert_ne!(
+            ambient(&["cat-file", "-p", &first]),
+            closed(&root.path, &["cat-file", "-p", &first]),
+            "the replacement did not change the ambient view, so this proves nothing"
+        );
+        assert!(
+            !closed(&root.path, &["cat-file", "-p", &first]).contains("parent "),
+            "the closed environment read the replacement, not the root commit"
+        );
+        run(&["replace", "-d", &first]);
+
+        // 2. A graft file rewrites parentage.
+        fs::create_dir_all(root.path.join(".git/info")).unwrap();
+        fs::write(
+            root.path.join(".git/info/grafts"),
+            format!("{third} {first}\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            ambient(&["rev-list", "--parents", "-n1", &third]),
+            format!("{third} {first}"),
+            "the graft did not take, so this proves nothing"
+        );
+        assert_eq!(
+            closed(&root.path, &["rev-list", "--parents", "-n1", &third]),
+            format!("{third} {second}"),
+            "the closed environment honoured .git/info/grafts"
+        );
+        fs::remove_file(root.path.join(".git/info/grafts")).unwrap();
+
+        // 3. A shallow file truncates it.
+        fs::write(root.path.join(".git/shallow"), format!("{third}\n")).unwrap();
+        assert_eq!(
+            ambient(&["rev-list", "--parents", "-n1", &third]),
+            third,
+            "the shallow file did not take, so this proves nothing"
+        );
+        assert_eq!(
+            closed(&root.path, &["rev-list", "--parents", "-n1", &third]),
+            format!("{third} {second}"),
+            "the closed environment honoured .git/shallow"
+        );
     }
 
     #[test]
