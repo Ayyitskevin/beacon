@@ -309,8 +309,7 @@ fn a_declared_length_that_cannot_fit_the_remaining_input_is_refused_by_arithmeti
 
     // Beyond the field's own limit: refused as over-limit before the remaining input is consulted.
     let mut over_limit = bytes.clone();
-    over_limit[length_offset..length_offset + 8]
-        .copy_from_slice(&u64::MAX.to_be_bytes());
+    over_limit[length_offset..length_offset + 8].copy_from_slice(&u64::MAX.to_be_bytes());
     assert_eq!(
         ArtifactV1::from_canonical_bytes(&over_limit).expect_err("refuses"),
         MalformedArtifact::OverLimitLength
