@@ -1436,7 +1436,7 @@ fn a_store_at_the_previous_version_migrates_forward_and_reconciles() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(version, 27, "the ladder did not reach the current version");
+    assert_eq!(version, 28, "the ladder did not reach the current version");
     connection
         .query_row("SELECT count(*) FROM artifacts", [], |row| {
             row.get::<_, i64>(0)

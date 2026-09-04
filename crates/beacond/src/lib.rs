@@ -212,7 +212,7 @@ pub use team::{
 pub use worktree::set_pinned_spawn_hook;
 pub use worktree::{CleanupOutcome, KeepReason, Worktree, WorktreeError};
 
-const SCHEMA_VERSION: i64 = 27;
+const SCHEMA_VERSION: i64 = 28;
 const MAX_WORKSPACE_NAME_CHARS: usize = 120;
 
 const SCHEMA_V1: &str = include_str!("../migrations/0001_initial.sql");
@@ -259,6 +259,9 @@ const MIGRATION_V26: &str = include_str!("../migrations/0026_mission_completions
 // a list written before the rebase is a snapshot of the wrong parent (the #50 trap), and the
 // migration tests diff the list against the enum.
 const MIGRATION_V27: &str = include_str!("../migrations/0027_artifacts.sql");
+// PROVISIONAL: the publication relation wants a number in this window too, and whichever lands
+// second renumbers at its final rebase.
+const MIGRATION_V28: &str = include_str!("../migrations/0028_evaluation_subjects.sql");
 
 #[derive(Debug, Clone)]
 pub struct StartupConfig {
@@ -848,6 +851,7 @@ const MIGRATION_LADDER: &[(i64, &str)] = &[
     (25, MIGRATION_V25),
     (26, MIGRATION_V26),
     (27, MIGRATION_V27),
+    (28, MIGRATION_V28),
 ];
 
 /// Applies the ladder up to and including `version` -- a store at that schema, from nothing.
