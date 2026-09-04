@@ -25,49 +25,17 @@ use std::fmt;
 use rusqlite::Connection;
 use uuid::Uuid;
 
+use crate::artifact::ArtifactDigest;
 use crate::artifact::verified_artifact_within;
-use crate::evaluation::{EvaluationSubject, Verdict, verified_evaluation_within};
-
-/// The candidate Artifact's RECORD digest, as its own type.
-///
-/// Two hex strings side by side in a signature are two things a caller can swap, and the swap
-/// compiles, runs, and refuses for a reason that reads like a data problem (sol1's P1). These are
-/// newtypes so that the mistake is a type error at the call site instead: the seam takes one of
-/// each, and neither can be built from the other by accident.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct CandidateArtifactDigest(String);
-
-/// The cited Evaluation's digest, as its own type. See `CandidateArtifactDigest`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct CitedEvaluationDigest(String);
-
-impl CandidateArtifactDigest {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl CitedEvaluationDigest {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
+use crate::evaluation::{EvaluationDigest, EvaluationSubject, Verdict, verified_evaluation_within};
 
 /// One publishable pairing, proved. Two identities and a Workspace: exactly the columns the
 /// relation's own foreign keys need, and nothing a surface could print as a claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicationCandidacy {
     workspace_id: Uuid,
-    candidate_artifact_digest: CandidateArtifactDigest,
-    evaluation_digest: CitedEvaluationDigest,
+    candidate_artifact_digest: ArtifactDigest,
+    evaluation_digest: EvaluationDigest,
 }
 
 impl PublicationCandidacy {
@@ -75,12 +43,13 @@ impl PublicationCandidacy {
         self.workspace_id
     }
 
-    /// The candidate Artifact's RECORD digest -- the identity the relation keys on.
-    pub fn candidate_artifact_digest(&self) -> &CandidateArtifactDigest {
+    /// The candidate Artifact's RECORD digest -- the identity the relation keys on, in the
+    /// envelope its owning module verified.
+    pub fn candidate_artifact_digest(&self) -> &ArtifactDigest {
         &self.candidate_artifact_digest
     }
 
-    pub fn evaluation_digest(&self) -> &CitedEvaluationDigest {
+    pub fn evaluation_digest(&self) -> &EvaluationDigest {
         &self.evaluation_digest
     }
 }
@@ -106,6 +75,10 @@ pub enum PublicationSeamRefusal {
     EvaluatorAuthoredTheCandidate,
     /// The Evaluation's derived Mission is not the Outcome's Mission.
     MissionDiffers,
+    /// A supplied digest envelope is not the one the owning module verified: same value, different
+    /// algorithm or canonicalizer. A digest read back under an envelope nobody produced is the
+    /// assumption these records exist to remove.
+    CitedEnvelopeDisagrees,
     /// A record did not verify. Deliberately opaque: the owning module's refusal is that module's
     /// to report, and repeating it here would be a second place for it to drift.
     Unverified,
@@ -125,6 +98,9 @@ impl fmt::Display for PublicationSeamRefusal {
                 "the evaluator is the candidate's accountable Resident"
             }
             Self::MissionDiffers => "the Evaluation's Mission is not this Outcome's Mission",
+            Self::CitedEnvelopeDisagrees => {
+                "the supplied digest envelope is not the one the owning module verified"
+            }
             Self::Unverified => "a cited record did not verify",
         })
     }
@@ -141,18 +117,35 @@ impl std::error::Error for PublicationSeamRefusal {}
 pub fn publication_candidacy(
     connection: &Connection,
     workspace_id: Uuid,
-    evaluation_digest: &CitedEvaluationDigest,
-    candidate_artifact_digest: &CandidateArtifactDigest,
+    evaluation_digest: &EvaluationDigest,
+    candidate_artifact_digest: &ArtifactDigest,
     outcome_mission_id: Uuid,
 ) -> Result<PublicationCandidacy, PublicationSeamRefusal> {
     let evaluation =
-        verified_evaluation_within(connection, workspace_id, evaluation_digest.as_str())
+        verified_evaluation_within(connection, workspace_id, evaluation_digest.value.as_str())
             .map_err(|_| PublicationSeamRefusal::Unverified)?
             .ok_or(PublicationSeamRefusal::EvaluationAbsent)?;
-    let candidate =
-        verified_artifact_within(connection, workspace_id, candidate_artifact_digest.as_str())
-            .map_err(|_| PublicationSeamRefusal::Unverified)?
-            .ok_or(PublicationSeamRefusal::CandidateAbsent)?;
+    let candidate = verified_artifact_within(
+        connection,
+        workspace_id,
+        candidate_artifact_digest.value.as_str(),
+    )
+    .map_err(|_| PublicationSeamRefusal::Unverified)?
+    .ok_or(PublicationSeamRefusal::CandidateAbsent)?;
+
+    // 0. The envelopes the caller supplied are the ones the owning modules verified.
+    //
+    //    Types stop a SWAP; they do not stop a FORGE. `ArtifactDigest` and `EvaluationDigest` have
+    //    public fields, so a caller can hand-build one with the right `value` and a wrong
+    //    algorithm or canonicalizer -- and a value read back under an envelope nobody produced is
+    //    exactly the "which function made this digest?" assumption these records exist to remove.
+    //    So the whole envelope is compared, not just the value the lookup used.
+    if evaluation.digest() != evaluation_digest {
+        return Err(PublicationSeamRefusal::CitedEnvelopeDisagrees);
+    }
+    if candidate.digest() != candidate_artifact_digest {
+        return Err(PublicationSeamRefusal::CitedEnvelopeDisagrees);
+    }
 
     // 1. The subject is an Artifact, and 2. it is THIS one -- from the Evaluation's own bytes.
     let EvaluationSubject::Artifact(subject) = &evaluation.payload().subject else {
@@ -178,7 +171,9 @@ pub fn publication_candidacy(
 
     Ok(PublicationCandidacy {
         workspace_id,
-        candidate_artifact_digest: CandidateArtifactDigest::new(candidate.digest().value.clone()),
-        evaluation_digest: CitedEvaluationDigest::new(evaluation.digest().value.clone()),
+        // From the VERIFIED records, never from the caller's arguments: what the relation stores
+        // is the envelope the owning modules proved, not the one it was handed.
+        candidate_artifact_digest: candidate.digest().clone(),
+        evaluation_digest: evaluation.digest().clone(),
     })
 }
