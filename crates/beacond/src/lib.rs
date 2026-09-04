@@ -28,6 +28,7 @@ mod mission_impact;
 mod operator_account;
 mod outcome;
 mod outcome_collector;
+mod outcome_store;
 mod platform_session;
 mod project;
 mod project_policy;
@@ -142,6 +143,10 @@ pub use outcome_collector::{
     CollectedClassification, CollectedCompletion, CollectedCondition, CollectedDigest,
     CollectedNarrative, CollectedSources, CollectedSpend, CollectionRequest, Collector,
     CollectorRefusal, OUTCOME_RECEIPT_CHECKSUM_LABEL, SpendAmount, positionable_sources,
+};
+pub use outcome_store::{
+    MAX_STORED_MANIFEST_BYTES, ManifestStoreRefusal, OutcomeCandidate, OutcomeService,
+    PrepareRefusal, StoredOutcomeManifest, manifest_reference_id, verified_manifest_within,
 };
 pub use platform_session::{
     PlatformMonitorState, PlatformSessionMonitor, PlatformSessionMonitorStatus,
