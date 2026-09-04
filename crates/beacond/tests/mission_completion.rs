@@ -432,3 +432,59 @@ fn decode_and_re_encode_are_byte_identical_for_every_arm() {
         assert_eq!(decoded.digest().unwrap(), record.digest().unwrap());
     }
 }
+
+#[test]
+fn a_set_that_is_not_in_canonical_order_or_repeats_an_entry_is_refused() {
+    // Not one of the design's six bullets, and it should have been. The design says "a permutation
+    // of the same support cannot produce a second completion identity" -- which is only true if an
+    // unordered list is REFUSED, and nothing tested that: the mutation table found both set-order
+    // checks surviving, because every fixture was already in order.
+    //
+    // Support references and delivered Artifacts are sets: one total order, strictly ascending, so
+    // a duplicate is refused too.
+    let mut permuted = fixture();
+    permuted.condition_results[0].support.swap(0, 2);
+    assert_eq!(
+        permuted.canonical_bytes(),
+        Err(MalformedCompletion::SupportOrder),
+        "a permuted support list would be a second identity for one set"
+    );
+
+    let mut repeated = fixture();
+    repeated.condition_results[0].support = vec![
+        SupportRef::Artifact(digest(0x22)),
+        SupportRef::Artifact(digest(0x22)),
+    ];
+    assert_eq!(
+        repeated.canonical_bytes(),
+        Err(MalformedCompletion::SupportOrder),
+        "one object cited twice is not a set"
+    );
+
+    let mut unordered = fixture();
+    unordered.delivered_artifacts = vec![digest(0x66), digest(0x55)];
+    assert_eq!(
+        unordered.canonical_bytes(),
+        Err(MalformedCompletion::DeliveredArtifactOrder)
+    );
+
+    let mut duplicated = fixture();
+    duplicated.delivered_artifacts = vec![digest(0x55), digest(0x55)];
+    assert_eq!(
+        duplicated.canonical_bytes(),
+        Err(MalformedCompletion::DeliveredArtifactOrder)
+    );
+
+    // ...and the decoder refuses them too, not only the encoder: bytes arriving from a store or
+    // another implementation get the same rule.
+    let mut bytes = fixture().canonical_bytes().unwrap();
+    let first = bytes
+        .windows(32)
+        .position(|window| window == digest(0x55))
+        .expect("the first delivered artifact is in the vector");
+    bytes[first..first + 32].copy_from_slice(&digest(0x77));
+    assert_eq!(
+        MissionCompletionV1::from_canonical_bytes(&bytes),
+        Err(MalformedCompletion::DeliveredArtifactOrder)
+    );
+}
