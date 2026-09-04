@@ -1376,11 +1376,10 @@ mod tests {
         MIGRATION_V7, MIGRATION_V8, MIGRATION_V9, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12,
         MIGRATION_V13, MIGRATION_V14, MIGRATION_V15, MIGRATION_V16_ONLY, MIGRATION_V17,
         MIGRATION_V18, MIGRATION_V19, MIGRATION_V20, MIGRATION_V22, MIGRATION_V23, MIGRATION_V24,
-        MIGRATION_V25, MIGRATION_V26, OperatorAccountService, PreflightOutcome, PreflightReceipt,
-        ProjectCharter, ProjectCharterDraft, ProjectDraft, ProjectRepositoryService,
-        ProjectService, ProjectView, Recorded, RepositoryDraft, RepositorySourceKind,
-        ResolvedCheck, SCHEMA_V1, SecretString, StartupConfig, Supervisor, SupervisorError,
-        UnavailableEvidence,
+        MIGRATION_V25, OperatorAccountService, PreflightOutcome, PreflightReceipt, ProjectCharter,
+        ProjectCharterDraft, ProjectDraft, ProjectRepositoryService, ProjectService, ProjectView,
+        Recorded, RepositoryDraft, RepositorySourceKind, ResolvedCheck, SCHEMA_V1, SecretString,
+        StartupConfig, Supervisor, SupervisorError, UnavailableEvidence,
     };
 
     struct TestStore {
