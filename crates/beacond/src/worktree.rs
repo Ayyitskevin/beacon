@@ -782,6 +782,32 @@ pub(crate) fn read_pinned(
     }
 }
 
+/// [`read_pinned`], returning the child's standard output as bytes.
+///
+/// For the two reads whose subject IS bytes -- the pre-image gate and the effect post-condition,
+/// both `cat-file blob` -- where a declared file that is not valid UTF-8 must survive the round
+/// trip rather than refuse a change Beacon wrote correctly.
+pub(crate) fn read_pinned_bytes(
+    repository: &PinnedRepository,
+    arguments: &[&str],
+    budget: Duration,
+) -> Option<Vec<u8>> {
+    let filter_drivers = pinned_filter_drivers(repository)?;
+    let mut command = read_only_git_command(Path::new(GIT), &filter_drivers);
+    repository.enter(&mut command);
+    // `--literal-pathspecs` is not needed here: `cat-file` takes an object name, not a pathspec.
+    for argument in arguments {
+        command.arg(argument);
+    }
+    match run_git_bounded_raw(command, None, budget) {
+        BoundedRaw::Finished {
+            success: true,
+            stdout,
+        } if repository.still_pinned() => Some(stdout),
+        _ => None,
+    }
+}
+
 /// Run one **mutating** Git invocation in a pinned repository, bounded, with optional stdin.
 ///
 /// The mutating half of the split gpt1's probes forced: gate reads carry `GIT_OPTIONAL_LOCKS=0`
@@ -1010,26 +1036,56 @@ fn run_git_bounded_with_stdin(
     run_git_bounded_inner(command, stdin_bytes, budget)
 }
 
+/// [`Bounded`], before its standard output is required to be text.
+///
+/// A Candidate carries `Vec<u8>` and neither ADR 0034 nor ADR 0039 narrows a declared file to
+/// UTF-8, so the post-condition's `cat-file blob` may legitimately produce bytes that are not.
+/// Decoding them was a fail-closed refusal (`EffectDoesNotMatchDeclaration`) of a change Beacon had
+/// already written correctly -- the digest is over bytes, and "exact bytes" has to mean bytes all
+/// the way out (sol1). There is still one runner; this is its output before the text conversion.
+enum BoundedRaw {
+    Finished { success: bool, stdout: Vec<u8> },
+    TimedOut,
+    Failed,
+}
+
 fn run_git_bounded_inner(
-    mut command: Command,
+    command: Command,
     stdin_bytes: Option<&[u8]>,
     budget: Duration,
 ) -> Bounded {
+    match run_git_bounded_raw(command, stdin_bytes, budget) {
+        BoundedRaw::Finished { success, stdout } => match String::from_utf8(stdout) {
+            Ok(stdout) => Bounded::Finished { success, stdout },
+            // Unchanged behaviour for every textual caller: `rev-parse`, `status` and
+            // `diff --name-status` producing invalid UTF-8 is not an answer.
+            Err(_) => Bounded::Failed,
+        },
+        BoundedRaw::TimedOut => Bounded::TimedOut,
+        BoundedRaw::Failed => Bounded::Failed,
+    }
+}
+
+fn run_git_bounded_raw(
+    mut command: Command,
+    stdin_bytes: Option<&[u8]>,
+    budget: Duration,
+) -> BoundedRaw {
     if stdin_bytes.is_none() {
         command.stdin(Stdio::null());
     }
     command.stdout(Stdio::piped()).stderr(Stdio::null());
     let Ok(mut child) = command.spawn() else {
-        return Bounded::Failed;
+        return BoundedRaw::Failed;
     };
     if let Some(bytes) = stdin_bytes {
         let Some(mut pipe) = child.stdin.take() else {
             let _ = child.kill();
-            return Bounded::Failed;
+            return BoundedRaw::Failed;
         };
         if std::io::Write::write_all(&mut pipe, bytes).is_err() {
             let _ = child.kill();
-            return Bounded::Failed;
+            return BoundedRaw::Failed;
         }
         drop(pipe);
     }
@@ -1041,25 +1097,25 @@ fn run_git_bounded_inner(
                 if started.elapsed() >= budget {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Bounded::TimedOut;
+                    return BoundedRaw::TimedOut;
                 }
                 thread::sleep(POLL_INTERVAL);
             }
             Err(_) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Bounded::Failed;
+                return BoundedRaw::Failed;
             }
         }
     };
     let Some(mut pipe) = child.stdout.take() else {
-        return Bounded::Failed;
+        return BoundedRaw::Failed;
     };
-    let mut stdout = String::new();
-    if pipe.read_to_string(&mut stdout).is_err() {
-        return Bounded::Failed;
+    let mut stdout = Vec::new();
+    if pipe.read_to_end(&mut stdout).is_err() {
+        return BoundedRaw::Failed;
     }
-    Bounded::Finished {
+    BoundedRaw::Finished {
         success: status.success(),
         stdout,
     }
