@@ -59,7 +59,7 @@ silently is how two incompatible codecs get written from one table.
 | # | field | encoding | bound |
 |---|---|---|---|
 | 1 | magic | 21 literal bytes `beacon.evaluation.v1\0` | fixed; not length-framed |
-| 2 | `subject` | tag: `proposal` = `0x01` | the only assigned value in v1 |
+| 2 | `subject` | tag: `proposal` = `0x01` | the only assigned value in v1 (amended 2026-09-04 — see the amendment) |
 | 3 | └ `proposal_digest` | 32 raw bytes | — |
 | 4 | └ `proposal_digest_algorithm` | string | `sha256` |
 | 5 | └ `proposal_digest_canonicalizer` | string | `beacon.proposal.v1` |
@@ -118,7 +118,7 @@ is not, and must not be claimed to be, enforced at runtime.
 `subject` and `verdict` are the one pair the caveat does not reach, and the
 reason must be stated correctly or it reads as a licence the grammar does not
 grant. They are not disjoint: both assign `0x01`. What holds is three separate
-facts. `subject` assigns only `0x01`, so any other verdict value landing in its
+facts. `subject` assigns only `0x01` as shipped (amended 2026-09-04), so any other verdict value landing in its
 position is an unassigned tag refused by a closed vocabulary. The `0x01`/`0x01`
 case is not a swap at all, because the bytes are identical. And they are fields
 2 and 13, separated by ten variable-length fields, so a positional transposition
@@ -319,4 +319,7 @@ vector is built by a non-author seat from the amended field table BEFORE the
 arm's encoder exists — the order that proves anything. (c) The pinned refusal
 test that flips the subject byte to `0x02` stays green while only arms `0x01`
 and `0x03` exist; whichever later arm makes `0x02` valid edits that test, and a
-reviewer should expect a pinned test edited by a later change.
+reviewer should expect a pinned test edited by a later change. The arm's own
+codec tests owe a `0x04+` refusal: assigning `0x03` is precisely when the
+closed-vocabulary guarantee needs re-proving one value up, because the `0x02`
+flip then stops being the boundary case.
