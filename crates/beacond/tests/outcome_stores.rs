@@ -505,6 +505,34 @@ fn the_classification_reader_refuses_a_row_whose_impact_column_disagrees_with_it
     );
 }
 
+/// The classification reader's twin of the spend round-trip test.
+///
+/// It exists because the twin did not: opus's O2 deleted `mission_impact.rs`'s digest recomputation
+/// and all fourteen tests stayed green, while deleting the identical three lines from `spend.rs` was
+/// caught. A guard that is real on one half and untested on the other is one half of a guard.
+#[test]
+fn the_classification_reader_refuses_a_row_whose_bytes_do_not_hash_to_its_digest() {
+    let stored = stored("impact-digest");
+    let revision = stored.policy_revision();
+    let id = Uuid::new_v4();
+    let classification = stored.classification_record(id, revision);
+    let bytes = classification.canonical_bytes().unwrap();
+
+    // The bytes decode, re-encode to themselves, and agree with every projection column. The only
+    // thing wrong with this row is the identity it is filed under -- which is the one fault this
+    // check exists for, and the reason it has to be its own recomputation rather than a column read.
+    let wrong = "b".repeat(64);
+    assert_ne!(wrong, classification.digest().unwrap().value);
+    stored.insert_classification(&bytes, &wrong, id, revision, "high");
+
+    let connection = stored.connection();
+    assert_eq!(
+        verified_classification_within(&connection, stored.store.workspace_id, &wrong)
+            .expect_err("refuses"),
+        ClassificationStoreError::DigestMismatch
+    );
+}
+
 /// A citation whose reference identity and content identity disagree is refused (R15).
 #[test]
 fn a_citation_whose_id_and_digest_disagree_is_refused() {
