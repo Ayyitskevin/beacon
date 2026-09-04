@@ -1388,8 +1388,13 @@ pub(crate) fn verify_artifact_event(
 ) -> Result<(), ArtifactError> {
     let payload: ArtifactRecordedPayload = serde_json::from_str(payload_json)?;
     let recorded = payload.artifact;
+    // Whole envelopes, not values alone (R15): a forged algorithm or canonicalizer beside a
+    // matching value is different evidence, and the content digest's envelope is the content's
+    // own -- sha256 under beacon.raw.v1 -- not whatever the Event claims.
     if recorded.digest.algorithm != DIGEST_ALGORITHM
         || recorded.digest.canonicalizer != CANONICALIZER
+        || recorded.content_digest.algorithm != DIGEST_ALGORITHM
+        || recorded.content_digest.canonicalizer != RAW_CONTENT_CANONICALIZER
         || recorded.recorded_at_ms != occurred_at_ms
     {
         return Err(ArtifactError::InvalidStore);
