@@ -245,13 +245,19 @@ fn downgrade_execution_schema_to_v15(store_path: &Path) {
     connection
         .execute_batch(
             "BEGIN IMMEDIATE;
-             -- Records come off innermost first, newest migration first. Migration 0027's
-             -- Artifact store is newest (the supersession relation first, since it keys into
-             -- `artifacts`); migration 0026's completion store is next; migration 0025's spend
+             -- Records come off innermost first, newest migration first. Migration 0029's
+             -- Outcome manifest store is newest: it keys into `artifacts`, `mission_completions`
+             -- and `missions`, so it comes off before any of them. Migration 0027's Artifact
+             -- store is next (the supersession relation first, since it keys into `artifacts`);
+             -- migration 0026's completion store is next; migration 0025's spend
              -- and classification tables reference missions and Project Policy revisions;
              -- migration 0024's condition identity is next (ADR 0041); migration 0023's
              -- Evaluation tables reference proposals, and 0022's Ruling/Candidate binding
              -- references both rulings and candidates, which reference proposals in turn.
+             DROP TRIGGER outcome_manifests_no_update;
+             DROP TRIGGER outcome_manifests_no_delete;
+             DROP INDEX outcome_manifests_by_mission;
+             DROP TABLE outcome_manifests;
              DROP TRIGGER artifact_supersessions_no_update;
              DROP TRIGGER artifact_supersessions_no_delete;
              DROP TABLE artifact_supersessions;
