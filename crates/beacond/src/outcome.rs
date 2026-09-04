@@ -724,11 +724,20 @@ fn uuid_key(value: &Uuid) -> String {
     value.hyphenated().to_string()
 }
 
+/// The canonical order and identity of one cited source.
+///
+/// The digest is a three-part envelope and all three parts are in the key. A key built from the
+/// value alone makes two references that differ only in canonicalizer -- `beacon.artifact.v1` and
+/// `beacon.artifact.v2` over the same bytes -- collide: the encoder would reject them as a repeated
+/// canonical key and the census would count them as one object. They are two objects, because a
+/// digest value without the function that produced it names nothing (ADR 0034/0037).
 fn source_ref_key(value: &SourceRef) -> Vec<KeyPart> {
     vec![
         KeyPart::Num(u64::from(value.kind.tag())),
         KeyPart::Text(uuid_key(&value.object_id)),
         KeyPart::Num(u64::from(value.schema_version)),
+        KeyPart::Text(value.digest.algorithm.clone()),
+        KeyPart::Text(value.digest.canonicalizer.clone()),
         KeyPart::Text(value.digest.value.clone()),
     ]
 }
@@ -1561,8 +1570,8 @@ fn require_single_workspace(manifest: &OutcomeManifestV1) -> Result<(), Malforme
 /// object. The walk stops the moment the set exceeds the limit, so the reported figure is an
 /// observed-at-least count rather than a total nobody finished counting.
 fn citation_census(manifest: &OutcomeManifestV1) -> Result<u64, BoundRefusal> {
-    let mut seen: BTreeSet<(u8, String, u32, String)> = BTreeSet::new();
-    let refuse_if_over = |seen: &BTreeSet<(u8, String, u32, String)>| -> Result<(), BoundRefusal> {
+    let mut seen: BTreeSet<Vec<KeyPart>> = BTreeSet::new();
+    let refuse_if_over = |seen: &BTreeSet<Vec<KeyPart>>| -> Result<(), BoundRefusal> {
         let observed = seen.len() as u64;
         if observed > MAX_CITATIONS {
             return Err(BoundRefusal {
@@ -1575,34 +1584,33 @@ fn citation_census(manifest: &OutcomeManifestV1) -> Result<u64, BoundRefusal> {
     };
 
     for reference in cited_refs(manifest) {
-        seen.insert((
-            reference.kind.tag(),
-            uuid_key(&reference.object_id),
-            reference.schema_version,
-            reference.digest.value.clone(),
-        ));
+        seen.insert(source_ref_key(reference));
         refuse_if_over(&seen)?;
     }
     if let Some(receipts) = manifest.receipt_refs.verified() {
         for receipt in receipts {
             // Receipts have no `SourceKind`; 0x00 is unassigned there and names the Receipt lane
             // in this census without widening the source vocabulary.
-            seen.insert((
-                0x00,
-                uuid_key(&receipt.run_uuid),
-                receipt.receipt_version,
-                receipt.outcome_checksum.clone(),
-            ));
+            seen.insert(vec![
+                KeyPart::Num(0x00),
+                KeyPart::Text(uuid_key(&receipt.run_uuid)),
+                KeyPart::Num(u64::from(receipt.receipt_version)),
+                KeyPart::Text(DIGEST_ALGORITHM.to_owned()),
+                KeyPart::Text(RECEIPT_CHECKSUM_LABEL.to_owned()),
+                KeyPart::Text(receipt.outcome_checksum.clone()),
+            ]);
             refuse_if_over(&seen)?;
         }
     }
     if let Some(spend) = manifest.spend_ref.verified() {
-        seen.insert((
-            SourceKind::Spend.tag(),
-            uuid_key(&spend.spend_id),
-            spend.schema_version,
-            spend.digest.value.clone(),
-        ));
+        seen.insert(vec![
+            KeyPart::Num(u64::from(SourceKind::Spend.tag())),
+            KeyPart::Text(uuid_key(&spend.spend_id)),
+            KeyPart::Num(u64::from(spend.schema_version)),
+            KeyPart::Text(spend.digest.algorithm.clone()),
+            KeyPart::Text(spend.digest.canonicalizer.clone()),
+            KeyPart::Text(spend.digest.value.clone()),
+        ]);
         refuse_if_over(&seen)?;
     }
     Ok(seen.len() as u64)
