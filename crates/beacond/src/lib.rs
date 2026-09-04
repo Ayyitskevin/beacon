@@ -1335,8 +1335,7 @@ mod tests {
         MIGRATION_V7, MIGRATION_V8, MIGRATION_V9, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12,
         MIGRATION_V13, MIGRATION_V14, MIGRATION_V15, MIGRATION_V16_ONLY, MIGRATION_V17,
         MIGRATION_V18, MIGRATION_V19, MIGRATION_V20, MIGRATION_V22, MIGRATION_V23, MIGRATION_V24,
-        MIGRATION_V18, MIGRATION_V19, MIGRATION_V20, MIGRATION_V22, MIGRATION_V23, MIGRATION_V25,
-        OperatorAccountService, PreflightOutcome, PreflightReceipt, ProjectCharter,
+        MIGRATION_V25, OperatorAccountService, PreflightOutcome, PreflightReceipt, ProjectCharter,
         ProjectCharterDraft, ProjectDraft, ProjectRepositoryService, ProjectService, ProjectView,
         Recorded, RepositoryDraft, RepositorySourceKind, ResolvedCheck, SCHEMA_V1, SecretString,
         StartupConfig, Supervisor, SupervisorError, UnavailableEvidence,
@@ -3883,13 +3882,16 @@ mod tests {
     /// migration can silently delete history: a kind dropped from the CHECK takes every stored row
     /// that uses it.
     ///
-    /// So this plants one Event of EVERY kind a v23 store could hold -- the list read out of 0023's
-    /// own SQL rather than retyped here, because a hand-written expected list is the same mistake
-    /// one level up -- applies the migration, and looks for all of them afterwards.
+    /// So this plants one Event of EVERY kind the store could hold before this migration -- the
+    /// list read out of the parent's own SQL rather than retyped here, because a hand-written
+    /// expected list is the same mistake one level up -- applies the migration, and looks for all of
+    /// them afterwards. The parent is 0023: 0024 shipped between them and declares no kind list.
     #[test]
     fn the_event_kind_rebuild_carries_every_kind_and_its_rows() {
         let connection = Connection::open_in_memory().unwrap();
-        super::apply_migrations_through(&connection, 23).unwrap();
+        // The store this migration actually meets: 24, the version `main` shipped before it. The
+        // kind list's parent is still 0023, because 0024 declares none.
+        super::apply_migrations_through(&connection, 24).unwrap();
         let workspace = Uuid::new_v4().to_string();
         connection
             .execute(
