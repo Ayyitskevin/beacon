@@ -14,9 +14,9 @@ use uuid::Uuid;
 mod candidate;
 mod check_preflight;
 mod declared_checks;
-mod dispatch;
 #[cfg(unix)]
 mod disk_encryption;
+mod dispatch;
 mod git_object_store;
 mod local_model_activation;
 mod mission;
