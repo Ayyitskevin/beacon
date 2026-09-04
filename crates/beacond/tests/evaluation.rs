@@ -751,7 +751,7 @@ fn a_recorded_evaluation_is_immutable_and_survives_startup_verification() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .expect("startup verifies the Evaluation");
-    assert_eq!(report.diagnostics.schema_version, 28);
+    assert_eq!(report.diagnostics.schema_version, 29);
     assert_eq!(
         evaluations.get(&evaluation.digest().value).unwrap(),
         evaluation
