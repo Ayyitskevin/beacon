@@ -3762,6 +3762,11 @@ fn swapping_only_the_git_directory_cannot_redirect_a_pinned_dispatch() {
         .unwrap();
     assert!(cloned.success());
 
+    // The replacement's own bytes, before anything runs. This is the assertion that tells the
+    // descriptor pin apart from the refusal: a child that rediscovered `.git` by name would put a
+    // loose object in here, and the outcome would be the same refusal either way.
+    let replacement_before = raw_repository_snapshot(&decoy.join(".git"));
+
     let watched = repository.path.clone();
     let decoy_for_hook = decoy.clone();
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -3792,18 +3797,36 @@ fn swapping_only_the_git_directory_cannot_redirect_a_pinned_dispatch() {
     let redirected_head = CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]);
 
     fs::rename(repository.path.join(".git"), decoy.join(".git")).unwrap();
+    // Measured here, while the replacement still exists and before the cleanup below removes it.
+    let replacement_after = raw_repository_snapshot(&decoy.join(".git"));
     fs::rename(&original_git, repository.path.join(".git")).unwrap();
     CopyRepository::git(&repository.path, &["reset", "--hard", &base]);
     let _ = fs::remove_dir_all(&decoy);
 
-    assert!(
-        receipt.outcome != DispatchOutcome::Applied
-            && original_head.trim() != base
-            && redirected_head == base,
-        "outcome={:?}; descriptor-pinned ref={}; replacement ref={}; base={base}",
+    // sol1's arrangement, with the two assertions the fix makes separable.
+    //
+    // The probe asked that the pinned repository receive the landing while the replacement received
+    // nothing. Two mechanisms answer this swap now, and one test asserting a conjunction could not
+    // tell them apart, so each assertion below is killed by a different deletion:
+    //
+    //   * the replacement receiving NOTHING is the descriptor pin. Delete `GIT_DIR` from `enter`
+    //     and `hash-object -w` puts a loose object in the replacement -- with the same outcome,
+    //     because `still_pinned` then refuses anyway;
+    //   * the outcome NOT being `Applied` is `still_pinned`'s new `.git` check. Delete it and the
+    //     dispatch runs to completion in the correct repository and reports `Applied`.
+    //
+    // Refusing rather than proceeding is deliberate: the Receipt records `source` as a PATHNAME,
+    // and after a persistent swap that pathname names a different repository. Continuing would
+    // produce a truthful landing described by a lying reference.
+    assert_eq!(
+        replacement_after, replacement_before,
+        "the replacement received a write, so a child rediscovered .git by name"
+    );
+    assert_ne!(
         receipt.outcome,
+        DispatchOutcome::Applied,
+        "a persistent .git swap was not noticed; pinned ref={}, replacement ref={redirected_head}, base={base}",
         original_head.trim(),
-        redirected_head,
     );
 }
 

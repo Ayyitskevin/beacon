@@ -540,13 +540,31 @@ pub(crate) fn filter_drivers_from_config_output(stdout: &str) -> Vec<String> {
 /// The identity is the device and inode of the opened directory, which is what "the same directory"
 /// means to the kernel; the retained descriptor is what keeps that identity from being reused
 /// underneath us while this value lives.
+///
+/// **The root alone is not the repository.** A cold review swapped only `repo/.git` — leaving the
+/// root's inode, its pathname and its contents untouched — and every Git child, which discovers
+/// `.git` by name, wrote its objects and moved its ref inside the replacement while the Receipt
+/// said `Applied` about the directory Beacon pinned. Entering by descriptor solves a different
+/// race: it fixes *which directory the child starts in*, not *which repository the child finds
+/// there*. So the Git directory is opened through the root descriptor at pin time and held too,
+/// and every child is pointed at it by descriptor rather than by name.
 #[derive(Debug)]
 pub(crate) struct PinnedRepository {
     path: PathBuf,
     device: u64,
     inode: u64,
     directory: fs::File,
+    /// The `.git` directory inside `directory`, opened through it and held for the same reason.
+    git_directory: fs::File,
+    git_identity: (u64, u64),
 }
+
+/// The descriptor number a Git child receives the pinned Git directory on.
+///
+/// Fixed rather than inherited: the value has to be in `GIT_DIR` when the command is built, which
+/// is before the fork that would tell us what the kernel picked. High enough to be clear of the
+/// standard three and of anything `Command` arranges for the child.
+const PINNED_GIT_DIR_FD: std::os::fd::RawFd = 100;
 
 impl PinnedRepository {
     /// Open `path` as a directory without following its final component, and pin what was opened.
@@ -568,11 +586,22 @@ impl PinnedRepository {
         // A directory with no `.git` is not a repository, and saying "the revision is missing"
         // about one would be the wrong fact.
         ObjectStore::open(&path).map_err(|_| WorktreeError::RepositoryUnreadable)?;
+        // ...and the `.git` inside it is opened THROUGH the descriptor just taken, so the entry
+        // that is pinned is the one that directory holds rather than whatever the pathname
+        // `<root>/.git` resolves to a moment later. `O_NOFOLLOW` refuses a symlinked `.git`, and
+        // `O_DIRECTORY` refuses a gitfile: a linked worktree or a submodule is not the v1 scope,
+        // and admitting one would mean following a name out of the pinned directory.
+        let git_directory = open_git_directory(&directory)?;
+        let git_metadata = git_directory
+            .metadata()
+            .map_err(|_| WorktreeError::RepositoryUnreadable)?;
         Ok(Self {
             device: metadata.dev(),
             inode: metadata.ino(),
             path,
             directory,
+            git_identity: (git_metadata.dev(), git_metadata.ino()),
+            git_directory,
         })
     }
 
@@ -593,17 +622,35 @@ impl PinnedRepository {
     pub(crate) fn enter(&self, command: &mut Command) {
         use std::os::fd::AsRawFd;
         let fd = self.directory.as_raw_fd();
-        // SAFETY: `fchdir` is async-signal-safe, touches only this child's working directory, and
-        // the descriptor outlives the spawn because `self` is borrowed for the call.
+        let git_fd = self.git_directory.as_raw_fd();
+        // SAFETY: `fchdir` and `dup2` are async-signal-safe, touch only this child's working
+        // directory and descriptor table, and both descriptors outlive the spawn because `self` is
+        // borrowed for the call.
         unsafe {
             command.pre_exec(move || {
-                if libc::fchdir(fd) == 0 {
-                    Ok(())
-                } else {
-                    Err(std::io::Error::last_os_error())
+                if libc::fchdir(fd) != 0 {
+                    return Err(std::io::Error::last_os_error());
                 }
+                // `dup2` clears `O_CLOEXEC` on the copy, which is the point: the child must still
+                // hold this descriptor after the exec that resolves `GIT_DIR`.
+                if libc::dup2(git_fd, PINNED_GIT_DIR_FD) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
             });
         }
+        // With `GIT_DIR` set and no `GIT_WORK_TREE`, Git takes the working directory as the work
+        // tree -- and the working directory is the descriptor `fchdir` above installed. So both
+        // halves are pinned by descriptor and neither is rediscovered by name.
+        command.env("GIT_DIR", pinned_git_dir_path());
+    }
+
+    /// The path a child of this repository uses to name its own Git directory.
+    ///
+    /// A caller that must hand Git a path *inside* the pinned Git directory builds it from here,
+    /// so `.git/config` and its neighbours are read through the descriptor like everything else.
+    pub(crate) fn git_dir_child_path(component: &str) -> String {
+        format!("{}/{component}", pinned_git_dir_path())
     }
 
     /// The device and inode this value opened. Recorded with a dispatch so a later reader can ask
@@ -618,12 +665,50 @@ impl PinnedRepository {
     /// attacker or an ordinary `mv` can move. A pathname that no longer resolves, or that resolves
     /// to a different directory, is not "the repository changed" -- it is a different repository,
     /// and every measurement taken through the pinned value is void.
+    /// ...and does that directory still hold the Git directory this value opened? Both, because a
+    /// swap of either one alone is enough to make every measurement taken through this value void,
+    /// and a cold review demonstrated the second half by swapping only `.git`.
     pub(crate) fn still_pinned(&self) -> bool {
         let Ok(metadata) = fs::metadata(&self.path) else {
             return false;
         };
-        metadata.is_dir() && metadata.dev() == self.device && metadata.ino() == self.inode
+        if !(metadata.is_dir() && metadata.dev() == self.device && metadata.ino() == self.inode) {
+            return false;
+        }
+        let Ok(git_metadata) = fs::symlink_metadata(self.path.join(".git")) else {
+            return false;
+        };
+        git_metadata.is_dir() && (git_metadata.dev(), git_metadata.ino()) == self.git_identity
     }
+}
+
+/// `/proc/self/fd/<N>`, the pathname a child uses to name the descriptor it was handed.
+///
+/// The same mechanism `sandbox::worktree_launcher` already uses to name an opened directory to a
+/// child: procfs resolves it to the inode the descriptor holds, so a rename or replacement of the
+/// pathname it was opened from changes nothing about where the child writes.
+fn pinned_git_dir_path() -> String {
+    format!("/proc/self/fd/{PINNED_GIT_DIR_FD}")
+}
+
+/// Open `.git` inside an already-opened repository root, without following a name out of it.
+fn open_git_directory(root: &fs::File) -> Result<fs::File, WorktreeError> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let name = c".git";
+    // SAFETY: `root` is an open directory descriptor for the duration of the call, and the
+    // returned descriptor is adopted exactly once.
+    let raw = unsafe {
+        libc::openat(
+            root.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if raw < 0 {
+        return Err(WorktreeError::RepositoryUnreadable);
+    }
+    // SAFETY: `raw` is a fresh descriptor this call owns.
+    Ok(unsafe { fs::File::from_raw_fd(raw) })
 }
 
 /// A Git invocation that may not write.
@@ -760,7 +845,9 @@ fn pinned_filter_drivers(repository: &PinnedRepository) -> Option<Vec<String>> {
     command
         .arg("config")
         .arg("--file")
-        .arg(".git/config")
+        // Through the pinned descriptor, not `.git/config`: the pathname is exactly what a swap
+        // moves, and this read decides which filter drivers the hardening then suppresses.
+        .arg(PinnedRepository::git_dir_child_path("config"))
         .arg("--includes")
         .arg("--name-only")
         .arg("--null")
