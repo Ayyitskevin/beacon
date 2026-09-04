@@ -15,17 +15,18 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use beacond::{
-    AutonomyProfile, BeaconCapability, Conflicts, DeclaredCheck, EvaluationDraft, EvaluationError,
-    EvaluationService, EvaluationSubjectDraft, EvaluationSupersedes, Evaluator, Finding,
-    FindingSeverity, InconsistentEvaluation, LocalModelActivationService, LocalModelEndpoint,
-    MalformedEvaluation, MissionDraft, MissionMemberDraft, MissionService, OperatorAccountService,
-    OperatorSessionPhase, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft,
-    ProjectPolicyService, ProjectRepositoryService, ProjectService, ProposalService,
-    ProviderFeature, RepositoryDraft, RepositorySourceKind, ResidentConfigurationService,
-    ResidentLifecycleService, RubricDeclaration, SecretString, StarterOrganizationService,
-    StarterResidentDraft, StarterRole, StartupConfig, Supervisor, TeamDraft, TeamLeadAmbiguityRule,
-    TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
-    TeamService, TrackRecordEvidenceKind, TrackRecordRequirement, UnmetPrecondition, Verdict,
+    ArtifactContext, ArtifactKind, ArtifactService, AutonomyProfile, BeaconCapability, Conflicts,
+    DeclaredCheck, EvaluationDraft, EvaluationError, EvaluationService, EvaluationSubjectDraft,
+    EvaluationSupersedes, Evaluator, Finding, FindingSeverity, InconsistentEvaluation,
+    LocalModelActivationService, LocalModelEndpoint, MalformedEvaluation, MissionDraft,
+    MissionMemberDraft, MissionService, OperatorAccountService, OperatorSessionPhase,
+    ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService,
+    ProjectRepositoryService, ProjectService, ProposalService, ProviderFeature, RepositoryDraft,
+    RepositorySourceKind, ResidentConfigurationService, ResidentLifecycleService,
+    RubricDeclaration, SecretString, StarterOrganizationService, StarterResidentDraft, StarterRole,
+    StartupConfig, Supervisor, TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
+    TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft, TeamService,
+    TrackRecordEvidenceKind, TrackRecordRequirement, UnmetPrecondition, Verdict,
 };
 use data_encoding::{BASE64, HEXLOWER};
 use rusqlite::Connection;
@@ -2322,5 +2323,428 @@ fn a_rebind_keeping_the_same_pinned_commit_reports_only_the_revision_as_moved() 
         })
         .is_ok(),
         "drift failed startup"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Slice E2 — the Artifact subject arm in the store. One test per design bullet.
+// ---------------------------------------------------------------------------------------------
+
+impl Fixture {
+    fn artifacts(&self) -> ArtifactService {
+        ArtifactService::new(Arc::clone(&self.accounts), self.workspace_id)
+    }
+
+    /// One Mission-scoped Artifact, authored by `resident_id` -- so `other_resident_id` is the
+    /// permitted evaluator and the author is the refused one.
+    fn record_artifact(&self, content: &[u8]) -> beacond::VerifiedArtifactRecord {
+        self.artifacts()
+            .record(
+                ArtifactKind::OutcomeDocument,
+                content,
+                ArtifactContext::Mission {
+                    project_id: self.project_id,
+                    mission_id: self.mission_id,
+                },
+                self.resident_id,
+                self.configuration_id,
+                None,
+            )
+            .expect("the Artifact records")
+    }
+
+    fn artifact_evaluation_draft(&self, artifact_digest: &str) -> EvaluationDraft {
+        EvaluationDraft {
+            subject: EvaluationSubjectDraft::Artifact(artifact_digest.to_owned()),
+            evaluator: Evaluator {
+                resident_id: self.other_resident_id,
+                configuration_id: self.other_configuration_id,
+            },
+            rubric: RubricDeclaration {
+                id: "artifact-review-v1".to_owned(),
+                version: 1,
+                canonicalizer: "beacon.rubric.v1".to_owned(),
+                sha256: HEXLOWER.encode(&[0x31_u8; 32]),
+            },
+            cited_runs: vec![],
+            verdict: Verdict::Meets,
+            findings: vec![],
+            conflicts: Conflicts::None,
+            rationale: "The document meets the declared criteria.".to_owned(),
+            supersedes: EvaluationSupersedes::None,
+        }
+    }
+}
+
+/// Bullet 1. An Artifact digest nothing stored writes no row and no Event.
+#[test]
+fn an_evaluation_of_an_artifact_that_names_no_stored_artifact_writes_neither_row_nor_event() {
+    let fixture = admitted_mission("artifact-subject-absent");
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+
+    let error = evaluations
+        .record(fixture.artifact_evaluation_draft(&HEXLOWER.encode(&[0x99_u8; 32])))
+        .expect_err("an absent Artifact is refused");
+    assert!(matches!(
+        error,
+        EvaluationError::Inconsistent(InconsistentEvaluation::ArtifactNotFound)
+    ));
+
+    let connection = fixture.store.connect();
+    let rows: i64 = connection
+        .query_row("SELECT count(*) FROM evaluations", [], |row| row.get(0))
+        .unwrap();
+    let events: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind = 'evaluation.recorded'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        (rows, events),
+        (0, 0),
+        "a refused write left something behind"
+    );
+}
+
+/// Bullet 2. Exactly one subject column is populated, in both directions.
+#[test]
+fn exactly_one_subject_column_is_populated() {
+    let fixture = admitted_mission("one-subject-column");
+    let artifact = fixture.record_artifact(b"# Outcome\n\nThe work is described here.\n");
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+    let recorded = evaluations
+        .record(fixture.artifact_evaluation_draft(&artifact.digest().value))
+        .expect("an Artifact-subject Evaluation records");
+
+    let connection = fixture.store.connect();
+    let (kind, subject, proposal, artifact_column): (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+    ) = connection
+        .query_row(
+            "SELECT subject_kind, subject_digest, proposal_digest, artifact_digest
+                 FROM evaluations WHERE digest_value = ?1",
+            [&recorded.digest().value],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(kind, "artifact");
+    assert_eq!(subject, artifact.digest().value);
+    assert_eq!(proposal, None, "the other arm's column is populated");
+    assert_eq!(
+        artifact_column.as_deref(),
+        Some(artifact.digest().value.as_str())
+    );
+
+    // ...and the CHECK refuses a row that populates both, or one whose `subject_digest` names
+    // neither. Written with the immutability trigger down, which is the only way to build one.
+    connection
+        .execute_batch("DROP TRIGGER evaluations_no_update;")
+        .unwrap();
+    let both = connection.execute(
+        "UPDATE evaluations SET proposal_digest = ?1, proposal_digest_algorithm = 'sha256',
+             proposal_digest_canonicalizer = 'beacon.proposal.v1' WHERE digest_value = ?2",
+        rusqlite::params![artifact.digest().value, recorded.digest().value],
+    );
+    assert!(both.is_err(), "a row with both arms populated was admitted");
+    let neither = connection.execute(
+        "UPDATE evaluations SET subject_digest = ?1 WHERE digest_value = ?2",
+        rusqlite::params![HEXLOWER.encode(&[0x77_u8; 32]), recorded.digest().value],
+    );
+    assert!(
+        neither.is_err(),
+        "a subject_digest naming neither arm's record was admitted"
+    );
+}
+
+/// Bullet 3. The Artifact's accountable Resident may not evaluate it -- with the permitted
+/// non-author beside it, because a trigger and a blanket refusal are otherwise indistinguishable.
+#[test]
+fn an_evaluator_who_is_the_artifacts_accountable_resident_is_refused_by_the_store() {
+    let fixture = admitted_mission("artifact-self-evaluation");
+    let artifact = fixture.record_artifact(b"# Outcome\n\nAuthored by the first Resident.\n");
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+
+    let mut author = fixture.artifact_evaluation_draft(&artifact.digest().value);
+    author.evaluator = Evaluator {
+        resident_id: fixture.resident_id,
+        configuration_id: fixture.configuration_id,
+    };
+    assert!(matches!(
+        evaluations
+            .record(author)
+            .expect_err("the author is refused"),
+        EvaluationError::Inconsistent(InconsistentEvaluation::EvaluatorAuthoredTheArtifact)
+    ));
+
+    // The control: the other Resident, same Artifact, records.
+    evaluations
+        .record(fixture.artifact_evaluation_draft(&artifact.digest().value))
+        .expect("a non-author evaluator records");
+}
+
+/// Bullet 5. An Artifact with no Mission scope is not an Evaluation subject in v1.
+#[test]
+fn an_artifact_without_mission_scope_cannot_be_an_evaluation_subject() {
+    let fixture = admitted_mission("artifact-no-scope");
+    let unscoped = fixture
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            b"# Outcome\n\nNo Mission declared.\n",
+            ArtifactContext::None,
+            fixture.resident_id,
+            fixture.configuration_id,
+            None,
+        )
+        .expect("a Workspace-scoped Artifact is still a valid Artifact");
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+
+    assert!(matches!(
+        evaluations
+            .record(fixture.artifact_evaluation_draft(&unscoped.digest().value))
+            .expect_err("there is no roster to check the evaluator against"),
+        EvaluationError::Inconsistent(InconsistentEvaluation::ArtifactHasNoMissionScope)
+    ));
+}
+
+/// Bullet 6. The derived Mission is re-derived against the Artifact at every read and at startup.
+#[test]
+fn the_derived_mission_is_rederived_against_the_artifact_at_every_read_and_at_startup() {
+    let fixture = admitted_mission("artifact-mission-derived");
+    let artifact = fixture.record_artifact(b"# Outcome\n\nScoped to the Mission.\n");
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+    let recorded = evaluations
+        .record(fixture.artifact_evaluation_draft(&artifact.digest().value))
+        .expect("it records");
+    assert!(evaluations.get(&recorded.digest().value).is_ok());
+
+    // A Mission column that no longer matches the Artifact's own bytes: the trigger and the CHECK
+    // both allow it (the Mission is a projection, and this Mission exists), so only the
+    // re-derivation can catch it.
+    let connection = fixture.store.connect();
+    connection
+        .execute_batch("DROP TRIGGER evaluations_no_update;")
+        .unwrap();
+    let other_mission = Uuid::new_v4();
+    connection
+        .execute(
+            // Every column copied from the Mission beside it, so the decoy differs in exactly one
+            // thing: which Mission the Evaluation's column names.
+            "INSERT INTO missions SELECT ?1, workspace_id, project_id, charter_revision, team_id,
+                    desired_outcome, success_conditions_json, constraints_json, prohibitions_json,
+                    lifecycle, admitted_by, admitted_at_ms
+               FROM missions WHERE id = ?2",
+            rusqlite::params![other_mission.to_string(), fixture.mission_id.to_string()],
+        )
+        .expect("a second Mission row for the same Project");
+    connection
+        .execute(
+            "INSERT INTO mission_admission_members
+               SELECT workspace_id, ?1, team_id, position, resident_id, configuration_id
+               FROM mission_admission_members WHERE mission_id = ?2",
+            rusqlite::params![other_mission.to_string(), fixture.mission_id.to_string()],
+        )
+        .expect("the same roster");
+    connection
+        .execute(
+            "UPDATE evaluations SET mission_id = ?1 WHERE digest_value = ?2",
+            rusqlite::params![other_mission.to_string(), recorded.digest().value],
+        )
+        .expect("the store admits the decoy: SQL cannot read the bytes");
+    drop(connection);
+
+    assert!(
+        matches!(
+            evaluations.get(&recorded.digest().value),
+            Err(EvaluationError::Inconsistent(
+                InconsistentEvaluation::MissionDisagreesWithProposal
+            ))
+        ),
+        "the read accepted a Mission the subject Artifact does not declare"
+    );
+    assert!(
+        Supervisor::bootstrap(StartupConfig {
+            store_path: fixture.store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        })
+        .is_err(),
+        "startup accepted a Mission the subject Artifact does not declare"
+    );
+}
+
+/// Bullet 8. Chains are keyed by subject: an Artifact chain and a Proposal chain never mix.
+#[test]
+fn supersession_chains_are_keyed_by_subject_and_never_mix_kinds_or_versions() {
+    let fixture = admitted_mission("chains-by-subject");
+    let artifact = fixture.record_artifact(b"# Outcome\n\nFirst version.\n");
+    let record = fixture.record();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+
+    let on_artifact = evaluations
+        .record(fixture.artifact_evaluation_draft(&artifact.digest().value))
+        .expect("the Artifact-subject Evaluation records");
+    let on_proposal = evaluations
+        .record(evaluation_draft(&fixture, &proposal.digest().value))
+        .expect("the Proposal-subject Evaluation records");
+
+    // A supersession that names the OTHER subject's Evaluation is refused: chains do not cross.
+    let mut crossing = fixture.artifact_evaluation_draft(&artifact.digest().value);
+    crossing.rationale = "A second reading of the same document.".to_owned();
+    crossing.supersedes = EvaluationSupersedes::Evaluation(on_proposal.digest().value.clone());
+    assert!(matches!(
+        evaluations
+            .record(crossing)
+            .expect_err("chains do not cross subjects"),
+        EvaluationError::Inconsistent(InconsistentEvaluation::SupersedesOtherSubject)
+    ));
+
+    // Within the subject it works, and the link is keyed on the Artifact digest.
+    let mut successor = fixture.artifact_evaluation_draft(&artifact.digest().value);
+    successor.rationale = "A second reading of the same document.".to_owned();
+    successor.supersedes = EvaluationSupersedes::Evaluation(on_artifact.digest().value.clone());
+    let second = evaluations.record(successor).expect("the chain extends");
+
+    let connection = fixture.store.connect();
+    let keyed_on: String = connection
+        .query_row(
+            "SELECT subject_digest FROM evaluation_supersessions WHERE evaluation_digest = ?1",
+            [&second.digest().value],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(keyed_on, artifact.digest().value);
+}
+
+/// Bullet 9. The rekey carried Proposal-subject records and their chains across unchanged.
+#[test]
+fn proposal_subject_records_keep_their_proposal_digest_and_chain_after_the_rekey() {
+    let fixture = admitted_mission("proposal-rekey");
+    let record = fixture.record();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+    let first = evaluations
+        .record(evaluation_draft(&fixture, &proposal.digest().value))
+        .expect("it records");
+    let mut successor = evaluation_draft(&fixture, &proposal.digest().value);
+    successor.verdict = Verdict::Meets;
+    successor.rationale = "On a second reading the criteria are met.".to_owned();
+    successor.supersedes = EvaluationSupersedes::Evaluation(first.digest().value.clone());
+    let second = evaluations.record(successor).expect("the chain extends");
+
+    let connection = fixture.store.connect();
+    let (kind, subject, proposal_column): (String, String, Option<String>) = connection
+        .query_row(
+            "SELECT subject_kind, subject_digest, proposal_digest FROM evaluations
+             WHERE digest_value = ?1",
+            [&first.digest().value],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(kind, "proposal");
+    assert_eq!(subject, proposal.digest().value);
+    assert_eq!(
+        proposal_column.as_deref(),
+        Some(proposal.digest().value.as_str()),
+        "the Proposal arm kept its own column through the rekey"
+    );
+
+    let keyed_on: String = connection
+        .query_row(
+            "SELECT subject_digest FROM evaluation_supersessions WHERE evaluation_digest = ?1",
+            [&second.digest().value],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(keyed_on, proposal.digest().value);
+    assert!(evaluations.get(&first.digest().value).is_ok());
+    assert!(evaluations.get(&second.digest().value).is_ok());
+}
+
+/// Bullet 4. Non-authorship is keyed on the RESIDENT, never on the (Resident, Configuration) pair.
+///
+/// An author who reconfigures is still the author. If the comparison used the pair, changing
+/// configuration would be a way to evaluate your own work, which is the whole rule undone by a
+/// field nobody would think to look at.
+#[test]
+fn a_second_configuration_of_the_accountable_resident_is_still_that_resident() {
+    let fixture = admitted_mission("author-reconfigured");
+    let artifact = fixture.record_artifact(b"# Outcome\n\nAuthored under one configuration.\n");
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+
+    // The author, under a DIFFERENT configuration than the one the Artifact names.
+    let mut author = fixture.artifact_evaluation_draft(&artifact.digest().value);
+    author.evaluator = Evaluator {
+        resident_id: fixture.resident_id,
+        configuration_id: fixture.other_configuration_id,
+    };
+    assert_ne!(fixture.other_configuration_id, fixture.configuration_id);
+    let error = evaluations
+        .record(author)
+        .expect_err("a reconfigured author is still the author");
+    assert!(
+        matches!(
+            error,
+            EvaluationError::Inconsistent(InconsistentEvaluation::EvaluatorAuthoredTheArtifact)
+        ),
+        "refused for the wrong reason: {error}"
+    );
+}
+
+/// Bullet 7. The truthful forbidden row: drop the trigger, write what the Command refuses, restore
+/// the trigger, and let startup find it.
+///
+/// The store is left holding a row nothing should have written and a schema signature that still
+/// matches, which is the only honest way to test what reconciliation is FOR.
+#[test]
+fn an_artifact_subject_evaluation_written_past_the_command_refuses_startup() {
+    let fixture = admitted_mission("artifact-forbidden-row");
+    let artifact = fixture.record_artifact(b"# Outcome\n\nAuthored by the first Resident.\n");
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+    let recorded = evaluations
+        .record(fixture.artifact_evaluation_draft(&artifact.digest().value))
+        .expect("the honest Evaluation records");
+
+    // Splice the AUTHOR into the evaluator column of a stored Artifact-subject Evaluation. The
+    // Command refuses it, the trigger refuses it on insert, and neither runs on an UPDATE -- so
+    // only the read-time re-derivation is left, at every read and at startup.
+    let connection = fixture.store.connect();
+    connection
+        .execute_batch("DROP TRIGGER evaluations_no_update;")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE evaluations SET evaluator_resident_id = ?1, evaluator_configuration_id = ?2
+             WHERE digest_value = ?3",
+            rusqlite::params![
+                fixture.resident_id.to_string(),
+                fixture.configuration_id.to_string(),
+                recorded.digest().value
+            ],
+        )
+        .expect("the store admits the splice: no INSERT trigger runs on an UPDATE");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER evaluations_no_update
+             BEFORE UPDATE ON evaluations
+             BEGIN
+                 SELECT RAISE(ABORT, 'Evaluations are immutable');
+             END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    assert!(
+        Supervisor::bootstrap(StartupConfig {
+            store_path: fixture.store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        })
+        .is_err(),
+        "startup accepted an Evaluation whose evaluator authored the subject Artifact"
     );
 }
