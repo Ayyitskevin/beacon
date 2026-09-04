@@ -35,6 +35,7 @@ mod resource_discovery;
 mod ruling;
 mod sample_project;
 mod sandbox;
+mod spend;
 mod starter_organization;
 mod team;
 mod worktree;
@@ -156,6 +157,11 @@ pub use sample_project::{
     SAMPLE_PROJECT_BUNDLE_VERSION, SampleProjectDigest, SampleProjectError,
     SampleProjectInstallOutcome, SampleProjectInstallResult, SampleProjectInstallation,
     SampleProjectProvenance, SampleProjectService, SampleProjectStatus,
+};
+pub use spend::{
+    CANONICALIZER as SPEND_CANONICALIZER, MalformedSpend, MeasuredSpendV1, SpendDigest, SpendLine,
+    SpendMeasurement, SpendOrigin, SpendSupersedes, SpendTotals, UncountedEntry, UncountedKind,
+    compare_units,
 };
 pub use starter_organization::{
     ResidentAgentSummary, StarterOrganizationDecision, StarterOrganizationError,
