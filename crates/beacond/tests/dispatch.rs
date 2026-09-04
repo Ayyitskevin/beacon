@@ -3587,6 +3587,50 @@ fn a_policy_published_between_the_gates_and_the_swap_does_not_land() {
 }
 
 #[test]
+fn a_precondition_already_unmet_is_refused_by_the_gates_and_names_it() {
+    // The gate-side half of the readiness check, which had no test of its own: deleting the single
+    // readiness check from the shared evaluator turned only the landing-window test red, so the
+    // gates' copy of it was unfalsifiable. Both call sites go red now, which is the property
+    // extracting one evaluator was for.
+    //
+    // Same arrangement as the race above, without the race: the Resident is retired BEFORE the
+    // dispatch, so the precondition is already unmet when the gates read it.
+    let fixture = admitted_mission("unready-at-the-gate");
+    let (repository, ruling_digest) = fixture.approved("unready-at-the-gate");
+    let base = repository.revision.clone();
+    let decision: Uuid = fixture
+        .store
+        .connect()
+        .query_row(
+            "SELECT id FROM resident_lifecycle_decisions
+             WHERE resident_id = ?1 ORDER BY decided_at_ms DESC, id DESC LIMIT 1",
+            [fixture.resident_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .map(|value| Uuid::parse_str(&value).unwrap())
+        .unwrap();
+    ResidentLifecycleService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .retire(fixture.resident_id, Some(decision))
+        .unwrap();
+
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+
+    assert_eq!(receipt.outcome, DispatchOutcome::ProposalNotReady);
+    assert!(
+        !receipt.not_verified.is_empty() && receipt.prepared_commit.is_none(),
+        "a gate refusal prepared a commit"
+    );
+    assert_eq!(
+        CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]),
+        base,
+        "a refused dispatch moved the branch"
+    );
+}
+
+#[test]
 fn a_precondition_that_becomes_unmet_between_the_gates_and_the_swap_does_not_land() {
     // The third authority fact the re-read owes: the Proposal's live readiness. A second session
     // deactivates the Resident the Proposal was built against, which makes a precondition unmet in
