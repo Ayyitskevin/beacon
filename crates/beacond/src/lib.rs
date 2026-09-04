@@ -109,6 +109,10 @@ pub use mission_impact::{
     ClassificationDigest, ClassificationSupersedes, ImpactLevel, MalformedClassification,
     MissionImpactClassificationV1, PolicyRevisionRef,
 };
+pub use mission_impact::{
+    ClassificationRecordError, ClassificationStoreError, MissionImpactClassification,
+    MissionImpactService, verified_classification_for_citation, verified_classification_within,
+};
 pub use operator_account::{
     AccessOrigin, OperatorAccountError, OperatorAccountService, OperatorSessionPhase,
     OperatorSessionPolicy, OperatorSessionStatus, PlatformSessionEvent, RecoveryKey, SecretString,
@@ -174,9 +178,10 @@ pub use sample_project::{
     SampleProjectProvenance, SampleProjectService, SampleProjectStatus,
 };
 pub use spend::{
-    CANONICALIZER as SPEND_CANONICALIZER, MalformedSpend, MeasuredSpendV1, SpendDigest, SpendLine,
-    SpendMeasurement, SpendOrigin, SpendSupersedes, SpendTotals, UncountedEntry, UncountedKind,
-    compare_units,
+    CANONICALIZER as SPEND_CANONICALIZER, MalformedSpend, MeasuredSpend, MeasuredSpendService,
+    MeasuredSpendV1, SpendDigest, SpendLine, SpendMeasurement, SpendOrigin, SpendRecordError,
+    SpendStoreError, SpendSupersedes, SpendTotals, UncountedEntry, UncountedKind, compare_units,
+    verified_spend_for_citation, verified_spend_within,
 };
 pub use starter_organization::{
     ResidentAgentSummary, StarterOrganizationDecision, StarterOrganizationError,
@@ -192,7 +197,7 @@ pub use team::{
 pub use worktree::set_pinned_spawn_hook;
 pub use worktree::{CleanupOutcome, KeepReason, Worktree, WorktreeError};
 
-const SCHEMA_VERSION: i64 = 24;
+const SCHEMA_VERSION: i64 = 25;
 const MAX_WORKSPACE_NAME_CHARS: usize = 120;
 
 const SCHEMA_V1: &str = include_str!("../migrations/0001_initial.sql");
@@ -228,6 +233,10 @@ const MIGRATION_V20: &str = include_str!("../migrations/0020_recent_receipts_ind
 const MIGRATION_V22: &str = include_str!("../migrations/0022_candidates.sql");
 const MIGRATION_V23: &str = include_str!("../migrations/0023_evaluations.sql");
 const MIGRATION_V24: &str = include_str!("../migrations/0024_mission_success_conditions.sql");
+// 0024 landed first (the Mission-completion lane's success conditions), so this one took 0025 at
+// its rebase, exactly as the note on it said whichever landed second would, and the ladder steps
+// 24 -> 25.
+const MIGRATION_V25: &str = include_str!("../migrations/0025_spend_and_impact.sql");
 
 #[derive(Debug, Clone)]
 pub struct StartupConfig {
@@ -591,6 +600,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
                     transaction.execute_batch(MIGRATION_V24)?;
+                    transaction.execute_batch(MIGRATION_V25)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 2 => {
@@ -615,6 +625,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
                     transaction.execute_batch(MIGRATION_V24)?;
+                    transaction.execute_batch(MIGRATION_V25)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 3 => {
@@ -638,6 +649,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
                     transaction.execute_batch(MIGRATION_V24)?;
+                    transaction.execute_batch(MIGRATION_V25)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 4 => {
@@ -660,6 +672,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
                     transaction.execute_batch(MIGRATION_V24)?;
+                    transaction.execute_batch(MIGRATION_V25)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 5 => {
@@ -681,6 +694,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
                     transaction.execute_batch(MIGRATION_V24)?;
+                    transaction.execute_batch(MIGRATION_V25)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 6 => {
@@ -701,6 +715,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
                     transaction.execute_batch(MIGRATION_V24)?;
+                    transaction.execute_batch(MIGRATION_V25)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 7 => {
@@ -720,6 +735,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
                     transaction.execute_batch(MIGRATION_V24)?;
+                    transaction.execute_batch(MIGRATION_V25)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 8 => {
@@ -738,6 +754,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
                     transaction.execute_batch(MIGRATION_V24)?;
+                    transaction.execute_batch(MIGRATION_V25)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 9 => {
@@ -755,6 +772,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
                     transaction.execute_batch(MIGRATION_V24)?;
+                    transaction.execute_batch(MIGRATION_V25)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 10 => {
@@ -771,6 +789,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
                     transaction.execute_batch(MIGRATION_V24)?;
+                    transaction.execute_batch(MIGRATION_V25)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 11 => {
@@ -786,6 +805,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
                     transaction.execute_batch(MIGRATION_V24)?;
+                    transaction.execute_batch(MIGRATION_V25)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 12 => {
@@ -800,6 +820,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
                     transaction.execute_batch(MIGRATION_V24)?;
+                    transaction.execute_batch(MIGRATION_V25)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 13 => {
@@ -813,6 +834,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
                     transaction.execute_batch(MIGRATION_V24)?;
+                    transaction.execute_batch(MIGRATION_V25)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 14 => {
@@ -825,6 +847,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
                     transaction.execute_batch(MIGRATION_V24)?;
+                    transaction.execute_batch(MIGRATION_V25)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 15 => {
@@ -836,6 +859,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
                     transaction.execute_batch(MIGRATION_V24)?;
+                    transaction.execute_batch(MIGRATION_V25)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 16 => {
@@ -847,6 +871,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
                     transaction.execute_batch(MIGRATION_V24)?;
+                    transaction.execute_batch(MIGRATION_V25)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 17 => {
@@ -857,6 +882,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
                     transaction.execute_batch(MIGRATION_V24)?;
+                    transaction.execute_batch(MIGRATION_V25)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 18 => {
@@ -866,6 +892,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
                     transaction.execute_batch(MIGRATION_V24)?;
+                    transaction.execute_batch(MIGRATION_V25)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 19 => {
@@ -874,6 +901,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
                     transaction.execute_batch(MIGRATION_V24)?;
+                    transaction.execute_batch(MIGRATION_V25)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 20 => {
@@ -897,11 +925,20 @@ impl Supervisor {
                     verify_schema(&transaction, 22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
                     transaction.execute_batch(MIGRATION_V24)?;
+                    transaction.execute_batch(MIGRATION_V25)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 23 => {
                     verify_schema(&transaction, 23)?;
                     transaction.execute_batch(MIGRATION_V24)?;
+                    transaction.execute_batch(MIGRATION_V25)?;
+                    verify_schema(&transaction, SCHEMA_VERSION)?;
+                }
+                // The immediate predecessor: 0024 landed on `main` first, so every store that
+                // exists is at 24 and this is the arm all of them take.
+                24 => {
+                    verify_schema(&transaction, 24)?;
+                    transaction.execute_batch(MIGRATION_V25)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 SCHEMA_VERSION => verify_schema(&transaction, SCHEMA_VERSION)?,
@@ -930,6 +967,7 @@ impl Supervisor {
             transaction.execute_batch(MIGRATION_V22)?;
             transaction.execute_batch(MIGRATION_V23)?;
             transaction.execute_batch(MIGRATION_V24)?;
+            transaction.execute_batch(MIGRATION_V25)?;
             verify_schema(&transaction, SCHEMA_VERSION)?;
         }
 
@@ -1103,39 +1141,59 @@ fn declared_schema_version(connection: &Connection) -> Result<i64, SupervisorErr
         .map_err(SupervisorError::Store)
 }
 
-/// Applies every migration in order, for tests that need a store at the current
-/// schema without a file. One list, so a new migration is added in one place
-/// rather than in each test that needs one.
+/// The migration ladder as data: each step with the version it produces.
+///
+/// One list, so a new migration is added in one place rather than in each test that needs one, and
+/// so a test that wants a store at an *older* version builds it from the same source as one that
+/// wants the current schema -- a hand-copied prefix of this list is how a ladder test ends up
+/// proving something about a schema no store was ever in.
 #[cfg(test)]
-pub(crate) fn apply_every_migration(connection: &Connection) -> Result<(), SupervisorError> {
-    for migration in [
-        SCHEMA_V1,
-        MIGRATION_V2,
-        MIGRATION_V3,
-        MIGRATION_V4,
-        MIGRATION_V5,
-        MIGRATION_V6,
-        MIGRATION_V7,
-        MIGRATION_V8,
-        MIGRATION_V9,
-        MIGRATION_V10,
-        MIGRATION_V11,
-        MIGRATION_V12,
-        MIGRATION_V13,
-        MIGRATION_V14,
-        MIGRATION_V15,
-        MIGRATION_V16_ONLY,
-        MIGRATION_V17,
-        MIGRATION_V18,
-        MIGRATION_V19,
-        MIGRATION_V20,
-        MIGRATION_V22,
-        MIGRATION_V23,
-        MIGRATION_V24,
-    ] {
-        connection.execute_batch(migration)?;
+const MIGRATION_LADDER: &[(i64, &str)] = &[
+    (1, SCHEMA_V1),
+    (2, MIGRATION_V2),
+    (3, MIGRATION_V3),
+    (4, MIGRATION_V4),
+    (5, MIGRATION_V5),
+    (6, MIGRATION_V6),
+    (7, MIGRATION_V7),
+    (8, MIGRATION_V8),
+    (9, MIGRATION_V9),
+    (10, MIGRATION_V10),
+    (11, MIGRATION_V11),
+    (12, MIGRATION_V12),
+    (13, MIGRATION_V13),
+    (14, MIGRATION_V14),
+    (15, MIGRATION_V15),
+    (16, MIGRATION_V16_ONLY),
+    (17, MIGRATION_V17),
+    (18, MIGRATION_V18),
+    (19, MIGRATION_V19),
+    (20, MIGRATION_V20),
+    (22, MIGRATION_V22),
+    (23, MIGRATION_V23),
+    (24, MIGRATION_V24),
+    (25, MIGRATION_V25),
+];
+
+/// Applies the ladder up to and including `version`, for tests that need a store at some schema
+/// without a file.
+#[cfg(test)]
+pub(crate) fn apply_migrations_through(
+    connection: &Connection,
+    version: i64,
+) -> Result<(), SupervisorError> {
+    for (produces, migration) in MIGRATION_LADDER {
+        if *produces <= version {
+            connection.execute_batch(migration)?;
+        }
     }
     Ok(())
+}
+
+/// Applies every migration in order, for tests that need a store at the current schema.
+#[cfg(test)]
+pub(crate) fn apply_every_migration(connection: &Connection) -> Result<(), SupervisorError> {
+    apply_migrations_through(connection, SCHEMA_VERSION)
 }
 
 fn verify_schema(connection: &Connection, version: i64) -> Result<(), SupervisorError> {
@@ -1206,6 +1264,9 @@ fn verify_schema(connection: &Connection, version: i64) -> Result<(), Supervisor
     }
     if version >= 24 {
         expected_connection.execute_batch(MIGRATION_V24)?;
+    }
+    if version >= 25 {
+        expected_connection.execute_batch(MIGRATION_V25)?;
     }
     if !(1..=SCHEMA_VERSION).contains(&version) {
         return Err(SupervisorError::UnsupportedSchemaVersion(version));
@@ -1706,6 +1767,7 @@ mod tests {
         MIGRATION_V7, MIGRATION_V8, MIGRATION_V9, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12,
         MIGRATION_V13, MIGRATION_V14, MIGRATION_V15, MIGRATION_V16_ONLY, MIGRATION_V17,
         MIGRATION_V18, MIGRATION_V19, MIGRATION_V20, MIGRATION_V22, MIGRATION_V23, MIGRATION_V24,
+        MIGRATION_V18, MIGRATION_V19, MIGRATION_V20, MIGRATION_V22, MIGRATION_V23, MIGRATION_V25,
         OperatorAccountService, PreflightOutcome, PreflightReceipt, ProjectCharter,
         ProjectCharterDraft, ProjectDraft, ProjectRepositoryService, ProjectService, ProjectView,
         Recorded, RepositoryDraft, RepositorySourceKind, ResolvedCheck, SCHEMA_V1, SecretString,
@@ -4247,6 +4309,129 @@ mod tests {
             17,
             "a store not stamped 18 was advanced to 19 anyway"
         );
+    }
+
+    /// Migration 0025 rebuilds the closed Event-kind table, and that rebuild is the one place a
+    /// migration can silently delete history: a kind dropped from the CHECK takes every stored row
+    /// that uses it.
+    ///
+    /// So this plants one Event of EVERY kind a v23 store could hold -- the list read out of 0023's
+    /// own SQL rather than retyped here, because a hand-written expected list is the same mistake
+    /// one level up -- applies the migration, and looks for all of them afterwards.
+    #[test]
+    fn the_event_kind_rebuild_carries_every_kind_and_its_rows() {
+        let connection = Connection::open_in_memory().unwrap();
+        super::apply_migrations_through(&connection, 23).unwrap();
+        let workspace = Uuid::new_v4().to_string();
+        connection
+            .execute(
+                "INSERT INTO workspaces (id, name, created_at_ms) VALUES (?1, 'Personal', 1)",
+                rusqlite::params![workspace],
+            )
+            .unwrap();
+        let before = event_kinds_declared_in(MIGRATION_V23);
+        assert!(
+            before.len() >= 27,
+            "0023 declares {} kinds, which is fewer than the store had",
+            before.len()
+        );
+        for (offset, kind) in before.iter().enumerate() {
+            connection
+                .execute(
+                    "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+                     VALUES (?1, ?2, json_object('workspace_id', ?1, 'name', 'Personal'), ?3)",
+                    rusqlite::params![workspace, kind, offset as i64],
+                )
+                .unwrap();
+        }
+
+        connection.execute_batch(MIGRATION_V25).unwrap();
+
+        super::verify_schema(&connection, SCHEMA_VERSION)
+            .expect("the rebuilt schema must match the expected one");
+        let mut statement = connection
+            .prepare("SELECT kind FROM events ORDER BY sequence")
+            .unwrap();
+        let survived = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            survived, before,
+            "migration 0025 did not carry every stored Event across the rebuild, in order"
+        );
+
+        // And it admits exactly the two kinds this slice adds -- no more, so a third kind cannot
+        // arrive unannounced in a rebuild nobody reads.
+        let after = event_kinds_declared_in(MIGRATION_V25);
+        let mut added: Vec<&str> = after
+            .iter()
+            .filter(|kind| !before.contains(kind))
+            .map(String::as_str)
+            .collect();
+        added.sort_unstable();
+        assert_eq!(added, ["mission.impact_classified", "spend.measured"]);
+        assert_eq!(after.len(), before.len() + 2);
+    }
+
+    /// The ladder arm every store on this branch takes.
+    ///
+    /// A missing arm for the immediately-previous version is invisible from a fresh store and from
+    /// an old one: older stores chain through and look fine, while every store already at the last
+    /// shipped version refuses startup.
+    #[test]
+    fn a_store_at_the_previous_version_takes_the_ladder_arm() {
+        let previous = 23;
+        let store = TestStore::new("ladder-23-to-25");
+        let connection = Connection::open(&store.path).unwrap();
+        super::apply_migrations_through(&connection, previous).unwrap();
+        super::verify_schema(&connection, previous)
+            .expect("the ladder list must really produce a store at the previous version");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT version FROM schema_meta WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            previous
+        );
+        drop(connection);
+
+        let report = Supervisor::bootstrap(config(&store.path, "Personal"))
+            .expect("a store at the previous schema version must migrate");
+
+        assert_eq!(report.diagnostics.schema_version, SCHEMA_VERSION);
+        let connection = Connection::open(&store.path).unwrap();
+        for table in ["measured_spend", "mission_impact_classifications"] {
+            let present: i64 = connection
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    rusqlite::params![table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(present, 1, "{table} was not created by the migration");
+        }
+    }
+
+    /// Reads the Event kinds a migration's CHECK constraint admits, out of its own SQL.
+    fn event_kinds_declared_in(sql: &str) -> Vec<String> {
+        let start = sql
+            .find("kind TEXT NOT NULL CHECK (kind IN (")
+            .expect("the migration declares an Event-kind list");
+        let end = sql[start..].find("))").expect("the kind list closes") + start;
+        sql[start..end]
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim().trim_end_matches(',');
+                line.strip_prefix('\'')
+                    .and_then(|rest| rest.strip_suffix('\''))
+                    .map(str::to_owned)
+            })
+            .collect()
     }
 
     #[test]
