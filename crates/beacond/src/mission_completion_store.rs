@@ -1,0 +1,505 @@
+//! The store, the Event, and the verified reader for `MissionCompletionV1` (migration 0027).
+//!
+//! The record's grammar is `mission_completion`; this module is what makes one durable and what
+//! proves a stored one is what it says it is. Nothing here confers authority: recording a completion
+//! opens no Gate, publishes no Outcome, and answers no question with a boolean. **Publishing an
+//! Outcome never completes a Mission** (R4 item 1) -- completion is this record's Event, and the
+//! Outcome cites it.
+//!
+//! # What "verified" means on a read
+//!
+//! Every read re-proves the record in full, in this order, before any field of it is returned:
+//!
+//! 1. the stored digest is SHA-256 over the stored bytes -- identity is a computation, never a
+//!    column;
+//! 2. the bytes decode strictly under `beacon.mission_completion.v1`, and re-encode to the same
+//!    bytes;
+//! 3. every indexed column repeats what the bytes say -- a row that disagrees with itself is
+//!    refused;
+//! 4. the Workspace is the caller's. A cross-Workspace digest is a **refusal**, never an empty
+//!    result: "not yours" and "not there" are different answers;
+//! 5. **exactly once**: the condition ordinals stored for this completion are exactly
+//!    `{0..n-1}` for the Mission's declared count, and the record's own results agree;
+//! 6. `declared_conditions_sha256` equals the digest recomputed over the Mission's stored
+//!    conditions -- so a completion about a tampered Mission is refused even when its ordinal set
+//!    is complete;
+//! 7. the boundary is at or after the Mission's admission Event, and strictly before this
+//!    completion's own Event.
+//!
+//! 5 and 6 are separate on purpose, and the mutation gate asserts the separation: a Mission whose
+//! condition text was rewritten has a complete ordinal set, and a completion with a gap has a
+//! matching Mission. Neither scenario fires the other's check.
+//!
+//! Everything above is a fact about the **record**, re-proved now. The record's *claims* -- that a
+//! condition was met, that an Artifact was delivered -- are facts as of `boundary_event_seq`, and
+//! this reader does not re-verify the referents. A consumer that needs one verified reads it
+//! through its owning module and says so.
+
+use data_encoding::HEXLOWER;
+use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::mission_completion::{ConditionOutcome, MissionCompletionV1};
+use crate::proposal::sha256;
+
+/// The indexed columns of one stored completion, named rather than spelled as a tuple: the query's
+/// column order and the code that reads it cannot drift apart when each field has a name.
+struct StoredCompletion {
+    workspace_id: String,
+    canonical_bytes: Vec<u8>,
+    completion_id: String,
+    mission_id: String,
+    project_id: String,
+    accountable_resident_id: String,
+    accountable_configuration_id: String,
+    boundary_event_seq: i64,
+    disposition: String,
+    completed_at_ms: i64,
+}
+
+/// Why a stored completion is not a completion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompletionReadRefusal {
+    /// No completion with that digest in this Workspace.
+    Absent,
+    /// The digest exists, in another Workspace. Not `Absent`: "not yours" and "not there" are
+    /// different answers, and collapsing them tells a caller the wrong thing about their own store.
+    CrossWorkspace,
+    /// The stored bytes do not hash to the stored digest, do not decode, or do not re-encode
+    /// identically.
+    BytesDisagree,
+    /// An indexed column says something the bytes do not.
+    ColumnDisagrees(&'static str),
+    /// The condition ordinals are not exactly the Mission's declared set.
+    ConditionsNotExactlyOnce {
+        declared: usize,
+        stored: usize,
+    },
+    /// The Mission's conditions are not the ones this completion was written against.
+    DeclaredConditionsMoved,
+    /// The boundary is before the Mission's admission, or at/after this completion's own Event.
+    BoundaryOutOfRange,
+    /// Exactly one `mission.completed` Event must name this completion.
+    EventCount(i64),
+    Store(String),
+}
+
+impl std::fmt::Display for CompletionReadRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Absent => formatter.write_str("no such completion in this workspace"),
+            Self::CrossWorkspace => formatter.write_str("completion belongs to another workspace"),
+            Self::BytesDisagree => formatter.write_str("stored bytes disagree with their digest"),
+            Self::ColumnDisagrees(column) => {
+                write!(formatter, "column {column} disagrees with the bytes")
+            }
+            Self::ConditionsNotExactlyOnce { declared, stored } => write!(
+                formatter,
+                "{stored} condition results for {declared} declared conditions"
+            ),
+            Self::DeclaredConditionsMoved => {
+                formatter.write_str("the mission's declared conditions are not the ones recorded")
+            }
+            Self::BoundaryOutOfRange => formatter.write_str("boundary event sequence out of range"),
+            Self::EventCount(count) => write!(formatter, "{count} completion events, expected 1"),
+            Self::Store(reason) => write!(formatter, "store: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for CompletionReadRefusal {}
+
+fn store<E: std::fmt::Display>(error: E) -> CompletionReadRefusal {
+    CompletionReadRefusal::Store(error.to_string())
+}
+
+/// The `mission.completed` Event payload: the record's identity and its exact canonical bytes.
+///
+/// The bytes travel as padded base64 so the Event and the row can be compared byte-for-byte at
+/// startup without the Event ledger becoming a second encoding of the record.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct MissionCompletedPayload {
+    pub(crate) workspace_id: Uuid,
+    pub(crate) mission_id: Uuid,
+    pub(crate) completion_id: Uuid,
+    pub(crate) digest_value: String,
+    pub(crate) canonical_bytes_base64: String,
+}
+
+/// The digest over a Mission's declared conditions, in the framing the record's field 11 names.
+///
+/// `u32` count, then each condition's UTF-8 as a `u64` length and its bytes, in ascending ordinal.
+/// Published in the record's own table so a second implementation can reproduce it.
+pub fn declared_conditions_digest(conditions: &[String]) -> [u8; 32] {
+    let mut preimage = Vec::new();
+    preimage.extend_from_slice(
+        &u32::try_from(conditions.len())
+            .unwrap_or(u32::MAX)
+            .to_be_bytes(),
+    );
+    for condition in conditions {
+        preimage.extend_from_slice(&(condition.len() as u64).to_be_bytes());
+        preimage.extend_from_slice(condition.as_bytes());
+    }
+    sha256(&preimage)
+}
+
+/// The Mission's declared conditions, from the table migration 0024 gives them.
+fn declared_conditions(
+    connection: &Connection,
+    workspace_id: Uuid,
+    mission_id: Uuid,
+) -> Result<Vec<String>, CompletionReadRefusal> {
+    let mut statement = connection
+        .prepare(
+            "SELECT text FROM mission_success_conditions
+             WHERE workspace_id = ?1 AND mission_id = ?2 ORDER BY ordinal",
+        )
+        .map_err(store)?;
+    let rows = statement
+        .query_map(
+            params![workspace_id.to_string(), mission_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(store)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(store)?;
+    Ok(rows)
+}
+
+/// Read one completion by its digest, proving every claim in the module docs.
+///
+/// Crate-internal in this slice: the first caller is the Outcome collector, and there is no
+/// transport, no Command and no Agent path to it (`record` is not built here either -- a completion
+/// is written by the same transaction that writes its Event, and that Command is the next slice's).
+pub fn verified_completion_within(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+) -> Result<MissionCompletionV1, CompletionReadRefusal> {
+    // 1. The row, scoped to the caller's Workspace. A digest that exists elsewhere is a REFUSAL --
+    //    the whole point of scoping being structural rather than a filter that returns nothing.
+    let row: Option<StoredCompletion> = connection
+        .query_row(
+            "SELECT workspace_id, canonical_bytes, completion_id, mission_id, project_id,
+                    accountable_resident_id, accountable_configuration_id,
+                    boundary_event_seq, disposition, completed_at_ms
+             FROM mission_completions WHERE digest_value = ?1",
+            params![digest_value],
+            |row| {
+                Ok(StoredCompletion {
+                    workspace_id: row.get(0)?,
+                    canonical_bytes: row.get(1)?,
+                    completion_id: row.get(2)?,
+                    mission_id: row.get(3)?,
+                    project_id: row.get(4)?,
+                    accountable_resident_id: row.get(5)?,
+                    accountable_configuration_id: row.get(6)?,
+                    boundary_event_seq: row.get(7)?,
+                    disposition: row.get(8)?,
+                    completed_at_ms: row.get(9)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(store)?;
+    let Some(stored) = row else {
+        return Err(CompletionReadRefusal::Absent);
+    };
+    if stored.workspace_id != workspace_id.to_string() {
+        return Err(CompletionReadRefusal::CrossWorkspace);
+    }
+
+    // 2. Identity is a computation over the stored bytes, never the column it sits beside.
+    if HEXLOWER.encode(&sha256(&stored.canonical_bytes)) != digest_value {
+        return Err(CompletionReadRefusal::BytesDisagree);
+    }
+    let record = MissionCompletionV1::from_canonical_bytes(&stored.canonical_bytes)
+        .map_err(|_| CompletionReadRefusal::BytesDisagree)?;
+    if record.canonical_bytes().as_deref() != Ok(stored.canonical_bytes.as_slice()) {
+        return Err(CompletionReadRefusal::BytesDisagree);
+    }
+
+    // 3. Every indexed column repeats what the bytes say. Each names itself, because "a column
+    //    disagrees" and "which column" are different amounts of help.
+    // `column` shadows nothing: the loop variable is named `observed` so the struct stays
+    // reachable inside it.
+    for (column, observed, from_bytes) in [
+        (
+            "workspace_id",
+            &stored.workspace_id,
+            record.workspace_id.to_string(),
+        ),
+        (
+            "completion_id",
+            &stored.completion_id,
+            record.completion_id.to_string(),
+        ),
+        (
+            "mission_id",
+            &stored.mission_id,
+            record.mission_id.to_string(),
+        ),
+        (
+            "project_id",
+            &stored.project_id,
+            record.project_id.to_string(),
+        ),
+        (
+            "accountable_resident_id",
+            &stored.accountable_resident_id,
+            record.accountable_resident_id.to_string(),
+        ),
+        (
+            "accountable_configuration_id",
+            &stored.accountable_configuration_id,
+            record.accountable_resident_configuration_id.to_string(),
+        ),
+        (
+            "disposition",
+            &stored.disposition,
+            disposition_token(&record).to_owned(),
+        ),
+    ] {
+        if observed != &from_bytes {
+            return Err(CompletionReadRefusal::ColumnDisagrees(column));
+        }
+    }
+    if u64::try_from(stored.boundary_event_seq) != Ok(record.boundary_event_seq) {
+        return Err(CompletionReadRefusal::ColumnDisagrees("boundary_event_seq"));
+    }
+    if u64::try_from(stored.completed_at_ms) != Ok(record.completed_at_ms) {
+        return Err(CompletionReadRefusal::ColumnDisagrees("completed_at_ms"));
+    }
+
+    // 4. Exactly once, against the Mission's own declaration. The store's primary key already
+    //    forbids a duplicate ordinal and its foreign key forbids one past the end; what is left for
+    //    the reader is the count, which is the shape neither of those can see.
+    let declared = declared_conditions(connection, workspace_id, record.mission_id)?;
+    let stored_count: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM mission_completion_conditions
+             WHERE workspace_id = ?1 AND completion_digest = ?2",
+            params![workspace_id.to_string(), digest_value],
+            |row| row.get(0),
+        )
+        .map_err(store)?;
+    let stored_count = usize::try_from(stored_count).unwrap_or(usize::MAX);
+    if stored_count != declared.len() || record.condition_results.len() != declared.len() {
+        return Err(CompletionReadRefusal::ConditionsNotExactlyOnce {
+            declared: declared.len(),
+            stored: stored_count,
+        });
+    }
+
+    // 5. ...and about the SAME conditions. A complete ordinal set over rewritten text is exactly the
+    //    scenario the count cannot see, which is why this is a second check and not a second reason.
+    if declared_conditions_digest(&declared) != record.declared_conditions_sha256 {
+        return Err(CompletionReadRefusal::DeclaredConditionsMoved);
+    }
+
+    // 6. The boundary: at or after the Mission's admission, and strictly before this completion's
+    //    own Event. Two invariants, two scenarios -- a backdated boundary, and a record that claims
+    //    a cut at or after the moment it was itself written.
+    let admitted: i64 = connection
+        .query_row(
+            "SELECT min(sequence) FROM events
+             WHERE workspace_id = ?1 AND kind = 'mission.admitted'
+               AND json_extract(payload_json, '$.mission.id') = ?2",
+            params![workspace_id.to_string(), record.mission_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(store)?;
+    let completed: Option<i64> = connection
+        .query_row(
+            "SELECT sequence FROM events
+             WHERE workspace_id = ?1 AND kind = 'mission.completed'
+               AND json_extract(payload_json, '$.digestValue') = ?2",
+            params![workspace_id.to_string(), digest_value],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(store)?;
+    let Some(completed) = completed else {
+        return Err(CompletionReadRefusal::EventCount(0));
+    };
+    if stored.boundary_event_seq < admitted || stored.boundary_event_seq >= completed {
+        return Err(CompletionReadRefusal::BoundaryOutOfRange);
+    }
+
+    Ok(record)
+}
+
+fn disposition_token(record: &MissionCompletionV1) -> &'static str {
+    match record.disposition {
+        crate::mission_completion::CompletionDisposition::Concluded => "concluded",
+        crate::mission_completion::CompletionDisposition::Abandoned => "abandoned",
+    }
+}
+
+/// The token a condition outcome is stored as. One spelling, shared by the writer and the reader.
+pub(crate) fn outcome_token(outcome: ConditionOutcome) -> &'static str {
+    match outcome {
+        ConditionOutcome::Met => "met",
+        ConditionOutcome::NotMet => "not_met",
+        ConditionOutcome::NotAssessed => "not_assessed",
+        ConditionOutcome::AssessmentInconclusive => "assessment_inconclusive",
+    }
+}
+
+/// Startup: every stored completion re-proves itself, and every `mission.completed` Event names one.
+pub(crate) fn verify_completion_state(
+    connection: &Connection,
+) -> Result<(), CompletionReadRefusal> {
+    let mut statement = connection
+        .prepare("SELECT workspace_id, digest_value FROM mission_completions ORDER BY digest_value")
+        .map_err(store)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(store)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(store)?;
+    for (workspace_id, digest_value) in &rows {
+        let workspace_id =
+            Uuid::parse_str(workspace_id).map_err(|_| CompletionReadRefusal::BytesDisagree)?;
+        verified_completion_within(connection, workspace_id, digest_value)?;
+    }
+    // No orphan Event: one `mission.completed` per stored completion, and none naming a completion
+    // that is not there.
+    let events: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind = 'mission.completed'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(store)?;
+    if usize::try_from(events) != Ok(rows.len()) {
+        return Err(CompletionReadRefusal::EventCount(events));
+    }
+    Ok(())
+}
+
+/// Startup: one `mission.completed` Event, checked against the completion it names.
+///
+/// The Event carries the record's exact canonical bytes, so the check is byte equality against the
+/// stored row -- not a field-by-field comparison, which would prove the two agree about the fields
+/// somebody remembered to compare.
+pub(crate) fn verify_completion_event(
+    connection: &Connection,
+    workspace_id: Uuid,
+    payload_json: &str,
+) -> Result<(), CompletionReadRefusal> {
+    let payload: MissionCompletedPayload =
+        serde_json::from_str(payload_json).map_err(|_| CompletionReadRefusal::BytesDisagree)?;
+    if payload.workspace_id != workspace_id {
+        return Err(CompletionReadRefusal::CrossWorkspace);
+    }
+    let stored: Option<Vec<u8>> = connection
+        .query_row(
+            "SELECT canonical_bytes FROM mission_completions
+             WHERE workspace_id = ?1 AND digest_value = ?2",
+            params![workspace_id.to_string(), payload.digest_value],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(store)?;
+    let Some(stored) = stored else {
+        return Err(CompletionReadRefusal::EventCount(0));
+    };
+    let from_event = data_encoding::BASE64
+        .decode(payload.canonical_bytes_base64.as_bytes())
+        .map_err(|_| CompletionReadRefusal::BytesDisagree)?;
+    if from_event != stored {
+        return Err(CompletionReadRefusal::BytesDisagree);
+    }
+    Ok(())
+}
+
+/// Write one completion, its condition rows and its Event, in one transaction.
+///
+/// Crate-internal, and there is no Command, transport or Agent path to it in this slice: the
+/// authenticated surface arrives with the Operator command, and an input surface before its
+/// consumers exist is how a grammar gets frozen around a guess.
+///
+/// The Event is written **after** the row, in the same transaction, so `boundary_event_seq` can be
+/// strictly less than the Event's own sequence -- the invariant the reader checks, and one the
+/// caller cannot satisfy by choosing a number, because the sequence is the store's to assign.
+pub fn record_completion(
+    connection: &mut Connection,
+    record: &MissionCompletionV1,
+) -> Result<String, CompletionReadRefusal> {
+    let bytes = record
+        .canonical_bytes()
+        .map_err(|_| CompletionReadRefusal::BytesDisagree)?;
+    let digest = record
+        .digest()
+        .map_err(|_| CompletionReadRefusal::BytesDisagree)?;
+    let transaction = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(store)?;
+    transaction
+        .execute(
+            "INSERT INTO mission_completions (
+                 workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+                 canonical_bytes, completion_id, mission_id, project_id,
+                 accountable_resident_id, accountable_configuration_id,
+                 boundary_event_seq, disposition, completed_at_ms
+             ) VALUES (?1, 'sha256', 'beacon.mission_completion.v1', ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                       ?9, ?10, ?11)",
+            params![
+                record.workspace_id.to_string(),
+                digest.value,
+                bytes,
+                record.completion_id.to_string(),
+                record.mission_id.to_string(),
+                record.project_id.to_string(),
+                record.accountable_resident_id.to_string(),
+                record.accountable_resident_configuration_id.to_string(),
+                i64::try_from(record.boundary_event_seq).unwrap_or(i64::MAX),
+                disposition_token(record),
+                i64::try_from(record.completed_at_ms).unwrap_or(i64::MAX),
+            ],
+        )
+        .map_err(store)?;
+    for result in &record.condition_results {
+        transaction
+            .execute(
+                "INSERT INTO mission_completion_conditions (
+                     workspace_id, completion_digest, mission_id, condition_ordinal, outcome
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    record.workspace_id.to_string(),
+                    digest.value,
+                    record.mission_id.to_string(),
+                    i64::from(result.ordinal),
+                    outcome_token(result.outcome),
+                ],
+            )
+            .map_err(store)?;
+    }
+    let payload = serde_json::to_string(&MissionCompletedPayload {
+        workspace_id: record.workspace_id,
+        mission_id: record.mission_id,
+        completion_id: record.completion_id,
+        digest_value: digest.value.clone(),
+        canonical_bytes_base64: data_encoding::BASE64.encode(&bytes),
+    })
+    .map_err(|_| CompletionReadRefusal::BytesDisagree)?;
+    transaction
+        .execute(
+            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+             VALUES (?1, 'mission.completed', ?2, ?3)",
+            params![
+                record.workspace_id.to_string(),
+                payload,
+                i64::try_from(record.completed_at_ms).unwrap_or(i64::MAX),
+            ],
+        )
+        .map_err(store)?;
+    transaction.commit().map_err(store)?;
+    Ok(digest.value)
+}
