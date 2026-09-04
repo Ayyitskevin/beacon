@@ -3323,3 +3323,72 @@ fn the_publication_seam_can_check_subject_verdict_and_nonauthorship_from_the_two
         Err(PublicationSeamRefusal::CandidateAbsent)
     );
 }
+
+/// Fable's mutant, closed: **both** public spellings of the second link are read here.
+///
+/// `Evaluation::subject_superseded_by` and `EvaluationForce::subject_superseded_by` are two public
+/// accessors for one fact, and only the first was read by any test — so forcing the second to
+/// `None` left all 44 green while a consumer reading the force type saw "nothing has superseded
+/// this" about a document that had. Two surfaces for one fact need both read, or the untested one
+/// is free to lie.
+///
+/// The seam's whole currency story rests on this: `publication_seam` deliberately does NOT refuse a
+/// superseded candidate, because surfacing it is the read-time rule. If the read-time rule can
+/// silently return `None`, that decision becomes "nobody is told" rather than "the reader is told".
+#[test]
+fn both_public_spellings_of_the_subject_link_report_the_successor_beside_the_cited_digest() {
+    let fixture = admitted_mission("e3-both-accessors");
+    let artifact = fixture.record_artifact(b"# Outcome\n\nThe evaluated bytes.\n");
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+    let recorded = evaluations
+        .record(fixture.artifact_evaluation_draft(&artifact.digest().value))
+        .expect("it records");
+
+    // Before: nothing has superseded it, through both spellings.
+    assert_eq!(recorded.subject_superseded_by(), None);
+    assert_eq!(recorded.force().subject_superseded_by(), None);
+
+    let mut predecessor_digest = [0_u8; 32];
+    predecessor_digest
+        .copy_from_slice(&HEXLOWER.decode(artifact.digest().value.as_bytes()).unwrap());
+    let successor = fixture
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            b"# Outcome\n\nThe version that replaced it.\n",
+            ArtifactContext::Mission {
+                project_id: fixture.project_id,
+                mission_id: fixture.mission_id,
+            },
+            fixture.resident_id,
+            fixture.configuration_id,
+            Some(predecessor_digest),
+        )
+        .expect("the subject is superseded");
+
+    let reread = evaluations.get(&recorded.digest().value).unwrap();
+
+    // The cited digest, unmoved: what the Evaluation is about.
+    assert_eq!(
+        reread.payload().subject.digest_value(),
+        artifact.digest().value
+    );
+    // ...and the tail, through BOTH accessors, carrying its full envelope on the force type.
+    assert_eq!(
+        reread.subject_superseded_by(),
+        Some(successor.digest().value.as_str()),
+        "Evaluation::subject_superseded_by reports no successor"
+    );
+    let on_force = reread
+        .force()
+        .subject_superseded_by()
+        .expect("EvaluationForce::subject_superseded_by reports no successor");
+    assert_eq!(on_force.value, successor.digest().value);
+    assert_eq!(on_force.canonicalizer, "beacon.artifact.v1");
+    assert_eq!(on_force.algorithm, "sha256");
+    // The two spellings agree, which is the property that makes either safe to read.
+    assert_eq!(
+        Some(on_force.value.as_str()),
+        reread.subject_superseded_by()
+    );
+}
