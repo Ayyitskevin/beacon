@@ -194,15 +194,19 @@ python_checks() {
 # bug report that cannot be investigated at all -- not because it makes every failure replayable.
 # Replay with `GATE_VITEST_SEED=<printed seed> scripts/gate desktop`, and expect to repeat it.
 #
-# The seed is in the step NAME so it appears on the ok line and the FAIL line alike.
+# The seed is in the step NAME so it appears on the ok line and the FAIL line alike -- and it is a
+# VERIFIED claim, not a label: `scripts/desktop-tests` reads the seed back out of vitest's own
+# report and refuses if it differs or is missing. Printing a number nobody checked is worse than
+# printing none, because it is the number that ends up quoted in the bug report. Dropping the
+# `--sequence.seed` argument and dropping `--sequence.shuffle` both fail the step, with different
+# messages; that was measured, not assumed.
 #
 # `npm test -- <args>` does forward to vitest (checked with `-t`), so the stage keeps going through
 # the package script rather than reaching past it to `npx vitest`.
 desktop_checks() {
     local seed="${GATE_VITEST_SEED:-$(date +%s)}"
     run "npm clean install" run_in_desktop npm ci --ignore-scripts
-    run "desktop tests (shuffled, seed $seed)" \
-        run_in_desktop npm test -- --sequence.shuffle --sequence.seed="$seed"
+    run "desktop tests (shuffled, seed $seed)" scripts/desktop-tests "$seed"
     run "desktop build"    run_in_desktop npm run build
     run "Tauri build"      run_in_desktop npm run tauri build -- --no-bundle
 }
