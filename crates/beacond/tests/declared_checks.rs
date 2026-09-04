@@ -245,13 +245,20 @@ fn downgrade_execution_schema_to_v15(store_path: &Path) {
     connection
         .execute_batch(
             "BEGIN IMMEDIATE;
-             -- Migration 0024's condition identity: its triggers first, then the table (ADR 0041).
+             -- Records come off innermost first, newest migration first. Migration 0025's spend
+             -- and classification tables reference missions and Project Policy revisions;
+             -- migration 0024's condition identity is next (ADR 0041); migration 0023's
+             -- Evaluation tables reference proposals, and 0022's Ruling/Candidate binding
+             -- references both rulings and candidates, which reference proposals in turn.
+             DROP TRIGGER mission_impact_classifications_no_update;
+             DROP TRIGGER mission_impact_classifications_no_delete;
+             DROP TABLE mission_impact_classifications;
+             DROP TRIGGER measured_spend_no_update;
+             DROP TRIGGER measured_spend_no_delete;
+             DROP TABLE measured_spend;
              DROP TRIGGER mission_success_conditions_no_update;
              DROP TRIGGER mission_success_conditions_no_delete;
              DROP TABLE mission_success_conditions;
-             -- Records come off innermost first, newest migration first. Migration 0023's
-             -- Evaluation tables reference proposals, and 0022's Ruling/Candidate binding
-             -- references both rulings and candidates, which reference proposals in turn.
              DROP TABLE evaluation_supersessions;
              DROP TABLE evaluation_cited_runs;
              DROP TABLE evaluation_findings;
@@ -1995,7 +2002,7 @@ fn migration_preserves_real_v1_bytes_through_rollback_and_forward_startup() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 24);
+    assert_eq!(report.diagnostics.schema_version, 25);
     let connection = Connection::open(&store.path).unwrap();
     assert_v1_bytes(&connection, run_id, &v1_payload);
 }
