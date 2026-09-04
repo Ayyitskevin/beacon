@@ -445,6 +445,23 @@ fn insert_admission(
             ],
         )?;
     }
+    // The declared conditions, given rows in the same transaction that writes the Mission (ADR
+    // 0041). The migration's backfill covers the Missions that existed before this table; this
+    // covers every Mission after it, and without it the first admission after the migration fails
+    // startup reconciliation -- which is how the omission was found, by an existing test, one build
+    // after the design's slice-1 list did not mention it.
+    for (ordinal, text) in mission.success_conditions.iter().enumerate() {
+        connection.execute(
+            "INSERT INTO mission_success_conditions (workspace_id, mission_id, ordinal, text)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                mission.workspace_id.to_string(),
+                mission.id.to_string(),
+                i64::try_from(ordinal).map_err(|_| MissionError::InvalidStore)?,
+                text,
+            ],
+        )?;
+    }
     let payload = serde_json::to_string(&MissionAdmittedPayload {
         mission: mission.clone(),
     })?;
@@ -725,6 +742,55 @@ pub(crate) fn verify_mission_event(
     Ok(())
 }
 
+/// Re-derive `mission_success_conditions` from the Mission's own bytes, and refuse on disagreement.
+///
+/// The table is a projection of `missions.success_conditions_json`, and a projection that can drift
+/// from its source is a second place to be wrong about what a Mission declared. There is no store
+/// trigger comparing an inserted row against the JSON, deliberately: it would make a disagreeing row
+/// unrepresentable and this check dead code, and a check that cannot fail is a sentence rather than
+/// a guard. So the guard is here, and its tests write the bad rows directly.
+///
+/// **Two checks, not one.** The count and the text answer different questions and are separated so
+/// neither can hide the other: a row whose text was rewritten leaves the count correct, and a row
+/// appended past the end of the array leaves every text correct. Deriving both from one comparison
+/// -- rebuild the expected list, compare the whole set -- would pass both scenarios through one
+/// assertion, and a single mutant would kill a test that is supposed to be discriminating.
+fn verify_mission_success_conditions(
+    connection: &Connection,
+    workspace_id: Uuid,
+    mission_id: Uuid,
+    declared: &[String],
+) -> Result<(), MissionError> {
+    // 1. The count, against the array's length. Catches a row the Mission never declared, which is
+    //    the one shape a per-ordinal walk of the array cannot see.
+    let stored: i64 = connection.query_row(
+        "SELECT count(*) FROM mission_success_conditions
+         WHERE workspace_id = ?1 AND mission_id = ?2",
+        params![workspace_id.to_string(), mission_id.to_string()],
+        |row| row.get(0),
+    )?;
+    if usize::try_from(stored) != Ok(declared.len()) {
+        return Err(MissionError::InvalidStore);
+    }
+    // 2. The text, per ordinal, against the Mission's own bytes. Catches a row rewritten in place --
+    //    which the count cannot see, because rewriting one is not adding one.
+    for (ordinal, text) in declared.iter().enumerate() {
+        let ordinal = i64::try_from(ordinal).map_err(|_| MissionError::InvalidStore)?;
+        let row: Option<String> = connection
+            .query_row(
+                "SELECT text FROM mission_success_conditions
+                 WHERE workspace_id = ?1 AND mission_id = ?2 AND ordinal = ?3",
+                params![workspace_id.to_string(), mission_id.to_string(), ordinal],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if row.as_deref() != Some(text.as_str()) {
+            return Err(MissionError::InvalidStore);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn verify_mission_state(connection: &Connection) -> Result<(), MissionError> {
     let mut statement =
         connection.prepare("SELECT workspace_id, id FROM missions ORDER BY workspace_id, id")?;
@@ -748,6 +814,27 @@ pub(crate) fn verify_mission_state(connection: &Connection) -> Result<(), Missio
         if event_count != 1 {
             return Err(MissionError::InvalidStore);
         }
+        verify_mission_success_conditions(
+            connection,
+            workspace_id,
+            mission_id,
+            &mission.success_conditions,
+        )?;
+    }
+    // A condition row for a Mission that does not exist cannot be stored -- the composite foreign
+    // key forbids it -- so walking the Missions reaches every row there is.
+    let orphan_conditions: i64 = connection.query_row(
+        "SELECT count(*) FROM mission_success_conditions AS conditions
+         WHERE NOT EXISTS (
+             SELECT 1 FROM missions
+             WHERE missions.workspace_id = conditions.workspace_id
+               AND missions.id = conditions.mission_id
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if orphan_conditions != 0 {
+        return Err(MissionError::InvalidStore);
     }
     let event_count = connection.query_row(
         "SELECT count(*) FROM events WHERE kind = 'mission.admitted'",
