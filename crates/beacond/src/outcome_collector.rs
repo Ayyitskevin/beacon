@@ -727,14 +727,16 @@ impl<'a> Collector<'a> {
             SpendMeasurement::Unmeasured(reason) => OutcomeState::NotEvaluated(reason.clone()),
             SpendMeasurement::Broken(reason) => OutcomeState::Broken(reason.clone()),
             SpendMeasurement::Measured(totals) | SpendMeasurement::PartiallyMeasured(totals, _) => {
+                // Exactly one line is an amount. Everything else refuses, and the empty case is
+                // deliberately NOT its own arm: it used to be `Absent("counted no priced lines")`,
+                // which answered "there was none" for a state the grammar forbids --
+                // `MeasuredSpendV1`'s encoder and decoder both refuse a counted measurement with no
+                // lines (`MalformedSpend::NoLines`), so no verified record can carry one. An
+                // unreachable arm that reports absence is worse than no arm: it reads as coverage
+                // of a domain state, and reaching it would mean the store holds something its own
+                // codec says cannot exist. The catch-all refuses it, because corruption aborts
+                // rather than becoming an honest domain row (design §5 rule 6).
                 match totals.lines.as_slice() {
-                    // Unreachable by construction -- `MeasuredSpendV1`'s encoder refuses a counted
-                    // measurement with no lines (`MalformedSpend::NoLines`), so no verified record
-                    // can carry one. It REFUSES rather than reporting absence: reaching it means
-                    // the store holds something its own codec says cannot exist, and corruption
-                    // aborts rather than becoming an honest domain row (design §5 rule 6). An
-                    // `Absent` here would turn "this cannot be" into "there was none".
-                    [] => return Err(CollectorRefusal::SpendUnitsNotSingular { units: 0 }),
                     [line] => OutcomeState::Verified(SpendAmount {
                         unit: line.unit.clone(),
                         amount_minor: line.amount_minor,
