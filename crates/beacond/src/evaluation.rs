@@ -1081,7 +1081,12 @@ struct RecordedEvaluation {
     digest: EvaluationDigestPayload,
     /// The exact canonical bytes, as canonical RFC 4648 padded base64.
     canonical_bytes_base64: String,
-    proposal_digest: String,
+    /// The SUBJECT's digest, whichever arm it is. It was named `proposal_digest` while `0x01` was
+    /// the only arm; the field is renamed rather than joined by a second one, because two fields
+    /// for one fact is how an Event and a record come to disagree. Events written before the arm
+    /// carry the old name, and `alias` reads them: the bytes beside it are the evidence either way.
+    #[serde(alias = "proposal_digest")]
+    subject_digest: String,
     verdict: String,
     evaluated_at_ms: u64,
 }
@@ -1199,12 +1204,7 @@ fn insert_evaluation(
                 value: stored.digest_value.clone(),
             },
             canonical_bytes_base64: BASE64.encode(&stored.canonical_bytes),
-            proposal_digest: stored
-                .payload
-                .proposal_subject()
-                .ok_or(EvaluationError::SubjectNotStorable)?
-                .value
-                .clone(),
+            subject_digest: stored.payload.subject.digest_value().to_owned(),
             verdict: stored.payload.verdict.as_str().to_owned(),
             evaluated_at_ms: stored.payload.evaluated_at_ms,
         },
@@ -2170,11 +2170,7 @@ pub(crate) fn verify_evaluation_event(
     }
     let evaluation = verified_evaluation(connection, workspace_id, row)?;
     if evaluation.payload.evaluated_at_ms != occurred_at_ms
-        || Some(recorded.proposal_digest.as_str())
-            != evaluation
-                .payload
-                .proposal_subject()
-                .map(|s| s.value.as_str())
+        || recorded.subject_digest != evaluation.payload.subject.digest_value()
         || recorded.verdict != evaluation.payload.verdict.as_str()
     {
         return Err(EvaluationError::InvalidStore);
