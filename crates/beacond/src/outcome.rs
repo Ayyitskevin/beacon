@@ -1589,30 +1589,44 @@ fn decode(input: &[u8]) -> Result<OutcomeManifestV1, MalformedOutcome> {
 
 /// Every `SourceRef` a manifest cites, in a fixed walk order.
 ///
-/// One walk, used by both the Workspace check and the citation census, so the two can never
-/// disagree about what "cited" means.
-fn cited_refs(manifest: &OutcomeManifestV1) -> Vec<&SourceRef> {
-    let mut refs = vec![
+/// One walk, used by the Workspace check, the citation census, and the appendix, so the three can
+/// never disagree about what "cited" means.
+///
+/// **Lazy on purpose.** Its two bounded callers stop early -- the census at the 257th distinct
+/// object, the Workspace check at the first foreign reference -- and a walk that collected first
+/// would pay for the whole input before refusing part of it. That was measured: collecting cost one
+/// pointer for every citation past the bound. The appendix collects, but it runs after the census
+/// has already proved there are at most 256.
+fn cited_refs(manifest: &OutcomeManifestV1) -> impl Iterator<Item = &SourceRef> {
+    let identities = [
         &manifest.mission,
         &manifest.completion,
         &manifest.policy_classification,
     ];
-    for condition in &manifest.success_conditions {
-        if let Some(citations) = condition.citations.verified() {
-            refs.extend(citations.iter());
-        }
-    }
-    for collection in [
+    let conditions = manifest.success_conditions.iter().flat_map(|condition| {
+        condition
+            .citations
+            .verified()
+            .map(|citations| citations.iter())
+            .into_iter()
+            .flatten()
+    });
+    let collections = [
         &manifest.delivered_artifacts,
         &manifest.proposal_refs,
         &manifest.ruling_refs,
         &manifest.evaluation_refs,
-    ] {
-        if let Some(entries) = collection.verified() {
-            refs.extend(entries.iter());
-        }
-    }
-    refs
+    ]
+    .into_iter()
+    .flat_map(|collection| {
+        collection
+            .verified()
+            .map(|entries| entries.iter())
+            .into_iter()
+            .flatten()
+    });
+
+    identities.into_iter().chain(conditions).chain(collections)
 }
 
 /// Refuses a manifest that reaches outside its own Workspace.
@@ -2654,10 +2668,7 @@ fn render_appendix(
                 "| kind | identity | schema | digest algorithm | digest | canonicalizer | pinned revision | verification result |",
             )?;
             document.line("| --- | --- | --- | --- | --- | --- | --- | --- |")?;
-            let mut rows = cited_refs(manifest)
-                .into_iter()
-                .cloned()
-                .collect::<Vec<_>>();
+            let mut rows = cited_refs(manifest).cloned().collect::<Vec<_>>();
             rows = sorted(&rows, source_ref_key);
             // One object cited twice is one row: the appendix reports objects, and the
             // census it must agree with counts objects too.

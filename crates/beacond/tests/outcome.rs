@@ -8,6 +8,52 @@
 //! table rather than calling that encoder. The independence is the point -- a canonicalizer that
 //! quietly changed its layout would agree with itself and disagree with this file.
 
+/// A per-thread allocation counter, so a test can measure what a call path costs.
+///
+/// gpt2's confirmation measured the citation census with one of these and found the refusal path
+/// scaling with input it had already decided to refuse. Thread-local rather than global because
+/// tests run in parallel and a global counter would measure the whole binary; each test owns its
+/// thread, so each measures only itself. The initializer is `const` and every read is a `try_with`,
+/// so the counter can never allocate or panic from inside the allocator.
+mod counting {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    thread_local! {
+        static ALLOCATED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub struct Counting;
+
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let _ = ALLOCATED.try_with(|counter| counter.set(counter.get() + layout.size()));
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(pointer, layout) }
+        }
+
+        unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            let _ = ALLOCATED.try_with(|counter| {
+                counter.set(counter.get() + new_size.saturating_sub(layout.size()))
+            });
+            unsafe { System.realloc(pointer, layout, new_size) }
+        }
+    }
+
+    /// Bytes allocated on this thread while `body` ran.
+    pub fn measure(body: impl FnOnce()) -> usize {
+        let before = ALLOCATED.with(Cell::get);
+        body();
+        ALLOCATED.with(Cell::get).saturating_sub(before)
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: counting::Counting = counting::Counting;
+
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -1622,6 +1668,35 @@ fn outcome_bounds_are_checked_before_the_work_they_prevent() {
     assert_eq!(
         bound_refusal(render(&manifest, &sources).expect_err("refuses")).bound,
         OutcomeBound::CitationCount
+    );
+}
+
+/// gpt2's confirmation of OD-2, P1 still HOLD: a bound that refuses at 257 must not first walk to
+/// 50,000.
+///
+/// Precedence over canonicalization was already proved by
+/// `outcome_bounds_are_checked_before_the_work_they_prevent`; this measures the census's own cost.
+/// Both manifests are built before either measurement starts, so what is compared is the refusal
+/// path and nothing else.
+#[test]
+fn outcome_citation_bound_refuses_without_walking_past_it() {
+    let (just_over, just_over_sources) = bounded_manifest(254);
+    let (far_over, far_over_sources) = bounded_manifest(50_000);
+
+    // One warm-up so a lazily initialized static is not charged to the first measurement.
+    let _ = render(&just_over, &just_over_sources);
+
+    let near = counting::measure(|| {
+        assert!(render(&just_over, &just_over_sources).is_err());
+    });
+    let far = counting::measure(|| {
+        assert!(render(&far_over, &far_over_sources).is_err());
+    });
+
+    assert!(
+        far <= near * 2,
+        "the citation census walked past its own bound: {near} bytes for 257 citations, {far} for \
+         50,003 -- a refusal path that scales with input it has already decided to refuse"
     );
 }
 
