@@ -305,7 +305,7 @@ fn operator_admits_a_finite_mission_from_exact_current_team_evidence() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 27);
+    assert_eq!(report.diagnostics.schema_version, 28);
 }
 
 #[test]
@@ -656,7 +656,7 @@ fn schema_ten_migrates_without_rewriting_events_or_the_team_roster_guard() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 27);
+    assert_eq!(report.diagnostics.schema_version, 28);
     let connection = Connection::open(&path).unwrap();
     let after = connection
         .query_row(
@@ -978,6 +978,43 @@ fn the_condition_migration_adds_triggers_and_rewrites_none() {
     }
 }
 
+/// Migration 0028 REBUILT `evaluations` and its three related tables to generalize the subject, so
+/// a rollback to 23 has to put 0023's shapes back -- otherwise the store keeps a v28 `evaluations`
+/// whose triggers reference `artifacts`, which the rollback above has just dropped.
+///
+/// The definitions are sliced out of 0023's own text, like `restore_pre_0025_events` above: a
+/// rollback that retyped them would be testing the test. This store has no Evaluations, so the
+/// tables come back empty.
+fn restore_pre_0028_evaluations(connection: &Connection) {
+    let source = include_str!("../migrations/0023_evaluations.sql");
+    let from = source
+        .find("CREATE TABLE evaluations (")
+        .expect("0023 defines the evaluations table");
+    let to = source
+        .find("UPDATE schema_meta")
+        .expect("0023 stamps its version last");
+    connection
+        .execute_batch(
+            "DROP TRIGGER evaluations_evaluator_is_not_the_artifact_author;
+             DROP TRIGGER evaluations_artifact_subject_carries_its_mission;
+             DROP TRIGGER evaluations_no_self_evaluation;
+             DROP TRIGGER evaluations_no_update;
+             DROP TRIGGER evaluations_no_delete;
+             DROP TRIGGER evaluation_supersessions_no_update;
+             DROP TRIGGER evaluation_supersessions_no_delete;
+             DROP TRIGGER evaluation_findings_no_update;
+             DROP TRIGGER evaluation_findings_no_delete;
+             DROP TRIGGER evaluation_cited_runs_no_update;
+             DROP TRIGGER evaluation_cited_runs_no_delete;
+             DROP TABLE evaluation_supersessions;
+             DROP TABLE evaluation_cited_runs;
+             DROP TABLE evaluation_findings;
+             DROP TABLE evaluations;",
+        )
+        .unwrap();
+    connection.execute_batch(&source[from..to]).unwrap();
+}
+
 /// Migrations 0025 and 0026 each rebuild the closed Event-kind table -- 0025 to add two kinds, 0026
 /// to add `mission.completed`. A rollback that drops only their tables leaves the rebuilt table
 /// behind, and the store then matches no schema version. Restoring 0023's definition takes both
@@ -1065,6 +1102,7 @@ fn a_store_at_the_previous_schema_version_migrates_and_keeps_its_condition_rows(
              UPDATE schema_meta SET version = 23 WHERE singleton = 1;",
         )
         .unwrap();
+    restore_pre_0028_evaluations(&connection);
     restore_pre_0025_events(&connection);
     drop(connection);
 
@@ -1073,7 +1111,7 @@ fn a_store_at_the_previous_schema_version_migrates_and_keeps_its_condition_rows(
         initial_workspace_name: "Ignored".to_owned(),
     })
     .expect("a store at the previous schema version must migrate");
-    assert_eq!(report.diagnostics.schema_version, 27);
+    assert_eq!(report.diagnostics.schema_version, 28);
 
     assert_eq!(
         condition_rows(&store.path, mission.id),

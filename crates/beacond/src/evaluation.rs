@@ -1110,13 +1110,14 @@ fn insert_evaluation(
     connection.execute(
         "INSERT INTO evaluations (
              workspace_id, digest_algorithm, digest_canonicalizer, digest_value, canonical_bytes,
+             subject_kind, subject_digest,
              proposal_digest, proposal_digest_algorithm, proposal_digest_canonicalizer,
              mission_id, evaluator_resident_id, evaluator_configuration_id,
              rubric_id, rubric_version, rubric_canonicalizer, rubric_sha256,
              verdict, conflicts_declared, conflicts_text, rationale, evaluated_at_ms
          ) VALUES (
-             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
-             ?19, ?20
+             ?1, ?2, ?3, ?4, ?5, 'proposal', ?6, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+             ?16, ?17, ?18, ?19, ?20
          )",
         params![
             stored.workspace_id.to_string(),
@@ -1221,7 +1222,7 @@ struct StoredRow {
     evaluated_at_ms: i64,
 }
 
-const SELECT_COLUMNS: &str = "digest_value, canonical_bytes, proposal_digest,
+const SELECT_COLUMNS: &str = "digest_value, canonical_bytes, subject_digest,
      proposal_digest_algorithm, proposal_digest_canonicalizer, mission_id, evaluator_resident_id,
      evaluator_configuration_id, rubric_id, rubric_version, rubric_canonicalizer, rubric_sha256,
      verdict, conflicts_declared, conflicts_text, rationale, evaluated_at_ms";
@@ -1329,7 +1330,7 @@ fn verified_evaluation(
     let recorded_predecessor: Option<String> = connection
         .query_row(
             "SELECT supersedes_evaluation_digest FROM evaluation_supersessions
-             WHERE workspace_id = ?1 AND proposal_digest = ?2 AND evaluation_digest = ?3",
+             WHERE workspace_id = ?1 AND subject_digest = ?2 AND evaluation_digest = ?3",
             params![
                 workspace_id.to_string(),
                 row.proposal_digest.as_str(),
@@ -1377,7 +1378,7 @@ fn derive_force(
     let superseded_by = connection
         .query_row(
             "SELECT evaluation_digest FROM evaluation_supersessions
-             WHERE workspace_id = ?1 AND proposal_digest = ?2
+             WHERE workspace_id = ?1 AND subject_digest = ?2
                AND supersedes_evaluation_digest = ?3",
             params![
                 workspace_id.to_string(),
@@ -1442,17 +1443,21 @@ fn derive_force(
 /// Chain order, never timestamp order: a timestamp is evidence about when, and the chain is what
 /// the records say about each other. Two Evaluations can land in the same millisecond; only one of
 /// them supersedes the other.
+/// The supersession chain for one SUBJECT digest.
+///
+/// Chains are per subject, never per kind: a new Artifact version is a different subject, and the
+/// old digest's Evaluations stay true of the old bytes rather than carrying over (R12.10).
 fn evaluation_chain(
     connection: &Connection,
     workspace_id: Uuid,
-    proposal_digest: &str,
+    subject_digest: &str,
 ) -> Result<Vec<String>, EvaluationError> {
     let mut statement = connection.prepare(
         "SELECT digest_value FROM evaluations
-         WHERE workspace_id = ?1 AND proposal_digest = ?2",
+         WHERE workspace_id = ?1 AND subject_digest = ?2",
     )?;
     let all = statement
-        .query_map(params![workspace_id.to_string(), proposal_digest], |row| {
+        .query_map(params![workspace_id.to_string(), subject_digest], |row| {
             row.get::<_, String>(0)
         })?
         .collect::<Result<HashSet<_>, _>>()?;
@@ -1463,10 +1468,10 @@ fn evaluation_chain(
 
     let mut statement = connection.prepare(
         "SELECT supersedes_evaluation_digest, evaluation_digest FROM evaluation_supersessions
-         WHERE workspace_id = ?1 AND proposal_digest = ?2",
+         WHERE workspace_id = ?1 AND subject_digest = ?2",
     )?;
     let links = statement
-        .query_map(params![workspace_id.to_string(), proposal_digest], |row| {
+        .query_map(params![workspace_id.to_string(), subject_digest], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -1756,7 +1761,7 @@ impl EvaluationService {
             if let EvaluationSupersedes::Evaluation(superseded) = &stored.payload.supersedes {
                 transaction.execute(
                     "INSERT INTO evaluation_supersessions (
-                         workspace_id, proposal_digest, evaluation_digest,
+                         workspace_id, subject_digest, evaluation_digest,
                          supersedes_evaluation_digest
                      ) VALUES (?1, ?2, ?3, ?4)",
                     params![

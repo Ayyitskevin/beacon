@@ -749,7 +749,7 @@ fn a_recorded_evaluation_is_immutable_and_survives_startup_verification() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .expect("startup verifies the Evaluation");
-    assert_eq!(report.diagnostics.schema_version, 27);
+    assert_eq!(report.diagnostics.schema_version, 28);
     assert_eq!(
         evaluations.get(&evaluation.digest().value).unwrap(),
         evaluation
@@ -910,13 +910,15 @@ fn an_evaluator_who_authored_the_bound_proposal_is_refused_by_the_store() {
         connection.execute(
             "INSERT INTO evaluations (
                  workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
-                 canonical_bytes, proposal_digest, proposal_digest_algorithm,
+                 canonical_bytes, subject_kind, subject_digest,
+                 proposal_digest, proposal_digest_algorithm,
                  proposal_digest_canonicalizer, mission_id, evaluator_resident_id,
                  evaluator_configuration_id, rubric_id, rubric_version, rubric_canonicalizer,
                  rubric_sha256, verdict, conflicts_declared, conflicts_text, rationale,
                  evaluated_at_ms
              ) VALUES (
-                 ?1, 'sha256', 'beacon.evaluation.v1', ?2, ?3, ?4, 'sha256', 'beacon.proposal.v1',
+                 ?1, 'sha256', 'beacon.evaluation.v1', ?2, ?3, 'proposal', ?4, ?4, 'sha256',
+                 'beacon.proposal.v1',
                  ?5, ?6, ?7, 'r', 1, 'beacon.rubric.v1', ?8, 'uncertain', 0, NULL, 'why', 7
              )",
             rusqlite::params![
@@ -1104,13 +1106,15 @@ fn a_self_evaluation_written_past_the_command_refuses_startup() {
         .execute(
             "INSERT INTO evaluations (
                  workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
-                 canonical_bytes, proposal_digest, proposal_digest_algorithm,
+                 canonical_bytes, subject_kind, subject_digest,
+                 proposal_digest, proposal_digest_algorithm,
                  proposal_digest_canonicalizer, mission_id, evaluator_resident_id,
                  evaluator_configuration_id, rubric_id, rubric_version, rubric_canonicalizer,
                  rubric_sha256, verdict, conflicts_declared, conflicts_text, rationale,
                  evaluated_at_ms
              )
-             SELECT workspace_id, digest_algorithm, digest_canonicalizer, ?1, ?2, proposal_digest,
+             SELECT workspace_id, digest_algorithm, digest_canonicalizer, ?1, ?2,
+                    subject_kind, subject_digest, proposal_digest,
                     proposal_digest_algorithm, proposal_digest_canonicalizer, mission_id, ?3,
                     ?4, rubric_id, rubric_version, rubric_canonicalizer,
                     rubric_sha256, verdict, conflicts_declared, conflicts_text, rationale,
@@ -1334,7 +1338,12 @@ fn a_projection_that_names_another_proposal_than_the_bytes_is_refused_at_the_rea
         .unwrap();
     connection
         .execute(
-            "UPDATE evaluations SET proposal_digest = ?1 WHERE digest_value = ?2",
+            // Both projections move together: the store's own CHECK requires `subject_digest`
+            // to be the populated arm's digest, so a decoy that moved only one of them would be
+            // refused by the schema rather than by the reader -- and this test is about the READER
+            // catching a projection that disagrees with the BYTES.
+            "UPDATE evaluations SET proposal_digest = ?1, subject_digest = ?1
+             WHERE digest_value = ?2",
             rusqlite::params![decoy.digest().value, evaluation.digest().value],
         )
         .expect("the store admits the decoy: SQL cannot read the bytes");
@@ -1382,13 +1391,15 @@ fn the_migrated_column_repeats_the_codecs_owned_byte_bound() {
         connection.execute(
             "INSERT INTO evaluations (
                  workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
-                 canonical_bytes, proposal_digest, proposal_digest_algorithm,
+                 canonical_bytes, subject_kind, subject_digest,
+                 proposal_digest, proposal_digest_algorithm,
                  proposal_digest_canonicalizer, mission_id, evaluator_resident_id,
                  evaluator_configuration_id, rubric_id, rubric_version, rubric_canonicalizer,
                  rubric_sha256, verdict, conflicts_declared, conflicts_text, rationale,
                  evaluated_at_ms
              ) VALUES (
-                 ?1, 'sha256', 'beacon.evaluation.v1', ?2, ?3, ?4, 'sha256', 'beacon.proposal.v1',
+                 ?1, 'sha256', 'beacon.evaluation.v1', ?2, ?3, 'proposal', ?4, ?4, 'sha256',
+                 'beacon.proposal.v1',
                  ?5, ?6, ?7, 'r', 1, 'beacon.rubric.v1', ?8, 'uncertain', 0, NULL, 'why', 7
              )",
             rusqlite::params![
@@ -1590,13 +1601,15 @@ fn an_evaluated_time_earlier_than_the_link_it_supersedes_is_refused() {
         .execute(
             "INSERT INTO evaluations (
                  workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
-                 canonical_bytes, proposal_digest, proposal_digest_algorithm,
+                 canonical_bytes, subject_kind, subject_digest,
+                 proposal_digest, proposal_digest_algorithm,
                  proposal_digest_canonicalizer, mission_id, evaluator_resident_id,
                  evaluator_configuration_id, rubric_id, rubric_version, rubric_canonicalizer,
                  rubric_sha256, verdict, conflicts_declared, conflicts_text, rationale,
                  evaluated_at_ms
              )
-             SELECT workspace_id, digest_algorithm, digest_canonicalizer, ?1, ?2, proposal_digest,
+             SELECT workspace_id, digest_algorithm, digest_canonicalizer, ?1, ?2,
+                    subject_kind, subject_digest, proposal_digest,
                     proposal_digest_algorithm, proposal_digest_canonicalizer, mission_id,
                     evaluator_resident_id, evaluator_configuration_id, rubric_id, rubric_version,
                     rubric_canonicalizer, rubric_sha256, verdict, conflicts_declared,
@@ -1621,7 +1634,7 @@ fn an_evaluated_time_earlier_than_the_link_it_supersedes_is_refused() {
     connection
         .execute(
             "INSERT INTO evaluation_supersessions (
-                 workspace_id, proposal_digest, evaluation_digest, supersedes_evaluation_digest
+                 workspace_id, subject_digest, evaluation_digest, supersedes_evaluation_digest
              ) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![
                 fixture.workspace_id.to_string(),
@@ -1705,13 +1718,15 @@ fn two_links_recorded_in_the_same_millisecond_are_accepted() {
         .execute(
             "INSERT INTO evaluations (
                  workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
-                 canonical_bytes, proposal_digest, proposal_digest_algorithm,
+                 canonical_bytes, subject_kind, subject_digest,
+                 proposal_digest, proposal_digest_algorithm,
                  proposal_digest_canonicalizer, mission_id, evaluator_resident_id,
                  evaluator_configuration_id, rubric_id, rubric_version, rubric_canonicalizer,
                  rubric_sha256, verdict, conflicts_declared, conflicts_text, rationale,
                  evaluated_at_ms
              )
-             SELECT workspace_id, digest_algorithm, digest_canonicalizer, ?1, ?2, proposal_digest,
+             SELECT workspace_id, digest_algorithm, digest_canonicalizer, ?1, ?2,
+                    subject_kind, subject_digest, proposal_digest,
                     proposal_digest_algorithm, proposal_digest_canonicalizer, mission_id,
                     evaluator_resident_id, evaluator_configuration_id, rubric_id, rubric_version,
                     rubric_canonicalizer, rubric_sha256, verdict, conflicts_declared,
@@ -1731,7 +1746,7 @@ fn two_links_recorded_in_the_same_millisecond_are_accepted() {
     connection
         .execute(
             "INSERT INTO evaluation_supersessions (
-                 workspace_id, proposal_digest, evaluation_digest, supersedes_evaluation_digest
+                 workspace_id, subject_digest, evaluation_digest, supersedes_evaluation_digest
              ) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![
                 fixture.workspace_id.to_string(),
@@ -1883,13 +1898,15 @@ fn an_evaluation_chain_that_forks_refuses_startup() {
         .execute(
             "INSERT INTO evaluations (
                  workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
-                 canonical_bytes, proposal_digest, proposal_digest_algorithm,
+                 canonical_bytes, subject_kind, subject_digest,
+                 proposal_digest, proposal_digest_algorithm,
                  proposal_digest_canonicalizer, mission_id, evaluator_resident_id,
                  evaluator_configuration_id, rubric_id, rubric_version, rubric_canonicalizer,
                  rubric_sha256, verdict, conflicts_declared, conflicts_text, rationale,
                  evaluated_at_ms
              )
-             SELECT workspace_id, digest_algorithm, digest_canonicalizer, ?1, ?2, proposal_digest,
+             SELECT workspace_id, digest_algorithm, digest_canonicalizer, ?1, ?2,
+                    subject_kind, subject_digest, proposal_digest,
                     proposal_digest_algorithm, proposal_digest_canonicalizer, mission_id,
                     evaluator_resident_id, evaluator_configuration_id, rubric_id, rubric_version,
                     rubric_canonicalizer, ?3, verdict, conflicts_declared, conflicts_text,
@@ -2057,13 +2074,15 @@ fn store_with_a_relation_the_bytes_do_not_declare(
         .execute(
             "INSERT INTO evaluations (
                  workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
-                 canonical_bytes, proposal_digest, proposal_digest_algorithm,
+                 canonical_bytes, subject_kind, subject_digest,
+                 proposal_digest, proposal_digest_algorithm,
                  proposal_digest_canonicalizer, mission_id, evaluator_resident_id,
                  evaluator_configuration_id, rubric_id, rubric_version, rubric_canonicalizer,
                  rubric_sha256, verdict, conflicts_declared, conflicts_text, rationale,
                  evaluated_at_ms
              )
-             SELECT workspace_id, digest_algorithm, digest_canonicalizer, ?1, ?2, proposal_digest,
+             SELECT workspace_id, digest_algorithm, digest_canonicalizer, ?1, ?2,
+                    subject_kind, subject_digest, proposal_digest,
                     proposal_digest_algorithm, proposal_digest_canonicalizer, mission_id,
                     evaluator_resident_id, evaluator_configuration_id, rubric_id, rubric_version,
                     rubric_canonicalizer, ?3, verdict, conflicts_declared, conflicts_text,
@@ -2106,7 +2125,7 @@ fn store_with_a_relation_the_bytes_do_not_declare(
     connection
         .execute(
             "INSERT INTO evaluation_supersessions (
-                 workspace_id, proposal_digest, evaluation_digest, supersedes_evaluation_digest
+                 workspace_id, subject_digest, evaluation_digest, supersedes_evaluation_digest
              ) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![
                 fixture.workspace_id.to_string(),
@@ -2185,7 +2204,7 @@ fn each_composite_foreign_key_independently_refuses_a_cross_proposal_relation() 
     let link = |proposal: &str, successor: &str, predecessor: &str| {
         connection.execute(
             "INSERT INTO evaluation_supersessions (
-                 workspace_id, proposal_digest, evaluation_digest, supersedes_evaluation_digest
+                 workspace_id, subject_digest, evaluation_digest, supersedes_evaluation_digest
              ) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![
                 fixture.workspace_id.to_string(),
@@ -2227,13 +2246,15 @@ fn each_composite_foreign_key_independently_refuses_a_cross_proposal_relation() 
         .execute(
             "INSERT INTO evaluations (
                  workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
-                 canonical_bytes, proposal_digest, proposal_digest_algorithm,
+                 canonical_bytes, subject_kind, subject_digest,
+                 proposal_digest, proposal_digest_algorithm,
                  proposal_digest_canonicalizer, mission_id, evaluator_resident_id,
                  evaluator_configuration_id, rubric_id, rubric_version, rubric_canonicalizer,
                  rubric_sha256, verdict, conflicts_declared, conflicts_text, rationale,
                  evaluated_at_ms
              )
-             SELECT workspace_id, digest_algorithm, digest_canonicalizer, ?1, ?2, proposal_digest,
+             SELECT workspace_id, digest_algorithm, digest_canonicalizer, ?1, ?2,
+                    subject_kind, subject_digest, proposal_digest,
                     proposal_digest_algorithm, proposal_digest_canonicalizer, mission_id,
                     evaluator_resident_id, evaluator_configuration_id, rubric_id, rubric_version,
                     rubric_canonicalizer, ?3, verdict, conflicts_declared, conflicts_text,
