@@ -170,9 +170,39 @@ python_checks() {
     run "pytest"      "$PY" -m pytest -q
 }
 
+# The desktop tests run SHUFFLED, with the seed chosen here, printed, and overridable.
+#
+# Why: a #48 test asserted a status line synchronously right after an async unlock. It passed every
+# full-file run, failed 100% when run alone, and failed one full gate on main -- an order-dependent
+# test the gate let through to the default branch.
+#
+# Measured on this branch with that test's pre-fix form restored, 30 full runs:
+#
+#   unshuffled   0 / 10 runs failed
+#   shuffled     7 / 20 runs failed        (and all 7 are the #48 test, by name)
+#   shuffled, against the FIXED test: 0 / 4 -- the detector is specific, not just noisy
+#
+# So shuffling is a real detector and NOT a complete one: about a third of runs catch this class,
+# which converges over PRs rather than guaranteeing any single one. It is worth having because it
+# costs nothing -- the stage takes the same ~15s either way -- but a green shuffled stage is weaker
+# evidence than it looks, and this comment is where that is written down.
+#
+# THE SEED DOES NOT REPLAY THIS PARTICULAR FAILURE, and that was measured too: seed 2 failed once
+# and then passed six consecutive runs. Ordering is what exposes the dependency; whether the race is
+# lost inside a given ordering is still timing. The seed is printed because for a purely
+# order-dependent test it does reproduce the order, and because a random order nobody recorded is a
+# bug report that cannot be investigated at all -- not because it makes every failure replayable.
+# Replay with `GATE_VITEST_SEED=<printed seed> scripts/gate desktop`, and expect to repeat it.
+#
+# The seed is in the step NAME so it appears on the ok line and the FAIL line alike.
+#
+# `npm test -- <args>` does forward to vitest (checked with `-t`), so the stage keeps going through
+# the package script rather than reaching past it to `npx vitest`.
 desktop_checks() {
+    local seed="${GATE_VITEST_SEED:-$(date +%s)}"
     run "npm clean install" run_in_desktop npm ci --ignore-scripts
-    run "desktop tests"    run_in_desktop npm test
+    run "desktop tests (shuffled, seed $seed)" \
+        run_in_desktop npm test -- --sequence.shuffle --sequence.seed="$seed"
     run "desktop build"    run_in_desktop npm run build
     run "Tauri build"      run_in_desktop npm run tauri build -- --no-bundle
 }
