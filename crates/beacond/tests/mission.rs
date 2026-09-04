@@ -305,7 +305,7 @@ fn operator_admits_a_finite_mission_from_exact_current_team_evidence() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 23);
+    assert_eq!(report.diagnostics.schema_version, 24);
 }
 
 #[test]
@@ -656,7 +656,7 @@ fn schema_ten_migrates_without_rewriting_events_or_the_team_roster_guard() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 23);
+    assert_eq!(report.diagnostics.schema_version, 24);
     let connection = Connection::open(&path).unwrap();
     let after = connection
         .query_row(
@@ -724,5 +724,302 @@ fn concurrent_accepted_admissions_create_distinct_immutable_missions() {
             )
             .unwrap(),
         2
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// ADR 0041 slice 1 — condition identity.
+//
+// A Mission's success conditions had no identity of any kind: a JSON array of strings, stable by
+// accident of three unrelated mechanisms and pointable-at by no foreign key. These six tests are the
+// slice's whole acceptance, one per bullet of the design's list.
+// ---------------------------------------------------------------------------------------------
+
+/// Every condition row a store holds for one Mission, in ordinal order.
+fn condition_rows(path: &PathBuf, mission_id: Uuid) -> Vec<(i64, String)> {
+    let connection = Connection::open(path).unwrap();
+    let mut statement = connection
+        .prepare(
+            "SELECT ordinal, text FROM mission_success_conditions
+             WHERE mission_id = ?1 ORDER BY ordinal",
+        )
+        .unwrap();
+    statement
+        .query_map([mission_id.to_string()], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+}
+
+fn admit_with_conditions(
+    store: &TestStore,
+    accounts: &Arc<OperatorAccountService>,
+    conditions: Vec<String>,
+) -> beacond::MissionView {
+    let prepared = prepare_team(store, accounts, 1);
+    let mut draft = mission_draft(&prepared);
+    draft.success_conditions = conditions;
+    MissionService::new(Arc::clone(accounts), store.workspace_id)
+        .admit(draft)
+        .unwrap()
+}
+
+#[test]
+fn every_declared_condition_gets_a_row_in_declaration_order() {
+    // Bullet 1. Declaration order, not sorted order: the ordinal IS the identity, so a row set that
+    // is correct as a *set* and wrong as a *sequence* is wrong.
+    let store = TestStore::new("conditions-order");
+    let accounts = enrolled_accounts(&store);
+    let declared = vec![
+        "Zebra crossing is painted".to_owned(),
+        "Alpha gate passes".to_owned(),
+        "Middle review is recorded".to_owned(),
+    ];
+    let mission = admit_with_conditions(&store, &accounts, declared.clone());
+    assert_eq!(mission.success_conditions, declared);
+
+    assert_eq!(
+        condition_rows(&store.path, mission.id),
+        declared
+            .iter()
+            .enumerate()
+            .map(|(ordinal, text)| (i64::try_from(ordinal).unwrap(), text.clone()))
+            .collect::<Vec<_>>(),
+        "the rows are not the Mission's declaration order"
+    );
+}
+
+#[test]
+fn twenty_conditions_give_twenty_rows_and_one_gives_one() {
+    // Bullet 2. Both ends of the module's own bound, because an off-by-one at either end is a
+    // different defect from an off-by-one in the middle.
+    // Two stores: one store enrols one Team, and a second `prepare_team` in the same store is
+    // refused as `DecisionAlreadyRecorded`.
+    let many_store = TestStore::new("conditions-twenty");
+    let many_accounts = enrolled_accounts(&many_store);
+    let twenty: Vec<String> = (0..20).map(|index| format!("Condition {index}")).collect();
+    let many = admit_with_conditions(&many_store, &many_accounts, twenty.clone());
+    assert_eq!(
+        condition_rows(&many_store.path, many.id),
+        twenty
+            .iter()
+            .enumerate()
+            .map(|(ordinal, text)| (i64::try_from(ordinal).unwrap(), text.clone()))
+            .collect::<Vec<_>>()
+    );
+
+    let one_store = TestStore::new("conditions-one");
+    let one_accounts = enrolled_accounts(&one_store);
+    let one = admit_with_conditions(&one_store, &one_accounts, vec!["Only this".to_owned()]);
+    assert_eq!(
+        condition_rows(&one_store.path, one.id),
+        vec![(0, "Only this".to_owned())]
+    );
+}
+
+#[test]
+fn condition_rows_refuse_update_and_refuse_delete() {
+    // Bullet 3. The ordinal is an identity only if it cannot move, and the text is evidence only if
+    // it cannot be rewritten. Both refusals are the store's, not a Command's.
+    let store = TestStore::new("conditions-immutable");
+    let accounts = enrolled_accounts(&store);
+    let mission = admit_with_conditions(&store, &accounts, vec!["Immutable".to_owned()]);
+
+    let connection = Connection::open(&store.path).unwrap();
+    let update = connection.execute(
+        "UPDATE mission_success_conditions SET text = 'rewritten' WHERE mission_id = ?1",
+        [mission.id.to_string()],
+    );
+    assert!(update.is_err(), "a condition row accepted an UPDATE");
+    let delete = connection.execute(
+        "DELETE FROM mission_success_conditions WHERE mission_id = ?1",
+        [mission.id.to_string()],
+    );
+    assert!(delete.is_err(), "a condition row accepted a DELETE");
+    drop(connection);
+
+    assert_eq!(
+        condition_rows(&store.path, mission.id),
+        vec![(0, "Immutable".to_owned())]
+    );
+}
+
+#[test]
+fn a_condition_row_whose_text_disagrees_with_the_mission_fails_startup() {
+    // Bullet 4, and the scenario ONLY the per-ordinal text check can see: the count is still right.
+    // Written through a fresh table because the row itself refuses UPDATE -- which is the point:
+    // getting a disagreeing row into this store takes deliberate tampering, and reconciliation is
+    // what notices it anyway.
+    let store = TestStore::new("conditions-text-drift");
+    let accounts = enrolled_accounts(&store);
+    let mission = admit_with_conditions(&store, &accounts, vec!["Declared exactly".to_owned()]);
+
+    let connection = Connection::open(&store.path).unwrap();
+    // The row refuses UPDATE, so the trigger comes off and goes back on **byte-identically** -- its
+    // own stored text, replayed. `verify_schema` compares the store's schema against the migrations,
+    // so a re-creation that differs by one space refuses startup as `SchemaMismatch` and proves
+    // nothing about this check. (It did, first try.)
+    let trigger_sql: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'trigger' AND name = 'mission_success_conditions_no_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute_batch(
+            "DROP TRIGGER mission_success_conditions_no_update;
+             UPDATE mission_success_conditions SET text = 'something else entirely';",
+        )
+        .unwrap();
+    connection.execute_batch(&trigger_sql).unwrap();
+    let count: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM mission_success_conditions WHERE mission_id = ?1",
+            [mission.id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "the count must still agree, or this proves nothing"
+    );
+    drop(connection);
+
+    let outcome = Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    });
+    assert!(
+        matches!(outcome, Err(beacond::SupervisorError::MissionStateMismatch)),
+        "startup accepted a condition row that disagrees with its Mission: {outcome:?}"
+    );
+}
+
+#[test]
+fn a_condition_row_the_mission_never_declared_fails_startup() {
+    // Bullet 5, and the scenario ONLY the count check can see: every declared ordinal still holds
+    // exactly the declared text, so a walk of the Mission's array finds nothing wrong. The extra row
+    // sits past the end of it.
+    let store = TestStore::new("conditions-extra-row");
+    let accounts = enrolled_accounts(&store);
+    let mission = admit_with_conditions(&store, &accounts, vec!["Declared exactly".to_owned()]);
+
+    let connection = Connection::open(&store.path).unwrap();
+    connection
+        .execute(
+            "INSERT INTO mission_success_conditions (workspace_id, mission_id, ordinal, text)
+             VALUES (?1, ?2, 1, 'a condition nobody declared')",
+            [store.workspace_id.to_string(), mission.id.to_string()],
+        )
+        .unwrap();
+    let declared: String = connection
+        .query_row(
+            "SELECT text FROM mission_success_conditions
+             WHERE mission_id = ?1 AND ordinal = 0",
+            [mission.id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        declared, "Declared exactly",
+        "the declared ordinal must still be right, or this proves nothing"
+    );
+    drop(connection);
+
+    assert!(matches!(
+        Supervisor::bootstrap(StartupConfig {
+            store_path: store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        }),
+        Err(beacond::SupervisorError::MissionStateMismatch)
+    ));
+}
+
+#[test]
+fn the_condition_migration_adds_triggers_and_rewrites_none() {
+    // Bullet 6. Every migration in this series that touched the Event-kind vocabulary had to drop
+    // and re-create every trigger referencing `events`, and one forgotten trigger is a guard that
+    // silently stops existing. This migration is additive and adds no Event, so the whole inventory
+    // is pinned: any future migration that drops, renames or rewrites a trigger turns this red.
+    let store = TestStore::new("conditions-triggers");
+    let connection = Connection::open(&store.path).unwrap();
+    let mut statement = connection
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name")
+        .unwrap();
+    let triggers = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(
+        triggers.contains(&"mission_success_conditions_no_update".to_owned())
+            && triggers.contains(&"mission_success_conditions_no_delete".to_owned()),
+        "the new triggers are missing: {triggers:?}"
+    );
+    assert!(
+        triggers.contains(&"team_formation_members_no_insert_after_formation".to_owned())
+            && triggers.contains(&"mission_admission_members_no_insert_after_admission".to_owned()),
+        "an Event-keyed roster guard stopped existing: {triggers:?}"
+    );
+
+    // ...and the migration's own text is additive: it names no trigger of anyone else's, renames no
+    // table, and does not touch `events`. Asserted against the shipped file, so a later edit to it
+    // is what fails rather than a store that happens to look right.
+    let migration = include_str!("../migrations/0024_mission_success_conditions.sql");
+    for forbidden in ["DROP TRIGGER", "ALTER TABLE", "DROP TABLE", "UPDATE events"] {
+        assert!(
+            !migration.contains(forbidden),
+            "the migration is not additive: it contains {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn the_backfill_gives_existing_missions_their_condition_rows_in_order() {
+    // Bullet 1's other half, and the only test that exercises the BACKFILL rather than the write
+    // path. Every other slice-1 test admits its Mission after the migration, so the rows it checks
+    // came from `insert_admission`; this one takes a store that already has a Mission, drops the
+    // table, rolls the version back, and lets the migration rebuild it from the Mission's own JSON.
+    //
+    // It found two defects the other six could not: the missing `20 =>` ladder arm (every store on
+    // main is at 20, and without the arm they all refuse startup), and that the backfill's order is
+    // load-bearing and untested.
+    let store = TestStore::new("conditions-backfill");
+    let accounts = enrolled_accounts(&store);
+    let declared = vec![
+        "Zebra crossing is painted".to_owned(),
+        "Alpha gate passes".to_owned(),
+        "Middle review is recorded".to_owned(),
+    ];
+    let mission = admit_with_conditions(&store, &accounts, declared.clone());
+
+    let connection = Connection::open(&store.path).unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE mission_success_conditions;
+             UPDATE schema_meta SET version = 23 WHERE singleton = 1;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let report = Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .expect("a store at the previous schema version must migrate");
+    assert_eq!(report.diagnostics.schema_version, 24);
+
+    assert_eq!(
+        condition_rows(&store.path, mission.id),
+        declared
+            .iter()
+            .enumerate()
+            .map(|(ordinal, text)| (i64::try_from(ordinal).unwrap(), text.clone()))
+            .collect::<Vec<_>>(),
+        "the backfill did not reproduce the Mission's declaration order"
     );
 }

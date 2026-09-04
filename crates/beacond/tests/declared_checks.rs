@@ -245,6 +245,10 @@ fn downgrade_execution_schema_to_v15(store_path: &Path) {
     connection
         .execute_batch(
             "BEGIN IMMEDIATE;
+             -- Migration 0024's condition identity: its triggers first, then the table (ADR 0041).
+             DROP TRIGGER mission_success_conditions_no_update;
+             DROP TRIGGER mission_success_conditions_no_delete;
+             DROP TABLE mission_success_conditions;
              -- Records come off innermost first, newest migration first. Migration 0023's
              -- Evaluation tables reference proposals, and 0022's Ruling/Candidate binding
              -- references both rulings and candidates, which reference proposals in turn.
@@ -1991,7 +1995,7 @@ fn migration_preserves_real_v1_bytes_through_rollback_and_forward_startup() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 23);
+    assert_eq!(report.diagnostics.schema_version, 24);
     let connection = Connection::open(&store.path).unwrap();
     assert_v1_bytes(&connection, run_id, &v1_payload);
 }
