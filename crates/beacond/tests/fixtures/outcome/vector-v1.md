@@ -148,7 +148,7 @@ Every result below was verified at boundary event `4210`; it is not re-verified 
 | field | value |
 | --- | --- |
 | Policy classification | `00000000-0000-4000-8000-000000000004` |
-| Policy classification digest | `3333333333333333333333333333333333333333333333333333333333333333` (`beacon.policy.v1`) |
+| Policy classification digest | `sha256:3333333333333333333333333333333333333333333333333333333333333333` (`beacon.policy.v1`) |
 | Policy high impact | `true` |
 | appendix request | `policy_default` |
 | appendix mode | `included` |

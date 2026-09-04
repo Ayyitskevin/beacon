@@ -62,8 +62,22 @@ const MAX_TEXT_BYTES: usize = MAX_TEXT_SCALARS * 4;
 /// comparison (ruling.rs's rule, kept).
 const MAX_TOKEN_BYTES: usize = 64;
 /// A decoder-side guard on any declared collection length. It is not a product bound -- the
-/// citation bound is -- it only stops a declared count from allocating before it is checked.
+/// citation bound is -- it only stops a declared count from being trusted.
 const MAX_COLLECTION_ENTRIES: u32 = 4_096;
+
+/// The smallest number of bytes one entry of each collection can occupy.
+///
+/// ADR 0034's accepted rule, and `proposal.rs`'s `Decoder::count`: a declared count is checked
+/// against the remaining input using the smallest possible size of one entry, before the first
+/// entry is read and before anything reserves capacity for it. A cap alone leaves a hostile count
+/// buying 4,096 slots and one decode attempt; the arithmetic refuses it without reading a byte.
+///
+/// Each figure is the structural minimum: every fixed-width field, every length prefix, and the
+/// cheapest arm of every tag, with zero-length strings.
+const MIN_SOURCE_REF_BYTES: usize = 94;
+const MIN_RECEIPT_REF_BYTES: usize = 84;
+const MIN_NARRATIVE_REF_BYTES: usize = 12;
+const MIN_CONDITION_BYTES: usize = 19;
 const DIGEST_HEX_CHARS: usize = 64;
 const GIT_COMMIT_HEX_CHARS: usize = 40;
 
@@ -1066,12 +1080,23 @@ impl<'a> Decoder<'a> {
             .map_err(|_| MalformedOutcome::InvalidUtf8)
     }
 
-    fn count(&mut self) -> Result<usize, MalformedOutcome> {
+    /// Reads a declared entry count and proves the input could hold that many entries.
+    ///
+    /// Refuse before allocate: the count is checked against its cap and then against the remaining
+    /// input at `entry_bytes` each, before any entry is read and before any `Vec` reserves for it.
+    fn count(&mut self, entry_bytes: usize) -> Result<usize, MalformedOutcome> {
         let count = self.u32()?;
         if count > MAX_COLLECTION_ENTRIES {
             return Err(MalformedOutcome::OverLimitLength);
         }
-        Ok(count as usize)
+        let count = count as usize;
+        let smallest = count
+            .checked_mul(entry_bytes)
+            .ok_or(MalformedOutcome::Truncated)?;
+        if smallest > self.remaining() {
+            return Err(MalformedOutcome::Truncated);
+        }
+        Ok(count)
     }
 
     fn finish(self) -> Result<(), MalformedOutcome> {
@@ -1255,8 +1280,8 @@ fn decode_refs(
     expected: Option<SourceKind>,
 ) -> Result<OutcomeState<Vec<SourceRef>>, MalformedOutcome> {
     decode_state(decoder, |decoder| {
-        let count = decoder.count()?;
-        let mut refs = Vec::with_capacity(count);
+        let count = decoder.count(MIN_SOURCE_REF_BYTES)?;
+        let mut refs = Vec::new();
         for _ in 0..count {
             let entry = decode_source_ref(decoder)?;
             if let Some(expected) = expected {
@@ -1290,8 +1315,8 @@ fn decode_narrative(
     decoder: &mut Decoder<'_>,
 ) -> Result<OutcomeState<Vec<NarrativeRef>>, MalformedOutcome> {
     decode_state(decoder, |decoder| {
-        let count = decoder.count()?;
-        let mut items = Vec::with_capacity(count);
+        let count = decoder.count(MIN_NARRATIVE_REF_BYTES)?;
+        let mut items = Vec::new();
         for _ in 0..count {
             let ordinal = decoder.u32()?;
             let item_id = decoder.string(MAX_TOKEN_BYTES)?;
@@ -1506,11 +1531,11 @@ fn decode(input: &[u8]) -> Result<OutcomeManifestV1, MalformedOutcome> {
     let policy_high_impact = decoder.bool()?;
     let appendix_request = AppendixRequest::parse(decoder.tag()?)?;
 
-    let count = decoder.count()?;
+    let count = decoder.count(MIN_CONDITION_BYTES)?;
     if count == 0 {
         return Err(MalformedOutcome::NoSuccessConditions);
     }
-    let mut success_conditions = Vec::with_capacity(count);
+    let mut success_conditions = Vec::new();
     for _ in 0..count {
         success_conditions.push(decode_condition(&mut decoder)?);
     }
@@ -1521,8 +1546,8 @@ fn decode(input: &[u8]) -> Result<OutcomeManifestV1, MalformedOutcome> {
     let ruling_refs = decode_refs(&mut decoder, Some(SourceKind::Ruling))?;
     let evaluation_refs = decode_refs(&mut decoder, Some(SourceKind::Evaluation))?;
     let receipt_refs = decode_state(&mut decoder, |decoder| {
-        let count = decoder.count()?;
-        let mut refs = Vec::with_capacity(count);
+        let count = decoder.count(MIN_RECEIPT_REF_BYTES)?;
+        let mut refs = Vec::new();
         for _ in 0..count {
             refs.push(decode_receipt_ref(decoder)?);
         }
@@ -2004,8 +2029,26 @@ impl Markdown {
     }
 }
 
+/// The one spelling of a digest anywhere in the document.
+///
+/// One value rendered three ways in one document is three things a reader has to learn are the
+/// same thing, and three places a change has to be made in step. The appendix's cited-objects
+/// table is the deliberate exception: it is a column layout, so the envelope's parts are columns
+/// rather than one span.
 fn digest_span(digest: &SourceDigest) -> String {
     format!("`{}:{}`", digest.algorithm, digest.value)
+}
+
+/// A Receipt's Outcome checksum, spelled by the same function as every other digest.
+///
+/// The envelope is fixed rather than stored, because a Receipt has no content digest of its own:
+/// this is an Outcome verification checksum over stored `receipt_json` bytes (Kevin's ruling 5).
+fn checksum_span(value: &str) -> String {
+    digest_span(&SourceDigest {
+        algorithm: DIGEST_ALGORITHM.to_owned(),
+        canonicalizer: RECEIPT_CHECKSUM_LABEL.to_owned(),
+        value: value.to_owned(),
+    })
 }
 
 fn revision_cell(state: &OutcomeState<PinnedRevision>, escape: Escaper) -> String {
@@ -2474,11 +2517,10 @@ fn render_body(
             document.line("| --- | --- | --- |")?;
             for receipt in refs {
                 document.line(&format!(
-                    "| `{}` | `{}` | `{}:{}` |",
+                    "| `{}` | `{}` | {} |",
                     uuid_key(&receipt.run_uuid),
                     receipt.receipt_version,
-                    DIGEST_ALGORITHM,
-                    receipt.outcome_checksum
+                    checksum_span(&receipt.outcome_checksum)
                 ))?;
             }
             document.blank()?;
@@ -2699,8 +2741,8 @@ fn render_appendix(
                 uuid_key(&manifest.policy_classification.object_id)
             ))?;
             document.line(&format!(
-                "| Policy classification digest | `{}` (`{}`) |",
-                manifest.policy_classification.digest.value,
+                "| Policy classification digest | {} (`{}`) |",
+                digest_span(&manifest.policy_classification.digest),
                 manifest.policy_classification.digest.canonicalizer
             ))?;
             document.line(&format!(
