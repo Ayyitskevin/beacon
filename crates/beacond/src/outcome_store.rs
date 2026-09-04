@@ -380,7 +380,11 @@ pub fn verified_manifest_within(
             stored.workspace_id.clone(),
             manifest.workspace_id.to_string(),
         ),
-        ("manifest_id", stored.manifest_id.clone(), manifest_id.to_string()),
+        (
+            "manifest_id",
+            stored.manifest_id.clone(),
+            manifest_id.to_string(),
+        ),
         (
             "mission_id",
             stored.mission_id.clone(),
@@ -574,8 +578,7 @@ impl OutcomeService {
         manifest_digest: &str,
     ) -> Result<VerifiedArtifactRecord, PrepareRefusal> {
         self.accounts.with_authenticated_store(|connection, _now| {
-            let stored =
-                verified_manifest_within(connection, self.workspace_id, manifest_digest)?;
+            let stored = verified_manifest_within(connection, self.workspace_id, manifest_digest)?;
             Ok(crate::artifact::verified_artifact_within(
                 connection,
                 self.workspace_id,
@@ -606,11 +609,8 @@ fn read_completion(
             ),
         });
     }
-    let record = verified_completion_within(
-        connection,
-        workspace_id,
-        &manifest.completion.digest.value,
-    )?;
+    let record =
+        verified_completion_within(connection, workspace_id, &manifest.completion.digest.value)?;
 
     let mismatches: [(&str, String, String); 6] = [
         (

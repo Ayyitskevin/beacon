@@ -15,21 +15,21 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use beacond::{
-    AccessOrigin, AppendixMode, AppendixRequest, AutonomyProfile, BeaconCapability, COMPLETION_CANONICALIZER,
-    ClassificationActor, ClassificationBasis, ClassificationSupersedes, CompletionActor,
-    CompletionDisposition, CompletionSupersedes, ConditionOutcome, ConditionResult,
-    ConditionResultRecord, ImpactLevel, LocalModelActivationService, LocalModelEndpoint,
-    MISSION_IMPACT_CANONICALIZER, ManifestStoreRefusal, MissionCompletionV1, MissionDraft,
-    MissionImpactClassificationV1, MissionImpactService, MissionMemberDraft, MissionService,
-    OperatorAccountService, OperatorSessionPhase, OutcomeManifestV1, OutcomeService, OutcomeState,
-    PolicyRevisionRef, PrepareRefusal, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft,
-    ProjectPolicyService, ProjectService, ProviderFeature, ResidentConfigurationService,
-    ResidentLifecycleService, SecretString, SourceDigest, SourceKind, SourceRef, SpendReference,
-    StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig, SuccessCondition,
-    Supervisor, TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule,
-    TeamLeadSelectionPolicy, TeamMemberDraft, TeamService, TrackRecordEvidenceKind,
-    TrackRecordRequirement, VerifiedSources, VerifiedText, declared_conditions_digest,
-    record_completion, render, verified_manifest_within,
+    AccessOrigin, AppendixMode, AppendixRequest, AutonomyProfile, BeaconCapability,
+    COMPLETION_CANONICALIZER, ClassificationActor, ClassificationBasis, ClassificationSupersedes,
+    CompletionActor, CompletionDisposition, CompletionSupersedes, ConditionOutcome,
+    ConditionResult, ConditionResultRecord, ImpactLevel, LocalModelActivationService,
+    LocalModelEndpoint, MISSION_IMPACT_CANONICALIZER, ManifestStoreRefusal, MissionCompletionV1,
+    MissionDraft, MissionImpactClassificationV1, MissionImpactService, MissionMemberDraft,
+    MissionService, OperatorAccountService, OperatorSessionPhase, OutcomeManifestV1,
+    OutcomeService, OutcomeState, PolicyRevisionRef, PrepareRefusal, ProjectCharterDraft,
+    ProjectDraft, ProjectPolicyDraft, ProjectPolicyService, ProjectService, ProviderFeature,
+    ResidentConfigurationService, ResidentLifecycleService, SecretString, SourceDigest, SourceKind,
+    SourceRef, SpendReference, StarterOrganizationService, StarterResidentDraft, StarterRole,
+    StartupConfig, SuccessCondition, Supervisor, TeamDraft, TeamLeadAmbiguityRule,
+    TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
+    TeamService, TrackRecordEvidenceKind, TrackRecordRequirement, VerifiedSources, VerifiedText,
+    declared_conditions_digest, record_completion, render, verified_manifest_within,
 };
 use rusqlite::{Connection, params};
 use uuid::Uuid;
@@ -515,7 +515,13 @@ fn ordinary(label: &str) -> (Fixture, OutcomeManifestV1, VerifiedSources) {
 
 /// Runs `tamper` with an immutability trigger down, then restores it -- leaving the schema
 /// signature intact and the store holding a row nothing should have written.
-fn with_trigger_down(store: &TestStore, name: &str, table: &str, message: &str, tamper: impl FnOnce(&Connection)) {
+fn with_trigger_down(
+    store: &TestStore,
+    name: &str,
+    table: &str,
+    message: &str,
+    tamper: impl FnOnce(&Connection),
+) {
     let connection = store.connect();
     connection
         .execute_batch(&format!("DROP TRIGGER {name};"))
@@ -635,7 +641,10 @@ fn a_decoy_projection_column_cannot_change_what_the_reader_returns() {
     // disagrees with its own bytes is invalid state rather than a differently-shaped record.
     for (column, lie) in [
         ("renderer_version", "beacon.outcome.md.v2".to_owned()),
-        ("canonicalizer_version", "beacon.outcome.manifest.v2".to_owned()),
+        (
+            "canonicalizer_version",
+            "beacon.outcome.manifest.v2".to_owned(),
+        ),
         ("mission_id", Uuid::new_v4().to_string()),
         ("manifest_id", Uuid::new_v4().to_string()),
         ("completion_digest", "aa".repeat(32)),
@@ -747,7 +756,10 @@ fn prepare_is_idempotent_for_same_manifest_and_renderer_version() {
     let events_after_first = rows("events");
 
     let second = fixture.outcomes.prepare(&manifest, &sources).unwrap();
-    assert_eq!(first, second, "a second prepare produced different identities");
+    assert_eq!(
+        first, second,
+        "a second prepare produced different identities"
+    );
     assert_eq!(rows("outcome_manifests"), manifests_after_first);
     assert_eq!(rows("artifacts"), artifacts_after_first);
     assert_eq!(
@@ -850,7 +862,10 @@ fn candidate_accountable_author_equals_completion_accountable_resident() {
         record.payload().accountable_configuration_id,
         completion.accountable_resident_configuration_id
     );
-    assert_ne!(record.payload().accountable_resident_id, fixture.resident_id);
+    assert_ne!(
+        record.payload().accountable_resident_id,
+        fixture.resident_id
+    );
 }
 
 #[test]
@@ -1145,11 +1160,17 @@ fn manifest_bytes_remain_retrievable_for_every_retained_outcome_version() {
         appendix_request: AppendixRequest::Include,
         ..first_manifest.clone()
     };
-    let second = fixture.outcomes.prepare(&second_manifest, &sources).unwrap();
+    let second = fixture
+        .outcomes
+        .prepare(&second_manifest, &sources)
+        .unwrap();
     assert_ne!(first.manifest_digest, second.manifest_digest);
 
     for (candidate, expected) in [(&first, &first_manifest), (&second, &second_manifest)] {
-        let stored = fixture.outcomes.manifest(&candidate.manifest_digest).unwrap();
+        let stored = fixture
+            .outcomes
+            .manifest(&candidate.manifest_digest)
+            .unwrap();
         assert_eq!(stored.manifest(), expected);
         assert_eq!(
             stored.canonical_bytes(),
