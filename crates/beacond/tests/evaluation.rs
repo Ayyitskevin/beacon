@@ -21,12 +21,13 @@ use beacond::{
     LocalModelActivationService, LocalModelEndpoint, MalformedEvaluation, MissionDraft,
     MissionMemberDraft, MissionService, OperatorAccountService, OperatorSessionPhase,
     ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService,
-    ProjectRepositoryService, ProjectService, ProposalService, ProviderFeature, RepositoryDraft,
-    RepositorySourceKind, ResidentConfigurationService, ResidentLifecycleService,
-    RubricDeclaration, SecretString, StarterOrganizationService, StarterResidentDraft, StarterRole,
-    StartupConfig, Supervisor, TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
-    TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft, TeamService,
-    TrackRecordEvidenceKind, TrackRecordRequirement, UnmetPrecondition, Verdict,
+    ProjectRepositoryService, ProjectService, ProposalService, ProviderFeature,
+    PublicationSeamRefusal, RepositoryDraft, RepositorySourceKind, ResidentConfigurationService,
+    ResidentLifecycleService, RubricDeclaration, SecretString, StarterOrganizationService,
+    StarterResidentDraft, StarterRole, StartupConfig, Supervisor, TeamDraft, TeamLeadAmbiguityRule,
+    TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
+    TeamService, TrackRecordEvidenceKind, TrackRecordRequirement, UnmetPrecondition, Verdict,
+    publication_candidacy,
 };
 use data_encoding::{BASE64, HEXLOWER};
 use rusqlite::Connection;
@@ -3053,5 +3054,272 @@ fn migration_0028_preserves_preexisting_proposal_evaluation_bytes_and_chain() {
     assert_eq!(
         events_after, events_before,
         "the migration changed Event bytes"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Slice E3 — the verified reader's seam contract and the both-links surface.
+// ---------------------------------------------------------------------------------------------
+
+/// E3 bullet 1. Every read re-verifies the SUBJECT Artifact's bytes and digest, not only the
+/// Evaluation's own.
+///
+/// The Evaluation's bytes can be perfect while the record they cite has rotted: the reader reaches
+/// the Artifact through its owning module, so a subject whose stored bytes no longer hash to its
+/// digest takes the Evaluation with it rather than being read past.
+#[test]
+fn the_verified_reader_reverifies_the_subject_artifacts_bytes_and_digest_on_every_read() {
+    let fixture = admitted_mission("e3-subject-reverified");
+    let artifact = fixture.record_artifact(b"# Outcome\n\nThe subject document.\n");
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+    let recorded = evaluations
+        .record(fixture.artifact_evaluation_draft(&artifact.digest().value))
+        .expect("it records");
+    evaluations
+        .get(&recorded.digest().value)
+        .expect("the positive control reads");
+
+    // Tamper with the SUBJECT's bytes only. The Evaluation's own row is untouched and still hashes
+    // to its own digest, so only a reader that follows the citation can notice.
+    let connection = fixture.store.connect();
+    connection
+        .execute_batch("DROP TRIGGER artifacts_no_update;")
+        .unwrap();
+    let mut rotted: Vec<u8> = connection
+        .query_row(
+            "SELECT canonical_bytes FROM artifacts WHERE digest_value = ?1",
+            [&artifact.digest().value],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let last = rotted.len() - 1;
+    rotted[last] ^= 0xff;
+    connection
+        .execute(
+            "UPDATE artifacts SET canonical_bytes = ?1 WHERE digest_value = ?2",
+            rusqlite::params![rotted, artifact.digest().value],
+        )
+        .expect("the store admits it: SQL cannot hash");
+    drop(connection);
+
+    assert!(
+        evaluations.get(&recorded.digest().value).is_err(),
+        "the read accepted an Evaluation whose subject Artifact no longer verifies"
+    );
+}
+
+/// E3 bullet 3. Drift is empty for an Artifact subject, and subject supersession is NOT folded into
+/// it.
+///
+/// Two absences that mean different things: an Artifact record carries no Charter, Policy,
+/// Repository or base revision, so nothing could have moved under it -- while its successor is a
+/// real fact about the world, reported in its own field. Folding the second into the first would
+/// make "the document was replaced" read as "a precondition moved".
+#[test]
+fn drift_is_empty_for_artifact_subjects_and_subject_supersession_is_not_folded_into_it() {
+    let fixture = admitted_mission("e3-drift-empty");
+    let artifact = fixture.record_artifact(b"# Outcome\n\nFirst version.\n");
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+    let recorded = evaluations
+        .record(fixture.artifact_evaluation_draft(&artifact.digest().value))
+        .expect("it records");
+    assert!(recorded.force().drift().is_empty());
+
+    let mut predecessor_digest = [0_u8; 32];
+    predecessor_digest
+        .copy_from_slice(&HEXLOWER.decode(artifact.digest().value.as_bytes()).unwrap());
+    let successor = fixture
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            b"# Outcome\n\nSecond version.\n",
+            ArtifactContext::Mission {
+                project_id: fixture.project_id,
+                mission_id: fixture.mission_id,
+            },
+            fixture.resident_id,
+            fixture.configuration_id,
+            Some(predecessor_digest),
+        )
+        .expect("the subject is superseded");
+
+    let reread = evaluations.get(&recorded.digest().value).unwrap();
+    assert!(
+        reread.force().drift().is_empty(),
+        "the subject's supersession was reported as drift"
+    );
+    assert_eq!(
+        reread.subject_superseded_by(),
+        Some(successor.digest().value.as_str()),
+        "the successor is reported in its own field"
+    );
+}
+
+/// E3 bullet 4. A citation of a superseded Artifact shows BOTH links at read time.
+///
+/// The manifest-shaped question: what a surface must be able to say about a published Evaluation of
+/// a document that has since moved on. Both facts, at once, neither replacing the other.
+#[test]
+fn a_manifest_citation_of_a_superseded_artifact_shows_both_links_at_read_time() {
+    let fixture = admitted_mission("e3-both-links-manifest");
+    let artifact = fixture.record_artifact(b"# Outcome\n\nThe evaluated version.\n");
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+    let first = evaluations
+        .record(fixture.artifact_evaluation_draft(&artifact.digest().value))
+        .expect("it records");
+
+    // The Evaluation chain moves...
+    let mut successor_draft = fixture.artifact_evaluation_draft(&artifact.digest().value);
+    successor_draft.rationale = "A second reading of the same bytes.".to_owned();
+    successor_draft.supersedes = EvaluationSupersedes::Evaluation(first.digest().value.clone());
+    let second = evaluations
+        .record(successor_draft)
+        .expect("the chain extends");
+
+    // ...and so does the document.
+    let mut predecessor_digest = [0_u8; 32];
+    predecessor_digest
+        .copy_from_slice(&HEXLOWER.decode(artifact.digest().value.as_bytes()).unwrap());
+    let newer = fixture
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            b"# Outcome\n\nA later version of the document.\n",
+            ArtifactContext::Mission {
+                project_id: fixture.project_id,
+                mission_id: fixture.mission_id,
+            },
+            fixture.resident_id,
+            fixture.configuration_id,
+            Some(predecessor_digest),
+        )
+        .expect("the subject is superseded");
+
+    let citation = evaluations.get(&first.digest().value).unwrap();
+    // The cited identities, unmoved: this is what the Evaluation is about.
+    assert_eq!(citation.digest().value, first.digest().value);
+    assert_eq!(
+        citation.payload().subject.digest_value(),
+        artifact.digest().value
+    );
+    // And both read-time tails, beside them.
+    assert_eq!(
+        citation.force().superseded_by().map(|d| d.value.as_str()),
+        Some(second.digest().value.as_str()),
+        "the Evaluation's own chain tail is missing"
+    );
+    assert_eq!(
+        citation.subject_superseded_by(),
+        Some(newer.digest().value.as_str()),
+        "the subject Artifact's tail is missing"
+    );
+}
+
+/// E3 bullet 5. The publication seam decides from the two records alone (§8, R4.3).
+///
+/// The relation is Outcome slice 3's; this exercises the contract it consumes, in the shape a
+/// consumer would use it, and pins what does NOT cross: the candidacy carries two digests and a
+/// Workspace, and no rendering of the verdict, the rationale or the evaluator.
+#[test]
+fn the_publication_seam_can_check_subject_verdict_and_nonauthorship_from_the_two_records_alone() {
+    let fixture = admitted_mission("e3-publication-seam");
+    let artifact = fixture.record_artifact(b"# Outcome\n\nThe candidate.\n");
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+    let meets = evaluations
+        .record(fixture.artifact_evaluation_draft(&artifact.digest().value))
+        .expect("a `meets` Evaluation records");
+
+    let connection = fixture.store.connect();
+    let candidacy = publication_candidacy(
+        &connection,
+        fixture.workspace_id,
+        &meets.digest().value,
+        &artifact.digest().value,
+        fixture.mission_id,
+    )
+    .expect("the pairing is publishable");
+    assert_eq!(candidacy.evaluation_digest(), meets.digest().value);
+    assert_eq!(
+        candidacy.candidate_artifact_digest(),
+        artifact.digest().value
+    );
+    assert_eq!(candidacy.workspace_id(), fixture.workspace_id);
+
+    // A verdict that is not `meets` is not a soft yes.
+    let mut uncertain_draft = fixture.artifact_evaluation_draft(&artifact.digest().value);
+    uncertain_draft.verdict = Verdict::Uncertain;
+    uncertain_draft.rationale = "The criteria could not be assessed from the document.".to_owned();
+    uncertain_draft.supersedes = EvaluationSupersedes::Evaluation(meets.digest().value.clone());
+    let uncertain = evaluations.record(uncertain_draft).expect("it records");
+    assert_eq!(
+        publication_candidacy(
+            &connection,
+            fixture.workspace_id,
+            &uncertain.digest().value,
+            &artifact.digest().value,
+            fixture.mission_id,
+        ),
+        Err(PublicationSeamRefusal::VerdictIsNotMeets)
+    );
+
+    // A Proposal-subject Evaluation is not a candidate for publication at all.
+    let proposal = fixture.proposals.submit(&fixture.record().bytes()).unwrap();
+    let on_proposal = evaluations
+        .record(evaluation_draft(&fixture, &proposal.digest().value))
+        .expect("it records");
+    assert_eq!(
+        publication_candidacy(
+            &connection,
+            fixture.workspace_id,
+            &on_proposal.digest().value,
+            &artifact.digest().value,
+            fixture.mission_id,
+        ),
+        Err(PublicationSeamRefusal::SubjectIsNotAnArtifact)
+    );
+
+    // An Evaluation about DIFFERENT bytes than the candidate named.
+    let other = fixture.record_artifact(b"# Outcome\n\nA different document.\n");
+    assert_eq!(
+        publication_candidacy(
+            &connection,
+            fixture.workspace_id,
+            &meets.digest().value,
+            &other.digest().value,
+            fixture.mission_id,
+        ),
+        Err(PublicationSeamRefusal::SubjectIsNotTheCandidate)
+    );
+
+    // A different Outcome Mission, and absent records on both sides.
+    assert_eq!(
+        publication_candidacy(
+            &connection,
+            fixture.workspace_id,
+            &meets.digest().value,
+            &artifact.digest().value,
+            Uuid::new_v4(),
+        ),
+        Err(PublicationSeamRefusal::MissionDiffers)
+    );
+    assert_eq!(
+        publication_candidacy(
+            &connection,
+            fixture.workspace_id,
+            &HEXLOWER.encode(&[0x5a_u8; 32]),
+            &artifact.digest().value,
+            fixture.mission_id,
+        ),
+        Err(PublicationSeamRefusal::EvaluationAbsent)
+    );
+    assert_eq!(
+        publication_candidacy(
+            &connection,
+            fixture.workspace_id,
+            &meets.digest().value,
+            &HEXLOWER.encode(&[0x5b_u8; 32]),
+            fixture.mission_id,
+        ),
+        Err(PublicationSeamRefusal::CandidateAbsent)
     );
 }
