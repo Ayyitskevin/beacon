@@ -851,6 +851,111 @@ fn outcome_commonmark_escaping_blocks_raw_html_and_table_injection() {
     assert!(document.contains("| Mission declaration | 1\\. not an ordered list |"));
 }
 
+/// R13.5 and gpt2's specification review, P1.
+///
+/// Multi-line narrative text is accepted, not refused. LF structure is preserved through
+/// CommonMark hard breaks and paragraph breaks, no raw HTML appears, nothing is silently altered,
+/// and every other control character is refused by a refusal that names itself rather than by one
+/// collapsed name shared with "empty" and "too long".
+#[test]
+fn outcome_accepts_multiline_narrative_and_names_every_text_refusal() {
+    let narrative = concat!(
+        "The runbook was not updated.\n",
+        "Two paragraphs follow.\n",
+        "\n",
+        "The second one mentions <script> and | on its own line."
+    );
+    let mut manifest = vector_manifest();
+    manifest.policy_high_impact = false;
+    let mut sources = vector_sources();
+    sources.unfinished_work = vec![text("uw-docs", narrative)];
+
+    let document = render(&manifest, &sources).expect("multi-line narrative renders");
+    let unfinished = section(&document, "## 6. Unfinished work", "## 7. Uncertainty");
+
+    // LF structure survives: a trailing backslash is a CommonMark hard break, a blank line is a
+    // paragraph break. Neither is a trailing space, which the byte rules forbid.
+    assert!(
+        unfinished.contains(concat!(
+            "The runbook was not updated.\\\n",
+            "Two paragraphs follow.\n",
+            "\n",
+            "The second one mentions"
+        )),
+        "the line structure was not preserved: {unfinished}"
+    );
+    // Every line is still escaped, so nothing in a stored value becomes structure.
+    assert!(unfinished.contains("\\<script\\> and \\| on its own line."));
+    assert!(!unfinished.contains("<script>"));
+    // No trailing whitespace anywhere.
+    for line in document.lines() {
+        assert_eq!(line.trim_end(), line, "trailing whitespace in {line:?}");
+    }
+    // And nothing was added or dropped: every scalar of the stored value survives, in order.
+    let strip = |value: &str| -> String {
+        value
+            .chars()
+            .filter(|character| !matches!(character, '\\' | '\n'))
+            .collect()
+    };
+    assert!(
+        strip(unfinished).contains(&strip(narrative)),
+        "the stored text was altered"
+    );
+
+    // TAB is permitted too.
+    let mut tabbed = vector_sources();
+    tabbed.unfinished_work = vec![text("uw-docs", "column one\tcolumn two")];
+    render(&manifest, &tabbed).expect("TAB is permitted");
+
+    // Every other control character is refused, and the refusal names itself.
+    for control in ['\u{0}', '\u{7}', '\r', '\u{1b}', '\u{85}'] {
+        let mut hostile = vector_sources();
+        hostile.unfinished_work = vec![text("uw-docs", &format!("before{control}after"))];
+        assert_eq!(
+            render(&manifest, &hostile).expect_err("refuses"),
+            OutcomeRefusal::Malformed(MalformedOutcome::ControlCharacter),
+            "control character {control:?} was not refused by name"
+        );
+    }
+
+    // The other text refusals are no longer spelled with one collapsed name.
+    let mut empty = vector_sources();
+    empty.unfinished_work = vec![text("uw-docs", "")];
+    assert_eq!(
+        render(&manifest, &empty).expect_err("refuses"),
+        OutcomeRefusal::Malformed(MalformedOutcome::EmptyText)
+    );
+    let mut padded = vector_sources();
+    padded.unfinished_work = vec![text("uw-docs", "  padded  ")];
+    assert_eq!(
+        render(&manifest, &padded).expect_err("refuses"),
+        OutcomeRefusal::Malformed(MalformedOutcome::UntrimmedText)
+    );
+    let mut long = vector_sources();
+    long.unfinished_work = vec![text("uw-docs", &"x".repeat(2_001))];
+    assert_eq!(
+        render(&manifest, &long).expect_err("refuses"),
+        OutcomeRefusal::Malformed(MalformedOutcome::TextTooLong)
+    );
+
+    // A label that renders inside a table cell still refuses a line break, and says so by name.
+    let mut titled = vector_sources();
+    titled.mission_title = "two\nlines".to_owned();
+    assert_eq!(
+        render(&manifest, &titled).expect_err("refuses"),
+        OutcomeRefusal::Malformed(MalformedOutcome::LineBreakInLabel)
+    );
+    assert_eq!(
+        MalformedOutcome::LineBreakInLabel.as_str(),
+        "line_break_in_label"
+    );
+    assert_eq!(
+        MalformedOutcome::ControlCharacter.as_str(),
+        "control_character"
+    );
+}
+
 #[test]
 fn outcome_renderer_version_selects_the_exact_commonmark_escaping_function() {
     // The known version escapes, and the document says which function did it.

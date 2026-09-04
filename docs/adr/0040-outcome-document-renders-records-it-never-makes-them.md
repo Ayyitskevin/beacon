@@ -177,13 +177,35 @@ spans, so `not_evaluated` reaches the document as `not_evaluated` rather than as
 media types, currency and unit tokens -- are **validated** against a charset that excludes
 backtick and `|` rather than escaped, because a backslash inside a code span is literal.
 
-### v1 refuses multi-line human text
+### Narrative text carries line breaks; a label does not
 
-The fixed shape puts human text in table cells and list items, where a line break changes
-the structure. Neutralizing one would need raw HTML, which is forbidden; replacing it with
-a space would silently alter a stored value. So v1 refuses it at the boundary and records
-the limitation here. A shape that carries multi-line narrative is a renderer version
-change.
+Human text divides into two classes, and the division is by rendered position rather than by
+field name.
+
+**Narrative text** -- success-condition statements, unfinished-work items, uncertainty items --
+is prose a reader is meant to read, and it renders as CommonMark blocks. LF is structure and is
+preserved: a run of blank lines is a paragraph break, and every other newline is a hard line
+break written as a trailing backslash, because the byte rules forbid the two trailing spaces
+CommonMark's other hard break uses. TAB is content and is preserved; a leading TAB may render as
+indentation, which is a rendering effect of a value Beacon was told to keep, not an alteration of
+it. Every line passes through the versioned escaping function first, so no stored value becomes
+structure.
+
+For that to work the prose has to sit in a block position, so a condition's statement is a
+paragraph under its `### 2.N` heading rather than a bullet, and each narrative item gets its own
+`### 6.N` / `### 7.N` heading. Prose in a bullet cannot carry a paragraph break without ending the
+bullet.
+
+**Label text** -- the Mission declaration title, an Artifact title, and every honesty-state
+reason -- renders inside a table cell, where a line break ends the row. Labels refuse one. The two
+alternatives are raw HTML, which is forbidden, and replacing it with a space, which silently
+alters a stored value; refusing is the only honest third option, and it is named
+`line_break_in_label` so a caller knows which rule it broke.
+
+**Every text refusal names itself.** Empty, padded, too long, carrying a control character, and
+carrying a line break in a label are five different faults: `empty_text`, `untrimmed_text`,
+`text_too_long`, `control_character`, `line_break_in_label`. One name for all five tells a caller
+nothing about which it hit, and a refusal a caller cannot act on is a refusal that gets retried.
 
 ## The four honesty states
 
@@ -304,8 +326,9 @@ after rebasing on current main, and arrive with slice 2.
 - Prose is escaped conservatively enough to be safe and loosely enough to stay readable;
   the exact set is versioned, so widening it later is a new renderer version and a new
   document, not a silent change to old ones.
-- Multi-line narrative text is refused in v1. Real completion records may carry it, and
-  the first one that does is a renderer version change rather than a bug.
+- Narrative text carries line breaks; label text does not. A completion record whose Artifact
+  title or state reason spans lines is refused rather than flattened, and moving one of those
+  fields out of a table cell is a renderer version change.
 - The appendix embeds the manifest twice its byte length in hexadecimal. For a large
   Mission that is the largest part of the document, and it is what makes the document
   self-verifying.
