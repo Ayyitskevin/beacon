@@ -355,6 +355,17 @@ pub struct EvaluationDigest {
 pub struct EvaluationForce {
     superseded_by: Option<EvaluationDigest>,
     drift: Vec<UnmetPrecondition>,
+    /// The SUBJECT's own successor, for an Artifact subject: the Artifact record that supersedes
+    /// the one this Evaluation cites, as of this read.
+    ///
+    /// R12.10 applied twice. A surface showing an Evaluation of an Artifact shows the cited
+    /// Evaluation digest with ITS chain tail beside it, AND the cited Artifact digest with ITS
+    /// supersession tail beside it -- **beside, never instead**. The cited digest is what the
+    /// Evaluation is about and does not move; this is read-time state about the world around it,
+    /// and it is a THIRD field rather than folded into `superseded_by` (which is the Evaluation
+    /// chain) or into `drift` (which is the Proposal's bindings, and is empty here by
+    /// construction).
+    subject_superseded_by: Option<ArtifactDigest>,
 }
 
 impl EvaluationForce {
@@ -362,6 +373,12 @@ impl EvaluationForce {
     /// not a null column.
     pub fn superseded_by(&self) -> Option<&EvaluationDigest> {
         self.superseded_by.as_ref()
+    }
+
+    /// The subject Artifact's successor, as of this read. `None` for a Proposal subject, and for an
+    /// Artifact nothing has superseded.
+    pub fn subject_superseded_by(&self) -> Option<&ArtifactDigest> {
+        self.subject_superseded_by.as_ref()
     }
 
     /// Which of the bound Proposal's revisions have moved since. Empty means none have moved --
@@ -396,6 +413,17 @@ impl Evaluation {
     /// Supersession and drift, as two separate facts. Never a boolean.
     pub fn force(&self) -> &EvaluationForce {
         &self.force
+    }
+
+    /// The subject Artifact's successor digest, as of this read -- the second of R12.10's two
+    /// links. It sits BESIDE `digest()` and the subject the payload names, never in place of
+    /// either: the Evaluation is about the exact bytes it cites, and this says what has happened
+    /// to that document since.
+    pub fn subject_superseded_by(&self) -> Option<&str> {
+        self.force
+            .subject_superseded_by
+            .as_ref()
+            .map(|digest| digest.value.as_str())
     }
 }
 
@@ -1392,6 +1420,7 @@ fn verified_evaluation(
         None => EvaluationForce {
             superseded_by: superseded_by(connection, workspace_id, &row)?,
             drift: Vec::new(),
+            subject_superseded_by: subject_successor(connection, workspace_id, &payload)?,
         },
     };
     Ok(Evaluation {
@@ -1413,6 +1442,34 @@ fn verified_evaluation(
 /// revisions. A Repository rebind that keeps the same pinned commit reports only the revision as
 /// moved, one drift and not two; that distinction is the same one Ruling v1 draws, repeated here
 /// rather than shared because the two records answer different questions about the same columns.
+/// The SUBJECT Artifact's successor, read at read time (R12.10's second link).
+///
+/// Read through the Artifact module's own relation, keyed on the digest the Evaluation cites. It is
+/// never resolved INTO the citation: the Evaluation is about the exact bytes it names, and this is
+/// what has happened to that document since.
+fn subject_successor(
+    connection: &Connection,
+    workspace_id: Uuid,
+    payload: &EvaluationV1,
+) -> Result<Option<ArtifactDigest>, EvaluationError> {
+    let EvaluationSubject::Artifact(subject) = &payload.subject else {
+        return Ok(None);
+    };
+    Ok(connection
+        .query_row(
+            "SELECT artifact_digest FROM artifact_supersessions
+             WHERE workspace_id = ?1 AND supersedes_digest = ?2",
+            params![workspace_id.to_string(), subject.digest.value],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|value| ArtifactDigest {
+            algorithm: subject.digest.algorithm.clone(),
+            canonicalizer: subject.digest.canonicalizer.clone(),
+            value,
+        }))
+}
+
 /// The successor link, for either arm: chains are per subject digest and carry no kind.
 fn superseded_by(
     connection: &Connection,
@@ -1503,6 +1560,9 @@ fn derive_force(
         }
     }
     Ok(EvaluationForce {
+        // A Proposal has no supersession chain of its own, so this is None for arm 0x01 -- absent
+        // because the relation does not exist for that subject kind, not because nothing was read.
+        subject_superseded_by: None,
         superseded_by,
         drift,
     })
@@ -2099,17 +2159,21 @@ pub(crate) fn verify_evaluation_state(connection: &Connection) -> Result<(), Eva
 
     // Every supersession chain: one first link, one path, every Evaluation on it, and
     // `evaluated_at_ms` non-decreasing ALONG THE CHAIN -- chain order, never timestamp order.
+    // Enumerated by SUBJECT, not by Proposal. `proposal_digest` is NULL for an Artifact-subject
+    // row, so reading it as a String here made one valid Artifact Evaluation refuse startup for the
+    // whole store -- a Proposal-only call site the arm did not generalize (sol1's P0). The chain
+    // key has been `subject_digest` since migration 0028; this query had not caught up.
     let mut statement = connection.prepare(
-        "SELECT DISTINCT workspace_id, proposal_digest FROM evaluations ORDER BY proposal_digest",
+        "SELECT DISTINCT workspace_id, subject_digest FROM evaluations ORDER BY subject_digest",
     )?;
     let chains: Vec<(String, String)> = statement
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<Result<_, _>>()?;
     drop(statement);
-    for (workspace, proposal_digest) in chains {
+    for (workspace, subject_digest) in chains {
         let workspace_id =
             Uuid::parse_str(&workspace).map_err(|_| EvaluationError::InvalidStore)?;
-        let chain = evaluation_chain(connection, workspace_id, &proposal_digest)?;
+        let chain = evaluation_chain(connection, workspace_id, &subject_digest)?;
         let mut previous: Option<u64> = None;
         for digest in &chain {
             let at = evaluated_at_ms_of(connection, digest)?;
