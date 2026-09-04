@@ -21,23 +21,25 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use beacond::{
-    AutonomyProfile, BeaconCapability, ClassificationActor, ClassificationBasis,
-    ClassificationSupersedes, CollectionRequest, Collector, CollectorRefusal, CompletionActor,
-    CompletionDisposition, ConditionOutcome, ConditionResultRecord, Conflicts, DeclaredCheck,
-    EvaluationDraft, EvaluationService, EvaluationSubjectDraft, EvaluationSupersedes, Evaluator,
-    Finding, FindingSeverity, ImpactLevel, LocalModelActivationService, LocalModelEndpoint,
-    MeasuredSpendService, MeasuredSpendV1, MissingReader, MissionCompletionV1, MissionDraft,
-    MissionImpactClassificationV1, MissionImpactService, MissionMemberDraft, MissionService,
-    MissionView, OUTCOME_RECEIPT_CHECKSUM_LABEL, OperatorAccountService, OperatorSessionPhase,
-    OutcomeState, PolicyRevisionRef, ProjectCharterDraft, ProjectDraft, ProjectRepositoryService,
-    ProjectService, ProjectView, ProposalService, ProviderFeature, RepositoryDraft,
-    RepositorySourceKind, ResidentConfiguration, ResidentConfigurationService,
-    ResidentLifecycleService, RubricDeclaration, RulingDecision, RulingService, RulingSupersedes,
-    SecretString, SourceKind, SpendLine, SpendMeasurement, SpendOrigin, SpendReference,
-    SpendSupersedes, SpendTotals, StarterOrganizationService, StarterResidentDraft, StarterRole,
-    StartupConfig, Supervisor, TeamDraft, TeamMemberDraft, TeamService, TeamView, UncertaintyKind,
-    UnfinishedKind, Verdict, declared_conditions_digest, positionable_sources, record_completion,
+    ArtifactContext, ArtifactKind, ArtifactService, AutonomyProfile, BeaconCapability,
+    ClassificationActor, ClassificationBasis, ClassificationSupersedes, CollectionRequest,
+    Collector, CollectorRefusal, CompletionActor, CompletionDisposition, ConditionOutcome,
+    ConditionResultRecord, Conflicts, DeclaredCheck, EvaluationDraft, EvaluationService,
+    EvaluationSubjectDraft, EvaluationSupersedes, Evaluator, Finding, FindingSeverity, ImpactLevel,
+    LocalModelActivationService, LocalModelEndpoint, MeasuredSpendService, MeasuredSpendV1,
+    MissionCompletionV1, MissionDraft, MissionImpactClassificationV1, MissionImpactService,
+    MissionMemberDraft, MissionService, MissionView, OUTCOME_RECEIPT_CHECKSUM_LABEL,
+    OperatorAccountService, OperatorSessionPhase, OutcomeState, PolicyRevisionRef,
+    ProjectCharterDraft, ProjectDraft, ProjectRepositoryService, ProjectService, ProjectView,
+    ProposalService, ProviderFeature, RepositoryDraft, RepositorySourceKind, ResidentConfiguration,
+    ResidentConfigurationService, ResidentLifecycleService, RubricDeclaration, RulingDecision,
+    RulingService, RulingSupersedes, SecretString, SourceKind, SpendLine, SpendMeasurement,
+    SpendOrigin, SpendReference, SpendSupersedes, SpendTotals, StarterOrganizationService,
+    StarterResidentDraft, StarterRole, StartupConfig, Supervisor, TeamDraft, TeamMemberDraft,
+    TeamService, TeamView, UncertaintyKind, UnfinishedKind, Verdict, declared_conditions_digest,
+    positionable_sources, record_completion,
 };
+use data_encoding::HEXLOWER;
 use rusqlite::{Connection, params};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -595,6 +597,24 @@ fn admitted(label: &str, conditions: Vec<String>) -> Admitted {
 }
 
 impl Admitted {
+    /// One Artifact scoped to this Mission, authored by its first admitted member.
+    fn record_mission_artifact(&self, content: &[u8]) -> beacond::VerifiedArtifactRecord {
+        let member = &self.mission.members[0];
+        ArtifactService::new(Arc::clone(&self.accounts), self.store.workspace_id)
+            .record(
+                ArtifactKind::OutcomeDocument,
+                content,
+                ArtifactContext::Mission {
+                    project_id: self.mission.project_id,
+                    mission_id: self.mission.id,
+                },
+                member.resident_id,
+                member.admission_configuration_id,
+                None,
+            )
+            .expect("the Artifact records")
+    }
+
     fn connection(&self) -> Connection {
         self.store.connection()
     }
@@ -1156,12 +1176,13 @@ fn collector_reads_each_source_through_its_owning_verified_reader() {
     assert_eq!(collected_spend.spend_id, Some(spend.spend_id));
     assert_eq!(collected_spend.measurement, "measured");
 
-    // The one seam left. It is a refusal, never a stub that returns a value: a stub is
-    // indistinguishable from a verified read at the call site.
-    assert_eq!(
-        collector.artifact().expect_err("no reader"),
-        CollectorRefusal::NotYetAvailable(MissingReader::Artifact)
-    );
+    // The last seam is gone: the Artifact store landed (#63) and this reads through it.
+    let artifact = fixture.record_mission_artifact(b"# Outcome\n\nThe delivered document.\n");
+    let collected_artifact = collector
+        .artifact(&artifact.digest().value, fixture.mission.id)
+        .expect("the Artifact reads through its owning module");
+    assert_eq!(collected_artifact.digest_value, artifact.digest().value);
+    assert_eq!(collected_artifact.workspace_id, fixture.store.workspace_id);
 }
 
 /// §7 slice 2. A digest that exists is not a digest that is yours.
@@ -1698,8 +1719,11 @@ fn a_completion_that_delivered_artifacts_is_refused_rather_than_reported_as_deli
                 completion_digest: Some(digest),
                 ..CollectionRequest::default()
             })
-            .expect_err("no Artifact entity exists to verify the delivery against"),
-        CollectorRefusal::NotYetAvailable(MissingReader::Artifact)
+            .expect_err("the cited Artifact is not in the store"),
+        CollectorRefusal::Absent {
+            kind: "artifact",
+            id: HEXLOWER.encode(&[7_u8; 32]),
+        }
     );
 }
 
@@ -2055,9 +2079,12 @@ fn collector_reconciles_delivered_artifacts_and_unfinished_work_with_completion(
         .expect_err("a delivered Artifact needs an Artifact entity to verify it against");
     assert_eq!(
         Collector::new(&connection, delivering.store.workspace_id)
-            .artifact()
-            .expect_err("the store is not there"),
-        CollectorRefusal::NotYetAvailable(MissingReader::Artifact)
+            .artifact(&HEXLOWER.encode(&[7_u8; 32]), delivering.mission.id)
+            .expect_err("nothing is stored under that digest"),
+        CollectorRefusal::Absent {
+            kind: "artifact",
+            id: HEXLOWER.encode(&[7_u8; 32]),
+        }
     );
 }
 
@@ -2343,5 +2370,119 @@ fn every_positionable_source_has_a_locator() {
             found.is_some(),
             "the locator for {label} ({event_kind}, {path}) does not find its own record's Event"
         );
+    }
+}
+
+/// Store a completion whose bytes deliver `delivered`, bypassing the write path.
+///
+/// `record_completion` refuses a non-empty delivery outright, so the only way to exercise the READ
+/// path is to write the row the way a restore or an older binary could. Every column is derived
+/// from the record's own bytes, so the row is honest about itself -- the question under test is
+/// what the collector does with a delivery, not what a corrupt row does.
+fn store_completion_with_delivery(
+    fixture: &Admitted,
+    boundary: u64,
+    delivered: Vec<[u8; 32]>,
+) -> String {
+    let mut record = fixture.completion(
+        boundary,
+        vec![ConditionOutcome::Met],
+        SpendReference::NotMeasured("no ledger was read".to_owned()),
+    );
+    record.delivered_artifacts = delivered;
+    let bytes = record.canonical_bytes().unwrap();
+    let digest = sha256_hex(&bytes);
+    let member = &fixture.mission.members[0];
+    let connection = fixture.connection();
+    connection
+        .execute(
+            "INSERT INTO mission_completions (
+                 workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+                 canonical_bytes, completion_id, mission_id, project_id, accountable_resident_id,
+                 accountable_configuration_id, boundary_event_seq, disposition, completed_at_ms
+             ) VALUES (?1, 'sha256', 'beacon.mission_completion.v1', ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                       ?9, 'concluded', 9000)",
+            params![
+                fixture.store.workspace_id.to_string(),
+                digest,
+                bytes,
+                record.completion_id.to_string(),
+                fixture.mission.id.to_string(),
+                fixture.mission.project_id.to_string(),
+                member.resident_id.to_string(),
+                member.admission_configuration_id.to_string(),
+                i64::try_from(boundary).unwrap(),
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO mission_completion_conditions (
+                 workspace_id, completion_digest, mission_id, condition_ordinal, outcome
+             ) VALUES (?1, ?2, ?3, 0, 'met')",
+            params![
+                fixture.store.workspace_id.to_string(),
+                digest,
+                fixture.mission.id.to_string(),
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+             VALUES (?1, 'mission.completed', ?2, 9000)",
+            params![
+                fixture.store.workspace_id.to_string(),
+                serde_json::json!({
+                    "workspaceId": fixture.store.workspace_id.to_string(),
+                    "missionId": fixture.mission.id.to_string(),
+                    "completionId": record.completion_id.to_string(),
+                    "digestValue": digest,
+                    "canonicalBytesBase64": data_encoding::BASE64.encode(&bytes),
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+    digest
+}
+
+/// Scoreboard row 11, closed: a delivered Artifact collects as a VERIFIED digest.
+///
+/// The collected value is the **exact cited digest**, not the tail of that document's supersession
+/// chain: an Outcome cites the bytes the Mission delivered, and resolving to a later version would
+/// make the document say something the completion never did. The tail is a read-time surface
+/// (`ArtifactService::list_supersession_tail`), asked separately by whoever renders.
+#[test]
+fn delivered_artifacts_collect_as_verified_digests() {
+    let fixture = admitted(
+        "delivered-artifacts-verified",
+        vec!["Gates pass".to_owned()],
+    );
+    let first = fixture.record_mission_artifact(b"# Outcome\n\nThe first delivered document.\n");
+    let second = fixture.record_mission_artifact(b"# Outcome\n\nThe second delivered document.\n");
+    let boundary = newest_event(&fixture.store);
+    let mut cited = [[0_u8; 32]; 2];
+    cited[0].copy_from_slice(&HEXLOWER.decode(first.digest().value.as_bytes()).unwrap());
+    cited[1].copy_from_slice(&HEXLOWER.decode(second.digest().value.as_bytes()).unwrap());
+    let mut delivered = cited.to_vec();
+    delivered.sort_unstable();
+    let digest = store_completion_with_delivery(&fixture, boundary, delivered);
+
+    let connection = fixture.connection();
+    let collected = Collector::new(&connection, fixture.store.workspace_id)
+        .collect(&CollectionRequest {
+            completion_digest: Some(digest),
+            ..CollectionRequest::default()
+        })
+        .expect("both delivered Artifacts read through their owning module");
+    let completion = collected.completion.expect("the completion collected");
+    match &completion.delivered_artifacts {
+        OutcomeState::Verified(digests) => {
+            assert_eq!(digests.len(), 2);
+            assert!(digests.contains(&first.digest().value));
+            assert!(digests.contains(&second.digest().value));
+        }
+        other => panic!("the delivery did not collect as verified: {other:?}"),
     }
 }
