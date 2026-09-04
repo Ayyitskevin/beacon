@@ -25,6 +25,7 @@ mod mission;
 mod mission_impact;
 mod operator_account;
 mod outcome;
+mod outcome_collector;
 mod platform_session;
 mod project;
 mod project_policy;
@@ -117,6 +118,10 @@ pub use outcome::{
     OutcomeBound, OutcomeManifestV1, OutcomeRefusal, OutcomeState, PinnedRevision, ReceiptRef,
     RevisionKind, SourceDigest, SourceKind, SourceMismatch, SourceRef, SpendRef, SuccessCondition,
     VerifiedArtifact, VerifiedSources, VerifiedText, compare_canonical_keys, render,
+};
+pub use outcome_collector::{
+    CollectedDigest, CollectedSources, CollectionRequest, Collector, CollectorRefusal,
+    MissingReader, OUTCOME_RECEIPT_CHECKSUM_LABEL,
 };
 pub use platform_session::{
     PlatformMonitorState, PlatformSessionMonitor, PlatformSessionMonitorStatus,
