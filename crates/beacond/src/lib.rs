@@ -141,8 +141,7 @@ pub use outcome::{
 pub use outcome_collector::{
     CollectedClassification, CollectedCompletion, CollectedCondition, CollectedDigest,
     CollectedNarrative, CollectedSources, CollectedSpend, CollectionRequest, Collector,
-    CollectorRefusal, MissingReader, OUTCOME_RECEIPT_CHECKSUM_LABEL, SpendAmount,
-    positionable_sources,
+    CollectorRefusal, OUTCOME_RECEIPT_CHECKSUM_LABEL, SpendAmount, positionable_sources,
 };
 pub use platform_session::{
     PlatformMonitorState, PlatformSessionMonitor, PlatformSessionMonitorStatus,
