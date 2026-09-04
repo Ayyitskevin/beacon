@@ -52,7 +52,7 @@ use crate::ruling::{
 };
 use crate::worktree::{
     GitIdentity, PinnedRepository, READ_BUDGET, WRITE_BUDGET, read_pinned, read_pinned_bytes,
-    write_pinned,
+    read_pinned_exit, write_pinned,
 };
 use crate::{AutonomyProfile, CandidateDigest, RepositorySourceKind};
 
@@ -448,6 +448,10 @@ pub enum GitStepName {
     /// `read-tree -u --reset` on Beacon's own copy, after the swap: index and working tree only,
     /// never the ref.
     ReadTreeCheckout,
+    /// `merge-base --is-ancestor <prepared> <observed>`: the reachability read that earns the
+    /// residue token. Runs only where the observed tip is not the prepared commit, so it never
+    /// appears in an ordinary `Applied` Receipt's step list.
+    MergeBase,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -1233,12 +1237,9 @@ impl DispatchService {
             // names it may have been moved there by something else -- and reporting that as this
             // attempt's application would be a Receipt claiming an act it did not perform (gpt1).
             let observed = observed.as_deref().map(str::trim);
-            decided.landing_observation = match observed {
-                None => LandingObservation::Unobserved,
-                Some(head) if head == commit => LandingObservation::RefNamesPreparedCommit,
-                Some(_) => LandingObservation::RefNamesSomethingElse,
-            };
             decided.observed_head = observed.map(str::to_owned);
+            decided.landing_observation =
+                observed_branch_reaches(&repository, commit, observed, decided);
             let outcome = match (swapped.is_some(), observed) {
                 // This attempt performed the swap. That is an act, and a Receipt that called it a
                 // refusal would hide a mutation Beacon made -- the one direction a record must
@@ -1257,9 +1258,11 @@ impl DispatchService {
             // branch still names what it installed. A swap this attempt lost must not touch the
             // tree at all, and a branch a later writer moved on is a ref this attempt no longer
             // owns -- resetting the tree to its commit would be a second write against it.
-            if outcome == DispatchOutcome::Applied
-                && decided.landing_observation == LandingObservation::RefNamesPreparedCommit
-            {
+            // Keyed on the TIP, not on reachability: a branch holding a descendant of this
+            // commit reaches it and is still not at it, and resetting the tree to a commit the
+            // branch has moved past would be a write against a ref this attempt no longer owns.
+            // Two questions, two comparisons -- the reachability read answers the other one.
+            if outcome == DispatchOutcome::Applied && observed == Some(commit) {
                 // Beacon owns this checkout -- v1 lands nowhere else -- so leaving it showing the
                 // previous revision would be Beacon knowingly leaving its own tree stale.
                 //
@@ -1459,30 +1462,69 @@ struct OpenRun {
     wall_clock_ms: u64,
 }
 
-/// What the branch held when this attempt looked at it, and therefore what may be said about the
-/// objects this attempt wrote.
+/// Whether the branch this attempt observed **reaches** the prepared commit.
 ///
-/// Residue is a fact about a ref, not about an outcome. Deriving it from the outcome asserted that
-/// no ref names the prepared commit in every prepared non-`Applied` state -- including the one a
-/// cold review drove, where a competing writer published that exact commit and this attempt's
-/// compare-and-swap lost. A ref named the objects; the Receipt said none did.
+/// Residue is a fact about a ref, not about an outcome, and it is *earned* rather than asserted.
+/// Two reviews walked this down one arm at a time. Deriving it from the outcome claimed that no ref
+/// names the prepared commit in every prepared non-`Applied` state, including one where a competing
+/// writer had published that exact commit (sol1). Deriving it from tip INEQUALITY claimed the same
+/// thing whenever the branch held anything else -- but a branch holding a DESCENDANT of the prepared
+/// commit reaches it, so its objects are named, and the Receipt said they were not (sol1 again, on
+/// the fix). Tip equality is not reachability, and only one of them is the question.
 ///
-/// The affirmative arm is `RefNamesSomethingElse`, and its claim is bounded by what was read: the
-/// branch this attempt observed does not name the prepared commit. A descendant of that commit
-/// would still reach it, which this observation does not exclude -- the narrower residue of the
-/// same class, recorded in ADR 0039 rather than papered over, and closable only by a reachability
-/// read whose cost is a ruling because it tightens the token's published meaning.
+/// So the affirmative arm is established by a bounded `merge-base --is-ancestor` read through the
+/// pinned repository, and `unreferenced_object_residue` means exactly what that read gives:
+/// **the branch this attempt observed does not reach the prepared commit** (FABLE-RULINGS R14).
+/// Claims about refs this attempt did not observe are outside the token's definition, said here
+/// rather than admitted later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum LandingObservation {
     /// No commit was prepared, so no object of this attempt's could be residue.
     #[default]
     NothingPrepared,
-    /// The branch named the prepared commit. Whoever put it there, a ref names these objects.
-    RefNamesPreparedCommit,
-    /// The branch named something else.
-    RefNamesSomethingElse,
-    /// The branch could not be read.
+    /// The observed branch reaches the prepared commit -- it is that commit, or a descendant of it.
+    /// Whoever put it there, a ref names these objects.
+    BranchReachesPreparedCommit,
+    /// The branch was read, the reachability read answered, and the answer is no.
+    BranchDoesNotReachPreparedCommit,
+    /// The branch could not be read, or the reachability read could not answer. Not a residue
+    /// state in either direction: `landing_result_unknown` is what this has to say (C37).
     Unobserved,
+}
+
+/// Does the observed branch reach the prepared commit? Answered by a read, never by comparison.
+///
+/// `merge-base --is-ancestor` answers with its exit code -- 0 yes, 1 no, anything else an error --
+/// which is why this uses `read_pinned_exit`: a reader that only sees success would collapse "no"
+/// and "could not tell" into one value, and those are the two answers this whole finding is about.
+/// Tip equality short-circuits it because a commit reaches itself and a Git invocation to establish
+/// that would be a read with a known answer.
+fn observed_branch_reaches(
+    repository: &PinnedRepository,
+    commit: &str,
+    observed: Option<&str>,
+    decided: &mut Decided,
+) -> LandingObservation {
+    let Some(observed) = observed else {
+        return LandingObservation::Unobserved;
+    };
+    if observed == commit {
+        return LandingObservation::BranchReachesPreparedCommit;
+    }
+    let is_ancestor = ["merge-base", "--is-ancestor", commit, observed];
+    let exit = read_pinned_exit(repository, &is_ancestor, READ_BUDGET);
+    // "Succeeded" here means the read ANSWERED. Exit 1 is an answer -- the interesting one -- and
+    // recording it as a failed step would file the finding's own evidence as a failure.
+    decided.record_step(
+        GitStepName::MergeBase,
+        &is_ancestor,
+        matches!(exit, Some(0 | 1)),
+    );
+    match exit {
+        Some(0) => LandingObservation::BranchReachesPreparedCommit,
+        Some(1) => LandingObservation::BranchDoesNotReachPreparedCommit,
+        _ => LandingObservation::Unobserved,
+    }
 }
 
 /// What the gates established, accumulated as they run so a Receipt can name the last thing that
@@ -1689,7 +1731,7 @@ fn not_verified(outcome: &DispatchOutcome, decided: &Decided) -> Vec<NotVerified
     // gpt2 found the unobserved case, sol1 the case where a competing writer published this exact
     // commit and this attempt's swap lost.
     if decided.prepared_commit.is_some()
-        && decided.landing_observation == LandingObservation::RefNamesSomethingElse
+        && decided.landing_observation == LandingObservation::BranchDoesNotReachPreparedCommit
     {
         names.push(NotVerified::UnreferencedObjectResidue);
     }
@@ -2243,7 +2285,7 @@ fn interrupted_receipt(
     }
     // The same derivation as the live path, from the same observation: a ref that names the
     // prepared commit is a ref that names its objects, whatever this attempt's outcome was.
-    if prepared.is_some() && observation == LandingObservation::RefNamesSomethingElse {
+    if prepared.is_some() && observation == LandingObservation::BranchDoesNotReachPreparedCommit {
         not_verified.push(NotVerified::UnreferencedObjectResidue);
     }
     not_verified.push(NotVerified::ReconstructedAfterInterruption);
@@ -2334,17 +2376,47 @@ fn observe_landing(prepared: &PreparedDispatch) -> (DispatchOutcome, LandingObse
     ) {
         Some(head) if head.trim() == prepared.prepared_commit => (
             DispatchOutcome::Applied,
-            LandingObservation::RefNamesPreparedCommit,
+            LandingObservation::BranchReachesPreparedCommit,
         ),
+        // The branch is back at the base. The outcome is a refusal, and whether this attempt's
+        // objects are still reachable is a separate question, answered by the same read the live
+        // path uses rather than assumed from the tip (R14).
         Some(head) if head.trim() == prepared.pinned_base_revision => (
             DispatchOutcome::LandingRefused,
-            LandingObservation::RefNamesSomethingElse,
+            reconstructed_reachability(&repository, prepared, head.trim()),
         ),
         // The branch holds something else entirely: the attempt may have landed and been moved
-        // afterwards, or never landed. That is exactly what "unobserved" means -- and it is also
-        // why no residue claim may be made here, because a branch that moved on may hold a
-        // DESCENDANT of the prepared commit and therefore reach its objects (gpt2, s4f).
+        // afterwards, or never landed. That is exactly what "unobserved" means, and an outcome
+        // nobody could establish makes no residue claim in either direction (gpt2, s4f).
         Some(_) | None => unobserved,
+    }
+}
+
+/// The reachability half of a reconstructed observation, with no `Decided` to record a step on.
+///
+/// Startup writes a Receipt for an attempt that never wrote one, so there is no step list to append
+/// to; the answer still has to be earned by the same read rather than inferred from the tip.
+fn reconstructed_reachability(
+    repository: &PinnedRepository,
+    prepared: &PreparedDispatch,
+    observed: &str,
+) -> LandingObservation {
+    if observed == prepared.prepared_commit {
+        return LandingObservation::BranchReachesPreparedCommit;
+    }
+    match read_pinned_exit(
+        repository,
+        &[
+            "merge-base",
+            "--is-ancestor",
+            &prepared.prepared_commit,
+            observed,
+        ],
+        READ_BUDGET,
+    ) {
+        Some(0) => LandingObservation::BranchReachesPreparedCommit,
+        Some(1) => LandingObservation::BranchDoesNotReachPreparedCommit,
+        _ => LandingObservation::Unobserved,
     }
 }
 

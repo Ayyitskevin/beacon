@@ -3878,7 +3878,13 @@ fn a_swap_this_attempt_did_not_perform_is_not_reported_as_its_application() {
                         |row| row.get(0),
                     )
                     .unwrap();
-                CopyRepository::git(&head, &["update-ref", "refs/heads/main", &prepared]);
+                let prepared_tree = format!("{prepared}^{{tree}}");
+                let tree = CopyRepository::git(&head, &["rev-parse", &prepared_tree]);
+                let descendant = CopyRepository::git(
+                    &head,
+                    &["commit-tree", &tree, "-p", &prepared, "-m", "descendant"],
+                );
+                CopyRepository::git(&head, &["update-ref", "refs/heads/main", &descendant]);
             })),
             ..DispatchFailpoints::default()
         });
@@ -3889,16 +3895,20 @@ fn a_swap_this_attempt_did_not_perform_is_not_reported_as_its_application() {
 
     assert_eq!(receipt.outcome, DispatchOutcome::LandingRefused);
     assert_eq!(receipt.resulting_revision, None);
-    // The branch does name the prepared commit -- someone else put it there, and this Receipt does
-    // not claim otherwise.
-    assert_eq!(
-        CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]),
-        receipt.prepared_commit.clone().unwrap()
+    // The branch names a descendant of the prepared commit, so its history reaches the prepared
+    // object even though its tip is something else.
+    let prepared = receipt.prepared_commit.clone().unwrap();
+    let observed = CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]);
+    assert_ne!(observed, prepared);
+    CopyRepository::git(
+        &repository.path,
+        &["merge-base", "--is-ancestor", &prepared, &observed],
     );
-    assert_ne!(
-        receipt.repository_effect(),
-        RepositoryEffect::UnreferencedObjects,
-        "the prepared commit is the branch head, so the Receipt cannot claim that no ref names its objects"
+    assert!(
+        !receipt
+            .not_verified
+            .contains(&NotVerified::UnreferencedObjectResidue),
+        "the branch reaches the prepared commit, so the Receipt cannot claim that no ref names its objects"
     );
     fixture
         .restart()
