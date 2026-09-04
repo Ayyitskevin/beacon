@@ -527,9 +527,8 @@ pub(crate) fn filter_drivers_from_config_output(stdout: &str) -> Vec<String> {
     drivers.into_iter().collect()
 }
 
-/// Construct the one production Git command shape used for untrusted trees.
-/// A repository this process has pinned: the directory it opened, and the identity of the
-/// directory it opened.
+/// A repository this process has pinned: the directory it opened, the Git directory inside it, and
+/// the identity of both.
 ///
 /// A kernel review redirected a mutation by renaming the source directory and installing an
 /// equivalent decoy at the same pathname between the gate that measured the repository and the act
