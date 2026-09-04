@@ -2009,6 +2009,7 @@ fn a_descriptor_that_is_not_the_directory_beacon_created_is_refused() {
         after_open: Some(Arc::new(move |created: &Path| {
             restore_beacons_child(created, &copies_root);
         })),
+        ..CopyFailpoints::default()
     });
     let outcome = samples.copy_for_dispatch(&fixture.copies_root, "swap");
 
@@ -2102,6 +2103,59 @@ fn an_unsubstituted_copy_is_made_and_recorded() {
     assert_eq!(
         fs::metadata(&copy).unwrap().permissions().mode() & 0o777,
         0o700
+    );
+}
+
+#[test]
+fn a_published_copy_name_cannot_redirect_writes_before_the_descriptor_is_reopened() {
+    let fixture = admitted_mission("copy-after-publish");
+    let samples = SampleProjectService::new(
+        Arc::clone(&fixture.accounts),
+        fixture.workspace_id,
+        &fixture.store.path,
+    )
+    .unwrap();
+    samples.install().unwrap();
+
+    let victim = fixture
+        .copies_root
+        .parent()
+        .unwrap()
+        .join(format!("dispatch-copy-victim-{}.md", Uuid::new_v4()));
+    fs::write(&victim, b"operator bytes\n").unwrap();
+    let victim_for_hook = victim.clone();
+    let fired = Arc::new(Mutex::new(false));
+    let observed = Arc::clone(&fired);
+    let samples = samples.with_copy_failpoints(CopyFailpoints {
+        after_publish: Some(Arc::new(move |published: &Path| {
+            let mut seen = observed.lock().unwrap();
+            if *seen {
+                return;
+            }
+            let aside = published.with_file_name("beacons-published-child");
+            fs::rename(published, aside).unwrap();
+            fs::create_dir(published).unwrap();
+            std::os::unix::fs::symlink(&victim_for_hook, published.join("README.md")).unwrap();
+            *seen = true;
+        })),
+        ..CopyFailpoints::default()
+    });
+
+    let outcome = samples.copy_for_dispatch(&fixture.copies_root, "after-publish");
+    let victim_bytes = fs::read(&victim).unwrap();
+    let _ = fs::remove_file(&victim);
+
+    assert!(
+        *fired.lock().unwrap(),
+        "the post-publication seam was not reached"
+    );
+    assert!(matches!(
+        outcome,
+        Err(SampleProjectError::UnsafeDestination)
+    ));
+    assert_eq!(
+        victim_bytes, b"operator bytes\n",
+        "path-based copy_tree followed the replacement's child symlink and wrote outside Beacon's directory"
     );
 }
 
@@ -3684,9 +3738,266 @@ fn a_swap_this_attempt_did_not_perform_is_not_reported_as_its_application() {
         CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]),
         receipt.prepared_commit.clone().unwrap()
     );
+    assert_ne!(
+        receipt.repository_effect(),
+        RepositoryEffect::UnreferencedObjects,
+        "the prepared commit is the branch head, so the Receipt cannot claim that no ref names its objects"
+    );
     fixture
         .restart()
         .expect("a refusal that measured its prepared commit still replays");
+}
+
+#[test]
+fn swapping_only_the_git_directory_cannot_redirect_a_pinned_dispatch() {
+    let fixture = admitted_mission("gitdir-swap");
+    let (repository, ruling_digest) = fixture.approved("gitdir-swap");
+    let base = repository.revision.clone();
+    let decoy = fixture.copies_root.join("gitdir-decoy");
+    let cloned = Command::new("git")
+        .args(["clone", "--quiet", "--no-hardlinks"])
+        .arg(&repository.path)
+        .arg(&decoy)
+        .status()
+        .unwrap();
+    assert!(cloned.success());
+
+    let watched = repository.path.clone();
+    let decoy_for_hook = decoy.clone();
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = Arc::clone(&calls);
+    beacond::set_pinned_spawn_hook(Some(Arc::new(move |path| {
+        if path != watched || observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) != 1 {
+            return;
+        }
+        fs::rename(watched.join(".git"), watched.join(".git-beacon-original")).unwrap();
+        fs::rename(decoy_for_hook.join(".git"), watched.join(".git")).unwrap();
+    })));
+
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+    beacond::set_pinned_spawn_hook(None);
+    assert!(calls.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+
+    let original_git = repository.path.join(".git-beacon-original");
+    let original_head = Command::new("git")
+        .arg(format!("--git-dir={}", original_git.display()))
+        .args(["rev-parse", "refs/heads/main"])
+        .output()
+        .unwrap();
+    assert!(original_head.status.success());
+    let original_head = String::from_utf8(original_head.stdout).unwrap();
+    let redirected_head = CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]);
+
+    fs::rename(repository.path.join(".git"), decoy.join(".git")).unwrap();
+    fs::rename(&original_git, repository.path.join(".git")).unwrap();
+    CopyRepository::git(&repository.path, &["reset", "--hard", &base]);
+    let _ = fs::remove_dir_all(&decoy);
+
+    assert!(
+        receipt.outcome != DispatchOutcome::Applied
+            && original_head.trim() != base
+            && redirected_head == base,
+        "outcome={:?}; descriptor-pinned ref={}; replacement ref={}; base={base}",
+        receipt.outcome,
+        original_head.trim(),
+        redirected_head,
+    );
+}
+
+#[test]
+fn exact_candidate_bytes_include_non_utf8_file_content() {
+    let fixture = admitted_mission("binary-content");
+    let repository = CopyRepository::create(&fixture.copies_root, "binary-content");
+    fixture.beacon_made(&repository);
+    let revision = fixture.rebind_repository_at(&repository, 1);
+    let binary = vec![0xff, 0x00, 0x80, b'\n'];
+    let mut record = fixture.proposal("Create an exact binary file.");
+    record.mutations = vec![(MUTATION_CREATE, "data.bin".to_owned())];
+    record.repository_revision = revision;
+    record.base_revision = repository.revision.clone();
+    record.context_digest = sha256(BASE_LIB_BYTES);
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    fixture
+        .candidates
+        .record(
+            &proposal.digest().value,
+            &[CandidateImages {
+                pre_image_sha256: None,
+                post_image_sha256: Some(sha256(&binary)),
+            }],
+        )
+        .unwrap();
+    let ruling = fixture
+        .rulings
+        .rule_on_candidate(
+            &fixture
+                .candidates
+                .present(&proposal.digest().value)
+                .unwrap(),
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap();
+
+    let receipt = fixture
+        .dispatches
+        .dispatch(
+            &ruling.digest().value,
+            &[SuppliedContent {
+                path: "data.bin".to_owned(),
+                bytes: Some(binary.clone()),
+            }],
+        )
+        .unwrap();
+
+    assert_eq!(
+        receipt.outcome,
+        DispatchOutcome::Applied,
+        "the unqualified exact-byte contract rejected non-UTF-8 content"
+    );
+    assert_eq!(fs::read(repository.path.join("data.bin")).unwrap(), binary);
+}
+
+#[test]
+fn replacement_refs_cannot_widen_the_commit_beyond_the_declared_change() {
+    let fixture = admitted_mission("replace-object");
+    let repository = CopyRepository::create(&fixture.copies_root, "replace-object");
+    let base = repository.revision.clone();
+    fs::write(
+        repository.path.join("extra.txt"),
+        b"not in the pinned base\n",
+    )
+    .unwrap();
+    CopyRepository::git(&repository.path, &["add", "extra.txt"]);
+    CopyRepository::git(
+        &repository.path,
+        &["commit", "--quiet", "-m", "replacement tree"],
+    );
+    let replacement = CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]);
+    CopyRepository::git(
+        &repository.path,
+        &["update-ref", "refs/heads/main", &base, &replacement],
+    );
+    CopyRepository::git(&repository.path, &["replace", &base, &replacement]);
+    assert!(CopyRepository::git(&repository.path, &["status", "--porcelain"]).is_empty());
+
+    let (proposal_digest, _) = fixture.candidate_for(
+        &repository,
+        "Modify only src/lib.rs from the literal pinned base.",
+        BASE_LIB_BYTES,
+    );
+    let ruling = fixture
+        .rulings
+        .rule_on_candidate(
+            &fixture.candidates.present(&proposal_digest).unwrap(),
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap();
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling.digest().value, &content_for(NEW_BYTES))
+        .unwrap();
+
+    // sol1's arrangement, with the outcome it produces once the replacement is not honoured.
+    //
+    // The probe committed `extra.txt`, moved the branch back to the literal base, and left the file
+    // on disk. Under the replaced view HEAD contains it and the tree is clean -- which is how the
+    // dispatch reached the object writes and published a commit carrying an undeclared path. Under
+    // the LITERAL view the same tree has an untracked file, so G11's cleanliness gate refuses three
+    // steps before anything is written. The finding is not that the outcome changed; it is that the
+    // literal graph and the gate's view are now the same graph. `..._is_simply_not_honoured` below
+    // holds the positive half, where the tree is clean literally and the dispatch applies narrowly.
+    assert_eq!(receipt.outcome, DispatchOutcome::SourceDirty);
+    assert!(
+        receipt.prepared_commit.is_none(),
+        "a refusal at G11 prepared a commit"
+    );
+    assert_eq!(
+        CopyRepository::git(&repository.path, &["rev-parse", "refs/heads/main"]),
+        base,
+        "a refused dispatch moved the branch"
+    );
+}
+
+#[test]
+fn a_replacement_ref_is_simply_not_honoured_and_the_dispatch_applies_literally() {
+    // The positive half of sol1's counterexample, and the one that carries its assertion.
+    //
+    // Same replacement, but `extra.txt` is removed from the working tree, so the tree matches the
+    // LITERAL base exactly and disagrees with the replaced one. Before the fix this dispatch was
+    // refused as `SourceDirty` -- the gate saw a file missing from the replaced HEAD. After it, the
+    // replacement is invisible: the dispatch applies, and `base..prepared` in the literal graph is
+    // exactly the declared path. Deleting `GIT_NO_REPLACE_OBJECTS` flips both tests at once and in
+    // opposite directions, which is what proves the neutralizer decides *which graph is
+    // authoritative* rather than merely making something stricter.
+    let fixture = admitted_mission("replace-ignored");
+    let repository = CopyRepository::create(&fixture.copies_root, "replace-ignored");
+    let base = repository.revision.clone();
+    fs::write(
+        repository.path.join("extra.txt"),
+        b"not in the pinned base\n",
+    )
+    .unwrap();
+    CopyRepository::git(&repository.path, &["add", "extra.txt"]);
+    CopyRepository::git(
+        &repository.path,
+        &["commit", "--quiet", "-m", "replacement tree"],
+    );
+    let replacement = CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]);
+    CopyRepository::git(
+        &repository.path,
+        &["update-ref", "refs/heads/main", &base, &replacement],
+    );
+    // Index AND working tree back to the literal base -- moving the ref alone leaves `extra.txt`
+    // staged, which is a dirty tree under either view and would refuse for the wrong reason.
+    CopyRepository::git(&repository.path, &["reset", "--quiet", "--hard", &base]);
+    CopyRepository::git(&repository.path, &["replace", &base, &replacement]);
+    // Under the replaced view the tree is dirty; under the literal view it is clean. The two views
+    // disagree, which is the whole point of the arrangement.
+    assert!(
+        !CopyRepository::git(&repository.path, &["status", "--porcelain"]).is_empty(),
+        "the replaced view should see extra.txt missing"
+    );
+
+    let (proposal_digest, _) = fixture.candidate_for(
+        &repository,
+        "Modify only src/lib.rs from the literal pinned base.",
+        BASE_LIB_BYTES,
+    );
+    let ruling = fixture
+        .rulings
+        .rule_on_candidate(
+            &fixture.candidates.present(&proposal_digest).unwrap(),
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap();
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling.digest().value, &content_for(NEW_BYTES))
+        .unwrap();
+    assert_eq!(receipt.outcome, DispatchOutcome::Applied);
+    let prepared = receipt.prepared_commit.unwrap();
+
+    let literal = Command::new("git")
+        .args(["diff", "--name-status", &base, &prepared])
+        .current_dir(&repository.path)
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .output()
+        .unwrap();
+    assert!(literal.status.success());
+    assert_eq!(
+        String::from_utf8(literal.stdout).unwrap(),
+        "M\tsrc/lib.rs\n",
+        "the literal base..commit effect is wider than the Candidate declaration"
+    );
 }
 
 #[test]
