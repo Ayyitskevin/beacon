@@ -1228,18 +1228,14 @@ impl DispatchService {
 
             // L1, inside the lock. `update-ref <ref> <new> <old>` fails unless the ref still holds
             // exactly the value the gates observed -- which a fast-forward merge does not check.
-            let swapped = swap_ref(&repository, branch, commit, base);
+            let (swapped, swap) = swap_ref(&repository, branch, commit, base);
             #[cfg(debug_assertions)]
             if let Some(hook) = self.failpoints.after_swap.clone() {
                 // The ref has moved and nothing about it is committed. A death here loses exactly
                 // this transaction, which is why the claim above is not in it.
                 hook();
             }
-            decided.record_step(
-                GitStepName::UpdateRef,
-                &["update-ref", branch, commit, base],
-                swapped.is_some(),
-            );
+            decided.record_step(GitStepName::UpdateRef, &swap, swapped.is_some());
             let observe = ["rev-parse", "--verify", branch];
             let observed = read_pinned(&repository, &observe, READ_BUDGET);
             decided.record_step(GitStepName::RevParse, &observe, observed.is_some());
@@ -1267,21 +1263,11 @@ impl DispatchService {
                 if let Some(hook) = self.failpoints.before_checkout.clone() {
                     hook();
                 }
-                decided.checkout_updated = write_pinned(
-                    &repository,
-                    None,
-                    None,
-                    &["read-tree", "-u", "--reset", commit],
-                    None,
-                    WRITE_BUDGET,
-                )
-                .is_some();
+                let checkout = ["read-tree", "-u", "--reset", commit];
+                decided.checkout_updated =
+                    write_pinned(&repository, None, None, &checkout, None, WRITE_BUDGET).is_some();
                 let updated = decided.checkout_updated;
-                decided.record_step(
-                    GitStepName::ReadTreeCheckout,
-                    &["read-tree", "-u", "--reset", commit],
-                    updated,
-                );
+                decided.record_step(GitStepName::ReadTreeCheckout, &checkout, updated);
                 for record in &mut decided.per_mutation {
                     record.effect = match record.kind {
                         MutationKind::DeleteFile => MutationEffect::Removed,
@@ -1788,20 +1774,20 @@ fn reverify_authority(
 /// the old value is not optional here, and
 /// `a_swap_refuses_unless_the_ref_still_holds_the_expected_value` is what keeps it from being
 /// dropped.
-fn swap_ref(
+///
+/// The argv is built here and handed back so the caller records the invocation that RAN rather than
+/// a second literal of its own. A Receipt's `gitSteps` is a record of attempted commands; two
+/// literals for one command can drift, and the Receipt would then describe a plain update while a
+/// compare-and-swap ran, or the reverse, with nothing to notice (Fable).
+fn swap_ref<'a>(
     repository: &PinnedRepository,
-    branch: &str,
-    commit: &str,
-    expected: &str,
-) -> Option<String> {
-    write_pinned(
-        repository,
-        None,
-        None,
-        &["update-ref", branch, commit, expected],
-        None,
-        WRITE_BUDGET,
-    )
+    branch: &'a str,
+    commit: &'a str,
+    expected: &'a str,
+) -> (Option<String>, [&'a str; 4]) {
+    let argv = ["update-ref", branch, commit, expected];
+    let swapped = write_pinned(repository, None, None, &argv, None, WRITE_BUDGET);
+    (swapped, argv)
 }
 
 /// Does every declared pre-image match what the pinned base revision actually holds?
@@ -2680,13 +2666,13 @@ mod tests {
         // The ref holds `third`. A swap expecting `first` -- the ancestor case that a fast-forward
         // merge accepts -- must refuse, and must leave the ref exactly where it was.
         assert!(
-            swap_ref(&repository, branch, &second, &first).is_none(),
+            swap_ref(&repository, branch, &second, &first).0.is_none(),
             "a swap expecting a stale value succeeded"
         );
         assert_eq!(git(&root, &["rev-parse", "HEAD"]), third);
 
         // And the positive control: expecting what the ref actually holds moves it.
-        assert!(swap_ref(&repository, branch, &second, &third).is_some());
+        assert!(swap_ref(&repository, branch, &second, &third).0.is_some());
         assert_eq!(git(&root, &["rev-parse", branch]), second);
 
         std::fs::remove_dir_all(&root).unwrap();
