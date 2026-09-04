@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+#
+# Run the desktop suite SHUFFLED, and prove the seed that ran is the seed we asked
+# for.
+#
+# FF-45 put shuffling in the gate; opus2's read pointed out that printing the seed
+# in the step name makes it a LABEL, not a claim: delete the `--sequence.seed`
+# argument and the gate keeps printing the seed it never passed. A number nobody
+# checked is worse than no number, because it is quoted in bug reports.
+#
+# So the seed is read back out of vitest's own report (`Running tests with seed
+# "N"`) and compared with the one this script passed. A mismatch, or a missing
+# line, fails the step -- including the case where a future vitest stops printing
+# it, which is exactly when the gate would silently go back to being a label.
+#
+# It is a separate script, not a function in `scripts/gate`, for the reason
+# `stage-sidecar` is: `run` calls its argument as `if "$@"; then`, which suppresses
+# `set -e` inside a function body, so a check after the test command would not stop
+# a green report. A separate script has its own shell and its own exit status.
+#
+# Usage: scripts/desktop-tests <seed>            (run from the repository root)
+set -euo pipefail
+
+seed="${1:?usage: scripts/desktop-tests <seed>}"
+case "$seed" in
+    ''|*[!0-9]*) echo "desktop-tests: seed must be digits, got '$seed'" >&2; exit 2 ;;
+esac
+
+log="$(mktemp -t desktop-tests-XXXXXX.log)"
+trap 'rm -f "$log"' EXIT
+
+# No pipe around the test command: `tee` would make the pipeline's status tee's.
+# The output is captured, then replayed, then checked -- in that order, so the
+# test's own exit code is the first thing that can stop this script.
+status=0
+(cd apps/desktop && npm test -- --sequence.shuffle --sequence.seed="$seed") \
+    >"$log" 2>&1 || status=$?
+cat "$log"
+if [ "$status" -ne 0 ]; then
+    echo "desktop-tests: the suite failed (exit $status) with seed $seed." >&2
+    echo "desktop-tests: replay it with GATE_VITEST_SEED=$seed scripts/gate desktop" >&2
+    echo "desktop-tests: ordering exposes the dependency; the race inside an ordering" >&2
+    echo "desktop-tests: is still timing, so expect to repeat the run." >&2
+    exit "$status"
+fi
+
+# vitest prints `Running tests with seed "1234"` when shuffling. Absence means the
+# flags did not reach it, which is the failure this check exists for.
+reported="$(sed -n 's/.*Running tests with seed "\([0-9]*\)".*/\1/p' "$log" | head -1)"
+if [ -z "$reported" ]; then
+    echo "desktop-tests: vitest did not report a seed, so the suite did not run" >&2
+    echo "desktop-tests: shuffled. The step's seed would be a label. Refusing." >&2
+    exit 1
+fi
+if [ "$reported" != "$seed" ]; then
+    echo "desktop-tests: asked for seed $seed, vitest ran seed $reported. Refusing." >&2
+    exit 1
+fi
+echo "desktop-tests: vitest confirms it ran with seed $reported"
