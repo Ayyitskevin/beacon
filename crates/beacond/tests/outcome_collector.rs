@@ -23,17 +23,20 @@ use std::thread::{self, JoinHandle};
 use beacond::{
     AutonomyProfile, BeaconCapability, ClassificationActor, ClassificationBasis,
     ClassificationSupersedes, CollectionRequest, Collector, CollectorRefusal, CompletionActor,
-    CompletionDisposition, ConditionOutcome, ConditionResultRecord, ImpactLevel,
-    LocalModelActivationService, LocalModelEndpoint, MeasuredSpendService, MeasuredSpendV1,
-    MissingReader, MissionCompletionV1, MissionDraft, MissionImpactClassificationV1,
-    MissionImpactService, MissionMemberDraft, MissionService, MissionView,
-    OUTCOME_RECEIPT_CHECKSUM_LABEL, OperatorAccountService, OperatorSessionPhase, OutcomeState,
-    PolicyRevisionRef, ProjectCharterDraft, ProjectDraft, ProjectService, ProjectView,
-    ProviderFeature, ResidentConfiguration, ResidentConfigurationService, ResidentLifecycleService,
-    SecretString, SpendLine, SpendMeasurement, SpendOrigin, SpendReference, SpendSupersedes,
-    SpendTotals, StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig,
-    Supervisor, TeamDraft, TeamMemberDraft, TeamService, TeamView, UncertaintyKind, UnfinishedKind,
-    declared_conditions_digest, positionable_sources, record_completion,
+    CompletionDisposition, ConditionOutcome, ConditionResultRecord, Conflicts, DeclaredCheck,
+    EvaluationDraft, EvaluationService, EvaluationSupersedes, Evaluator, Finding, FindingSeverity,
+    ImpactLevel, LocalModelActivationService, LocalModelEndpoint, MeasuredSpendService,
+    MeasuredSpendV1, MissingReader, MissionCompletionV1, MissionDraft,
+    MissionImpactClassificationV1, MissionImpactService, MissionMemberDraft, MissionService,
+    MissionView, OUTCOME_RECEIPT_CHECKSUM_LABEL, OperatorAccountService, OperatorSessionPhase,
+    OutcomeState, PolicyRevisionRef, ProjectCharterDraft, ProjectDraft, ProjectRepositoryService,
+    ProjectService, ProjectView, ProposalService, ProviderFeature, RepositoryDraft,
+    RepositorySourceKind, ResidentConfiguration, ResidentConfigurationService,
+    ResidentLifecycleService, RubricDeclaration, RulingDecision, RulingService, RulingSupersedes,
+    SecretString, SourceKind, SpendLine, SpendMeasurement, SpendOrigin, SpendReference,
+    SpendSupersedes, SpendTotals, StarterOrganizationService, StarterResidentDraft, StarterRole,
+    StartupConfig, Supervisor, TeamDraft, TeamMemberDraft, TeamService, TeamView, UncertaintyKind,
+    UnfinishedKind, Verdict, declared_conditions_digest, positionable_sources, record_completion,
 };
 use rusqlite::{Connection, params};
 use serde_json::json;
@@ -279,6 +282,157 @@ fn mission_draft(prepared: &PreparedTeam) -> MissionDraft {
                 expected_configuration_id: configuration.id,
             })
             .collect(),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// An independent encoder for the Proposal grammar
+//
+// Copied from `tests/evaluation.rs`, which built it from the published table rather than from
+// `proposal.rs`'s encoder. `ProposalV1` has no public `canonical_bytes`, so a suite that needs a
+// stored Proposal has to spell the bytes itself -- and a fixture that called Beacon's own encoder
+// would prove only that the encoder agrees with itself.
+// ---------------------------------------------------------------------------------------------
+
+const BASE_REVISION: &str = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+const MAGIC: &[u8] = b"beacon.proposal.v1\0";
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(bytes);
+    let output = digest.finalize();
+    let mut value = [0_u8; 32];
+    value.copy_from_slice(&output[..]);
+    value
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Context {
+    Declared {
+        entries: Vec<(String, [u8; 32])>,
+        /// `None` means "the digest of the encoded entry list", which is what a truthful record
+        /// carries. `Some` is how a test states a manifest that does not match.
+        manifest: Option<[u8; 32]>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Constraint {
+    NotDeclared,
+}
+
+/// One canonical record, field by field, so a test can change exactly one thing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Record {
+    magic: Vec<u8>,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    mission_id: Uuid,
+    resident_id: Uuid,
+    configuration_id: Uuid,
+    bootstrap_tag: u8,
+    bootstrap_reason: String,
+    charter_revision: u32,
+    policy_revision: u32,
+    repository_revision: u32,
+    base_revision: String,
+    summary: String,
+    context: Context,
+    targets: Vec<String>,
+    mutations: Vec<(u8, String)>,
+    check_runs: Vec<String>,
+    checks: Vec<(String, Vec<String>, String)>,
+    requirements: Vec<Constraint>,
+    bounds: [u64; 6],
+    budget_tag: u8,
+    rollback_tag: u8,
+}
+
+fn push_string(out: &mut Vec<u8>, value: &str) {
+    out.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    out.extend_from_slice(value.as_bytes());
+}
+
+fn push_count(out: &mut Vec<u8>, count: usize) {
+    out.extend_from_slice(&(count as u32).to_be_bytes());
+}
+
+fn encoded_entries(entries: &[(String, [u8; 32])]) -> Vec<u8> {
+    let mut out = Vec::new();
+    push_count(&mut out, entries.len());
+    for (path, digest) in entries {
+        push_string(&mut out, path);
+        out.extend_from_slice(digest);
+    }
+    out
+}
+
+impl Record {
+    fn bytes(&self) -> Vec<u8> {
+        let mut out = self.magic.clone();
+        for id in [
+            self.workspace_id,
+            self.project_id,
+            self.mission_id,
+            self.resident_id,
+            self.configuration_id,
+        ] {
+            out.extend_from_slice(id.as_bytes());
+        }
+        out.push(self.bootstrap_tag);
+        push_string(&mut out, &self.bootstrap_reason);
+
+        for revision in [
+            self.charter_revision,
+            self.policy_revision,
+            self.repository_revision,
+        ] {
+            out.extend_from_slice(&revision.to_be_bytes());
+        }
+        push_string(&mut out, &self.base_revision);
+
+        push_string(&mut out, &self.summary);
+        match &self.context {
+            Context::Declared { entries, manifest } => {
+                out.push(0x02);
+                let encoded = encoded_entries(entries);
+                out.extend_from_slice(&encoded);
+                out.extend_from_slice(&manifest.unwrap_or_else(|| sha256(&encoded)));
+            }
+        }
+        push_count(&mut out, self.targets.len());
+        for target in &self.targets {
+            push_string(&mut out, target);
+        }
+        push_count(&mut out, self.mutations.len());
+        for (tag, target) in &self.mutations {
+            out.push(*tag);
+            push_string(&mut out, target);
+        }
+        push_count(&mut out, self.check_runs.len());
+        for name in &self.check_runs {
+            push_string(&mut out, name);
+        }
+        push_count(&mut out, self.checks.len());
+        for (name, argv, working_directory) in &self.checks {
+            push_string(&mut out, name);
+            push_count(&mut out, argv.len());
+            for argument in argv {
+                push_string(&mut out, argument);
+            }
+            push_string(&mut out, working_directory);
+        }
+
+        for constraint in &self.requirements {
+            match constraint {
+                Constraint::NotDeclared => out.push(0x01),
+            }
+        }
+        for bound in self.bounds {
+            out.extend_from_slice(&bound.to_be_bytes());
+        }
+        out.push(self.budget_tag);
+        out.push(self.rollback_tag);
+        out
     }
 }
 
@@ -553,6 +707,77 @@ impl Admitted {
             supersedes: beacond::CompletionSupersedes::None,
             summary: "One reviewed feature shipped.".to_owned(),
             completed_at_ms: 9_000,
+        }
+    }
+
+    /// A bound repository revision for this Project, through the bind path rather than a seeded
+    /// row: a Proposal's bindings are checked against what that path actually writes, and a
+    /// hand-written row is how a fixture agrees with itself about a shape nothing produces.
+    fn repository_revision(&self) {
+        ProjectRepositoryService::new(Arc::clone(&self.accounts), self.store.workspace_id)
+            .bind(
+                self.project.id,
+                self.project.charter.revision,
+                None,
+                RepositoryDraft {
+                    source_kind: RepositorySourceKind::LocalPath,
+                    source: "/home/operator/projects/sample-tracker".to_owned(),
+                    base_revision: BASE_REVISION.to_owned(),
+                    declared_checks: vec![DeclaredCheck {
+                        name: "cargo-test".to_owned(),
+                        argv: vec![
+                            "cargo".to_owned(),
+                            "test".to_owned(),
+                            "--workspace".to_owned(),
+                        ],
+                        working_directory: ".".to_owned(),
+                    }],
+                },
+            )
+            .expect("the repository binds");
+    }
+
+    /// One Proposal record, field by field, bound to this Mission's own chain.
+    fn proposal_record(&self) -> Record {
+        let member = &self.mission.members[0];
+        Record {
+            magic: MAGIC.to_vec(),
+            workspace_id: self.store.workspace_id,
+            project_id: self.project.id,
+            mission_id: self.mission.id,
+            resident_id: member.resident_id,
+            configuration_id: member.admission_configuration_id,
+            bootstrap_tag: 0x01,
+            bootstrap_reason: "The Owner selected this Resident to request this one Proposal."
+                .to_owned(),
+            charter_revision: self.project.charter.revision,
+            policy_revision: 1,
+            repository_revision: 1,
+            base_revision: BASE_REVISION.to_owned(),
+            summary: "Add a regression test for the invariant checker.".to_owned(),
+            context: Context::Declared {
+                entries: vec![("src/lib.rs".to_owned(), [0x66; 32])],
+                manifest: None,
+            },
+            targets: vec!["src/lib.rs".to_owned(), "tests/invariants.rs".to_owned()],
+            mutations: vec![
+                (0x02, "src/lib.rs".to_owned()),
+                (0x01, "tests/invariants.rs".to_owned()),
+            ],
+            check_runs: vec!["cargo-test".to_owned()],
+            checks: vec![(
+                "cargo-test".to_owned(),
+                vec![
+                    "cargo".to_owned(),
+                    "test".to_owned(),
+                    "--workspace".to_owned(),
+                ],
+                ".".to_owned(),
+            )],
+            requirements: vec![Constraint::NotDeclared; 7],
+            bounds: [300_000, 240, 2 << 30, 256 << 20, 1 << 20, 0],
+            budget_tag: 0x01,
+            rollback_tag: 0x01,
         }
     }
 
@@ -1521,6 +1746,177 @@ fn a_counted_measurement_with_no_priced_lines_cannot_be_built_at_all() {
     record
         .canonical_bytes()
         .expect("one priced line is a record");
+}
+
+/// C49, opus2's F3. The SUCCESS path of Proposal, Ruling and Evaluation.
+///
+/// The skeleton gave those three sources absence tests and nothing else: no fixture stored one, so
+/// every positive branch in `proposal()`, `ruling()` and `evaluation()` was unexecuted. This stores
+/// one of each through its own service and collects all three.
+///
+/// **Measured, and it corrects the brief:** deleting the "cite from the verified value, never the
+/// caller's string" guard is NOT red, and no test can make it so. Each reader looks its row up with
+/// `WHERE workspace_id = ?1 AND digest_value = ?2` -- an exact match -- so on every reachable input
+/// the caller's string and the verified value are the same bytes. The guard is defence in depth
+/// against a reader that ever normalises (a `lower()`, a trimmed input), and it is worth keeping for
+/// that; it is not evidence, and this test does not pretend to make it so. What these tests DO make
+/// falsifiable is the boundary locator for each of the three, which C48 shipped verified by
+/// inspection -- see M16, M17 and M18.
+#[test]
+fn a_stored_proposal_ruling_and_evaluation_each_collect_through_their_owning_reader() {
+    let fixture = admitted("positive-path", vec!["Gates pass".to_owned()]);
+    fixture.repository_revision();
+    fixture.policy_revision();
+
+    let proposal = ProposalService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+        .submit(&fixture.proposal_record().bytes())
+        .expect("the Proposal records");
+    let proposal_digest = proposal.digest().value.clone();
+
+    let ruling = RulingService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+        .rule(
+            &proposal_digest,
+            RulingDecision::Approve,
+            "The change is scoped to one test file and is reversible.",
+            RulingSupersedes::None,
+        )
+        .expect("the Ruling records");
+
+    let other = &fixture.mission.members[1];
+    let evaluation =
+        EvaluationService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+            .record(EvaluationDraft {
+                proposal_digest: proposal_digest.clone(),
+                evaluator: Evaluator {
+                    resident_id: other.resident_id,
+                    configuration_id: other.admission_configuration_id,
+                },
+                rubric: RubricDeclaration {
+                    id: "security-review-v1".to_owned(),
+                    version: 1,
+                    canonicalizer: "beacon.rubric.v1".to_owned(),
+                    sha256: sha256_hex(&[0x20_u8; 32]),
+                },
+                cited_runs: Vec::new(),
+                verdict: Verdict::Uncertain,
+                findings: vec![Finding {
+                    severity: FindingSeverity::Note,
+                    summary: "Read the exact bytes.".to_owned(),
+                }],
+                conflicts: Conflicts::None,
+                rationale: "Independent evaluator reviewed the exact Proposal bytes.".to_owned(),
+                supersedes: EvaluationSupersedes::None,
+            })
+            .expect("the Evaluation records");
+
+    let connection = fixture.connection();
+    let collected = Collector::new(&connection, fixture.store.workspace_id)
+        .collect(&CollectionRequest {
+            proposal_digests: vec![proposal_digest.clone()],
+            ruling_digests: vec![ruling.digest().value.clone()],
+            evaluation_digests: vec![evaluation.digest().value.clone()],
+            ..CollectionRequest::default()
+        })
+        .expect("all three verify");
+
+    for (collected, kind, digest) in [
+        (
+            &collected.proposals[0],
+            SourceKind::Proposal,
+            &proposal_digest,
+        ),
+        (
+            &collected.rulings[0],
+            SourceKind::Ruling,
+            &ruling.digest().value,
+        ),
+        (
+            &collected.evaluations[0],
+            SourceKind::Evaluation,
+            &evaluation.digest().value,
+        ),
+    ] {
+        assert_eq!(collected.kind, kind);
+        assert_eq!(collected.workspace_id, fixture.store.workspace_id);
+        assert_eq!(&collected.digest_value, digest);
+    }
+}
+
+/// C49, opus2's F3, second half: the three locator rows C48 could only verify by reading.
+///
+/// A wrong JSON path refuses every real record as `Unpositioned`, which reads like a store problem
+/// and is a typo -- exactly what M5 showed for the completion. With a stored Proposal, Ruling and
+/// Evaluation the other three rows become executable, and M16-M18 break each one in turn.
+#[test]
+fn the_proposal_ruling_and_evaluation_locators_find_their_own_records_events() {
+    let fixture = admitted("positive-locators", vec!["Gates pass".to_owned()]);
+    fixture.repository_revision();
+    fixture.policy_revision();
+
+    let proposal = ProposalService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+        .submit(&fixture.proposal_record().bytes())
+        .expect("the Proposal records");
+    let ruling = RulingService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+        .rule(
+            &proposal.digest().value,
+            RulingDecision::Approve,
+            "The change is scoped to one test file and is reversible.",
+            RulingSupersedes::None,
+        )
+        .expect("the Ruling records");
+    let other = &fixture.mission.members[1];
+    let evaluation =
+        EvaluationService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+            .record(EvaluationDraft {
+                proposal_digest: proposal.digest().value.clone(),
+                evaluator: Evaluator {
+                    resident_id: other.resident_id,
+                    configuration_id: other.admission_configuration_id,
+                },
+                rubric: RubricDeclaration {
+                    id: "security-review-v1".to_owned(),
+                    version: 1,
+                    canonicalizer: "beacon.rubric.v1".to_owned(),
+                    sha256: sha256_hex(&[0x20_u8; 32]),
+                },
+                cited_runs: Vec::new(),
+                verdict: Verdict::Uncertain,
+                findings: vec![Finding {
+                    severity: FindingSeverity::Note,
+                    summary: "Read the exact bytes.".to_owned(),
+                }],
+                conflicts: Conflicts::None,
+                rationale: "Independent evaluator reviewed the exact Proposal bytes.".to_owned(),
+                supersedes: EvaluationSupersedes::None,
+            })
+            .expect("the Evaluation records");
+
+    let sources = positionable_sources();
+    let connection = fixture.connection();
+    for (label, identity) in [
+        ("proposal", proposal.digest().value.clone()),
+        ("ruling", ruling.digest().value.clone()),
+        ("evaluation", evaluation.digest().value.clone()),
+    ] {
+        let (event_kind, path) = sources[label];
+        let found: Option<i64> = connection
+            .query_row(
+                "SELECT MIN(sequence) FROM events
+                 WHERE workspace_id = ?1 AND kind = ?2 AND json_extract(payload_json, ?3) = ?4",
+                params![
+                    fixture.store.workspace_id.to_string(),
+                    event_kind,
+                    path,
+                    identity
+                ],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .unwrap();
+        assert!(
+            found.is_some(),
+            "the locator for {label} ({event_kind}, {path}) does not find its own record's Event"
+        );
+    }
 }
 
 /// The appendix bit is the record's, in both directions.
