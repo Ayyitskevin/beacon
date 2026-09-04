@@ -24,9 +24,9 @@ use beacond::{
     AutonomyProfile, BeaconCapability, ClassificationActor, ClassificationBasis,
     ClassificationSupersedes, CollectionRequest, Collector, CollectorRefusal, CompletionActor,
     CompletionDisposition, ConditionOutcome, ConditionResultRecord, Conflicts, DeclaredCheck,
-    EvaluationDraft, EvaluationService, EvaluationSupersedes, Evaluator, Finding, FindingSeverity,
-    ImpactLevel, LocalModelActivationService, LocalModelEndpoint, MeasuredSpendService,
-    MeasuredSpendV1, MissingReader, MissionCompletionV1, MissionDraft,
+    EvaluationDraft, EvaluationService, EvaluationSubjectDraft, EvaluationSupersedes, Evaluator,
+    Finding, FindingSeverity, ImpactLevel, LocalModelActivationService, LocalModelEndpoint,
+    MeasuredSpendService, MeasuredSpendV1, MissingReader, MissionCompletionV1, MissionDraft,
     MissionImpactClassificationV1, MissionImpactService, MissionMemberDraft, MissionService,
     MissionView, OUTCOME_RECEIPT_CHECKSUM_LABEL, OperatorAccountService, OperatorSessionPhase,
     OutcomeState, PolicyRevisionRef, ProjectCharterDraft, ProjectDraft, ProjectRepositoryService,
@@ -1786,7 +1786,7 @@ fn a_stored_proposal_ruling_and_evaluation_each_collect_through_their_owning_rea
     let evaluation =
         EvaluationService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
             .record(EvaluationDraft {
-                proposal_digest: proposal_digest.clone(),
+                subject: EvaluationSubjectDraft::Proposal(proposal_digest.clone()),
                 evaluator: Evaluator {
                     resident_id: other.resident_id,
                     configuration_id: other.admission_configuration_id,
@@ -1868,7 +1868,7 @@ fn the_proposal_ruling_and_evaluation_locators_find_their_own_records_events() {
     let evaluation =
         EvaluationService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
             .record(EvaluationDraft {
-                proposal_digest: proposal.digest().value.clone(),
+                subject: EvaluationSubjectDraft::Proposal(proposal.digest().value.clone()),
                 evaluator: Evaluator {
                     resident_id: other.resident_id,
                     configuration_id: other.admission_configuration_id,

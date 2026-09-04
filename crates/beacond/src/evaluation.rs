@@ -477,8 +477,15 @@ pub enum InconsistentEvaluation {
     ProposalEnvelopeDisagrees,
     MissionDisagreesWithProposal,
     EvaluatorAuthoredTheProposal,
+    /// The evaluator is the accountable Resident of the subject Artifact. Keyed on the Resident,
+    /// never the (Resident, Configuration) pair.
+    EvaluatorAuthoredTheArtifact,
+    ArtifactNotFound,
+    /// The subject Artifact declares `context = none`, so there is no roster to check the
+    /// evaluator against. Not an Evaluation subject in v1.
+    ArtifactHasNoMissionScope,
     SupersedesNotRecorded,
-    SupersedesOtherProposal,
+    SupersedesOtherSubject,
     NotTheCurrentTail,
     EvaluatedBeforeTail,
     SupersessionDisagreesWithBytes,
@@ -502,10 +509,16 @@ impl fmt::Display for InconsistentEvaluation {
             Self::EvaluatorAuthoredTheProposal => {
                 "the evaluator authored the Proposal being evaluated"
             }
-            Self::SupersedesNotRecorded => "the superseded digest names no stored Evaluation",
-            Self::SupersedesOtherProposal => {
-                "the superseded Evaluation belongs to another Proposal"
+            Self::EvaluatorAuthoredTheArtifact => {
+                "the evaluator is the accountable Resident of the Artifact being evaluated"
             }
+            Self::ArtifactNotFound => "no Artifact in this Workspace has that digest",
+            Self::ArtifactHasNoMissionScope => {
+                "the subject Artifact declares no Mission scope, so it has no roster to check the \
+                 evaluator against"
+            }
+            Self::SupersedesNotRecorded => "the superseded digest names no stored Evaluation",
+            Self::SupersedesOtherSubject => "the superseded Evaluation belongs to another Proposal",
             Self::NotTheCurrentTail => {
                 "the superseded Evaluation is not the current end of the chain"
             }
@@ -1103,21 +1116,25 @@ fn insert_evaluation(
         Conflicts::None => (0_i64, None),
         Conflicts::Declared(text) => (1_i64, Some(text.clone())),
     };
-    let subject = stored
-        .payload
-        .proposal_subject()
-        .ok_or(EvaluationError::SubjectNotStorable)?;
+    // Every subject column is derived HERE, from the payload, in one place: a caller cannot supply
+    // a projection beside the bytes, and a new arm adds one match arm rather than a new call site.
+    let (subject_kind, proposal, artifact) = match &stored.payload.subject {
+        EvaluationSubject::Proposal(digest) => ("proposal", Some(digest), None),
+        EvaluationSubject::Artifact(subject) => ("artifact", None, Some(subject)),
+    };
     connection.execute(
         "INSERT INTO evaluations (
              workspace_id, digest_algorithm, digest_canonicalizer, digest_value, canonical_bytes,
              subject_kind, subject_digest,
              proposal_digest, proposal_digest_algorithm, proposal_digest_canonicalizer,
+             artifact_digest, artifact_digest_algorithm, artifact_digest_canonicalizer,
+             artifact_project_id,
              mission_id, evaluator_resident_id, evaluator_configuration_id,
              rubric_id, rubric_version, rubric_canonicalizer, rubric_sha256,
              verdict, conflicts_declared, conflicts_text, rationale, evaluated_at_ms
          ) VALUES (
-             ?1, ?2, ?3, ?4, ?5, 'proposal', ?6, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-             ?16, ?17, ?18, ?19, ?20
+             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?21, ?22, ?23, ?24, ?11, ?12, ?13, ?14,
+             ?15, ?16, ?17, ?18, ?19, ?20, ?25, ?26
          )",
         params![
             stored.workspace_id.to_string(),
@@ -1125,9 +1142,11 @@ fn insert_evaluation(
             CANONICALIZER,
             stored.digest_value,
             stored.canonical_bytes,
-            subject.value,
-            subject.algorithm,
-            subject.canonicalizer,
+            subject_kind,
+            stored.payload.subject.digest_value(),
+            proposal.map(|digest| digest.value.clone()),
+            proposal.map(|digest| digest.algorithm.clone()),
+            proposal.map(|digest| digest.canonicalizer.clone()),
             stored.mission_id.to_string(),
             stored.payload.evaluator.resident_id.to_string(),
             stored.payload.evaluator.configuration_id.to_string(),
@@ -1138,6 +1157,10 @@ fn insert_evaluation(
             stored.payload.verdict.as_str(),
             conflicts_declared,
             conflicts_text,
+            artifact.map(|subject| subject.digest.value.clone()),
+            artifact.map(|subject| subject.digest.algorithm.clone()),
+            artifact.map(|subject| subject.digest.canonicalizer.clone()),
+            artifact.map(|subject| subject.project_id.to_string()),
             stored.payload.rationale,
             i64::try_from(stored.payload.evaluated_at_ms)
                 .map_err(|_| EvaluationError::InvalidStore)?,
@@ -1205,9 +1228,13 @@ fn insert_evaluation(
 struct StoredRow {
     digest_value: String,
     canonical_bytes: Vec<u8>,
-    proposal_digest: String,
-    proposal_digest_algorithm: String,
-    proposal_digest_canonicalizer: String,
+    subject_kind: String,
+    subject_digest: String,
+    proposal_digest_algorithm: Option<String>,
+    proposal_digest_canonicalizer: Option<String>,
+    artifact_digest_algorithm: Option<String>,
+    artifact_digest_canonicalizer: Option<String>,
+    artifact_project_id: Option<String>,
     mission_id: String,
     evaluator_resident_id: String,
     evaluator_configuration_id: String,
@@ -1222,8 +1249,10 @@ struct StoredRow {
     evaluated_at_ms: i64,
 }
 
-const SELECT_COLUMNS: &str = "digest_value, canonical_bytes, subject_digest,
-     proposal_digest_algorithm, proposal_digest_canonicalizer, mission_id, evaluator_resident_id,
+const SELECT_COLUMNS: &str = "digest_value, canonical_bytes, subject_kind, subject_digest,
+     proposal_digest_algorithm, proposal_digest_canonicalizer,
+     artifact_digest_algorithm, artifact_digest_canonicalizer, artifact_project_id,
+     mission_id, evaluator_resident_id,
      evaluator_configuration_id, rubric_id, rubric_version, rubric_canonicalizer, rubric_sha256,
      verdict, conflicts_declared, conflicts_text, rationale, evaluated_at_ms";
 
@@ -1231,21 +1260,25 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
     Ok(StoredRow {
         digest_value: row.get(0)?,
         canonical_bytes: row.get(1)?,
-        proposal_digest: row.get(2)?,
-        proposal_digest_algorithm: row.get(3)?,
-        proposal_digest_canonicalizer: row.get(4)?,
-        mission_id: row.get(5)?,
-        evaluator_resident_id: row.get(6)?,
-        evaluator_configuration_id: row.get(7)?,
-        rubric_id: row.get(8)?,
-        rubric_version: row.get(9)?,
-        rubric_canonicalizer: row.get(10)?,
-        rubric_sha256: row.get(11)?,
-        verdict: row.get(12)?,
-        conflicts_declared: row.get(13)?,
-        conflicts_text: row.get(14)?,
-        rationale: row.get(15)?,
-        evaluated_at_ms: row.get(16)?,
+        subject_kind: row.get(2)?,
+        subject_digest: row.get(3)?,
+        proposal_digest_algorithm: row.get(4)?,
+        proposal_digest_canonicalizer: row.get(5)?,
+        artifact_digest_algorithm: row.get(6)?,
+        artifact_digest_canonicalizer: row.get(7)?,
+        artifact_project_id: row.get(8)?,
+        mission_id: row.get(9)?,
+        evaluator_resident_id: row.get(10)?,
+        evaluator_configuration_id: row.get(11)?,
+        rubric_id: row.get(12)?,
+        rubric_version: row.get(13)?,
+        rubric_canonicalizer: row.get(14)?,
+        rubric_sha256: row.get(15)?,
+        verdict: row.get(16)?,
+        conflicts_declared: row.get(17)?,
+        conflicts_text: row.get(18)?,
+        rationale: row.get(19)?,
+        evaluated_at_ms: row.get(20)?,
     })
 }
 
@@ -1293,17 +1326,11 @@ fn verified_evaluation(
             InconsistentEvaluation::ColumnDisagreesWithBytes,
         ));
     }
-    let subject = payload
-        .proposal_subject()
-        .ok_or(EvaluationError::SubjectNotStorable)?;
-    let Some(facts) = proposal_binding_facts(connection, workspace_id, &subject.value)
-        .map_err(map_proposal_error)?
-    else {
-        return Err(EvaluationError::Inconsistent(
-            InconsistentEvaluation::ProposalNotFound,
-        ));
-    };
-    if &facts.digest != subject {
+    // The subject record, read through ITS owning verified reader, and every derived column
+    // re-derived against what that record's own bytes say. For the Artifact arm the derivation is
+    // one hop through a different record -- the same discipline, not a weaker one.
+    let facts = subject_facts_for_read(connection, workspace_id, &payload.subject)?;
+    if facts.subject != payload.subject {
         return Err(EvaluationError::Inconsistent(
             InconsistentEvaluation::ProposalEnvelopeDisagrees,
         ));
@@ -1313,15 +1340,16 @@ fn verified_evaluation(
             InconsistentEvaluation::MissionDisagreesWithProposal,
         ));
     }
-    // Re-derived on EVERY read, even though the trigger forbids it. Reconciliation must be complete
+    // Re-derived on EVERY read, even though the triggers forbid it. Reconciliation must be complete
     // on its own terms rather than on the order the store's checks happen to have run -- ADR 0037
     // re-derives two store-forbidden properties for exactly this reason. The evaluator here comes
-    // from the canonical BYTES, so this is the layer that proves the projection the trigger saw
-    // was the projection the bytes describe.
+    // from the canonical BYTES, so this is the layer that proves the projection the trigger saw was
+    // the projection the bytes describe.
     if payload.evaluator.resident_id == facts.author_resident_id {
-        return Err(EvaluationError::Inconsistent(
-            InconsistentEvaluation::EvaluatorAuthoredTheProposal,
-        ));
+        return Err(EvaluationError::Inconsistent(match payload.subject {
+            EvaluationSubject::Proposal(_) => InconsistentEvaluation::EvaluatorAuthoredTheProposal,
+            EvaluationSubject::Artifact(_) => InconsistentEvaluation::EvaluatorAuthoredTheArtifact,
+        }));
     }
     verify_children(connection, workspace_id, &row.digest_value, &payload)?;
 
@@ -1333,7 +1361,7 @@ fn verified_evaluation(
              WHERE workspace_id = ?1 AND subject_digest = ?2 AND evaluation_digest = ?3",
             params![
                 workspace_id.to_string(),
-                row.proposal_digest.as_str(),
+                row.subject_digest.as_str(),
                 row.digest_value.as_str()
             ],
             |row| row.get(0),
@@ -1349,7 +1377,13 @@ fn verified_evaluation(
         ));
     }
 
-    let force = derive_force(connection, workspace_id, &row, &facts)?;
+    let force = match &facts.proposal_bindings {
+        Some(bindings) => derive_force(connection, workspace_id, &row, bindings)?,
+        None => EvaluationForce {
+            superseded_by: superseded_by(connection, workspace_id, &row)?,
+            drift: Vec::new(),
+        },
+    };
     Ok(Evaluation {
         digest: EvaluationDigest {
             algorithm: DIGEST_ALGORITHM.to_owned(),
@@ -1369,6 +1403,32 @@ fn verified_evaluation(
 /// revisions. A Repository rebind that keeps the same pinned commit reports only the revision as
 /// moved, one drift and not two; that distinction is the same one Ruling v1 draws, repeated here
 /// rather than shared because the two records answer different questions about the same columns.
+/// The successor link, for either arm: chains are per subject digest and carry no kind.
+fn superseded_by(
+    connection: &Connection,
+    workspace_id: Uuid,
+    row: &StoredRow,
+) -> Result<Option<EvaluationDigest>, EvaluationError> {
+    Ok(connection
+        .query_row(
+            "SELECT evaluation_digest FROM evaluation_supersessions
+             WHERE workspace_id = ?1 AND subject_digest = ?2
+               AND supersedes_evaluation_digest = ?3",
+            params![
+                workspace_id.to_string(),
+                row.subject_digest.as_str(),
+                row.digest_value.as_str()
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|value| EvaluationDigest {
+            algorithm: DIGEST_ALGORITHM.to_owned(),
+            canonicalizer: CANONICALIZER.to_owned(),
+            value,
+        }))
+}
+
 fn derive_force(
     connection: &Connection,
     workspace_id: Uuid,
@@ -1382,7 +1442,7 @@ fn derive_force(
                AND supersedes_evaluation_digest = ?3",
             params![
                 workspace_id.to_string(),
-                row.proposal_digest.as_str(),
+                row.subject_digest.as_str(),
                 row.digest_value.as_str()
             ],
             |row| row.get::<_, String>(0),
@@ -1525,11 +1585,34 @@ fn columns_match(row: &StoredRow, payload: &EvaluationV1) -> bool {
         Conflicts::None => (0_i64, None),
         Conflicts::Declared(value) => (1_i64, Some(value.as_str())),
     };
-    payload.proposal_subject().is_some_and(|subject| {
-        row.proposal_digest == subject.value
-            && row.proposal_digest_algorithm == subject.algorithm
-            && row.proposal_digest_canonicalizer == subject.canonicalizer
-    }) && row.evaluator_resident_id == payload.evaluator.resident_id.to_string()
+    // Per arm, and both halves: the populated arm agrees with the bytes AND the other arm is
+    // absent. A row that carried both would satisfy a one-sided comparison.
+    let subject_matches = match &payload.subject {
+        EvaluationSubject::Proposal(digest) => {
+            row.subject_kind == "proposal"
+                && row.subject_digest == digest.value
+                && row.proposal_digest_algorithm.as_deref() == Some(digest.algorithm.as_str())
+                && row.proposal_digest_canonicalizer.as_deref()
+                    == Some(digest.canonicalizer.as_str())
+                && row.artifact_digest_algorithm.is_none()
+                && row.artifact_digest_canonicalizer.is_none()
+                && row.artifact_project_id.is_none()
+        }
+        EvaluationSubject::Artifact(subject) => {
+            row.subject_kind == "artifact"
+                && row.subject_digest == subject.digest.value
+                && row.artifact_digest_algorithm.as_deref()
+                    == Some(subject.digest.algorithm.as_str())
+                && row.artifact_digest_canonicalizer.as_deref()
+                    == Some(subject.digest.canonicalizer.as_str())
+                && row.artifact_project_id.as_deref()
+                    == Some(subject.project_id.to_string().as_str())
+                && row.proposal_digest_algorithm.is_none()
+                && row.proposal_digest_canonicalizer.is_none()
+        }
+    };
+    subject_matches
+        && row.evaluator_resident_id == payload.evaluator.resident_id.to_string()
         && row.evaluator_configuration_id == payload.evaluator.configuration_id.to_string()
         && row.rubric_id == payload.rubric.id
         && row.rubric_version == payload.rubric.version
@@ -1617,9 +1700,27 @@ pub struct EvaluationService {
 /// `supersedes` names the Evaluation this one replaces, and must be the CURRENT END of that
 /// Proposal's chain: superseding a link that has already been superseded would fork it, and a fork
 /// has no last link, so "the effective Evaluation" would stop having an answer.
+/// What a caller names as the subject.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvaluationSubjectDraft {
+    Proposal(String),
+    Artifact(String),
+}
+
+impl EvaluationSubjectDraft {
+    fn digest(&self) -> &str {
+        match self {
+            Self::Proposal(digest) | Self::Artifact(digest) => digest,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct EvaluationDraft {
-    pub proposal_digest: String,
+    /// Which record this Evaluation is about, by digest. The kind is named because the two are
+    /// read from different stores; everything else about the subject -- its envelope, its Mission
+    /// scope, its author -- is DERIVED from the stored record rather than supplied beside it.
+    pub subject: EvaluationSubjectDraft,
     pub evaluator: Evaluator,
     pub rubric: RubricDeclaration,
     pub cited_runs: Vec<Uuid>,
@@ -1628,6 +1729,97 @@ pub struct EvaluationDraft {
     pub conflicts: Conflicts,
     pub rationale: String,
     pub supersedes: EvaluationSupersedes,
+}
+
+/// What a subject record says about itself, read from its own verified bytes.
+///
+/// One shape for both arms so the Command reads the same four facts either way: the subject as it
+/// will be recorded, the Mission the roster check needs, the author non-authorship excludes, and
+/// nothing a caller supplied.
+struct SubjectFacts {
+    subject: EvaluationSubject,
+    mission_id: Uuid,
+    author_resident_id: Uuid,
+    /// Present only for the Proposal arm. DRIFT IS EMPTY BY CONSTRUCTION for an Artifact subject:
+    /// the record carries no Charter, Policy, Repository or base revision, so there is nothing that
+    /// could have moved under it. `None` here is that fact, not a missing lookup.
+    proposal_bindings: Option<crate::proposal::ProposalBindingFacts>,
+}
+
+/// The same four facts, for a subject already recorded: the read path knows the arm from the bytes
+/// rather than from a caller. One function would need two shapes of input; two functions that share
+/// `SubjectFacts` keep the comparison identical on both sides.
+fn subject_facts_for_read(
+    connection: &Connection,
+    workspace_id: Uuid,
+    subject: &EvaluationSubject,
+) -> Result<SubjectFacts, EvaluationError> {
+    let draft = match subject {
+        EvaluationSubject::Proposal(digest) => {
+            EvaluationSubjectDraft::Proposal(digest.value.clone())
+        }
+        EvaluationSubject::Artifact(subject) => {
+            EvaluationSubjectDraft::Artifact(subject.digest.value.clone())
+        }
+    };
+    subject_facts(connection, workspace_id, &draft)
+}
+
+fn subject_facts(
+    connection: &Connection,
+    workspace_id: Uuid,
+    draft: &EvaluationSubjectDraft,
+) -> Result<SubjectFacts, EvaluationError> {
+    match draft {
+        EvaluationSubjectDraft::Proposal(digest) => {
+            let Some(facts) = proposal_binding_facts(connection, workspace_id, digest)
+                .map_err(map_proposal_error)?
+            else {
+                return Err(EvaluationError::Inconsistent(
+                    InconsistentEvaluation::ProposalNotFound,
+                ));
+            };
+            Ok(SubjectFacts {
+                subject: EvaluationSubject::Proposal(facts.digest.clone()),
+                mission_id: facts.mission_id,
+                author_resident_id: facts.author_resident_id,
+                proposal_bindings: Some(facts),
+            })
+        }
+        EvaluationSubjectDraft::Artifact(digest) => {
+            let Some(record) =
+                crate::artifact::verified_artifact_within(connection, workspace_id, digest)
+                    .map_err(|_| EvaluationError::InvalidStore)?
+            else {
+                return Err(EvaluationError::Inconsistent(
+                    InconsistentEvaluation::ArtifactNotFound,
+                ));
+            };
+            // An Artifact with `context = none` has no roster to check an evaluator against, so it
+            // is not an Evaluation subject in v1. The check cannot be performed, and performing a
+            // weaker one instead is how "the evaluator was a member" becomes a sentence nobody
+            // proved (design section 4).
+            let crate::artifact::ArtifactContext::Mission {
+                project_id,
+                mission_id,
+            } = record.payload().context
+            else {
+                return Err(EvaluationError::Inconsistent(
+                    InconsistentEvaluation::ArtifactHasNoMissionScope,
+                ));
+            };
+            Ok(SubjectFacts {
+                subject: EvaluationSubject::Artifact(ArtifactSubject {
+                    digest: record.digest().clone(),
+                    project_id,
+                    mission_id,
+                }),
+                mission_id,
+                author_resident_id: record.payload().accountable_resident_id,
+                proposal_bindings: None,
+            })
+        }
+    }
 }
 
 impl EvaluationService {
@@ -1646,9 +1838,13 @@ impl EvaluationService {
     /// reaches the store, and because both call the same predicate they cannot disagree.
     pub fn record(&self, draft: EvaluationDraft) -> Result<Evaluation, EvaluationError> {
         self.accounts.with_authenticated_store(|connection, now| {
+            let subject_digest = draft.subject.digest().to_owned();
             digest_bytes(
-                &draft.proposal_digest,
-                MalformedEvaluation::ProposalDigestValue,
+                &subject_digest,
+                match draft.subject {
+                    EvaluationSubjectDraft::Proposal(_) => MalformedEvaluation::ProposalDigestValue,
+                    EvaluationSubjectDraft::Artifact(_) => MalformedEvaluation::ArtifactDigestValue,
+                },
             )
             .map_err(EvaluationError::Malformed)?;
             // Validated BEFORE any store lookup. Querying an unvalidated string and reporting
@@ -1663,25 +1859,26 @@ impl EvaluationService {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-            // The Proposal must exist in this Workspace and still agree with its own bytes. Its
-            // envelope and Mission are read out of those bytes, never off the row.
-            let Some(facts) =
-                proposal_binding_facts(&transaction, self.workspace_id, &draft.proposal_digest)
-                    .map_err(map_proposal_error)?
-            else {
-                return Err(EvaluationError::Inconsistent(
-                    InconsistentEvaluation::ProposalNotFound,
-                ));
-            };
+            // The subject must exist in this Workspace and still agree with its own bytes. Its
+            // envelope, its Mission and its author are read out of THOSE bytes, never off a row --
+            // and for the Artifact arm that is one hop through a different record's verified
+            // reader, which is the same discipline and not a weaker one.
+            let subject = subject_facts(&transaction, self.workspace_id, &draft.subject)?;
 
-            // Non-authorship, at the Command. The trigger below would refuse this write anyway,
-            // but a caller deserves the reason rather than a database abort, and the Command is
-            // where the two-layer proof starts: this compares against the AUTHOR the Proposal's
-            // verified bytes name, not against a column an earlier write chose.
-            if draft.evaluator.resident_id == facts.author_resident_id {
-                return Err(EvaluationError::Inconsistent(
-                    InconsistentEvaluation::EvaluatorAuthoredTheProposal,
-                ));
+            // Non-authorship, at the Command. The triggers would refuse this write anyway, but a
+            // caller deserves the reason rather than a database abort, and the Command is where the
+            // two-layer proof starts: this compares against the AUTHOR the subject's verified bytes
+            // name, not against a column an earlier write chose. Keyed on the Resident and never on
+            // the (Resident, Configuration) pair: an author who reconfigures is still the author.
+            if draft.evaluator.resident_id == subject.author_resident_id {
+                return Err(EvaluationError::Inconsistent(match draft.subject {
+                    EvaluationSubjectDraft::Proposal(_) => {
+                        InconsistentEvaluation::EvaluatorAuthoredTheProposal
+                    }
+                    EvaluationSubjectDraft::Artifact(_) => {
+                        InconsistentEvaluation::EvaluatorAuthoredTheArtifact
+                    }
+                }));
             }
 
             // Cited Runs are a set in the bytes: sorted here so a caller's order cannot change the
@@ -1697,7 +1894,7 @@ impl EvaluationService {
 
             // The chain is read and extended inside this one immediate transaction, so two
             // concurrent Evaluations cannot both believe they extend it.
-            let chain = evaluation_chain(&transaction, self.workspace_id, &draft.proposal_digest)?;
+            let chain = evaluation_chain(&transaction, self.workspace_id, &subject_digest)?;
             let tail = chain.last();
             match (tail, &draft.supersedes) {
                 (None, EvaluationSupersedes::None) => {}
@@ -1707,10 +1904,10 @@ impl EvaluationService {
                     // nothing, one naming another Proposal's Evaluation, and one naming an
                     // already-superseded link of this chain.
                     return Err(EvaluationError::Inconsistent(
-                        match recorded_proposal_of(&transaction, cited)? {
+                        match recorded_subject_of(&transaction, cited)? {
                             None => InconsistentEvaluation::SupersedesNotRecorded,
-                            Some(other) if other != draft.proposal_digest => {
-                                InconsistentEvaluation::SupersedesOtherProposal
+                            Some(other) if other != subject_digest => {
+                                InconsistentEvaluation::SupersedesOtherSubject
                             }
                             Some(_) => InconsistentEvaluation::NotTheCurrentTail,
                         },
@@ -1734,9 +1931,10 @@ impl EvaluationService {
             }
 
             let payload = EvaluationV1 {
-                // COPIED from the verified Proposal, never rebuilt from this module's constants:
-                // equality is not provenance.
-                subject: EvaluationSubject::Proposal(facts.digest),
+                // COPIED from the verified subject record, never rebuilt from this module's
+                // constants: equality is not provenance. For the Artifact arm that copy includes
+                // the Mission scope, which is why an Evaluation never asserts its own Mission.
+                subject: subject.subject.clone(),
                 evaluator: draft.evaluator,
                 rubric: draft.rubric,
                 cited_runs,
@@ -1754,7 +1952,7 @@ impl EvaluationService {
                 workspace_id: self.workspace_id,
                 digest_value: digest_value.clone(),
                 canonical_bytes,
-                mission_id: facts.mission_id,
+                mission_id: subject.mission_id,
                 payload,
             };
             insert_evaluation(&transaction, &stored)?;
@@ -1766,7 +1964,7 @@ impl EvaluationService {
                      ) VALUES (?1, ?2, ?3, ?4)",
                     params![
                         self.workspace_id.to_string(),
-                        draft.proposal_digest,
+                        subject_digest,
                         digest_value,
                         superseded,
                     ],
@@ -1805,13 +2003,13 @@ pub(crate) fn verified_evaluation_within(
     verified_evaluation(connection, workspace_id, row).map(Some)
 }
 
-fn recorded_proposal_of(
+fn recorded_subject_of(
     connection: &Connection,
     digest_value: &str,
 ) -> Result<Option<String>, EvaluationError> {
     Ok(connection
         .query_row(
-            "SELECT proposal_digest FROM evaluations WHERE digest_value = ?1",
+            "SELECT subject_digest FROM evaluations WHERE digest_value = ?1",
             params![digest_value],
             |row| row.get(0),
         )
@@ -1841,21 +2039,25 @@ pub(crate) fn verify_evaluation_state(connection: &Connection) -> Result<(), Eva
                 StoredRow {
                     digest_value: row.get(1)?,
                     canonical_bytes: row.get(2)?,
-                    proposal_digest: row.get(3)?,
-                    proposal_digest_algorithm: row.get(4)?,
-                    proposal_digest_canonicalizer: row.get(5)?,
-                    mission_id: row.get(6)?,
-                    evaluator_resident_id: row.get(7)?,
-                    evaluator_configuration_id: row.get(8)?,
-                    rubric_id: row.get(9)?,
-                    rubric_version: row.get(10)?,
-                    rubric_canonicalizer: row.get(11)?,
-                    rubric_sha256: row.get(12)?,
-                    verdict: row.get(13)?,
-                    conflicts_declared: row.get(14)?,
-                    conflicts_text: row.get(15)?,
-                    rationale: row.get(16)?,
-                    evaluated_at_ms: row.get(17)?,
+                    subject_kind: row.get(3)?,
+                    subject_digest: row.get(4)?,
+                    proposal_digest_algorithm: row.get(5)?,
+                    proposal_digest_canonicalizer: row.get(6)?,
+                    artifact_digest_algorithm: row.get(7)?,
+                    artifact_digest_canonicalizer: row.get(8)?,
+                    artifact_project_id: row.get(9)?,
+                    mission_id: row.get(10)?,
+                    evaluator_resident_id: row.get(11)?,
+                    evaluator_configuration_id: row.get(12)?,
+                    rubric_id: row.get(13)?,
+                    rubric_version: row.get(14)?,
+                    rubric_canonicalizer: row.get(15)?,
+                    rubric_sha256: row.get(16)?,
+                    verdict: row.get(17)?,
+                    conflicts_declared: row.get(18)?,
+                    conflicts_text: row.get(19)?,
+                    rationale: row.get(20)?,
+                    evaluated_at_ms: row.get(21)?,
                 },
             ))
         })?
