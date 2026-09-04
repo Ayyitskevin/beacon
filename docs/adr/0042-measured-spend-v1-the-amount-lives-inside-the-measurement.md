@@ -225,6 +225,19 @@ several lanes are queued behind it.
 triggers), `MeasuredSpendService::{record, get, for_mission}`, the `spend.measured` event, and
 `verified_spend_within` / `verified_spend_for_citation`.
 
+**The coverage window is verified against the store, at record time.** `coverage_to_event_seq` is a
+claim about a stretch of this Workspace's own Event history, and the store is the only thing that can
+confirm it. `record` refuses a window ending past `max(sequence)` by name
+(`SpendRecordError::CoverageBeyondStore`), before the row exists.
+
+Record time is the only honest place for that check. There, `max(sequence)` is a fact. At read time
+the same question cannot be answered without re-deriving a past fact from a world that has moved on,
+so a reader asking it would either re-litigate history or wave the window through — and a window
+nobody confirmed is a claim an Outcome would render as verified. The check is `>` rather than `>=`: a
+measurement may cover everything that has happened. A record's own `spend.measured` Event is written
+after the check, so no record can cover the moment it was itself recorded; a *later* record may cover
+that Event, because by then it is history like any other.
+
 **The migration number is provisional.** The Mission-completion lane holds 0024 and this holds
 **0025**, and *whichever lands second renumbers at its final rebase*. On this branch the ladder steps
 23 → 25, because 0024 belongs to a parallel lane and no store on this branch can be at 24 — the shape

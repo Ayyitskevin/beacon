@@ -1102,6 +1102,14 @@ pub enum SpendRecordError {
     /// `(workspace, mission, origin, version)` is already taken, or `spend_id` is. A correction is
     /// a new record at the next version, never an edit.
     IdentityTaken,
+    /// The declared coverage window ends past the last Event this Workspace has. A window is a
+    /// claim about a stretch of the store's own history, and the store is the only thing that can
+    /// confirm it -- at record time, where `max(sequence)` is a fact. At read time the same question
+    /// cannot be answered without re-deriving a past fact from a world that has moved on.
+    CoverageBeyondStore {
+        claimed_to_event_seq: u64,
+        last_event_seq: u64,
+    },
     Store(String),
 }
 
@@ -1139,6 +1147,14 @@ impl fmt::Display for SpendRecordError {
             Self::NotCanonical => formatter.write_str("not_canonical"),
             Self::CrossWorkspace => formatter.write_str("cross_workspace"),
             Self::IdentityTaken => formatter.write_str("identity_taken"),
+            Self::CoverageBeyondStore {
+                claimed_to_event_seq,
+                last_event_seq,
+            } => write!(
+                formatter,
+                "coverage_beyond_store: window ends at {claimed_to_event_seq}, \
+                 the last event in this workspace is {last_event_seq}"
+            ),
             Self::Store(reason) => write!(formatter, "store: {reason}"),
         }
     }
@@ -1269,6 +1285,24 @@ fn insert_spend(
     canonical_bytes: &[u8],
     payload: &MeasuredSpendV1,
 ) -> Result<(), SpendRecordError> {
+    // The window is checked against the store BEFORE the row is written, and against this
+    // Workspace's own Events. The record's own `spend.measured` Event is written after this, so a
+    // window can never include the moment the measurement was recorded -- it covers work that had
+    // already happened, which is the only thing a measurement can honestly cover.
+    let last_event_seq: i64 = connection
+        .query_row(
+            "SELECT coalesce(max(sequence), 0) FROM events WHERE workspace_id = ?1",
+            rusqlite::params![payload.workspace_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(|error| SpendRecordError::Store(error.to_string()))?;
+    let last_event_seq = u64::try_from(last_event_seq).unwrap_or(0);
+    if payload.coverage_to_event_seq > last_event_seq {
+        return Err(SpendRecordError::CoverageBeyondStore {
+            claimed_to_event_seq: payload.coverage_to_event_seq,
+            last_event_seq,
+        });
+    }
     connection.execute(
         "INSERT INTO measured_spend (
              workspace_id, digest_algorithm, digest_canonicalizer, digest_value, canonical_bytes,
