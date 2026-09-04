@@ -535,6 +535,83 @@ fn outcome_markdown_is_byte_identical_for_same_manifest_across_insertion_orders(
     );
 }
 
+/// gpt2's counterexample (spec review, P1): two references equal in kind, ID, schema and digest
+/// value but differing in digest canonicalizer are two objects, not one spelling of one.
+///
+/// `SourceDigest` is a three-part envelope and the canonicalizer is a validated input, so a key
+/// built from the value alone makes `artifact.v1` and `artifact.v2` collide: the encoder rejects
+/// them as a repeated canonical key, and the census would merge them into one cited object.
+#[test]
+fn outcome_source_identity_includes_the_whole_digest_envelope() {
+    let mut manifest = vector_manifest();
+    let first = source(
+        SourceKind::Artifact,
+        ARTIFACT,
+        "beacon.artifact.v1",
+        "44",
+        1,
+    );
+    let second = SourceRef {
+        digest: digest("beacon.artifact.v2", hex32("44")),
+        ..first.clone()
+    };
+    manifest.delivered_artifacts = OutcomeState::Verified(vec![first.clone(), second.clone()]);
+    let mut sources = vector_sources();
+    sources.artifacts = vec![VerifiedArtifact {
+        object_id: uuid(ARTIFACT),
+        media_type: "text/plain".to_owned(),
+        title: "One object, two canonicalizers".to_owned(),
+    }];
+
+    // They must encode: two distinct keys, strictly ascending.
+    let bytes = manifest
+        .canonical_bytes()
+        .expect("two canonicalizers are two canonical keys, not a repeat");
+    let decoded = OutcomeManifestV1::from_canonical_bytes(&bytes).expect("decodes");
+    assert_eq!(decoded.canonical_bytes().expect("re-encodes"), bytes);
+
+    // And insertion order must not reach the identity.
+    let mut reversed = manifest.clone();
+    reversed.delivered_artifacts = OutcomeState::Verified(vec![second, first]);
+    assert_eq!(reversed.canonical_bytes().expect("encodes"), bytes);
+
+    // The census counts them as two, and the appendix prints two rows.
+    let document = render(&manifest, &sources).expect("renders");
+    let objects = section(&document, "### 10.1 Cited objects", "### 10.2");
+    assert!(objects.contains("`beacon.artifact.v1`"));
+    assert!(objects.contains("`beacon.artifact.v2`"));
+
+    // The census bound sees two objects where a value-only key would see one.
+    let (mut bounded, mut bounded_sources) = bounded_manifest(252);
+    let base = source(
+        SourceKind::Artifact,
+        PROPOSAL,
+        "beacon.artifact.v1",
+        "aa",
+        1,
+    );
+    let twin = SourceRef {
+        digest: digest("beacon.artifact.v2", hex32("aa")),
+        ..base.clone()
+    };
+    if let OutcomeState::Verified(refs) = &mut bounded.delivered_artifacts {
+        refs.push(base.clone());
+        refs.push(twin);
+    }
+    bounded_sources.artifacts.push(VerifiedArtifact {
+        object_id: base.object_id,
+        media_type: "text/plain".to_owned(),
+        title: "twin".to_owned(),
+    });
+    // 3 identities + 252 + 2 = 257.
+    let refusal = bound_refusal(render(&bounded, &bounded_sources).expect_err("257 refuse"));
+    assert_eq!(refusal.bound, OutcomeBound::CitationCount);
+    assert_eq!(
+        refusal.observed_at_least, 257,
+        "the census merged two canonicalizers into one cited object"
+    );
+}
+
 #[test]
 fn outcome_markdown_uses_utf8_lf_no_trailing_space_and_one_final_newline() {
     let document = rendered();
