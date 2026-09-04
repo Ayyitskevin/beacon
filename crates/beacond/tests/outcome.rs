@@ -949,10 +949,52 @@ fn outcome_accepts_multiline_narrative_and_names_every_text_refusal() {
         "the stored text was altered"
     );
 
-    // TAB is permitted too.
+    // TAB is content, wherever it sits. gpt2's confirmation: the integration test exercised only an
+    // interior TAB, while ADR 0040 says a *leading* TAB is preserved -- and the trim rule refused
+    // one as `UntrimmedText`.
     let mut tabbed = vector_sources();
     tabbed.unfinished_work = vec![text("uw-docs", "column one\tcolumn two")];
-    render(&manifest, &tabbed).expect("TAB is permitted");
+    render(&manifest, &tabbed).expect("an interior TAB is content");
+
+    let mut leading = vector_sources();
+    leading.unfinished_work = vec![text("uw-docs", "\tleading tab")];
+    let document = render(&manifest, &leading).expect("a leading TAB is content");
+    assert!(
+        document.contains("\n\tleading tab\n"),
+        "the leading TAB was not preserved into the document"
+    );
+
+    // Whitespace the document cannot carry is still refused, and each case says which rule it
+    // broke. A trailing TAB would put trailing whitespace in the bytes, which the byte rules
+    // forbid; leading or trailing SPACE and LF render identically to their absence, so accepting
+    // them would let two stored values become one document.
+    for padded in [
+        " leading space",
+        "trailing space ",
+        "trailing tab\t",
+        "\nleading newline",
+        "trailing newline\n",
+    ] {
+        let mut hostile = vector_sources();
+        hostile.unfinished_work = vec![text("uw-docs", padded)];
+        assert_eq!(
+            render(&manifest, &hostile).expect_err("refuses"),
+            OutcomeRefusal::Malformed(MalformedOutcome::UntrimmedText),
+            "padding {padded:?} was not refused by name"
+        );
+    }
+
+    // A run of blank lines is kept one for one. Collapsing it would make two stored values one
+    // document, which is the alteration a paragraph break must not perform.
+    let mut one_break = vector_sources();
+    one_break.unfinished_work = vec![text("uw-docs", "first\n\nsecond")];
+    let mut two_breaks = vector_sources();
+    two_breaks.unfinished_work = vec![text("uw-docs", "first\n\n\nsecond")];
+    assert_ne!(
+        render(&manifest, &one_break).expect("renders"),
+        render(&manifest, &two_breaks).expect("renders"),
+        "two blank lines and three rendered the same document"
+    );
 
     // Every other control character is refused, and the refusal names itself.
     for control in ['\u{0}', '\u{7}', '\r', '\u{1b}', '\u{85}'] {
