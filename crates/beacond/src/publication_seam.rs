@@ -28,13 +28,46 @@ use uuid::Uuid;
 use crate::artifact::verified_artifact_within;
 use crate::evaluation::{EvaluationSubject, Verdict, verified_evaluation_within};
 
+/// The candidate Artifact's RECORD digest, as its own type.
+///
+/// Two hex strings side by side in a signature are two things a caller can swap, and the swap
+/// compiles, runs, and refuses for a reason that reads like a data problem (sol1's P1). These are
+/// newtypes so that the mistake is a type error at the call site instead: the seam takes one of
+/// each, and neither can be built from the other by accident.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CandidateArtifactDigest(String);
+
+/// The cited Evaluation's digest, as its own type. See `CandidateArtifactDigest`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CitedEvaluationDigest(String);
+
+impl CandidateArtifactDigest {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl CitedEvaluationDigest {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// One publishable pairing, proved. Two identities and a Workspace: exactly the columns the
 /// relation's own foreign keys need, and nothing a surface could print as a claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicationCandidacy {
     workspace_id: Uuid,
-    candidate_artifact_digest: String,
-    evaluation_digest: String,
+    candidate_artifact_digest: CandidateArtifactDigest,
+    evaluation_digest: CitedEvaluationDigest,
 }
 
 impl PublicationCandidacy {
@@ -43,11 +76,11 @@ impl PublicationCandidacy {
     }
 
     /// The candidate Artifact's RECORD digest -- the identity the relation keys on.
-    pub fn candidate_artifact_digest(&self) -> &str {
+    pub fn candidate_artifact_digest(&self) -> &CandidateArtifactDigest {
         &self.candidate_artifact_digest
     }
 
-    pub fn evaluation_digest(&self) -> &str {
+    pub fn evaluation_digest(&self) -> &CitedEvaluationDigest {
         &self.evaluation_digest
     }
 }
@@ -108,16 +141,18 @@ impl std::error::Error for PublicationSeamRefusal {}
 pub fn publication_candidacy(
     connection: &Connection,
     workspace_id: Uuid,
-    evaluation_digest: &str,
-    candidate_artifact_digest: &str,
+    evaluation_digest: &CitedEvaluationDigest,
+    candidate_artifact_digest: &CandidateArtifactDigest,
     outcome_mission_id: Uuid,
 ) -> Result<PublicationCandidacy, PublicationSeamRefusal> {
-    let evaluation = verified_evaluation_within(connection, workspace_id, evaluation_digest)
-        .map_err(|_| PublicationSeamRefusal::Unverified)?
-        .ok_or(PublicationSeamRefusal::EvaluationAbsent)?;
-    let candidate = verified_artifact_within(connection, workspace_id, candidate_artifact_digest)
-        .map_err(|_| PublicationSeamRefusal::Unverified)?
-        .ok_or(PublicationSeamRefusal::CandidateAbsent)?;
+    let evaluation =
+        verified_evaluation_within(connection, workspace_id, evaluation_digest.as_str())
+            .map_err(|_| PublicationSeamRefusal::Unverified)?
+            .ok_or(PublicationSeamRefusal::EvaluationAbsent)?;
+    let candidate =
+        verified_artifact_within(connection, workspace_id, candidate_artifact_digest.as_str())
+            .map_err(|_| PublicationSeamRefusal::Unverified)?
+            .ok_or(PublicationSeamRefusal::CandidateAbsent)?;
 
     // 1. The subject is an Artifact, and 2. it is THIS one -- from the Evaluation's own bytes.
     let EvaluationSubject::Artifact(subject) = &evaluation.payload().subject else {
@@ -143,7 +178,7 @@ pub fn publication_candidacy(
 
     Ok(PublicationCandidacy {
         workspace_id,
-        candidate_artifact_digest: candidate.digest().value.clone(),
-        evaluation_digest: evaluation.digest().value.clone(),
+        candidate_artifact_digest: CandidateArtifactDigest::new(candidate.digest().value.clone()),
+        evaluation_digest: CitedEvaluationDigest::new(evaluation.digest().value.clone()),
     })
 }
