@@ -501,6 +501,19 @@ fn outcome_markdown_is_byte_identical_for_same_manifest_across_insertion_orders(
         refs.insert(0, extra.clone());
     }
 
+    // Two references to one object id that differ only by digest. The digest is part of the sort
+    // key, so dropping it from the key would leave these two in insertion order.
+    let superseded = SourceRef {
+        digest: digest("beacon.artifact.v1", hex32("bb")),
+        ..extra.clone()
+    };
+    if let OutcomeState::Verified(refs) = &mut ascending.delivered_artifacts {
+        refs.push(superseded.clone());
+    }
+    if let OutcomeState::Verified(refs) = &mut descending.delivered_artifacts {
+        refs.insert(0, superseded);
+    }
+
     let mut sources = vector_sources();
     sources.artifacts.push(VerifiedArtifact {
         object_id: extra.object_id,
@@ -644,6 +657,33 @@ fn outcome_renders_absent_broken_and_not_evaluated_as_distinct_literal_states() 
         conditions
             .contains("zero entries were recorded at the boundary event. This is not `absent`."),
         "an empty verified collection was rendered as absence"
+    );
+
+    // The same holds in a reference table, which is a different emission path.
+    let mut manifest = vector_manifest();
+    manifest.ruling_refs = OutcomeState::Verified(Vec::new());
+    let document = render(&manifest, &vector_sources()).expect("renders");
+    let rulings = section(&document, "### 8.1 Rulings", "### 8.2 Proposal lineage");
+    assert!(
+        rulings.contains("zero entries were recorded at the boundary event. This is not `absent`."),
+        "an empty verified reference table was rendered as absence: {rulings}"
+    );
+    assert!(
+        !rulings.contains("`absent` (reason"),
+        "an empty verified reference table claimed a domain absence"
+    );
+
+    // And in a narrative list.
+    let mut manifest = vector_manifest();
+    manifest.unfinished_work = OutcomeState::Verified(Vec::new());
+    let mut sources = vector_sources();
+    sources.unfinished_work = Vec::new();
+    let document = render(&manifest, &sources).expect("renders");
+    let unfinished = section(&document, "## 6. Unfinished work", "## 7. Uncertainty");
+    assert!(
+        unfinished
+            .contains("zero entries were recorded at the boundary event. This is not `absent`."),
+        "an empty verified narrative list was rendered as absence: {unfinished}"
     );
 }
 
