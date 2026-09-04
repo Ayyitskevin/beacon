@@ -388,3 +388,19 @@ fn impact_copies_both_policy_revision_and_charter_revision() {
     let text = String::from_utf8_lossy(&bytes);
     assert!(!text.contains("beacon.policy"));
 }
+
+/// ADR 0044 publishes this record's byte count and digest. Pinning them makes those numbers
+/// load-bearing: a layout change fails a named test instead of leaving a document that quietly
+/// describes a grammar the code no longer has.
+#[test]
+fn a_known_classification_fixture_reproduces_its_published_digest() {
+    let bytes = fixture().canonical_bytes().expect("encodes");
+    assert_eq!(bytes.len(), 219, "ADR 0044 publishes 219 canonical bytes");
+    let digest = fixture().digest().expect("digest");
+    assert_eq!(
+        digest.value,
+        "6b9f9051849fe42a67c44bfdde487af02082022edff2c1ffa777efba07da44c0"
+    );
+    assert_eq!(digest.algorithm, "sha256");
+    assert_eq!(digest.canonicalizer, "beacon.mission-impact.v1");
+}
