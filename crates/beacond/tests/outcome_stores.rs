@@ -277,6 +277,9 @@ struct Stored {
     mission_id: Uuid,
     project_id: Uuid,
     charter_revision: u32,
+    /// The last Event sequence this Workspace had when the fixture was built -- the honest end of a
+    /// coverage window, and the value the writer now checks a record against.
+    coverage_to: u64,
 }
 
 /// A Workspace with one admitted Mission, a published Project Policy, and nothing else.
@@ -287,11 +290,21 @@ fn stored(label: &str) -> Stored {
     let mission = MissionService::new(Arc::clone(&accounts), store.workspace_id)
         .admit(mission_draft(&prepared))
         .expect("the Mission is admitted");
+    let coverage_to = Connection::open(&store.path)
+        .unwrap()
+        .query_row(
+            "SELECT coalesce(max(sequence), 0) FROM events WHERE workspace_id = ?1",
+            params![store.workspace_id.to_string()],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|sequence| u64::try_from(sequence).unwrap())
+        .unwrap();
     Stored {
         mission_id: mission.id,
         project_id: prepared.project.id,
         charter_revision: prepared.project.charter.revision,
         accounts,
+        coverage_to,
         store,
     }
 }
@@ -333,7 +346,7 @@ impl Stored {
             origin: SpendOrigin::DaemonLedger,
             measured_at_ms: 1_788_400_000_000,
             coverage_from_event_seq: 1,
-            coverage_to_event_seq: 4_210,
+            coverage_to_event_seq: self.coverage_to,
             measurement: SpendMeasurement::Measured(SpendTotals {
                 counted_units: 412,
                 lines: vec![SpendLine {
@@ -357,7 +370,7 @@ impl Stored {
                      canonical_bytes, spend_id, mission_id, version, origin, measurement,
                      coverage_from_event_seq, coverage_to_event_seq, measured_at_ms
                  ) VALUES (?1, 'sha256', 'beacon.spend.v1', ?2, ?3, ?4, ?5, ?6, ?7, 'measured',
-                           1, 4210, 1788400000000)",
+                           1, ?8, 1788400000000)",
                 params![
                     self.store.workspace_id.to_string(),
                     digest,
@@ -366,6 +379,7 @@ impl Stored {
                     self.mission_id.to_string(),
                     version,
                     origin,
+                    i64::try_from(self.coverage_to).unwrap(),
                 ],
             )
             .unwrap();
@@ -830,6 +844,64 @@ fn recording_refuses_a_record_addressed_at_another_workspace() {
         .query_row("SELECT count(*) FROM measured_spend", [], |row| row.get(0))
         .unwrap();
     assert_eq!(rows, 0, "a refused record must leave no row");
+}
+
+/// A coverage window is a claim about a stretch of the store's own history, and the store is the
+/// only thing that can confirm it.
+///
+/// The check is at RECORD time on purpose: `max(sequence)` is a fact then, and at read time the same
+/// question cannot be answered without re-deriving a past fact from a world that has moved on. So a
+/// window past the last Event is refused before the row exists, by name -- rather than stored and
+/// rendered as verified by an Outcome that has no way to know better.
+#[test]
+fn a_coverage_window_past_the_stores_last_event_is_refused_at_record_time() {
+    let stored = stored("coverage");
+    let service = stored.spend_service();
+
+    let mut beyond = stored.spend_record(Uuid::new_v4(), 1);
+    beyond.coverage_to_event_seq = stored.coverage_to + 1;
+    match service.record(&beyond.canonical_bytes().unwrap()) {
+        Err(SpendRecordError::CoverageBeyondStore {
+            claimed_to_event_seq,
+            last_event_seq,
+        }) => {
+            assert_eq!(claimed_to_event_seq, stored.coverage_to + 1);
+            assert_eq!(last_event_seq, stored.coverage_to);
+        }
+        other => panic!("a window past the last Event must be refused by name: {other:?}"),
+    }
+    let rows: i64 = stored
+        .connection()
+        .query_row("SELECT count(*) FROM measured_spend", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 0, "a refused window must leave no row");
+
+    // A window that ends exactly at the last Event is the boundary case and is accepted -- the
+    // check is `>`, not `>=`, because a measurement may cover everything that has happened.
+    let at_the_edge = stored.spend_record(Uuid::new_v4(), 1);
+    assert_eq!(at_the_edge.coverage_to_event_seq, stored.coverage_to);
+    service
+        .record(&at_the_edge.canonical_bytes().unwrap())
+        .expect("a window ending at the last Event is honest");
+
+    // ...and no record can cover its own Event. The window is checked before the row is written, so
+    // the `spend.measured` Event that record produced lands strictly after the window it declares.
+    // (A LATER record may cover it -- by then it is history like any other Event, which is the
+    // honest reading and the reason this is a record-time check rather than a rule about which
+    // Events may be covered.)
+    let after: i64 = stored
+        .connection()
+        .query_row(
+            "SELECT max(sequence) FROM events WHERE workspace_id = ?1",
+            params![stored.store.workspace_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        u64::try_from(after).unwrap(),
+        at_the_edge.coverage_to_event_seq + 1,
+        "the record's own Event must fall outside the window it declared"
+    );
 }
 
 /// The classification's composite foreign key answers "is there such a Policy revision?", so it is
