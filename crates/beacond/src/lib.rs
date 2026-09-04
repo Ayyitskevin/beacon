@@ -204,7 +204,7 @@ pub use team::{
 pub use worktree::set_pinned_spawn_hook;
 pub use worktree::{CleanupOutcome, KeepReason, Worktree, WorktreeError};
 
-const SCHEMA_VERSION: i64 = 25;
+const SCHEMA_VERSION: i64 = 26;
 const MAX_WORKSPACE_NAME_CHARS: usize = 120;
 
 const SCHEMA_V1: &str = include_str!("../migrations/0001_initial.sql");
@@ -241,6 +241,10 @@ const MIGRATION_V24: &str = include_str!("../migrations/0024_mission_success_con
 // its rebase, exactly as the note on it said whichever landed second would, and the ladder steps
 // 24 -> 25.
 const MIGRATION_V25: &str = include_str!("../migrations/0025_spend_and_impact.sql");
+// PROVISIONAL. 0024 and 0025 landed first, so this one took 0026 at its rebase. kimi's Artifact
+// store is the remaining lane in this window and renumbers to 0027 when it lands; the ladder
+// step below moves with the file, and the file says the same.
+const MIGRATION_V26: &str = include_str!("../migrations/0026_mission_completions.sql");
 
 #[derive(Debug, Clone)]
 pub struct StartupConfig {
@@ -806,6 +810,7 @@ const MIGRATION_LADDER: &[(i64, &str)] = &[
     (23, MIGRATION_V23),
     (24, MIGRATION_V24),
     (25, MIGRATION_V25),
+    (26, MIGRATION_V26),
 ];
 
 /// Applies the ladder up to and including `version` -- a store at that schema, from nothing.
@@ -1342,10 +1347,11 @@ mod tests {
         MIGRATION_V7, MIGRATION_V8, MIGRATION_V9, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12,
         MIGRATION_V13, MIGRATION_V14, MIGRATION_V15, MIGRATION_V16_ONLY, MIGRATION_V17,
         MIGRATION_V18, MIGRATION_V19, MIGRATION_V20, MIGRATION_V22, MIGRATION_V23, MIGRATION_V24,
-        MIGRATION_V25, OperatorAccountService, PreflightOutcome, PreflightReceipt, ProjectCharter,
-        ProjectCharterDraft, ProjectDraft, ProjectRepositoryService, ProjectService, ProjectView,
-        Recorded, RepositoryDraft, RepositorySourceKind, ResolvedCheck, SCHEMA_V1, SecretString,
-        StartupConfig, Supervisor, SupervisorError, UnavailableEvidence,
+        MIGRATION_V25, MIGRATION_V26, OperatorAccountService, PreflightOutcome, PreflightReceipt,
+        ProjectCharter, ProjectCharterDraft, ProjectDraft, ProjectRepositoryService,
+        ProjectService, ProjectView, Recorded, RepositoryDraft, RepositorySourceKind,
+        ResolvedCheck, SCHEMA_V1, SecretString, StartupConfig, Supervisor, SupervisorError,
+        UnavailableEvidence,
     };
 
     struct TestStore {
@@ -3924,7 +3930,10 @@ mod tests {
 
         connection.execute_batch(MIGRATION_V25).unwrap();
 
-        super::verify_schema(&connection, SCHEMA_VERSION)
+        // 25, not SCHEMA_VERSION: this test applies 0025 and nothing above it, so the schema it
+        // produces is 25 whatever the newest migration happens to be. It read as SCHEMA_VERSION
+        // while 0025 was the top, which is the same literal by coincidence rather than by meaning.
+        super::verify_schema(&connection, 25)
             .expect("the rebuilt schema must match the expected one");
         let mut statement = connection
             .prepare("SELECT kind FROM events ORDER BY sequence")
