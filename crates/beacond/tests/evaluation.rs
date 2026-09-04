@@ -15,20 +15,19 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use beacond::{
-    ArtifactContext, ArtifactKind, ArtifactService, AutonomyProfile, BeaconCapability,
-    CandidateArtifactDigest, CitedEvaluationDigest, Conflicts, DeclaredCheck, EvaluationDraft,
-    EvaluationError, EvaluationService, EvaluationSubjectDraft, EvaluationSupersedes, Evaluator,
-    Finding, FindingSeverity, InconsistentEvaluation, LocalModelActivationService,
-    LocalModelEndpoint, MalformedEvaluation, MissionDraft, MissionMemberDraft, MissionService,
-    OperatorAccountService, OperatorSessionPhase, ProjectCharterDraft, ProjectDraft,
-    ProjectPolicyDraft, ProjectPolicyService, ProjectRepositoryService, ProjectService,
-    ProposalService, ProviderFeature, PublicationSeamRefusal, RepositoryDraft,
-    RepositorySourceKind, ResidentConfigurationService, ResidentLifecycleService,
-    RubricDeclaration, SecretString, StarterOrganizationService, StarterResidentDraft, StarterRole,
-    StartupConfig, Supervisor, TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
-    TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft, TeamService,
-    TrackRecordEvidenceKind, TrackRecordRequirement, UnmetPrecondition, Verdict,
-    publication_candidacy,
+    ArtifactContext, ArtifactDigest, ArtifactKind, ArtifactService, AutonomyProfile,
+    BeaconCapability, Conflicts, DeclaredCheck, EvaluationDigest, EvaluationDraft, EvaluationError,
+    EvaluationService, EvaluationSubjectDraft, EvaluationSupersedes, Evaluator, Finding,
+    FindingSeverity, InconsistentEvaluation, LocalModelActivationService, LocalModelEndpoint,
+    MalformedEvaluation, MissionDraft, MissionMemberDraft, MissionService, OperatorAccountService,
+    OperatorSessionPhase, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft,
+    ProjectPolicyService, ProjectRepositoryService, ProjectService, ProposalService,
+    ProviderFeature, PublicationSeamRefusal, RepositoryDraft, RepositorySourceKind,
+    ResidentConfigurationService, ResidentLifecycleService, RubricDeclaration, SecretString,
+    StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig, Supervisor,
+    TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule,
+    TeamLeadSelectionPolicy, TeamMemberDraft, TeamService, TrackRecordEvidenceKind,
+    TrackRecordRequirement, UnmetPrecondition, Verdict, publication_candidacy,
 };
 use data_encoding::{BASE64, HEXLOWER};
 use rusqlite::Connection;
@@ -3234,22 +3233,49 @@ fn the_publication_seam_can_check_subject_verdict_and_nonauthorship_from_the_two
     let candidacy = publication_candidacy(
         &connection,
         fixture.workspace_id,
-        &CitedEvaluationDigest::new(meets.digest().value.clone()),
-        &CandidateArtifactDigest::new(artifact.digest().value.clone()),
+        meets.digest(),
+        artifact.digest(),
         fixture.mission_id,
     )
     .expect("the pairing is publishable");
-    assert_eq!(candidacy.evaluation_digest().as_str(), meets.digest().value);
-    assert_eq!(
-        candidacy.candidate_artifact_digest().as_str(),
-        artifact.digest().value
-    );
+    assert_eq!(candidacy.evaluation_digest(), meets.digest());
+    assert_eq!(candidacy.candidate_artifact_digest(), artifact.digest());
     // The two identities are distinct TYPES, so a caller cannot swap them: the line below is the
     // shape of that mistake, and it does not compile.
     //
-    //   publication_candidacy(&connection, ws,
-    //       &CandidateArtifactDigest::new(...), &CitedEvaluationDigest::new(...), mission)
-    //   ^ expected `&CitedEvaluationDigest`, found `&CandidateArtifactDigest`
+    //   publication_candidacy(&connection, ws, artifact.digest(), meets.digest(), mission)
+    //   ^ expected `&EvaluationDigest`, found `&ArtifactDigest`
+    //
+    // ...and a hand-built envelope with the right value and the wrong canonicalizer is refused,
+    // because types stop a swap and not a forge.
+    assert_eq!(
+        publication_candidacy(
+            &connection,
+            fixture.workspace_id,
+            &EvaluationDigest {
+                algorithm: "sha256".to_owned(),
+                canonicalizer: "beacon.evaluation.v2".to_owned(),
+                value: meets.digest().value.clone(),
+            },
+            artifact.digest(),
+            fixture.mission_id,
+        ),
+        Err(PublicationSeamRefusal::CitedEnvelopeDisagrees)
+    );
+    assert_eq!(
+        publication_candidacy(
+            &connection,
+            fixture.workspace_id,
+            meets.digest(),
+            &ArtifactDigest {
+                algorithm: "sha512".to_owned(),
+                canonicalizer: "beacon.artifact.v1".to_owned(),
+                value: artifact.digest().value.clone(),
+            },
+            fixture.mission_id,
+        ),
+        Err(PublicationSeamRefusal::CitedEnvelopeDisagrees)
+    );
     assert_eq!(candidacy.workspace_id(), fixture.workspace_id);
 
     // A verdict that is not `meets` is not a soft yes.
@@ -3262,8 +3288,8 @@ fn the_publication_seam_can_check_subject_verdict_and_nonauthorship_from_the_two
         publication_candidacy(
             &connection,
             fixture.workspace_id,
-            &CitedEvaluationDigest::new(uncertain.digest().value.clone()),
-            &CandidateArtifactDigest::new(artifact.digest().value.clone()),
+            uncertain.digest(),
+            artifact.digest(),
             fixture.mission_id,
         ),
         Err(PublicationSeamRefusal::VerdictIsNotMeets)
@@ -3278,8 +3304,8 @@ fn the_publication_seam_can_check_subject_verdict_and_nonauthorship_from_the_two
         publication_candidacy(
             &connection,
             fixture.workspace_id,
-            &CitedEvaluationDigest::new(on_proposal.digest().value.clone()),
-            &CandidateArtifactDigest::new(artifact.digest().value.clone()),
+            on_proposal.digest(),
+            artifact.digest(),
             fixture.mission_id,
         ),
         Err(PublicationSeamRefusal::SubjectIsNotAnArtifact)
@@ -3291,8 +3317,8 @@ fn the_publication_seam_can_check_subject_verdict_and_nonauthorship_from_the_two
         publication_candidacy(
             &connection,
             fixture.workspace_id,
-            &CitedEvaluationDigest::new(meets.digest().value.clone()),
-            &CandidateArtifactDigest::new(other.digest().value.clone()),
+            meets.digest(),
+            other.digest(),
             fixture.mission_id,
         ),
         Err(PublicationSeamRefusal::SubjectIsNotTheCandidate)
@@ -3303,8 +3329,8 @@ fn the_publication_seam_can_check_subject_verdict_and_nonauthorship_from_the_two
         publication_candidacy(
             &connection,
             fixture.workspace_id,
-            &CitedEvaluationDigest::new(meets.digest().value.clone()),
-            &CandidateArtifactDigest::new(artifact.digest().value.clone()),
+            meets.digest(),
+            artifact.digest(),
             Uuid::new_v4(),
         ),
         Err(PublicationSeamRefusal::MissionDiffers)
@@ -3313,8 +3339,12 @@ fn the_publication_seam_can_check_subject_verdict_and_nonauthorship_from_the_two
         publication_candidacy(
             &connection,
             fixture.workspace_id,
-            &CitedEvaluationDigest::new(HEXLOWER.encode(&[0x5a_u8; 32])),
-            &CandidateArtifactDigest::new(artifact.digest().value.clone()),
+            &EvaluationDigest {
+                algorithm: "sha256".to_owned(),
+                canonicalizer: "beacon.evaluation.v1".to_owned(),
+                value: HEXLOWER.encode(&[0x5a_u8; 32]),
+            },
+            artifact.digest(),
             fixture.mission_id,
         ),
         Err(PublicationSeamRefusal::EvaluationAbsent)
@@ -3323,8 +3353,12 @@ fn the_publication_seam_can_check_subject_verdict_and_nonauthorship_from_the_two
         publication_candidacy(
             &connection,
             fixture.workspace_id,
-            &CitedEvaluationDigest::new(meets.digest().value.clone()),
-            &CandidateArtifactDigest::new(HEXLOWER.encode(&[0x5b_u8; 32])),
+            meets.digest(),
+            &ArtifactDigest {
+                algorithm: "sha256".to_owned(),
+                canonicalizer: "beacon.artifact.v1".to_owned(),
+                value: HEXLOWER.encode(&[0x5b_u8; 32]),
+            },
             fixture.mission_id,
         ),
         Err(PublicationSeamRefusal::CandidateAbsent)
