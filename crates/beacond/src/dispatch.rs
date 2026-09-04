@@ -712,54 +712,36 @@ impl DispatchService {
     ) -> Result<Decided, DispatchError> {
         let mut decided = Decided::default();
 
-        // G2: the Ruling, proved from its own bytes, with its force derived now and its Event
-        // required. A snapshot taken before this transaction would be a fact about another moment.
-        // A Ruling that cannot be proved is a REFUSAL, not an error: the Run is already open, and
-        // an error path would leave it nonterminal with no Receipt -- which AGENTS.md:154 forbids
-        // and which would make "every gate refuses with evidence" false for exactly the states the
-        // gate is named for (gpt1's P0).
-        let ruling =
-            match verified_ruling_within(connection, self.workspace_id, &opened.ruling_digest) {
-                Ok(Some(ruling)) => ruling,
-                Ok(None) | Err(_) => {
-                    return Ok(decided.refused(DispatchOutcome::RulingUnreadable));
+        // G2-G7: the Ruling proved from its own bytes with its force derived now, what it
+        // decided, whether it still applies, and the Proposal through its owning module's full
+        // contract including readiness -- all through `verified_authority`, which the landing
+        // transaction's re-verification also calls. A Ruling that cannot be proved is a REFUSAL,
+        // not an error: the Run is already open, and an error path would leave it nonterminal with
+        // no Receipt, which AGENTS.md:154 forbids (gpt1's P0).
+        //
+        // The digests are recorded before the refusal is returned, because a Receipt names the
+        // last thing that was true rather than only the refusal.
+        let facts = match verified_authority(connection, self.workspace_id, &opened.ruling_digest) {
+            Ok(facts) => facts,
+            Err(refused) => {
+                if let Ok(Some(ruling)) =
+                    verified_ruling_within(connection, self.workspace_id, &opened.ruling_digest)
+                {
+                    decided.ruling_digest = Some(ruling.digest().clone());
+                    decided.proposal_digest = Some(ruling.payload().proposal.clone());
+                    decided.bindings = Some(ruling.payload().bindings.clone());
                 }
-            };
+                decided.drift = refused.drift;
+                decided.unmet = refused.unmet;
+                return Ok(decided.refused(refused.outcome));
+            }
+        };
+        let (ruling, proposal) = (facts.ruling, facts.proposal);
         decided.ruling_digest = Some(ruling.digest().clone());
         decided.proposal_digest = Some(ruling.payload().proposal.clone());
         decided.bindings = Some(ruling.payload().bindings.clone());
-
-        // G3-G5: what the Ruling decided, and whether it still applies. Reported separately
-        // because a Ruling can be both superseded and drifted, and an Operator corrects each
-        // differently.
-        if ruling.payload().decision != RulingDecision::Approve {
-            return Ok(decided.refused(DispatchOutcome::RulingRefused));
-        }
-        if ruling.force().superseded_by().is_some() {
-            return Ok(decided.refused(DispatchOutcome::RulingSuperseded));
-        }
-        if !ruling.force().drift().is_empty() {
-            decided.drift = ruling.force().drift().to_vec();
-            return Ok(decided.refused(DispatchOutcome::RulingDrifted));
-        }
-
-        // G6-G7: the Proposal, through its owning module's full contract -- which includes
-        // readiness. A digest comparison alone would be a weaker rule than `ProposalService::get`
-        // applies, and readiness is the part a dispatch must not skip.
-        let proposal_digest = ruling.payload().proposal.value.clone();
-        let proposal =
-            match verified_proposal_within(connection, self.workspace_id, &proposal_digest) {
-                Ok(Some(proposal)) => proposal,
-                Ok(None) | Err(_) => {
-                    return Ok(decided.refused(DispatchOutcome::ProposalDigestMismatch));
-                }
-            };
         decided.summary = proposal.payload().intent.summary.clone();
-        let unmet = live_unmet(proposal.readiness().unmet());
-        if !unmet.is_empty() {
-            decided.unmet = unmet;
-            return Ok(decided.refused(DispatchOutcome::ProposalNotReady));
-        }
+        let proposal_digest = ruling.payload().proposal.value.clone();
 
         // G8-G9: the Candidate. `verified_candidate_for_proposal` proves it from bytes and
         // re-derives the copy rule; the Ruling must name that same record, and it must have existed
@@ -805,25 +787,13 @@ impl DispatchService {
             })
             .collect();
 
-        // The autonomy gate. ADR 0004 gives Observe, Supervised and Bounded; BLUEPRINT:405-406 says
-        // Observe permits no external mutation, so Observe refuses here rather than being recorded
-        // as a limitation.
-        // Through the Project module's own reader: "current Charter revision" is its invariant, and
-        // a gate that authorizes a write must not carry a second definition of it (gpt1).
-        let Ok(Some(profile)) =
-            current_autonomy_profile(connection, self.workspace_id, opened.project_id)
-        else {
-            return Ok(decided.refused(DispatchOutcome::AutonomyProfileRefuses));
-        };
-        decided.autonomy_profile = Some(profile);
-        if profile != AutonomyProfile::Supervised {
-            return Ok(decided.refused(DispatchOutcome::AutonomyProfileRefuses));
-        }
-
-        // The pause gate. A paused Installation refuses new dispatches (BLUEPRINT:377-379,
-        // AGENTS.md:128) -- as a gate, never as a line in `not_verified`.
-        if installation_is_paused(connection)? {
-            return Ok(decided.refused(DispatchOutcome::InstallationPaused));
+        // The autonomy and pause gates, through `live_permission` -- the same function the landing
+        // transaction re-runs. Evaluated here, after the Candidate, because the order of refusals
+        // is part of what a Receipt says and moving it would change which one a caller sees.
+        let permission = live_permission(connection, self.workspace_id, opened.project_id)?;
+        decided.autonomy_profile = permission.profile;
+        if let Some(outcome) = permission.refusal {
+            return Ok(decided.refused(outcome));
         }
 
         // G12: the supplied content, against what the Candidate declares -- and against the
@@ -1790,49 +1760,150 @@ fn blob_arguments() -> [&'static str; 6] {
     ["hash-object", "-w", "-t", "blob", "--no-filters", "--stdin"]
 }
 
+/// What one authority evaluation established, when it granted.
+struct AuthorityFacts {
+    ruling: crate::ruling::Ruling,
+    proposal: crate::proposal::Proposal,
+}
+
+/// Why one authority evaluation refused, and what it had established when it did.
+///
+/// The lists are carried because a Receipt names the last thing that was true: a drifted Ruling
+/// says which bindings moved, an unready Proposal which preconditions are unmet.
+struct AuthorityRefused {
+    outcome: DispatchOutcome,
+    drift: Vec<UnmetPrecondition>,
+    unmet: Vec<UnmetPrecondition>,
+}
+
+impl AuthorityRefused {
+    fn outcome(outcome: DispatchOutcome) -> Self {
+        Self {
+            outcome,
+            drift: Vec::new(),
+            unmet: Vec::new(),
+        }
+    }
+}
+
+/// The recorded half of the authority decision: is this Ruling one that permits a dispatch?
+///
+/// **One evaluator, two call sites**, and that is the point. The gates and the re-verification
+/// inside the landing transaction each encoded this sequence independently, with their own copy of
+/// the refusal mapping; the second copy had already omitted the Proposal's readiness once and said
+/// so in its own comment. A safety decision written twice drifts, and only one of the copies is the
+/// one that runs at the moment it matters.
+///
+/// Every fact is read through its owning module's verified reader. Nothing here reads the world --
+/// `live_permission` does that, separately, because the gates evaluate it AFTER the Candidate and
+/// the order of refusals is part of what each Receipt says.
+fn verified_authority(
+    connection: &Connection,
+    workspace_id: Uuid,
+    ruling_digest: &str,
+) -> Result<AuthorityFacts, AuthorityRefused> {
+    let ruling = match verified_ruling_within(connection, workspace_id, ruling_digest) {
+        Ok(Some(ruling)) => ruling,
+        Ok(None) | Err(_) => {
+            return Err(AuthorityRefused::outcome(DispatchOutcome::RulingUnreadable));
+        }
+    };
+    if ruling.payload().decision != RulingDecision::Approve {
+        return Err(AuthorityRefused::outcome(DispatchOutcome::RulingRefused));
+    }
+    if ruling.force().superseded_by().is_some() {
+        return Err(AuthorityRefused::outcome(DispatchOutcome::RulingSuperseded));
+    }
+    if !ruling.force().drift().is_empty() {
+        return Err(AuthorityRefused {
+            outcome: DispatchOutcome::RulingDrifted,
+            drift: ruling.force().drift().to_vec(),
+            unmet: Vec::new(),
+        });
+    }
+    // The Proposal through its owning module's FULL contract, which includes readiness. A digest
+    // comparison alone would be a weaker rule than `ProposalService::get` applies, and a
+    // precondition that becomes unmet in the landing window -- a Resident deactivated, a
+    // Configuration changed -- is as much a reason to refuse as a supersession.
+    let proposal = match verified_proposal_within(
+        connection,
+        workspace_id,
+        &ruling.payload().proposal.value,
+    ) {
+        Ok(Some(proposal)) => proposal,
+        Ok(None) | Err(_) => {
+            return Err(AuthorityRefused::outcome(
+                DispatchOutcome::ProposalDigestMismatch,
+            ));
+        }
+    };
+    let unmet = live_unmet(proposal.readiness().unmet());
+    if !unmet.is_empty() {
+        return Err(AuthorityRefused {
+            outcome: DispatchOutcome::ProposalNotReady,
+            drift: Vec::new(),
+            unmet,
+        });
+    }
+    Ok(AuthorityFacts { ruling, proposal })
+}
+
+/// The live permission, and the profile that decided it.
+///
+/// The profile is carried even when it refuses, because it IS the gate and a Receipt that refused
+/// under Observe has to name Observe.
+struct Permission {
+    profile: Option<AutonomyProfile>,
+    refusal: Option<DispatchOutcome>,
+}
+
+/// The live half: may this Installation dispatch at all, right now?
+///
+/// Observe permits no external mutation (`BLUEPRINT:405-406`), so it refuses here rather than being
+/// recorded as a limitation; a paused Installation refuses as a gate, never as a line in
+/// `not_verified` (`BLUEPRINT:377-379`, `AGENTS.md:128`). Read through the Project module's own
+/// reader, because "current Charter revision" is its invariant and a gate that authorizes a write
+/// must not carry a second definition of it.
+fn live_permission(
+    connection: &Connection,
+    workspace_id: Uuid,
+    project_id: Uuid,
+) -> Result<Permission, DispatchError> {
+    let Ok(Some(profile)) = current_autonomy_profile(connection, workspace_id, project_id) else {
+        return Ok(Permission {
+            profile: None,
+            refusal: Some(DispatchOutcome::AutonomyProfileRefuses),
+        });
+    };
+    let refusal = if profile != AutonomyProfile::Supervised {
+        Some(DispatchOutcome::AutonomyProfileRefuses)
+    } else if installation_is_paused(connection)? {
+        Some(DispatchOutcome::InstallationPaused)
+    } else {
+        None
+    };
+    Ok(Permission {
+        profile: Some(profile),
+        refusal,
+    })
+}
+
 /// The authority, re-read at the last moment before the irreversible step.
 ///
 /// Returns the refusal if anything that permitted this dispatch has stopped permitting it. Called
 /// inside the landing transaction, so nothing it reads can change before the ref moves: a competing
 /// Ruling, Policy publication, Charter revision or Pause is a write, and the write lock is held.
+/// It makes the SAME decision the gates made, by calling the same two functions -- which is why
+/// there is no second copy of it to drift.
 fn reverify_authority(
     connection: &Connection,
     workspace_id: Uuid,
     opened: &OpenRun,
 ) -> Result<Option<DispatchOutcome>, DispatchError> {
-    let ruling = match verified_ruling_within(connection, workspace_id, &opened.ruling_digest) {
-        Ok(Some(ruling)) => ruling,
-        Ok(None) | Err(_) => return Ok(Some(DispatchOutcome::RulingUnreadable)),
-    };
-    if ruling.payload().decision != RulingDecision::Approve {
-        return Ok(Some(DispatchOutcome::RulingRefused));
+    if let Err(refused) = verified_authority(connection, workspace_id, &opened.ruling_digest) {
+        return Ok(Some(refused.outcome));
     }
-    if ruling.force().superseded_by().is_some() {
-        return Ok(Some(DispatchOutcome::RulingSuperseded));
-    }
-    if !ruling.force().drift().is_empty() {
-        return Ok(Some(DispatchOutcome::RulingDrifted));
-    }
-    // The Proposal's live readiness, through its owning module, exactly as G6-G7 read it. A kernel
-    // review pointed out that leaving it out made "the authority, re-read" an overstatement: a
-    // precondition that becomes unmet in the window -- a Resident deactivated, a Configuration
-    // changed -- is as much a reason to refuse as a supersession.
-    match verified_proposal_within(connection, workspace_id, &ruling.payload().proposal.value) {
-        Ok(Some(proposal)) => {
-            if !live_unmet(proposal.readiness().unmet()).is_empty() {
-                return Ok(Some(DispatchOutcome::ProposalNotReady));
-            }
-        }
-        Ok(None) | Err(_) => return Ok(Some(DispatchOutcome::ProposalDigestMismatch)),
-    }
-    match current_autonomy_profile(connection, workspace_id, opened.project_id) {
-        Ok(Some(AutonomyProfile::Supervised)) => {}
-        _ => return Ok(Some(DispatchOutcome::AutonomyProfileRefuses)),
-    }
-    if installation_is_paused(connection)? {
-        return Ok(Some(DispatchOutcome::InstallationPaused));
-    }
-    Ok(None)
+    Ok(live_permission(connection, workspace_id, opened.project_id)?.refusal)
 }
 
 /// Move `branch` from exactly `expected` to `commit`, or fail.
@@ -1951,7 +2022,6 @@ fn provenance_token_arguments() -> [&'static str; 5] {
 /// Where a Beacon-made copy carries the token that says Beacon made it.
 pub(crate) const PROVENANCE_TOKEN_KEY: &str = "beacon.provenanceToken";
 
-/// Record that Beacon created this repository, so a dispatch may reach it.
 /// Record a repository Beacon made, from the descriptor it has held since it made it.
 ///
 /// The repository is passed in already pinned rather than opened from a pathname here: a review
