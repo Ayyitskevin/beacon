@@ -1455,45 +1455,87 @@ fn subject_successor(
     let EvaluationSubject::Artifact(subject) = &payload.subject else {
         return Ok(None);
     };
-    Ok(connection
-        .query_row(
-            "SELECT artifact_digest FROM artifact_supersessions
-             WHERE workspace_id = ?1 AND supersedes_digest = ?2",
-            params![workspace_id.to_string(), subject.digest.value],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?
-        .map(|value| ArtifactDigest {
-            algorithm: subject.digest.algorithm.clone(),
-            canonicalizer: subject.digest.canonicalizer.clone(),
-            value,
-        }))
+    let Some(tail) = supersession_tail(&subject.digest.value, |digest| {
+        Ok(connection
+            .query_row(
+                "SELECT artifact_digest FROM artifact_supersessions
+                     WHERE workspace_id = ?1 AND supersedes_digest = ?2",
+                params![workspace_id.to_string(), digest],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?)
+    })?
+    else {
+        return Ok(None);
+    };
+    // Read through the ARTIFACT module's own verified reader, and the envelope taken from that
+    // record rather than synthesized from the subject's. A digest assembled here would be a claim
+    // about bytes this module never saw -- and the first version of this function did exactly that.
+    let record = crate::artifact::verified_artifact_within(connection, workspace_id, &tail)
+        .map_err(|_| EvaluationError::InvalidStore)?
+        .ok_or(EvaluationError::InvalidStore)?;
+    Ok(Some(record.digest().clone()))
+}
+
+/// Walk a supersession relation to its TERMINAL node, or `None` if nothing supersedes the start.
+///
+/// R12.10 asks for the current tail, not the next link. One query returns the successor, and with a
+/// v1 -> v2 -> v3 chain those are different records: a reader that stops at the first hop reports a
+/// version that has itself been replaced, which is the failure this rule exists to prevent
+/// (sol1's P0; the one-hop test could not tell the two apart).
+///
+/// A cycle is a corrupt store rather than a long chain: the relation's uniqueness constraints make
+/// the graph a set of disjoint paths, so a repeat means something wrote past them, and this refuses
+/// instead of looping.
+fn supersession_tail(
+    start: &str,
+    mut next: impl FnMut(&str) -> Result<Option<String>, EvaluationError>,
+) -> Result<Option<String>, EvaluationError> {
+    let mut seen: HashSet<String> = HashSet::from([start.to_owned()]);
+    let mut current = start.to_owned();
+    let mut tail = None;
+    while let Some(successor) = next(&current)? {
+        if !seen.insert(successor.clone()) {
+            return Err(EvaluationError::InvalidStore);
+        }
+        current = successor.clone();
+        tail = Some(successor);
+    }
+    Ok(tail)
 }
 
 /// The successor link, for either arm: chains are per subject digest and carry no kind.
+///
+/// The **tail**, not the next link, and read back through this module's own verified reader — the
+/// same rule the subject side follows, for the same reason.
 fn superseded_by(
     connection: &Connection,
     workspace_id: Uuid,
     row: &StoredRow,
 ) -> Result<Option<EvaluationDigest>, EvaluationError> {
-    Ok(connection
-        .query_row(
-            "SELECT evaluation_digest FROM evaluation_supersessions
-             WHERE workspace_id = ?1 AND subject_digest = ?2
-               AND supersedes_evaluation_digest = ?3",
-            params![
-                workspace_id.to_string(),
-                row.subject_digest.as_str(),
-                row.digest_value.as_str()
-            ],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?
-        .map(|value| EvaluationDigest {
-            algorithm: DIGEST_ALGORITHM.to_owned(),
-            canonicalizer: CANONICALIZER.to_owned(),
-            value,
-        }))
+    let Some(tail) = supersession_tail(&row.digest_value, |digest| {
+        Ok(connection
+            .query_row(
+                "SELECT evaluation_digest FROM evaluation_supersessions
+                 WHERE workspace_id = ?1 AND subject_digest = ?2
+                   AND supersedes_evaluation_digest = ?3",
+                params![
+                    workspace_id.to_string(),
+                    row.subject_digest.as_str(),
+                    digest
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?)
+    })?
+    else {
+        return Ok(None);
+    };
+    // Verified: the tail is a record this module can still read, and its digest comes from that
+    // read rather than from the relation row that named it.
+    let record = verified_evaluation_within(connection, workspace_id, &tail)?
+        .ok_or(EvaluationError::InvalidStore)?;
+    Ok(Some(record.digest().clone()))
 }
 
 fn derive_force(
@@ -1502,24 +1544,10 @@ fn derive_force(
     row: &StoredRow,
     facts: &crate::proposal::ProposalBindingFacts,
 ) -> Result<EvaluationForce, EvaluationError> {
-    let superseded_by = connection
-        .query_row(
-            "SELECT evaluation_digest FROM evaluation_supersessions
-             WHERE workspace_id = ?1 AND subject_digest = ?2
-               AND supersedes_evaluation_digest = ?3",
-            params![
-                workspace_id.to_string(),
-                row.subject_digest.as_str(),
-                row.digest_value.as_str()
-            ],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?
-        .map(|value| EvaluationDigest {
-            algorithm: DIGEST_ALGORITHM.to_owned(),
-            canonicalizer: CANONICALIZER.to_owned(),
-            value,
-        });
+    // The same tail walk both arms use. This site had its own one-hop query and its own synthesized
+    // envelope -- a third spelling of one rule, and the one that made the Proposal arm report a
+    // successor that had itself been superseded.
+    let superseded_by = superseded_by(connection, workspace_id, row)?;
 
     let mut drift = Vec::new();
     let (current_charter, latest_repository) =

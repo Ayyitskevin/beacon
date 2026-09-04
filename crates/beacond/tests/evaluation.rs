@@ -3392,3 +3392,112 @@ fn both_public_spellings_of_the_subject_link_report_the_successor_beside_the_cit
         reread.subject_superseded_by()
     );
 }
+
+/// sol1's P0, on the SUBJECT side: with `v1 -> v2 -> v3` the successor and the tail are different
+/// records, and R12.10 asks for the tail.
+///
+/// The committed test had one hop, where the two are indistinguishable — so a reader that stopped
+/// at the first link passed it while reporting a version that had itself been replaced. That is the
+/// failure the rule exists to prevent: a surface saying "superseded by v2" about a document now at
+/// v3 is worse than saying nothing, because it reads as current.
+#[test]
+fn the_subject_link_reports_the_tail_of_the_artifact_chain_not_the_next_version() {
+    let fixture = admitted_mission("e3-subject-tail");
+    let v1 = fixture.record_artifact(b"# Outcome\n\nVersion one.\n");
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+    let recorded = evaluations
+        .record(fixture.artifact_evaluation_draft(&v1.digest().value))
+        .expect("it records");
+
+    let supersede = |predecessor: &str, content: &[u8]| {
+        let mut digest = [0_u8; 32];
+        digest.copy_from_slice(&HEXLOWER.decode(predecessor.as_bytes()).unwrap());
+        fixture
+            .artifacts()
+            .record(
+                ArtifactKind::OutcomeDocument,
+                content,
+                ArtifactContext::Mission {
+                    project_id: fixture.project_id,
+                    mission_id: fixture.mission_id,
+                },
+                fixture.resident_id,
+                fixture.configuration_id,
+                Some(digest),
+            )
+            .expect("the version records")
+    };
+    let v2 = supersede(&v1.digest().value, b"# Outcome\n\nVersion two.\n");
+    let v3 = supersede(&v2.digest().value, b"# Outcome\n\nVersion three.\n");
+    assert_ne!(v2.digest().value, v3.digest().value);
+
+    let reread = evaluations.get(&recorded.digest().value).unwrap();
+    assert_eq!(
+        reread.subject_superseded_by(),
+        Some(v3.digest().value.as_str()),
+        "the subject link reported the next version instead of the tail"
+    );
+    assert_eq!(
+        reread
+            .force()
+            .subject_superseded_by()
+            .map(|d| d.value.as_str()),
+        Some(v3.digest().value.as_str())
+    );
+    // The cited digest is still v1: the tail is reported beside it, never in place of it.
+    assert_eq!(reread.payload().subject.digest_value(), v1.digest().value);
+}
+
+/// sol1's P0, on the EVALUATION side: the same two-hop shape for the Evaluation's own chain.
+///
+/// Both arms take this path — the Proposal arm's `derive_force` had its own one-hop query and its
+/// own synthesized envelope, a third spelling of one rule — so this is asserted for a Proposal
+/// subject, where the third site lived.
+#[test]
+fn the_evaluation_chain_link_reports_the_tail_not_the_next_evaluation() {
+    let fixture = admitted_mission("e3-chain-tail");
+    let proposal = fixture.proposals.submit(&fixture.record().bytes()).unwrap();
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+    let first = evaluations
+        .record(evaluation_draft(&fixture, &proposal.digest().value))
+        .expect("the first records");
+
+    let extend = |predecessor: &str, rationale: &str| {
+        let mut draft = evaluation_draft(&fixture, &proposal.digest().value);
+        draft.rationale = rationale.to_owned();
+        draft.supersedes = EvaluationSupersedes::Evaluation(predecessor.to_owned());
+        evaluations.record(draft).expect("the chain extends")
+    };
+    let second = extend(&first.digest().value, "A second reading of the same bytes.");
+    let third = extend(&second.digest().value, "A third reading of the same bytes.");
+    assert_ne!(second.digest().value, third.digest().value);
+
+    let reread = evaluations.get(&first.digest().value).unwrap();
+    assert_eq!(
+        reread.force().superseded_by().map(|d| d.value.as_str()),
+        Some(third.digest().value.as_str()),
+        "the chain link reported the next Evaluation instead of the tail"
+    );
+    // ...and the tail's own envelope comes from reading that record, not from constants here.
+    let tail = reread.force().superseded_by().unwrap();
+    assert_eq!(tail.canonicalizer, "beacon.evaluation.v1");
+    assert_eq!(tail.algorithm, "sha256");
+    // The middle link still reports the same tail, and the tail reports none.
+    assert_eq!(
+        evaluations
+            .get(&second.digest().value)
+            .unwrap()
+            .force()
+            .superseded_by()
+            .map(|d| d.value.as_str()),
+        Some(third.digest().value.as_str())
+    );
+    assert_eq!(
+        evaluations
+            .get(&third.digest().value)
+            .unwrap()
+            .force()
+            .superseded_by(),
+        None
+    );
+}
