@@ -43,7 +43,7 @@ use crate::{OperatorAccountError, OperatorAccountService};
 /// The canonicalizer identity. Any future grammar that alters the byte layout of records that
 /// already exist is a new canonicalizer; assigning a value in a published tag position is not one.
 /// Existing v1 bytes are never reinterpreted under v2 rules (ADR 0034's rule, kept).
-const CANONICALIZER: &str = "beacon.artifact.v1";
+pub(crate) const CANONICALIZER: &str = "beacon.artifact.v1";
 /// The literal ASCII magic that starts every record, including its terminating NUL: 19 bytes.
 const MAGIC: &[u8] = b"beacon.artifact.v1\0";
 const DIGEST_ALGORITHM: &str = "sha256";

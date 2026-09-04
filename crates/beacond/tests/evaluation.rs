@@ -596,7 +596,10 @@ fn an_evaluation_binds_to_the_exact_proposal_bytes_and_reads_back_verified() {
         .expect("the Evaluation records");
 
     // The copied envelope is the bound Proposal's OWN, not this module's constants restated.
-    assert_eq!(evaluation.payload().proposal, *proposal.digest());
+    assert_eq!(
+        evaluation.payload().proposal_subject(),
+        Some(proposal.digest())
+    );
     assert_eq!(evaluation.digest().canonicalizer, "beacon.evaluation.v1");
     assert_eq!(evaluation.digest().algorithm, "sha256");
     assert_eq!(
