@@ -167,7 +167,9 @@ impl ArtifactV1 {
 
     /// The record's identity: SHA-256 over its canonical bytes, carrying its own envelope.
     pub fn digest(&self) -> Result<ArtifactDigest, MalformedArtifact> {
-        Ok(digest_envelope(&HEXLOWER.encode(&sha256(&self.canonical_bytes()?))))
+        Ok(digest_envelope(
+            &HEXLOWER.encode(&sha256(&self.canonical_bytes()?)),
+        ))
     }
 
     /// Decode canonical bytes back into a payload. Strict: unknown tags, over-limit or invalid
@@ -459,9 +461,7 @@ fn digest_bytes(value: &str) -> Result<[u8; 32], MalformedArtifact> {
 /// decoder: the algorithm is `sha256`, the canonicalizer is `beacon.raw.v1`, and the value is 64
 /// lowercase hex characters.
 fn require_content_envelope(digest: &ArtifactDigest) -> Result<(), MalformedArtifact> {
-    if digest.algorithm != DIGEST_ALGORITHM
-        || digest.canonicalizer != RAW_CONTENT_CANONICALIZER
-    {
+    if digest.algorithm != DIGEST_ALGORITHM || digest.canonicalizer != RAW_CONTENT_CANONICALIZER {
         return Err(MalformedArtifact::DigestEnvelope);
     }
     digest_bytes(&digest.value)?;
