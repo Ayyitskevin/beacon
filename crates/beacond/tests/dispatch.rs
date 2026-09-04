@@ -3756,6 +3756,60 @@ fn a_repository_declared_process_filter_does_not_run_during_the_landing() {
 }
 
 #[test]
+fn a_swap_this_attempt_performed_is_reported_even_when_the_branch_moves_on() {
+    // The other half of sol1's residue finding. This attempt's compare-and-swap returns 0 -- the
+    // ref moved, which is the irreversible step -- and a competing writer then moves the branch
+    // before this attempt reads it back. The old classification called that `LandingRefused`,
+    // whose published meaning is "the change was not published". It was published. A Receipt that
+    // under-reports a mutation Beacon performed is the one direction a record must never take, so
+    // the outcome follows the swap and `observedHead` carries what the branch actually held.
+    let fixture = admitted_mission("moved-after-swap");
+    let (repository, ruling_digest) = fixture.approved("moved-after-swap");
+    let base = repository.revision.clone();
+    let path = repository.path.clone();
+    let moved_to = base.clone();
+    let dispatches = DispatchService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .with_failpoints(DispatchFailpoints {
+            after_swap: Some(Arc::new(move || {
+                // Another writer, between this attempt's swap and its observation.
+                CopyRepository::git(&path, &["update-ref", "refs/heads/main", &moved_to]);
+            })),
+            ..DispatchFailpoints::default()
+        });
+
+    let receipt = dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+
+    assert_eq!(
+        receipt.outcome,
+        DispatchOutcome::Applied,
+        "a swap this attempt performed was reported as a refusal"
+    );
+    let prepared = receipt.prepared_commit.clone().unwrap();
+    assert_eq!(
+        receipt.resulting_revision.as_deref(),
+        Some(prepared.as_str()),
+        "resultingRevision is what the swap installed, not what the ref names now"
+    );
+    assert_eq!(
+        receipt.observed_head.as_deref(),
+        Some(base.as_str()),
+        "observedHead must record what the branch actually held, not what was installed"
+    );
+    // The tree is not reset to a commit the branch no longer names: that would be a second write
+    // against a ref this attempt no longer owns.
+    assert!(!receipt.checkout_updated);
+    // And the residue claim is true here, because the branch was OBSERVED to name something else.
+    assert!(
+        receipt
+            .not_verified
+            .contains(&NotVerified::UnreferencedObjectResidue),
+        "a branch observed to hold something else leaves this attempt's objects unreferenced"
+    );
+}
+
+#[test]
 fn a_swap_this_attempt_did_not_perform_is_not_reported_as_its_application() {
     // The prepared commit is a deterministic function of its inputs, so a branch can come to name
     // it without this attempt having put it there. The classifier compared the observed head with
