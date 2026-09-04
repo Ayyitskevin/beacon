@@ -994,3 +994,32 @@ fn the_readers_refuse_a_record_whose_bytes_name_another_workspace() {
         ClassificationStoreError::CrossWorkspace
     );
 }
+
+#[test]
+fn a_store_holding_spend_or_classification_events_restarts() {
+    // Regression for the gap kimi's 0027 kind-list tripwire exposed: 0025 admitted
+    // 'spend.measured' and 'mission.impact_classified' into the events CHECK without teaching
+    // the replay vocabulary to parse them, so a store holding either Event refused every
+    // subsequent startup with InvalidEventKind. These arms still verify nothing beyond
+    // admission; startup verification for the two tables is the spend lane's follow-on.
+    let store = TestStore::new("spend-event-restart");
+    let connection = Connection::open(&store.path).unwrap();
+    for (kind, marker) in [
+        ("spend.measured", "{\"marker\":\"spend\"}"),
+        ("mission.impact_classified", "{\"marker\":\"impact\"}"),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+                 VALUES (?1, ?2, ?3, 1)",
+                params![store.workspace_id.to_string(), kind, marker],
+            )
+            .unwrap();
+    }
+    drop(connection);
+    Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .expect("a store holding spend and classification Events must restart");
+}
