@@ -24,9 +24,13 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-use data_encoding::HEXLOWER;
+use std::sync::Arc;
+
+use data_encoding::{BASE64, HEXLOWER};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use uuid::Uuid;
 
+use crate::operator_account::{OperatorAccountError, OperatorAccountService};
 use crate::proposal::sha256;
 
 /// The canonicalizer identity. Any future grammar is a new canonicalizer; existing v1 bytes are
@@ -871,4 +875,450 @@ impl MeasuredSpendV1 {
     pub fn from_canonical_bytes(input: &[u8]) -> Result<Self, MalformedSpend> {
         decode(input)
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The store and its verified reader (slice 2)
+// ---------------------------------------------------------------------------------------------
+
+/// Why a stored measured-spend record could not be returned.
+///
+/// Every arm is an integrity failure, not an honest domain state. A digest mismatch, a projection
+/// that disagrees with the bytes, a cross-Workspace reference or a citation whose reference identity
+/// and content identity disagree all **abort**; none of them becomes a `broken` measurement, because
+/// `broken` is a statement about a ledger and these are statements about the store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpendStoreError {
+    /// The stored bytes do not hash to the digest the row is keyed by.
+    DigestMismatch,
+    /// The stored bytes are not a v1 record.
+    Malformed(MalformedSpend),
+    /// A projection column disagrees with the canonical bytes. The bytes win, and the read refuses:
+    /// a column is for querying and never for claiming.
+    ColumnsDisagree,
+    /// A citation named this digest with a different `spend_id` or `version` (R15).
+    CitedIdentityMismatch,
+    /// The row belongs to another Workspace.
+    CrossWorkspace,
+    Store(String),
+}
+
+impl fmt::Display for SpendStoreError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DigestMismatch => formatter.write_str("digest_mismatch"),
+            Self::Malformed(reason) => write!(formatter, "malformed: {reason}"),
+            Self::ColumnsDisagree => formatter.write_str("columns_disagree"),
+            Self::CitedIdentityMismatch => formatter.write_str("cited_identity_mismatch"),
+            Self::CrossWorkspace => formatter.write_str("cross_workspace"),
+            Self::Store(reason) => write!(formatter, "store: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for SpendStoreError {}
+
+/// One stored record: its bytes, the identity of those bytes, and what they decode to.
+///
+/// The fields are private for the reason ADR 0034 gives: a caller-supplied parsed object beside a
+/// digest permits the two to disagree. These three were proved equal by the reader that built them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeasuredSpend {
+    digest: SpendDigest,
+    canonical_bytes: Vec<u8>,
+    payload: MeasuredSpendV1,
+}
+
+impl MeasuredSpend {
+    pub fn digest(&self) -> &SpendDigest {
+        &self.digest
+    }
+
+    pub fn canonical_bytes(&self) -> &[u8] {
+        &self.canonical_bytes
+    }
+
+    pub fn payload(&self) -> &MeasuredSpendV1 {
+        &self.payload
+    }
+}
+
+/// Does every projection column say what the bytes say?
+///
+/// Each column is re-derived rather than compared to a remembered value, so adding a column without
+/// adding a line here is a compile-time hole rather than a silent one -- the shape `ruling.rs`
+/// established.
+fn spend_columns_match(row: &StoredSpendRow, payload: &MeasuredSpendV1) -> bool {
+    row.spend_id == payload.spend_id
+        && row.mission_id == payload.mission_id
+        && row.version == payload.version
+        && row.origin == payload.origin.as_str()
+        && row.measurement == payload.measurement.literal()
+        && row.coverage_from_event_seq == payload.coverage_from_event_seq
+        && row.coverage_to_event_seq == payload.coverage_to_event_seq
+        && row.measured_at_ms == payload.measured_at_ms
+}
+
+struct StoredSpendRow {
+    digest_value: String,
+    canonical_bytes: Vec<u8>,
+    spend_id: Uuid,
+    mission_id: Uuid,
+    version: u32,
+    origin: String,
+    measurement: String,
+    coverage_from_event_seq: u64,
+    coverage_to_event_seq: u64,
+    measured_at_ms: u64,
+}
+
+fn load_spend_row(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+) -> Result<Option<StoredSpendRow>, SpendStoreError> {
+    connection
+        .query_row(
+            "SELECT digest_value, canonical_bytes, spend_id, mission_id, version, origin,
+                    measurement, coverage_from_event_seq, coverage_to_event_seq, measured_at_ms
+             FROM measured_spend WHERE workspace_id = ?1 AND digest_value = ?2",
+            rusqlite::params![workspace_id.to_string(), digest_value],
+            |row| {
+                Ok(StoredSpendRow {
+                    digest_value: row.get(0)?,
+                    canonical_bytes: row.get(1)?,
+                    spend_id: parse_uuid_column(row.get::<_, String>(2)?),
+                    mission_id: parse_uuid_column(row.get::<_, String>(3)?),
+                    version: row.get::<_, i64>(4)? as u32,
+                    origin: row.get(5)?,
+                    measurement: row.get(6)?,
+                    coverage_from_event_seq: row.get::<_, i64>(7)? as u64,
+                    coverage_to_event_seq: row.get::<_, i64>(8)? as u64,
+                    measured_at_ms: row.get::<_, i64>(9)? as u64,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| SpendStoreError::Store(error.to_string()))
+}
+
+/// A UUID column that cannot parse is a corrupt store, and the reader that follows refuses on the
+/// projection comparison rather than here, so one refusal names one fault.
+fn parse_uuid_column(value: String) -> Uuid {
+    Uuid::parse_str(&value).unwrap_or(Uuid::nil())
+}
+
+/// One measured-spend record, verified, by digest within a Workspace.
+///
+/// The shape `verified_proposal_within` and `verified_ruling_within` already have. `Ok(None)` is
+/// "no such record in this Workspace" and is a different answer from a refusal -- and it is also
+/// what a cross-Workspace digest returns, because the Workspace is a predicate of the query rather
+/// than a field compared afterwards: a row that exists in another Workspace is not visible here at
+/// all.
+pub fn verified_spend_within(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+) -> Result<Option<MeasuredSpend>, SpendStoreError> {
+    let Some(row) = load_spend_row(connection, workspace_id, digest_value)? else {
+        return Ok(None);
+    };
+    // 1. The bytes hash to the identity the row is keyed by.
+    if HEXLOWER.encode(&sha256(&row.canonical_bytes)) != row.digest_value {
+        return Err(SpendStoreError::DigestMismatch);
+    }
+    // 2. They strictly decode, and re-encode to exactly themselves.
+    let payload = decode(&row.canonical_bytes).map_err(SpendStoreError::Malformed)?;
+    if encode(&payload).map_err(SpendStoreError::Malformed)? != row.canonical_bytes {
+        return Err(SpendStoreError::Malformed(MalformedSpend::TrailingBytes));
+    }
+    // 3. Every projection says what the bytes say.
+    if !spend_columns_match(&row, &payload) {
+        return Err(SpendStoreError::ColumnsDisagree);
+    }
+    // 4. And the record's own Workspace is the one that was asked for -- keyed on the field in the
+    //    bytes, not on the column the query matched.
+    if payload.workspace_id != workspace_id {
+        return Err(SpendStoreError::CrossWorkspace);
+    }
+    Ok(MeasuredSpend {
+        digest: SpendDigest {
+            algorithm: DIGEST_ALGORITHM.to_owned(),
+            canonicalizer: CANONICALIZER.to_owned(),
+            value: row.digest_value,
+        },
+        canonical_bytes: row.canonical_bytes,
+        payload,
+    }
+    .into())
+}
+
+/// The reader a citation uses: `(workspace_id, spend_id, version, digest)`.
+///
+/// R15: the digest is content identity and the UUID is reference identity, and **a citation whose
+/// pair disagrees is refused**. The comparison reads both from the decoded canonical bytes, never
+/// from the projection columns -- a decoy row with the right id and the wrong bytes fails at the
+/// digest, and one with the right bytes and a lying column fails at `columns_disagree` before this
+/// check is reached.
+pub fn verified_spend_for_citation(
+    connection: &Connection,
+    workspace_id: Uuid,
+    spend_id: Uuid,
+    version: u32,
+    digest_value: &str,
+) -> Result<Option<MeasuredSpend>, SpendStoreError> {
+    let Some(record) = verified_spend_within(connection, workspace_id, digest_value)? else {
+        return Ok(None);
+    };
+    if record.payload.spend_id != spend_id || record.payload.version != version {
+        return Err(SpendStoreError::CitedIdentityMismatch);
+    }
+    Ok(Some(record))
+}
+
+// ---------------------------------------------------------------------------------------------
+// The write path: one Command, one record, one Event
+// ---------------------------------------------------------------------------------------------
+
+/// Why a measured-spend record could not be recorded.
+///
+/// The account refusal comes first and alone, so an unauthenticated caller learns nothing about the
+/// bytes it supplied. Everything after it names one fault: bytes that are not a v1 record, bytes
+/// that decode but do not re-encode to themselves, a record addressed at another Workspace, a
+/// Mission that does not exist here, and a record that would take an identity already taken are
+/// five different mistakes.
+#[derive(Debug)]
+pub enum SpendRecordError {
+    Account(OperatorAccountError),
+    /// The supplied bytes are not a v1 record.
+    Malformed(MalformedSpend),
+    /// The bytes decode, but re-encoding the decoded value does not reproduce them. ADR 0034's
+    /// submit contract: a caller submits bytes, and only bytes that are already canonical are
+    /// stored -- otherwise the digest names something the caller never sent.
+    NotCanonical,
+    /// The record's own `workspace_id` is not this service's Workspace. Read from the bytes, never
+    /// from the caller's argument, because the bytes are what the digest covers.
+    CrossWorkspace,
+    /// `(workspace, mission, origin, version)` is already taken, or `spend_id` is. A correction is
+    /// a new record at the next version, never an edit.
+    IdentityTaken,
+    Store(String),
+}
+
+impl From<OperatorAccountError> for SpendRecordError {
+    fn from(error: OperatorAccountError) -> Self {
+        Self::Account(error)
+    }
+}
+
+impl From<rusqlite::Error> for SpendRecordError {
+    fn from(error: rusqlite::Error) -> Self {
+        if let rusqlite::Error::SqliteFailure(inner, _) = &error
+            && inner.code == rusqlite::ErrorCode::ConstraintViolation
+        {
+            return Self::IdentityTaken;
+        }
+        Self::Store(error.to_string())
+    }
+}
+
+impl From<SpendStoreError> for SpendRecordError {
+    fn from(error: SpendStoreError) -> Self {
+        match error {
+            SpendStoreError::Malformed(reason) => Self::Malformed(reason),
+            other => Self::Store(other.to_string()),
+        }
+    }
+}
+
+impl fmt::Display for SpendRecordError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Account(error) => write!(formatter, "account: {error:?}"),
+            Self::Malformed(reason) => write!(formatter, "malformed: {reason}"),
+            Self::NotCanonical => formatter.write_str("not_canonical"),
+            Self::CrossWorkspace => formatter.write_str("cross_workspace"),
+            Self::IdentityTaken => formatter.write_str("identity_taken"),
+            Self::Store(reason) => write!(formatter, "store: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for SpendRecordError {}
+
+/// The `spend.measured` Event payload.
+///
+/// It carries the record's two identities and its exact bytes, and **no amount**: a consumer that
+/// wants the amount reads the record through its verified reader, where the bytes are proved. An
+/// amount copied into an Event is a second source that can disagree with the ledger, which is the
+/// same reason `MissionCompletionV1` cites spend rather than restating it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SpendMeasuredPayload {
+    pub workspace_id: String,
+    pub spend_id: String,
+    pub mission_id: String,
+    pub version: u32,
+    pub origin: String,
+    pub measurement: String,
+    pub digest: SpendDigestPayload,
+    pub canonical_bytes_base64: String,
+    pub measured_at_ms: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SpendDigestPayload {
+    pub algorithm: String,
+    pub canonicalizer: String,
+    pub value: String,
+}
+
+/// Records measured spend, and reads it back verified.
+///
+/// There is deliberately **no** `record(payload: MeasuredSpendV1)` and no
+/// `record(payload, digest)`: a parsed object beside a digest permits the two to disagree, and the
+/// disagreement is invisible at the call site. The only way in is bytes.
+pub struct MeasuredSpendService {
+    accounts: Arc<OperatorAccountService>,
+    workspace_id: Uuid,
+}
+
+impl MeasuredSpendService {
+    pub fn new(accounts: Arc<OperatorAccountService>, workspace_id: Uuid) -> Self {
+        Self {
+            accounts,
+            workspace_id,
+        }
+    }
+
+    /// Records one immutable measured-spend record from the exact bytes supplied.
+    ///
+    /// The value returned is **read back through the verified reader**, never the caller's parse:
+    /// what a caller receives is what a later reader will see, or the call fails.
+    pub fn record(&self, canonical_bytes: &[u8]) -> Result<MeasuredSpend, SpendRecordError> {
+        self.accounts.with_authenticated_store(|connection, _now| {
+            let payload = decode(canonical_bytes).map_err(SpendRecordError::Malformed)?;
+            // Decoded, then re-encoded, then compared to the caller's slice. A decoder alone
+            // accepts more than one byte sequence for some values; this is the check that makes the
+            // digest an identity for exactly one of them.
+            if encode(&payload).map_err(SpendRecordError::Malformed)? != canonical_bytes {
+                return Err(SpendRecordError::NotCanonical);
+            }
+            if payload.workspace_id != self.workspace_id {
+                return Err(SpendRecordError::CrossWorkspace);
+            }
+            let digest_value = HEXLOWER.encode(&sha256(canonical_bytes));
+
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            insert_spend(&transaction, &digest_value, canonical_bytes, &payload)?;
+            let recorded = verified_spend_within(&transaction, self.workspace_id, &digest_value)?
+                .ok_or_else(|| SpendRecordError::Store("record vanished".to_owned()))?;
+            transaction.commit()?;
+            Ok(recorded)
+        })
+    }
+
+    /// One record by its content identity, verified.
+    pub fn get(&self, digest_value: &str) -> Result<Option<MeasuredSpend>, SpendRecordError> {
+        self.accounts.with_authenticated_store(|connection, _now| {
+            Ok(verified_spend_within(
+                connection,
+                self.workspace_id,
+                digest_value,
+            )?)
+        })
+    }
+
+    /// Every record for one Mission, each verified, oldest first.
+    ///
+    /// Daemon and operator records coexist: they are separate `(origin, version)` ladders and are
+    /// never merged into one number here or anywhere else.
+    pub fn for_mission(&self, mission_id: Uuid) -> Result<Vec<MeasuredSpend>, SpendRecordError> {
+        self.accounts.with_authenticated_store(|connection, _now| {
+            let mut statement = connection.prepare(
+                "SELECT digest_value FROM measured_spend
+                 WHERE workspace_id = ?1 AND mission_id = ?2
+                 ORDER BY origin, version",
+            )?;
+            let digests = statement
+                .query_map(
+                    rusqlite::params![self.workspace_id.to_string(), mission_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut records = Vec::with_capacity(digests.len());
+            for digest_value in digests {
+                // The joined row identified a candidate; the record itself is read verified.
+                let record =
+                    verified_spend_within(connection, self.workspace_id, &digest_value)?
+                        .ok_or_else(|| SpendRecordError::Store("record vanished".to_owned()))?;
+                records.push(record);
+            }
+            Ok(records)
+        })
+    }
+}
+
+/// The row and its Event, written together in one transaction.
+///
+/// Every projection column is derived from `payload` here, in the one place, so a column cannot be
+/// supplied separately from the bytes it is supposed to project.
+fn insert_spend(
+    connection: &Connection,
+    digest_value: &str,
+    canonical_bytes: &[u8],
+    payload: &MeasuredSpendV1,
+) -> Result<(), SpendRecordError> {
+    connection.execute(
+        "INSERT INTO measured_spend (
+             workspace_id, digest_algorithm, digest_canonicalizer, digest_value, canonical_bytes,
+             spend_id, mission_id, version, origin, measurement,
+             coverage_from_event_seq, coverage_to_event_seq, measured_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        rusqlite::params![
+            payload.workspace_id.to_string(),
+            DIGEST_ALGORITHM,
+            CANONICALIZER,
+            digest_value,
+            canonical_bytes,
+            payload.spend_id.to_string(),
+            payload.mission_id.to_string(),
+            i64::from(payload.version),
+            payload.origin.as_str(),
+            payload.measurement.literal(),
+            i64::try_from(payload.coverage_from_event_seq)
+                .map_err(|_| SpendRecordError::Store("coverage out of range".to_owned()))?,
+            i64::try_from(payload.coverage_to_event_seq)
+                .map_err(|_| SpendRecordError::Store("coverage out of range".to_owned()))?,
+            i64::try_from(payload.measured_at_ms)
+                .map_err(|_| SpendRecordError::Store("timestamp out of range".to_owned()))?,
+        ],
+    )?;
+    let event = serde_json::to_string(&SpendMeasuredPayload {
+        workspace_id: payload.workspace_id.to_string(),
+        spend_id: payload.spend_id.to_string(),
+        mission_id: payload.mission_id.to_string(),
+        version: payload.version,
+        origin: payload.origin.as_str().to_owned(),
+        measurement: payload.measurement.literal().to_owned(),
+        digest: SpendDigestPayload {
+            algorithm: DIGEST_ALGORITHM.to_owned(),
+            canonicalizer: CANONICALIZER.to_owned(),
+            value: digest_value.to_owned(),
+        },
+        canonical_bytes_base64: BASE64.encode(canonical_bytes),
+        measured_at_ms: payload.measured_at_ms,
+    })
+    .map_err(|error| SpendRecordError::Store(error.to_string()))?;
+    connection.execute(
+        "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+         VALUES (?1, 'spend.measured', ?2, ?3)",
+        rusqlite::params![
+            payload.workspace_id.to_string(),
+            event,
+            i64::try_from(payload.measured_at_ms)
+                .map_err(|_| SpendRecordError::Store("timestamp out of range".to_owned()))?,
+        ],
+    )?;
+    Ok(())
 }

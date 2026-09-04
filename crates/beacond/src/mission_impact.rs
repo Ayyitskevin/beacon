@@ -26,9 +26,13 @@
 
 use std::fmt;
 
-use data_encoding::HEXLOWER;
+use std::sync::Arc;
+
+use data_encoding::{BASE64, HEXLOWER};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use uuid::Uuid;
 
+use crate::operator_account::{OperatorAccountError, OperatorAccountService};
 use crate::proposal::sha256;
 
 /// The canonicalizer identity. Any future grammar is a new canonicalizer; existing v1 bytes are
@@ -602,4 +606,457 @@ impl MissionImpactClassificationV1 {
     pub fn appendix_is_mandatory(&self) -> bool {
         self.impact == ImpactLevel::High
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The store and its verified reader (slice 2)
+// ---------------------------------------------------------------------------------------------
+
+/// Why a stored classification could not be returned. Every arm is an integrity failure that
+/// aborts; none becomes a classification value, because there is no honest classification state for
+/// "the store is wrong".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClassificationStoreError {
+    DigestMismatch,
+    Malformed(MalformedClassification),
+    /// A projection column disagrees with the canonical bytes.
+    ColumnsDisagree,
+    /// A citation named this digest with a different `classification_id` or `version` (R15).
+    CitedIdentityMismatch,
+    CrossWorkspace,
+    /// R13.7: the bit a caller copied into a manifest disagrees with the record it cites.
+    CopiedBitDisagrees,
+    Store(String),
+}
+
+impl fmt::Display for ClassificationStoreError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DigestMismatch => formatter.write_str("digest_mismatch"),
+            Self::Malformed(reason) => write!(formatter, "malformed: {reason}"),
+            Self::ColumnsDisagree => formatter.write_str("columns_disagree"),
+            Self::CitedIdentityMismatch => formatter.write_str("cited_identity_mismatch"),
+            Self::CrossWorkspace => formatter.write_str("cross_workspace"),
+            Self::CopiedBitDisagrees => formatter.write_str("copied_bit_disagrees"),
+            Self::Store(reason) => write!(formatter, "store: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for ClassificationStoreError {}
+
+/// One stored classification: its bytes, their identity, and what they decode to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissionImpactClassification {
+    digest: ClassificationDigest,
+    canonical_bytes: Vec<u8>,
+    payload: MissionImpactClassificationV1,
+}
+
+impl MissionImpactClassification {
+    pub fn digest(&self) -> &ClassificationDigest {
+        &self.digest
+    }
+
+    pub fn canonical_bytes(&self) -> &[u8] {
+        &self.canonical_bytes
+    }
+
+    pub fn payload(&self) -> &MissionImpactClassificationV1 {
+        &self.payload
+    }
+
+    /// R13.7's re-check, and the reason this method exists rather than a bare getter.
+    ///
+    /// `prepare` copies the impact bit into the Outcome manifest **and** re-checks it against this
+    /// exact record. Handing a caller a `bool` would let it copy one and check nothing; handing it
+    /// this makes the copy and the check one call, and the refusal names what disagreed.
+    pub fn recheck_copied_bit(
+        &self,
+        copied_high_impact: bool,
+    ) -> Result<(), ClassificationStoreError> {
+        if copied_high_impact == self.payload.appendix_is_mandatory() {
+            Ok(())
+        } else {
+            Err(ClassificationStoreError::CopiedBitDisagrees)
+        }
+    }
+}
+
+struct StoredClassificationRow {
+    digest_value: String,
+    canonical_bytes: Vec<u8>,
+    classification_id: Uuid,
+    mission_id: Uuid,
+    project_id: Uuid,
+    version: u32,
+    impact: String,
+    basis: String,
+    policy_revision: u32,
+    charter_revision: u32,
+    classified_at_ms: u64,
+}
+
+fn classification_columns_match(
+    row: &StoredClassificationRow,
+    payload: &MissionImpactClassificationV1,
+) -> bool {
+    row.classification_id == payload.classification_id
+        && row.mission_id == payload.mission_id
+        && row.project_id == payload.policy.project_id
+        && row.version == payload.version
+        && row.impact == payload.impact.as_str()
+        && row.basis == payload.basis.as_str()
+        && row.policy_revision == payload.policy.policy_revision
+        && row.charter_revision == payload.policy.charter_revision
+        && row.classified_at_ms == payload.classified_at_ms
+}
+
+fn load_classification_row(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+) -> Result<Option<StoredClassificationRow>, ClassificationStoreError> {
+    connection
+        .query_row(
+            "SELECT digest_value, canonical_bytes, classification_id, mission_id, project_id,
+                    version, impact, basis, policy_revision, charter_revision, classified_at_ms
+             FROM mission_impact_classifications
+             WHERE workspace_id = ?1 AND digest_value = ?2",
+            rusqlite::params![workspace_id.to_string(), digest_value],
+            |row| {
+                Ok(StoredClassificationRow {
+                    digest_value: row.get(0)?,
+                    canonical_bytes: row.get(1)?,
+                    classification_id: uuid_column(row.get::<_, String>(2)?),
+                    mission_id: uuid_column(row.get::<_, String>(3)?),
+                    project_id: uuid_column(row.get::<_, String>(4)?),
+                    version: row.get::<_, i64>(5)? as u32,
+                    impact: row.get(6)?,
+                    basis: row.get(7)?,
+                    policy_revision: row.get::<_, i64>(8)? as u32,
+                    charter_revision: row.get::<_, i64>(9)? as u32,
+                    classified_at_ms: row.get::<_, i64>(10)? as u64,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| ClassificationStoreError::Store(error.to_string()))
+}
+
+fn uuid_column(value: String) -> Uuid {
+    Uuid::parse_str(&value).unwrap_or(Uuid::nil())
+}
+
+/// One classification, verified, by digest within a Workspace.
+pub fn verified_classification_within(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+) -> Result<Option<MissionImpactClassification>, ClassificationStoreError> {
+    let Some(row) = load_classification_row(connection, workspace_id, digest_value)? else {
+        return Ok(None);
+    };
+    if HEXLOWER.encode(&sha256(&row.canonical_bytes)) != row.digest_value {
+        return Err(ClassificationStoreError::DigestMismatch);
+    }
+    let payload = decode(&row.canonical_bytes).map_err(ClassificationStoreError::Malformed)?;
+    if encode(&payload).map_err(ClassificationStoreError::Malformed)? != row.canonical_bytes {
+        return Err(ClassificationStoreError::Malformed(
+            MalformedClassification::TrailingBytes,
+        ));
+    }
+    if !classification_columns_match(&row, &payload) {
+        return Err(ClassificationStoreError::ColumnsDisagree);
+    }
+    if payload.workspace_id != workspace_id {
+        return Err(ClassificationStoreError::CrossWorkspace);
+    }
+    Ok(Some(MissionImpactClassification {
+        digest: ClassificationDigest {
+            algorithm: DIGEST_ALGORITHM.to_owned(),
+            canonicalizer: CANONICALIZER.to_owned(),
+            value: row.digest_value,
+        },
+        canonical_bytes: row.canonical_bytes,
+        payload,
+    }))
+}
+
+/// The reader a citation uses: `(workspace_id, classification_id, version, digest)` (R15).
+pub fn verified_classification_for_citation(
+    connection: &Connection,
+    workspace_id: Uuid,
+    classification_id: Uuid,
+    version: u32,
+    digest_value: &str,
+) -> Result<Option<MissionImpactClassification>, ClassificationStoreError> {
+    let Some(record) = verified_classification_within(connection, workspace_id, digest_value)?
+    else {
+        return Ok(None);
+    };
+    if record.payload.classification_id != classification_id || record.payload.version != version {
+        return Err(ClassificationStoreError::CitedIdentityMismatch);
+    }
+    Ok(Some(record))
+}
+
+// ---------------------------------------------------------------------------------------------
+// The write path: one Command, one record, one Event
+// ---------------------------------------------------------------------------------------------
+
+/// Why a classification could not be recorded. Same shape, and the same reasons, as
+/// `SpendRecordError`.
+#[derive(Debug)]
+pub enum ClassificationRecordError {
+    Account(OperatorAccountError),
+    Malformed(MalformedClassification),
+    /// The bytes decode but do not re-encode to themselves (ADR 0034's submit contract).
+    NotCanonical,
+    CrossWorkspace,
+    /// `(workspace, mission, version)` or `classification_id` is already taken. A reclassification
+    /// is a new record at the next version, never an edit.
+    IdentityTaken,
+    /// The composite foreign key refused: this Workspace's Project has no such Policy revision.
+    /// The store answers it, so it cannot be a check a caller forgets.
+    PolicyRevisionNotFound,
+    Store(String),
+}
+
+impl From<OperatorAccountError> for ClassificationRecordError {
+    fn from(error: OperatorAccountError) -> Self {
+        Self::Account(error)
+    }
+}
+
+impl From<rusqlite::Error> for ClassificationRecordError {
+    fn from(error: rusqlite::Error) -> Self {
+        if let rusqlite::Error::SqliteFailure(inner, _) = &error
+            && inner.code == rusqlite::ErrorCode::ConstraintViolation
+        {
+            // A foreign-key refusal and a uniqueness refusal are two different mistakes, and
+            // collapsing them would tell a caller to bump a version when the Policy revision is
+            // what is missing.
+            return match inner.extended_code {
+                rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY => Self::PolicyRevisionNotFound,
+                _ => Self::IdentityTaken,
+            };
+        }
+        Self::Store(error.to_string())
+    }
+}
+
+impl From<ClassificationStoreError> for ClassificationRecordError {
+    fn from(error: ClassificationStoreError) -> Self {
+        match error {
+            ClassificationStoreError::Malformed(reason) => Self::Malformed(reason),
+            other => Self::Store(other.to_string()),
+        }
+    }
+}
+
+impl fmt::Display for ClassificationRecordError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Account(error) => write!(formatter, "account: {error:?}"),
+            Self::Malformed(reason) => write!(formatter, "malformed: {reason}"),
+            Self::NotCanonical => formatter.write_str("not_canonical"),
+            Self::CrossWorkspace => formatter.write_str("cross_workspace"),
+            Self::IdentityTaken => formatter.write_str("identity_taken"),
+            Self::PolicyRevisionNotFound => formatter.write_str("policy_revision_not_found"),
+            Self::Store(reason) => write!(formatter, "store: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for ClassificationRecordError {}
+
+/// The `mission.impact_classified` Event payload.
+///
+/// It carries the impact level as the record's own literal, and the Policy revision the
+/// classification was made under -- so a reader of the ledger can tell *which* Policy said this
+/// without resolving "the current one", which is a different question with a different answer.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MissionImpactClassifiedPayload {
+    pub workspace_id: String,
+    pub classification_id: String,
+    pub mission_id: String,
+    pub project_id: String,
+    pub version: u32,
+    pub impact: String,
+    pub basis: String,
+    pub policy_revision: u32,
+    pub charter_revision: u32,
+    pub digest: ClassificationDigestPayload,
+    pub canonical_bytes_base64: String,
+    pub classified_at_ms: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ClassificationDigestPayload {
+    pub algorithm: String,
+    pub canonicalizer: String,
+    pub value: String,
+}
+
+/// Records Mission impact classifications, and reads them back verified.
+///
+/// There is deliberately **no** `is_high_impact(mission_id) -> bool` here. A caller that wants the
+/// level reads a record and gets its identity, its version, its Policy revision and its digest with
+/// it; a bare boolean is exactly the shortcut that lets a renderer print "high impact" without
+/// being able to say which classification said so (ADR 0044).
+pub struct MissionImpactService {
+    accounts: Arc<OperatorAccountService>,
+    workspace_id: Uuid,
+}
+
+impl MissionImpactService {
+    pub fn new(accounts: Arc<OperatorAccountService>, workspace_id: Uuid) -> Self {
+        Self {
+            accounts,
+            workspace_id,
+        }
+    }
+
+    /// Records one immutable classification from the exact bytes supplied.
+    pub fn classify(
+        &self,
+        canonical_bytes: &[u8],
+    ) -> Result<MissionImpactClassification, ClassificationRecordError> {
+        self.accounts.with_authenticated_store(|connection, _now| {
+            let payload = decode(canonical_bytes).map_err(ClassificationRecordError::Malformed)?;
+            if encode(&payload).map_err(ClassificationRecordError::Malformed)? != canonical_bytes {
+                return Err(ClassificationRecordError::NotCanonical);
+            }
+            if payload.workspace_id != self.workspace_id {
+                return Err(ClassificationRecordError::CrossWorkspace);
+            }
+            let digest_value = HEXLOWER.encode(&sha256(canonical_bytes));
+
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            insert_classification(&transaction, &digest_value, canonical_bytes, &payload)?;
+            let recorded =
+                verified_classification_within(&transaction, self.workspace_id, &digest_value)?
+                    .ok_or_else(|| {
+                        ClassificationRecordError::Store("record vanished".to_owned())
+                    })?;
+            transaction.commit()?;
+            Ok(recorded)
+        })
+    }
+
+    /// One classification by its content identity, verified.
+    pub fn get(
+        &self,
+        digest_value: &str,
+    ) -> Result<Option<MissionImpactClassification>, ClassificationRecordError> {
+        self.accounts.with_authenticated_store(|connection, _now| {
+            Ok(verified_classification_within(
+                connection,
+                self.workspace_id,
+                digest_value,
+            )?)
+        })
+    }
+
+    /// Every classification of one Mission, each verified, in version order.
+    ///
+    /// The caller is handed the ladder rather than a "current" answer, because *which* record is
+    /// current depends on the event cursor the caller is resolving at -- a question this store
+    /// cannot answer and must not appear to.
+    pub fn history(
+        &self,
+        mission_id: Uuid,
+    ) -> Result<Vec<MissionImpactClassification>, ClassificationRecordError> {
+        self.accounts.with_authenticated_store(|connection, _now| {
+            let mut statement = connection.prepare(
+                "SELECT digest_value FROM mission_impact_classifications
+                 WHERE workspace_id = ?1 AND mission_id = ?2
+                 ORDER BY version",
+            )?;
+            let digests = statement
+                .query_map(
+                    rusqlite::params![self.workspace_id.to_string(), mission_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut records = Vec::with_capacity(digests.len());
+            for digest_value in digests {
+                let record =
+                    verified_classification_within(connection, self.workspace_id, &digest_value)?
+                        .ok_or_else(|| {
+                        ClassificationRecordError::Store("record vanished".to_owned())
+                    })?;
+                records.push(record);
+            }
+            Ok(records)
+        })
+    }
+}
+
+/// The row and its Event, written together in one transaction, every projection column derived
+/// from `payload` in this one place.
+fn insert_classification(
+    connection: &Connection,
+    digest_value: &str,
+    canonical_bytes: &[u8],
+    payload: &MissionImpactClassificationV1,
+) -> Result<(), ClassificationRecordError> {
+    connection.execute(
+        "INSERT INTO mission_impact_classifications (
+             workspace_id, digest_algorithm, digest_canonicalizer, digest_value, canonical_bytes,
+             classification_id, mission_id, project_id, version, impact, basis,
+             policy_revision, charter_revision, classified_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        rusqlite::params![
+            payload.workspace_id.to_string(),
+            DIGEST_ALGORITHM,
+            CANONICALIZER,
+            digest_value,
+            canonical_bytes,
+            payload.classification_id.to_string(),
+            payload.mission_id.to_string(),
+            payload.policy.project_id.to_string(),
+            i64::from(payload.version),
+            payload.impact.as_str(),
+            payload.basis.as_str(),
+            i64::from(payload.policy.policy_revision),
+            i64::from(payload.policy.charter_revision),
+            i64::try_from(payload.classified_at_ms).map_err(|_| {
+                ClassificationRecordError::Store("timestamp out of range".to_owned())
+            })?,
+        ],
+    )?;
+    let event = serde_json::to_string(&MissionImpactClassifiedPayload {
+        workspace_id: payload.workspace_id.to_string(),
+        classification_id: payload.classification_id.to_string(),
+        mission_id: payload.mission_id.to_string(),
+        project_id: payload.policy.project_id.to_string(),
+        version: payload.version,
+        impact: payload.impact.as_str().to_owned(),
+        basis: payload.basis.as_str().to_owned(),
+        policy_revision: payload.policy.policy_revision,
+        charter_revision: payload.policy.charter_revision,
+        digest: ClassificationDigestPayload {
+            algorithm: DIGEST_ALGORITHM.to_owned(),
+            canonicalizer: CANONICALIZER.to_owned(),
+            value: digest_value.to_owned(),
+        },
+        canonical_bytes_base64: BASE64.encode(canonical_bytes),
+        classified_at_ms: payload.classified_at_ms,
+    })
+    .map_err(|error| ClassificationRecordError::Store(error.to_string()))?;
+    connection.execute(
+        "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+         VALUES (?1, 'mission.impact_classified', ?2, ?3)",
+        rusqlite::params![
+            payload.workspace_id.to_string(),
+            event,
+            i64::try_from(payload.classified_at_ms).map_err(|_| {
+                ClassificationRecordError::Store("timestamp out of range".to_owned())
+            })?,
+        ],
+    )?;
+    Ok(())
 }
