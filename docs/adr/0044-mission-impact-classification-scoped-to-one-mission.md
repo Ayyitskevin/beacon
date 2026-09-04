@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # The Mission impact classification is a record, scoped to one Mission

@@ -1,6 +1,6 @@
 # Give a Mission's success conditions an identity
 
-- Status: proposed
+- Status: accepted
 - Deciders: the Product Steward
 - Date: 2026-09-04
 

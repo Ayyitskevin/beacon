@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Artifact v1: a general content identity beside the authority ledger
