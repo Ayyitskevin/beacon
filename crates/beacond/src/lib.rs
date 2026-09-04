@@ -215,13 +215,10 @@ const MIGRATION_V12: &str = include_str!("../migrations/0012_project_policy.sql"
 const MIGRATION_V13: &str = include_str!("../migrations/0013_project_repository.sql");
 const MIGRATION_V14: &str = include_str!("../migrations/0014_run_receipt.sql");
 const MIGRATION_V15: &str = include_str!("../migrations/0015_declared_check_runs.sql");
-// Bootstrap paths below always advance through the current schema. Schema-shape
-// verification keeps the individual steps so a declared v16 store is checked
-// before the additive v17 migration is applied.
-const MIGRATION_V16: &str = concat!(
-    include_str!("../migrations/0016_execution_receipt_v2.sql"),
-    include_str!("../migrations/0017_sample_project.sql")
-);
+// 0016 and 0017 were once concatenated into one `MIGRATION_V16` for the bootstrap paths, while the
+// schema check kept them apart so a declared v16 store could be verified before the additive 0017
+// was applied. The ladder keeps them apart for everyone, which is the same behaviour with one
+// spelling instead of two.
 const MIGRATION_V16_ONLY: &str = include_str!("../migrations/0016_execution_receipt_v2.sql");
 const MIGRATION_V17: &str = include_str!("../migrations/0017_sample_project.sql");
 const MIGRATION_V18: &str = include_str!("../migrations/0018_proposals.sql");
@@ -575,401 +572,29 @@ impl Supervisor {
         // first Workspace. Source:
         // https://docs.rs/rusqlite/0.40.2/rusqlite/struct.Connection.html#method.transaction_with_behavior
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if has_user_schema(&transaction)? {
-            match declared_schema_version(&transaction)? {
-                1 => {
-                    verify_schema(&transaction, 1)?;
-                    transaction.execute_batch(MIGRATION_V2)?;
-                    transaction.execute_batch(MIGRATION_V3)?;
-                    transaction.execute_batch(MIGRATION_V4)?;
-                    transaction.execute_batch(MIGRATION_V5)?;
-                    transaction.execute_batch(MIGRATION_V6)?;
-                    transaction.execute_batch(MIGRATION_V7)?;
-                    transaction.execute_batch(MIGRATION_V8)?;
-                    transaction.execute_batch(MIGRATION_V9)?;
-                    transaction.execute_batch(MIGRATION_V10)?;
-                    transaction.execute_batch(MIGRATION_V11)?;
-                    transaction.execute_batch(MIGRATION_V12)?;
-                    transaction.execute_batch(MIGRATION_V13)?;
-                    transaction.execute_batch(MIGRATION_V14)?;
-                    transaction.execute_batch(MIGRATION_V15)?;
-                    transaction.execute_batch(MIGRATION_V16)?;
-                    transaction.execute_batch(MIGRATION_V18)?;
-                    transaction.execute_batch(MIGRATION_V19)?;
-                    transaction.execute_batch(MIGRATION_V20)?;
-                    transaction.execute_batch(MIGRATION_V22)?;
-                    transaction.execute_batch(MIGRATION_V23)?;
-                    transaction.execute_batch(MIGRATION_V24)?;
-                    transaction.execute_batch(MIGRATION_V25)?;
-                    verify_schema(&transaction, SCHEMA_VERSION)?;
-                }
-                2 => {
-                    verify_schema(&transaction, 2)?;
-                    transaction.execute_batch(MIGRATION_V3)?;
-                    transaction.execute_batch(MIGRATION_V4)?;
-                    transaction.execute_batch(MIGRATION_V5)?;
-                    transaction.execute_batch(MIGRATION_V6)?;
-                    transaction.execute_batch(MIGRATION_V7)?;
-                    transaction.execute_batch(MIGRATION_V8)?;
-                    transaction.execute_batch(MIGRATION_V9)?;
-                    transaction.execute_batch(MIGRATION_V10)?;
-                    transaction.execute_batch(MIGRATION_V11)?;
-                    transaction.execute_batch(MIGRATION_V12)?;
-                    transaction.execute_batch(MIGRATION_V13)?;
-                    transaction.execute_batch(MIGRATION_V14)?;
-                    transaction.execute_batch(MIGRATION_V15)?;
-                    transaction.execute_batch(MIGRATION_V16)?;
-                    transaction.execute_batch(MIGRATION_V18)?;
-                    transaction.execute_batch(MIGRATION_V19)?;
-                    transaction.execute_batch(MIGRATION_V20)?;
-                    transaction.execute_batch(MIGRATION_V22)?;
-                    transaction.execute_batch(MIGRATION_V23)?;
-                    transaction.execute_batch(MIGRATION_V24)?;
-                    transaction.execute_batch(MIGRATION_V25)?;
-                    verify_schema(&transaction, SCHEMA_VERSION)?;
-                }
-                3 => {
-                    verify_schema(&transaction, 3)?;
-                    transaction.execute_batch(MIGRATION_V4)?;
-                    transaction.execute_batch(MIGRATION_V5)?;
-                    transaction.execute_batch(MIGRATION_V6)?;
-                    transaction.execute_batch(MIGRATION_V7)?;
-                    transaction.execute_batch(MIGRATION_V8)?;
-                    transaction.execute_batch(MIGRATION_V9)?;
-                    transaction.execute_batch(MIGRATION_V10)?;
-                    transaction.execute_batch(MIGRATION_V11)?;
-                    transaction.execute_batch(MIGRATION_V12)?;
-                    transaction.execute_batch(MIGRATION_V13)?;
-                    transaction.execute_batch(MIGRATION_V14)?;
-                    transaction.execute_batch(MIGRATION_V15)?;
-                    transaction.execute_batch(MIGRATION_V16)?;
-                    transaction.execute_batch(MIGRATION_V18)?;
-                    transaction.execute_batch(MIGRATION_V19)?;
-                    transaction.execute_batch(MIGRATION_V20)?;
-                    transaction.execute_batch(MIGRATION_V22)?;
-                    transaction.execute_batch(MIGRATION_V23)?;
-                    transaction.execute_batch(MIGRATION_V24)?;
-                    transaction.execute_batch(MIGRATION_V25)?;
-                    verify_schema(&transaction, SCHEMA_VERSION)?;
-                }
-                4 => {
-                    verify_schema(&transaction, 4)?;
-                    transaction.execute_batch(MIGRATION_V5)?;
-                    transaction.execute_batch(MIGRATION_V6)?;
-                    transaction.execute_batch(MIGRATION_V7)?;
-                    transaction.execute_batch(MIGRATION_V8)?;
-                    transaction.execute_batch(MIGRATION_V9)?;
-                    transaction.execute_batch(MIGRATION_V10)?;
-                    transaction.execute_batch(MIGRATION_V11)?;
-                    transaction.execute_batch(MIGRATION_V12)?;
-                    transaction.execute_batch(MIGRATION_V13)?;
-                    transaction.execute_batch(MIGRATION_V14)?;
-                    transaction.execute_batch(MIGRATION_V15)?;
-                    transaction.execute_batch(MIGRATION_V16)?;
-                    transaction.execute_batch(MIGRATION_V18)?;
-                    transaction.execute_batch(MIGRATION_V19)?;
-                    transaction.execute_batch(MIGRATION_V20)?;
-                    transaction.execute_batch(MIGRATION_V22)?;
-                    transaction.execute_batch(MIGRATION_V23)?;
-                    transaction.execute_batch(MIGRATION_V24)?;
-                    transaction.execute_batch(MIGRATION_V25)?;
-                    verify_schema(&transaction, SCHEMA_VERSION)?;
-                }
-                5 => {
-                    verify_schema(&transaction, 5)?;
-                    transaction.execute_batch(MIGRATION_V6)?;
-                    transaction.execute_batch(MIGRATION_V7)?;
-                    transaction.execute_batch(MIGRATION_V8)?;
-                    transaction.execute_batch(MIGRATION_V9)?;
-                    transaction.execute_batch(MIGRATION_V10)?;
-                    transaction.execute_batch(MIGRATION_V11)?;
-                    transaction.execute_batch(MIGRATION_V12)?;
-                    transaction.execute_batch(MIGRATION_V13)?;
-                    transaction.execute_batch(MIGRATION_V14)?;
-                    transaction.execute_batch(MIGRATION_V15)?;
-                    transaction.execute_batch(MIGRATION_V16)?;
-                    transaction.execute_batch(MIGRATION_V18)?;
-                    transaction.execute_batch(MIGRATION_V19)?;
-                    transaction.execute_batch(MIGRATION_V20)?;
-                    transaction.execute_batch(MIGRATION_V22)?;
-                    transaction.execute_batch(MIGRATION_V23)?;
-                    transaction.execute_batch(MIGRATION_V24)?;
-                    transaction.execute_batch(MIGRATION_V25)?;
-                    verify_schema(&transaction, SCHEMA_VERSION)?;
-                }
-                6 => {
-                    verify_schema(&transaction, 6)?;
-                    transaction.execute_batch(MIGRATION_V7)?;
-                    transaction.execute_batch(MIGRATION_V8)?;
-                    transaction.execute_batch(MIGRATION_V9)?;
-                    transaction.execute_batch(MIGRATION_V10)?;
-                    transaction.execute_batch(MIGRATION_V11)?;
-                    transaction.execute_batch(MIGRATION_V12)?;
-                    transaction.execute_batch(MIGRATION_V13)?;
-                    transaction.execute_batch(MIGRATION_V14)?;
-                    transaction.execute_batch(MIGRATION_V15)?;
-                    transaction.execute_batch(MIGRATION_V16)?;
-                    transaction.execute_batch(MIGRATION_V18)?;
-                    transaction.execute_batch(MIGRATION_V19)?;
-                    transaction.execute_batch(MIGRATION_V20)?;
-                    transaction.execute_batch(MIGRATION_V22)?;
-                    transaction.execute_batch(MIGRATION_V23)?;
-                    transaction.execute_batch(MIGRATION_V24)?;
-                    transaction.execute_batch(MIGRATION_V25)?;
-                    verify_schema(&transaction, SCHEMA_VERSION)?;
-                }
-                7 => {
-                    verify_schema(&transaction, 7)?;
-                    transaction.execute_batch(MIGRATION_V8)?;
-                    transaction.execute_batch(MIGRATION_V9)?;
-                    transaction.execute_batch(MIGRATION_V10)?;
-                    transaction.execute_batch(MIGRATION_V11)?;
-                    transaction.execute_batch(MIGRATION_V12)?;
-                    transaction.execute_batch(MIGRATION_V13)?;
-                    transaction.execute_batch(MIGRATION_V14)?;
-                    transaction.execute_batch(MIGRATION_V15)?;
-                    transaction.execute_batch(MIGRATION_V16)?;
-                    transaction.execute_batch(MIGRATION_V18)?;
-                    transaction.execute_batch(MIGRATION_V19)?;
-                    transaction.execute_batch(MIGRATION_V20)?;
-                    transaction.execute_batch(MIGRATION_V22)?;
-                    transaction.execute_batch(MIGRATION_V23)?;
-                    transaction.execute_batch(MIGRATION_V24)?;
-                    transaction.execute_batch(MIGRATION_V25)?;
-                    verify_schema(&transaction, SCHEMA_VERSION)?;
-                }
-                8 => {
-                    verify_schema(&transaction, 8)?;
-                    transaction.execute_batch(MIGRATION_V9)?;
-                    transaction.execute_batch(MIGRATION_V10)?;
-                    transaction.execute_batch(MIGRATION_V11)?;
-                    transaction.execute_batch(MIGRATION_V12)?;
-                    transaction.execute_batch(MIGRATION_V13)?;
-                    transaction.execute_batch(MIGRATION_V14)?;
-                    transaction.execute_batch(MIGRATION_V15)?;
-                    transaction.execute_batch(MIGRATION_V16)?;
-                    transaction.execute_batch(MIGRATION_V18)?;
-                    transaction.execute_batch(MIGRATION_V19)?;
-                    transaction.execute_batch(MIGRATION_V20)?;
-                    transaction.execute_batch(MIGRATION_V22)?;
-                    transaction.execute_batch(MIGRATION_V23)?;
-                    transaction.execute_batch(MIGRATION_V24)?;
-                    transaction.execute_batch(MIGRATION_V25)?;
-                    verify_schema(&transaction, SCHEMA_VERSION)?;
-                }
-                9 => {
-                    verify_schema(&transaction, 9)?;
-                    transaction.execute_batch(MIGRATION_V10)?;
-                    transaction.execute_batch(MIGRATION_V11)?;
-                    transaction.execute_batch(MIGRATION_V12)?;
-                    transaction.execute_batch(MIGRATION_V13)?;
-                    transaction.execute_batch(MIGRATION_V14)?;
-                    transaction.execute_batch(MIGRATION_V15)?;
-                    transaction.execute_batch(MIGRATION_V16)?;
-                    transaction.execute_batch(MIGRATION_V18)?;
-                    transaction.execute_batch(MIGRATION_V19)?;
-                    transaction.execute_batch(MIGRATION_V20)?;
-                    transaction.execute_batch(MIGRATION_V22)?;
-                    transaction.execute_batch(MIGRATION_V23)?;
-                    transaction.execute_batch(MIGRATION_V24)?;
-                    transaction.execute_batch(MIGRATION_V25)?;
-                    verify_schema(&transaction, SCHEMA_VERSION)?;
-                }
-                10 => {
-                    verify_schema(&transaction, 10)?;
-                    transaction.execute_batch(MIGRATION_V11)?;
-                    transaction.execute_batch(MIGRATION_V12)?;
-                    transaction.execute_batch(MIGRATION_V13)?;
-                    transaction.execute_batch(MIGRATION_V14)?;
-                    transaction.execute_batch(MIGRATION_V15)?;
-                    transaction.execute_batch(MIGRATION_V16)?;
-                    transaction.execute_batch(MIGRATION_V18)?;
-                    transaction.execute_batch(MIGRATION_V19)?;
-                    transaction.execute_batch(MIGRATION_V20)?;
-                    transaction.execute_batch(MIGRATION_V22)?;
-                    transaction.execute_batch(MIGRATION_V23)?;
-                    transaction.execute_batch(MIGRATION_V24)?;
-                    transaction.execute_batch(MIGRATION_V25)?;
-                    verify_schema(&transaction, SCHEMA_VERSION)?;
-                }
-                11 => {
-                    verify_schema(&transaction, 11)?;
-                    transaction.execute_batch(MIGRATION_V12)?;
-                    transaction.execute_batch(MIGRATION_V13)?;
-                    transaction.execute_batch(MIGRATION_V14)?;
-                    transaction.execute_batch(MIGRATION_V15)?;
-                    transaction.execute_batch(MIGRATION_V16)?;
-                    transaction.execute_batch(MIGRATION_V18)?;
-                    transaction.execute_batch(MIGRATION_V19)?;
-                    transaction.execute_batch(MIGRATION_V20)?;
-                    transaction.execute_batch(MIGRATION_V22)?;
-                    transaction.execute_batch(MIGRATION_V23)?;
-                    transaction.execute_batch(MIGRATION_V24)?;
-                    transaction.execute_batch(MIGRATION_V25)?;
-                    verify_schema(&transaction, SCHEMA_VERSION)?;
-                }
-                12 => {
-                    verify_schema(&transaction, 12)?;
-                    transaction.execute_batch(MIGRATION_V13)?;
-                    transaction.execute_batch(MIGRATION_V14)?;
-                    transaction.execute_batch(MIGRATION_V15)?;
-                    transaction.execute_batch(MIGRATION_V16)?;
-                    transaction.execute_batch(MIGRATION_V18)?;
-                    transaction.execute_batch(MIGRATION_V19)?;
-                    transaction.execute_batch(MIGRATION_V20)?;
-                    transaction.execute_batch(MIGRATION_V22)?;
-                    transaction.execute_batch(MIGRATION_V23)?;
-                    transaction.execute_batch(MIGRATION_V24)?;
-                    transaction.execute_batch(MIGRATION_V25)?;
-                    verify_schema(&transaction, SCHEMA_VERSION)?;
-                }
-                13 => {
-                    verify_schema(&transaction, 13)?;
-                    transaction.execute_batch(MIGRATION_V14)?;
-                    transaction.execute_batch(MIGRATION_V15)?;
-                    transaction.execute_batch(MIGRATION_V16)?;
-                    transaction.execute_batch(MIGRATION_V18)?;
-                    transaction.execute_batch(MIGRATION_V19)?;
-                    transaction.execute_batch(MIGRATION_V20)?;
-                    transaction.execute_batch(MIGRATION_V22)?;
-                    transaction.execute_batch(MIGRATION_V23)?;
-                    transaction.execute_batch(MIGRATION_V24)?;
-                    transaction.execute_batch(MIGRATION_V25)?;
-                    verify_schema(&transaction, SCHEMA_VERSION)?;
-                }
-                14 => {
-                    verify_schema(&transaction, 14)?;
-                    transaction.execute_batch(MIGRATION_V15)?;
-                    transaction.execute_batch(MIGRATION_V16)?;
-                    transaction.execute_batch(MIGRATION_V18)?;
-                    transaction.execute_batch(MIGRATION_V19)?;
-                    transaction.execute_batch(MIGRATION_V20)?;
-                    transaction.execute_batch(MIGRATION_V22)?;
-                    transaction.execute_batch(MIGRATION_V23)?;
-                    transaction.execute_batch(MIGRATION_V24)?;
-                    transaction.execute_batch(MIGRATION_V25)?;
-                    verify_schema(&transaction, SCHEMA_VERSION)?;
-                }
-                15 => {
-                    verify_schema(&transaction, 15)?;
-                    transaction.execute_batch(MIGRATION_V16)?;
-                    transaction.execute_batch(MIGRATION_V18)?;
-                    transaction.execute_batch(MIGRATION_V19)?;
-                    transaction.execute_batch(MIGRATION_V20)?;
-                    transaction.execute_batch(MIGRATION_V22)?;
-                    transaction.execute_batch(MIGRATION_V23)?;
-                    transaction.execute_batch(MIGRATION_V24)?;
-                    transaction.execute_batch(MIGRATION_V25)?;
-                    verify_schema(&transaction, SCHEMA_VERSION)?;
-                }
-                16 => {
-                    verify_schema(&transaction, 16)?;
-                    transaction.execute_batch(MIGRATION_V17)?;
-                    transaction.execute_batch(MIGRATION_V18)?;
-                    transaction.execute_batch(MIGRATION_V19)?;
-                    transaction.execute_batch(MIGRATION_V20)?;
-                    transaction.execute_batch(MIGRATION_V22)?;
-                    transaction.execute_batch(MIGRATION_V23)?;
-                    transaction.execute_batch(MIGRATION_V24)?;
-                    transaction.execute_batch(MIGRATION_V25)?;
-                    verify_schema(&transaction, SCHEMA_VERSION)?;
-                }
-                17 => {
-                    verify_schema(&transaction, 17)?;
-                    transaction.execute_batch(MIGRATION_V18)?;
-                    transaction.execute_batch(MIGRATION_V19)?;
-                    transaction.execute_batch(MIGRATION_V20)?;
-                    transaction.execute_batch(MIGRATION_V22)?;
-                    transaction.execute_batch(MIGRATION_V23)?;
-                    transaction.execute_batch(MIGRATION_V24)?;
-                    transaction.execute_batch(MIGRATION_V25)?;
-                    verify_schema(&transaction, SCHEMA_VERSION)?;
-                }
-                18 => {
-                    verify_schema(&transaction, 18)?;
-                    transaction.execute_batch(MIGRATION_V19)?;
-                    transaction.execute_batch(MIGRATION_V20)?;
-                    transaction.execute_batch(MIGRATION_V22)?;
-                    transaction.execute_batch(MIGRATION_V23)?;
-                    transaction.execute_batch(MIGRATION_V24)?;
-                    transaction.execute_batch(MIGRATION_V25)?;
-                    verify_schema(&transaction, SCHEMA_VERSION)?;
-                }
-                19 => {
-                    verify_schema(&transaction, 19)?;
-                    transaction.execute_batch(MIGRATION_V20)?;
-                    transaction.execute_batch(MIGRATION_V22)?;
-                    transaction.execute_batch(MIGRATION_V23)?;
-                    transaction.execute_batch(MIGRATION_V24)?;
-                    transaction.execute_batch(MIGRATION_V25)?;
-                    verify_schema(&transaction, SCHEMA_VERSION)?;
-                }
-                20 => {
-                    verify_schema(&transaction, 20)?;
-                    transaction.execute_batch(MIGRATION_V22)?;
-                    transaction.execute_batch(MIGRATION_V23)?;
-                    transaction.execute_batch(MIGRATION_V24)?;
-                    verify_schema(&transaction, SCHEMA_VERSION)?;
-                }
-                // The arms every store that exists actually takes. Adding a migration without an
-                // arm for its immediate predecessor leaves the previous ladder intact -- an older
-                // store chains through and looks fine -- while every store already at the last
-                // shipped version refuses startup as `UnsupportedSchemaVersion`.
-                //
-                // 21 has no arm because 21 never shipped: this slice's migration was renumbered
-                // to 24 at its rebase and Evaluation's from 21 to 23, so no store can be at 21.
-                // 22 and 23 CAN exist -- a store bootstrapped between the dispatch and Evaluation
-                // merges is at 22, and every store on main tonight is at 23 -- and neither had an
-                // arm before this commit.
-                22 => {
-                    verify_schema(&transaction, 22)?;
-                    transaction.execute_batch(MIGRATION_V23)?;
-                    transaction.execute_batch(MIGRATION_V24)?;
-                    transaction.execute_batch(MIGRATION_V25)?;
-                    verify_schema(&transaction, SCHEMA_VERSION)?;
-                }
-                23 => {
-                    verify_schema(&transaction, 23)?;
-                    transaction.execute_batch(MIGRATION_V24)?;
-                    transaction.execute_batch(MIGRATION_V25)?;
-                    verify_schema(&transaction, SCHEMA_VERSION)?;
-                }
-                // The immediate predecessor: 0024 landed on `main` first, so every store that
-                // exists is at 24 and this is the arm all of them take.
-                24 => {
-                    verify_schema(&transaction, 24)?;
-                    transaction.execute_batch(MIGRATION_V25)?;
-                    verify_schema(&transaction, SCHEMA_VERSION)?;
-                }
-                SCHEMA_VERSION => verify_schema(&transaction, SCHEMA_VERSION)?,
-                version => return Err(SupervisorError::UnsupportedSchemaVersion(version)),
+        // The ladder is applied from ONE list (`MIGRATION_LADDER`), for both an existing store and
+        // a new one. It used to be stated three times -- twenty-four hand-written match arms, a
+        // hand-written batch for a fresh store, and the test helper -- and the three could disagree
+        // silently: a migration missing from one arm leaves stores at that one version refusing
+        // startup while every other version chains through and looks fine. opus's O3 mutant deleted
+        // a step from the `20 =>` arm and all 255 tests stayed green.
+        let declared = if has_user_schema(&transaction)? {
+            let declared = declared_schema_version(&transaction)?;
+            if !MIGRATION_LADDER
+                .iter()
+                .any(|(produces, _)| *produces == declared)
+            {
+                return Err(SupervisorError::UnsupportedSchemaVersion(declared));
             }
+            // The store is checked against the schema it CLAIMS before anything is applied to it,
+            // so a mis-stamped store is refused rather than migrated from a shape it never had.
+            verify_schema(&transaction, declared)?;
+            declared
         } else {
-            transaction.execute_batch(SCHEMA_V1)?;
-            transaction.execute_batch(MIGRATION_V2)?;
-            transaction.execute_batch(MIGRATION_V3)?;
-            transaction.execute_batch(MIGRATION_V4)?;
-            transaction.execute_batch(MIGRATION_V5)?;
-            transaction.execute_batch(MIGRATION_V6)?;
-            transaction.execute_batch(MIGRATION_V7)?;
-            transaction.execute_batch(MIGRATION_V8)?;
-            transaction.execute_batch(MIGRATION_V9)?;
-            transaction.execute_batch(MIGRATION_V10)?;
-            transaction.execute_batch(MIGRATION_V11)?;
-            transaction.execute_batch(MIGRATION_V12)?;
-            transaction.execute_batch(MIGRATION_V13)?;
-            transaction.execute_batch(MIGRATION_V14)?;
-            transaction.execute_batch(MIGRATION_V15)?;
-            transaction.execute_batch(MIGRATION_V16)?;
-            transaction.execute_batch(MIGRATION_V18)?;
-            transaction.execute_batch(MIGRATION_V19)?;
-            transaction.execute_batch(MIGRATION_V20)?;
-            transaction.execute_batch(MIGRATION_V22)?;
-            transaction.execute_batch(MIGRATION_V23)?;
-            transaction.execute_batch(MIGRATION_V24)?;
-            transaction.execute_batch(MIGRATION_V25)?;
-            verify_schema(&transaction, SCHEMA_VERSION)?;
-        }
+            0
+        };
+        apply_migrations_above(&transaction, declared)?;
+        verify_schema(&transaction, SCHEMA_VERSION)?;
 
         let existing = transaction
             .query_row(
@@ -1143,11 +768,12 @@ fn declared_schema_version(connection: &Connection) -> Result<i64, SupervisorErr
 
 /// The migration ladder as data: each step with the version it produces.
 ///
-/// One list, so a new migration is added in one place rather than in each test that needs one, and
-/// so a test that wants a store at an *older* version builds it from the same source as one that
-/// wants the current schema -- a hand-copied prefix of this list is how a ladder test ends up
-/// proving something about a schema no store was ever in.
-#[cfg(test)]
+/// **One list.** Startup applies it, the schema check builds its expectation from it, and tests that
+/// need a store at some version walk it -- so a new migration is added here and nowhere else. It was
+/// three lists before opus's O3: twenty-four match arms, a fresh-store batch, and this table under
+/// `#[cfg(test)]`, which read as though the problem were solved while production still walked the
+/// hand-written copies. Three statements of one fact disagree silently, and the disagreement is
+/// visible only to whoever is at the one version that was missed.
 const MIGRATION_LADDER: &[(i64, &str)] = &[
     (1, SCHEMA_V1),
     (2, MIGRATION_V2),
@@ -1175,15 +801,24 @@ const MIGRATION_LADDER: &[(i64, &str)] = &[
     (25, MIGRATION_V25),
 ];
 
-/// Applies the ladder up to and including `version`, for tests that need a store at some schema
-/// without a file.
-#[cfg(test)]
+/// Applies the ladder up to and including `version` -- a store at that schema, from nothing.
 pub(crate) fn apply_migrations_through(
     connection: &Connection,
     version: i64,
 ) -> Result<(), SupervisorError> {
     for (produces, migration) in MIGRATION_LADDER {
         if *produces <= version {
+            connection.execute_batch(migration)?;
+        }
+    }
+    Ok(())
+}
+
+/// Applies every step the ladder has above `version`. `0` is a store that does not exist yet, so
+/// the same call serves a fresh store and a migrating one -- there is no second list to forget.
+fn apply_migrations_above(connection: &Connection, version: i64) -> Result<(), SupervisorError> {
+    for (produces, migration) in MIGRATION_LADDER {
+        if *produces > version {
             connection.execute_batch(migration)?;
         }
     }
@@ -1197,80 +832,13 @@ pub(crate) fn apply_every_migration(connection: &Connection) -> Result<(), Super
 }
 
 fn verify_schema(connection: &Connection, version: i64) -> Result<(), SupervisorError> {
-    let expected_connection = Connection::open_in_memory()?;
-    expected_connection.execute_batch(SCHEMA_V1)?;
-    if version >= 2 {
-        expected_connection.execute_batch(MIGRATION_V2)?;
-    }
-    if version >= 3 {
-        expected_connection.execute_batch(MIGRATION_V3)?;
-    }
-    if version >= 4 {
-        expected_connection.execute_batch(MIGRATION_V4)?;
-    }
-    if version >= 5 {
-        expected_connection.execute_batch(MIGRATION_V5)?;
-    }
-    if version >= 6 {
-        expected_connection.execute_batch(MIGRATION_V6)?;
-    }
-    if version >= 7 {
-        expected_connection.execute_batch(MIGRATION_V7)?;
-    }
-    if version >= 8 {
-        expected_connection.execute_batch(MIGRATION_V8)?;
-    }
-    if version >= 9 {
-        expected_connection.execute_batch(MIGRATION_V9)?;
-    }
-    if version >= 10 {
-        expected_connection.execute_batch(MIGRATION_V10)?;
-    }
-    if version >= 11 {
-        expected_connection.execute_batch(MIGRATION_V11)?;
-    }
-    if version >= 12 {
-        expected_connection.execute_batch(MIGRATION_V12)?;
-    }
-    if version >= 13 {
-        expected_connection.execute_batch(MIGRATION_V13)?;
-    }
-    if version >= 14 {
-        expected_connection.execute_batch(MIGRATION_V14)?;
-    }
-    if version >= 15 {
-        expected_connection.execute_batch(MIGRATION_V15)?;
-    }
-    if version >= 16 {
-        expected_connection.execute_batch(MIGRATION_V16_ONLY)?;
-    }
-    if version >= 17 {
-        expected_connection.execute_batch(MIGRATION_V17)?;
-    }
-    if version >= 18 {
-        expected_connection.execute_batch(MIGRATION_V18)?;
-    }
-    if version >= 19 {
-        expected_connection.execute_batch(MIGRATION_V19)?;
-    }
-    if version >= 20 {
-        expected_connection.execute_batch(MIGRATION_V20)?;
-    }
-    if version >= 22 {
-        expected_connection.execute_batch(MIGRATION_V22)?;
-    }
-    if version >= 23 {
-        expected_connection.execute_batch(MIGRATION_V23)?;
-    }
-    if version >= 24 {
-        expected_connection.execute_batch(MIGRATION_V24)?;
-    }
-    if version >= 25 {
-        expected_connection.execute_batch(MIGRATION_V25)?;
-    }
     if !(1..=SCHEMA_VERSION).contains(&version) {
         return Err(SupervisorError::UnsupportedSchemaVersion(version));
     }
+    // The expectation is built from the same one list startup applies, so "what this version should
+    // look like" and "what startup produces" cannot drift apart.
+    let expected_connection = Connection::open_in_memory()?;
+    apply_migrations_through(&expected_connection, version)?;
     let expected = schema_signature(&expected_connection)?;
     let actual = schema_signature(connection)?;
     if actual != expected {
@@ -4375,46 +3943,73 @@ mod tests {
         assert_eq!(after.len(), before.len() + 2);
     }
 
-    /// The ladder arm every store on this branch takes.
+    /// Every version the ladder can produce reaches the current schema.
     ///
-    /// A missing arm for the immediately-previous version is invisible from a fresh store and from
-    /// an old one: older stores chain through and look fine, while every store already at the last
-    /// shipped version refuses startup.
+    /// This is the test opus's O3 asked for, and it is only writable because the ladder is one list:
+    /// it walks `MIGRATION_LADDER`, builds a real store at each version, and makes the real
+    /// `Supervisor::bootstrap` migrate it. Before that list, a step missing from one hand-written
+    /// arm left stores at exactly that version refusing startup -- loud for the operator who hits
+    /// it, silent for everyone else, and invisible to a suite that only ever tests one arm.
+    ///
+    /// Each store is checked against the schema it claims BEFORE bootstrap, so a fixture cannot pass
+    /// by building something no store was ever in.
     #[test]
-    fn a_store_at_the_previous_version_takes_the_ladder_arm() {
-        let previous = 23;
-        let store = TestStore::new("ladder-23-to-25");
-        let connection = Connection::open(&store.path).unwrap();
-        super::apply_migrations_through(&connection, previous).unwrap();
-        super::verify_schema(&connection, previous)
-            .expect("the ladder list must really produce a store at the previous version");
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT version FROM schema_meta WHERE singleton = 1",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-            previous
+    fn every_version_the_ladder_produces_reaches_the_current_schema() {
+        assert!(
+            super::MIGRATION_LADDER.len() >= 20,
+            "the ladder lost its steps"
         );
+        for (version, _) in super::MIGRATION_LADDER {
+            let store = TestStore::new(&format!("ladder-{version}"));
+            let connection = Connection::open(&store.path).unwrap();
+            super::apply_migrations_through(&connection, *version).unwrap();
+            super::verify_schema(&connection, *version)
+                .unwrap_or_else(|_| panic!("the ladder must really produce a store at {version}"));
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT version FROM schema_meta WHERE singleton = 1",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                *version,
+                "the step to {version} did not stamp the version it produces"
+            );
+            drop(connection);
+
+            let report = Supervisor::bootstrap(config(&store.path, "Personal"))
+                .unwrap_or_else(|error| panic!("a store at {version} must migrate: {error:?}"));
+            assert_eq!(report.diagnostics.schema_version, SCHEMA_VERSION);
+        }
+    }
+
+    /// A version the ladder never produces is refused, rather than migrated from a shape no store
+    /// was ever in.
+    #[test]
+    fn a_version_between_two_ladder_steps_is_unsupported() {
+        let between = 21;
+        assert!(
+            !super::MIGRATION_LADDER
+                .iter()
+                .any(|(produces, _)| *produces == between),
+            "21 is a real version now -- pick another gap"
+        );
+        let store = TestStore::new("ladder-between");
+        let connection = Connection::open(&store.path).unwrap();
+        super::apply_migrations_through(&connection, 20).unwrap();
+        connection
+            .execute(
+                "UPDATE schema_meta SET version = ?1 WHERE singleton = 1",
+                rusqlite::params![between],
+            )
+            .unwrap();
         drop(connection);
 
-        let report = Supervisor::bootstrap(config(&store.path, "Personal"))
-            .expect("a store at the previous schema version must migrate");
-
-        assert_eq!(report.diagnostics.schema_version, SCHEMA_VERSION);
-        let connection = Connection::open(&store.path).unwrap();
-        for table in ["measured_spend", "mission_impact_classifications"] {
-            let present: i64 = connection
-                .query_row(
-                    "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
-                    rusqlite::params![table],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(present, 1, "{table} was not created by the migration");
-        }
+        assert!(matches!(
+            Supervisor::bootstrap(config(&store.path, "Personal")),
+            Err(SupervisorError::UnsupportedSchemaVersion(v)) if v == between
+        ));
     }
 
     /// Reads the Event kinds a migration's CHECK constraint admits, out of its own SQL.
