@@ -16,16 +16,16 @@ use std::thread::{self, JoinHandle};
 
 use beacond::{
     AutonomyProfile, BeaconCapability, Conflicts, DeclaredCheck, EvaluationDraft, EvaluationError,
-    EvaluationService, EvaluationSupersedes, Evaluator, Finding, FindingSeverity,
-    InconsistentEvaluation, LocalModelActivationService, LocalModelEndpoint, MalformedEvaluation,
-    MissionDraft, MissionMemberDraft, MissionService, OperatorAccountService, OperatorSessionPhase,
-    ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService,
-    ProjectRepositoryService, ProjectService, ProposalService, ProviderFeature, RepositoryDraft,
-    RepositorySourceKind, ResidentConfigurationService, ResidentLifecycleService,
-    RubricDeclaration, SecretString, StarterOrganizationService, StarterResidentDraft, StarterRole,
-    StartupConfig, Supervisor, TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
-    TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft, TeamService,
-    TrackRecordEvidenceKind, TrackRecordRequirement, UnmetPrecondition, Verdict,
+    EvaluationService, EvaluationSubjectDraft, EvaluationSupersedes, Evaluator, Finding,
+    FindingSeverity, InconsistentEvaluation, LocalModelActivationService, LocalModelEndpoint,
+    MalformedEvaluation, MissionDraft, MissionMemberDraft, MissionService, OperatorAccountService,
+    OperatorSessionPhase, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft,
+    ProjectPolicyService, ProjectRepositoryService, ProjectService, ProposalService,
+    ProviderFeature, RepositoryDraft, RepositorySourceKind, ResidentConfigurationService,
+    ResidentLifecycleService, RubricDeclaration, SecretString, StarterOrganizationService,
+    StarterResidentDraft, StarterRole, StartupConfig, Supervisor, TeamDraft, TeamLeadAmbiguityRule,
+    TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
+    TeamService, TrackRecordEvidenceKind, TrackRecordRequirement, UnmetPrecondition, Verdict,
 };
 use data_encoding::{BASE64, HEXLOWER};
 use rusqlite::Connection;
@@ -551,7 +551,7 @@ impl Fixture {
 
 fn evaluation_draft(fixture: &Fixture, proposal_digest: &str) -> EvaluationDraft {
     EvaluationDraft {
-        proposal_digest: proposal_digest.to_owned(),
+        subject: EvaluationSubjectDraft::Proposal(proposal_digest.to_owned()),
         // The OTHER Resident: the author cannot evaluate their own Proposal, and slice 2 makes
         // that structural. Slice 1 uses a non-author because the fixture has one.
         evaluator: Evaluator {
@@ -1537,7 +1537,7 @@ fn superseding_any_link_but_the_current_tail_is_refused() {
             refuse(EvaluationSupersedes::Evaluation(
                 elsewhere.digest().value.clone()
             )),
-            EvaluationError::Inconsistent(InconsistentEvaluation::SupersedesOtherProposal)
+            EvaluationError::Inconsistent(InconsistentEvaluation::SupersedesOtherSubject)
         ),
         "another Proposal's Evaluation was not told apart"
     );
