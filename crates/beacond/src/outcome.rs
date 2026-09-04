@@ -1851,17 +1851,23 @@ impl Markdown {
         Self { out: String::new() }
     }
 
+    /// Appends one line, or refuses before appending it.
+    ///
+    /// The cap is checked against the line's projected total, not against the buffer after it has
+    /// already grown: a bound that exists to prevent work must run before the work. `String` also
+    /// grows geometrically, so an append that overshoots the cap can double a megabyte of buffer
+    /// on the way to reporting that a megabyte was too much.
     fn line(&mut self, text: &str) -> Result<(), BoundRefusal> {
-        self.out.push_str(text);
-        self.out.push('\n');
-        let observed = self.out.len() as u64;
-        if observed > MAX_EMITTED_MARKDOWN_BYTES {
+        let projected = self.out.len() as u64 + text.len() as u64 + 1;
+        if projected > MAX_EMITTED_MARKDOWN_BYTES {
             return Err(BoundRefusal {
                 bound: OutcomeBound::EmittedMarkdownBytes,
                 configured: MAX_EMITTED_MARKDOWN_BYTES,
-                observed_at_least: observed,
+                observed_at_least: projected,
             });
         }
+        self.out.push_str(text);
+        self.out.push('\n');
         Ok(())
     }
 
@@ -1908,6 +1914,21 @@ pub fn render(
     manifest: &OutcomeManifestV1,
     sources: &VerifiedSources,
 ) -> Result<String, OutcomeRefusal> {
+    // Bounds first, on the manifest exactly as supplied, before anything is cloned, sorted, or
+    // serialized. Canonicalization is the allocation these two bounds exist to prevent -- it clones
+    // and sorts every collection into a fresh byte vector -- so a bound checked after it has
+    // already paid for what it refuses. Sorting cannot change the census either: it reorders a set
+    // it does not add to.
+    let citations = citation_census(manifest).map_err(OutcomeRefusal::Bound)?;
+    debug_assert!(citations <= MAX_CITATIONS);
+    if sources.verified_source_bytes > MAX_VERIFIED_SOURCE_BYTES {
+        return Err(OutcomeRefusal::Bound(BoundRefusal {
+            bound: OutcomeBound::VerifiedSourceBytes,
+            configured: MAX_VERIFIED_SOURCE_BYTES,
+            observed_at_least: sources.verified_source_bytes,
+        }));
+    }
+
     // The canonical bytes are the identity, and rendering works from exactly them: encoding sorts
     // every array, so decoding them back is how insertion order is proved not to reach the
     // document.
@@ -1918,17 +1939,6 @@ pub fn render(
 
     let escape =
         escaping_for(&manifest.renderer_version).ok_or(MalformedOutcome::UnknownVersion)?;
-
-    // Bounds first, cheapest first, before a byte of the document exists.
-    let citations = citation_census(&manifest).map_err(OutcomeRefusal::Bound)?;
-    debug_assert!(citations <= MAX_CITATIONS);
-    if sources.verified_source_bytes > MAX_VERIFIED_SOURCE_BYTES {
-        return Err(OutcomeRefusal::Bound(BoundRefusal {
-            bound: OutcomeBound::VerifiedSourceBytes,
-            configured: MAX_VERIFIED_SOURCE_BYTES,
-            observed_at_least: sources.verified_source_bytes,
-        }));
-    }
 
     check_sources(&manifest, sources)?;
 
@@ -2603,5 +2613,40 @@ fn appendix_rule(manifest: &OutcomeManifestV1) -> &'static str {
         "the caller requested `include`; there is no way to request omission"
     } else {
         "the caller requested `policy_default` and the verified Policy classification is not high-impact"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The emitted-Markdown cap is checked before the append, and this is the only place that can
+    /// be measured: `render` drops the buffer on refusal, so no caller can observe how large it
+    /// grew. Moving the check after `push_str` leaves the buffer over the cap and turns this red.
+    #[test]
+    fn the_markdown_cap_refuses_before_the_append_that_would_exceed_it() {
+        let mut document = Markdown::new();
+        let filler = "x".repeat(1_000);
+        while (document.out.len() as u64) < MAX_EMITTED_MARKDOWN_BYTES - 1_002 {
+            document.line(&filler).expect("under the cap");
+        }
+        let before = document.out.len() as u64;
+        assert!(before < MAX_EMITTED_MARKDOWN_BYTES);
+
+        let overshoot = "y".repeat(usize::try_from(MAX_EMITTED_MARKDOWN_BYTES).unwrap());
+        let refusal = document.line(&overshoot).expect_err("over the cap");
+
+        assert_eq!(refusal.bound, OutcomeBound::EmittedMarkdownBytes);
+        assert_eq!(refusal.configured, MAX_EMITTED_MARKDOWN_BYTES);
+        assert_eq!(
+            refusal.observed_at_least,
+            before + overshoot.len() as u64 + 1,
+            "the refusal did not report the projected total"
+        );
+        assert_eq!(
+            document.out.len() as u64,
+            before,
+            "the buffer grew past the cap before the cap was checked"
+        );
     }
 }

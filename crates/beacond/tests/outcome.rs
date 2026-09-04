@@ -1395,6 +1395,53 @@ fn outcome_renderer_refuses_markdown_over_1_mib_without_partial_output() {
     );
 }
 
+/// gpt2's specification review, P1: the bounds exist to prevent work, so they must run before the
+/// work they prevent.
+///
+/// Order is observable without measuring allocation. A manifest that is both over a bound *and*
+/// impossible to canonicalize can only report one of the two, and which one it reports says which
+/// ran first. Canonicalization is where every supplied collection is cloned, sorted, and serialized
+/// into a fresh byte vector, so a bound checked after it has already paid for what it was meant to
+/// refuse.
+#[test]
+fn outcome_bounds_are_checked_before_the_work_they_prevent() {
+    // The citation bound runs before canonicalization.
+    let (mut manifest, sources) = bounded_manifest(254);
+    manifest.renderer_version = "beacon.outcome.md.v99".to_owned();
+    assert_eq!(
+        manifest
+            .canonical_bytes()
+            .expect_err("this manifest cannot encode"),
+        MalformedOutcome::UnknownVersion
+    );
+    let refusal = render(&manifest, &sources).expect_err("refuses");
+    assert_eq!(
+        bound_refusal(refusal).bound,
+        OutcomeBound::CitationCount,
+        "the manifest was canonicalized before its citation bound was checked"
+    );
+
+    // The source-bytes bound runs before canonicalization too.
+    let (mut manifest, mut sources) = bounded_manifest(1);
+    manifest.renderer_version = "beacon.outcome.md.v99".to_owned();
+    sources.verified_source_bytes = 16 * 1024 * 1024 + 1;
+    let refusal = render(&manifest, &sources).expect_err("refuses");
+    assert_eq!(
+        bound_refusal(refusal).bound,
+        OutcomeBound::VerifiedSourceBytes,
+        "the manifest was canonicalized before its source-byte bound was checked"
+    );
+
+    // And the two keep their order relative to each other: the cheaper one bites first.
+    let (mut manifest, mut sources) = bounded_manifest(254);
+    manifest.renderer_version = "beacon.outcome.md.v99".to_owned();
+    sources.verified_source_bytes = 16 * 1024 * 1024 + 1;
+    assert_eq!(
+        bound_refusal(render(&manifest, &sources).expect_err("refuses")).bound,
+        OutcomeBound::CitationCount
+    );
+}
+
 #[test]
 fn outcome_each_bound_names_itself_and_is_distinct_from_other_bounds_and_absence() {
     let names = [
