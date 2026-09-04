@@ -733,3 +733,22 @@ fn spend_has_no_cross_unit_total_and_no_within_budget_predicate() {
         );
     }
 }
+
+/// ADR 0042 publishes this record's byte count and digest. Pinning them here makes those numbers
+/// load-bearing: a layout change fails a named test instead of leaving a document that quietly
+/// describes a grammar the code no longer has.
+#[test]
+fn a_known_spend_fixture_reproduces_its_published_digest() {
+    let bytes = fixture().canonical_bytes().expect("encodes");
+    assert_eq!(bytes.len(), 182, "ADR 0042 publishes 182 canonical bytes");
+    assert_eq!(
+        fixture().digest().expect("digest").value,
+        "9461d5deeba593e027dae523f3040515feea0ab5cb7b35cbf120a119ff7e774b"
+    );
+
+    // The envelope travels with the value: a digest without the function that produced it names
+    // nothing.
+    let digest = fixture().digest().expect("digest");
+    assert_eq!(digest.algorithm, "sha256");
+    assert_eq!(digest.canonicalizer, "beacon.spend.v1");
+}
