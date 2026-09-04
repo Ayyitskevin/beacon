@@ -41,23 +41,26 @@ This document is a record. Nothing derives permission to proceed, Mission comple
 
 ### 2.1 `sc-alpha`
 
+The exporter writes canonical Markdown for every completed Mission.
+
 - ordinal: `1`
-- statement: The exporter writes canonical Markdown for every completed Mission.
 - state: `verified` (`met`)
 - citations:
     - `artifact` `00000000-0000-4000-8000-000000000006` schema `1` `sha256:4444444444444444444444444444444444444444444444444444444444444444` (`beacon.artifact.v1`)
 
 ### 2.2 `sc-beta`
 
+A reviewer who is not the author evaluates the candidate.
+
 - ordinal: `2`
-- statement: A reviewer who is not the author evaluates the candidate.
 - state: `not_evaluated` (reason: no Evaluation names this condition at the boundary event.)
 - citations: `absent` (reason: the completion recorded no supporting object for this condition.)
 
 ### 2.3 `sc-gamma`
 
+The check harness runs on a clean host.
+
 - ordinal: `3`
-- statement: The check harness runs on a clean host.
 - state: `broken` (reason: the delivered check harness exited before producing a result.)
 - citations: `verified`: zero entries were recorded at the boundary event. This is not `absent`.
 
@@ -79,11 +82,15 @@ No amount is stated. An unmeasured or absent spend record is not zero spend.
 
 ## 6. Unfinished work
 
-- ordinal `1` `uw-docs`: The operator runbook was not updated for the new export path.
+### 6.1 `uw-docs` (ordinal `1`)
+
+The operator runbook was not updated for the new export path.
 
 ## 7. Uncertainty
 
-- ordinal `1` `un-latency`: Render latency was measured on one host only.
+### 7.1 `un-latency` (ordinal `1`)
+
+Render latency was measured on one host only.
 
 ## 8. Rulings and Proposal lineage
 

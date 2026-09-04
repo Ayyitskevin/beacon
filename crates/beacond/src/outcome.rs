@@ -529,8 +529,18 @@ pub enum MalformedOutcome {
     DigestEnvelope,
     /// A pinned revision that is not its declared kind's canonical form.
     PinnedRevision,
-    /// Text that is empty, padded, over-long, control-bearing, or -- in v1 -- multi-line.
-    Text,
+    /// Text with no scalars at all.
+    EmptyText,
+    /// Text with leading or trailing whitespace. Trimming it would alter a stored value.
+    UntrimmedText,
+    /// Text longer than the versioned scalar limit.
+    TextTooLong,
+    /// A control character other than LF or TAB. LF is narrative structure and TAB is content;
+    /// everything else in that class is refused, and this names which refusal fired.
+    ControlCharacter,
+    /// A line break in a value whose rendered position is a table cell. Narrative text may carry
+    /// line breaks; a label cannot, because one would end the row.
+    LineBreakInLabel,
     /// A token outside `[a-z0-9._-]`, or one that is not already canonical lowercase.
     Token,
     /// A canonicalizer or renderer version this build does not implement.
@@ -563,7 +573,11 @@ impl MalformedOutcome {
             Self::DigestValue => "digest_value",
             Self::DigestEnvelope => "digest_envelope",
             Self::PinnedRevision => "pinned_revision",
-            Self::Text => "text",
+            Self::EmptyText => "empty_text",
+            Self::UntrimmedText => "untrimmed_text",
+            Self::TextTooLong => "text_too_long",
+            Self::ControlCharacter => "control_character",
+            Self::LineBreakInLabel => "line_break_in_label",
             Self::Token => "token",
             Self::UnknownVersion => "unknown_version",
             Self::NonCanonicalOrder => "non_canonical_order",
@@ -805,19 +819,41 @@ fn require_token(value: &str) -> Result<(), MalformedOutcome> {
     }
 }
 
-/// Human text a renderer may escape and emit.
+/// Narrative text: prose a reader is meant to read, rendered as CommonMark blocks.
 ///
-/// Single-line in v1: the fixed Markdown shape puts human text in table cells and list items,
-/// where a line break changes the structure. Neutralizing one would need raw HTML, which is
-/// forbidden, and replacing it with a space silently alters a stored value. So v1 refuses it and
-/// ADR 0040 records the limitation.
-fn require_human_text(value: &str) -> Result<(), MalformedOutcome> {
-    if value.is_empty()
-        || value.trim() != value
-        || value.chars().count() > MAX_TEXT_SCALARS
-        || value.chars().any(char::is_control)
+/// LF is structure and is preserved; TAB is content and is preserved. Every other control
+/// character is refused, and each refusal names itself: "empty", "padded", "too long" and
+/// "carries a control character" are four different faults and one name for all four tells a
+/// caller nothing about which it hit.
+fn require_narrative_text(value: &str) -> Result<(), MalformedOutcome> {
+    if value.is_empty() {
+        return Err(MalformedOutcome::EmptyText);
+    }
+    if value.trim() != value {
+        return Err(MalformedOutcome::UntrimmedText);
+    }
+    if value.chars().count() > MAX_TEXT_SCALARS {
+        return Err(MalformedOutcome::TextTooLong);
+    }
+    if value
+        .chars()
+        .any(|character| character.is_control() && character != '\n' && character != '\t')
     {
-        return Err(MalformedOutcome::Text);
+        return Err(MalformedOutcome::ControlCharacter);
+    }
+    Ok(())
+}
+
+/// Label text: a short value whose rendered position is a table cell.
+///
+/// Everything narrative text must be, plus no line break. A line break in a cell ends the row, and
+/// the two honest alternatives -- raw HTML, or replacing it with a space -- are respectively
+/// forbidden and a silent alteration of a stored value. So a label refuses it, by a name that says
+/// which rule it broke rather than by the narrative rule's name.
+fn require_label_text(value: &str) -> Result<(), MalformedOutcome> {
+    require_narrative_text(value)?;
+    if value.contains('\n') {
+        return Err(MalformedOutcome::LineBreakInLabel);
     }
     Ok(())
 }
@@ -1043,7 +1079,7 @@ fn encode_state<T>(
         OutcomeState::Absent(reason)
         | OutcomeState::Broken(reason)
         | OutcomeState::NotEvaluated(reason) => {
-            require_human_text(reason)?;
+            require_label_text(reason)?;
             encoder.string(reason, MAX_TEXT_BYTES)
         }
     }
@@ -1058,7 +1094,7 @@ fn decode_state<T>(
         return Ok(OutcomeState::Verified(value(decoder)?));
     }
     let reason = decoder.string(MAX_TEXT_BYTES)?;
-    require_human_text(&reason)?;
+    require_label_text(&reason)?;
     match tag {
         TAG_STATE_ABSENT => Ok(OutcomeState::Absent(reason)),
         TAG_STATE_BROKEN => Ok(OutcomeState::Broken(reason)),
@@ -1815,6 +1851,47 @@ fn require_no_extra_text(
     Ok(())
 }
 
+/// Renders one narrative value as CommonMark blocks, preserving its LF structure exactly.
+///
+/// A run of blank lines is a paragraph break; every other newline is a hard line break, written as
+/// a trailing backslash rather than two trailing spaces because the byte rules forbid trailing
+/// whitespace. Every line goes through the versioned escaping function first, so no stored value
+/// becomes structure, and nothing is added to or removed from the text itself.
+///
+/// A leading TAB is preserved and may render as indentation. That is a rendering effect of a value
+/// Beacon was told to keep, not an alteration of it.
+fn narrative_lines(value: &str, escape: Escaper) -> Vec<String> {
+    fn flush(paragraph: &mut Vec<String>, out: &mut Vec<String>) {
+        if paragraph.is_empty() {
+            return;
+        }
+        if !out.is_empty() {
+            out.push(String::new());
+        }
+        let last = paragraph.len() - 1;
+        for (index, line) in paragraph.iter().enumerate() {
+            out.push(if index == last {
+                line.clone()
+            } else {
+                format!("{line}\\")
+            });
+        }
+        paragraph.clear();
+    }
+
+    let mut out = Vec::new();
+    let mut paragraph = Vec::new();
+    for line in value.split('\n') {
+        if line.is_empty() {
+            flush(&mut paragraph, &mut out);
+        } else {
+            paragraph.push(escape(line));
+        }
+    }
+    flush(&mut paragraph, &mut out);
+    out
+}
+
 /// A media type as its owning Artifact module stored it.
 ///
 /// Validated rather than escaped, because it renders inside a code span where a backslash would be
@@ -1970,7 +2047,7 @@ fn check_sources(
     manifest: &OutcomeManifestV1,
     sources: &VerifiedSources,
 ) -> Result<(), OutcomeRefusal> {
-    require_human_text(&sources.mission_title)?;
+    require_label_text(&sources.mission_title)?;
 
     let mut condition_ids = BTreeSet::new();
     for condition in &manifest.success_conditions {
@@ -1979,7 +2056,7 @@ fn check_sources(
             "success condition",
             &condition.condition_id,
         )?;
-        require_human_text(statement)?;
+        require_narrative_text(statement)?;
         condition_ids.insert(condition.condition_id.clone());
     }
     require_no_extra_text(
@@ -2000,7 +2077,7 @@ fn check_sources(
         if let Some(items) = state.verified() {
             for item in items {
                 let text = lookup_text(values, kind, &item.item_id)?;
-                require_human_text(text)?;
+                require_narrative_text(text)?;
                 ids.insert(item.item_id.clone());
             }
         }
@@ -2016,7 +2093,7 @@ fn check_sources(
                 if artifact.object_id == reference.object_id {
                     found += 1;
                     require_media_type(&artifact.media_type)?;
-                    require_human_text(&artifact.title)?;
+                    require_label_text(&artifact.title)?;
                 }
             }
             match found {
@@ -2192,14 +2269,17 @@ fn render_body(
             condition.condition_id
         ))?;
         document.blank()?;
-        document.line(&format!("- ordinal: `{}`", condition.ordinal))?;
         let statement = sources
             .condition_statements
             .iter()
             .find(|value| value.id == condition.condition_id)
             .map(|value| value.text.as_str())
             .unwrap_or_default();
-        document.line(&format!("- statement: {}", escape(statement)))?;
+        for line in narrative_lines(statement, escape) {
+            document.line(&line)?;
+        }
+        document.blank()?;
+        document.line(&format!("- ordinal: `{}`", condition.ordinal))?;
         match &condition.outcome {
             OutcomeState::Verified(result) => document.line(&format!(
                 "- state: `{}` (`{}`)",
@@ -2305,6 +2385,7 @@ fn render_body(
     document.blank()?;
     render_narrative(
         document,
+        6,
         &manifest.unfinished_work,
         &sources.unfinished_work,
         escape,
@@ -2315,6 +2396,7 @@ fn render_body(
     document.blank()?;
     render_narrative(
         document,
+        7,
         &manifest.uncertainty,
         &sources.uncertainty,
         escape,
@@ -2397,6 +2479,7 @@ fn render_ref_table(
 
 fn render_narrative(
     document: &mut Markdown,
+    section: usize,
     state: &OutcomeState<Vec<NarrativeRef>>,
     values: &[VerifiedText],
     escape: Escaper,
@@ -2404,18 +2487,25 @@ fn render_narrative(
     match state {
         OutcomeState::Verified(items) if items.is_empty() => document.line(VERIFIED_EMPTY),
         OutcomeState::Verified(items) => {
-            for item in items {
+            for (position, item) in items.iter().enumerate() {
                 let text = values
                     .iter()
                     .find(|value| value.id == item.item_id)
                     .map(|value| value.text.as_str())
                     .unwrap_or_default();
+                if position > 0 {
+                    document.blank()?;
+                }
                 document.line(&format!(
-                    "- ordinal `{}` `{}`: {}",
-                    item.ordinal,
+                    "### {section}.{} `{}` (ordinal `{}`)",
+                    position + 1,
                     item.item_id,
-                    escape(text)
+                    item.ordinal
                 ))?;
+                document.blank()?;
+                for line in narrative_lines(text, escape) {
+                    document.line(&line)?;
+                }
             }
             Ok(())
         }
