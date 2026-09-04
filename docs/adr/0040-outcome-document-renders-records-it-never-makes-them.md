@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # The Outcome Document renders records; it never makes one

@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Dispatch a change only on an in-force Ruling, an exact Proposal, and one Candidate
