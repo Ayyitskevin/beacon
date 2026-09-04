@@ -41,8 +41,10 @@ use crate::proposal::{
 };
 use crate::{OperatorAccountError, OperatorAccountService, ProposalError};
 
-/// The canonicalizer identity. Any future grammar is a new canonicalizer; existing v1 bytes are
-/// never reinterpreted under v2 rules.
+/// The canonicalizer identity. Existing v1 bytes are never reinterpreted under v2 rules, and
+/// the name survives a RESERVED tag assignment: a change that alters the byte layout of records
+/// that already exist takes a new canonicalizer; a change that assigns a value in a published
+/// tag position (the `0x02`/`0x03` reservations, ADR 0038's 2026-09-04 amendment) does not.
 const CANONICALIZER: &str = "beacon.evaluation.v1";
 const DIGEST_ALGORITHM: &str = "sha256";
 
