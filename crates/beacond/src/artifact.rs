@@ -31,7 +31,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use data_encoding::{BASE64, HEXLOWER};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -1267,85 +1267,19 @@ impl ArtifactService {
     ) -> Result<VerifiedArtifactRecord, ArtifactError> {
         self.accounts.with_authenticated_store(|connection, now| {
             let recorded_at_ms = u64::try_from(now).map_err(|_| ArtifactError::InvalidStore)?;
-            let media_type = kind.media_type().to_owned();
-            let payload = ArtifactV1 {
-                workspace_id: self.workspace_id,
-                kind,
-                media_type,
-                content_digest: ArtifactDigest {
-                    algorithm: DIGEST_ALGORITHM.to_owned(),
-                    canonicalizer: RAW_CONTENT_CANONICALIZER.to_owned(),
-                    value: HEXLOWER.encode(&sha256(content)),
-                },
-                content_bytes: u64::try_from(content.len())
-                    .map_err(|_| ArtifactError::InvalidStore)?,
-                accountable_resident_id,
-                accountable_configuration_id,
-                context,
-                supersedes,
-                recorded_at_ms,
-            };
-            // The codec's own refusals, run on the value the service just built: the encoder is
-            // the only producer of these bytes, and its bounds are the module's.
-            let canonical_bytes = payload.canonical_bytes()?;
-
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            if let Some(stored) =
-                load_stored(&transaction, self.workspace_id, &payload.digest()?.value)?
-            {
-                if stored.canonical_bytes != canonical_bytes || stored.content_inline != content {
-                    return Err(ArtifactError::DigestCollision);
-                }
-                let verified = verified_artifact_within(
-                    &transaction,
-                    self.workspace_id,
-                    &stored.digest_value,
-                )?
-                .ok_or(ArtifactError::InvalidStore)?;
-                transaction.commit()?;
-                return Ok(verified);
-            }
-
-            validate_references(&transaction, self.workspace_id, &payload)?;
-            validate_supersession(&transaction, self.workspace_id, &payload)?;
-
-            let content_digest = payload.content_digest.clone();
-            let stored = StoredArtifact {
-                workspace_id: self.workspace_id,
-                digest_value: payload.digest()?.value,
-                canonical_bytes,
-                content_inline: content.to_vec(),
-                kind: kind.as_str().to_owned(),
-                media_type: kind.media_type().to_owned(),
-                content_bytes: payload.content_bytes,
+            let verified = record_artifact_within(
+                &transaction,
+                self.workspace_id,
+                recorded_at_ms,
+                kind,
+                content,
+                context,
                 accountable_resident_id,
                 accountable_configuration_id,
-                context_kind: match &payload.context {
-                    ArtifactContext::None => "none".to_owned(),
-                    ArtifactContext::Mission { .. } => "mission".to_owned(),
-                },
-                context_project_id: match &payload.context {
-                    ArtifactContext::Mission { project_id, .. } => Some(*project_id),
-                    ArtifactContext::None => None,
-                },
-                context_mission_id: match &payload.context {
-                    ArtifactContext::Mission { mission_id, .. } => Some(*mission_id),
-                    ArtifactContext::None => None,
-                },
-                has_predecessor: payload.supersedes.is_some(),
-                supersedes_digest: payload.supersedes.map(|digest| HEXLOWER.encode(&digest)),
-                recorded_at_ms,
-                // The cursor IS the paired Event's position. The Event is written first and the
-                // row carries its sequence; `artifacts_no_update` makes any later correction
-                // impossible, which is exactly the guarantee reconciliation relies on.
-                creation_event_seq: 1,
-            };
-            let digest_value = stored.digest_value.clone();
-            insert_artifact(&transaction, &stored, &content_digest)?;
-            let verified =
-                verified_artifact_within(&transaction, self.workspace_id, &digest_value)?
-                    .ok_or(ArtifactError::InvalidStore)?;
+                supersedes,
+            )?;
             transaction.commit()?;
             Ok(verified)
         })
@@ -1374,6 +1308,101 @@ impl ArtifactService {
             supersession_tail(connection, self.workspace_id, digest)
         })
     }
+}
+
+/// Records one Artifact INSIDE a caller's transaction: the row, its `artifact.recorded` Event, and
+/// its supersession link, or nothing at all.
+///
+/// `ArtifactService::record` is this function plus an authenticated store and a commit. It is
+/// split out because a caller that must write an Artifact and its own record in ONE transaction
+/// cannot go through the service: `with_authenticated_store` holds the account mutex, so calling
+/// the service from inside another `with_authenticated_store` closure would deadlock, and calling
+/// it outside one would commit the Artifact before the record that names it. `prepare` is that
+/// caller (ADR 0040): a candidate Artifact with no manifest is an Outcome Document nothing can be
+/// verified against.
+///
+/// `recorded_at_ms` is the caller's authenticated service clock, never caller input -- the same
+/// value `record` stamps, passed rather than re-read so both writes in one transaction carry one
+/// time.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record_artifact_within(
+    transaction: &Transaction<'_>,
+    workspace_id: Uuid,
+    recorded_at_ms: u64,
+    kind: ArtifactKind,
+    content: &[u8],
+    context: ArtifactContext,
+    accountable_resident_id: Uuid,
+    accountable_configuration_id: Uuid,
+    supersedes: Option<[u8; 32]>,
+) -> Result<VerifiedArtifactRecord, ArtifactError> {
+    let media_type = kind.media_type().to_owned();
+    let payload = ArtifactV1 {
+        workspace_id,
+        kind,
+        media_type,
+        content_digest: ArtifactDigest {
+            algorithm: DIGEST_ALGORITHM.to_owned(),
+            canonicalizer: RAW_CONTENT_CANONICALIZER.to_owned(),
+            value: HEXLOWER.encode(&sha256(content)),
+        },
+        content_bytes: u64::try_from(content.len()).map_err(|_| ArtifactError::InvalidStore)?,
+        accountable_resident_id,
+        accountable_configuration_id,
+        context,
+        supersedes,
+        recorded_at_ms,
+    };
+    // The codec's own refusals, run on the value the service just built: the encoder is the only
+    // producer of these bytes, and its bounds are the module's.
+    let canonical_bytes = payload.canonical_bytes()?;
+
+    if let Some(stored) = load_stored(transaction, workspace_id, &payload.digest()?.value)? {
+        if stored.canonical_bytes != canonical_bytes || stored.content_inline != content {
+            return Err(ArtifactError::DigestCollision);
+        }
+        return verified_artifact_within(transaction, workspace_id, &stored.digest_value)?
+            .ok_or(ArtifactError::InvalidStore);
+    }
+
+    validate_references(transaction, workspace_id, &payload)?;
+    validate_supersession(transaction, workspace_id, &payload)?;
+
+    let content_digest = payload.content_digest.clone();
+    let stored = StoredArtifact {
+        workspace_id,
+        digest_value: payload.digest()?.value,
+        canonical_bytes,
+        content_inline: content.to_vec(),
+        kind: kind.as_str().to_owned(),
+        media_type: kind.media_type().to_owned(),
+        content_bytes: payload.content_bytes,
+        accountable_resident_id,
+        accountable_configuration_id,
+        context_kind: match &payload.context {
+            ArtifactContext::None => "none".to_owned(),
+            ArtifactContext::Mission { .. } => "mission".to_owned(),
+        },
+        context_project_id: match &payload.context {
+            ArtifactContext::Mission { project_id, .. } => Some(*project_id),
+            ArtifactContext::None => None,
+        },
+        context_mission_id: match &payload.context {
+            ArtifactContext::Mission { mission_id, .. } => Some(*mission_id),
+            ArtifactContext::None => None,
+        },
+        has_predecessor: payload.supersedes.is_some(),
+        supersedes_digest: payload.supersedes.map(|digest| HEXLOWER.encode(&digest)),
+        recorded_at_ms,
+        // The cursor IS the paired Event's position. The Event is written first and the row
+        // carries its sequence; `artifacts_no_update` makes any later correction impossible, which
+        // is exactly the guarantee reconciliation relies on.
+        creation_event_seq: 1,
+    };
+    let digest_value = stored.digest_value.clone();
+    insert_artifact(transaction, &stored, &content_digest)?;
+    verified_artifact_within(transaction, workspace_id, &digest_value)?
+        .ok_or(ArtifactError::InvalidStore)
 }
 
 /// Requires one Event per Artifact whose decoded byte field exactly equals the stored record
