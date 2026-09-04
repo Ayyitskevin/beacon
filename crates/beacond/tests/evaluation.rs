@@ -2807,3 +2807,251 @@ fn an_artifact_subject_evaluation_written_past_the_command_refuses_startup() {
         "refused for the wrong reason: {error}"
     );
 }
+
+/// sol1's P0 probe, committed as its test: an unchanged store holding one valid Artifact-subject
+/// Evaluation must still start.
+///
+/// `verify_evaluation_state` enumerated chains with `SELECT DISTINCT workspace_id, proposal_digest`
+/// read as `String`, and migration 0028 makes that column NULL for the Artifact arm -- so the first
+/// valid Artifact Evaluation made the whole store refuse startup. A Proposal-only call site the arm
+/// did not generalize. The positive control -- recording and reading before the restart -- is what
+/// makes the restart assertion mean something.
+#[test]
+fn a_valid_artifact_subject_evaluation_survives_restart() {
+    let fixture = admitted_mission("artifact-subject-restart-positive");
+    let artifact = fixture
+        .record_artifact(b"# Outcome\n\nAuthored by one Resident and evaluated by the other.\n");
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+    let recorded = evaluations
+        .record(fixture.artifact_evaluation_draft(&artifact.digest().value))
+        .expect("the valid Artifact-subject Evaluation records");
+    evaluations
+        .get(&recorded.digest().value)
+        .expect("the positive control reads before restart");
+
+    let restart = Supervisor::bootstrap(StartupConfig {
+        store_path: fixture.store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    });
+    assert!(
+        restart.is_ok(),
+        "an unchanged store holding a valid Artifact-subject Evaluation refused restart: \
+         {restart:?}"
+    );
+}
+
+/// sol1's both-links probe, committed as its test (R12.10 applied twice).
+///
+/// A surface showing an Evaluation of an Artifact shows the cited Evaluation digest with its chain
+/// tail AND the cited Artifact digest with its supersession tail -- **beside, never instead**. E2
+/// made Artifact-subject Evaluations readable through the public service, so deferring this field
+/// left a temporarily lying surface rather than an uncalled seam.
+#[test]
+fn an_artifact_evaluation_surface_reports_the_subject_artifacts_successor() {
+    let fixture = admitted_mission("artifact-subject-both-links");
+    let artifact = fixture.record_artifact(b"# Outcome\n\nFirst version.\n");
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+    let evaluation = evaluations
+        .record(fixture.artifact_evaluation_draft(&artifact.digest().value))
+        .expect("the Artifact-subject Evaluation records");
+    assert_eq!(
+        evaluation.subject_superseded_by(),
+        None,
+        "nothing has superseded the subject yet"
+    );
+
+    let predecessor = HEXLOWER.decode(artifact.digest().value.as_bytes()).unwrap();
+    let mut predecessor_digest = [0_u8; 32];
+    predecessor_digest.copy_from_slice(&predecessor);
+    let successor = fixture
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            b"# Outcome\n\nSecond version.\n",
+            ArtifactContext::Mission {
+                project_id: fixture.project_id,
+                mission_id: fixture.mission_id,
+            },
+            fixture.resident_id,
+            fixture.configuration_id,
+            Some(predecessor_digest),
+        )
+        .expect("the subject Artifact is superseded");
+
+    let reread = evaluations.get(&evaluation.digest().value).unwrap();
+    assert_eq!(
+        reread.subject_superseded_by(),
+        Some(successor.digest().value.as_str()),
+        "the Evaluation surface omits the cited Artifact's read-time successor"
+    );
+    // BESIDE, never instead: the citation still names the exact bytes evaluated, and the
+    // Evaluation's own chain tail is a different fact again.
+    assert_eq!(
+        reread.payload().subject.digest_value(),
+        artifact.digest().value,
+        "the cited digest was resolved to the successor"
+    );
+    assert_eq!(reread.force().superseded_by(), None);
+}
+
+/// sol1's rekey probe, committed as its test: a v1 Evaluation chain recorded BEFORE the migration
+/// survives the real 27 -> 28 startup byte-identically.
+///
+/// `proposal_subject_records_keep_their_proposal_digest_and_chain_after_the_rekey` builds its
+/// fixture at the CURRENT schema, so it checks the new schema's behaviour and never crosses the
+/// migration. This one reconstructs the exact 0023 Evaluation objects, stamps version 27, and lets
+/// the real ladder run -- and sol1 proved it reaches the migration by making the copied
+/// `canonical_bytes` equal-length zeroes and watching it go RED.
+
+#[test]
+fn migration_0028_preserves_preexisting_proposal_evaluation_bytes_and_chain() {
+    let fixture = admitted_mission("proposal-evaluation-rekey-migration");
+    let proposal = fixture.proposals.submit(&fixture.record().bytes()).unwrap();
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+    let first = evaluations
+        .record(evaluation_draft(&fixture, &proposal.digest().value))
+        .expect("the pre-migration Evaluation records");
+    let mut successor = evaluation_draft(&fixture, &proposal.digest().value);
+    successor.verdict = Verdict::Meets;
+    successor.rationale = "A second reading now meets the rubric.".to_owned();
+    successor.supersedes = EvaluationSupersedes::Evaluation(first.digest().value.clone());
+    let second = evaluations
+        .record(successor)
+        .expect("the pre-migration chain extends");
+    let pinned = [
+        (
+            first.digest().value.clone(),
+            first.canonical_bytes().to_vec(),
+        ),
+        (
+            second.digest().value.clone(),
+            second.canonical_bytes().to_vec(),
+        ),
+    ];
+
+    let connection = fixture.store.connect();
+    let events_before = {
+        let mut statement = connection
+            .prepare(
+                "SELECT sequence, payload_json, occurred_at_ms FROM events
+                 WHERE kind = 'evaluation.recorded' ORDER BY sequence",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+
+    connection
+        .execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TEMP TABLE evaluations_snapshot AS SELECT * FROM evaluations;
+             CREATE TEMP TABLE findings_snapshot AS SELECT * FROM evaluation_findings;
+             CREATE TEMP TABLE cited_runs_snapshot AS SELECT * FROM evaluation_cited_runs;
+             CREATE TEMP TABLE supersessions_snapshot AS SELECT * FROM evaluation_supersessions;
+             DROP TABLE evaluation_supersessions;
+             DROP TABLE evaluation_cited_runs;
+             DROP TABLE evaluation_findings;
+             DROP TABLE evaluations;",
+        )
+        .unwrap();
+    let migration_0023 = include_str!("../migrations/0023_evaluations.sql");
+    let evaluation_objects =
+        &migration_0023[migration_0023.find("CREATE TABLE evaluations (").unwrap()
+            ..migration_0023.find("UPDATE schema_meta").unwrap()];
+    connection.execute_batch(evaluation_objects).unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO evaluations (
+                 workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+                 canonical_bytes, proposal_digest, proposal_digest_algorithm,
+                 proposal_digest_canonicalizer, mission_id, evaluator_resident_id,
+                 evaluator_configuration_id, rubric_id, rubric_version, rubric_canonicalizer,
+                 rubric_sha256, verdict, conflicts_declared, conflicts_text, rationale,
+                 evaluated_at_ms
+             )
+             SELECT workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+                    canonical_bytes, proposal_digest, proposal_digest_algorithm,
+                    proposal_digest_canonicalizer, mission_id, evaluator_resident_id,
+                    evaluator_configuration_id, rubric_id, rubric_version, rubric_canonicalizer,
+                    rubric_sha256, verdict, conflicts_declared, conflicts_text, rationale,
+                    evaluated_at_ms
+             FROM evaluations_snapshot ORDER BY digest_value;
+             INSERT INTO evaluation_findings SELECT * FROM findings_snapshot;
+             INSERT INTO evaluation_cited_runs SELECT * FROM cited_runs_snapshot;
+             INSERT INTO evaluation_supersessions (
+                 workspace_id, proposal_digest, evaluation_digest, supersedes_evaluation_digest
+             )
+             SELECT workspace_id, subject_digest, evaluation_digest,
+                    supersedes_evaluation_digest
+             FROM supersessions_snapshot;
+             UPDATE schema_meta SET version = 27 WHERE singleton = 1 AND version = 28;
+             COMMIT;",
+        )
+        .unwrap();
+    drop(connection);
+
+    Supervisor::bootstrap(StartupConfig {
+        store_path: fixture.store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .expect("the real 27-to-28 startup migration succeeds");
+
+    let connection = fixture.store.connect();
+    for (digest, bytes) in &pinned {
+        let (stored_digest, stored_bytes): (String, Vec<u8>) = connection
+            .query_row(
+                "SELECT digest_value, canonical_bytes FROM evaluations WHERE digest_value = ?1",
+                [digest],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            &stored_digest, digest,
+            "the rekey changed Evaluation identity"
+        );
+        assert_eq!(&stored_bytes, bytes, "the rekey changed canonical bytes");
+        evaluations
+            .get(digest)
+            .expect("the migrated Evaluation still verifies");
+    }
+    let subject_key: String = connection
+        .query_row(
+            "SELECT subject_digest FROM evaluation_supersessions WHERE evaluation_digest = ?1",
+            [&second.digest().value],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(subject_key, proposal.digest().value);
+    let events_after = {
+        let mut statement = connection
+            .prepare(
+                "SELECT sequence, payload_json, occurred_at_ms FROM events
+                 WHERE kind = 'evaluation.recorded' ORDER BY sequence",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(
+        events_after, events_before,
+        "the migration changed Event bytes"
+    );
+}
