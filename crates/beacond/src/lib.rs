@@ -187,7 +187,7 @@ pub use team::{
 pub use worktree::set_pinned_spawn_hook;
 pub use worktree::{CleanupOutcome, KeepReason, Worktree, WorktreeError};
 
-const SCHEMA_VERSION: i64 = 23;
+const SCHEMA_VERSION: i64 = 24;
 const MAX_WORKSPACE_NAME_CHARS: usize = 120;
 
 const SCHEMA_V1: &str = include_str!("../migrations/0001_initial.sql");
@@ -222,6 +222,7 @@ const MIGRATION_V20: &str = include_str!("../migrations/0020_recent_receipts_ind
 // rebase, exactly as the note on this line said whichever landed second would.
 const MIGRATION_V22: &str = include_str!("../migrations/0022_candidates.sql");
 const MIGRATION_V23: &str = include_str!("../migrations/0023_evaluations.sql");
+const MIGRATION_V24: &str = include_str!("../migrations/0024_mission_success_conditions.sql");
 
 #[derive(Debug, Clone)]
 pub struct StartupConfig {
@@ -584,6 +585,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
+                    transaction.execute_batch(MIGRATION_V24)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 2 => {
@@ -607,6 +609,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
+                    transaction.execute_batch(MIGRATION_V24)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 3 => {
@@ -629,6 +632,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
+                    transaction.execute_batch(MIGRATION_V24)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 4 => {
@@ -650,6 +654,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
+                    transaction.execute_batch(MIGRATION_V24)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 5 => {
@@ -670,6 +675,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
+                    transaction.execute_batch(MIGRATION_V24)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 6 => {
@@ -689,6 +695,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
+                    transaction.execute_batch(MIGRATION_V24)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 7 => {
@@ -707,6 +714,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
+                    transaction.execute_batch(MIGRATION_V24)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 8 => {
@@ -724,6 +732,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
+                    transaction.execute_batch(MIGRATION_V24)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 9 => {
@@ -740,6 +749,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
+                    transaction.execute_batch(MIGRATION_V24)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 10 => {
@@ -755,6 +765,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
+                    transaction.execute_batch(MIGRATION_V24)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 11 => {
@@ -769,6 +780,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
+                    transaction.execute_batch(MIGRATION_V24)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 12 => {
@@ -782,6 +794,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
+                    transaction.execute_batch(MIGRATION_V24)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 13 => {
@@ -794,6 +807,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
+                    transaction.execute_batch(MIGRATION_V24)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 14 => {
@@ -805,6 +819,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
+                    transaction.execute_batch(MIGRATION_V24)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 15 => {
@@ -815,6 +830,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
+                    transaction.execute_batch(MIGRATION_V24)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 16 => {
@@ -825,6 +841,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
+                    transaction.execute_batch(MIGRATION_V24)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 17 => {
@@ -834,6 +851,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
+                    transaction.execute_batch(MIGRATION_V24)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 18 => {
@@ -842,6 +860,7 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
+                    transaction.execute_batch(MIGRATION_V24)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 19 => {
@@ -849,12 +868,30 @@ impl Supervisor {
                     transaction.execute_batch(MIGRATION_V20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
+                    transaction.execute_batch(MIGRATION_V24)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 20 => {
                     verify_schema(&transaction, 20)?;
                     transaction.execute_batch(MIGRATION_V22)?;
                     transaction.execute_batch(MIGRATION_V23)?;
+                    transaction.execute_batch(MIGRATION_V24)?;
+                    verify_schema(&transaction, SCHEMA_VERSION)?;
+                }
+                // 21 has no arm because 21 never shipped: this slice's migration was renumbered
+                // to 24 at its rebase and Evaluation's from 21 to 23, so no store can be at 21.
+                // 22 and 23 CAN exist -- a store bootstrapped between the dispatch and Evaluation
+                // merges is at 22, and every store on main tonight is at 23 -- and neither had an
+                // arm before this commit.
+                22 => {
+                    verify_schema(&transaction, 22)?;
+                    transaction.execute_batch(MIGRATION_V23)?;
+                    transaction.execute_batch(MIGRATION_V24)?;
+                    verify_schema(&transaction, SCHEMA_VERSION)?;
+                }
+                23 => {
+                    verify_schema(&transaction, 23)?;
+                    transaction.execute_batch(MIGRATION_V24)?;
                     verify_schema(&transaction, SCHEMA_VERSION)?;
                 }
                 SCHEMA_VERSION => verify_schema(&transaction, SCHEMA_VERSION)?,
@@ -882,6 +919,7 @@ impl Supervisor {
             transaction.execute_batch(MIGRATION_V20)?;
             transaction.execute_batch(MIGRATION_V22)?;
             transaction.execute_batch(MIGRATION_V23)?;
+            transaction.execute_batch(MIGRATION_V24)?;
             verify_schema(&transaction, SCHEMA_VERSION)?;
         }
 
@@ -1083,6 +1121,7 @@ pub(crate) fn apply_every_migration(connection: &Connection) -> Result<(), Super
         MIGRATION_V20,
         MIGRATION_V22,
         MIGRATION_V23,
+        MIGRATION_V24,
     ] {
         connection.execute_batch(migration)?;
     }
@@ -1154,6 +1193,9 @@ fn verify_schema(connection: &Connection, version: i64) -> Result<(), Supervisor
     }
     if version >= 23 {
         expected_connection.execute_batch(MIGRATION_V23)?;
+    }
+    if version >= 24 {
+        expected_connection.execute_batch(MIGRATION_V24)?;
     }
     if !(1..=SCHEMA_VERSION).contains(&version) {
         return Err(SupervisorError::UnsupportedSchemaVersion(version));
@@ -1653,7 +1695,7 @@ mod tests {
         ExternalEffects, MIGRATION_V2, MIGRATION_V3, MIGRATION_V4, MIGRATION_V5, MIGRATION_V6,
         MIGRATION_V7, MIGRATION_V8, MIGRATION_V9, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12,
         MIGRATION_V13, MIGRATION_V14, MIGRATION_V15, MIGRATION_V16_ONLY, MIGRATION_V17,
-        MIGRATION_V18, MIGRATION_V19, MIGRATION_V20, MIGRATION_V22, MIGRATION_V23,
+        MIGRATION_V18, MIGRATION_V19, MIGRATION_V20, MIGRATION_V22, MIGRATION_V23, MIGRATION_V24,
         OperatorAccountService, PreflightOutcome, PreflightReceipt, ProjectCharter,
         ProjectCharterDraft, ProjectDraft, ProjectRepositoryService, ProjectService, ProjectView,
         Recorded, RepositoryDraft, RepositorySourceKind, ResolvedCheck, SCHEMA_V1, SecretString,
@@ -4041,6 +4083,7 @@ mod tests {
             MIGRATION_V20,
             MIGRATION_V22,
             MIGRATION_V23,
+            MIGRATION_V24,
         ] {
             connection.execute_batch(migration).unwrap();
         }
