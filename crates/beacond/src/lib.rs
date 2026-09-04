@@ -19,6 +19,7 @@ mod git_object_store;
 mod local_model_activation;
 mod mission;
 mod operator_account;
+mod outcome;
 mod platform_session;
 mod project;
 mod project_policy;
@@ -84,6 +85,12 @@ pub use mission::{
 pub use operator_account::{
     AccessOrigin, OperatorAccountError, OperatorAccountService, OperatorSessionPhase,
     OperatorSessionPolicy, OperatorSessionStatus, PlatformSessionEvent, RecoveryKey, SecretString,
+};
+pub use outcome::{
+    AppendixMode, AppendixRequest, BoundRefusal, ConditionResult, MalformedOutcome, NarrativeRef,
+    OutcomeBound, OutcomeManifestV1, OutcomeRefusal, OutcomeState, PinnedRevision, ReceiptRef,
+    RevisionKind, SourceDigest, SourceKind, SourceMismatch, SourceRef, SpendRef, SuccessCondition,
+    VerifiedArtifact, VerifiedSources, VerifiedText, compare_canonical_keys, render,
 };
 pub use platform_session::{
     PlatformMonitorState, PlatformSessionMonitor, PlatformSessionMonitorStatus,
