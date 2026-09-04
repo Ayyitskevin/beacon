@@ -33,6 +33,7 @@ mod project;
 mod project_policy;
 mod project_repository;
 mod proposal;
+mod publication_seam;
 mod recent_receipts;
 mod resident_configuration;
 mod resident_lifecycle;
@@ -167,6 +168,7 @@ pub use proposal::{
     ProposalScope, ProposalService, ProposalV1, ReadableContext, RollbackStrategy,
     UnmetPrecondition,
 };
+pub use publication_seam::{PublicationCandidacy, PublicationSeamRefusal, publication_candidacy};
 pub use resident_configuration::{
     BeaconCapability, BeaconCapabilityDescriptor, ResidentConfiguration,
     ResidentConfigurationBinding, ResidentConfigurationError, ResidentConfigurationService,
