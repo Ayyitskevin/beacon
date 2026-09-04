@@ -2956,6 +2956,29 @@ mod tests {
     ];
 
     #[test]
+    fn an_unknown_landing_is_never_reported_as_byte_identical() {
+        // `repository_effect` answers `Unknown` for a `landing_result_unknown` Receipt because of
+        // the token, and this is the scenario where the token is the ONLY thing that can: a record
+        // that names no prepared commit falls through to the byte-identical arm otherwise, and
+        // saying a repository is unchanged when the landing's result is unknown is a false
+        // statement rather than a weak one.
+        //
+        // The scenario exists because C41 added a catch-all `Unknown` arm for prepared commits,
+        // which masked the token guard everywhere the two agreed -- the mutant survived until this
+        // test named the case only the guard can see (C37's rule, applied to its own guard).
+        let mut receipt = specimen(DispatchOutcome::RulingRefused);
+        receipt.outcome = DispatchOutcome::LandingUnobserved;
+        receipt.prepared_commit = None;
+        receipt.resulting_revision = None;
+        receipt.not_verified = vec![NotVerified::LandingResultUnknown];
+        assert_eq!(receipt.repository_effect(), RepositoryEffect::Unknown);
+
+        // The control: without the unknown token, the same shape IS byte-identical.
+        receipt.not_verified = Vec::new();
+        assert_eq!(receipt.repository_effect(), RepositoryEffect::ByteIdentical);
+    }
+
+    #[test]
     fn the_applied_receipt_specimen_is_exactly_these_bytes() {
         // The vector a second implementation matches against. A cross-lab review built a Receipt
         // from the ADR's field list and produced different bytes for the same facts, which is what
