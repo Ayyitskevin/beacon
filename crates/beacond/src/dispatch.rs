@@ -325,8 +325,26 @@ impl DispatchReceipt {
         match (&self.outcome, &self.prepared_commit) {
             (DispatchOutcome::Applied, _) => RepositoryEffect::Published,
             (_, None) => RepositoryEffect::ByteIdentical,
-            (_, Some(_)) => RepositoryEffect::UnreferencedObjects,
+            // A commit was prepared and this attempt did not publish it. Whether its objects are
+            // reachable is what the residue TOKEN says, and the token is derived from the branch
+            // this attempt observed. Deriving it here from the shape of the record instead was the
+            // same defect one level up: a cold review had a competing writer publish this exact
+            // commit, so a ref demonstrably named the objects while this accessor said none did.
+            (_, Some(_)) if self.names_unreferenced_residue() => {
+                RepositoryEffect::UnreferencedObjects
+            }
+            // Objects were written and a ref was observed to name them -- by someone else's act,
+            // not this one's. None of the four arms says that: it is not byte-identical, this
+            // attempt published nothing, and the objects are not unreferenced. `Unknown` is the
+            // arm that makes no false statement, and naming the state properly is a vocabulary
+            // change this ADR does not make on its own.
+            (_, Some(_)) => RepositoryEffect::Unknown,
         }
+    }
+
+    fn names_unreferenced_residue(&self) -> bool {
+        self.not_verified
+            .contains(&NotVerified::UnreferencedObjectResidue)
     }
 }
 
@@ -1243,13 +1261,34 @@ impl DispatchService {
             // of it. The commit is a deterministic function of its inputs, so a branch that already
             // names it may have been moved there by something else -- and reporting that as this
             // attempt's application would be a Receipt claiming an act it did not perform (gpt1).
-            let outcome = match (swapped.is_some(), observed.as_deref().map(str::trim)) {
-                (true, Some(head)) if head == commit => DispatchOutcome::Applied,
-                (_, Some(_)) => DispatchOutcome::LandingRefused,
+            let observed = observed.as_deref().map(str::trim);
+            decided.landing_observation = match observed {
+                None => LandingObservation::Unobserved,
+                Some(head) if head == commit => LandingObservation::RefNamesPreparedCommit,
+                Some(_) => LandingObservation::RefNamesSomethingElse,
+            };
+            decided.observed_head = observed.map(str::to_owned);
+            let outcome = match (swapped.is_some(), observed) {
+                // This attempt performed the swap. That is an act, and a Receipt that called it a
+                // refusal would hide a mutation Beacon made -- the one direction a record must
+                // never take. `resultingRevision` is what the swap installed (R11); `observedHead`
+                // records what the branch held afterwards, which is how a later writer having moved
+                // it on is visible rather than erased (sol1).
+                (true, Some(_)) => DispatchOutcome::Applied,
+                (false, Some(_)) => DispatchOutcome::LandingRefused,
+                // A swap that returned 0 and a branch that could not be read afterwards is still
+                // an unestablished result: `landing_result_unknown` and the prepared commit are
+                // what that state has to say, and it does not become an application by being
+                // unreadable.
                 (_, None) => DispatchOutcome::LandingUnobserved,
             };
-            if outcome == DispatchOutcome::Applied {
-                decided.observed_head = Some(commit.to_owned());
+            // Beacon updates its own checkout only for a landing THIS attempt performed whose
+            // branch still names what it installed. A swap this attempt lost must not touch the
+            // tree at all, and a branch a later writer moved on is a ref this attempt no longer
+            // owns -- resetting the tree to its commit would be a second write against it.
+            if outcome == DispatchOutcome::Applied
+                && decided.landing_observation == LandingObservation::RefNamesPreparedCommit
+            {
                 // Beacon owns this checkout -- v1 lands nowhere else -- so leaving it showing the
                 // previous revision would be Beacon knowingly leaving its own tree stale.
                 //
@@ -1268,6 +1307,10 @@ impl DispatchService {
                     write_pinned(&repository, None, None, &checkout, None, WRITE_BUDGET).is_some();
                 let updated = decided.checkout_updated;
                 decided.record_step(GitStepName::ReadTreeCheckout, &checkout, updated);
+            }
+            if outcome == DispatchOutcome::Applied {
+                // The effects are a fact about the swap this attempt performed, not about the
+                // checkout that may have been skipped above.
                 for record in &mut decided.per_mutation {
                     record.effect = match record.kind {
                         MutationKind::DeleteFile => MutationEffect::Removed,
@@ -1445,6 +1488,32 @@ struct OpenRun {
     wall_clock_ms: u64,
 }
 
+/// What the branch held when this attempt looked at it, and therefore what may be said about the
+/// objects this attempt wrote.
+///
+/// Residue is a fact about a ref, not about an outcome. Deriving it from the outcome asserted that
+/// no ref names the prepared commit in every prepared non-`Applied` state -- including the one a
+/// cold review drove, where a competing writer published that exact commit and this attempt's
+/// compare-and-swap lost. A ref named the objects; the Receipt said none did.
+///
+/// The affirmative arm is `RefNamesSomethingElse`, and its claim is bounded by what was read: the
+/// branch this attempt observed does not name the prepared commit. A descendant of that commit
+/// would still reach it, which this observation does not exclude -- the narrower residue of the
+/// same class, recorded in ADR 0039 rather than papered over, and closable only by a reachability
+/// read whose cost is a ruling because it tightens the token's published meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum LandingObservation {
+    /// No commit was prepared, so no object of this attempt's could be residue.
+    #[default]
+    NothingPrepared,
+    /// The branch named the prepared commit. Whoever put it there, a ref names these objects.
+    RefNamesPreparedCommit,
+    /// The branch named something else.
+    RefNamesSomethingElse,
+    /// The branch could not be read.
+    Unobserved,
+}
+
 /// What the gates established, accumulated as they run so a Receipt can name the last thing that
 /// was true rather than only the refusal.
 #[derive(Default)]
@@ -1466,6 +1535,8 @@ struct Decided {
     summary: String,
     prepared_commit: Option<String>,
     checkout_updated: bool,
+    /// What the branch held when this attempt observed it. `NothingPrepared` until a landing runs.
+    landing_observation: LandingObservation,
     git_steps: Vec<GitStep>,
     source_identity: Option<SourceIdentity>,
     /// SHA-256 over the commit's own NUL-delimited name-status output: a measured diff digest,
@@ -1641,16 +1712,13 @@ fn not_verified(outcome: &DispatchOutcome, decided: &Decided) -> Vec<NotVerified
         DispatchOutcome::LandingUnobserved => names.push(NotVerified::LandingResultUnknown),
         _ => names.push(NotVerified::ChangeNotApplied),
     }
-    // Not for an unobserved landing: this token asserts that objects exist which NO REF NAMES, and
-    // an unobserved landing is the one state where the repository could not say whether a ref names
-    // them. Emitting it there is not an unproven claim but a false one -- the branch may hold a
-    // descendant of the prepared commit (gpt2, s4f). `landing_result_unknown` is what that state
-    // has to say, and it is already above.
+    // Residue is derived from the OBSERVATION, never from the outcome. The token asserts that
+    // objects exist which no ref names, and only one of the four observations establishes that.
+    // Keying it on the outcome asserted it in states where a ref demonstrably named the commit --
+    // gpt2 found the unobserved case, sol1 the case where a competing writer published this exact
+    // commit and this attempt's swap lost.
     if decided.prepared_commit.is_some()
-        && !matches!(
-            outcome,
-            DispatchOutcome::Applied | DispatchOutcome::LandingUnobserved
-        )
+        && decided.landing_observation == LandingObservation::RefNamesSomethingElse
     {
         names.push(NotVerified::UnreferencedObjectResidue);
     }
@@ -2039,7 +2107,7 @@ pub(crate) fn finish_prepared_dispatches(connection: &Connection) -> Result<(), 
             started_at_ms,
             DispatchOutcome::LandingUnobserved,
             None,
-            true,
+            LandingObservation::NothingPrepared,
         );
         write_receipt(connection, workspace_id, run_id, &receipt)?;
     }
@@ -2050,7 +2118,7 @@ pub(crate) fn finish_prepared_dispatches(connection: &Connection) -> Result<(), 
         let run_id = Uuid::parse_str(&prepared.run_id).map_err(|_| DispatchError::InvalidStore)?;
         let project_id =
             Uuid::parse_str(&prepared.project_id).map_err(|_| DispatchError::InvalidStore)?;
-        let outcome = observe_landing(&prepared);
+        let (outcome, observation) = observe_landing(&prepared);
         let started_at_ms =
             u64::try_from(prepared.started_at_ms).map_err(|_| DispatchError::InvalidStore)?;
         let mut receipt = interrupted_receipt(
@@ -2060,7 +2128,7 @@ pub(crate) fn finish_prepared_dispatches(connection: &Connection) -> Result<(), 
             started_at_ms,
             outcome.clone(),
             Some(&prepared),
-            false,
+            observation,
         );
         receipt.ruling_digest.value = ruling_of_preparation(connection, &prepared)?;
         write_receipt(connection, workspace_id, run_id, &receipt)?;
@@ -2079,7 +2147,7 @@ fn interrupted_receipt(
     started_at_ms: u64,
     outcome: DispatchOutcome,
     prepared: Option<&PreparedDispatch>,
-    residue_unnamed: bool,
+    observation: LandingObservation,
 ) -> DispatchReceipt {
     let mut not_verified = vec![
         NotVerified::ExecutionPolicyConstraint,
@@ -2104,20 +2172,16 @@ fn interrupted_receipt(
         }
         _ => not_verified.push(NotVerified::ChangeNotApplied),
     }
-    // Same exclusion as the live path, and for the same reason: a reconstructed unobserved landing
-    // is exactly the record gpt2 drove, where the prepared commit turned out to be reachable.
-    if prepared.is_some()
-        && !matches!(
-            outcome,
-            DispatchOutcome::Applied | DispatchOutcome::LandingUnobserved
-        )
-    {
+    // The same derivation as the live path, from the same observation: a ref that names the
+    // prepared commit is a ref that names its objects, whatever this attempt's outcome was.
+    if prepared.is_some() && observation == LandingObservation::RefNamesSomethingElse {
         not_verified.push(NotVerified::UnreferencedObjectResidue);
     }
     not_verified.push(NotVerified::ReconstructedAfterInterruption);
-    if residue_unnamed {
+    if prepared.is_none() {
         // The interruption landed before the claim: whether any object was written is unknown,
-        // and if one was, nothing can name it.
+        // and if one was, nothing can name it. Derived from the absence of the preparation rather
+        // than passed alongside it, so the two cannot disagree.
         not_verified.push(NotVerified::ObjectResidueUnknown);
     }
     DispatchReceipt {
@@ -2178,9 +2242,13 @@ struct PreparedDispatch {
 }
 
 /// What became of a prepared commit, asked of the repository itself.
-fn observe_landing(prepared: &PreparedDispatch) -> DispatchOutcome {
+fn observe_landing(prepared: &PreparedDispatch) -> (DispatchOutcome, LandingObservation) {
+    let unobserved = (
+        DispatchOutcome::LandingUnobserved,
+        LandingObservation::Unobserved,
+    );
     let Ok(repository) = PinnedRepository::open(Path::new(&prepared.source)) else {
-        return DispatchOutcome::LandingUnobserved;
+        return unobserved;
     };
     let (device, inode) = repository.identity();
     // The identity the attempt pinned, or nothing: a directory that now has a different identity is
@@ -2188,20 +2256,26 @@ fn observe_landing(prepared: &PreparedDispatch) -> DispatchOutcome {
     if i64::try_from(device).unwrap_or(i64::MAX) != prepared.device
         || i64::try_from(inode).unwrap_or(i64::MAX) != prepared.inode
     {
-        return DispatchOutcome::LandingUnobserved;
+        return unobserved;
     }
     match read_pinned(
         &repository,
         &["rev-parse", "--verify", &prepared.branch],
         READ_BUDGET,
     ) {
-        Some(head) if head.trim() == prepared.prepared_commit => DispatchOutcome::Applied,
-        Some(head) if head.trim() == prepared.pinned_base_revision => {
-            DispatchOutcome::LandingRefused
-        }
+        Some(head) if head.trim() == prepared.prepared_commit => (
+            DispatchOutcome::Applied,
+            LandingObservation::RefNamesPreparedCommit,
+        ),
+        Some(head) if head.trim() == prepared.pinned_base_revision => (
+            DispatchOutcome::LandingRefused,
+            LandingObservation::RefNamesSomethingElse,
+        ),
         // The branch holds something else entirely: the attempt may have landed and been moved
-        // afterwards, or never landed. That is exactly what "unobserved" means.
-        Some(_) | None => DispatchOutcome::LandingUnobserved,
+        // afterwards, or never landed. That is exactly what "unobserved" means -- and it is also
+        // why no residue claim may be made here, because a branch that moved on may hold a
+        // DESCENDANT of the prepared commit and therefore reach its objects (gpt2, s4f).
+        Some(_) | None => unobserved,
     }
 }
 
@@ -2310,8 +2384,9 @@ fn verify_outcome_invariants(receipt: &DispatchReceipt) -> Result<(), DispatchEr
             receipt.resulting_revision.is_none()
                 && !receipt.checkout_updated
                 && names(NotVerified::ChangeNotApplied)
-                && (receipt.prepared_commit.is_none()
-                    || names(NotVerified::UnreferencedObjectResidue))
+            // No residue requirement: the token is derived from the observation now, and a refusal
+            // whose branch was observed to name the prepared commit correctly makes no claim.
+            // Requiring it here is what forced the false claim in the first place.
         }
     };
     if coherent {
