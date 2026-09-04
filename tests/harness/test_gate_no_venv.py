@@ -26,7 +26,10 @@ import subprocess
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-SCRIPTS = ("gate", "stage-sidecar")
+# `desktop-tests` is here for the same reason `stage-sidecar` is: `gate` calls it by a
+# repo-relative path, so a checkout without it fails the desktop stage with "No such
+# file or directory" -- which is what this fixture caught when it was added.
+SCRIPTS = ("gate", "stage-sidecar", "desktop-tests")
 SIDECAR_BUILD = "build --release -p beacond"
 BUILT_BYTES = "the supervisor this stub build produced\n"
 
@@ -60,8 +63,19 @@ exit 0
 """,
 )
 
+# The stub echoes vitest's seed line when it is asked to shuffle, because
+# `scripts/desktop-tests` reads that line back and refuses if it is missing. A stub
+# that stayed silent would make the gate refuse here for a reason that has nothing
+# to do with what this test is about -- and a stub that printed the line
+# unconditionally would let the gate stop passing the seed without anything noticing,
+# which is the LABEL problem one level down.
 PASSING_NPM = """#!/bin/sh
 echo "npm $*" >> "$STUB_LOG"
+for arg in "$@"; do
+    case "$arg" in
+        --sequence.seed=*) echo "Running tests with seed \\"${arg#--sequence.seed=}\\"" ;;
+    esac
+done
 exit 0
 """
 
@@ -128,7 +142,11 @@ def test_no_venv_all_runs_the_exempt_stages_and_names_every_skipped_one(tmp_path
     assert "ok    cargo test" in result.stdout, result.stdout
     assert "ok    desktop tests" in result.stdout, result.stdout
     assert "cargo test --workspace" in _stub_calls(tmp_path)
-    assert "npm test" in _stub_calls(tmp_path)
+    calls = _stub_calls(tmp_path)
+    assert "npm test" in calls
+    # The gate passes the seed through to vitest rather than only printing it in the
+    # step name: the stub records its own argv, so this is the argument as received.
+    assert "--sequence.shuffle" in calls and "--sequence.seed=" in calls
     # A partial pass must not read like a full one.
     assert "SKIPPED lint, format, test" in result.stdout, result.stdout
     assert "this is not a full gate" in result.stdout, result.stdout
