@@ -781,6 +781,32 @@ pub(crate) fn read_pinned(
     }
 }
 
+/// [`read_pinned`], returning the child's **exit code** rather than its output.
+///
+/// For the reads whose answer IS the exit code: `merge-base --is-ancestor` says "yes" with 0 and
+/// "no" with 1, and anything else is an error that must not be read as either. `read_pinned` cannot
+/// express that -- it returns `None` for any unsuccessful child, so "no" and "could not tell" arrive
+/// as one value, which is the absent/dead/broken collapse this crate refuses everywhere else.
+///
+/// `None` means the read did not answer: the child could not start, timed out, was signalled, or the
+/// pin broke. A caller that needs a definite answer treats `None` as unknown, never as "no".
+pub(crate) fn read_pinned_exit(
+    repository: &PinnedRepository,
+    arguments: &[&str],
+    budget: Duration,
+) -> Option<i32> {
+    let filter_drivers = pinned_filter_drivers(repository)?;
+    let mut command = read_only_git_command(Path::new(GIT), &filter_drivers);
+    repository.enter(&mut command);
+    for argument in arguments {
+        command.arg(argument);
+    }
+    match run_git_bounded_raw(command, None, budget) {
+        BoundedRaw::Finished { code, .. } if repository.still_pinned() => code,
+        _ => None,
+    }
+}
+
 /// [`read_pinned`], returning the child's standard output as bytes.
 ///
 /// For the two reads whose subject IS bytes -- the pre-image gate and the effect post-condition,
@@ -800,7 +826,7 @@ pub(crate) fn read_pinned_bytes(
     }
     match run_git_bounded_raw(command, None, budget) {
         BoundedRaw::Finished {
-            success: true,
+            code: Some(0),
             stdout,
         } if repository.still_pinned() => Some(stdout),
         _ => None,
@@ -1043,7 +1069,11 @@ fn run_git_bounded_with_stdin(
 /// already written correctly -- the digest is over bytes, and "exact bytes" has to mean bytes all
 /// the way out (sol1). There is still one runner; this is its output before the text conversion.
 enum BoundedRaw {
-    Finished { success: bool, stdout: Vec<u8> },
+    /// `code` is `None` when the child was terminated by a signal and therefore has no exit code.
+    Finished {
+        code: Option<i32>,
+        stdout: Vec<u8>,
+    },
     TimedOut,
     Failed,
 }
@@ -1054,8 +1084,11 @@ fn run_git_bounded_inner(
     budget: Duration,
 ) -> Bounded {
     match run_git_bounded_raw(command, stdin_bytes, budget) {
-        BoundedRaw::Finished { success, stdout } => match String::from_utf8(stdout) {
-            Ok(stdout) => Bounded::Finished { success, stdout },
+        BoundedRaw::Finished { code, stdout } => match String::from_utf8(stdout) {
+            Ok(stdout) => Bounded::Finished {
+                success: code == Some(0),
+                stdout,
+            },
             // Unchanged behaviour for every textual caller: `rev-parse`, `status` and
             // `diff --name-status` producing invalid UTF-8 is not an answer.
             Err(_) => Bounded::Failed,
@@ -1115,7 +1148,7 @@ fn run_git_bounded_raw(
         return BoundedRaw::Failed;
     }
     BoundedRaw::Finished {
-        success: status.success(),
+        code: status.code(),
         stdout,
     }
 }
@@ -1131,8 +1164,8 @@ mod tests {
 
     use super::{
         Bounded, CLOSED_GIT_ENVIRONMENT_KEYS, CleanupOutcome, KeepReason, PinnedRepository,
-        READ_BUDGET, Worktree, closed_git_command, configure_closed_git_environment,
-        run_git_bounded, status_holds,
+        READ_BUDGET, Worktree, closed_git_command, configure_closed_git_environment, read_pinned,
+        read_pinned_exit, run_git_bounded, status_holds,
     };
     use std::process::Command;
 
@@ -1215,6 +1248,58 @@ mod tests {
             }
             _ => panic!("closed git {arguments:?} did not finish"),
         }
+    }
+
+    #[test]
+    fn a_read_whose_answer_is_its_exit_code_tells_no_apart_from_could_not_tell() {
+        // `merge-base --is-ancestor` answers with the exit code: 0 yes, 1 no, anything else an
+        // error. `read_pinned` reports every unsuccessful child as one absent value, which would
+        // make "no" and "could not tell" the same answer -- and those are the two the residue token
+        // now turns on (R14). This pins the distinction at the level where it would be lost.
+        let (root, first, _second, third) = three_commits("exit-code");
+        let repository = PinnedRepository::open(&root.path).unwrap();
+
+        // Yes: the root commit is an ancestor of the tip.
+        assert_eq!(
+            read_pinned_exit(
+                &repository,
+                &["merge-base", "--is-ancestor", &first, &third],
+                READ_BUDGET,
+            ),
+            Some(0)
+        );
+        // No: the tip is not an ancestor of the root. An ANSWER, not a failure.
+        assert_eq!(
+            read_pinned_exit(
+                &repository,
+                &["merge-base", "--is-ancestor", &third, &first],
+                READ_BUDGET,
+            ),
+            Some(1)
+        );
+        // Could not tell: an object the repository does not have. Not `Some(1)`, which is the whole
+        // point -- a caller that treated any non-zero exit as "no" would claim a fact from an error.
+        let missing = "0".repeat(40);
+        let error = read_pinned_exit(
+            &repository,
+            &["merge-base", "--is-ancestor", &missing, &third],
+            READ_BUDGET,
+        );
+        assert_ne!(error, Some(0));
+        assert_ne!(error, Some(1), "an error was reported as a definite \"no\"");
+        // And `read_pinned` cannot make the distinction at all, which is why this function exists.
+        assert_eq!(
+            read_pinned(
+                &repository,
+                &["merge-base", "--is-ancestor", &third, &first],
+                READ_BUDGET,
+            ),
+            read_pinned(
+                &repository,
+                &["merge-base", "--is-ancestor", &missing, &third],
+                READ_BUDGET,
+            )
+        );
     }
 
     #[test]
