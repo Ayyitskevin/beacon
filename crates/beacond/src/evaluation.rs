@@ -265,6 +265,16 @@ pub enum EvaluationSubject {
 }
 
 impl EvaluationV1 {
+    /// This payload's canonical bytes, for a caller that needs the bytes a record WOULD have.
+    ///
+    /// The codec has no opinion about authorship, rosters or stores -- it cannot see them -- so
+    /// this encodes payloads a Command would refuse. That is what makes a truthful forbidden-row
+    /// test possible: bytes and columns that agree with each other and break a rule only a reader
+    /// with the other record in hand can catch.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, MalformedEvaluation> {
+        encode(self)
+    }
+
     /// The Proposal this Evaluation binds, if it binds one.
     ///
     /// Slice E2 gives the Artifact arm its own columns. Until it lands, every store path calls this
