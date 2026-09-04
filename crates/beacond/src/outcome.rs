@@ -746,8 +746,18 @@ fn uuid_key(value: &Uuid) -> String {
 /// canonical key and the census would count them as one object. They are two objects, because a
 /// digest value without the function that produced it names nothing (ADR 0034/0037).
 fn source_ref_key(value: &SourceRef) -> Vec<KeyPart> {
+    let mut key = vec![KeyPart::Num(u64::from(value.kind.tag()))];
+    key.extend(source_identity_key(value));
+    key
+}
+
+/// What a cited source *is*, with its kind left out.
+///
+/// The census names the kind once, in its lane; carrying it a second time inside the identity
+/// would make a lane confusion structurally harmless and therefore untestable, which is a worse
+/// place to be than a lane confusion a test catches.
+fn source_identity_key(value: &SourceRef) -> Vec<KeyPart> {
     vec![
-        KeyPart::Num(u64::from(value.kind.tag())),
         KeyPart::Text(uuid_key(&value.object_id)),
         KeyPart::Num(u64::from(value.schema_version)),
         KeyPart::Text(value.digest.algorithm.clone()),
@@ -1605,6 +1615,37 @@ fn require_single_workspace(manifest: &OutcomeManifestV1) -> Result<(), Malforme
 /// Distinct by typed identity, schema version, and digest -- one object cited twice is one cited
 /// object. The walk stops the moment the set exceeds the limit, so the reported figure is an
 /// observed-at-least count rather than a total nobody finished counting.
+/// The closed set of lanes the citation census counts.
+///
+/// Receipts are a lane of their own because they are not a `SourceKind`: they have no content
+/// digest, so they are cited by `(Workspace, run UUID, Receipt version)` plus an Outcome checksum.
+/// A census over a closed vocabulary does not borrow an unassigned tag byte to make room for them
+/// (R13.8) -- an unassigned tag is unassigned because the next arm will want it, and a census that
+/// silently shares a lane with a future source kind merges two cited objects into one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum CitationLane {
+    Source(SourceKind),
+    Receipt,
+}
+
+impl CitationLane {
+    /// The lane's own name. Text rather than a tag byte, so a lane cannot collide with a source
+    /// kind by arithmetic and a new lane costs a new word rather than a free number.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Source(kind) => kind.as_str(),
+            Self::Receipt => "receipt",
+        }
+    }
+}
+
+/// One cited object's census identity: its lane, then the identity that lane spells.
+fn citation_key(lane: CitationLane, identity: Vec<KeyPart>) -> Vec<KeyPart> {
+    let mut key = vec![KeyPart::Text(lane.as_str().to_owned())];
+    key.extend(identity);
+    key
+}
+
 fn citation_census(manifest: &OutcomeManifestV1) -> Result<u64, BoundRefusal> {
     let mut seen: BTreeSet<Vec<KeyPart>> = BTreeSet::new();
     let refuse_if_over = |seen: &BTreeSet<Vec<KeyPart>>| -> Result<(), BoundRefusal> {
@@ -1620,33 +1661,38 @@ fn citation_census(manifest: &OutcomeManifestV1) -> Result<u64, BoundRefusal> {
     };
 
     for reference in cited_refs(manifest) {
-        seen.insert(source_ref_key(reference));
+        seen.insert(citation_key(
+            CitationLane::Source(reference.kind),
+            source_identity_key(reference),
+        ));
         refuse_if_over(&seen)?;
     }
     if let Some(receipts) = manifest.receipt_refs.verified() {
         for receipt in receipts {
-            // Receipts have no `SourceKind`; 0x00 is unassigned there and names the Receipt lane
-            // in this census without widening the source vocabulary.
-            seen.insert(vec![
-                KeyPart::Num(0x00),
-                KeyPart::Text(uuid_key(&receipt.run_uuid)),
-                KeyPart::Num(u64::from(receipt.receipt_version)),
-                KeyPart::Text(DIGEST_ALGORITHM.to_owned()),
-                KeyPart::Text(RECEIPT_CHECKSUM_LABEL.to_owned()),
-                KeyPart::Text(receipt.outcome_checksum.clone()),
-            ]);
+            seen.insert(citation_key(
+                CitationLane::Receipt,
+                vec![
+                    KeyPart::Text(uuid_key(&receipt.run_uuid)),
+                    KeyPart::Num(u64::from(receipt.receipt_version)),
+                    KeyPart::Text(DIGEST_ALGORITHM.to_owned()),
+                    KeyPart::Text(RECEIPT_CHECKSUM_LABEL.to_owned()),
+                    KeyPart::Text(receipt.outcome_checksum.clone()),
+                ],
+            ));
             refuse_if_over(&seen)?;
         }
     }
     if let Some(spend) = manifest.spend_ref.verified() {
-        seen.insert(vec![
-            KeyPart::Num(u64::from(SourceKind::Spend.tag())),
-            KeyPart::Text(uuid_key(&spend.spend_id)),
-            KeyPart::Num(u64::from(spend.schema_version)),
-            KeyPart::Text(spend.digest.algorithm.clone()),
-            KeyPart::Text(spend.digest.canonicalizer.clone()),
-            KeyPart::Text(spend.digest.value.clone()),
-        ]);
+        seen.insert(citation_key(
+            CitationLane::Source(SourceKind::Spend),
+            vec![
+                KeyPart::Text(uuid_key(&spend.spend_id)),
+                KeyPart::Num(u64::from(spend.schema_version)),
+                KeyPart::Text(spend.digest.algorithm.clone()),
+                KeyPart::Text(spend.digest.canonicalizer.clone()),
+                KeyPart::Text(spend.digest.value.clone()),
+            ],
+        ));
         refuse_if_over(&seen)?;
     }
     Ok(seen.len() as u64)

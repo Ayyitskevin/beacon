@@ -1453,6 +1453,28 @@ fn outcome_renderer_refuses_257th_citation_with_observed_at_least_count() {
         "the refusal did not report an observed-at-least count"
     );
 
+    // R13.8 and gpt2's M23: Receipts are their own census lane, not a borrowed `0x00`. The
+    // counterexample is a Receipt and a Mission that agree on every other part of the key, so a
+    // census that put them in one lane would count them as one cited object and let 257 through.
+    let (mut collide, mut collide_sources) = bounded_manifest(253);
+    collide.mission.object_id = uuid(RUN);
+    collide.mission.schema_version = 2;
+    collide.mission.digest = digest("beacon.outcome.receipt-checksum.v1", hex32("77"));
+    collide.receipt_refs = OutcomeState::Verified(vec![ReceiptRef {
+        workspace_id: uuid(WORKSPACE),
+        run_uuid: uuid(RUN),
+        receipt_version: 2,
+        outcome_checksum: hex32("77"),
+    }]);
+    collide_sources.mission_title = "One Mission, one Receipt, one key apart".to_owned();
+    // 3 identities + 253 artifacts + 1 Receipt = 257, and only a distinct Receipt lane keeps it so.
+    let refusal = bound_refusal(render(&collide, &collide_sources).expect_err("257 refuse"));
+    assert_eq!(refusal.bound, OutcomeBound::CitationCount);
+    assert_eq!(
+        refusal.observed_at_least, 257,
+        "the Receipt was counted in a source lane and merged with the Mission"
+    );
+
     // One object cited twice is one cited object: the census counts objects, not rows.
     let (mut manifest, sources) = bounded_manifest(253);
     if let OutcomeState::Verified(refs) = &manifest.delivered_artifacts {
