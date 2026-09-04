@@ -44,24 +44,6 @@ use crate::outcome::{
 use crate::proposal::sha256;
 use crate::spend::{MeasuredSpend, SpendMeasurement};
 
-/// A reader the collector needs and the store does not have yet.
-///
-/// The skeleton listed four. Three landed; **one variant remains, because a variant no code can
-/// produce is a lie about the store**. When the Artifact entity store lands this enum goes with it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MissingReader {
-    Artifact,
-}
-
-impl MissingReader {
-    /// The lowercase token this seam is named by.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Artifact => "artifact",
-        }
-    }
-}
-
 /// Why a collection did not happen.
 ///
 /// Every arm is a refusal. There is deliberately no arm that carries a partially collected result:
@@ -70,8 +52,6 @@ impl MissingReader {
 /// manifest is the shape that would let one through.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CollectorRefusal {
-    /// The owning module has no verified reader yet.
-    NotYetAvailable(MissingReader),
     /// Outcome's own bound, refused before anything was read.
     Bound(BoundRefusal),
     /// The cited object is not in this Workspace's store at all.
@@ -126,9 +106,6 @@ pub enum CollectorRefusal {
 impl fmt::Display for CollectorRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotYetAvailable(reader) => {
-                write!(formatter, "no verified reader yet: {}", reader.as_str())
-            }
             Self::Bound(bound) => write!(
                 formatter,
                 "bound {} exhausted: configured {}, observed at least {}",
