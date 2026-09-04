@@ -165,6 +165,26 @@ vector is what this record is missing and is the right thing to ask of the revie
 No store, no service, no `mission.impact_classified` event, no migration, no verified reader, and no
 `prepare` integration. Migration numbers are taken at rebase, never reserved.
 
+## Slice 2-A adds the store
+
+`mission_impact_classifications`, `MissionImpactService::{classify, get, history}`, the
+`mission.impact_classified` event, and `verified_classification_within` /
+`verified_classification_for_citation`, which rechecks a copied high-impact bit against the record
+(R13.7) rather than trusting the copy.
+
+The Policy citation becomes a **composite foreign key** to
+`project_policy_revisions(workspace_id, project_id, revision)`, so classifying a Mission under a
+Policy revision that does not exist is unrepresentable rather than a check a caller can forget — and
+its refusal is named separately from the uniqueness refusal beside it.
+
+**The migration number is provisional**, and shared with ADR 0042: the completion lane holds 0024,
+this holds **0025**, and *whichever lands second renumbers at its final rebase*.
+
+There is deliberately still **no** `current(mission_id)` and no `is_high_impact`. Which
+classification is current depends on the event cursor being resolved at, and "highest version" would
+be a fourth answer to that question, unlabelled. `history()` hands back the ladder and makes the
+caller say which cursor it means.
+
 ## Consequences
 
 - A Mission cannot publish an Outcome until someone classifies it. That is the honest failure the
