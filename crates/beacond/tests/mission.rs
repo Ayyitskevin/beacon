@@ -978,6 +978,41 @@ fn the_condition_migration_adds_triggers_and_rewrites_none() {
     }
 }
 
+/// Migration 0025 rebuilds the closed Event-kind table to add two kinds. A rollback that drops only
+/// its two tables leaves that rebuilt table behind, and the store then matches no schema version.
+///
+/// The definition and the two Event-keyed roster triggers are read out of 0023's own text rather
+/// than retyped: a rollback that retyped them would be testing the test.
+fn restore_pre_0025_events(connection: &Connection) {
+    let source = include_str!("../migrations/0023_evaluations.sql");
+    let block = |start: &str| -> String {
+        let from = source.find(start).expect("0023 defines it");
+        let end = source[from..].find("\n\n").expect("the block ends");
+        source[from..from + end].to_owned()
+    };
+    let events = block("CREATE TABLE events (");
+    let team_guard = block("CREATE TRIGGER team_formation_members_no_insert_after_formation");
+    let mission_guard = block("CREATE TRIGGER mission_admission_members_no_insert_after_admission");
+    connection
+        .execute_batch(
+            "DROP TRIGGER team_formation_members_no_insert_after_formation;
+             DROP TRIGGER mission_admission_members_no_insert_after_admission;
+             ALTER TABLE events RENAME TO events_rollback;",
+        )
+        .unwrap();
+    connection.execute_batch(&events).unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO events (sequence, workspace_id, kind, payload_json, occurred_at_ms)
+             SELECT sequence, workspace_id, kind, payload_json, occurred_at_ms
+             FROM events_rollback ORDER BY sequence;
+             DROP TABLE events_rollback;",
+        )
+        .unwrap();
+    connection.execute_batch(&team_guard).unwrap();
+    connection.execute_batch(&mission_guard).unwrap();
+}
+
 #[test]
 fn the_backfill_gives_existing_missions_their_condition_rows_in_order() {
     // Bullet 1's other half, and the only test that exercises the BACKFILL rather than the write
@@ -1000,10 +1035,20 @@ fn the_backfill_gives_existing_missions_their_condition_rows_in_order() {
     let connection = Connection::open(&store.path).unwrap();
     connection
         .execute_batch(
-            "DROP TABLE mission_success_conditions;
+            // Newest migration first. 0025 REBUILT the closed `events` table to add two kinds, so
+            // dropping its two tables is not enough -- the rebuilt definition has to come off too
+            // or the store no longer matches schema 23.
+            "DROP TRIGGER mission_impact_classifications_no_update;
+             DROP TRIGGER mission_impact_classifications_no_delete;
+             DROP TABLE mission_impact_classifications;
+             DROP TRIGGER measured_spend_no_update;
+             DROP TRIGGER measured_spend_no_delete;
+             DROP TABLE measured_spend;
+             DROP TABLE mission_success_conditions;
              UPDATE schema_meta SET version = 23 WHERE singleton = 1;",
         )
         .unwrap();
+    restore_pre_0025_events(&connection);
     drop(connection);
 
     let report = Supervisor::bootstrap(StartupConfig {
@@ -1011,7 +1056,7 @@ fn the_backfill_gives_existing_missions_their_condition_rows_in_order() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .expect("a store at the previous schema version must migrate");
-    assert_eq!(report.diagnostics.schema_version, 24);
+    assert_eq!(report.diagnostics.schema_version, 25);
 
     assert_eq!(
         condition_rows(&store.path, mission.id),
