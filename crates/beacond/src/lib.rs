@@ -22,6 +22,7 @@ mod evaluation;
 mod git_object_store;
 mod local_model_activation;
 mod mission;
+mod mission_completion;
 mod mission_impact;
 mod operator_account;
 mod outcome;
@@ -103,6 +104,12 @@ pub use local_model_activation::{
 pub use mission::{
     MissionAdmissionActor, MissionDraft, MissionError, MissionLifecycle, MissionMemberDraft,
     MissionMemberView, MissionService, MissionView,
+};
+pub use mission_completion::{
+    COMPLETION_CANONICALIZER, CompletionActor, CompletionDigest, CompletionDisposition,
+    CompletionSupersedes, ConditionOutcome, ConditionResultRecord, MalformedCompletion,
+    MissionCompletionV1, NarrativeItem, SpendReference, SupportKind, SupportRef, UncertaintyKind,
+    UnfinishedKind,
 };
 pub use mission_impact::{
     CANONICALIZER as MISSION_IMPACT_CANONICALIZER, ClassificationActor, ClassificationBasis,
