@@ -75,6 +75,37 @@ Units are stored exactly as measured (R13.6): `USD` and `usd` are two units. Fol
 transformation ADR 0034 refuses for a pinned base revision — a silent normalization of a stored
 identity. Lines are unit-unique, because two amounts for one unit is a question rather than a record.
 
+### An amount has no sign, and a count is not a licence
+
+Two rules about what an amount may be, both in the record's definition rather than discovered later.
+opus's non-author read of slice 1 found the first by attack and asked the second as a question; R17
+ruled both.
+
+**A negative amount is refused**, by a refusal that names itself (`negative_amount`). A credit, a
+refund and a reversal are all real things and none of them is a measurement: each is a later record
+kind with its own identity, its own actor, and its own coverage. A negative line here would let a
+Mission render cheaper than free, and — because lines are per unit and there is no total — it would
+net against a positive line, which is arithmetic no ledger performed. The rule is therefore per line,
+and it lives in the codec's domain check, so the decoder refuses it too: the sign is a domain value,
+and bytes that never came from this encoder must not decode into a record it would have refused.
+
+The wire type stays `i64`. Narrowing it to an unsigned integer would be a canonicalizer change, and
+it would buy nothing the domain check does not already give — the sign is refused as a value rather
+than erased from the grammar, which is also what leaves the later credit record free to choose its
+own shape instead of inheriting this one's.
+
+**A nonzero amount over zero counted units stays legal.** A flat charge is a measurement: a provider
+that bills a fixed fee for a window in which nothing was individually priced has been measured
+correctly, and the record says exactly that — zero priced units, this much money. This is the other
+half of kimi's S-5, which asked whether `measured` should require `counted_units > 0` and answered
+no. opus attacked it from the opposite direction — *"I counted zero priced units, and the total is
+500.00 USD"* — and the ruling kept it legal, because "money from nothing" and "a flat charge" are the
+same bytes and only the domain can tell them apart. What makes it honest is that `counted_units` is
+recorded at all: a reader sees the zero and knows no per-unit pricing stands behind the figure.
+
+Neither rule changes the canonical bytes, and the published vector below is unaffected because no
+line in it is negative.
+
 ### Who measures, and why there is no third arm
 
 `SpendOrigin` is `daemon_ledger` or `operator_declared`, and there is deliberately **no
@@ -200,6 +231,8 @@ canonicalizer version.
   record is `unmeasured`, which is the answer this record exists to make sayable.
 - Byte-identical measurements taken twice are two records, because `spend_id` and `measured_at_ms`
   differ. That is the accountability event differing, not waste.
+- Beacon cannot record a credit, refund or reversal at all until that record kind exists. That is a
+  real gap and the honest one: a negative measurement would have hidden it.
 - Beacon will never sum two units. A consumer that wants one number has to choose a rate, and
   choosing a rate is a decision no ledger can reproduce afterwards.
 - A multi-line spend reason is valid here and unrenderable in the Outcome's current spend section.

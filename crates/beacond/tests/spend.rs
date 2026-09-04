@@ -217,6 +217,80 @@ fn totals_of_zero() -> SpendTotals {
     totals(vec![line("USD", 0, 2)], 0)
 }
 
+/// R17, from opus's read of OD-S1 (F2, and F1 in the other direction).
+///
+/// A negative amount is refused, by a refusal that names itself: a credit, refund or reversal is a
+/// later record kind with its own identity, never a sign bit on a measurement. A nonzero amount over
+/// zero counted units stays legal, because a flat charge is a measurement -- opus attacked that one
+/// and the ruling went the other way.
+#[test]
+fn spend_refuses_a_negative_amount_and_keeps_a_flat_charge_legal() {
+    // opus's probe `probe_a_negative_amount_is_representable` passed against the unmodified tree.
+    // It is now an assertion that it does not.
+    let negative = with(SpendMeasurement::Measured(totals(
+        vec![line("USD", -100, 2)],
+        1,
+    )));
+    assert_eq!(
+        negative.canonical_bytes().expect_err("refuses"),
+        MalformedSpend::NegativeAmount
+    );
+    assert_eq!(MalformedSpend::NegativeAmount.as_str(), "negative_amount");
+
+    // One negative line among positives is refused too: the rule is per line, not per total, and
+    // there is no total to net it against.
+    let mixed = with(SpendMeasurement::Measured(totals(
+        vec![line("USD", 100, 2), line("tokens", -1, 0)],
+        2,
+    )));
+    assert_eq!(
+        mixed.canonical_bytes().expect_err("refuses"),
+        MalformedSpend::NegativeAmount
+    );
+
+    // And the decoder refuses it, not only the encoder: the sign is a domain value, so bytes that
+    // never came from this encoder must not decode into a record it would have refused. The wire
+    // type stays `i64` -- narrowing it would be a canonicalizer change (R17: none) -- so the bytes
+    // can carry a negative and the grammar is what says no.
+    let legal = with(SpendMeasurement::Measured(totals(
+        vec![line("USD", 100, 2)],
+        1,
+    )));
+    let bytes = legal.canonical_bytes().expect("encodes");
+    let amount = bytes
+        .windows(8)
+        .position(|window| window == 100_i64.to_be_bytes())
+        .expect("the amount is in the bytes");
+    let mut spliced = bytes.clone();
+    spliced[amount..amount + 8].copy_from_slice(&(-100_i64).to_be_bytes());
+    assert_eq!(
+        MeasuredSpendV1::from_canonical_bytes(&spliced).expect_err("refuses"),
+        MalformedSpend::NegativeAmount
+    );
+
+    // Zero is not negative, and stays legal.
+    with(SpendMeasurement::Measured(totals(
+        vec![line("USD", 0, 2)],
+        1,
+    )))
+    .canonical_bytes()
+    .expect("zero is a measurement");
+
+    // F1, ruled the other way: a flat charge is a measurement. opus's probe
+    // `probe_a_nonzero_amount_over_zero_counted_units_is_representable` stays green.
+    let flat = with(SpendMeasurement::Measured(totals(
+        vec![line("USD", 50_000, 2)],
+        0,
+    )));
+    let bytes = flat
+        .canonical_bytes()
+        .expect("a flat charge over zero priced units is a measurement");
+    let decoded = MeasuredSpendV1::from_canonical_bytes(&bytes).expect("decodes");
+    let counted = decoded.measurement.totals().expect("totals");
+    assert_eq!(counted.counted_units, 0);
+    assert_eq!(counted.lines[0].amount_minor, 50_000);
+}
+
 #[test]
 fn spend_lines_are_unit_unique_and_sort_by_code_point_not_locale() {
     // A collation that treats `-` as ignorable -- the shape ICU uses at primary strength -- puts
