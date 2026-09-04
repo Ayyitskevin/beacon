@@ -510,6 +510,19 @@ pub fn record_completion(
             ],
         )
         .map_err(store)?;
+
+    // Read the record back through the verified reader, inside the transaction, before committing.
+    //
+    // Without this a write can leave the store in a state its own reader refuses: the exactly-once
+    // rule, the declared-conditions digest and the boundary are all the READER's checks, and none
+    // of them is a key or a trigger. A completion with a gap in its condition set was storable and
+    // then unreadable -- found by the Outcome collector's slice-2 test, which is one lane too late
+    // for a caller who was told the write succeeded. `MeasuredSpendService::record` already had
+    // this shape; this module did not, and the difference was invisible until something read.
+    let stored = verified_completion_within(&transaction, record.workspace_id, &digest.value)?;
+    if &stored != record {
+        return Err(CompletionReadRefusal::BytesDisagree);
+    }
     transaction.commit().map_err(store)?;
     Ok(digest.value)
 }
