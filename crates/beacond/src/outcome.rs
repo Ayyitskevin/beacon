@@ -303,9 +303,14 @@ pub struct ReceiptRef {
 
 /// The completion-owned result for one declared success condition.
 ///
-/// Two arms and no third. This vocabulary belongs to `MissionCompletionV1` (hard prerequisite 1);
-/// slice 1 models it here because the manifest must encode it, and moving it to its owner is a
-/// canonicalizer change, not a refactor.
+/// Two arms and no third.
+///
+/// **Seam (R13.3): this vocabulary is `MissionCompletionV1`'s, not Outcome's.** Slice 1 keeps the
+/// closed set here because the manifest has to encode something and the owner does not exist on
+/// `main` yet. When `MissionCompletionV1` lands, `outcome` imports its vocabulary rather than
+/// keeping a second copy, and the resulting tag-table change is the slice-2 migration's business --
+/// a canonicalizer version, not a refactor. Two modules holding one vocabulary is how the two
+/// spellings of a condition result start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConditionResult {
     Met,

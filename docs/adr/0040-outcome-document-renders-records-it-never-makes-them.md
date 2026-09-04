@@ -256,6 +256,27 @@ resolves to include. The resolved mode is derived from the request and the class
 rather than stored, because a stored resolution can disagree with its own inputs. The
 document prints the rule that selected it.
 
+### The Policy bit is copied and re-checked, and it is a boundary claim
+
+R13.7, stated exactly because slice 2 implements this seam and a sentence left out of an ADR is a
+seam nobody builds. At `prepare`:
+
+1. the owning Policy reader returns the classification through its verified read -- stored bytes,
+   recomputed digest, Workspace scope, strict decode, exact re-encode;
+2. `prepare` writes **both** the cited `SourceRef` (identity, version, digest) **and** the derived
+   `policy_high_impact` bool into the manifest;
+3. `prepare` **re-checks** the copied bool against that exact record and refuses if the two
+   disagree.
+
+Copying is ADR 0037's argument for copying a Proposal's bindings into a Ruling: a copy makes later
+drift detectable without trusting the source row to have stayed put. Re-checking is what stops the
+copy from being a caller's assertion.
+
+**The manifest therefore asserts what Policy said at the boundary event, not what Policy says now.**
+Every surface that shows it says so, which is what the appendix's `verified at boundary event N;
+not re-verified at read time` label is for. A Policy re-classified after publication is visible
+through `get()`'s read-time tail beside the frozen bytes, never by editing them.
+
 Every appendix mode -- including the literal non-high-impact policy state -- embeds a
 manifest-proof block: the exact canonical manifest bytes as lowercase hexadecimal, with
 byte length, canonicalizer, digest algorithm, and digest. Without it the one identity the
@@ -310,6 +331,47 @@ pinned_profile)`, with the profile named in front matter, embedded local assets,
 network, clock, host path, locale, or random identifier. A PDF is a deletable derivative;
 it is never a source of truth. Slice 4 builds this; slice 1 asserts only that the
 document declares no PDF profile.
+
+## The rest of the design contract this ADR carries
+
+gpt2's specification review found ten invariants the first draft of this ADR compressed away. They
+bind slices 2 to 4, and an invariant that lives only in a design file is one nobody implements, so
+they are recorded here in their own words.
+
+1. **Publication qualification is exact.** `publish` requires the candidate Artifact's exact
+   digest, an Artifact-subject Evaluation of *that* digest reading `meets`, an evaluator who is not
+   the accountable author, and an external immutable publication relation
+   `(candidate_artifact_digest, evaluation_digest, publication_version)`.
+2. **Corrections are new versions.** A correction creates a new candidate and a new publication
+   version that supersedes the old one. Nothing is edited, deleted, or re-rendered in place.
+3. **The six prerequisite records keep their full ownership.** `MissionCompletionV1` owns the
+   finishing cursor, accountable Resident, per-condition outcomes, delivered Artifact references,
+   unfinished work, uncertainty and the spend reference; the Artifact entity owns immutable bytes,
+   digest, media type, accountable authorship and supersession; measured spend owns amount, unit,
+   coverage boundary and verification state. Outcome refuses an invalid one; it never repairs one.
+4. **The verified-read discipline is four rules, not one.** One read transaction at the recorded
+   boundary; relations and joins may identify candidate IDs only and may never supply a renderable
+   claim; every candidate is re-read through its owning module before it is a typed value; and a
+   decoy-projection test must lie in every joined column while the owned object stays correct, with
+   the rendered Markdown following the object or refusing.
+5. **The front-matter field list is authoritative.** Manifest identity and digest, render profile,
+   boundary event sequence, accountable Resident, Workspace, Mission, completion, and appendix
+   policy. The candidate Artifact is deliberately absent (R13.1) and adding it is a new
+   `renderer_version`.
+6. **The appendix's per-object contract is every column, not a summary.** Typed identity, schema
+   version, digest algorithm, digest, owning canonicalizer, pinned revision or an explicit `absent`
+   with its reason, and the verification result; plus Receipt checksums labelled as Outcome
+   checksums, candidate media type and renderer version, manifest digest and boundary sequence,
+   Policy identity/digest and the rule that selected the mode, and the PDF profile when one exists.
+7. **Only verified stored allowlisted fields become positive prose.** The renderer never synthesizes
+   a result from counts, Activity, Trace, filenames, current branch state, or missing rows.
+8. **A missing qualifying Evaluation blocks publication and preserves the candidate.** A
+   non-qualifying candidate stays an Artifact; it is never deleted and never presented as the
+   outcome.
+9. **Owning readers refuse their own unknown fields, tags, states and versions** before a value
+   crosses the interface. The renderer has no unknown-field tolerance and is never a second, laxer
+   decoder.
+10. **The Policy bit is copied and re-checked** — the section above.
 
 ## What slice 1 deliberately does not do
 
