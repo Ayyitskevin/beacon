@@ -2957,6 +2957,14 @@ fn migration_0028_preserves_preexisting_proposal_evaluation_bytes_and_chain() {
              CREATE TEMP TABLE findings_snapshot AS SELECT * FROM evaluation_findings;
              CREATE TEMP TABLE cited_runs_snapshot AS SELECT * FROM evaluation_cited_runs;
              CREATE TEMP TABLE supersessions_snapshot AS SELECT * FROM evaluation_supersessions;
+             -- A store at 27 does not have migration 0029's Outcome manifest store either, and
+             -- startup verifies the schema a store CLAIMS before it migrates it: leaving a later
+             -- migration's objects behind under a 27 stamp is a mis-stamped store, which is
+             -- refused rather than migrated. Newest migration off first.
+             DROP TRIGGER outcome_manifests_no_update;
+             DROP TRIGGER outcome_manifests_no_delete;
+             DROP INDEX outcome_manifests_by_mission;
+             DROP TABLE outcome_manifests;
              DROP TABLE evaluation_supersessions;
              DROP TABLE evaluation_cited_runs;
              DROP TABLE evaluation_findings;
@@ -2993,10 +3001,25 @@ fn migration_0028_preserves_preexisting_proposal_evaluation_bytes_and_chain() {
              SELECT workspace_id, subject_digest, evaluation_digest,
                     supersedes_evaluation_digest
              FROM supersessions_snapshot;
-             UPDATE schema_meta SET version = 27 WHERE singleton = 1 AND version = 28;
+             UPDATE schema_meta SET version = 27 WHERE singleton = 1 AND version = 29;
              COMMIT;",
         )
         .unwrap();
+    // The stamp above is guarded on the version the store actually starts at, and a guard that
+    // matches nothing is a silent no-op: when the ladder grew 0029 this UPDATE stopped firing and
+    // the failure surfaced downstream as a `SchemaMismatch` from a store that still claimed the
+    // current version. Assert the rollback landed, so the next migration lane is told HERE.
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT version FROM schema_meta WHERE singleton = 1",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        27,
+        "the rollback did not stamp the store at 27 -- update its guard for the new ladder head"
+    );
     drop(connection);
 
     Supervisor::bootstrap(StartupConfig {

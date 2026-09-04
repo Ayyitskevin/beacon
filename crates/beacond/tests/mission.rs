@@ -1074,13 +1074,19 @@ fn a_store_at_the_previous_schema_version_migrates_and_keeps_its_condition_rows(
     let connection = Connection::open(&store.path).unwrap();
     connection
         .execute_batch(
-            // Newest migration first. 0027's Artifact store is newest (the relation first, since
-            // it keys into `artifacts`). 0026 and 0025 BOTH rebuilt the closed `events` table --
+            // Newest migration first. 0029's Outcome manifest store is newest: it keys into
+            // `artifacts`, `mission_completions` and `missions`, so it comes off before any of
+            // them. 0027's Artifact store is next (the relation first, since it keys into
+            // `artifacts`). 0026 and 0025 BOTH rebuilt the closed `events` table --
             // 0026 to add `mission.completed`, 0025 to add two kinds -- so dropping their tables
             // is not enough: the rebuilt definition has to come off too or the store no longer
             // matches schema 23. 0027 rebuilt `events` too; `restore_pre_0025_events` below
             // unwinds every rebuild at once, back to 0023's definition.
-            "DROP TRIGGER artifact_supersessions_no_update;
+            "DROP TRIGGER outcome_manifests_no_update;
+             DROP TRIGGER outcome_manifests_no_delete;
+             DROP INDEX outcome_manifests_by_mission;
+             DROP TABLE outcome_manifests;
+             DROP TRIGGER artifact_supersessions_no_update;
              DROP TRIGGER artifact_supersessions_no_delete;
              DROP TABLE artifact_supersessions;
              DROP TRIGGER artifacts_no_update;
