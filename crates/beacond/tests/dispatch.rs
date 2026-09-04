@@ -3910,6 +3910,15 @@ fn a_swap_this_attempt_did_not_perform_is_not_reported_as_its_application() {
             .contains(&NotVerified::UnreferencedObjectResidue),
         "the branch reaches the prepared commit, so the Receipt cannot claim that no ref names its objects"
     );
+    // Both layers, because they are two guards and one assertion cannot kill both mutants. sol1's
+    // re-run moved this test down to the persisted token, which left `repository_effect` with no
+    // witness at all -- its own mutant went from RED to surviving. The accessor reads the token, so
+    // it must agree with it here.
+    assert_ne!(
+        receipt.repository_effect(),
+        RepositoryEffect::UnreferencedObjects,
+        "the accessor claims unreferenced objects the persisted record does not"
+    );
     fixture
         .restart()
         .expect("a refusal that measured its prepared commit still replays");
