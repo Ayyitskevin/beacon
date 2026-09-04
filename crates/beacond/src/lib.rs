@@ -79,7 +79,8 @@ pub use sandbox::{
 };
 
 pub use artifact::{
-    Artifact, ArtifactContext, ArtifactDigest, ArtifactKind, ArtifactV1, MalformedArtifact,
+    Artifact, ArtifactActor, ArtifactContext, ArtifactDigest, ArtifactError, ArtifactKind,
+    ArtifactService, ArtifactV1, InconsistentArtifact, MalformedArtifact, VerifiedArtifactRecord,
 };
 pub use candidate::{
     Candidate, CandidateDigest, CandidateEntry, CandidateError, CandidateImages, CandidateService,
@@ -211,7 +212,7 @@ pub use team::{
 pub use worktree::set_pinned_spawn_hook;
 pub use worktree::{CleanupOutcome, KeepReason, Worktree, WorktreeError};
 
-const SCHEMA_VERSION: i64 = 26;
+const SCHEMA_VERSION: i64 = 27;
 const MAX_WORKSPACE_NAME_CHARS: usize = 120;
 
 const SCHEMA_V1: &str = include_str!("../migrations/0001_initial.sql");
@@ -252,6 +253,12 @@ const MIGRATION_V25: &str = include_str!("../migrations/0025_spend_and_impact.sq
 // store is the remaining lane in this window and renumbers to 0027 when it lands; the ladder
 // step below moves with the file, and the file says the same.
 const MIGRATION_V26: &str = include_str!("../migrations/0026_mission_completions.sql");
+// The Artifact store held 0026 provisionally; the completion store landed first and took it, so
+// this one is 0027 exactly as the note above said the second lane would do. The events kind list
+// in 0027 was regenerated against 0026's parent list (which now includes mission.completed) --
+// a list written before the rebase is a snapshot of the wrong parent (the #50 trap), and the
+// migration tests diff the list against the enum.
+const MIGRATION_V27: &str = include_str!("../migrations/0027_artifacts.sql");
 
 #[derive(Debug, Clone)]
 pub struct StartupConfig {
@@ -344,6 +351,8 @@ pub enum SupervisorError {
     EvaluationStateMismatch,
     MissionCompletionEventMismatch(i64),
     MissionCompletionStateMismatch,
+    ArtifactEventMismatch(i64),
+    ArtifactStateMismatch,
     PauseEventMismatch(i64),
     SchemaMismatch,
     UnsupportedSchemaVersion(i64),
@@ -509,6 +518,17 @@ impl fmt::Display for SupervisorError {
                     formatter,
                     "Evaluation state does not agree with its bytes, the Proposal it binds, its \
                      findings and cited Runs, or its audit Event"
+                )
+            }
+            Self::ArtifactEventMismatch(sequence) => write!(
+                formatter,
+                "Event sequence {sequence} does not match its stored Artifact bytes"
+            ),
+            Self::ArtifactStateMismatch => {
+                write!(
+                    formatter,
+                    "Artifact state does not agree with its bytes, its content, its supersession \
+                     chain, or its audit Event"
                 )
             }
             Self::RulingStateMismatch => {
@@ -827,6 +847,7 @@ const MIGRATION_LADDER: &[(i64, &str)] = &[
     (24, MIGRATION_V24),
     (25, MIGRATION_V25),
     (26, MIGRATION_V26),
+    (27, MIGRATION_V27),
 ];
 
 /// Applies the ladder up to and including `version` -- a store at that schema, from nothing.
@@ -946,6 +967,7 @@ enum PersistedEventKind {
     InstallationResumed,
     EvaluationRecorded,
     MissionCompleted,
+    ArtifactRecorded,
 }
 
 impl PersistedEventKind {
@@ -979,6 +1001,7 @@ impl PersistedEventKind {
             Self::InstallationResumed => "installation.resumed",
             Self::EvaluationRecorded => "evaluation.recorded",
             Self::MissionCompleted => "mission.completed",
+            Self::ArtifactRecorded => "artifact.recorded",
         }
     }
 
@@ -1012,6 +1035,7 @@ impl PersistedEventKind {
             "installation.resumed" => Ok(Self::InstallationResumed),
             "evaluation.recorded" => Ok(Self::EvaluationRecorded),
             "mission.completed" => Ok(Self::MissionCompleted),
+            "artifact.recorded" => Ok(Self::ArtifactRecorded),
             _ => Err(SupervisorError::InvalidEventKind(value)),
         }
     }
@@ -1071,6 +1095,10 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
         .map_err(|_| SupervisorError::DispatchStateMismatch)?;
     evaluation::verify_evaluation_state(connection)
         .map_err(|_| SupervisorError::EvaluationStateMismatch)?;
+    // The Artifact state stands alone: it binds no other module's record, and nothing else's
+    // verification reads it.
+    artifact::verify_artifact_state(connection)
+        .map_err(|_| SupervisorError::ArtifactStateMismatch)?;
     // A Run whose lease expired without a terminal Receipt becomes unconfirmed
     // here. Lease expiry is what proves that state; the Run is never removed.
     check_preflight::verify_run_state(connection).map_err(|_| SupervisorError::RunStateMismatch)?;
@@ -1240,6 +1268,15 @@ fn verify_persisted_events(connection: &Connection) -> Result<u64, SupervisorErr
                 )
                 .map_err(|_| SupervisorError::MissionCompletionEventMismatch(sequence))?;
             }
+            PersistedEventKind::ArtifactRecorded => {
+                artifact::verify_artifact_event(
+                    connection,
+                    workspace_id,
+                    occurred_at_ms,
+                    &payload_json,
+                )
+                .map_err(|_| SupervisorError::ArtifactEventMismatch(sequence))?;
+            }
             PersistedEventKind::RulingRecorded => {
                 ruling::verify_ruling_event(
                     connection,
@@ -1378,10 +1415,11 @@ mod tests {
         MIGRATION_V7, MIGRATION_V8, MIGRATION_V9, MIGRATION_V10, MIGRATION_V11, MIGRATION_V12,
         MIGRATION_V13, MIGRATION_V14, MIGRATION_V15, MIGRATION_V16_ONLY, MIGRATION_V17,
         MIGRATION_V18, MIGRATION_V19, MIGRATION_V20, MIGRATION_V22, MIGRATION_V23, MIGRATION_V24,
-        MIGRATION_V25, OperatorAccountService, PreflightOutcome, PreflightReceipt, ProjectCharter,
-        ProjectCharterDraft, ProjectDraft, ProjectRepositoryService, ProjectService, ProjectView,
-        Recorded, RepositoryDraft, RepositorySourceKind, ResolvedCheck, SCHEMA_V1, SecretString,
-        StartupConfig, Supervisor, SupervisorError, UnavailableEvidence,
+        MIGRATION_V25, MIGRATION_V26, MIGRATION_V27, OperatorAccountService, PersistedEventKind,
+        PreflightOutcome, PreflightReceipt, ProjectCharter, ProjectCharterDraft, ProjectDraft,
+        ProjectRepositoryService, ProjectService, ProjectView, Recorded, RepositoryDraft,
+        RepositorySourceKind, ResolvedCheck, SCHEMA_V1, SecretString, StartupConfig, Supervisor,
+        SupervisorError, UnavailableEvidence,
     };
 
     struct TestStore {
@@ -4571,5 +4609,218 @@ mod tests {
                 .is_err(),
             "the rebuild did not restore the immutability trigger"
         );
+    }
+
+    /// The Event-kind list a rebuild carries. Extracted from the migration text so the test reads
+    /// the artifact under test, not a copy of it.
+    fn event_kind_list(migration: &str) -> Vec<String> {
+        let start = migration.find("kind IN (").expect("kind list present");
+        let rest = &migration[start..];
+        let end = rest.find("))").expect("kind list ends");
+        rest[..end]
+            .split('\'')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn migration_0027_carries_every_event_kind_and_every_event_forward() {
+        // The #50 trap: an events rebuild whose kind list is a snapshot of the wrong parent drops
+        // every kind added since, and the rows that used them. 0027's list must be exactly the
+        // parent's plus 'artifact.recorded', and the rebuild must carry the rows themselves. The
+        // parent is 0026: the completion store landed first, and this lane renumbered at its
+        // final rebase exactly as its provisional note said it would.
+        let parent_kinds = event_kind_list(MIGRATION_V26);
+        let widened_kinds = event_kind_list(MIGRATION_V27);
+        let mut expected = parent_kinds.clone();
+        expected.push("artifact.recorded".to_owned());
+        assert_eq!(
+            widened_kinds, expected,
+            "the rebuild's kind list is not the parent's list plus the one new kind"
+        );
+        // And every kind the table now accepts is one the replay path can name.
+        for kind in &widened_kinds {
+            PersistedEventKind::parse(kind.clone()).unwrap_or_else(|_| {
+                panic!("the rebuilt events table accepts a kind the replay path cannot parse: {kind}")
+            });
+        }
+
+        // Row preservation, measured. Foreign keys off on purpose: this is a migration test, not
+        // a fixture exercise.
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", "OFF")
+            .unwrap();
+        for migration in [
+            SCHEMA_V1,
+            MIGRATION_V2,
+            MIGRATION_V3,
+            MIGRATION_V4,
+            MIGRATION_V5,
+            MIGRATION_V6,
+            MIGRATION_V7,
+            MIGRATION_V8,
+            MIGRATION_V9,
+            MIGRATION_V10,
+            MIGRATION_V11,
+            MIGRATION_V12,
+            MIGRATION_V13,
+            MIGRATION_V14,
+            MIGRATION_V15,
+            MIGRATION_V16_ONLY,
+            MIGRATION_V17,
+            MIGRATION_V18,
+            MIGRATION_V19,
+            MIGRATION_V20,
+            MIGRATION_V22,
+            MIGRATION_V23,
+            MIGRATION_V24,
+            MIGRATION_V25,
+            MIGRATION_V26,
+        ] {
+            connection.execute_batch(migration).unwrap();
+        }
+        let workspace = Uuid::new_v4().to_string();
+        connection
+            .execute(
+                "INSERT INTO workspaces (id, name, created_at_ms) VALUES (?1, 'Personal', 7)",
+                rusqlite::params![workspace],
+            )
+            .unwrap();
+        for (kind, marker) in [
+            ("workspace.created", "{\"marker\":\"first\"}"),
+            ("evaluation.recorded", "{\"marker\":\"second\"}"),
+            ("mission.completed", "{\"marker\":\"third\"}"),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+                     SELECT id, ?2, ?3, 42 FROM workspaces",
+                    rusqlite::params![workspace, kind, marker],
+                )
+                .unwrap();
+        }
+        let read_events = |connection: &Connection| {
+            connection
+                .prepare(
+                    "SELECT sequence, kind, payload_json, occurred_at_ms
+                     FROM events ORDER BY sequence",
+                )
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        let before = read_events(&connection);
+
+        connection.execute_batch(MIGRATION_V27).unwrap();
+
+        assert_eq!(
+            before,
+            read_events(&connection),
+            "the rebuild did not carry every event row"
+        );
+        let version: i64 = connection
+            .query_row("SELECT version FROM schema_meta WHERE singleton = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 27);
+        // The widened vocabulary is what the rebuild was for.
+        connection
+            .execute(
+                "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+                 SELECT id, 'artifact.recorded', '{}', 43 FROM workspaces",
+                [],
+            )
+            .expect("the rebuilt table accepts the new kind");
+        // The roster triggers the rebuild must put back.
+        let triggers: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name IN (
+                     'team_formation_members_no_insert_after_formation',
+                     'mission_admission_members_no_insert_after_admission')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(triggers, 2, "the rebuild did not restore the roster triggers");
+    }
+
+    #[test]
+    fn migration_0027_advances_the_version_only_from_twenty_six() {
+        // The guarded UPDATE is what stops a store that never ran the rebuild from being stamped
+        // as though it had. Applied to a store that is not at 26, the migration leaves the
+        // version alone.
+        let through_v25 = [
+            SCHEMA_V1,
+            MIGRATION_V2,
+            MIGRATION_V3,
+            MIGRATION_V4,
+            MIGRATION_V5,
+            MIGRATION_V6,
+            MIGRATION_V7,
+            MIGRATION_V8,
+            MIGRATION_V9,
+            MIGRATION_V10,
+            MIGRATION_V11,
+            MIGRATION_V12,
+            MIGRATION_V13,
+            MIGRATION_V14,
+            MIGRATION_V15,
+            MIGRATION_V16_ONLY,
+            MIGRATION_V17,
+            MIGRATION_V18,
+            MIGRATION_V19,
+            MIGRATION_V20,
+            MIGRATION_V22,
+            MIGRATION_V23,
+            MIGRATION_V24,
+            MIGRATION_V25,
+        ];
+        let version = |connection: &Connection| {
+            connection
+                .query_row("SELECT version FROM schema_meta WHERE singleton = 1", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap()
+        };
+
+        let early = Connection::open_in_memory().unwrap();
+        early
+            .pragma_update(None, "foreign_keys", "OFF")
+            .unwrap();
+        for migration in through_v25 {
+            early.execute_batch(migration).unwrap();
+        }
+        assert_eq!(version(&early), 25);
+        early.execute_batch(MIGRATION_V27).unwrap();
+        assert_eq!(
+            version(&early),
+            25,
+            "a store that never ran the 0026 rebuild was stamped as though it had"
+        );
+
+        let current = Connection::open_in_memory().unwrap();
+        current
+            .pragma_update(None, "foreign_keys", "OFF")
+            .unwrap();
+        for migration in through_v25 {
+            current.execute_batch(migration).unwrap();
+        }
+        current.execute_batch(MIGRATION_V26).unwrap();
+        assert_eq!(version(&current), 26);
+        current.execute_batch(MIGRATION_V27).unwrap();
+        assert_eq!(version(&current), 27);
     }
 }

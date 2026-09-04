@@ -21,13 +21,24 @@
 //! for the reason `ruling.rs` states: an identity grammar's whole value is that it cannot move, and
 //! one shared codec would couple two frozen grammars' futures. The one function shared rather than
 //! copied is `sha256`, the crate's single hashing primitive.
+//!
+//! Slice 2 adds the store: the `artifacts` table and its immutability triggers, one
+//! `artifact.recorded` Event per record, the derived creation event cursor, the supersession
+//! relation, startup reconciliation, and the verified reader. v1 is inline-only (R16/A7): content
+//! lives in `content_inline` under the module's 1 MiB ceiling, and no blob directory exists.
 
 use std::fmt;
+use std::sync::Arc;
 
-use data_encoding::HEXLOWER;
+use data_encoding::{BASE64, HEXLOWER};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::mission::mission_admission_facts;
+use crate::operator_account::owner_account_exists;
 use crate::proposal::sha256;
+use crate::{OperatorAccountError, OperatorAccountService};
 
 /// The canonicalizer identity. Any future grammar that alters the byte layout of records that
 /// already exist is a new canonicalizer; assigning a value in a published tag position is not one.
@@ -96,6 +107,13 @@ impl ArtifactKind {
         }
     }
 
+    /// The lowercase token this kind is projected as in the store.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::OutcomeDocument => "outcome_document",
+        }
+    }
+
     /// The one media token this kind owns. The guard is keyed on the kind: a caller never supplies
     /// a media type the kind does not own, in either codec direction.
     fn media_type(self) -> &'static str {
@@ -122,7 +140,8 @@ pub enum ArtifactContext {
 ///
 /// A recorded value alone would leave a reader to assume which function produced it: the
 /// assumption these records exist to remove (ADR 0034/0037).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ArtifactDigest {
     pub algorithm: String,
     pub canonicalizer: String,
@@ -561,4 +580,923 @@ fn decode(input: &[u8]) -> Result<ArtifactV1, MalformedArtifact> {
         supersedes,
         recorded_at_ms,
     })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Slice 2: the store, the Event, the cursor, and the verified reader
+// ---------------------------------------------------------------------------------------------
+
+/// Why a well-formed Artifact does not describe this Workspace's state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InconsistentArtifact {
+    /// The record names a Workspace other than the service's.
+    WorkspaceScope,
+    /// The accountable Resident does not exist in this Workspace.
+    ResidentNotFound,
+    /// The accountable Configuration is not a link in that Resident's configuration chain.
+    ConfigurationNotFound,
+    /// The named Mission does not exist in this Workspace.
+    MissionNotFound,
+    /// The context's Project is not the one the named Mission belongs to.
+    ProjectScopeMismatch,
+    /// The accountable Resident is not on the named Mission's admission roster under the named
+    /// Configuration (the E3 rule: without this, the roster an Evaluation's non-authorship proof
+    /// rests on would be self-chosen).
+    NotAnAdmittedMember,
+    /// The digest a correction names is no stored Artifact's.
+    PredecessorNotFound,
+    /// A correction must cite the current tail of its chain; the named predecessor is already
+    /// superseded. ADR 0037's rule, under its own name.
+    NotTheCurrentTail,
+    /// A correction's kind differs from its predecessor's. Kind, not encoding, is the lineage
+    /// property (R16/A8).
+    WrongKind,
+    /// A correction's context differs from its predecessor's. A document's versions stay in one
+    /// Mission.
+    WrongContext,
+    /// A correction predating the record it supersedes. Equal times are allowed: two records can
+    /// land in one millisecond.
+    TimeRegresses,
+    /// The supplied content does not hash to the record's content digest.
+    ContentDigestMismatch,
+    /// The supplied content's length is not the record's declared byte count.
+    ContentLengthMismatch,
+}
+
+impl InconsistentArtifact {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::WorkspaceScope => "the Artifact names a different Workspace",
+            Self::ResidentNotFound => "the accountable Resident does not exist in this Workspace",
+            Self::ConfigurationNotFound => {
+                "the accountable Configuration is not a configuration of that Resident"
+            }
+            Self::MissionNotFound => "the named Mission does not exist in this Workspace",
+            Self::ProjectScopeMismatch => {
+                "the context Project is not the one the Mission belongs to"
+            }
+            Self::NotAnAdmittedMember => {
+                "the accountable Resident is not on that Mission's admission roster under that \
+                 Configuration"
+            }
+            Self::PredecessorNotFound => "the superseded digest names no stored Artifact",
+            Self::NotTheCurrentTail => "the superseded Artifact is not the current tail",
+            Self::WrongKind => "a correction's kind differs from its predecessor's",
+            Self::WrongContext => "a correction's context differs from its predecessor's",
+            Self::TimeRegresses => "a correction predates the record it supersedes",
+            Self::ContentDigestMismatch => {
+                "the content does not hash to the record's content digest"
+            }
+            Self::ContentLengthMismatch => {
+                "the content's length is not the record's declared byte count"
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ArtifactError {
+    Account(OperatorAccountError),
+    Malformed(MalformedArtifact),
+    Inconsistent(InconsistentArtifact),
+    NotFound,
+    /// The digest exists and the bytes or content behind it differ. Never an idempotent match.
+    DigestCollision,
+    InvalidStore,
+    Store(rusqlite::Error),
+    Json(serde_json::Error),
+}
+
+impl fmt::Display for ArtifactError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Account(error) => write!(formatter, "operator account refused: {error}"),
+            Self::Malformed(reason) => write!(formatter, "{reason}"),
+            Self::Inconsistent(reason) => {
+                write!(formatter, "Artifact references are inconsistent: {}", reason.reason())
+            }
+            Self::NotFound => write!(formatter, "no Artifact in this Workspace has that digest"),
+            Self::DigestCollision => write!(
+                formatter,
+                "an Artifact with that digest exists and its bytes or content differ"
+            ),
+            Self::InvalidStore => write!(formatter, "Artifact state is invalid"),
+            Self::Store(error) => write!(formatter, "Artifact store failed: {error}"),
+            Self::Json(error) => write!(formatter, "Artifact event is invalid: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for ArtifactError {}
+
+impl From<OperatorAccountError> for ArtifactError {
+    fn from(error: OperatorAccountError) -> Self {
+        Self::Account(error)
+    }
+}
+
+impl From<MalformedArtifact> for ArtifactError {
+    fn from(reason: MalformedArtifact) -> Self {
+        Self::Malformed(reason)
+    }
+}
+
+impl From<rusqlite::Error> for ArtifactError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Store(error)
+    }
+}
+
+impl From<serde_json::Error> for ArtifactError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json(error)
+    }
+}
+
+/// Who recorded the Artifact. One arm: the singleton account model has no Operator UUID, so v1
+/// records the closed basis rather than inventing an identity (RulingDecider's reason).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ArtifactActor {
+    Owner,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RecordedArtifact {
+    digest: ArtifactDigest,
+    canonical_bytes_base64: String,
+    content_digest: ArtifactDigest,
+    content_bytes: u64,
+    actor: ArtifactActor,
+    recorded_at_ms: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ArtifactRecordedPayload {
+    artifact: RecordedArtifact,
+}
+
+/// One stored Artifact row: the bytes, the identity, the content, and the projections.
+///
+/// Every column past `content_inline` is a projection for querying. Every claim is re-derived
+/// from the bytes on every verified read and at startup, and a row that disagrees with its own
+/// bytes is invalid state, not a different record.
+struct StoredArtifact {
+    workspace_id: Uuid,
+    digest_value: String,
+    canonical_bytes: Vec<u8>,
+    content_inline: Vec<u8>,
+    kind: String,
+    media_type: String,
+    content_bytes: u64,
+    accountable_resident_id: Uuid,
+    accountable_configuration_id: Uuid,
+    context_kind: String,
+    context_project_id: Option<Uuid>,
+    context_mission_id: Option<Uuid>,
+    has_predecessor: bool,
+    supersedes_digest: Option<String>,
+    recorded_at_ms: u64,
+    creation_event_seq: u64,
+}
+
+fn parse_uuid(value: &str) -> Result<Uuid, ArtifactError> {
+    Uuid::parse_str(value).map_err(|_| ArtifactError::InvalidStore)
+}
+
+fn parse_optional_uuid(value: Option<String>) -> Result<Option<Uuid>, ArtifactError> {
+    value.map(|inner| parse_uuid(&inner)).transpose()
+}
+
+fn nonnegative_u64(value: i64) -> Result<u64, ArtifactError> {
+    u64::try_from(value).map_err(|_| ArtifactError::InvalidStore)
+}
+
+fn load_stored(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+) -> Result<Option<StoredArtifact>, ArtifactError> {
+    connection
+        .query_row(
+            "SELECT workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+                    canonical_bytes, content_inline, kind, media_type, content_bytes,
+                    accountable_resident_id, accountable_configuration_id, context_kind,
+                    context_project_id, context_mission_id, has_predecessor, supersedes_digest,
+                    recorded_at_ms, creation_event_seq
+             FROM artifacts
+             WHERE workspace_id = ?1 AND digest_value = ?2",
+            params![workspace_id.to_string(), digest_value],
+            |row| {
+                let digest_algorithm: String = row.get(1)?;
+                let digest_canonicalizer: String = row.get(2)?;
+                // A row naming another algorithm or canonicalizer is not this module's record at
+                // all: refuse it here so no reader ever re-hashes bytes under the wrong function.
+                if digest_algorithm != DIGEST_ALGORITHM || digest_canonicalizer != CANONICALIZER {
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
+                Ok(StoredArtifact {
+                    workspace_id: parse_uuid(&row.get::<_, String>(0)?)
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    digest_value: row.get(3)?,
+                    canonical_bytes: row.get(4)?,
+                    content_inline: row.get(5)?,
+                    kind: row.get(6)?,
+                    media_type: row.get(7)?,
+                    content_bytes: nonnegative_u64(row.get(8)?)
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    accountable_resident_id: parse_uuid(&row.get::<_, String>(9)?)
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    accountable_configuration_id: parse_uuid(&row.get::<_, String>(10)?)
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    context_kind: row.get(11)?,
+                    context_project_id: parse_optional_uuid(row.get(12)?)
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    context_mission_id: parse_optional_uuid(row.get(13)?)
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    has_predecessor: row.get::<_, i64>(14)? != 0,
+                    supersedes_digest: row.get(15)?,
+                    recorded_at_ms: nonnegative_u64(row.get(16)?)
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    creation_event_seq: nonnegative_u64(row.get(17)?)
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(ArtifactError::from)
+}
+
+/// Every indexed column repeats what the bytes say. A row that disagrees with its own bytes is
+/// refused, on every verified read and at startup.
+fn columns_match(stored: &StoredArtifact, payload: &ArtifactV1) -> bool {
+    let (context_kind, context_project_id, context_mission_id) = match &payload.context {
+        ArtifactContext::None => ("none", None, None),
+        ArtifactContext::Mission {
+            project_id,
+            mission_id,
+        } => ("mission", Some(*project_id), Some(*mission_id)),
+    };
+    stored.workspace_id == payload.workspace_id
+        && stored.kind == payload.kind.as_str()
+        && stored.media_type == payload.media_type
+        && stored.content_bytes == payload.content_bytes
+        && stored.accountable_resident_id == payload.accountable_resident_id
+        && stored.accountable_configuration_id == payload.accountable_configuration_id
+        && stored.context_kind == context_kind
+        && stored.context_project_id == context_project_id
+        && stored.context_mission_id == context_mission_id
+        && stored.has_predecessor == payload.supersedes.is_some()
+        && stored.supersedes_digest.as_deref()
+            == payload.supersedes.map(|digest| HEXLOWER.encode(&digest)).as_deref()
+        && stored.recorded_at_ms == payload.recorded_at_ms
+}
+
+/// The content proof: the stored bytes hash to the record's content digest and measure its
+/// declared count. Recomputed on every verified read; never trusted from a column.
+fn content_matches(stored: &StoredArtifact, payload: &ArtifactV1) -> bool {
+    stored.content_inline.len() as u64 == payload.content_bytes
+        && payload.content_digest.value == HEXLOWER.encode(&sha256(&stored.content_inline))
+}
+
+/// One stored Artifact, proved: the digest names these bytes, the bytes decode strictly and
+/// re-encode identically, every indexed column repeats what they say, and the content hashes to
+/// the digest the bytes carry. The supersession relation is checked against the bytes too: the
+/// row a successor cites must be the digest the successor's bytes name.
+fn verified_payload(
+    connection: &Connection,
+    stored: &StoredArtifact,
+) -> Result<ArtifactV1, ArtifactError> {
+    if HEXLOWER.encode(&sha256(&stored.canonical_bytes)) != stored.digest_value {
+        return Err(ArtifactError::InvalidStore);
+    }
+    let payload = decode(&stored.canonical_bytes).map_err(|_| ArtifactError::InvalidStore)?;
+    if encode(&payload).map_err(|_| ArtifactError::InvalidStore)? != stored.canonical_bytes {
+        return Err(ArtifactError::InvalidStore);
+    }
+    if !columns_match(stored, &payload) || !content_matches(stored, &payload) {
+        return Err(ArtifactError::InvalidStore);
+    }
+    if let Some(predecessor) = &stored.supersedes_digest {
+        let cited: bool = connection
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM artifact_supersessions
+                     WHERE workspace_id = ?1 AND artifact_digest = ?2 AND supersedes_digest = ?3)",
+                params![
+                    stored.workspace_id.to_string(),
+                    stored.digest_value,
+                    predecessor
+                ],
+                |row| row.get(0),
+            )
+            .map_err(ArtifactError::Store)?;
+        if !cited {
+            return Err(ArtifactError::InvalidStore);
+        }
+    }
+    Ok(payload)
+}
+
+/// The Event paired with one Artifact: exactly one, its decoded byte field exactly equal to the
+/// stored record bytes, and its sequence is the record's creation cursor. Re-derived on every
+/// verified read, never trusted from the column.
+fn paired_event_sequence(
+    connection: &Connection,
+    stored: &StoredArtifact,
+) -> Result<u64, ArtifactError> {
+    let mut statement = connection.prepare(
+        "SELECT sequence, payload_json, occurred_at_ms FROM events
+         WHERE workspace_id = ?1 AND kind = 'artifact.recorded'
+           AND json_extract(payload_json, '$.artifact.digest.value') = ?2",
+    )?;
+    let rows = statement
+        .query_map(params![stored.workspace_id.to_string(), stored.digest_value], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    if rows.len() != 1 {
+        return Err(ArtifactError::InvalidStore);
+    }
+    let (sequence, payload_json, occurred_at_ms) = rows.into_iter().next().expect("one row");
+    verify_artifact_event(
+        connection,
+        stored.workspace_id,
+        nonnegative_u64(occurred_at_ms)?,
+        &payload_json,
+    )?;
+    nonnegative_u64(sequence)
+}
+
+/// One stored Artifact, fully proved, inside the caller's transaction.
+///
+/// Returns `Ok(None)` when this Workspace has no such Artifact -- a different fact from one that
+/// disagrees with itself, which is `InvalidStore`, and from a digest that names another
+/// Workspace's Artifact, which the caller never learns about.
+pub(crate) fn verified_artifact_within(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+) -> Result<Option<VerifiedArtifactRecord>, ArtifactError> {
+    let Some(stored) = load_stored(connection, workspace_id, digest_value)? else {
+        return Ok(None);
+    };
+    let payload = verified_payload(connection, &stored)?;
+    let event_sequence = paired_event_sequence(connection, &stored)?;
+    if event_sequence != stored.creation_event_seq {
+        return Err(ArtifactError::InvalidStore);
+    }
+    let superseded_by = connection
+        .query_row(
+            "SELECT artifact_digest FROM artifact_supersessions
+             WHERE workspace_id = ?1 AND supersedes_digest = ?2",
+            params![stored.workspace_id.to_string(), stored.digest_value],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(Some(VerifiedArtifactRecord {
+        digest: digest_envelope(&stored.digest_value),
+        payload,
+        content: stored.content_inline,
+        creation_event_seq: stored.creation_event_seq,
+        superseded_by,
+    }))
+}
+
+/// One Artifact, verified: the record, its content, its creation cursor, and its supersession
+/// state.
+///
+/// The record's own fields are proved at read time (bytes, digest, columns, content). Two fields
+/// are different in kind: `payload.supersedes` is a fact of the record (boundary-time, inside the
+/// bytes), while `superseded_by` is derived from the relation **now** -- read-time state, labelled
+/// so by the accessor's documentation, and never silently merged into the cited record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedArtifactRecord {
+    digest: ArtifactDigest,
+    payload: ArtifactV1,
+    content: Vec<u8>,
+    creation_event_seq: u64,
+    superseded_by: Option<String>,
+}
+
+impl VerifiedArtifactRecord {
+    /// The record's identity envelope (algorithm, canonicalizer, value), proved at read time.
+    pub fn digest(&self) -> &ArtifactDigest {
+        &self.digest
+    }
+
+    /// The decoded record, proved against its own bytes at read time.
+    pub fn payload(&self) -> &ArtifactV1 {
+        &self.payload
+    }
+
+    /// The exact stored content bytes, proved against the record's content digest at read time.
+    pub fn content(&self) -> &[u8] {
+        &self.content
+    }
+
+    /// The sequence of this record's `artifact.recorded` Event: where this record entered the
+    /// ledger. Re-derived against the Event on every read; a position, not a claim about anything
+    /// else.
+    pub fn creation_event_seq(&self) -> u64 {
+        self.creation_event_seq
+    }
+
+    /// The digest of the Artifact that supersedes this one, if one exists -- derived from the
+    /// supersession relation at read time. This is read-time state: it moves as corrections land,
+    /// and it is never a property of this record's bytes.
+    pub fn superseded_by(&self) -> Option<&str> {
+        self.superseded_by.as_deref()
+    }
+}
+
+/// The digest chain from one Artifact to its current tail, in chain order, cited digest first.
+///
+/// Chain order, never timestamp order. Every hop is re-proved: the successor's bytes must name the
+/// predecessor the relation records. This is the both-links rule's instrument (R12 item 10): a
+/// consumer shows the cited digest and, beside it, the current tail -- never the tail silently in
+/// place of the link.
+pub(crate) fn supersession_tail(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+) -> Result<Vec<ArtifactDigest>, ArtifactError> {
+    let mut chain = Vec::new();
+    let mut current = digest_value.to_owned();
+    loop {
+        let Some(verified) = verified_artifact_within(connection, workspace_id, &current)? else {
+            return Err(ArtifactError::InvalidStore);
+        };
+        let next = verified.superseded_by.clone();
+        chain.push(verified.digest.clone());
+        match next {
+            None => return Ok(chain),
+            Some(successor) => current = successor,
+        }
+    }
+}
+
+/// Proves the record's references exist and agree, at record time and again at startup.
+/// Lifecycle is deliberately not consulted: accountability is a record-time fact, and a retired
+/// Resident's Artifacts stay attributable (`BLUEPRINT:343`).
+fn validate_references(
+    connection: &Connection,
+    workspace_id: Uuid,
+    payload: &ArtifactV1,
+) -> Result<(), ArtifactError> {
+    let inconsistent = |reason| Err(ArtifactError::Inconsistent(reason));
+
+    if payload.workspace_id != workspace_id {
+        return inconsistent(InconsistentArtifact::WorkspaceScope);
+    }
+
+    let resident_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM agents WHERE workspace_id = ?1 AND id = ?2)",
+            params![
+                workspace_id.to_string(),
+                payload.accountable_resident_id.to_string()
+            ],
+            |row| row.get(0),
+        )?;
+    if !resident_exists {
+        return inconsistent(InconsistentArtifact::ResidentNotFound);
+    }
+    let configuration_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM resident_configuration_decisions
+                 WHERE workspace_id = ?1 AND resident_id = ?2 AND id = ?3)",
+            params![
+                workspace_id.to_string(),
+                payload.accountable_resident_id.to_string(),
+                payload.accountable_configuration_id.to_string()
+            ],
+            |row| row.get(0),
+        )?;
+    if !configuration_exists {
+        return inconsistent(InconsistentArtifact::ConfigurationNotFound);
+    }
+
+    if let ArtifactContext::Mission {
+        project_id,
+        mission_id,
+    } = &payload.context
+    {
+        let Some(facts) = mission_admission_facts(
+            connection,
+            workspace_id,
+            *mission_id,
+            payload.accountable_resident_id,
+        )
+        .map_err(|_| ArtifactError::InvalidStore)?
+        else {
+            return inconsistent(InconsistentArtifact::MissionNotFound);
+        };
+        if &facts.project_id != project_id {
+            return inconsistent(InconsistentArtifact::ProjectScopeMismatch);
+        }
+        if facts.member_configuration_id != Some(payload.accountable_configuration_id) {
+            return inconsistent(InconsistentArtifact::NotAnAdmittedMember);
+        }
+    }
+    Ok(())
+}
+
+/// The supersession rules, checked at record time inside the writer's transaction so two
+/// concurrent corrections cannot both extend one tail: cite the current tail, same kind, same
+/// context, and no step back in time.
+fn validate_supersession(
+    connection: &Connection,
+    workspace_id: Uuid,
+    payload: &ArtifactV1,
+) -> Result<(), ArtifactError> {
+    let Some(predecessor) = payload.supersedes else {
+        return Ok(());
+    };
+    let predecessor_hex = HEXLOWER.encode(&predecessor);
+    let inconsistent = |reason| Err(ArtifactError::Inconsistent(reason));
+
+    let Some(stored) = load_stored(connection, workspace_id, &predecessor_hex)? else {
+        return inconsistent(InconsistentArtifact::PredecessorNotFound);
+    };
+    let predecessor_payload = verified_payload(connection, &stored)?;
+    if predecessor_payload.kind != payload.kind {
+        return inconsistent(InconsistentArtifact::WrongKind);
+    }
+    if predecessor_payload.context != payload.context {
+        return inconsistent(InconsistentArtifact::WrongContext);
+    }
+    if payload.recorded_at_ms < predecessor_payload.recorded_at_ms {
+        return inconsistent(InconsistentArtifact::TimeRegresses);
+    }
+    let already_superseded: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM artifact_supersessions
+                 WHERE workspace_id = ?1 AND supersedes_digest = ?2)",
+            params![workspace_id.to_string(), predecessor_hex],
+            |row| row.get(0),
+        )?;
+    if already_superseded {
+        return inconsistent(InconsistentArtifact::NotTheCurrentTail);
+    }
+    Ok(())
+}
+
+/// Writes the Event, then the row carrying the Event's sequence as its creation cursor, then the
+/// supersession relation. The Event goes FIRST because the cursor is the Event's own sequence and
+/// `artifacts_no_update` makes a later correction impossible -- a row written with a provisional
+/// cursor could never be repaired. One transaction, opened by the caller, so a failure partway
+/// rolls all three back together.
+fn insert_artifact(
+    connection: &Connection,
+    stored: &StoredArtifact,
+    content_digest: &ArtifactDigest,
+) -> Result<(), ArtifactError> {
+    let payload = serde_json::to_string(&ArtifactRecordedPayload {
+        artifact: RecordedArtifact {
+            digest: digest_envelope(&stored.digest_value),
+            canonical_bytes_base64: BASE64.encode(&stored.canonical_bytes),
+            content_digest: content_digest.clone(),
+            content_bytes: stored.content_bytes,
+            actor: ArtifactActor::Owner,
+            recorded_at_ms: stored.recorded_at_ms,
+        },
+    })?;
+    connection.execute(
+        "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+         VALUES (?1, 'artifact.recorded', ?2, ?3)",
+        params![
+            stored.workspace_id.to_string(),
+            payload,
+            i64::try_from(stored.recorded_at_ms).map_err(|_| ArtifactError::InvalidStore)?
+        ],
+    )?;
+    let sequence = connection.last_insert_rowid();
+    connection.execute(
+        "INSERT INTO artifacts (
+             workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+             canonical_bytes, content_inline, kind, media_type, content_bytes,
+             accountable_resident_id, accountable_configuration_id, context_kind,
+             context_project_id, context_mission_id, has_predecessor, supersedes_digest,
+             recorded_at_ms, creation_event_seq
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                   ?17, ?18)",
+        params![
+            stored.workspace_id.to_string(),
+            DIGEST_ALGORITHM,
+            CANONICALIZER,
+            stored.digest_value.as_str(),
+            stored.canonical_bytes.as_slice(),
+            stored.content_inline.as_slice(),
+            stored.kind.as_str(),
+            stored.media_type.as_str(),
+            i64::try_from(stored.content_bytes).map_err(|_| ArtifactError::InvalidStore)?,
+            stored.accountable_resident_id.to_string(),
+            stored.accountable_configuration_id.to_string(),
+            stored.context_kind.as_str(),
+            stored.context_project_id.map(|id| id.to_string()),
+            stored.context_mission_id.map(|id| id.to_string()),
+            i64::from(stored.has_predecessor),
+            stored.supersedes_digest.as_deref(),
+            i64::try_from(stored.recorded_at_ms).map_err(|_| ArtifactError::InvalidStore)?,
+            sequence,
+        ],
+    )?;
+    if let Some(predecessor) = &stored.supersedes_digest {
+        connection.execute(
+            "INSERT INTO artifact_supersessions (workspace_id, artifact_digest, supersedes_digest)
+             VALUES (?1, ?2, ?3)",
+            params![
+                stored.workspace_id.to_string(),
+                stored.digest_value.as_str(),
+                predecessor
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// Owns authenticated Artifact recording and identity reads behind one deep interface.
+///
+/// Recording an Artifact creates no authority. It opens no Gate, admits no dispatch, completes no
+/// Mission, publishes no Outcome, invokes no model, and makes no network request.
+pub struct ArtifactService {
+    accounts: Arc<OperatorAccountService>,
+    workspace_id: Uuid,
+}
+
+impl ArtifactService {
+    pub fn new(accounts: Arc<OperatorAccountService>, workspace_id: Uuid) -> Self {
+        Self {
+            accounts,
+            workspace_id,
+        }
+    }
+
+    /// Records one immutable Artifact and its content. The Owner is authenticated before anything
+    /// is inspected. The time is the service clock, stamped into the bytes the service
+    /// canonicalizes -- the typed-argument pattern (Ruling v1, Candidate v1): there is no second
+    /// party whose exact encoding must be preserved, so no untrusted byte slice is accepted.
+    /// Identical content recorded twice is two Artifacts, because the accountability event
+    /// differs; idempotence across a crash belongs to the caller, who can first read by the digest
+    /// it would have produced.
+    pub fn record(
+        &self,
+        kind: ArtifactKind,
+        content: &[u8],
+        context: ArtifactContext,
+        accountable_resident_id: Uuid,
+        accountable_configuration_id: Uuid,
+        supersedes: Option<[u8; 32]>,
+    ) -> Result<VerifiedArtifactRecord, ArtifactError> {
+        self.accounts.with_authenticated_store(|connection, now| {
+            let recorded_at_ms = u64::try_from(now).map_err(|_| ArtifactError::InvalidStore)?;
+            let media_type = kind.media_type().to_owned();
+            let payload = ArtifactV1 {
+                workspace_id: self.workspace_id,
+                kind,
+                media_type,
+                content_digest: ArtifactDigest {
+                    algorithm: DIGEST_ALGORITHM.to_owned(),
+                    canonicalizer: RAW_CONTENT_CANONICALIZER.to_owned(),
+                    value: HEXLOWER.encode(&sha256(content)),
+                },
+                content_bytes: u64::try_from(content.len())
+                    .map_err(|_| ArtifactError::InvalidStore)?,
+                accountable_resident_id,
+                accountable_configuration_id,
+                context,
+                supersedes,
+                recorded_at_ms,
+            };
+            // The codec's own refusals, run on the value the service just built: the encoder is
+            // the only producer of these bytes, and its bounds are the module's.
+            let canonical_bytes = payload.canonical_bytes()?;
+
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if let Some(stored) =
+                load_stored(&transaction, self.workspace_id, &payload.digest()?.value)?
+            {
+                if stored.canonical_bytes != canonical_bytes || stored.content_inline != content {
+                    return Err(ArtifactError::DigestCollision);
+                }
+                let verified = verified_artifact_within(
+                    &transaction,
+                    self.workspace_id,
+                    &stored.digest_value,
+                )?
+                .ok_or(ArtifactError::InvalidStore)?;
+                transaction.commit()?;
+                return Ok(verified);
+            }
+
+            validate_references(&transaction, self.workspace_id, &payload)?;
+            validate_supersession(&transaction, self.workspace_id, &payload)?;
+
+            let content_digest = payload.content_digest.clone();
+            let stored = StoredArtifact {
+                workspace_id: self.workspace_id,
+                digest_value: payload.digest()?.value,
+                canonical_bytes,
+                content_inline: content.to_vec(),
+                kind: kind.as_str().to_owned(),
+                media_type: kind.media_type().to_owned(),
+                content_bytes: payload.content_bytes,
+                accountable_resident_id,
+                accountable_configuration_id,
+                context_kind: match &payload.context {
+                    ArtifactContext::None => "none".to_owned(),
+                    ArtifactContext::Mission { .. } => "mission".to_owned(),
+                },
+                context_project_id: match &payload.context {
+                    ArtifactContext::Mission { project_id, .. } => Some(*project_id),
+                    ArtifactContext::None => None,
+                },
+                context_mission_id: match &payload.context {
+                    ArtifactContext::Mission { mission_id, .. } => Some(*mission_id),
+                    ArtifactContext::None => None,
+                },
+                has_predecessor: payload.supersedes.is_some(),
+                supersedes_digest: payload.supersedes.map(|digest| HEXLOWER.encode(&digest)),
+                recorded_at_ms,
+                // The cursor IS the paired Event's position. The Event is written first and the
+                // row carries its sequence; `artifacts_no_update` makes any later correction
+                // impossible, which is exactly the guarantee reconciliation relies on.
+                creation_event_seq: 1,
+            };
+            let digest_value = stored.digest_value.clone();
+            insert_artifact(&transaction, &stored, &content_digest)?;
+            let verified = verified_artifact_within(&transaction, self.workspace_id, &digest_value)?
+                .ok_or(ArtifactError::InvalidStore)?;
+            transaction.commit()?;
+            Ok(verified)
+        })
+    }
+
+    /// The exact-digest read: the record, its content, its cursor, and its read-time supersession
+    /// state -- or a refusal. A digest that names nothing in this Workspace is `NotFound`, never
+    /// an empty or filtered answer.
+    pub fn get(&self, digest: &str) -> Result<VerifiedArtifactRecord, ArtifactError> {
+        self.accounts.with_authenticated_store(|connection, _now| {
+            verified_artifact_within(connection, self.workspace_id, digest)?
+                .ok_or(ArtifactError::NotFound)
+        })
+    }
+
+    /// The digest chain from one Artifact to its current tail, chain order, cited digest first.
+    /// Read-time state, derived on every call.
+    pub fn list_supersession_tail(
+        &self,
+        digest: &str,
+    ) -> Result<Vec<ArtifactDigest>, ArtifactError> {
+        self.accounts.with_authenticated_store(|connection, _now| {
+            if load_stored(connection, self.workspace_id, digest)?.is_none() {
+                return Err(ArtifactError::NotFound);
+            }
+            supersession_tail(connection, self.workspace_id, digest)
+        })
+    }
+}
+
+/// Requires one Event per Artifact whose decoded byte field exactly equals the stored record
+/// bytes, whose content digest envelope is the content's own, and whose encoding is the canonical
+/// padded base64 -- a differently encoded payload carrying the same bytes is different evidence,
+/// not the same evidence reformatted.
+pub(crate) fn verify_artifact_event(
+    connection: &Connection,
+    workspace_id: Uuid,
+    occurred_at_ms: u64,
+    payload_json: &str,
+) -> Result<(), ArtifactError> {
+    let payload: ArtifactRecordedPayload = serde_json::from_str(payload_json)?;
+    let recorded = payload.artifact;
+    if recorded.digest.algorithm != DIGEST_ALGORITHM
+        || recorded.digest.canonicalizer != CANONICALIZER
+        || recorded.recorded_at_ms != occurred_at_ms
+    {
+        return Err(ArtifactError::InvalidStore);
+    }
+    let canonical_bytes = BASE64
+        .decode(recorded.canonical_bytes_base64.as_bytes())
+        .map_err(|_| ArtifactError::InvalidStore)?;
+    if BASE64.encode(&canonical_bytes) != recorded.canonical_bytes_base64 {
+        return Err(ArtifactError::InvalidStore);
+    }
+    if HEXLOWER.encode(&sha256(&canonical_bytes)) != recorded.digest.value {
+        return Err(ArtifactError::InvalidStore);
+    }
+    let stored = load_stored(connection, workspace_id, &recorded.digest.value)?
+        .ok_or(ArtifactError::InvalidStore)?;
+    if stored.canonical_bytes != canonical_bytes
+        || stored.recorded_at_ms != occurred_at_ms
+        || recorded.content_bytes != stored.content_bytes
+        || recorded.content_digest.value != HEXLOWER.encode(&sha256(&stored.content_inline))
+    {
+        return Err(ArtifactError::InvalidStore);
+    }
+    Ok(())
+}
+
+/// Startup reconciliation: every Artifact row re-proved against its bytes, its content, its Event,
+/// its cursor, its references, and its chain. The world is not re-derived -- a later Mission or a
+/// retired Resident does not corrupt a recorded Artifact.
+pub(crate) fn verify_artifact_state(connection: &Connection) -> Result<(), ArtifactError> {
+    let mut statement = connection.prepare(
+        "SELECT workspace_id, digest_value FROM artifacts ORDER BY workspace_id, digest_value",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+
+    if !rows.is_empty() && !owner_account_exists(connection)? {
+        return Err(ArtifactError::InvalidStore);
+    }
+
+    for (workspace_id, digest_value) in &rows {
+        let workspace_id = parse_uuid(workspace_id)?;
+        let stored = load_stored(connection, workspace_id, digest_value)?
+            .ok_or(ArtifactError::InvalidStore)?;
+        let payload = verified_payload(connection, &stored)?;
+        validate_references(connection, workspace_id, &payload)?;
+        let event_sequence = paired_event_sequence(connection, &stored)?;
+        if event_sequence != stored.creation_event_seq {
+            return Err(ArtifactError::InvalidStore);
+        }
+    }
+
+    // The relation re-derived against the bytes: every supersession row's successor must name that
+    // predecessor in its canonical bytes, no Artifact may be superseded twice (the store's UNIQUE
+    // is re-proved here, reconciliation being complete on its own terms), and no chain may cycle.
+    let mut statement = connection.prepare(
+        "SELECT workspace_id, artifact_digest, supersedes_digest
+         FROM artifact_supersessions ORDER BY workspace_id, artifact_digest",
+    )?;
+    let links: Vec<(String, String, String)> = statement
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    let mut superseded_once: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    for (workspace, successor, predecessor) in &links {
+        if !superseded_once.insert((workspace.clone(), predecessor.clone())) {
+            return Err(ArtifactError::InvalidStore);
+        }
+        let stored = load_stored(connection, parse_uuid(workspace)?, successor)?
+            .ok_or(ArtifactError::InvalidStore)?;
+        let payload = verified_payload(connection, &stored)?;
+        let Some(named) = payload.supersedes else {
+            return Err(ArtifactError::InvalidStore);
+        };
+        if HEXLOWER.encode(&named) != *predecessor {
+            return Err(ArtifactError::InvalidStore);
+        }
+        let predecessor_stored = load_stored(connection, parse_uuid(workspace)?, predecessor)?
+            .ok_or(ArtifactError::InvalidStore)?;
+        let predecessor_payload = verified_payload(connection, &predecessor_stored)?;
+        if payload.recorded_at_ms < predecessor_payload.recorded_at_ms {
+            return Err(ArtifactError::InvalidStore);
+        }
+    }
+    // A cycle in the relation whose bytes agreed with it would be a cycle of SHA-256 preimages;
+    // what a store can actually hold is a cycle the bytes contradict, refused above, or one whose
+    // walk never ends, refused here.
+    for (workspace, successor, _) in &links {
+        let mut walked = std::collections::HashSet::new();
+        let mut current = successor.clone();
+        while let Some(next) = links
+            .iter()
+            .find(|link| &link.1 == &current && &link.0 == workspace)
+            .map(|link| link.2.clone())
+        {
+            if !walked.insert(current.clone()) {
+                return Err(ArtifactError::InvalidStore);
+            }
+            current = next;
+        }
+    }
+
+    let total_events: i64 = connection.query_row(
+        "SELECT count(*) FROM events WHERE kind = 'artifact.recorded'",
+        [],
+        |row| row.get(0),
+    )?;
+    if usize::try_from(total_events) != Ok(rows.len()) {
+        return Err(ArtifactError::InvalidStore);
+    }
+    Ok(())
 }

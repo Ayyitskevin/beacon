@@ -245,12 +245,19 @@ fn downgrade_execution_schema_to_v15(store_path: &Path) {
     connection
         .execute_batch(
             "BEGIN IMMEDIATE;
-             -- Records come off innermost first, newest migration first. Migration 0026's
-             -- completion store is newest; migration 0025's spend and classification tables
-             -- reference missions and Project Policy revisions; migration 0024's condition
-             -- identity is next (ADR 0041); migration 0023's Evaluation tables reference
-             -- proposals, and 0022's Ruling/Candidate binding references both rulings and
-             -- candidates, which reference proposals in turn.
+             -- Records come off innermost first, newest migration first. Migration 0027's
+             -- Artifact store is newest (the supersession relation first, since it keys into
+             -- `artifacts`); migration 0026's completion store is next; migration 0025's spend
+             -- and classification tables reference missions and Project Policy revisions;
+             -- migration 0024's condition identity is next (ADR 0041); migration 0023's
+             -- Evaluation tables reference proposals, and 0022's Ruling/Candidate binding
+             -- references both rulings and candidates, which reference proposals in turn.
+             DROP TRIGGER artifact_supersessions_no_update;
+             DROP TRIGGER artifact_supersessions_no_delete;
+             DROP TABLE artifact_supersessions;
+             DROP TRIGGER artifacts_no_update;
+             DROP TRIGGER artifacts_no_delete;
+             DROP TABLE artifacts;
              DROP TRIGGER mission_completion_conditions_no_update;
              DROP TRIGGER mission_completion_conditions_no_delete;
              DROP TABLE mission_completion_conditions;
@@ -2010,7 +2017,7 @@ fn migration_preserves_real_v1_bytes_through_rollback_and_forward_startup() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 26);
+    assert_eq!(report.diagnostics.schema_version, 27);
     let connection = Connection::open(&store.path).unwrap();
     assert_v1_bytes(&connection, run_id, &v1_payload);
 }
