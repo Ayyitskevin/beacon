@@ -11,6 +11,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+mod artifact;
 mod candidate;
 mod check_preflight;
 mod declared_checks;
@@ -74,6 +75,9 @@ pub use sandbox::{
     run_bounded_for_test,
 };
 
+pub use artifact::{
+    Artifact, ArtifactContext, ArtifactDigest, ArtifactKind, ArtifactV1, MalformedArtifact,
+};
 pub use candidate::{
     Candidate, CandidateDigest, CandidateEntry, CandidateError, CandidateImages, CandidateService,
     CandidateV1, InconsistentCandidate, MalformedCandidate,
