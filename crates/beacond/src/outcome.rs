@@ -48,11 +48,11 @@ const CANDIDATE_MEDIA_TYPE: &str = "text/markdown; charset=utf-8";
 /// Kevin's ruling 5: this is an Outcome verification checksum over the exact stored `receipt_json`,
 /// not a retroactive Receipt domain digest. ADR 0027 and Receipt v2 define no Receipt content
 /// digest, so the label lives in the canonical bytes where it cannot be dropped by a renderer.
-const RECEIPT_CHECKSUM_LABEL: &str = "beacon.outcome.receipt-checksum.v1";
+pub(crate) const RECEIPT_CHECKSUM_LABEL: &str = "beacon.outcome.receipt-checksum.v1";
 
 /// The three bounds this function owns. Kevin's ruling 9: the Outcome function owns them, a caller
 /// cannot supply them, and an exceeded bound refuses the whole render.
-const MAX_CITATIONS: u64 = 256;
+pub(crate) const MAX_CITATIONS: u64 = 256;
 const MAX_VERIFIED_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_EMITTED_MARKDOWN_BYTES: u64 = 1024 * 1024;
 
@@ -222,7 +222,7 @@ pub enum SourceKind {
 }
 
 impl SourceKind {
-    fn tag(self) -> u8 {
+    pub(crate) fn tag(self) -> u8 {
         match self {
             Self::Mission => TAG_SOURCE_MISSION,
             Self::Completion => TAG_SOURCE_COMPLETION,

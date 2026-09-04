@@ -1636,6 +1636,22 @@ impl EvaluationService {
     }
 }
 
+/// One Evaluation, verified, by digest within a Workspace.
+///
+/// The shape `verified_proposal_within` and `verified_ruling_within` already have, so a consumer
+/// that reads all three does not have to learn a third calling convention. `Ok(None)` is "no such
+/// Evaluation in this Workspace" and is a different answer from a refusal.
+pub(crate) fn verified_evaluation_within(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+) -> Result<Option<Evaluation>, EvaluationError> {
+    let Some(row) = load_row(connection, workspace_id, digest_value)? else {
+        return Ok(None);
+    };
+    verified_evaluation(connection, workspace_id, row).map(Some)
+}
+
 fn recorded_proposal_of(
     connection: &Connection,
     digest_value: &str,
