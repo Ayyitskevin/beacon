@@ -424,6 +424,11 @@ pub struct CollectedNarrative {
 pub struct CollectedClassification {
     pub digest_value: String,
     pub classification_id: Uuid,
+    /// The record's own version, as its verified reader proved it (R15: `classification_id` +
+    /// `version` are the reference identity). Carried so the assembler copies a verified value into
+    /// the Policy citation instead of a constant (R23.5) -- a constant where a verified value
+    /// belongs is a decoy waiting to happen.
+    pub version: u32,
     /// The Mission the record's own bytes classify. Carried, not dropped: without it the
     /// completion/classification mismatch this collector refuses would be erased before the
     /// `prepare` seam could ever check it (sol1's cold read, #3).
@@ -1063,6 +1068,7 @@ impl<'a> Collector<'a> {
         Ok(CollectedClassification {
             digest_value: record.digest().value.clone(),
             classification_id: payload.classification_id,
+            version: payload.version,
             mission_id: payload.mission_id,
             project_id: payload.policy.project_id,
             policy_revision: payload.policy.policy_revision,
