@@ -3033,7 +3033,7 @@ fn kimi_startup_refuses_a_candidate_scoped_to_another_mission() {
     assert!(
         matches!(
             boot,
-            Err(beacond::SupervisorError::OutcomeManifestStateMismatch)
+            Err(beacond::SupervisorError::OutcomeManifestStateMismatch { .. })
         ),
         "startup accepted a candidate scoped to another Mission: {boot:?}"
     );
@@ -3080,7 +3080,7 @@ fn kimi_startup_refuses_a_candidate_authored_by_another_resident() {
     assert!(
         matches!(
             boot,
-            Err(beacond::SupervisorError::OutcomeManifestStateMismatch)
+            Err(beacond::SupervisorError::OutcomeManifestStateMismatch { .. })
         ),
         "startup accepted a candidate authored by another Resident: {boot:?}"
     );
@@ -3928,8 +3928,41 @@ END;",
     let refusal = astra_boot(&fixture)
         .expect_err("a store holding a manifest that disagrees with its bytes reopened Ready");
     assert!(
-        matches!(&refusal, beacond::SupervisorError::OutcomeManifestStateMismatch),
-        "startup did not refuse the tampered manifest: {refusal:?}"
+        matches!(
+            &refusal,
+            beacond::SupervisorError::OutcomeManifestStateMismatch {
+                workspace_id,
+                manifest_digest,
+                cause: ManifestStoreRefusal::ColumnDisagrees {
+                    column: "renderer_version"
+                },
+            } if *workspace_id == fixture.workspace_id && manifest_digest == &target
+        ),
+        "refused for the wrong reason, with the cause flattened, or naming the wrong row: \
+         {refusal:?}"
+    );
+
+    // R28.4: the key and the fault's NAME, and not the carried refusal's own text.
+    let line = refusal.to_string();
+    assert!(
+        line.contains(&target) && line.contains(&fixture.workspace_id.to_string()),
+        "the refusal does not name the row it refused: {line}"
+    );
+    assert!(
+        line.contains("ColumnDisagrees"),
+        "the refusal does not name the fault: {line}"
+    );
+    let carried = ManifestStoreRefusal::ColumnDisagrees {
+        column: "renderer_version",
+    }
+    .to_string();
+    assert!(
+        !line.contains(&carried),
+        "the carried refusal's own text reached the one-line message: {line}"
+    );
+    assert!(
+        format!("{refusal:?}").contains("renderer_version"),
+        "the carried fault is not reachable through Debug: {refusal:?}"
     );
 }
 
