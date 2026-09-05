@@ -5286,3 +5286,92 @@ fn classify_in(
         .value
         .clone()
 }
+
+// ---------------------------------------------------------------------------------------------
+// R32 — the two closure-walk defects astra found (OV1-opus2-report.md). astra's probes enter this
+// suite verbatim, names kept, because this is the suite whose fixture chain they were built on.
+// ---------------------------------------------------------------------------------------------
+
+/// astra's completion builder, verbatim from its C11-D probe.
+fn c11d_completion(
+    f: &Fixture,
+    spend: SpendReference,
+    delivered: Vec<[u8; 32]>,
+) -> MissionCompletionV1 {
+    MissionCompletionV1 {
+        workspace_id: f.workspace_id,
+        project_id: f.project_id,
+        mission_id: f.mission_id,
+        completion_id: Uuid::new_v4(),
+        actor: CompletionActor::Operator,
+        accountable_resident_id: f.resident_id,
+        accountable_resident_configuration_id: f.configuration_id,
+        boundary_event_seq: f.latest_event_seq(),
+        disposition: CompletionDisposition::Concluded,
+        declared_conditions_sha256: declared_conditions_digest(&[CONDITION_TEXT.to_owned()]),
+        condition_results: vec![ConditionResultRecord {
+            ordinal: 0,
+            outcome: ConditionOutcome::Met,
+            support: vec![],
+            note: None,
+        }],
+        delivered_artifacts: delivered,
+        unfinished_work: vec![],
+        uncertainty: vec![],
+        spend,
+        supersedes: CompletionSupersedes::None,
+        summary: "C11-D scratch completion".to_owned(),
+        completed_at_ms: 1_788_400_000_000,
+    }
+}
+
+/// Today's behaviour, pinned before it changes (R32.1 removes it).
+///
+/// `record_completion` refuses ANY non-empty `delivered_artifacts` and examines nothing about them
+/// — not the digest's form, not the Artifact's kind, not its scope, not whether it resolves. This
+/// test is that sentence made executable: the Artifact it names is real, Mission-scoped, recorded
+/// through its own owner in the line above, and the refusal is identical to the one a garbage
+/// digest would get. So the refusal is not a verification that a caller could satisfy; it is a
+/// closed door, and astra's finding is not a fixture artefact.
+///
+/// It is deleted by the commit that opens the door, and replaced by astra's own probe.
+#[test]
+fn record_completion_refuses_every_delivery_unconditionally() {
+    let f = admitted_mission("r32-delivery-today");
+    let artifact = f
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            b"# Recorded support\n",
+            ArtifactContext::Mission {
+                project_id: f.project_id,
+                mission_id: f.mission_id,
+            },
+            f.resident_id,
+            f.configuration_id,
+            None,
+        )
+        .expect("a real Mission-scoped Artifact records through its owner");
+
+    let real = c11d_completion(
+        &f,
+        SpendReference::NotMeasured("not measured".to_owned()),
+        vec![digest_bytes(&artifact.digest().value)],
+    );
+    let garbage = c11d_completion(
+        &f,
+        SpendReference::NotMeasured("not measured".to_owned()),
+        vec![[0x5a; 32]],
+    );
+
+    assert_eq!(
+        record_completion(&mut f.store.connect(), &real).unwrap_err(),
+        beacond::CompletionReadRefusal::NoArtifactEntity,
+        "a real, resolvable, Mission-scoped delivery was refused"
+    );
+    assert_eq!(
+        record_completion(&mut f.store.connect(), &garbage).unwrap_err(),
+        beacond::CompletionReadRefusal::NoArtifactEntity,
+        "and a digest that resolves to nothing gets the same answer, which is the point"
+    );
+}
