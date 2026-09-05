@@ -725,6 +725,49 @@ pub(crate) fn mission_admission_facts(
     }))
 }
 
+/// The Project a Mission belongs to, proved rather than read off a column.
+///
+/// Startup already re-proves every Mission against its own `mission.admitted` Event; this is the
+/// same proof, on demand, for a reader that must not take `missions.project_id` on trust. It finds
+/// the one Event that admitted this Mission, runs the same whole-payload comparison
+/// `verify_mission_event` runs, and only then returns the Project the verified record names.
+///
+/// `Ok(None)` means this Workspace admitted no such Mission -- a different fact from a Mission whose
+/// record and Event disagree, which is `InvalidStore`.
+///
+/// Added for sol1's #5: `mission_completions` has no composite key binding a Mission to a Project,
+/// so a completion could name Mission A and Project B and satisfy the schema. The completion reader
+/// asks this instead of joining.
+pub(crate) fn verified_mission_project(
+    connection: &Connection,
+    workspace_id: Uuid,
+    mission_id: Uuid,
+) -> Result<Option<Uuid>, MissionError> {
+    let Some(stored) = load_stored_mission(connection, workspace_id, mission_id)? else {
+        return Ok(None);
+    };
+    let mut statement = connection.prepare(
+        "SELECT payload_json, occurred_at_ms FROM events
+         WHERE workspace_id = ?1 AND kind = 'mission.admitted'
+           AND json_extract(payload_json, '$.mission.id') = ?2",
+    )?;
+    let events: Vec<(String, i64)> = statement
+        .query_map(
+            params![workspace_id.to_string(), mission_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    // Exactly one. None is a Mission the log does not account for; two would make "when was this
+    // Mission admitted" a question with two answers.
+    let [(payload_json, occurred_at_ms)] = events.as_slice() else {
+        return Err(MissionError::InvalidStore);
+    };
+    let occurred_at_ms = u64::try_from(*occurred_at_ms).map_err(|_| MissionError::InvalidStore)?;
+    verify_mission_event(connection, workspace_id, occurred_at_ms, payload_json)?;
+    Ok(Some(stored.project_id))
+}
+
 pub(crate) fn verify_mission_event(
     connection: &Connection,
     workspace_id: Uuid,
