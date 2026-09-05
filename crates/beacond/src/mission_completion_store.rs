@@ -722,9 +722,7 @@ pub(crate) fn outcome_token(outcome: ConditionOutcome) -> &'static str {
 }
 
 /// Startup: every stored completion re-proves itself, and every `mission.completed` Event names one.
-pub(crate) fn verify_completion_state(
-    connection: &Connection,
-) -> Result<(), CompletionStateFault> {
+pub(crate) fn verify_completion_state(connection: &Connection) -> Result<(), CompletionStateFault> {
     let mut statement = connection
         .prepare("SELECT workspace_id, digest_value FROM mission_completions ORDER BY digest_value")
         .map_err(CompletionStateFault::Store)?;

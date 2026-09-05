@@ -1445,7 +1445,9 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     // After Mission state, because every completion re-derives its conditions from the Mission's own
     // rows and its boundary from the Mission's admission Event.
     mission_completion_store::verify_completion_state(connection).map_err(|fault| match fault {
-        mission_completion_store::CompletionStateFault::Store(error) => SupervisorError::Store(error),
+        mission_completion_store::CompletionStateFault::Store(error) => {
+            SupervisorError::Store(error)
+        }
         mission_completion_store::CompletionStateFault::Row {
             workspace_id,
             digest_value,
