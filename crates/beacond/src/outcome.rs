@@ -1281,9 +1281,13 @@ fn encode_refs(
     expected: Option<SourceKind>,
 ) -> Result<(), MalformedOutcome> {
     encode_state(encoder, state, |encoder, refs| {
+        // The bound is applied to the STORED count before anything is cloned or sorted. `sorted`
+        // clones every entry; refusing after it meant an already-refusable 50,000-entry array cost
+        // 60 MB of allocation on its way to a refusal (sol1's cold read, #6). The count is written
+        // here, in the position the table gives it, and the sort follows.
+        encoder.count(refs.len())?;
         let refs = sorted(refs, source_ref_key);
         require_canonical_order(&refs, source_ref_key)?;
-        encoder.count(refs.len())?;
         for entry in &refs {
             if let Some(expected) = expected {
                 require_kind(entry, expected)?;
@@ -1709,6 +1713,27 @@ fn citation_key(lane: CitationLane, identity: Vec<KeyPart>) -> Vec<KeyPart> {
     key
 }
 
+/// Every collection's stored length against `MAX_COLLECTION_ENTRIES`, with no allocation: the
+/// lengths are facts the manifest already holds. This is the same bound `Encoder::count` applies
+/// while encoding, lifted to run before anything clones, sorts or walks -- the bound is owned by
+/// the grammar and applied before the work it exists to prevent.
+fn require_collection_lengths(manifest: &OutcomeManifestV1) -> Result<(), MalformedOutcome> {
+    let over = |length: usize| length > MAX_COLLECTION_ENTRIES as usize;
+    let refs_over = |state: &OutcomeState<Vec<SourceRef>>| matches!(state, OutcomeState::Verified(refs) if over(refs.len()));
+    if over(manifest.success_conditions.len())
+        || refs_over(&manifest.delivered_artifacts)
+        || refs_over(&manifest.proposal_refs)
+        || refs_over(&manifest.ruling_refs)
+        || refs_over(&manifest.evaluation_refs)
+        || matches!(&manifest.receipt_refs, OutcomeState::Verified(refs) if over(refs.len()))
+        || matches!(&manifest.unfinished_work, OutcomeState::Verified(items) if over(items.len()))
+        || matches!(&manifest.uncertainty, OutcomeState::Verified(items) if over(items.len()))
+    {
+        return Err(MalformedOutcome::OverLimitLength);
+    }
+    Ok(())
+}
+
 fn citation_census(manifest: &OutcomeManifestV1) -> Result<u64, BoundRefusal> {
     let mut seen: BTreeSet<Vec<KeyPart>> = BTreeSet::new();
     let refuse_if_over = |seen: &BTreeSet<Vec<KeyPart>>| -> Result<(), BoundRefusal> {
@@ -2123,6 +2148,12 @@ pub fn render(
     // and sorts every collection into a fresh byte vector -- so a bound checked after it has
     // already paid for what it refuses. Sorting cannot change the census either: it reorders a set
     // it does not add to.
+    // The per-collection length bound, on the STORED counts, before the census walks anything.
+    // The census clones a key per entry into a set; for an already-refusable 50,000-entry array
+    // that was 20 MB of allocation on the way to a refusal the encoder would have given anyway
+    // (sol1's cold read, #6). Same refusal, earlier: `OverLimitLength`, exactly what `encode`
+    // raises for the same input, so nothing observable changes except when it is said.
+    require_collection_lengths(manifest)?;
     let citations = citation_census(manifest).map_err(OutcomeRefusal::Bound)?;
     debug_assert!(citations <= MAX_CITATIONS);
     if sources.verified_source_bytes > MAX_VERIFIED_SOURCE_BYTES {
