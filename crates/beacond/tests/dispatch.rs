@@ -2858,7 +2858,7 @@ fn a_recovery_that_cannot_name_its_run_is_a_failed_write() {
     assert!(
         matches!(
             fixture.restart(),
-            Err(SupervisorError::DispatchStateMismatch)
+            Err(SupervisorError::DispatchRecoveryFailed)
         ),
         "a recovery write that could not complete did not say so at startup"
     );
