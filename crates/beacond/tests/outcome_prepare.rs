@@ -25,17 +25,18 @@ use beacond::{
     Finding, FindingSeverity, ImpactLevel, InconsistentEvaluation, LocalModelActivationService,
     LocalModelEndpoint, MISSION_IMPACT_CANONICALIZER, ManifestStoreRefusal, MissionCompletionV1,
     MissionDraft, MissionImpactClassificationV1, MissionImpactService, MissionMemberDraft,
-    MissionService, NarrativeItem, OperatorAccountService, OperatorSessionPhase, OutcomeCandidate,
-    OutcomeManifestV1, OutcomeService, OutcomeState, PolicyRevisionRef, PredecessorFault,
-    PrepareRefusal, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService,
-    ProjectRepositoryService, ProjectService, Provenance, ProviderFeature, PublicationSeamRefusal,
-    PublishRefusal, RepositoryDraft, RepositorySourceKind, ResidentConfigurationService,
-    ResidentLifecycleService, RubricDeclaration, SecretString, SourceDigest, SourceKind, SourceRef,
-    SourcesRefusal, SpendReference, StarterOrganizationService, StarterResidentDraft, StarterRole,
-    StartupConfig, SuccessCondition, Supervisor, SupervisorError, SupportRef, TeamDraft,
-    TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy,
-    TeamMemberDraft, TeamService, TrackRecordEvidenceKind, TrackRecordRequirement, UnfinishedKind,
-    Verdict, VerifiedSources, VerifiedText, declared_conditions_digest, publication_candidacy,
+    MissionService, NarrativeItem, OperatorAccountError, OperatorAccountService,
+    OperatorSessionPhase, OutcomeCandidate, OutcomeManifestV1, OutcomeService, OutcomeState,
+    PolicyRevisionRef, PredecessorFault, PrepareRefusal, ProjectCharterDraft, ProjectDraft,
+    ProjectPolicyDraft, ProjectPolicyService, ProjectRepositoryService, ProjectService, Provenance,
+    ProviderFeature, PublicationSeamRefusal, PublishRefusal, RepositoryDraft, RepositorySourceKind,
+    ResidentConfigurationService, ResidentLifecycleService, RubricDeclaration, SecretString,
+    SourceDigest, SourceKind, SourceRef, SourcesRefusal, SpendReference,
+    StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig, SuccessCondition,
+    Supervisor, SupervisorError, SupportRef, TeamDraft, TeamLeadAmbiguityRule,
+    TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
+    TeamService, TrackRecordEvidenceKind, TrackRecordRequirement, UnfinishedKind, Verdict,
+    VerifiedSources, VerifiedText, declared_conditions_digest, publication_candidacy,
     record_completion, render, verified_manifest_within,
 };
 use rusqlite::types::Value;
@@ -5999,6 +6000,18 @@ fn export_without_an_authenticated_session_is_refused_and_not_as_absent() {
 
     fixture.accounts.lock().unwrap();
 
+    // And it is the ACCOUNT's refusal, carried typed rather than flattened, so the transport can
+    // map it to `NotAuthenticated` instead of a protocol fault.
+    assert!(
+        matches!(
+            fixture
+                .outcomes
+                .export_markdown(fixture.mission_id)
+                .expect_err("a locked store exported"),
+            PublishRefusal::Account(OperatorAccountError::NotAuthenticated)
+        ),
+        "the account refusal did not survive as itself"
+    );
     for refusal in [
         fixture
             .outcomes
