@@ -751,7 +751,7 @@ fn a_recorded_evaluation_is_immutable_and_survives_startup_verification() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .expect("startup verifies the Evaluation");
-    assert_eq!(report.diagnostics.schema_version, 30);
+    assert_eq!(report.diagnostics.schema_version, 31);
     assert_eq!(
         evaluations.get(&evaluation.digest().value).unwrap(),
         evaluation
@@ -2962,6 +2962,10 @@ fn migration_0028_preserves_preexisting_proposal_evaluation_bytes_and_chain() {
              -- startup verifies the schema a store CLAIMS before it migrates it: leaving a later
              -- migration's objects behind under a 27 stamp is a mis-stamped store, which is
              -- refused rather than migrated. Newest migration off first.
+             DROP TRIGGER outcome_publications_no_update;
+             DROP TRIGGER outcome_publications_no_delete;
+             DROP INDEX outcome_publications_by_mission;
+             DROP TABLE outcome_publications;
              DROP TRIGGER outcome_manifests_no_update;
              DROP TRIGGER outcome_manifests_no_delete;
              DROP INDEX outcome_manifests_by_mission;
@@ -3002,7 +3006,7 @@ fn migration_0028_preserves_preexisting_proposal_evaluation_bytes_and_chain() {
              SELECT workspace_id, subject_digest, evaluation_digest,
                     supersedes_evaluation_digest
              FROM supersessions_snapshot;
-             UPDATE schema_meta SET version = 27 WHERE singleton = 1 AND version = 30;
+             UPDATE schema_meta SET version = 27 WHERE singleton = 1 AND version = 31;
              COMMIT;",
         )
         .unwrap();

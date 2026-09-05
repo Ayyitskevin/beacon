@@ -245,7 +245,9 @@ fn downgrade_execution_schema_to_v15(store_path: &Path) {
     connection
         .execute_batch(
             "BEGIN IMMEDIATE;
-             -- Records come off innermost first, newest migration first. Migration 0029's
+             -- Records come off innermost first, newest migration first. Migration 0031's
+             -- publication relation is newest: it keys into `artifacts`, `evaluations` and
+             -- `missions`, so it comes off before all three. Migration 0029's
              -- Outcome manifest store is newest: it keys into `artifacts`, `mission_completions`
              -- and `missions`, so it comes off before any of them. Migration 0027's Artifact
              -- store is next (the supersession relation first, since it keys into `artifacts`);
@@ -254,6 +256,10 @@ fn downgrade_execution_schema_to_v15(store_path: &Path) {
              -- migration 0024's condition identity is next (ADR 0041); migration 0023's
              -- Evaluation tables reference proposals, and 0022's Ruling/Candidate binding
              -- references both rulings and candidates, which reference proposals in turn.
+             DROP TRIGGER outcome_publications_no_update;
+             DROP TRIGGER outcome_publications_no_delete;
+             DROP INDEX outcome_publications_by_mission;
+             DROP TABLE outcome_publications;
              DROP TRIGGER outcome_manifests_no_update;
              DROP TRIGGER outcome_manifests_no_delete;
              DROP INDEX outcome_manifests_by_mission;
@@ -2023,7 +2029,7 @@ fn migration_preserves_real_v1_bytes_through_rollback_and_forward_startup() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 30);
+    assert_eq!(report.diagnostics.schema_version, 31);
     let connection = Connection::open(&store.path).unwrap();
     assert_v1_bytes(&connection, run_id, &v1_payload);
 }
