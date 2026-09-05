@@ -341,6 +341,11 @@ network, clock, host path, locale, or random identifier. A PDF is a deletable de
 it is never a source of truth. Slice 4 builds this; slice 1 asserts only that the
 document declares no PDF profile.
 
+**Correction (R30.2, slice 4b).** "with the profile named in front matter" is superseded: the
+profile is the renderer's, not the document's, and naming it in front matter would change every
+byte of every document and require a new `renderer_version`. The profile names itself in the
+PDF's `Creator`.
+
 ## The rest of the design contract this ADR carries
 
 gpt2's specification review found ten invariants the first draft of this ADR compressed away. They
