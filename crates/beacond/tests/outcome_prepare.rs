@@ -3944,26 +3944,15 @@ END;",
     )
     .expect_err("the candidate's own author qualified it");
 
-    // The seam refuses it. WHICH name comes back is the measurement: the Evaluation module
-    // re-derives non-authorship from the canonical bytes on every read
-    // (`evaluation.rs` `verified_evaluation`), and the seam calls that reader FIRST and maps its
-    // error to `Unverified` -- so the seam's own `EvaluatorAuthoredTheCandidate` arm sits behind a
-    // wall that never lets a self-evaluation through. Both are refusals of the same fact; the arm
-    // is a second wall, not the one that fires.
-    assert!(
-        matches!(
-            refusal,
-            PublicationSeamRefusal::Unverified
-                | PublicationSeamRefusal::EvaluatorAuthoredTheCandidate
-        ),
-        "{refusal:?}"
-    );
-    assert_eq!(
-        refusal,
-        PublicationSeamRefusal::Unverified,
-        "the seam's own arm fired, so it is reachable after all -- update the report's acceptance \
-         row 1, which records it as unreachable"
-    );
+    // The seam refuses it, as `Unverified` -- the Evaluation module's refusal, surfaced opaquely.
+    //
+    // That name is the whole point of this test. The seam calls `verified_evaluation_within` FIRST,
+    // and `verified_evaluation` re-derives non-authorship from the canonical bytes and refuses the
+    // read, so no self-evaluation ever reaches a check further down. The seam used to carry its own
+    // non-authorship arm for this case; R24.1 had it removed (R9) once this test showed the arm
+    // could not fire. If this assertion ever fails with a different name, a wall moved: find out
+    // which before changing the expectation.
+    assert_eq!(refusal, PublicationSeamRefusal::Unverified, "{refusal:?}");
     // And publishing that pairing refuses too, so nothing downstream is more permissive.
     assert!(
         fixture
