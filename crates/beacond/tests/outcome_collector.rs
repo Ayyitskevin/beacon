@@ -22,21 +22,22 @@ use std::thread::{self, JoinHandle};
 
 use beacond::{
     ArtifactContext, ArtifactKind, ArtifactService, AutonomyProfile, BeaconCapability,
-    ClassificationActor, ClassificationBasis, ClassificationSupersedes, CollectionRequest,
-    Collector, CollectorRefusal, CompletionActor, CompletionDisposition, ConditionOutcome,
-    ConditionResultRecord, Conflicts, DeclaredCheck, EvaluationDraft, EvaluationService,
-    EvaluationSubjectDraft, EvaluationSupersedes, Evaluator, Finding, FindingSeverity, ImpactLevel,
-    LocalModelActivationService, LocalModelEndpoint, MeasuredSpendService, MeasuredSpendV1,
-    MissionCompletionV1, MissionDraft, MissionImpactClassificationV1, MissionImpactService,
-    MissionMemberDraft, MissionService, MissionView, OUTCOME_RECEIPT_CHECKSUM_LABEL,
-    OperatorAccountService, OperatorSessionPhase, OutcomeState, PolicyRevisionRef,
-    ProjectCharterDraft, ProjectDraft, ProjectRepositoryService, ProjectService, ProjectView,
-    ProposalService, ProviderFeature, RepositoryDraft, RepositorySourceKind, ResidentConfiguration,
-    ResidentConfigurationService, ResidentLifecycleService, RubricDeclaration, RulingDecision,
-    RulingService, RulingSupersedes, SecretString, SourceKind, SpendLine, SpendMeasurement,
-    SpendOrigin, SpendReference, SpendSupersedes, SpendTotals, StarterOrganizationService,
-    StarterResidentDraft, StarterRole, StartupConfig, Supervisor, TeamDraft, TeamMemberDraft,
-    TeamService, TeamView, UncertaintyKind, UncountedEntry, UncountedKind, UnfinishedKind, Verdict,
+    ClassificationActor, ClassificationBasis, ClassificationSupersedes, CollectedUncounted,
+    CollectionRequest, Collector, CollectorRefusal, CompletionActor, CompletionDisposition,
+    ConditionOutcome, ConditionResultRecord, Conflicts, DeclaredCheck, EvaluationDraft,
+    EvaluationService, EvaluationSubjectDraft, EvaluationSupersedes, Evaluator, Finding,
+    FindingSeverity, ImpactLevel, LocalModelActivationService, LocalModelEndpoint,
+    MeasuredSpendService, MeasuredSpendV1, MissionCompletionV1, MissionDraft,
+    MissionImpactClassificationV1, MissionImpactService, MissionMemberDraft, MissionService,
+    MissionView, OUTCOME_RECEIPT_CHECKSUM_LABEL, OperatorAccountService, OperatorSessionPhase,
+    OutcomeState, PolicyRevisionRef, ProjectCharterDraft, ProjectDraft, ProjectRepositoryService,
+    ProjectService, ProjectView, ProposalService, ProviderFeature, RepositoryDraft,
+    RepositorySourceKind, ResidentConfiguration, ResidentConfigurationService,
+    ResidentLifecycleService, RubricDeclaration, RulingDecision, RulingService, RulingSupersedes,
+    SecretString, SourceKind, SpendCompleteness, SpendLine, SpendMeasurement, SpendOrigin,
+    SpendReference, SpendSupersedes, SpendTotals, StarterOrganizationService, StarterResidentDraft,
+    StarterRole, StartupConfig, Supervisor, TeamDraft, TeamMemberDraft, TeamService, TeamView,
+    UncertaintyKind, UncountedEntry, UncountedKind, UnfinishedKind, Verdict,
     declared_conditions_digest, positionable_sources, record_completion,
 };
 use data_encoding::HEXLOWER;
@@ -3305,4 +3306,102 @@ fn collector_preserves_where_a_partial_spend_measurement_is_incomplete() {
             && exposed.contains("provider omitted one invocation"),
         "the collected partial measurement lost the named gap: {exposed}"
     );
+}
+
+/// The three states of #14 are three values: a whole count is `Complete` (a positive claim), a
+/// partial count carries its gaps exactly as recorded, and an unmeasured record -- or none -- has
+/// `NoCount`. None of them is another's default.
+#[test]
+fn a_whole_count_a_partial_count_and_no_count_are_three_distinct_states() {
+    let totals = || SpendTotals {
+        counted_units: 3,
+        lines: vec![SpendLine {
+            unit: "USD".to_owned(),
+            amount_minor: 900,
+            minor_units_exponent: 2,
+        }],
+    };
+    for (label, measurement, expected) in [
+        (
+            "measured",
+            SpendMeasurement::Measured(totals()),
+            SpendCompleteness::Complete,
+        ),
+        (
+            "partially_measured",
+            SpendMeasurement::PartiallyMeasured(
+                totals(),
+                vec![
+                    UncountedEntry {
+                        kind: UncountedKind::OutsideRetention,
+                        detail: "the ledger keeps thirty days".to_owned(),
+                    },
+                    UncountedEntry {
+                        kind: UncountedKind::UnitNotConvertible,
+                        detail: "one provider bills in tokens".to_owned(),
+                    },
+                ],
+            ),
+            SpendCompleteness::Partial(vec![
+                CollectedUncounted {
+                    kind: "outside_retention".to_owned(),
+                    detail: "the ledger keeps thirty days".to_owned(),
+                },
+                CollectedUncounted {
+                    kind: "unit_not_convertible".to_owned(),
+                    detail: "one provider bills in tokens".to_owned(),
+                },
+            ]),
+        ),
+        (
+            "unmeasured",
+            SpendMeasurement::Unmeasured("no ledger was read".to_owned()),
+            SpendCompleteness::NoCount,
+        ),
+    ] {
+        let fixture = admitted(
+            &format!("completeness-{label}"),
+            vec!["Gates pass".to_owned()],
+        );
+        let spend = fixture.measure_spend(measurement);
+        let completion = fixture.completion(
+            newest_event(&fixture.store),
+            vec![ConditionOutcome::Met],
+            SpendReference::Recorded {
+                spend_id: spend.spend_id,
+                spend_version: spend.version,
+                spend_sha256: sha256_bytes(&spend.canonical_bytes().unwrap()),
+            },
+        );
+        let digest = fixture.record(&completion);
+        let connection = fixture.connection();
+        let collected = Collector::new(&connection, fixture.store.workspace_id)
+            .collect(&CollectionRequest {
+                completion_digest: Some(digest),
+                ..CollectionRequest::default()
+            })
+            .expect("every measurement state collects");
+        let spend = collected.spend.expect("the completion cited spend");
+        assert_eq!(spend.measurement, label);
+        assert_eq!(spend.completeness, expected, "{label}");
+    }
+
+    // And no record at all is NoCount too -- not Complete, which is a count with nothing missing.
+    let fixture = admitted("completeness-not-measured", vec!["Gates pass".to_owned()]);
+    let completion = fixture.completion(
+        newest_event(&fixture.store),
+        vec![ConditionOutcome::Met],
+        SpendReference::NotMeasured("nobody counted".to_owned()),
+    );
+    let digest = fixture.record(&completion);
+    let connection = fixture.connection();
+    let collected = Collector::new(&connection, fixture.store.workspace_id)
+        .collect(&CollectionRequest {
+            completion_digest: Some(digest),
+            ..CollectionRequest::default()
+        })
+        .expect("a completion that recorded no spend collects");
+    let spend = collected.spend.expect("the spend slot is present");
+    assert_eq!(spend.measurement, "not_measured");
+    assert_eq!(spend.completeness, SpendCompleteness::NoCount);
 }
