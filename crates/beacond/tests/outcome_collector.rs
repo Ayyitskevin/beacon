@@ -3812,3 +3812,137 @@ fn support_about_another_mission_is_refused_by_its_own_bytes() {
         }
     );
 }
+
+/// A second admitted Mission in this Workspace, cloned from the fixture's so that only its
+/// identity differs -- the same Project, Charter, Team and roster -- so every foreign key a
+/// record under it needs already holds. Its roster clones freely: the roster trigger closes a
+/// Mission's members only once its admission Event exists, and the clone has none.
+fn second_mission(fixture: &Admitted) -> Uuid {
+    let id = Uuid::new_v4();
+    let connection = fixture.connection();
+    connection
+        .execute(
+            "INSERT INTO missions (
+                 id, workspace_id, project_id, charter_revision, team_id, desired_outcome,
+                 success_conditions_json, constraints_json, prohibitions_json, lifecycle,
+                 admitted_by, admitted_at_ms
+             ) SELECT ?1, workspace_id, project_id, charter_revision, team_id, desired_outcome,
+                      success_conditions_json, constraints_json, prohibitions_json, lifecycle,
+                      admitted_by, admitted_at_ms
+               FROM missions WHERE workspace_id = ?2 AND id = ?3",
+            params![
+                id.to_string(),
+                fixture.store.workspace_id.to_string(),
+                fixture.mission.id.to_string(),
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO mission_admission_members (
+                 workspace_id, mission_id, team_id, position, resident_id, configuration_id
+             ) SELECT workspace_id, ?1, team_id, position, resident_id, configuration_id
+               FROM mission_admission_members WHERE workspace_id = ?2 AND mission_id = ?3",
+            params![
+                id.to_string(),
+                fixture.store.workspace_id.to_string(),
+                fixture.mission.id.to_string(),
+            ],
+        )
+        .unwrap();
+    id
+}
+
+/// The Mission arms for the two kinds whose Mission is their Proposal's: an Evaluation of another
+/// Mission's Proposal, and a Ruling on it, each cited under this Mission's condition, each refused
+/// with the Mission the Proposal's own verified scope declares. Without this witness the
+/// comparison for these two kinds could be deleted and every other test would stay green.
+#[test]
+fn support_by_an_evaluation_or_ruling_of_another_missions_proposal_is_refused_by_name() {
+    let proposal_of_another_mission = |fixture: &Admitted| -> (Uuid, beacond::Proposal) {
+        fixture.repository_revision();
+        fixture.policy_revision();
+        let other = second_mission(fixture);
+        let mut record = fixture.proposal_record();
+        record.mission_id = other;
+        let proposal =
+            ProposalService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+                .submit(&record.bytes())
+                .expect("a Proposal for the other Mission records");
+        (other, proposal)
+    };
+
+    let fixture = admitted(
+        "support-other-mission-ruling",
+        vec!["Gates pass".to_owned()],
+    );
+    let (other, proposal) = proposal_of_another_mission(&fixture);
+    let ruling = RulingService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+        .rule(
+            &proposal.digest().value,
+            RulingDecision::Approve,
+            "Approved for the other Mission.",
+            RulingSupersedes::None,
+        )
+        .expect("the Ruling records");
+    let digest = record_completion_with_support(
+        &fixture,
+        newest_event(&fixture.store),
+        vec![SupportRef::Ruling(digest_bytes(&ruling.digest().value))],
+    );
+    assert_eq!(
+        collect_completion(&fixture, digest).expect_err("a Ruling on another Mission's Proposal"),
+        CollectorRefusal::RecordForAnotherMission {
+            kind: "ruling",
+            id: ruling.digest().value.clone(),
+            declared_mission: other,
+            expected_mission: fixture.mission.id,
+        }
+    );
+
+    let fixture = admitted(
+        "support-other-mission-evaluation",
+        vec!["Gates pass".to_owned()],
+    );
+    let (other, proposal) = proposal_of_another_mission(&fixture);
+    let evaluator = &fixture.mission.members[1];
+    let evaluation =
+        EvaluationService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+            .record(EvaluationDraft {
+                subject: EvaluationSubjectDraft::Proposal(proposal.digest().value.clone()),
+                evaluator: Evaluator {
+                    resident_id: evaluator.resident_id,
+                    configuration_id: evaluator.admission_configuration_id,
+                },
+                rubric: RubricDeclaration {
+                    id: "security-review-v1".to_owned(),
+                    version: 1,
+                    canonicalizer: "beacon.rubric.v1".to_owned(),
+                    sha256: sha256_hex(&[0x20_u8; 32]),
+                },
+                cited_runs: Vec::new(),
+                verdict: Verdict::Meets,
+                findings: vec![],
+                conflicts: Conflicts::None,
+                rationale: "Evaluated for the other Mission.".to_owned(),
+                supersedes: EvaluationSupersedes::None,
+            })
+            .expect("the Evaluation of the other Mission's Proposal records");
+    let digest = record_completion_with_support(
+        &fixture,
+        newest_event(&fixture.store),
+        vec![SupportRef::Evaluation(digest_bytes(
+            &evaluation.digest().value,
+        ))],
+    );
+    assert_eq!(
+        collect_completion(&fixture, digest)
+            .expect_err("an Evaluation of another Mission's Proposal"),
+        CollectorRefusal::RecordForAnotherMission {
+            kind: "evaluation",
+            id: evaluation.digest().value.clone(),
+            declared_mission: other,
+            expected_mission: fixture.mission.id,
+        }
+    );
+}
