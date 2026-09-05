@@ -598,6 +598,40 @@ fn digest_bytes(digest: &str) -> [u8; 32] {
     bytes
 }
 
+fn sol1_admit_other_mission(fixture: &Fixture, desired_outcome: &str) -> Uuid {
+    let team_id: String = fixture
+        .store
+        .connect()
+        .query_row(
+            "SELECT team_id FROM missions WHERE id = ?1",
+            params![fixture.mission_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    MissionService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .admit(MissionDraft {
+            project_id: fixture.project_id,
+            expected_charter_revision: fixture.charter_revision,
+            team_id: Uuid::parse_str(&team_id).unwrap(),
+            desired_outcome: desired_outcome.to_owned(),
+            success_conditions: vec![CONDITION_TEXT.to_owned()],
+            constraints: vec!["Keep changes reversible".to_owned()],
+            prohibitions: vec!["Do not deploy".to_owned()],
+            members: vec![
+                MissionMemberDraft {
+                    resident_id: fixture.resident_id,
+                    expected_configuration_id: fixture.configuration_id,
+                },
+                MissionMemberDraft {
+                    resident_id: fixture.other_resident_id,
+                    expected_configuration_id: fixture.other_configuration_id,
+                },
+            ],
+        })
+        .expect("the second Mission admits")
+        .id
+}
+
 fn source(
     kind: SourceKind,
     object_id: Uuid,
@@ -3469,6 +3503,292 @@ fn a_published_outcome_is_never_edited_or_deleted_in_place() {
         params![fixture.workspace_id.to_string()],
     );
     assert!(deleted.is_err(), "a publication was deleted");
+}
+
+#[test]
+fn sol1_get_refuses_a_relation_forged_under_another_mission() {
+    let fixture = admitted_mission("sol1-get-cross-mission");
+    let other_mission = sol1_admit_other_mission(&fixture, "A distinct Mission");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, candidate, evaluation) = fixture.publishable();
+
+    let control = fixture
+        .outcomes
+        .publish(other_mission, &candidate, &evaluation)
+        .expect_err("the public path accepted another Mission's records");
+    assert!(matches!(
+        control,
+        PublishRefusal::Seam(PublicationSeamRefusal::MissionDiffers)
+    ));
+
+    let connection = fixture.store.connect();
+    connection.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+    connection
+        .execute(
+            "INSERT INTO outcome_publications (
+                 workspace_id, mission_id, publication_id, candidate_artifact_digest,
+                 evaluation_digest, publication_version
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+            params![
+                fixture.workspace_id.to_string(),
+                other_mission.to_string(),
+                Uuid::new_v4().to_string(),
+                candidate.value,
+                evaluation.value,
+            ],
+        )
+        .expect("the schema admits the cross-Mission relation");
+
+    let read = fixture.outcomes.get(other_mission);
+    eprintln!("SOL1_CROSS_MISSION_GET result={read:?}");
+    assert!(
+        read.is_err(),
+        "get accepted a relation whose candidate, Evaluation, and manifest all belong to another Mission"
+    );
+}
+
+#[test]
+fn sol1_startup_refuses_a_relation_forged_under_another_mission() {
+    let fixture = admitted_mission("sol1-startup-cross-mission");
+    let other_mission = sol1_admit_other_mission(&fixture, "A distinct Mission");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, candidate, evaluation) = fixture.publishable();
+    let connection = fixture.store.connect();
+    connection.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+    connection
+        .execute(
+            "INSERT INTO outcome_publications (
+                 workspace_id, mission_id, publication_id, candidate_artifact_digest,
+                 evaluation_digest, publication_version
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+            params![
+                fixture.workspace_id.to_string(),
+                other_mission.to_string(),
+                Uuid::new_v4().to_string(),
+                candidate.value,
+                evaluation.value,
+            ],
+        )
+        .expect("the schema admits the cross-Mission relation");
+    drop(connection);
+
+    let restart = Supervisor::bootstrap(StartupConfig {
+        store_path: fixture.store.path.clone(),
+        initial_workspace_name: "Personal".to_owned(),
+    });
+    eprintln!("SOL1_CROSS_MISSION_STARTUP result={restart:?}");
+    assert!(
+        restart.is_err(),
+        "startup accepted a publication relation that publish itself refuses"
+    );
+}
+
+#[test]
+fn sol1_get_refuses_a_valid_evaluation_swapped_into_the_relation() {
+    let fixture = admitted_mission("sol1-get-evaluation-swap");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, candidate, evaluation) = fixture.publishable();
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate, &evaluation)
+        .expect("the control publishes");
+
+    let sibling = fixture
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            b"# A different candidate\n",
+            ArtifactContext::Mission {
+                project_id: fixture.project_id,
+                mission_id: fixture.mission_id,
+            },
+            fixture.resident_id,
+            fixture.configuration_id,
+            None,
+        )
+        .expect("the sibling records");
+    let sibling_evaluation = fixture.evaluate(&sibling.digest().value, Verdict::Meets);
+    let connection = fixture.store.connect();
+    connection
+        .execute_batch("DROP TRIGGER outcome_publications_no_update;")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE outcome_publications SET evaluation_digest = ?1 WHERE workspace_id = ?2",
+            params![
+                sibling_evaluation.digest().value,
+                fixture.workspace_id.to_string()
+            ],
+        )
+        .unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER outcome_publications_no_update
+             BEFORE UPDATE ON outcome_publications
+             BEGIN
+                 SELECT RAISE(ABORT, 'Outcome publications are immutable');
+             END;",
+        )
+        .unwrap();
+
+    let refusal = fixture
+        .outcomes
+        .get(fixture.mission_id)
+        .expect_err("get trusted the relation's swapped Evaluation digest");
+    assert!(matches!(
+        refusal,
+        PublishRefusal::Seam(PublicationSeamRefusal::SubjectIsNotTheCandidate)
+    ));
+}
+
+#[test]
+fn sol1_get_refuses_a_non_meets_evaluation_of_the_same_candidate_swapped_into_the_relation() {
+    let fixture = admitted_mission("sol1-get-same-candidate-evaluation-swap");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, candidate, first_evaluation) = fixture.publishable();
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate, &first_evaluation)
+        .expect("the control publishes");
+
+    // Independently valid owner record, same exact candidate and verdict, distinct identity/digest.
+    let mut replacement = fixture.artifact_evaluation_draft(
+        &candidate.value,
+        Verdict::DoesNotMeet,
+        (fixture.other_resident_id, fixture.other_configuration_id),
+    );
+    replacement.rationale = "A second reading says the exact candidate does not meet.".to_owned();
+    replacement.supersedes =
+        EvaluationSupersedes::Evaluation(first_evaluation.value.clone());
+    let replacement_evaluation = fixture
+        .evaluations()
+        .record(replacement)
+        .expect("the replacement Evaluation records through its owner");
+    assert_ne!(replacement_evaluation.digest().value, first_evaluation.value);
+    let connection = fixture.store.connect();
+    connection
+        .execute_batch("DROP TRIGGER outcome_publications_no_update;")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE outcome_publications SET evaluation_digest = ?1 WHERE workspace_id = ?2",
+            params![
+                replacement_evaluation.digest().value,
+                fixture.workspace_id.to_string()
+            ],
+        )
+        .unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER outcome_publications_no_update
+             BEFORE UPDATE ON outcome_publications
+             BEGIN
+                 SELECT RAISE(ABORT, 'Outcome publications are immutable');
+             END;",
+        )
+        .unwrap();
+
+    let read = fixture.outcomes.get(fixture.mission_id);
+    eprintln!("SOL1_NON_MEETS_EVALUATION_SWAP result={read:?}");
+    assert!(
+        read.is_err(),
+        "get accepted a valid does-not-meet Evaluation as qualifying the publication"
+    );
+}
+
+#[test]
+fn sol1_get_refuses_a_noncontiguous_relation_history() {
+    let fixture = admitted_mission("sol1-get-version-gap");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, candidate, evaluation) = fixture.publishable();
+    let connection = fixture.store.connect();
+    connection.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+    connection
+        .execute(
+            "INSERT INTO outcome_publications (
+                 workspace_id, mission_id, publication_id, candidate_artifact_digest,
+                 evaluation_digest, publication_version
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 2)",
+            params![
+                fixture.workspace_id.to_string(),
+                fixture.mission_id.to_string(),
+                Uuid::new_v4().to_string(),
+                candidate.value,
+                evaluation.value,
+            ],
+        )
+        .expect("the schema admits a history beginning at version 2");
+
+    let read = fixture.outcomes.get(fixture.mission_id);
+    eprintln!("SOL1_GAPPED_GET result={read:?}");
+    assert!(read.is_err(), "get accepted a noncontiguous publication history");
+}
+
+#[test]
+fn sol1_same_candidate_is_not_a_correction() {
+    let fixture = admitted_mission("sol1-same-candidate-correction");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, candidate, evaluation) = fixture.publishable();
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate, &evaluation)
+        .expect("version 1 publishes");
+    let refusal = fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate, &evaluation)
+        .expect_err("the same candidate was accepted as a correction");
+    assert!(matches!(refusal, PublishRefusal::AlreadyPublished));
+    let count: i64 = fixture
+        .store
+        .connect()
+        .query_row("SELECT count(*) FROM outcome_publications", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn sol1_concurrent_publish_cannot_create_two_version_one_rows() {
+    let fixture = admitted_mission("sol1-concurrent-publish");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, candidate, evaluation) = fixture.publishable();
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let results = thread::scope(|scope| {
+        let run = |barrier: Arc<std::sync::Barrier>| {
+            let accounts = Arc::clone(&fixture.accounts);
+            let candidate = candidate.clone();
+            let evaluation = evaluation.clone();
+            move || {
+                barrier.wait();
+                OutcomeService::new(accounts, fixture.workspace_id).publish(
+                    fixture.mission_id,
+                    &candidate,
+                    &evaluation,
+                )
+            }
+        };
+        let first = scope.spawn(run(Arc::clone(&barrier)));
+        let second = scope.spawn(run(Arc::clone(&barrier)));
+        [first.join().unwrap(), second.join().unwrap()]
+    });
+    eprintln!("SOL1_CONCURRENT_PUBLISH results={results:?}");
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    let versions: Vec<i64> = fixture
+        .store
+        .connect()
+        .prepare("SELECT publication_version FROM outcome_publications ORDER BY publication_version")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(versions, vec![1]);
 }
 
 /// R24.1: the seam's non-authorship arm, exercised directly against the row the Evaluation module
