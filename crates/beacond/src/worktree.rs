@@ -1180,7 +1180,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Stdio;
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use uuid::Uuid;
 
@@ -1433,22 +1433,26 @@ mod tests {
         assert_eq!(holds, vec![KeepReason::GateTimedOut]);
     }
 
+    /// Open `program` for writing, hand that descriptor to a forked child, and return once the
+    /// child is holding it.
+    ///
     /// The kernel refuses to exec a file that any process holds open for writing. Beacon is
     /// multi-threaded, so when one thread forks while a sibling holds a freshly written program
     /// open, the child inherits that write descriptor and every exec of the program fails with
     /// `ETXTBSY` until the child reaches its own exec and `CLOEXEC` closes it
-    /// (rust-lang/rust#114554). That window turned the 50 ms timeout test below into
+    /// (rust-lang/rust#114554). That window turned the 50 ms timeout test above into
     /// `CheckFailed` on the main gate at 77f430c, under a load average of 17.
     ///
-    /// The window is held open on purpose here rather than raced for, because racing for it
-    /// reproduced in only 1 to 6 runs of 10 and a bar that usually passes is not a bar. A child
-    /// announces itself down a pipe from between its own fork and exec, so by the time the status
-    /// is asked for, exactly one descriptor — the child's inherited one — holds the program open.
-    #[test]
-    fn a_check_a_forked_child_holds_open_is_never_a_failure() {
-        let directory = TempDir::new("gate-text-file-busy");
-        let fresh = program(&directory.path, "exit 0\n");
-
+    /// The window is held open here rather than raced for, because racing for it reproduced in
+    /// only 1 to 6 runs of 10 and a bar that usually passes is not a bar. `spawn` does not return
+    /// until the child execs, so the child announces itself down a pipe from between its own fork
+    /// and exec and then sleeps there; the child runs on its own thread for the same reason.
+    ///
+    /// Returns the child's thread and this side's own descriptor. Drop that descriptor and the
+    /// child is the only holder left.
+    fn hold_open_across_a_fork(
+        program: &Path,
+    ) -> (thread::JoinHandle<std::process::ExitStatus>, fs::File) {
         let mut ends = [0_i32; 2];
         assert_eq!(
             unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) },
@@ -1460,18 +1464,16 @@ mod tests {
             unsafe { (OwnedFd::from_raw_fd(ends[0]), OwnedFd::from_raw_fd(ends[1])) };
         let announce = writer_end.as_raw_fd();
 
-        // Open for writing and keep it open across the fork below, so the child inherits it.
-        let held = fs::OpenOptions::new().write(true).open(&fresh).unwrap();
+        let held = fs::OpenOptions::new().write(true).open(program).unwrap();
 
         let mut command = Command::new("/bin/true");
         command.stdin(Stdio::null());
         command.stdout(Stdio::null());
         command.stderr(Stdio::null());
         // SAFETY: `write` and `nanosleep` are async-signal-safe, allocate nothing, and run between
-        // fork and exec on descriptors this command retains. Setting `pre_exec` at all also forces
-        // the real fork/exec path rather than `posix_spawn`, which is the path that shares the
-        // descriptor table. `spawn` does not return until the child execs, so the announcement has
-        // to come from the child itself.
+        // fork and exec on a descriptor this command retains. Setting `pre_exec` at all also
+        // forces the real fork/exec path rather than `posix_spawn`, which is the path that shares
+        // the descriptor table.
         unsafe {
             command.pre_exec(move || {
                 libc::write(announce, [1_u8].as_ptr().cast(), 1);
@@ -1487,8 +1489,17 @@ mod tests {
 
         let mut announcement = [0_u8; 1];
         std::io::Read::read_exact(&mut fs::File::from(reader), &mut announcement).unwrap();
-        // From here the child is the only holder: it has forked, it has not yet exec'd, and this
-        // side lets go.
+        drop(writer_end);
+        (forked, held)
+    }
+
+    /// A transient kernel condition is not an answer about the worktree. See
+    /// [`hold_open_across_a_fork`] for the race this closes.
+    #[test]
+    fn a_check_a_forked_child_holds_open_is_never_a_failure() {
+        let directory = TempDir::new("gate-text-file-busy");
+        let fresh = program(&directory.path, "exit 0\n");
+        let (forked, held) = hold_open_across_a_fork(&fresh);
         drop(held);
 
         let holds = status_holds(&fresh, &directory.path, Duration::from_secs(5), &[]);
@@ -1498,6 +1509,30 @@ mod tests {
             holds,
             Vec::new(),
             "a program a sibling's child held open was recorded as an answer about the worktree"
+        );
+    }
+
+    /// The retry waits for a busy program inside the caller's budget and no longer. A program
+    /// still held open when the budget runs out is a check that did not finish in time, which is
+    /// a timeout; calling it a failure would claim an answer nobody got, and retrying past the
+    /// budget would leave the bound unenforceable. Same held-open window, a budget far shorter
+    /// than the hold.
+    #[test]
+    fn a_program_still_held_open_when_the_budget_ends_is_a_timeout() {
+        let directory = TempDir::new("gate-text-file-busy-budget");
+        let fresh = program(&directory.path, "exit 0\n");
+        let (forked, held) = hold_open_across_a_fork(&fresh);
+        drop(held);
+
+        let started = Instant::now();
+        let holds = status_holds(&fresh, &directory.path, Duration::from_millis(50), &[]);
+        let waited = started.elapsed();
+        forked.join().unwrap();
+
+        assert_eq!(holds, vec![KeepReason::GateTimedOut]);
+        assert!(
+            waited < Duration::from_millis(250),
+            "the retry outlived the 50 ms budget by waiting {waited:?}, so the bound is not a bound"
         );
     }
 
