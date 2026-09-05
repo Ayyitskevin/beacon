@@ -192,7 +192,8 @@ impl PublishedOutcome {
 /// `digest` is the CITED candidate digest -- the bytes that were evaluated -- and not the chain
 /// tail; `publication_version_count` rides along for R24.2's reason, because "version 2" alone
 /// cannot tell a caller whether a version 3 exists.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExportedOutcome {
     bytes: Vec<u8>,
     digest: ArtifactDigest,
@@ -247,7 +248,8 @@ impl From<PublishedOutcome> for ExportedOutcome {
 /// Nothing here needs a manifest decoded or a document verified: drawing a list of versions must
 /// not cost one full verification per row (R29.5). The boundary event belongs to the document view,
 /// which reads one version through `get_version`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PublicationSummary {
     pub publication_id: Uuid,
     pub publication_version: u32,
@@ -308,6 +310,13 @@ pub enum PublishRefusal {
     },
     /// No publication exists for that Mission, or not at that version.
     Absent,
+    /// The store could not be opened for this caller: no authenticated session.
+    ///
+    /// Carried as the account module's own error rather than flattened into a string (R27's
+    /// principle, applied where this slice needed it): the transport maps it to
+    /// `NotAuthenticated`, and a locked store must not reach a caller as a protocol fault or --
+    /// worse -- as `Absent`, which is a claim about what the store holds.
+    Account(crate::operator_account::OperatorAccountError),
     /// A cited record did not verify at read time.
     Unverified(String),
     Store(rusqlite::Error),
@@ -360,6 +369,7 @@ impl fmt::Display for PublishRefusal {
                  filed under Mission {relation}"
             ),
             Self::Absent => formatter.write_str("this Mission has no published Outcome"),
+            Self::Account(error) => write!(formatter, "{error}"),
             Self::Unverified(detail) => write!(formatter, "{detail}"),
             Self::Store(error) => write!(formatter, "{error}"),
         }
@@ -370,7 +380,7 @@ impl std::error::Error for PublishRefusal {}
 
 impl From<crate::operator_account::OperatorAccountError> for PublishRefusal {
     fn from(error: crate::operator_account::OperatorAccountError) -> Self {
-        Self::Unverified(format!("the store could not be opened: {error}"))
+        Self::Account(error)
     }
 }
 

@@ -17,19 +17,19 @@ use zeroize::Zeroizing;
 
 use crate::{
     AccessOrigin, BeaconCapability, BeaconCapabilityDescriptor, CheckPreflightError,
-    CheckPreflightService, DiskEncryptionService, LiveDataEncryptionReport, MissionDraft,
-    MissionError, MissionService, MissionView, OperatorAccountError, OperatorAccountService,
-    OperatorSessionPolicy, OperatorSessionStatus, PlatformSessionMonitor,
-    PlatformSessionMonitorStatus, PreflightReceipt, ProjectCharter, ProjectCharterDraft,
-    ProjectDraft, ProjectError, ProjectPolicy, ProjectPolicyDraft, ProjectPolicyError,
-    ProjectPolicyService, ProjectRepository, ProjectRepositoryError, ProjectRepositoryService,
-    ProjectService, ProjectSummary, ProjectView, RecoveryKey, RepositoryDraft, ResidentAgentView,
-    ResidentConfiguration, ResidentConfigurationError, ResidentConfigurationService,
-    ResidentLifecycleError, ResidentLifecycleService, ResourceDiscoveryError,
-    ResourceDiscoveryService, SampleProjectError, SampleProjectInstallResult, SampleProjectService,
-    SampleProjectStatus, SecretString, StarterOrganizationError, StarterOrganizationService,
-    StarterOrganizationView, StarterResidentDraft, StartupConfig, Supervisor, TeamDraft, TeamError,
-    TeamService, TeamView,
+    CheckPreflightService, DiskEncryptionService, ExportedOutcome, LiveDataEncryptionReport,
+    MissionDraft, MissionError, MissionService, MissionView, OperatorAccountError,
+    OperatorAccountService, OperatorSessionPolicy, OperatorSessionStatus, OutcomeService,
+    PlatformSessionMonitor, PlatformSessionMonitorStatus, PreflightReceipt, ProjectCharter,
+    ProjectCharterDraft, ProjectDraft, ProjectError, ProjectPolicy, ProjectPolicyDraft,
+    ProjectPolicyError, ProjectPolicyService, ProjectRepository, ProjectRepositoryError,
+    ProjectRepositoryService, ProjectService, ProjectSummary, ProjectView, PublicationSummary,
+    PublishRefusal, RecoveryKey, RepositoryDraft, ResidentAgentView, ResidentConfiguration,
+    ResidentConfigurationError, ResidentConfigurationService, ResidentLifecycleError,
+    ResidentLifecycleService, ResourceDiscoveryError, ResourceDiscoveryService, SampleProjectError,
+    SampleProjectInstallResult, SampleProjectService, SampleProjectStatus, SecretString,
+    StarterOrganizationError, StarterOrganizationService, StarterOrganizationView,
+    StarterResidentDraft, StartupConfig, Supervisor, TeamDraft, TeamError, TeamService, TeamView,
 };
 
 const PROTOCOL_VERSION: u16 = 1;
@@ -142,6 +142,7 @@ pub enum LocalTransportError {
     Mission(MissionError),
     ResourceDiscovery(ResourceDiscoveryError),
     LocalModelActivation(crate::LocalModelActivationError),
+    Outcome(PublishRefusal),
 }
 
 impl fmt::Display for LocalTransportError {
@@ -171,6 +172,7 @@ impl fmt::Display for LocalTransportError {
             }
             Self::Project(error) => write!(formatter, "Project operation failed: {error}"),
             Self::ProjectPolicy(error) => write!(formatter, "Project Policy failed: {error}"),
+            Self::Outcome(error) => write!(formatter, "Outcome failed: {error}"),
             Self::ProjectRepository(error) => {
                 write!(formatter, "Project Repository failed: {error}")
             }
@@ -242,6 +244,12 @@ impl From<ProjectError> for LocalTransportError {
 impl From<ProjectPolicyError> for LocalTransportError {
     fn from(error: ProjectPolicyError) -> Self {
         Self::ProjectPolicy(error)
+    }
+}
+
+impl From<PublishRefusal> for LocalTransportError {
+    fn from(error: PublishRefusal) -> Self {
+        Self::Outcome(error)
     }
 }
 
@@ -525,6 +533,13 @@ enum LocalCommand {
     ProjectPolicyHistory {
         project_id: uuid::Uuid,
     },
+    MissionPublications {
+        mission_id: uuid::Uuid,
+    },
+    OutcomeDocument {
+        mission_id: uuid::Uuid,
+        publication_version: Option<u32>,
+    },
     PublishProjectPolicy {
         project_id: uuid::Uuid,
         expected_charter_revision: u32,
@@ -645,6 +660,12 @@ enum LocalResult {
     ProjectPolicyHistory {
         policies: Vec<ProjectPolicy>,
     },
+    MissionPublications {
+        publications: Vec<PublicationSummary>,
+    },
+    OutcomeDocument {
+        document: ExportedOutcome,
+    },
     ProjectRepository {
         repository: Option<ProjectRepository>,
     },
@@ -711,6 +732,7 @@ pub struct LocalSupervisorServer {
     recent_receipts: crate::RecentReceiptService,
     teams: TeamService,
     missions: MissionService,
+    outcomes: OutcomeService,
     resource_discovery: ResourceDiscoveryService,
     disk_encryption: DiskEncryptionService,
     local_model_activation: crate::LocalModelActivationService,
@@ -756,6 +778,7 @@ impl LocalSupervisorServer {
             crate::RecentReceiptService::new(Arc::clone(&accounts), report.workspace.id);
         let teams = TeamService::new(Arc::clone(&accounts), report.workspace.id);
         let missions = MissionService::new(Arc::clone(&accounts), report.workspace.id);
+        let outcomes = OutcomeService::new(Arc::clone(&accounts), report.workspace.id);
         let resource_discovery =
             ResourceDiscoveryService::new(Arc::clone(&accounts), config.local_model_endpoint);
         let disk_encryption =
@@ -789,6 +812,7 @@ impl LocalSupervisorServer {
             recent_receipts,
             teams,
             missions,
+            outcomes,
             resource_discovery,
             disk_encryption,
             local_model_activation,
@@ -1022,6 +1046,20 @@ impl LocalSupervisorServer {
                     policies: self.project_policies.history(project_id)?,
                 }
             }
+            LocalCommand::MissionPublications { mission_id } => LocalResult::MissionPublications {
+                publications: self.outcomes.publication_history(mission_id)?,
+            },
+            LocalCommand::OutcomeDocument {
+                mission_id,
+                publication_version,
+            } => LocalResult::OutcomeDocument {
+                document: match publication_version {
+                    // The bytes come through export, so the surface and any other caller read the
+                    // document by one path rather than two.
+                    None => self.outcomes.export_markdown(mission_id)?,
+                    Some(version) => self.outcomes.export_markdown_version(mission_id, version)?,
+                },
+            },
             LocalCommand::PublishProjectPolicy {
                 project_id,
                 expected_charter_revision,
@@ -1417,6 +1455,24 @@ impl LocalSupervisorClient {
         expect_project_policy_history(self.send(LocalCommand::ProjectPolicyHistory { project_id })?)
     }
 
+    pub fn mission_publications(
+        &self,
+        mission_id: uuid::Uuid,
+    ) -> Result<Vec<PublicationSummary>, LocalTransportError> {
+        expect_mission_publications(self.send(LocalCommand::MissionPublications { mission_id })?)
+    }
+
+    pub fn outcome_document(
+        &self,
+        mission_id: uuid::Uuid,
+        publication_version: Option<u32>,
+    ) -> Result<ExportedOutcome, LocalTransportError> {
+        expect_outcome_document(self.send(LocalCommand::OutcomeDocument {
+            mission_id,
+            publication_version,
+        })?)
+    }
+
     pub fn publish_project_policy(
         &self,
         project_id: uuid::Uuid,
@@ -1726,6 +1782,22 @@ fn expect_project_policy_history(
     }
 }
 
+fn expect_mission_publications(
+    result: LocalResult,
+) -> Result<Vec<PublicationSummary>, LocalTransportError> {
+    match result {
+        LocalResult::MissionPublications { publications } => Ok(publications),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
+fn expect_outcome_document(result: LocalResult) -> Result<ExportedOutcome, LocalTransportError> {
+    match result {
+        LocalResult::OutcomeDocument { document } => Ok(document),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
 fn expect_project_repository(
     result: LocalResult,
 ) -> Result<Option<ProjectRepository>, LocalTransportError> {
@@ -1843,6 +1915,7 @@ fn response_from_transport_error(error: LocalTransportError) -> ResponseEnvelope
         }
         LocalTransportError::Project(error) => wire_error_from_project(error),
         LocalTransportError::ProjectPolicy(error) => wire_error_from_project_policy(error),
+        LocalTransportError::Outcome(error) => wire_error_from_outcome(error),
         LocalTransportError::ProjectRepository(error) => wire_error_from_project_repository(error),
         LocalTransportError::Team(error) => wire_error_from_team(error),
         LocalTransportError::CheckPreflight(error) => wire_error_from_check_preflight(error),
@@ -2030,6 +2103,27 @@ fn wire_error_from_sample_project(error: SampleProjectError) -> WireError {
         | SampleProjectError::Store(_)
         | SampleProjectError::Io(_)
         | SampleProjectError::Json(_) => LocalErrorCode::SampleProjectUnavailable,
+    };
+    WireError {
+        code,
+        retry_after_ms: None,
+    }
+}
+
+/// An Outcome refusal on the wire.
+///
+/// `Absent` is `MissionNotFound` deliberately: it is the answer for a Mission with no publication
+/// AND for a Mission in another Workspace (R29.6), and the wire must not separate the two -- a
+/// distinct code would confirm to a caller who may not read the Workspace that the record exists.
+/// Everything else that is not an account refusal is an unavailable store, because every remaining
+/// arm means a stored record did not prove.
+fn wire_error_from_outcome(error: PublishRefusal) -> WireError {
+    let code = match error {
+        // An account refusal is the account module's to report, exactly as every other wire
+        // mapping does: a locked store must reach the caller as `NotAuthenticated`.
+        PublishRefusal::Account(error) => return wire_error_from_account(error),
+        PublishRefusal::Absent => LocalErrorCode::MissionNotFound,
+        _ => LocalErrorCode::ProtocolError,
     };
     WireError {
         code,
