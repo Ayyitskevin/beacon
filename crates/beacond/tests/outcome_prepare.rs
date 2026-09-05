@@ -28,8 +28,8 @@ use beacond::{
     Finding, FindingSeverity, ImpactLevel, InconsistentEvaluation, LocalErrorCode,
     LocalModelActivationService, LocalModelEndpoint, LocalServerConfig, LocalSupervisorClient,
     LocalSupervisorServer, LocalTransportError, MISSION_IMPACT_CANONICALIZER, ManifestStoreRefusal,
-    MissionCompletionV1, MissionDraft, MissionImpactClassificationV1, MissionImpactService,
-    MissionMemberDraft, MissionService, NarrativeItem, OperatorAccountError,
+    MissionCompletionV1, MissionDraft, MissionError, MissionImpactClassificationV1,
+    MissionImpactService, MissionMemberDraft, MissionService, NarrativeItem, OperatorAccountError,
     OperatorAccountService, OperatorSessionPhase, OutcomeCandidate, OutcomeManifestV1,
     OutcomeService, OutcomeState, PolicyRevisionRef, PredecessorFault, PrepareRefusal,
     ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService,
@@ -3879,13 +3879,19 @@ fn startup_refuses_a_manifest_whose_column_disagrees_and_names_the_row() {
 
     let connection = fixture.store.connect();
     let ordered: Vec<String> = connection
-        .prepare("SELECT manifest_digest FROM outcome_manifests ORDER BY workspace_id, manifest_digest")
+        .prepare(
+            "SELECT manifest_digest FROM outcome_manifests ORDER BY workspace_id, manifest_digest",
+        )
         .unwrap()
         .query_map([], |row| row.get(0))
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    assert_eq!(ordered.len(), 2, "the fixture must hold two manifests: {ordered:?}");
+    assert_eq!(
+        ordered.len(),
+        2,
+        "the fixture must hold two manifests: {ordered:?}"
+    );
     let target = ordered.last().unwrap().clone();
 
     connection
@@ -3962,6 +3968,101 @@ END;",
     );
     assert!(
         format!("{refusal:?}").contains("renderer_version"),
+        "the carried fault is not reachable through Debug: {refusal:?}"
+    );
+}
+
+/// R28.1 pass 3 of 5: a Mission whose success-condition projection disagrees with its own bytes is
+/// refused at startup, and the refusal names WHICH Mission.
+///
+/// WHY THIS PLANT AND NOT A COLUMN TAMPER. Every column of `missions` is compared against the
+/// admission event's payload by `verify_mission_event`, which runs EARLIER, so a tampered column
+/// reopens as `MissionEventMismatch` and never reaches this pass -- measured, not assumed: the
+/// first version of this bar tampered `success_conditions_json` and got
+/// `MissionEventMismatch(12)`. The success-condition projection is the one thing this pass owns
+/// alone (`verify_mission_success_conditions`, called only from here).
+///
+/// R39.3's two-row shape, deliberate: two Missions are admitted, the pass's own `ORDER BY` is read
+/// back, and the tamper lands on whichever sorts LAST.
+#[test]
+fn startup_refuses_a_mission_whose_condition_projection_disagrees_and_names_the_row() {
+    let fixture = admitted_mission("r28-mission-startup");
+    let other = sol1_admit_other_mission(&fixture, "A second admitted Mission");
+    assert_ne!(other, fixture.mission_id);
+
+    let connection = fixture.store.connect();
+    let ordered: Vec<String> = connection
+        .prepare("SELECT id FROM missions ORDER BY workspace_id, id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        ordered.len(),
+        2,
+        "the fixture must hold two Missions: {ordered:?}"
+    );
+    let target = Uuid::parse_str(ordered.last().unwrap()).unwrap();
+
+    connection
+        .execute_batch("DROP TRIGGER mission_success_conditions_no_delete;")
+        .unwrap();
+    let removed = connection
+        .execute(
+            "DELETE FROM mission_success_conditions WHERE mission_id = ?1",
+            params![target.to_string()],
+        )
+        .unwrap();
+    assert!(removed > 0, "the plant removed nothing, so it plants nothing");
+    // Byte-exact, as migration 0024 wrote it (R39.3).
+    connection
+        .execute_batch(
+            "CREATE TRIGGER mission_success_conditions_no_delete
+BEFORE DELETE ON mission_success_conditions
+BEGIN
+    SELECT RAISE(ABORT, 'Mission success conditions are immutable');
+END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    // The direct reader still answers: this fault lives in a projection `get` never consults, which
+    // is exactly why the startup pass exists and why the pass owns the refusal.
+    MissionService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .get(target)
+        .expect("the Mission's own record is untouched");
+
+    let refusal = astra_boot(&fixture)
+        .expect_err("a store whose condition projection disagrees reopened Ready");
+    assert!(
+        matches!(
+            &refusal,
+            beacond::SupervisorError::MissionStateMismatch {
+                workspace_id,
+                mission_id,
+                cause: MissionError::InvalidStore,
+            } if *workspace_id == fixture.workspace_id && *mission_id == target
+        ),
+        "refused for the wrong reason, or naming the wrong row: {refusal:?}"
+    );
+
+    // R28.4: the key and the fault's NAME.
+    let line = refusal.to_string();
+    assert!(
+        line.contains(&target.to_string()) && line.contains(&fixture.workspace_id.to_string()),
+        "the refusal does not name the row it refused: {line}"
+    );
+    assert!(
+        line.contains("InvalidStore"),
+        "the refusal does not name the fault: {line}"
+    );
+    // NOTE, and it is why this pass has no "cause flattened" mutant: `InvalidStore` is the ONLY
+    // cause this pass can reach for a row. Every column of `missions` is compared against the
+    // admission event by an earlier pass, so a richer fault never gets here. The row identity is
+    // the whole of what widening buys for this pass today.
+    assert!(
+        format!("{refusal:?}").contains("InvalidStore"),
         "the carried fault is not reachable through Debug: {refusal:?}"
     );
 }
