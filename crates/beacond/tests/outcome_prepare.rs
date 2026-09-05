@@ -7873,3 +7873,123 @@ fn a_manifest_whose_renderer_version_disagrees_is_refused_through_the_pdf_servic
         "the two paths disagree about the same store"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// R39.2 — no invented identities: a refusal reports what was found
+// ---------------------------------------------------------------------------------------------
+
+/// A classification id column that is not a UUID is refused with the text that was there (R39.2).
+///
+/// `uuid_column` used to be `parse_str(..).unwrap_or(Uuid::nil())`, so a corrupt column became a
+/// well-formed id the reader handed on as though the row had said it.
+#[test]
+fn a_classification_id_column_that_is_not_a_uuid_is_refused_with_what_was_found() {
+    let fixture = admitted_mission("r39-bad-id-column");
+    let (_, _, digest) = fixture.classify(ImpactLevel::Ordinary);
+
+    with_trigger_down(
+        &fixture.store,
+        "mission_impact_classifications_no_update",
+        "mission_impact_classifications",
+        "Mission impact classifications are immutable",
+        |connection| {
+            // 0032 keys the row on (workspace, mission, project), so a non-UUID mission_id breaks
+            // that foreign key. The column is what is under test, not the constraint.
+            connection
+                .pragma_update(None, "foreign_keys", "OFF")
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE mission_impact_classifications SET mission_id = 'not-a-uuid-NEEDLE'
+                     WHERE workspace_id = ?1",
+                    params![fixture.workspace_id.to_string()],
+                )
+                .unwrap();
+        },
+    );
+
+    let connection = fixture.store.connect();
+    let refusal =
+        beacond::verified_classification_within(&connection, fixture.workspace_id, &digest)
+            .expect_err("a mission_id column that is not a UUID was read as one");
+    let debug = format!("{refusal:?}");
+    assert!(
+        debug.contains("not-a-uuid-NEEDLE") && debug.contains("mission_id"),
+        "the refusal does not carry what was found: {debug}"
+    );
+    assert!(
+        !debug.contains("00000000-0000-0000-0000-000000000000"),
+        "a nil UUID reached the refusal: {debug}"
+    );
+}
+
+/// The two remaining R39.2 sites are DEFENSIVE, and this records the measurement that says so.
+///
+/// Both were fixed in the product -- neither invents an identity any more -- but neither arm can be
+/// reached through the owners, so neither gets a bar that would pass for the wrong reason. Each
+/// claim below is a refusal observed on this fixture, not an argument.
+///
+/// * `outcome_publication.rs`, the candidate with no Mission context: the Evaluation owner refuses
+///   an unscoped Artifact first, with `Inconsistent(ArtifactHasNoMissionScope)`, so no publication
+///   can cite one through any owner path.
+/// * `mission_impact.rs`, the unparseable Workspace column at startup: an earlier pass parses
+///   Workspace ids and refuses with `InvalidWorkspaceId("...")` (`lib.rs:996`) before the
+///   classification pass runs. A first draft of this bar asserted the raw text and passed for that
+///   reason; restoring the nil-carrying arm left it GREEN, which is how the vacuity was found.
+#[test]
+fn the_unreachable_r39_sites_are_recorded_rather_than_barred() {
+    let fixture = admitted_mission("r39-defensive-sites");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (candidate, _, _) = fixture.publishable();
+
+    // Site 1: the Evaluation owner refuses an unscoped Artifact, so the publication path never
+    // reaches the candidate-context arm.
+    let rendered = fixture
+        .artifacts()
+        .get(&candidate.candidate_artifact_digest)
+        .unwrap()
+        .content()
+        .to_vec();
+    let unscoped = fixture
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            &rendered,
+            ArtifactContext::None,
+            fixture.resident_id,
+            fixture.configuration_id,
+            None,
+        )
+        .expect("an Artifact with no Mission context records");
+    let refusal = fixture
+        .evaluations()
+        .record(EvaluationDraft {
+            subject: EvaluationSubjectDraft::Artifact(unscoped.digest().value.clone()),
+            evaluator: Evaluator {
+                resident_id: fixture.other_resident_id,
+                configuration_id: fixture.other_configuration_id,
+            },
+            rubric: RubricDeclaration {
+                id: "outcome-document-v1".to_owned(),
+                version: 1,
+                canonicalizer: "beacon.rubric.v1".to_owned(),
+                sha256: data_encoding::HEXLOWER.encode(&[0x20_u8; 32]),
+            },
+            cited_runs: Vec::new(),
+            verdict: Verdict::Meets,
+            findings: vec![Finding {
+                severity: FindingSeverity::Note,
+                summary: "Read the exact candidate bytes.".to_owned(),
+            }],
+            conflicts: Conflicts::None,
+            rationale: "An independent Resident read the exact candidate bytes.".to_owned(),
+            supersedes: EvaluationSupersedes::None,
+        })
+        .expect_err("an unscoped Artifact was evaluated");
+    assert!(
+        format!("{refusal:?}").contains("ArtifactHasNoMissionScope"),
+        "the Evaluation owner no longer refuses first, so the publication arm may now be \
+         reachable and deserves its own bar: {refusal:?}"
+    );
+}

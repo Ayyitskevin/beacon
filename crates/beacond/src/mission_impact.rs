@@ -758,9 +758,9 @@ fn load_classification_row(
                 Ok(StoredClassificationRow {
                     digest_value: row.get(0)?,
                     canonical_bytes: row.get(1)?,
-                    classification_id: uuid_column(row.get::<_, String>(2)?),
-                    mission_id: uuid_column(row.get::<_, String>(3)?),
-                    project_id: uuid_column(row.get::<_, String>(4)?),
+                    classification_id: uuid_column("classification_id", row.get::<_, String>(2)?)?,
+                    mission_id: uuid_column("mission_id", row.get::<_, String>(3)?)?,
+                    project_id: uuid_column("project_id", row.get::<_, String>(4)?)?,
                     version: row.get::<_, i64>(5)? as u32,
                     impact: row.get(6)?,
                     basis: row.get(7)?,
@@ -774,8 +774,26 @@ fn load_classification_row(
         .map_err(|error| ClassificationStoreError::Store(error.to_string()))
 }
 
-fn uuid_column(value: String) -> Uuid {
-    Uuid::parse_str(&value).unwrap_or(Uuid::nil())
+/// Parse an id column, or refuse with the text that was actually there (R39.2).
+///
+/// It used to be `Uuid::parse_str(&value).unwrap_or(Uuid::nil())`. A corrupt column then became a
+/// well-formed UUID -- and nil is a value a later reader can carry forward, compare, and store as
+/// though the row had said it. Reporting what was found costs one `?` and invents nothing.
+///
+/// The error is a `rusqlite` conversion failure because the caller is inside a `query_row` closure:
+/// it propagates through the caller's existing
+/// `ClassificationStoreError::Store(error.to_string())` mapping, where the raw text reaches a reader
+/// through `Debug` and never through the one-line Display (R28.4).
+fn uuid_column(column: &'static str, value: String) -> rusqlite::Result<Uuid> {
+    Uuid::parse_str(&value).map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::other(format!(
+                "the {column} column is not a UUID: {value:?}"
+            ))),
+        )
+    })
 }
 
 /// One classification, verified, by digest within a Workspace.
@@ -1343,12 +1361,20 @@ pub(crate) fn verify_classification_state(
     drop(statement);
 
     for (workspace_id, digest_value) in &rows {
-        let parsed = Uuid::parse_str(workspace_id).map_err(|_| ClassificationStateFault::Row {
-            workspace_id: Uuid::nil(),
-            digest: digest_value.clone(),
-            cause: ClassificationStoreError::Store(format!(
-                "the Workspace id {workspace_id} is not a UUID"
-            )),
+        // Not `Row { workspace_id: Uuid::nil(), .. }` (R39.2). A row whose Workspace id will not
+        // parse has no Workspace to name, and nil is a well-formed UUID that a reader could carry
+        // forward as one. `Store` is the arm for "the pass could not proceed", and both raw values
+        // -- the Workspace text and the digest -- travel in the error rather than being invented
+        // into typed fields.
+        let parsed = Uuid::parse_str(workspace_id).map_err(|_| {
+            ClassificationStateFault::Store(rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::other(format!(
+                    "the workspace_id column is not a UUID: {workspace_id:?} \
+                     (classification {digest_value})"
+                ))),
+            ))
         })?;
         // `Ok(None)` cannot happen for a digest this query just read, and it is not treated as
         // success: a row that vanished between the two statements is a store changing under a pass

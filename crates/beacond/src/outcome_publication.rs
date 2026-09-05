@@ -326,6 +326,17 @@ pub enum PublishRefusal {
         named: Uuid,
         relation: Uuid,
     },
+    /// The candidate Artifact is not Mission-scoped at all, so it names no Mission to compare.
+    ///
+    /// Distinct from [`Self::MissionBindingBroken`] on purpose (R39.2): that one says the candidate
+    /// named a DIFFERENT Mission, and carries both ids. This one says it named none. The previous
+    /// shape reported the absence as `MissionBindingBroken { named: Uuid::nil(), .. }`, which put an
+    /// invented identity where a reader looks for one the store holds -- and nil is a well-formed
+    /// UUID a later reader could carry forward as real.
+    CandidateIsNotMissionScoped {
+        /// The Mission the publication relation names, which IS known.
+        relation: Uuid,
+    },
     /// No publication exists for that Mission, or not at that version.
     /// The stored document could not be rendered to PDF. The renderer's own refusal, carried whole
     /// (R30.3): a v1 document that fails translation is a refusal by name, never an empty PDF.
@@ -389,6 +400,11 @@ impl fmt::Display for PublishRefusal {
                 "the {what} this publication cites is about Mission {named} and the publication is \
                  filed under Mission {relation}"
             ),
+            Self::CandidateIsNotMissionScoped { relation } => write!(
+                formatter,
+                "the candidate Artifact is not scoped to a Mission, and the publication names \
+                 Mission {relation}"
+            ),
             Self::Pdf(refusal) => write!(formatter, "the document did not render: {refusal}"),
             Self::Absent => formatter.write_str("this Mission has no published Outcome"),
             Self::Account(error) => write!(formatter, "{error}"),
@@ -412,6 +428,7 @@ impl PublishRefusal {
             // `name()` being exhaustive (R28.4).
             Self::Pdf(_) => "Pdf",
             Self::Seam(_) => "Seam",
+            Self::CandidateIsNotMissionScoped { .. } => "CandidateIsNotMissionScoped",
             Self::NoManifestForCandidate => "NoManifestForCandidate",
             Self::Manifest(_) => "Manifest",
             Self::ManifestMissionDiffers { .. } => "ManifestMissionDiffers",
@@ -718,9 +735,7 @@ fn read_publication_within(
             });
         }
     } else {
-        return Err(PublishRefusal::MissionBindingBroken {
-            what: "candidate Artifact",
-            named: Uuid::nil(),
+        return Err(PublishRefusal::CandidateIsNotMissionScoped {
             relation: row.mission_id,
         });
     }
@@ -1137,6 +1152,7 @@ mod name_witness {
             PublishRefusal::HistoryNotContiguous { .. } => "HistoryNotContiguous",
             PublishRefusal::QualifyingVerdictNotMeets => "QualifyingVerdictNotMeets",
             PublishRefusal::MissionBindingBroken { .. } => "MissionBindingBroken",
+            PublishRefusal::CandidateIsNotMissionScoped { .. } => "CandidateIsNotMissionScoped",
             PublishRefusal::Pdf(_) => "Pdf",
             PublishRefusal::Absent => "Absent",
             PublishRefusal::Account(_) => "Account",
@@ -1172,6 +1188,9 @@ mod name_witness {
                 named: Uuid::nil(),
                 relation: Uuid::nil(),
             },
+            PublishRefusal::CandidateIsNotMissionScoped {
+                relation: Uuid::new_v4(),
+            },
             PublishRefusal::Pdf(crate::outcome_pdf::PdfRefusal::NotUtf8),
             PublishRefusal::Absent,
             PublishRefusal::Account(
@@ -1182,7 +1201,7 @@ mod name_witness {
         ];
         assert_eq!(
             every_arm.len(),
-            16,
+            17,
             "an arm was added to `PublishRefusal` without a fixture here"
         );
 
@@ -1200,7 +1219,7 @@ mod name_witness {
             every_arm.iter().map(PublishRefusal::name).collect();
         assert_eq!(
             names.len(),
-            16,
+            17,
             "two arms share a startup name, so a swap between them is invisible: {names:?}"
         );
 
