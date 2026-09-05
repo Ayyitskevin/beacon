@@ -3470,6 +3470,11 @@ fn a_real_evaluation_cited_under_a_condition_collects_with_its_envelope() {
         vec![CollectedSupport::Evaluation(CollectedDigest {
             kind: SourceKind::Evaluation,
             workspace_id: fixture.store.workspace_id,
+            // The whole envelope the Evaluation's own reader returned, not three constants: the
+            // assembler cites a source as algorithm:canonicalizer:value, so an expectation that
+            // named only the value would pass a collector that invented the other two.
+            digest_algorithm: evaluation.digest().algorithm.clone(),
+            digest_canonicalizer: evaluation.digest().canonicalizer.clone(),
             digest_value: evaluation.digest().value.clone(),
         })]
     );
@@ -3669,23 +3674,45 @@ fn every_support_kind_collects_through_its_owner_under_one_condition() {
     );
     let collected = collect_completion(&fixture, digest).expect("every kind verifies");
     let condition = &collected.completion.unwrap().condition_results[0];
-    let cited = |kind: SourceKind, digest_value: &str| CollectedDigest {
-        kind,
-        workspace_id: fixture.store.workspace_id,
-        digest_value: digest_value.to_owned(),
-    };
+    // Each expectation carries the envelope its OWN owner returned. A closure that took only the
+    // value would have to supply an algorithm and a canonicalizer from somewhere, and the only
+    // somewhere available to a test is a constant -- which agrees with a collector that made them
+    // up. The three kinds do not share a canonicalizer, so this is also what tells them apart.
+    let cited =
+        |kind: SourceKind, algorithm: &str, canonicalizer: &str, value: &str| CollectedDigest {
+            kind,
+            workspace_id: fixture.store.workspace_id,
+            digest_algorithm: algorithm.to_owned(),
+            digest_canonicalizer: canonicalizer.to_owned(),
+            digest_value: value.to_owned(),
+        };
     assert_eq!(
         condition.support,
         vec![
-            CollectedSupport::Artifact(cited(SourceKind::Artifact, &artifact.digest().value)),
+            CollectedSupport::Artifact(cited(
+                SourceKind::Artifact,
+                &artifact.digest().algorithm,
+                &artifact.digest().canonicalizer,
+                &artifact.digest().value,
+            )),
             CollectedSupport::Receipt(beacond::ReceiptRef {
                 workspace_id: fixture.store.workspace_id,
                 run_uuid: run_id,
                 receipt_version: 1,
                 outcome_checksum: sha256_hex(&receipt_json),
             }),
-            CollectedSupport::Evaluation(cited(SourceKind::Evaluation, &evaluation.digest().value)),
-            CollectedSupport::Ruling(cited(SourceKind::Ruling, &ruling.digest().value)),
+            CollectedSupport::Evaluation(cited(
+                SourceKind::Evaluation,
+                &evaluation.digest().algorithm,
+                &evaluation.digest().canonicalizer,
+                &evaluation.digest().value,
+            )),
+            CollectedSupport::Ruling(cited(
+                SourceKind::Ruling,
+                &ruling.digest().algorithm,
+                &ruling.digest().canonicalizer,
+                &ruling.digest().value,
+            )),
         ]
     );
     assert_eq!(condition.support_count(), 4);
