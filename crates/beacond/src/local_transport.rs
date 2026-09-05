@@ -40,6 +40,21 @@ const SERVER_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
 // Keep transport overhead outside that six-second worst case so a provider error is returned as
 // a domain result rather than being mistaken for a broken supervisor socket.
 const CLIENT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(7);
+/// The deadline for commands that materialize a tree or run a subprocess.
+///
+/// `CLIENT_RESPONSE_TIMEOUT` above is a **socket read timeout**, so when it expires the client gets
+/// `EAGAIN` -- `Io(WouldBlock)` -- while the supervisor is still working. Sized for the provider
+/// reads, it is the wrong budget for `InstallSampleProject`, which copies a bundle and runs `git`:
+/// that command's wall time scales with disk and process-spawn contention rather than with CPU, so
+/// under a full parallel gate it inflates far past a budget a six-second worst case justified. Four
+/// recorded flakes, all on that one command, all `Io(Os { code: 11, kind: WouldBlock })`.
+///
+/// A retry on `WouldBlock` would be the wrong shape here, and the distinction is the whole
+/// diagnosis: `SO_RCVTIMEO` IS the bounded wait, so retrying only re-expresses a longer deadline in
+/// a second place that can disagree with this one. (TF-1's ETXTBSY retry was the opposite case --
+/// there the kernel refused an operation that would later succeed, and waiting was the only way to
+/// make progress.)
+const CLIENT_SLOW_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 pub struct LocalServerConfig {
@@ -1410,7 +1425,10 @@ impl LocalSupervisorClient {
     pub fn install_sample_project(
         &self,
     ) -> Result<SampleProjectInstallResult, LocalTransportError> {
-        expect_sample_project_install_result(self.send(LocalCommand::InstallSampleProject)?)
+        expect_sample_project_install_result(self.send_within(
+            LocalCommand::InstallSampleProject,
+            CLIENT_SLOW_COMMAND_TIMEOUT,
+        )?)
     }
 
     pub fn project(&self, project_id: uuid::Uuid) -> Result<ProjectView, LocalTransportError> {
@@ -1614,6 +1632,14 @@ impl LocalSupervisorClient {
     }
 
     fn send(&self, command: LocalCommand) -> Result<LocalResult, LocalTransportError> {
+        self.send_within(command, CLIENT_RESPONSE_TIMEOUT)
+    }
+
+    fn send_within(
+        &self,
+        command: LocalCommand,
+        response_timeout: Duration,
+    ) -> Result<LocalResult, LocalTransportError> {
         let token = load_local_auth_token(&self.token_path)?;
         let request = RequestEnvelope {
             protocol: PROTOCOL_VERSION,
@@ -1622,7 +1648,7 @@ impl LocalSupervisorClient {
         };
         let serialized = Zeroizing::new(serde_json::to_vec(&request)?);
         let mut stream = UnixStream::connect(&self.socket_path)?;
-        configure_stream_deadlines(&stream, CLIENT_RESPONSE_TIMEOUT)?;
+        configure_stream_deadlines(&stream, response_timeout)?;
         stream.write_all(&serialized)?;
         stream.shutdown(std::net::Shutdown::Write)?;
         let mut bytes = Zeroizing::new(Vec::new());
@@ -2345,6 +2371,76 @@ mod tests {
         running.store(false, Ordering::Release);
         server_thread.join().unwrap();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A command slower than the default deadline is ANSWERED, not reported as a broken socket.
+    ///
+    /// R41.4. `CLIENT_RESPONSE_TIMEOUT` is a socket read timeout, so when it expires the client
+    /// gets `EAGAIN` -- `Io(WouldBlock)` -- while the supervisor is still working, and the desktop
+    /// flattens that to `account_service_unavailable`. Four recorded flakes, all on
+    /// `InstallSampleProject`, the one command that copies a tree and runs `git`.
+    ///
+    /// The stub answers after the default deadline and well inside the slow-command one, so the
+    /// bar is deterministic without load: the install must come back with what the server sent, and
+    /// an ordinary command against the same stub must still time out -- which is what says the
+    /// longer budget is scoped to the slow command rather than relaxing every deadline.
+    #[test]
+    fn a_command_slower_than_the_default_deadline_is_answered_not_refused() {
+        use std::io::{Read as _, Write as _};
+        use std::os::unix::net::UnixListener;
+
+        let root = std::env::temp_dir().join(format!("beacond-slow-command-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let socket_path = root.join("supervisor.sock");
+        let token_path = root.join("auth.token");
+        super::initialize_local_auth_token(&token_path).unwrap();
+
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let stub = thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                stream.read_to_end(&mut request).unwrap();
+                // Past `CLIENT_RESPONSE_TIMEOUT` (7 s), far inside `CLIENT_SLOW_COMMAND_TIMEOUT`.
+                thread::sleep(std::time::Duration::from_millis(7_500));
+                let response = super::ResponseEnvelope {
+                    protocol: super::PROTOCOL_VERSION,
+                    result: None,
+                    error: Some(super::WireError {
+                        code: LocalErrorCode::AccountMissing,
+                        retry_after_ms: None,
+                    }),
+                };
+                let _ = stream.write_all(&serde_json::to_vec(&response).unwrap());
+            }
+        });
+
+        let client = LocalSupervisorClient::connect(&socket_path, &token_path).unwrap();
+
+        // The slow command waits, and comes back with the server's own answer.
+        assert!(
+            matches!(
+                client.install_sample_project(),
+                Err(LocalTransportError::Remote {
+                    code: LocalErrorCode::AccountMissing,
+                    ..
+                })
+            ),
+            "the install did not survive its own deadline"
+        );
+
+        // An ordinary command against the SAME stub still gives up on time.
+        assert!(
+            matches!(
+                client.sample_project_status(),
+                Err(LocalTransportError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock
+            ),
+            "the default deadline was relaxed for every command, not just the slow one"
+        );
+
+        stub.join().unwrap();
+        fs::remove_dir_all(&root).unwrap();
     }
 
     /// Every arm of the wire vocabulary, read out of this file's own source.
