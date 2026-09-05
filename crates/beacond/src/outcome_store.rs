@@ -234,6 +234,14 @@ pub enum PrepareRefusal {
     /// `prepare_for_mission`: the Mission has no impact classification, so the appendix policy has
     /// no bit to key on.
     MissionNotClassified { mission_id: Uuid },
+    /// `prepare_for_mission`: the Mission is classified, but every version's Event falls after the
+    /// completion's boundary. None of them is the classification that was current when the Mission
+    /// completed, and the appendix policy will not read from the future (R23.4).
+    MissionNotClassifiedAtBoundary {
+        mission_id: Uuid,
+        boundary_event_seq: u64,
+        classifications_after: usize,
+    },
     /// The collector refused, in its own words.
     Collector(CollectorRefusal),
     /// The assembler refused to guess, in its own words.
@@ -275,6 +283,16 @@ impl std::fmt::Display for PrepareRefusal {
                     "Mission {mission_id} has no impact classification"
                 )
             }
+            Self::MissionNotClassifiedAtBoundary {
+                mission_id,
+                boundary_event_seq,
+                classifications_after,
+            } => write!(
+                formatter,
+                "Mission {mission_id} has {classifications_after} impact classification(s), all \
+                 recorded after the completion's boundary (event {boundary_event_seq}); none was \
+                 current when the Mission completed"
+            ),
             Self::Collector(refusal) => write!(formatter, "the collector: {refusal}"),
             Self::Assembly(refusal) => write!(formatter, "the assembler: {refusal}"),
             Self::Sources(refusal) => write!(formatter, "the document's sources: {refusal}"),
@@ -693,27 +711,60 @@ impl OutcomeService {
             let Some(completion_digest) = completion_digest else {
                 return Err(PrepareRefusal::MissionNotCompleted { mission_id });
             };
-            let classification_digest: Option<String> = transaction
-                .query_row(
+            // Every classification of the Mission, newest first. "Current" is decided below, not
+            // here: it is the newest version whose Event is at or before the completion's boundary
+            // (R23.4), and only the collector knows where the boundary falls.
+            let classification_digests: Vec<String> = transaction
+                .prepare(
                     "SELECT digest_value FROM mission_impact_classifications
                      WHERE workspace_id = ?1 AND mission_id = ?2
-                     ORDER BY version DESC LIMIT 1",
+                     ORDER BY version DESC",
+                )?
+                .query_map(
                     params![workspace_id.to_string(), mission_id.to_string()],
                     |row| row.get(0),
-                )
-                .optional()?;
-            let Some(classification_digest) = classification_digest else {
+                )?
+                .collect::<Result<_, _>>()?;
+            if classification_digests.is_empty() {
                 return Err(PrepareRefusal::MissionNotClassified { mission_id });
-            };
+            }
 
             // What the document cites is what the completion says supported its conditions -- read
             // from the completion's bytes through its owner, then handed to the collector to read
             // each one through ITS owner at the boundary.
             let completion =
                 verified_completion_within(&transaction, workspace_id, &completion_digest)?;
-            let request = request_from(&completion, &completion_digest, &classification_digest);
+            let collector = Collector::new(&transaction, workspace_id);
 
-            let collected = Collector::new(&transaction, workspace_id).collect(&request)?;
+            // Newest first; a classification the collector places after the boundary is not the
+            // current one, it is a later one -- step down a version. Any other refusal is the
+            // collector's own and stands.
+            let mut collected = None;
+            let mut newest_boundary = None;
+            for classification_digest in &classification_digests {
+                let request = request_from(&completion, &completion_digest, classification_digest);
+                match collector.collect(&request) {
+                    Ok(sources) => {
+                        collected = Some(sources);
+                        break;
+                    }
+                    Err(CollectorRefusal::AfterBoundary {
+                        kind: "classification",
+                        boundary_event_seq,
+                        ..
+                    }) => {
+                        newest_boundary.get_or_insert(boundary_event_seq);
+                    }
+                    Err(refusal) => return Err(refusal.into()),
+                }
+            }
+            let Some(collected) = collected else {
+                return Err(PrepareRefusal::MissionNotClassifiedAtBoundary {
+                    mission_id,
+                    boundary_event_seq: newest_boundary.unwrap_or_default(),
+                    classifications_after: classification_digests.len(),
+                });
+            };
             let manifest = assemble(&collected, workspace_id, appendix_request)?;
             let sources = verified_sources_for(&transaction, workspace_id, &manifest)?;
             let candidate = prepare_within(
