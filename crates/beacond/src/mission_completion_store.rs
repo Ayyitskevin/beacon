@@ -35,6 +35,8 @@
 //! this reader does not re-verify the referents. A consumer that needs one verified reads it
 //! through its owning module and says so.
 
+use std::fmt;
+
 use std::collections::BTreeSet;
 
 use data_encoding::HEXLOWER;
@@ -61,6 +63,125 @@ struct StoredCompletion {
 }
 
 /// Why a stored completion is not a completion.
+/// Which fault the completion startup pass hit, and WHICH ROW hit it (R27.1's shape, R28.1).
+///
+/// This is the pass with the richest reader in tier 1 -- seventeen refusals, most of them about
+/// one completion's own bytes -- so it is the one where carrying the cause buys the most.
+pub(crate) enum CompletionStateFault {
+    /// The enumeration itself failed: no row to name, because none was reached.
+    Store(rusqlite::Error),
+    /// One completion did not re-prove. `cause` is the owning reader's OWN refusal, carried whole.
+    Row {
+        workspace_id: Uuid,
+        digest_value: String,
+        cause: CompletionReadRefusal,
+    },
+    /// One `mission.completed` Event per stored completion: a count across the store, with no row
+    /// to name.
+    Totals(CompletionReadRefusal),
+    /// A row whose Workspace column is not a UUID. Unreachable while the foreign-key check and the
+    /// Workspace pass run first.
+    Identity {
+        workspace_id: String,
+        digest_value: String,
+    },
+}
+
+impl CompletionReadRefusal {
+    /// The variant's NAME, for R28.4's one-line startup message. Several of these carry column
+    /// names, ordinals and reader sentences; none of that belongs in a refusal line.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Absent => "Absent",
+            Self::CrossWorkspace => "CrossWorkspace",
+            Self::BytesDisagree => "BytesDisagree",
+            Self::ColumnDisagrees(..) => "ColumnDisagrees",
+            Self::SupersessionAbsent => "SupersessionAbsent",
+            Self::SupersessionUnverified(..) => "SupersessionUnverified",
+            Self::SupersessionOtherMission => "SupersessionOtherMission",
+            Self::SupersessionCycle => "SupersessionCycle",
+            Self::MissionProjectDisagrees(..) => "MissionProjectDisagrees",
+            Self::ConditionProjectionDisagrees { .. } => "ConditionProjectionDisagrees",
+            Self::ConditionsNotExactlyOnce { .. } => "ConditionsNotExactlyOnce",
+            Self::DeclaredConditionsMoved => "DeclaredConditionsMoved",
+            Self::MissionNotAdmitted => "MissionNotAdmitted",
+            Self::MissionAdmissionUnreadable { .. } => "MissionAdmissionUnreadable",
+            Self::BoundaryOutOfRange => "BoundaryOutOfRange",
+            Self::EventCount(..) => "EventCount",
+            Self::Store(..) => "Store",
+        }
+    }
+}
+
+impl fmt::Display for CompletionStateFault {
+    /// R28.4: the KEY and the fault's NAME, never the carried refusal's own text.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(_) => formatter.write_str("the Mission completions could not be read"),
+            Self::Row {
+                workspace_id,
+                digest_value,
+                cause,
+            } => write!(
+                formatter,
+                "completion {digest_value} in Workspace {workspace_id} does not re-prove: {}",
+                cause.name()
+            ),
+            Self::Totals(cause) => write!(
+                formatter,
+                "the Mission completions do not agree with the log as a whole: {}",
+                cause.name()
+            ),
+            Self::Identity {
+                workspace_id,
+                digest_value,
+            } => write!(
+                formatter,
+                "a completion row's Workspace is not readable: {workspace_id}, completion \
+                 {digest_value}"
+            ),
+        }
+    }
+}
+
+/// Hand-written and NOT delegating to `Display`: R28.4 keeps the carried text reachable here.
+impl fmt::Debug for CompletionStateFault {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => formatter.debug_tuple("Store").field(error).finish(),
+            Self::Totals(cause) => formatter.debug_tuple("Totals").field(cause).finish(),
+            Self::Row {
+                workspace_id,
+                digest_value,
+                cause,
+            } => formatter
+                .debug_struct("Row")
+                .field("workspace_id", workspace_id)
+                .field("digest_value", digest_value)
+                .field("cause", cause)
+                .finish(),
+            Self::Identity {
+                workspace_id,
+                digest_value,
+            } => formatter
+                .debug_struct("Identity")
+                .field("workspace_id", workspace_id)
+                .field("digest_value", digest_value)
+                .finish(),
+        }
+    }
+}
+
+impl std::error::Error for CompletionStateFault {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::Totals(cause) | Self::Row { cause, .. } => Some(cause),
+            Self::Identity { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompletionReadRefusal {
     /// No completion with that digest in this Workspace.
@@ -603,21 +724,29 @@ pub(crate) fn outcome_token(outcome: ConditionOutcome) -> &'static str {
 /// Startup: every stored completion re-proves itself, and every `mission.completed` Event names one.
 pub(crate) fn verify_completion_state(
     connection: &Connection,
-) -> Result<(), CompletionReadRefusal> {
+) -> Result<(), CompletionStateFault> {
     let mut statement = connection
         .prepare("SELECT workspace_id, digest_value FROM mission_completions ORDER BY digest_value")
-        .map_err(store)?;
+        .map_err(CompletionStateFault::Store)?;
     let rows = statement
         .query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
-        .map_err(store)?
+        .map_err(CompletionStateFault::Store)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(store)?;
+        .map_err(CompletionStateFault::Store)?;
     for (workspace_id, digest_value) in &rows {
-        let workspace_id =
-            Uuid::parse_str(workspace_id).map_err(|_| CompletionReadRefusal::BytesDisagree)?;
-        verified_completion_within(connection, workspace_id, digest_value)?;
+        let parsed = Uuid::parse_str(workspace_id).map_err(|_| CompletionStateFault::Identity {
+            workspace_id: workspace_id.clone(),
+            digest_value: digest_value.clone(),
+        })?;
+        verified_completion_within(connection, parsed, digest_value).map_err(|cause| {
+            CompletionStateFault::Row {
+                workspace_id: parsed,
+                digest_value: digest_value.clone(),
+                cause,
+            }
+        })?;
     }
     // No orphan Event: one `mission.completed` per stored completion, and none naming a completion
     // that is not there.
@@ -627,9 +756,11 @@ pub(crate) fn verify_completion_state(
             [],
             |row| row.get(0),
         )
-        .map_err(store)?;
+        .map_err(CompletionStateFault::Store)?;
     if usize::try_from(events) != Ok(rows.len()) {
-        return Err(CompletionReadRefusal::EventCount(events));
+        return Err(CompletionStateFault::Totals(
+            CompletionReadRefusal::EventCount(events),
+        ));
     }
     Ok(())
 }
