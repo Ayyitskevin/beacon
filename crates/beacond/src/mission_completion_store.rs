@@ -35,12 +35,14 @@
 //! this reader does not re-verify the referents. A consumer that needs one verified reads it
 //! through its owning module and says so.
 
+use std::collections::BTreeSet;
+
 use data_encoding::HEXLOWER;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::mission_completion::{ConditionOutcome, MissionCompletionV1};
+use crate::mission_completion::{CompletionSupersedes, ConditionOutcome, MissionCompletionV1};
 use crate::proposal::sha256;
 
 /// The indexed columns of one stored completion, named rather than spelled as a tuple: the query's
@@ -71,6 +73,19 @@ pub enum CompletionReadRefusal {
     BytesDisagree,
     /// An indexed column says something the bytes do not.
     ColumnDisagrees(&'static str),
+    /// No completion in this Workspace carries the predecessor digest this record supersedes.
+    ///
+    /// Distinct from `SupersessionUnverified`: nothing is wrong with a record, there is no record.
+    SupersessionAbsent,
+    /// The predecessor exists in this Workspace and does not verify. Its owning reader's reason is
+    /// repeated, never reinterpreted.
+    SupersessionUnverified(String),
+    /// The predecessor is a completion of a different Mission. `CompletionSupersedes::Record` means
+    /// an earlier completion of the SAME Mission, and nothing checked it.
+    SupersessionOtherMission,
+    /// The supersession chain returns to a record already on the path. A chain that never ends is
+    /// refused rather than walked.
+    SupersessionCycle,
     /// The Project this completion names does not own the Mission it names (sol1's #5).
     ///
     /// Two distinct ways to be wrong, one refusal with a reason: the Project is not in this
@@ -108,6 +123,18 @@ impl std::fmt::Display for CompletionReadRefusal {
             Self::BytesDisagree => formatter.write_str("stored bytes disagree with their digest"),
             Self::ColumnDisagrees(column) => {
                 write!(formatter, "column {column} disagrees with the bytes")
+            }
+            Self::SupersessionAbsent => {
+                formatter.write_str("no completion in this workspace carries the superseded digest")
+            }
+            Self::SupersessionUnverified(reason) => {
+                write!(formatter, "the superseded completion: {reason}")
+            }
+            Self::SupersessionOtherMission => {
+                formatter.write_str("the superseded completion is another mission's")
+            }
+            Self::SupersessionCycle => {
+                formatter.write_str("the supersession chain returns to a record already on it")
             }
             Self::MissionProjectDisagrees(reason) => write!(
                 formatter,
@@ -205,6 +232,23 @@ pub fn verified_completion_within(
     workspace_id: Uuid,
     digest_value: &str,
 ) -> Result<MissionCompletionV1, CompletionReadRefusal> {
+    verified_completion_on_path(connection, workspace_id, digest_value, &mut BTreeSet::new())
+}
+
+/// The reader proper, carrying the supersession path walked so far.
+///
+/// A completion may name a predecessor, and proving this record means proving that one too --
+/// which is a walk, and a walk needs an end. `path` holds every digest already on it, so a chain
+/// that returns to itself is refused rather than followed (sol1's #10).
+fn verified_completion_on_path(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+    path: &mut BTreeSet<String>,
+) -> Result<MissionCompletionV1, CompletionReadRefusal> {
+    if !path.insert(digest_value.to_owned()) {
+        return Err(CompletionReadRefusal::SupersessionCycle);
+    }
     // 1. The row, scoped to the caller's Workspace. A digest that exists elsewhere is a REFUSAL --
     //    the whole point of scoping being structural rather than a filter that returns nothing.
     let row: Option<StoredCompletion> = connection
@@ -458,6 +502,35 @@ pub fn verified_completion_within(
     };
     if stored.boundary_event_seq < admitted || stored.boundary_event_seq >= completed {
         return Err(CompletionReadRefusal::BoundaryOutOfRange);
+    }
+
+    // 8. The predecessor, if this record names one, is a completion of the SAME Mission in THIS
+    //    Workspace -- which is what `CompletionSupersedes::Record` means and what nothing checked.
+    //    `record_completion` wrote the digest into the canonical bytes and never resolved it, so
+    //    sol1 put another store's completion digest in a local record and both the write and the
+    //    read-back accepted it.
+    //
+    //    NOTE, and it is the interesting part: migration 0026's
+    //    `mission_completions_one_per_mission` index permits one completion per Mission per
+    //    Workspace, so a same-Mission predecessor cannot coexist with its successor TODAY. This
+    //    check therefore refuses every `Record` predecessor there can currently be -- which is
+    //    correct, because there can currently be no valid one. Supporting a real ladder is a
+    //    migration, and sol1's scope note says so.
+    if let CompletionSupersedes::Record(predecessor) = record.supersedes {
+        let predecessor = HEXLOWER.encode(&predecessor);
+        let earlier = verified_completion_on_path(connection, workspace_id, &predecessor, path)
+            .map_err(|refusal| match refusal {
+                CompletionReadRefusal::Absent | CompletionReadRefusal::CrossWorkspace => {
+                    CompletionReadRefusal::SupersessionAbsent
+                }
+                CompletionReadRefusal::SupersessionCycle => {
+                    CompletionReadRefusal::SupersessionCycle
+                }
+                other => CompletionReadRefusal::SupersessionUnverified(other.to_string()),
+            })?;
+        if earlier.mission_id != record.mission_id {
+            return Err(CompletionReadRefusal::SupersessionOtherMission);
+        }
     }
 
     Ok(record)

@@ -1307,6 +1307,17 @@ fn completion_supersession_cannot_name_a_record_from_another_workspace() {
         result.is_err(),
         "a completion accepted another Workspace's predecessor: {result:?}"
     );
+    // sol1's probe asserts only that it is refused, and a refusal under any name would satisfy it.
+    // A mutant that refuses this record for an unrelated reason -- a fabricated condition-count
+    // mismatch -- survives that assertion, so the name is asserted too. Added beneath sol1's own
+    // assertion rather than replacing it.
+    assert!(
+        matches!(
+            result,
+            Err(beacond::CompletionReadRefusal::SupersessionAbsent)
+        ),
+        "refused, but not as a foreign predecessor: {result:?}"
+    );
 }
 
 /// §7 slice 2. A digest that exists is not a digest that is yours.
