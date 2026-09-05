@@ -112,6 +112,13 @@ pub enum CollectorRefusal {
         coverage_from_event_seq: u64,
         mission_admitted_at_seq: u64,
     },
+    /// A condition cites more support than the collector will read for one condition. Refused
+    /// before the first reference is read, so the bound is on the work, not on the result.
+    SupportOverBound {
+        ordinal: u32,
+        observed: usize,
+        bound: usize,
+    },
     /// A delivered Artifact's own bytes name another Workspace (R19.2: the collector's own arm,
     /// like the other sources', never `Unverified` with a reason).
     ///
@@ -198,6 +205,15 @@ impl fmt::Display for CollectorRefusal {
                 "the spend {id}'s coverage starts at event {coverage_from_event_seq}, after the \
                  Mission was admitted at event {mission_admitted_at_seq}"
             ),
+            Self::SupportOverBound {
+                ordinal,
+                observed,
+                bound,
+            } => write!(
+                formatter,
+                "condition {ordinal} cites {observed} support references; the collector reads at \
+                 most {bound}"
+            ),
             Self::ArtifactInAnotherWorkspace { id } => write!(
                 formatter,
                 "the delivered Artifact {id}'s own bytes name another Workspace"
@@ -277,6 +293,13 @@ const EVENT_LOCATORS: &[(&str, &str, &str)] = &[
 /// which is the conservative direction — a Receipt whose newest state arrived after the boundary is
 /// refused rather than quietly cited at its older one.
 const RECEIPT_RUN_EVENT_KINDS: &[&str] = &["run.preflighted", "run.executed"];
+
+/// The most support references the collector will read for one condition -- the grammar's own
+/// bound, applied HERE before anything is allocated or read (the #6 lesson). The completion's
+/// decoder refuses a longer list, so today no verified record can exceed it; the check stays
+/// because "the owner would have refused it" is a claim about somebody else's code, and a bound
+/// that is applied after the clone is a bound on nothing.
+const MAX_SUPPORT_REFS_PER_CONDITION: usize = crate::mission_completion::MAX_SUPPORT_PER_CONDITION;
 
 // ---------------------------------------------------------------------------------------------
 // The request
@@ -759,10 +782,9 @@ impl<'a> Collector<'a> {
         let mut condition_results: Vec<CollectedCondition> =
             Vec::with_capacity(record.condition_results.len());
         for result in &record.condition_results {
-            let mut support = Vec::with_capacity(result.support.len());
-            for reference in &result.support {
-                support.push(self.support(reference, &record)?);
-            }
+            let support = collected_support(result.ordinal, &result.support, |reference| {
+                self.support(reference, &record)
+            })?;
             condition_results.push(CollectedCondition {
                 ordinal: result.ordinal,
                 outcome: result.outcome,
@@ -1544,6 +1566,28 @@ impl<'a> Collector<'a> {
     }
 }
 
+/// A condition's support, read one reference at a time through `read`, with the bound applied
+/// BEFORE the first read and before the list is allocated. Pure over the slice and a closure, so
+/// a unit test can hand it a longer list than any verified record can carry and count the reads.
+fn collected_support(
+    ordinal: u32,
+    references: &[SupportRef],
+    mut read: impl FnMut(&SupportRef) -> Result<CollectedSupport, CollectorRefusal>,
+) -> Result<Vec<CollectedSupport>, CollectorRefusal> {
+    if references.len() > MAX_SUPPORT_REFS_PER_CONDITION {
+        return Err(CollectorRefusal::SupportOverBound {
+            ordinal,
+            observed: references.len(),
+            bound: MAX_SUPPORT_REFS_PER_CONDITION,
+        });
+    }
+    let mut support = Vec::with_capacity(references.len());
+    for reference in references {
+        support.push(read(reference)?);
+    }
+    Ok(support)
+}
+
 /// The two things the owning reader cannot know about a delivered Artifact: that it is THIS
 /// Workspace's and scoped to THIS Mission. Pure over the decoded payload, so both refusals are
 /// reachable by a unit test without bypassing the owner's own guards.
@@ -1651,6 +1695,46 @@ mod scope_tests {
     /// Acceptance row 0. The realistic row never reaches this line -- the owning reader refuses it
     /// three ways first -- so the arm is proved here, on the payload, where a mutant that disables
     /// the comparison has nowhere to hide behind the owner.
+    /// The bound is on the WORK: a list one past it is refused before a single reference is read,
+    /// and one at it is read exactly once per entry.
+    #[test]
+    fn support_past_the_bound_is_refused_before_any_reference_is_read() {
+        let reference = |byte: u8| SupportRef::Evaluation([byte; 32]);
+        let reads = std::cell::Cell::new(0_usize);
+        let read = |_: &SupportRef| {
+            reads.set(reads.get() + 1);
+            Ok(CollectedSupport::Evaluation(CollectedDigest {
+                kind: SourceKind::Evaluation,
+                workspace_id: Uuid::nil(),
+                digest_value: String::new(),
+            }))
+        };
+        let over: Vec<SupportRef> = (0..=MAX_SUPPORT_REFS_PER_CONDITION)
+            .map(|i| reference(u8::try_from(i).unwrap()))
+            .collect();
+        let refused = collected_support(3, &over, read).expect_err("one past the bound");
+        assert_eq!(
+            refused,
+            CollectorRefusal::SupportOverBound {
+                ordinal: 3,
+                observed: MAX_SUPPORT_REFS_PER_CONDITION + 1,
+                bound: MAX_SUPPORT_REFS_PER_CONDITION,
+            }
+        );
+        assert_eq!(
+            reads.get(),
+            0,
+            "a reference was read before the bound was applied"
+        );
+
+        let at: Vec<SupportRef> = (0..MAX_SUPPORT_REFS_PER_CONDITION)
+            .map(|i| reference(u8::try_from(i).unwrap()))
+            .collect();
+        let collected = collected_support(3, &at, read).expect("at the bound");
+        assert_eq!(collected.len(), MAX_SUPPORT_REFS_PER_CONDITION);
+        assert_eq!(reads.get(), MAX_SUPPORT_REFS_PER_CONDITION);
+    }
+
     #[test]
     fn a_payload_naming_another_workspace_is_the_collectors_own_refusal() {
         let mine = Uuid::new_v4();
