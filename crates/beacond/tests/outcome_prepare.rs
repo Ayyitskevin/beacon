@@ -849,18 +849,26 @@ fn verified_sources_text_is_read_through_owners_not_narrative_projections() {
         .outcomes
         .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
         .expect_err("a tampered Mission title was served as the document's title");
-    // Two owners prove the same row against the same Event: the completion reader (its Mission's
-    // Project must own it, #71) and the Mission reader the producer calls. Whichever reads first
-    // names the lie; both names are the lie refused, and neither is the lie printed.
+    // THREE owners can now prove the same tampered row, and which one speaks first is not this
+    // test's business -- only that the lie is refused by a name and never printed.
+    //
+    // #74 (the seams fold) made the completion reader authenticate the Mission's admission Event
+    // through the Mission's owner BEFORE anything else, so a `missions` row edited out from under
+    // its Event is caught as `MissionAdmissionUnreadable` -- earlier, and by a stronger check, than
+    // the two names this list used to allow. The list is widened rather than pinned to one name
+    // because pinning it says the refusal must come from a particular layer, which is exactly the
+    // coupling that made this test fail when a lower layer got better at its job.
     assert!(
         matches!(
             refusal,
             PrepareRefusal::Sources(SourcesRefusal::MissionUnverified)
                 | PrepareRefusal::Sources(SourcesRefusal::Completion(
                     beacond::CompletionReadRefusal::MissionProjectDisagrees(_)
+                        | beacond::CompletionReadRefusal::MissionAdmissionUnreadable { .. }
                 ))
                 | PrepareRefusal::Completion(
                     beacond::CompletionReadRefusal::MissionProjectDisagrees(_)
+                        | beacond::CompletionReadRefusal::MissionAdmissionUnreadable { .. }
                 )
         ),
         "refused for the wrong reason: {refusal}"
