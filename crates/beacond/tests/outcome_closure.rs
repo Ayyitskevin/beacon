@@ -1850,18 +1850,14 @@ fn criterion_11_outcome_closure_on_one_store() {
         completion_digest.value, primary_completion_digest,
         "C11.09.APPENDIX_OBJECT_ROWS_EXACT"
     );
-    let expected_row = |
-        kind: SourceKind,
-        identity: Option<(Uuid, u32)>,
-        algorithm: &str,
-        digest: &str,
-        canonicalizer: &str,
-        pinned_revision: &str,
-    | {
+    let expected_row = |kind: SourceKind,
+                        identity: Option<(Uuid, u32)>,
+                        algorithm: &str,
+                        digest: &str,
+                        canonicalizer: &str,
+                        pinned_revision: &str| {
         let (identity, schema) = match identity {
-            Some((object_id, version)) => {
-                (format!("`{object_id}`"), format!("`{version}`"))
-            }
+            Some((object_id, version)) => (format!("`{object_id}`"), format!("`{version}`")),
             None => (
                 "`absent (the owner carries no reference identity)`".to_owned(),
                 "`absent`".to_owned(),
@@ -1925,10 +1921,7 @@ fn criterion_11_outcome_closure_on_one_store() {
         ),
         expected_row(
             SourceKind::Policy,
-            Some((
-                high.payload().classification_id,
-                high.payload().version,
-            )),
+            Some((high.payload().classification_id, high.payload().version)),
             &high.digest().algorithm,
             &high.digest().value,
             &high.digest().canonicalizer,
