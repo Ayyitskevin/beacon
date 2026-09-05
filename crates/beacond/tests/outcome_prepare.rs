@@ -7153,3 +7153,95 @@ fn the_pdf_of_a_superseded_version_is_rendered_from_that_versions_bytes() {
         );
     }
 }
+
+/// The version `render_pdf_version` hands the translator is proved to be the document's, by the
+/// reader, before this service ever looks at it (R38).
+///
+/// Why this bar and not the one that was asked for. The brief wanted a published document whose
+/// manifest names an UNKNOWN renderer version, refused through the service by the translator. That
+/// state is not reachable, and the reasons are three guards that were already there:
+///
+/// * `encode` refuses a manifest whose renderer version has no escaping function (`outcome.rs`),
+///   so unknown-version bytes cannot be produced;
+/// * `decode` refuses the same, so unknown-version bytes cannot be read back
+///   (`MalformedOutcome::UnknownVersion`, covered in `tests/outcome.rs`);
+/// * and `verified_manifest_within` proves the `renderer_version` PROJECTION COLUMN against the
+///   decoded bytes, which is what this test drives.
+///
+/// Together they mean every manifest that reaches `render_pdf_version` names `beacon.outcome.md.v1`
+/// — so reading the version from the manifest and hard-coding the constant are, today,
+/// indistinguishable by construction. That is worth knowing rather than papering over: this bar
+/// pins the guard that MAKES them equivalent, and the day `escaping_for` learns a second version it
+/// is the enforcement this test describes that keeps the service honest.
+#[test]
+fn a_manifest_whose_renderer_version_disagrees_is_refused_through_the_pdf_service() {
+    let fixture = admitted_mission("pdf-service-renderer-version");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, candidate_digest, evaluation_digest) = fixture.publishable();
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
+        .expect("the honest pairing publishes");
+
+    // Control: both paths work before the plant, so the refusals below are the plant's doing.
+    assert!(
+        fixture
+            .outcomes
+            .render_pdf_version(fixture.mission_id, 1)
+            .is_ok()
+    );
+    assert!(
+        fixture
+            .outcomes
+            .export_markdown_version(fixture.mission_id, 1)
+            .is_ok()
+    );
+
+    // The projection column alone, past the Command and with the immutability trigger down -- the
+    // shape a restore or an older binary produces. The canonical bytes still say v1; only the
+    // column a reader might trust instead says otherwise.
+    with_trigger_down(
+        &fixture.store,
+        "outcome_manifests_no_update",
+        "outcome_manifests",
+        "Outcome manifests are immutable",
+        |connection| {
+            connection
+                .execute(
+                    "UPDATE outcome_manifests SET renderer_version = 'beacon.outcome.md.v2'
+                     WHERE workspace_id = ?1",
+                    params![fixture.workspace_id.to_string()],
+                )
+                .unwrap();
+        },
+    );
+
+    let refusal = fixture
+        .outcomes
+        .render_pdf_version(fixture.mission_id, 1)
+        .expect_err("a manifest whose renderer version disagrees rendered a PDF");
+    assert!(
+        matches!(
+            refusal,
+            PublishRefusal::Manifest(beacond::ManifestStoreRefusal::ColumnDisagrees {
+                column: "renderer_version"
+            })
+        ),
+        "the disagreement was not named, or was named as something else: {refusal:?}"
+    );
+
+    // And the PDF path is no laxer than the export it is built on: same store, same refusal.
+    assert!(
+        matches!(
+            fixture
+                .outcomes
+                .export_markdown_version(fixture.mission_id, 1)
+                .expect_err("the export accepted what the PDF path refused"),
+            PublishRefusal::Manifest(beacond::ManifestStoreRefusal::ColumnDisagrees {
+                column: "renderer_version"
+            })
+        ),
+        "the two paths disagree about the same store"
+    );
+}
