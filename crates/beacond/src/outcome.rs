@@ -85,7 +85,10 @@ const MAX_COLLECTION_ENTRIES: u32 = 4_096;
 ///
 /// Each figure is the structural minimum: every fixed-width field, every length prefix, and the
 /// cheapest arm of every tag, with zero-length strings.
-const MIN_SOURCE_REF_BYTES: usize = 94;
+// A source reference's cheapest shape is identity-absent: 16 (Workspace) + 1 (kind) + 1 (identity
+// presence) + 32 (sha256) + 8 + 8 (two zero-length token prefixes) + 1 (revision state tag) + 8
+// (zero-length reason prefix). The identity-present shape adds 16 + 4 and is never the minimum.
+const MIN_SOURCE_REF_BYTES: usize = 75;
 const MIN_RECEIPT_REF_BYTES: usize = 84;
 const MIN_NARRATIVE_REF_BYTES: usize = 12;
 const MIN_CONDITION_BYTES: usize = 19;
@@ -115,6 +118,10 @@ const TAG_APPENDIX_POLICY_DEFAULT: u8 = 0x01;
 const TAG_APPENDIX_INCLUDE: u8 = 0x02;
 
 const TAG_REVISION_GIT_COMMIT: u8 = 0x01;
+
+// Reference-identity presence. Explicit, never by omission, and neither arm is 0x00.
+const TAG_IDENTITY_NONE: u8 = 0x01;
+const TAG_IDENTITY_SOME: u8 = 0x02;
 
 const TAG_FALSE: u8 = 0x00;
 const TAG_TRUE: u8 = 0x01;
@@ -298,7 +305,25 @@ pub struct PinnedRevision {
     pub value: String,
 }
 
-/// One cited object: Workspace scope, typed identity, schema version, and canonical digest.
+/// A record's REFERENCE identity (R15): which record a citation names, beside its schema version.
+/// The digest is CONTENT identity; this is only ever what the owning record carries inside its own
+/// canonical bytes, and it is never minted by a manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferenceIdentity {
+    pub object_id: Uuid,
+    pub schema_version: u32,
+}
+
+/// One cited object: Workspace scope, kind, canonical digest, and -- where the owning record has
+/// one -- its reference identity (R18.5).
+///
+/// `identity` is `Some` exactly for the kinds whose records carry a UUID and version inside their
+/// canonical bytes today (Completion, Policy classification, Spend) and `None` for the kinds whose
+/// records do not (Artifact, Proposal, Ruling, Evaluation). The codec enforces that per kind in
+/// both directions and encodes presence with an explicit tag, never by omission: when a record
+/// gains its UUID under R15 the rule for its kind flips, and no byte in any existing manifest has
+/// to move to say so. v1 required `object_id` + `schema_version` of every reference, which for four
+/// of the six kinds meant a value the manifest had to invent.
 ///
 /// `pinned_revision` is a state rather than an `Option` so that "this source type pins no
 /// revision" is a sentence the appendix prints rather than a blank it leaves.
@@ -306,8 +331,7 @@ pub struct PinnedRevision {
 pub struct SourceRef {
     pub workspace_id: Uuid,
     pub kind: SourceKind,
-    pub object_id: Uuid,
-    pub schema_version: u32,
+    pub identity: Option<ReferenceIdentity>,
     pub digest: SourceDigest,
     pub pinned_revision: OutcomeState<PinnedRevision>,
 }
@@ -610,6 +634,12 @@ pub enum MalformedOutcome {
     Token,
     /// A canonicalizer or renderer version this build does not implement.
     UnknownVersion,
+    /// A reference of a kind whose records carry a UUID + version inside their canonical bytes
+    /// arrived without one (R18.5).
+    ReferenceIdentityRequired,
+    /// A reference of a kind whose records carry NO UUID inside their canonical bytes arrived with
+    /// one: an identity the manifest minted (R18.5, R15's "never minted").
+    ReferenceIdentityNotCarried,
     /// Bytes under a canonicalizer this decoder once held and no longer does. Distinct from
     /// `Magic` (not a manifest at all) and from `UnknownVersion` (a grammar this build has never
     /// heard of): a retired grammar is a known thing, refused on purpose, and the refusal says so.
@@ -649,6 +679,8 @@ impl MalformedOutcome {
             Self::LineBreakInLabel => "line_break_in_label",
             Self::Token => "token",
             Self::UnknownVersion => "unknown_version",
+            Self::ReferenceIdentityRequired => "reference_identity_required",
+            Self::ReferenceIdentityNotCarried => "reference_identity_not_carried",
             Self::RetiredVersion => "retired_version",
             Self::NonCanonicalOrder => "non_canonical_order",
             Self::NoSuccessConditions => "no_success_conditions",
@@ -827,13 +859,22 @@ fn source_ref_key(value: &SourceRef) -> Vec<KeyPart> {
 /// would make a lane confusion structurally harmless and therefore untestable, which is a worse
 /// place to be than a lane confusion a test catches.
 fn source_identity_key(value: &SourceRef) -> Vec<KeyPart> {
-    vec![
-        KeyPart::Text(uuid_key(&value.object_id)),
-        KeyPart::Num(u64::from(value.schema_version)),
+    // Presence first, so the two shapes never interleave; then the identity if there is one; then
+    // the whole digest envelope. For a kind with no reference identity the digest IS the identity.
+    let mut key = match &value.identity {
+        Some(identity) => vec![
+            KeyPart::Num(1),
+            KeyPart::Text(uuid_key(&identity.object_id)),
+            KeyPart::Num(u64::from(identity.schema_version)),
+        ],
+        None => vec![KeyPart::Num(0)],
+    };
+    key.extend([
         KeyPart::Text(value.digest.algorithm.clone()),
         KeyPart::Text(value.digest.canonicalizer.clone()),
         KeyPart::Text(value.digest.value.clone()),
-    ]
+    ]);
+    key
 }
 
 fn receipt_ref_key(value: &ReceiptRef) -> Vec<KeyPart> {
@@ -1240,10 +1281,17 @@ fn encode_source_ref(encoder: &mut Encoder, value: &SourceRef) -> Result<(), Mal
     if value.kind == SourceKind::Mission {
         return Err(MalformedOutcome::SourceKind);
     }
+    require_identity_shape(value.kind, value.identity.as_ref())?;
     encoder.uuid(&value.workspace_id);
     encoder.tag(value.kind.tag());
-    encoder.uuid(&value.object_id);
-    encoder.u32(value.schema_version);
+    match &value.identity {
+        Some(identity) => {
+            encoder.tag(TAG_IDENTITY_SOME);
+            encoder.uuid(&identity.object_id);
+            encoder.u32(identity.schema_version);
+        }
+        None => encoder.tag(TAG_IDENTITY_NONE),
+    }
     encode_digest(encoder, &value.digest)?;
     encode_state(encoder, &value.pinned_revision, |encoder, revision| {
         encoder.tag(match revision.kind {
@@ -1266,8 +1314,15 @@ fn decode_source_ref(decoder: &mut Decoder<'_>) -> Result<SourceRef, MalformedOu
     if kind == SourceKind::Mission {
         return Err(MalformedOutcome::SourceKind);
     }
-    let object_id = decoder.uuid()?;
-    let schema_version = decoder.u32()?;
+    let identity = match decoder.tag()? {
+        TAG_IDENTITY_SOME => Some(ReferenceIdentity {
+            object_id: decoder.uuid()?,
+            schema_version: decoder.u32()?,
+        }),
+        TAG_IDENTITY_NONE => None,
+        _ => return Err(MalformedOutcome::UnknownTag),
+    };
+    require_identity_shape(kind, identity.as_ref())?;
     let digest = decode_digest(decoder)?;
     let pinned_revision = decode_state(decoder, |decoder| {
         let kind = match decoder.tag()? {
@@ -1287,11 +1342,55 @@ fn decode_source_ref(decoder: &mut Decoder<'_>) -> Result<SourceRef, MalformedOu
     Ok(SourceRef {
         workspace_id,
         kind,
-        object_id,
-        schema_version,
+        identity,
         digest,
         pinned_revision,
     })
+}
+
+/// R18.5's rule, executable: identity present exactly where the owning record carries one inside
+/// its canonical bytes today. Kept as ONE table so that when a record gains its UUID under R15 the
+/// flip is one line here and nothing in the byte layout.
+fn require_identity_shape(
+    kind: SourceKind,
+    identity: Option<&ReferenceIdentity>,
+) -> Result<(), MalformedOutcome> {
+    let carries_identity = match kind {
+        // `completion_id`, `classification_id` + `version`, `spend_id` + `version`: in the bytes.
+        SourceKind::Completion | SourceKind::Policy | SourceKind::Spend => true,
+        // Record-digest identity (R16) or no UUID yet (R15 ruled, not implemented for them).
+        SourceKind::Artifact
+        | SourceKind::Proposal
+        | SourceKind::Ruling
+        | SourceKind::Evaluation => false,
+        // Refused before this is asked; listed so the match stays exhaustive.
+        SourceKind::Mission => false,
+    };
+    match (carries_identity, identity) {
+        (true, None) => Err(MalformedOutcome::ReferenceIdentityRequired),
+        (false, Some(_)) => Err(MalformedOutcome::ReferenceIdentityNotCarried),
+        _ => Ok(()),
+    }
+}
+
+/// The two identity cells of a reference row: the UUID and the schema version, or the literal
+/// that says this kind's records carry no reference identity -- a sentence, never a blank.
+///
+/// The completion and Policy rows use it too. Their identities are REQUIRED, and the codec has
+/// refused any manifest lacking one before a document is rendered (`render` canonicalizes first);
+/// if the literal ever printed for them it would still be a true sentence, which is more than a
+/// fabricated UUID would be.
+fn identity_cells(reference: &SourceRef) -> (String, String) {
+    match &reference.identity {
+        Some(identity) => (
+            uuid_key(&identity.object_id),
+            identity.schema_version.to_string(),
+        ),
+        None => (
+            "absent (the owner carries no reference identity)".to_owned(),
+            "absent".to_owned(),
+        ),
+    }
 }
 
 fn encode_receipt_ref(encoder: &mut Encoder, value: &ReceiptRef) -> Result<(), MalformedOutcome> {
@@ -1977,9 +2076,13 @@ pub struct VerifiedText {
 }
 
 /// The metadata an Artifact's owning module returns beside its exact bytes.
+///
+/// Keyed by the record digest, because that IS an Artifact's identity (R16): an Artifact carries no
+/// UUID inside its canonical bytes, so a manifest cites it by digest and this value is matched to
+/// the citation the same way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedArtifact {
-    pub object_id: Uuid,
+    pub digest_value: String,
     pub media_type: String,
     pub title: String,
 }
@@ -1996,7 +2099,7 @@ pub struct VerifiedSources {
     pub mission_title: String,
     /// One statement per manifest success condition, keyed by `condition_id`.
     pub condition_statements: Vec<VerifiedText>,
-    /// One entry per cited delivered Artifact, keyed by `object_id`.
+    /// One entry per cited delivered Artifact, keyed by the record digest value.
     pub artifacts: Vec<VerifiedArtifact>,
     /// One entry per cited unfinished-work item, keyed by `item_id`.
     pub unfinished_work: Vec<VerifiedText>,
@@ -2311,10 +2414,10 @@ fn check_sources(
     let mut artifact_ids = BTreeSet::new();
     if let Some(refs) = manifest.delivered_artifacts.verified() {
         for reference in refs {
-            let id = uuid_key(&reference.object_id);
+            let id = reference.digest.value.clone();
             let mut found = 0_usize;
             for artifact in &sources.artifacts {
-                if artifact.object_id == reference.object_id {
+                if artifact.digest_value == reference.digest.value {
                     found += 1;
                     require_media_type(&artifact.media_type)?;
                     require_label_text(&artifact.title)?;
@@ -2342,10 +2445,10 @@ fn check_sources(
         }
     }
     for artifact in &sources.artifacts {
-        if !artifact_ids.contains(&uuid_key(&artifact.object_id)) {
+        if !artifact_ids.contains(&artifact.digest_value.clone()) {
             return Err(SourceMismatch::UnreferencedValue {
                 kind: "artifact",
-                id: uuid_key(&artifact.object_id),
+                id: artifact.digest_value.clone(),
             }
             .into());
         }
@@ -2381,7 +2484,7 @@ fn render_front_matter(
     document.line(&format!("mission_id: {}", uuid_key(&manifest.mission_id)))?;
     document.line(&format!(
         "completion_id: {}",
-        uuid_key(&manifest.completion.object_id)
+        identity_cells(&manifest.completion).0
     ))?;
     document.line(&format!(
         "boundary_event_seq: {}",
@@ -2393,7 +2496,7 @@ fn render_front_matter(
     ))?;
     document.line(&format!(
         "policy_classification_id: {}",
-        uuid_key(&manifest.policy_classification.object_id)
+        identity_cells(&manifest.policy_classification).0
     ))?;
     document.line(&format!(
         "policy_high_impact: {}",
@@ -2446,11 +2549,11 @@ fn render_body(
     ))?;
     document.line(&format!(
         "| completion | `{}` |",
-        uuid_key(&manifest.completion.object_id)
+        identity_cells(&manifest.completion).0
     ))?;
     document.line(&format!(
         "| completion schema version | `{}` |",
-        manifest.completion.schema_version
+        identity_cells(&manifest.completion).1
     ))?;
     document.line(&format!(
         "| completion digest | {} (`{}`) |",
@@ -2468,7 +2571,7 @@ fn render_body(
     ))?;
     document.line(&format!(
         "| Policy classification | `{}` |",
-        uuid_key(&manifest.policy_classification.object_id)
+        identity_cells(&manifest.policy_classification).0
     ))?;
     document.line(&format!(
         "| Policy high impact | `{}` |",
@@ -2536,15 +2639,16 @@ fn render_body(
                 let artifact = sources
                     .artifacts
                     .iter()
-                    .find(|value| value.object_id == reference.object_id);
+                    .find(|value| value.digest_value == reference.digest.value);
                 let media_type = artifact
                     .map(|value| value.media_type.as_str())
                     .unwrap_or("");
                 let title = artifact.map(|value| value.title.as_str()).unwrap_or("");
+                let (identity, schema) = identity_cells(reference);
                 document.line(&format!(
                     "| `{}` | `{}` | {} | `{}` | `{}` | {} |",
-                    uuid_key(&reference.object_id),
-                    reference.schema_version,
+                    identity,
+                    schema,
                     digest_span(&reference.digest),
                     reference.digest.canonicalizer,
                     media_type,
@@ -2656,11 +2760,12 @@ fn render_body(
 }
 
 fn reference_line(reference: &SourceRef) -> String {
+    let (identity, schema) = identity_cells(reference);
     format!(
         "`{}` `{}` schema `{}` {} (`{}`)",
         reference.kind.as_str(),
-        uuid_key(&reference.object_id),
-        reference.schema_version,
+        identity,
+        schema,
         digest_span(&reference.digest),
         reference.digest.canonicalizer
     )
@@ -2678,10 +2783,11 @@ fn render_ref_table(
             document.line(&format!("| {heading} | schema | digest | canonicalizer |"))?;
             document.line("| --- | --- | --- | --- |")?;
             for reference in refs {
+                let (identity, schema) = identity_cells(reference);
                 document.line(&format!(
                     "| `{}` | `{}` | {} | `{}` |",
-                    uuid_key(&reference.object_id),
-                    reference.schema_version,
+                    identity,
+                    schema,
                     digest_span(&reference.digest),
                     reference.digest.canonicalizer
                 ))?;
@@ -2782,11 +2888,12 @@ fn render_appendix(
             // census it must agree with counts objects too.
             rows.dedup_by(|left, right| source_ref_key(left) == source_ref_key(right));
             for reference in &rows {
+                let (identity, schema) = identity_cells(reference);
                 document.line(&format!(
                     "| `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | {} | `verified at boundary event {boundary}` |",
                     reference.kind.as_str(),
-                    uuid_key(&reference.object_id),
-                    reference.schema_version,
+                    identity,
+                    schema,
                     reference.digest.algorithm,
                     reference.digest.value,
                     reference.digest.canonicalizer,
@@ -2857,7 +2964,7 @@ fn render_appendix(
             document.line("| --- | --- |")?;
             document.line(&format!(
                 "| Policy classification | `{}` |",
-                uuid_key(&manifest.policy_classification.object_id)
+                identity_cells(&manifest.policy_classification).0
             ))?;
             document.line(&format!(
                 "| Policy classification digest | {} (`{}`) |",
