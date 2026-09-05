@@ -906,6 +906,59 @@ fn sol1_hand_built_collected_sources_cannot_invent_a_delivered_artifact() {
     );
 }
 
+/// sol1's third probe, rebuilt on the path that stays public once the assembler seam is sealed: a
+/// hand-built manifest -- no `CollectedSources` anywhere -- that says the completion delivered an
+/// Artifact the completion's own bytes never cited. The store's reconcile refuses it by name, on
+/// the write path; the same function runs in the startup pass.
+#[test]
+fn sol1_a_hand_built_manifest_cannot_invent_a_delivered_artifact() {
+    let (fixture, mut manifest, mut sources) = ordinary("invented-delivery-by-hand");
+    let undelivered = fixture
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            b"# This Artifact was never delivered by the completion.\n",
+            ArtifactContext::Mission {
+                project_id: fixture.project_id,
+                mission_id: fixture.mission_id,
+            },
+            fixture.resident_id,
+            fixture.configuration_id,
+            None,
+        )
+        .expect("the decoy Artifact records");
+    let envelope = undelivered.digest().clone();
+    manifest.delivered_artifacts = OutcomeState::Verified(vec![SourceRef {
+        workspace_id: fixture.workspace_id,
+        kind: SourceKind::Artifact,
+        identity: None,
+        digest: SourceDigest {
+            algorithm: envelope.algorithm.clone(),
+            canonicalizer: envelope.canonicalizer.clone(),
+            value: envelope.value.clone(),
+        },
+        pinned_revision: OutcomeState::Absent(
+            "an Artifact record pins no content revision.".to_owned(),
+        ),
+    }]);
+    sources.artifacts.push(beacond::VerifiedArtifact {
+        digest_value: envelope.value.clone(),
+        media_type: "text/markdown".to_owned(),
+        title: "(no title recorded)".to_owned(),
+    });
+
+    let result = fixture.outcomes.prepare(&manifest, &sources);
+    assert!(
+        matches!(
+            result,
+            Err(PrepareRefusal::Irreconcilable { ref detail })
+                if detail.contains("delivered Artifacts") && detail.contains(&envelope.value)
+        ),
+        "prepare stored a manifest that says an Artifact was delivered although the verified \
+         completion says none: {result:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // The real path: prepare_for_mission (slice 3b item 0b, item 3)
 // ---------------------------------------------------------------------------------------------
