@@ -584,6 +584,56 @@ fn stored_manifests_are_immutable_under_update_and_delete() {
 }
 
 #[test]
+fn migration_0030_rebuilds_outcome_manifests_from_0029s_ddl_with_exactly_one_line_changed() {
+    // R22's promise, made executable: 0030 is 0029's table definition with the canonicalizer CHECK
+    // repointed and nothing else. A rebuild that quietly dropped a column CHECK, a foreign key or a
+    // constraint would pass every behavioural test that does not happen to exercise it; this diff
+    // catches it at the DDL.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    let m29 = std::fs::read_to_string(dir.join("0029_outcome_manifests.sql")).unwrap();
+    let m30 =
+        std::fs::read_to_string(dir.join("0030_outcome_manifest_canonicalizer_v2.sql")).unwrap();
+    let table = |source: &str, name: &str| -> Vec<String> {
+        let start = source
+            .find(&format!("CREATE TABLE {name} ("))
+            .unwrap_or_else(|| panic!("no CREATE TABLE {name}"));
+        let end = source[start..].find(") STRICT;").expect("table end") + start;
+        source[start..end]
+            .lines()
+            .skip(1)
+            .map(|line| line.trim_end().to_owned())
+            .collect()
+    };
+    let old = table(&m29, "outcome_manifests");
+    let new = table(&m30, "outcome_manifests_v30");
+    assert_eq!(
+        old.len(),
+        new.len(),
+        "0030's table has a different number of lines than 0029's"
+    );
+    let differing: Vec<(&String, &String)> =
+        old.iter().zip(new.iter()).filter(|(a, b)| a != b).collect();
+    assert_eq!(
+        differing,
+        vec![(
+            &"        CHECK (digest_canonicalizer = 'beacon.outcome.manifest.v1'),".to_owned(),
+            &"        CHECK (digest_canonicalizer = 'beacon.outcome.manifest.v2'),".to_owned(),
+        )],
+        "0030 changed something other than the canonicalizer CHECK"
+    );
+    // And the objects come back under their 0029 names, so the three hand-rolled rollback helpers
+    // and every reader keep working unchanged.
+    for name in [
+        "CREATE INDEX outcome_manifests_by_mission",
+        "CREATE TRIGGER outcome_manifests_no_update",
+        "CREATE TRIGGER outcome_manifests_no_delete",
+        "ALTER TABLE outcome_manifests_v30 RENAME TO outcome_manifests;",
+    ] {
+        assert!(m30.contains(name), "0030 is missing: {name}");
+    }
+}
+
+#[test]
 fn a_v2_manifest_row_is_refused_by_a_store_at_0029_and_admitted_after_the_ladder() {
     // R22. Migration 0029 merged with `digest_canonicalizer` pinned to the v1 token, and 0029 is
     // applied history now -- immutable. The v2 grammar (R18.3-5) therefore needs a migration of its
