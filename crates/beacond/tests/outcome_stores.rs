@@ -1512,3 +1512,19 @@ fn the_verified_readers_refuse_a_stored_successor_by_its_predecessors_own_bytes(
             .unwrap();
     }
 }
+
+#[test]
+fn classification_refuses_a_charter_revision_the_cited_policy_does_not_have() {
+    let stored = stored("classification-charter-mismatch");
+    let policy_revision = stored.policy_revision();
+    let mut classification = stored.classification_record(Uuid::new_v4(), policy_revision);
+    classification.policy.charter_revision = stored.charter_revision + 1;
+
+    let result = MissionImpactService::new(Arc::clone(&stored.accounts), stored.store.workspace_id)
+        .classify(&classification.canonical_bytes().unwrap());
+
+    assert!(
+        result.is_err(),
+        "classification accepted a Charter revision absent from its Policy: {result:?}"
+    );
+}
