@@ -3857,6 +3857,93 @@ fn sol1_get_refuses_a_valid_evaluation_swapped_into_the_relation() {
     ));
 }
 
+/// R28.1 pass 1 of 5: a publication that does not re-prove is refused at startup, and the refusal
+/// names WHICH publication and carries the reader's own fault.
+///
+/// Mirrors `sol1_get_refuses_a_valid_evaluation_swapped_into_the_relation` for the plant (the
+/// relation's `evaluation_digest` swapped for a valid Evaluation of a different candidate, with
+/// the immutability trigger dropped and recreated around the write) and
+/// `an_unreadable_classification_is_refused_at_startup_with_the_readers_fault` for the reopen.
+#[test]
+fn startup_refuses_a_swapped_publication_evaluation_and_names_the_row() {
+    let fixture = admitted_mission("r28-publication-startup-swap");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, candidate, evaluation) = fixture.publishable();
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate, &evaluation)
+        .expect("the control publishes");
+
+    let sibling = fixture
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            b"# A different candidate\n",
+            ArtifactContext::Mission {
+                project_id: fixture.project_id,
+                mission_id: fixture.mission_id,
+            },
+            fixture.resident_id,
+            fixture.configuration_id,
+            None,
+        )
+        .expect("the sibling records");
+    let sibling_evaluation = fixture.evaluate(&sibling.digest().value, Verdict::Meets);
+
+    let connection = fixture.store.connect();
+    connection
+        .execute_batch("DROP TRIGGER outcome_publications_no_update;")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE outcome_publications SET evaluation_digest = ?1 WHERE workspace_id = ?2",
+            params![
+                sibling_evaluation.digest().value,
+                fixture.workspace_id.to_string()
+            ],
+        )
+        .unwrap();
+    // Recreated BYTE-EXACTLY as migration 0031 wrote it. SQLite keeps the literal CREATE text in
+    // `sqlite_master`, and startup compares the schema before it ever reaches a verification pass,
+    // so the sibling `sol1_get_` tests' indented re-CREATE reopens as `SchemaMismatch` and never
+    // reaches this pass at all. (Those tests never bootstrap, so it is invisible there.)
+    connection
+        .execute_batch(
+            "CREATE TRIGGER outcome_publications_no_update
+BEFORE UPDATE ON outcome_publications
+BEGIN
+    SELECT RAISE(ABORT, 'Outcome publications are immutable');
+END;",
+        )
+        .unwrap();
+
+    // The belt refuses it ON READ, so the planted fault is real and has a name of its own.
+    let read = fixture
+        .outcomes
+        .get(fixture.mission_id)
+        .expect_err("get trusted the relation's swapped Evaluation digest");
+    assert!(
+        matches!(
+            read,
+            PublishRefusal::Seam(PublicationSeamRefusal::SubjectIsNotTheCandidate)
+        ),
+        "the planted fault is not the one this test is about: {read:?}"
+    );
+    drop(connection);
+
+    // And startup refuses it. Before the widening this is all it can say.
+    let refusal = Supervisor::bootstrap(StartupConfig {
+        store_path: fixture.store.path.clone(),
+        initial_workspace_name: "Personal".to_owned(),
+    })
+    .expect_err("a store holding a swapped publication Evaluation reopened Ready");
+    assert!(
+        matches!(&refusal, SupervisorError::OutcomePublicationStateMismatch),
+        "startup did not refuse the swapped publication: {refusal:?}"
+    );
+}
+
 #[test]
 fn sol1_get_refuses_a_non_meets_evaluation_of_the_same_candidate_swapped_into_the_relation() {
     let fixture = admitted_mission("sol1-get-same-candidate-evaluation-swap");
