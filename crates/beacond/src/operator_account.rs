@@ -227,9 +227,7 @@ pub struct OperatorAccountService {
 
 impl OperatorAccountService {
     pub fn open(store_path: impl AsRef<Path>) -> Result<Self, OperatorAccountError> {
-        let connection = Connection::open(store_path)?;
-        connection.pragma_update(None, "foreign_keys", "ON")?;
-        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        let connection = crate::open_store_connection(store_path.as_ref())?;
         verify_schema(&connection, SCHEMA_VERSION)
             .map_err(|_| OperatorAccountError::InvalidStore)?;
         Ok(Self {
