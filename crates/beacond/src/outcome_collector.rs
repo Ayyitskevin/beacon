@@ -38,7 +38,9 @@ use data_encoding::HEXLOWER;
 use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
-use crate::mission_completion::{ConditionOutcome, MissionCompletionV1, SpendReference};
+use crate::mission_completion::{
+    ConditionOutcome, MissionCompletionV1, SpendReference, SupportRef,
+};
 use crate::outcome::{
     BoundRefusal, MAX_CITATIONS, OutcomeBound, OutcomeState, RECEIPT_CHECKSUM_LABEL, ReceiptRef,
     SourceKind,
@@ -398,7 +400,36 @@ pub struct CollectedCompletion {
 pub struct CollectedCondition {
     pub ordinal: u32,
     pub outcome: ConditionOutcome,
-    pub support_count: usize,
+    /// What the completion cites for this outcome, each entry read through its owning verified
+    /// reader at the completion's stored boundary and scoped to this Workspace and Mission from
+    /// its own bytes (R23.2). In the record's order. A support reference the owner cannot
+    /// verify, one recorded after the boundary, or one about another Mission aborts the
+    /// collection rather than shortening this list.
+    pub support: Vec<CollectedSupport>,
+}
+
+impl CollectedCondition {
+    /// The count is the list's length and nothing else: there is no second field to disagree
+    /// with it, so "the count says three and the list holds two" is not a state this type can be in.
+    pub fn support_count(&self) -> usize {
+        self.support.len()
+    }
+}
+
+/// One piece of support a condition cites, typed by the owner's own vocabulary (`SupportRef`).
+///
+/// Per kind rather than one list of digests, because a Receipt has no digest: it is identified by
+/// `(run, version)` plus an Outcome checksum over its exact stored bytes, and a single-digest list
+/// could hold it only by minting an identity its owner does not have (the R13.8 mistake, again).
+/// The three digest-identified kinds carry the same `CollectedDigest` the top-level citations do,
+/// so the assembler cites a condition's support with the vocabulary it already has. Closed: the
+/// owner's decoder admits exactly these four tags, and there is no `Other` for a fifth to hide in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CollectedSupport {
+    Artifact(CollectedDigest),
+    Evaluation(CollectedDigest),
+    Ruling(CollectedDigest),
+    Receipt(ReceiptRef),
 }
 
 /// One narrative item, with the condition it relates to when it relates to one.
@@ -725,15 +756,19 @@ impl<'a> Collector<'a> {
         digest_value: &str,
         record: MissionCompletionV1,
     ) -> Result<CollectedCompletion, CollectorRefusal> {
-        let condition_results: Vec<CollectedCondition> = record
-            .condition_results
-            .iter()
-            .map(|result| CollectedCondition {
+        let mut condition_results: Vec<CollectedCondition> =
+            Vec::with_capacity(record.condition_results.len());
+        for result in &record.condition_results {
+            let mut support = Vec::with_capacity(result.support.len());
+            for reference in &result.support {
+                support.push(self.support(reference, &record)?);
+            }
+            condition_results.push(CollectedCondition {
                 ordinal: result.ordinal,
                 outcome: result.outcome,
-                support_count: result.support.len(),
-            })
-            .collect();
+                support,
+            });
+        }
 
         // Reconciliation nobody else can make: a narrative item may name a condition, and the
         // condition it names has to be one this completion actually has. The record's own decoder
@@ -1069,6 +1104,125 @@ impl<'a> Collector<'a> {
         })
     }
 
+    /// One support reference, through its owner, at the completion's boundary, scoped to the
+    /// completion's Mission from the record's own bytes (R23.2).
+    ///
+    /// Nothing here is read off the completion's word for the record: the reference says which
+    /// record, and the owner says what it is. An Artifact declares its Mission in its context; an
+    /// Evaluation in its subject -- directly for an Artifact subject, through the Proposal's own
+    /// verified scope for a Proposal subject; a Ruling through the Proposal it rules on. A Receipt
+    /// carries no Mission in its bytes (ADR 0039): it is scoped to the Workspace by its reader and
+    /// held to the exact `(run, version, checksum)` the completion cited.
+    fn support(
+        &self,
+        reference: &SupportRef,
+        completion: &MissionCompletionV1,
+    ) -> Result<CollectedSupport, CollectorRefusal> {
+        let cut = completion.boundary_event_seq;
+        let expected_mission = completion.mission_id;
+        match reference {
+            SupportRef::Artifact(digest) => {
+                let digest_value = HEXLOWER.encode(digest);
+                let (record, collected) =
+                    self.verified_artifact(&digest_value, expected_mission)?;
+                // Positioned by the record's own creation cursor, which the owner re-derives
+                // against the Event that carries its bytes on every read.
+                let recorded_at_seq = record.creation_event_seq();
+                if recorded_at_seq > cut {
+                    return Err(CollectorRefusal::AfterBoundary {
+                        kind: "artifact",
+                        id: digest_value,
+                        recorded_at_seq: i64::try_from(recorded_at_seq).unwrap_or(i64::MAX),
+                        boundary_event_seq: cut,
+                    });
+                }
+                Ok(CollectedSupport::Artifact(collected))
+            }
+            SupportRef::Evaluation(digest) => {
+                let digest_value = HEXLOWER.encode(digest);
+                let (evaluation, collected) = self.verified_evaluation(&digest_value, Some(cut))?;
+                let declared_mission = match &evaluation.payload().subject {
+                    crate::evaluation::EvaluationSubject::Artifact(subject) => subject.mission_id,
+                    crate::evaluation::EvaluationSubject::Proposal(proposal) => {
+                        self.proposal_mission("evaluation", &digest_value, &proposal.value)?
+                    }
+                };
+                if declared_mission != expected_mission {
+                    return Err(CollectorRefusal::RecordForAnotherMission {
+                        kind: "evaluation",
+                        id: digest_value,
+                        declared_mission,
+                        expected_mission,
+                    });
+                }
+                Ok(CollectedSupport::Evaluation(collected))
+            }
+            SupportRef::Ruling(digest) => {
+                let digest_value = HEXLOWER.encode(digest);
+                let (ruling, collected) = self.verified_ruling(&digest_value, Some(cut))?;
+                let declared_mission = self.proposal_mission(
+                    "ruling",
+                    &digest_value,
+                    &ruling.payload().proposal.value,
+                )?;
+                if declared_mission != expected_mission {
+                    return Err(CollectorRefusal::RecordForAnotherMission {
+                        kind: "ruling",
+                        id: digest_value,
+                        declared_mission,
+                        expected_mission,
+                    });
+                }
+                Ok(CollectedSupport::Ruling(collected))
+            }
+            SupportRef::Receipt {
+                run_id,
+                receipt_version,
+                receipt_bytes_sha256,
+            } => {
+                let collected = self.receipt(*run_id, Some(cut))?;
+                // The completion's word for the Receipt against the owner's bytes: the version it
+                // cited and the checksum it recorded must both be what the store holds (R15).
+                if collected.receipt_version != *receipt_version
+                    || collected.outcome_checksum != HEXLOWER.encode(receipt_bytes_sha256)
+                {
+                    return Err(CollectorRefusal::CitedIdentityMismatch {
+                        kind: "receipt",
+                        id: run_id.hyphenated().to_string(),
+                    });
+                }
+                Ok(CollectedSupport::Receipt(collected))
+            }
+        }
+    }
+
+    /// The Mission a Proposal declares in its own scope, read through the Proposal's verified
+    /// reader -- for the records (an Evaluation of a Proposal, a Ruling) whose Mission is the
+    /// Proposal's. A subject Proposal the store does not hold is the citing record's fault to
+    /// name, not a Proposal absence.
+    fn proposal_mission(
+        &self,
+        kind: &'static str,
+        id: &str,
+        proposal_digest: &str,
+    ) -> Result<Uuid, CollectorRefusal> {
+        match crate::proposal::verified_proposal_within(
+            self.connection,
+            self.workspace_id,
+            proposal_digest,
+        ) {
+            Ok(Some(proposal)) => Ok(proposal.payload().scope.mission_id),
+            Ok(None) => Err(CollectorRefusal::Unverified {
+                kind,
+                reason: format!("{id}: its Proposal {proposal_digest} is not in this Workspace"),
+            }),
+            Err(error) => Err(CollectorRefusal::Unverified {
+                kind,
+                reason: format!("{id}: its Proposal refused by its owning reader: {error}"),
+            }),
+        }
+    }
+
     /// The Proposal, through `proposal::verified_proposal_within`.
     fn proposal(
         &self,
@@ -1109,6 +1263,16 @@ impl<'a> Collector<'a> {
         digest_value: &str,
         boundary: Option<u64>,
     ) -> Result<CollectedDigest, CollectorRefusal> {
+        Ok(self.verified_ruling(digest_value, boundary)?.1)
+    }
+
+    /// The Ruling with its verified record beside the citation, for a caller that has to read the
+    /// record's own scope (support under a condition) as well as cite it.
+    fn verified_ruling(
+        &self,
+        digest_value: &str,
+        boundary: Option<u64>,
+    ) -> Result<(crate::ruling::Ruling, CollectedDigest), CollectorRefusal> {
         match crate::ruling::verified_ruling_within(
             self.connection,
             self.workspace_id,
@@ -1118,11 +1282,12 @@ impl<'a> Collector<'a> {
                 if let Some(cut) = boundary {
                     self.at_or_before("ruling", digest_value, ruling.canonical_bytes(), cut)?;
                 }
-                Ok(CollectedDigest {
+                let collected = CollectedDigest {
                     kind: SourceKind::Ruling,
                     workspace_id: self.workspace_id,
                     digest_value: ruling.digest().value.clone(),
-                })
+                };
+                Ok((ruling, collected))
             }
             Ok(None) => Err(CollectorRefusal::Absent {
                 kind: "ruling",
@@ -1141,6 +1306,15 @@ impl<'a> Collector<'a> {
         digest_value: &str,
         boundary: Option<u64>,
     ) -> Result<CollectedDigest, CollectorRefusal> {
+        Ok(self.verified_evaluation(digest_value, boundary)?.1)
+    }
+
+    /// The Evaluation with its verified record beside the citation (see `verified_ruling`).
+    fn verified_evaluation(
+        &self,
+        digest_value: &str,
+        boundary: Option<u64>,
+    ) -> Result<(crate::evaluation::Evaluation, CollectedDigest), CollectorRefusal> {
         match crate::evaluation::verified_evaluation_within(
             self.connection,
             self.workspace_id,
@@ -1155,11 +1329,12 @@ impl<'a> Collector<'a> {
                         cut,
                     )?;
                 }
-                Ok(CollectedDigest {
+                let collected = CollectedDigest {
                     kind: SourceKind::Evaluation,
                     workspace_id: self.workspace_id,
                     digest_value: evaluation.digest().value.clone(),
-                })
+                };
+                Ok((evaluation, collected))
             }
             Ok(None) => Err(CollectorRefusal::Absent {
                 kind: "evaluation",
@@ -1322,7 +1497,10 @@ impl<'a> Collector<'a> {
     }
 
     /// The owner's verified read plus the two scope facts the owner cannot know, with the record
-    /// kept for the caller that needs its cursor.
+    /// kept for the caller that needs its cursor: `delivered_artifact` for the completion's own
+    /// delivery, and the Artifact arm of `support` for a reference cited under a condition. One
+    /// read, one place the scope facts are checked, and the boundary applied by each caller against
+    /// the cut it owns.
     fn verified_artifact(
         &self,
         digest_value: &str,
