@@ -1599,9 +1599,7 @@ pub(crate) fn verify_artifact_state(connection: &Connection) -> Result<(), Artif
         .map_err(ArtifactStateFault::Store)?;
     drop(statement);
 
-    if !rows.is_empty()
-        && !owner_account_exists(connection).map_err(ArtifactStateFault::Store)?
-    {
+    if !rows.is_empty() && !owner_account_exists(connection).map_err(ArtifactStateFault::Store)? {
         return Err(ArtifactStateFault::Totals(ArtifactError::InvalidStore));
     }
 
@@ -1632,8 +1630,8 @@ fn verify_one_artifact(
     workspace_id: Uuid,
     digest_value: &str,
 ) -> Result<(), ArtifactError> {
-    let stored = load_stored(connection, workspace_id, digest_value)?
-        .ok_or(ArtifactError::InvalidStore)?;
+    let stored =
+        load_stored(connection, workspace_id, digest_value)?.ok_or(ArtifactError::InvalidStore)?;
     let payload = verified_payload(connection, &stored)?;
     validate_references(connection, workspace_id, &payload)?;
     let event_sequence = paired_event_sequence(connection, &stored)?;
@@ -1648,7 +1646,6 @@ fn verify_artifact_supersessions(
     connection: &Connection,
     artifact_count: usize,
 ) -> Result<(), ArtifactError> {
-
     // The relation re-derived against the bytes: every supersession row's successor must name that
     // predecessor in its canonical bytes, no Artifact may be superseded twice (the store's UNIQUE
     // is re-proved here, reconciliation being complete on its own terms), and no chain may cycle.

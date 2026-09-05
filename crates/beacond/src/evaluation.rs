@@ -2365,9 +2365,7 @@ fn evaluated_at_ms_of(connection: &Connection, digest_value: &str) -> Result<u64
 
 /// Startup reconciliation: every stored Evaluation is re-verified against its own bytes, its bound
 /// Proposal, and its children, and every row must have exactly one `evaluation.recorded` Event.
-pub(crate) fn verify_evaluation_state(
-    connection: &Connection,
-) -> Result<(), EvaluationStateFault> {
+pub(crate) fn verify_evaluation_state(connection: &Connection) -> Result<(), EvaluationStateFault> {
     let mut statement = connection
         .prepare(&format!(
             "SELECT workspace_id, {SELECT_COLUMNS} FROM evaluations ORDER BY digest_value"
@@ -2409,12 +2407,11 @@ pub(crate) fn verify_evaluation_state(
 
     for (workspace, row) in rows {
         let digest_value = row.digest_value.clone();
-        let workspace_id = Uuid::parse_str(&workspace).map_err(|_| {
-            EvaluationStateFault::Identity {
+        let workspace_id =
+            Uuid::parse_str(&workspace).map_err(|_| EvaluationStateFault::Identity {
                 workspace_id: workspace.clone(),
                 digest_value: digest_value.clone(),
-            }
-        })?;
+            })?;
         verify_one_evaluation(connection, workspace_id, &workspace, row).map_err(|cause| {
             EvaluationStateFault::Row {
                 workspace_id,
@@ -2463,7 +2460,6 @@ fn verify_one_evaluation(
 
 /// The supersession chains: about the store, not one row.
 fn verify_evaluation_chains(connection: &Connection) -> Result<(), EvaluationError> {
-
     // Every supersession chain: one first link, one path, every Evaluation on it, and
     // `evaluated_at_ms` non-decreasing ALONG THE CHAIN -- chain order, never timestamp order.
     // Enumerated by SUBJECT, not by Proposal. `proposal_digest` is NULL for an Artifact-subject
@@ -3208,7 +3204,9 @@ mod name_witness {
     #[test]
     fn every_evaluation_error_arm_has_its_own_pinned_name() {
         let every_arm = [
-            EvaluationError::Account(crate::operator_account::OperatorAccountError::PasswordTooShort),
+            EvaluationError::Account(
+                crate::operator_account::OperatorAccountError::PasswordTooShort,
+            ),
             EvaluationError::Malformed(MalformedEvaluation::Magic),
             EvaluationError::Inconsistent(InconsistentEvaluation::DigestMismatch),
             EvaluationError::NotFound,

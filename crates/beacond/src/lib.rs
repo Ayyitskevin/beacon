@@ -1735,7 +1735,9 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
             digest_value,
             cause,
         },
-        proposal::ProposalStateFault::Totals(cause) => SupervisorError::ProposalTotalsMismatch(cause),
+        proposal::ProposalStateFault::Totals(cause) => {
+            SupervisorError::ProposalTotalsMismatch(cause)
+        }
         proposal::ProposalStateFault::Identity {
             workspace_id,
             digest_value,
@@ -1794,7 +1796,9 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
             digest_value,
             cause,
         },
-        artifact::ArtifactStateFault::Totals(cause) => SupervisorError::ArtifactTotalsMismatch(cause),
+        artifact::ArtifactStateFault::Totals(cause) => {
+            SupervisorError::ArtifactTotalsMismatch(cause)
+        }
         artifact::ArtifactStateFault::Identity {
             workspace_id,
             digest_value,
