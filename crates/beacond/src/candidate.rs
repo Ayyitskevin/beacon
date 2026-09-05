@@ -837,11 +837,6 @@ impl CandidateService {
                 {
                     CandidateError::Inconsistent(InconsistentCandidate::AlreadyRecorded)
                 }
-                // Since migration 0029 the table's own insert guard refuses the duplicate before
-                // the unique index is consulted: the same rule, one trigger earlier.
-                CandidateError::Store(ref error) if crate::is_identity_already_stored(error) => {
-                    CandidateError::Inconsistent(InconsistentCandidate::AlreadyRecorded)
-                }
                 other => other,
             })?;
             let candidate = verified_candidate(stored)?;

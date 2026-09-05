@@ -354,7 +354,6 @@ fn downgrade_execution_schema_to_v15(store_path: &Path) {
              COMMIT;",
         )
         .unwrap();
-    drop_0029_insert_guards(&connection);
     assert_eq!(read_events(&connection), events_before);
     let read_schema = |connection: &Connection| {
         let mut statement = connection
@@ -1888,29 +1887,6 @@ fn startup_fails_closed_when_execution_representations_disagree() {
             matches!(error, SupervisorError::RunEventMismatch(_)),
             "{tamper} failed through the wrong guard: {error:?}"
         );
-    }
-}
-
-/// The rollback undoes migration 0029 too: a store at an earlier version carries none of its
-/// insert guards, and startup compares a store's schema with its declared version BEFORE it
-/// migrates -- a rolled-back store that still carried them was refused as a schema mismatch.
-fn drop_0029_insert_guards(connection: &Connection) {
-    let mut statement = connection
-        .prepare(
-            r"SELECT name FROM sqlite_schema
-              WHERE type = 'trigger' AND name LIKE '%\_no\_conflicting\_insert' ESCAPE '\'",
-        )
-        .unwrap();
-    let guards: Vec<String> = statement
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap();
-    drop(statement);
-    for guard in guards {
-        connection
-            .execute_batch(&format!("DROP TRIGGER {guard};"))
-            .unwrap();
     }
 }
 
