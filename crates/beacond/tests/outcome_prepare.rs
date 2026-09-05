@@ -4336,6 +4336,92 @@ fn an_unverifiable_predecessors_reason_stays_out_of_the_one_line_message() {
     );
 }
 
+/// R28 tier 2 pass 1 of 14: an Evaluation row the log does not account for is refused at startup,
+/// and the refusal names WHICH Evaluation and carries the reader's own fault.
+///
+/// WHY A PLANTED ROW AND NOT A COLUMN TAMPER, measured before it was designed. The global event
+/// replay runs `verify_evaluation_event` for every `evaluation.recorded` Event EARLIER in
+/// `inspect_store`, and that function loads the row and runs the same verified reader -- so a
+/// tampered projection reopens as `EvaluationEventMismatch`, not as this pass. The first version of
+/// this bar tampered `rationale` and got `EvaluationEventMismatch(15)`.
+///
+/// The replay walks EVENTS; this pass walks ROWS. A row with no Event of its own is exactly the gap
+/// only this pass can see, and it is where the pass's own refusal lives.
+///
+/// R39.3's "tamper whichever sorts last" is satisfied BY CONSTRUCTION here rather than by reading
+/// the order back: the planted digest is all `f`, which sorts after every real sha256.
+#[test]
+fn startup_refuses_an_unaccounted_evaluation_row_and_names_the_row() {
+    let fixture = admitted_mission("r28t2-evaluation-startup");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, candidate, _) = fixture.publishable();
+    let source: String = candidate.value.clone();
+
+    let connection = fixture.store.connect();
+    let existing: String = connection
+        .query_row(
+            "SELECT digest_value FROM evaluations ORDER BY digest_value LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the fixture recorded an Evaluation");
+    let _ = source;
+
+    // A copy of an honest row under a digest its bytes do not hash to, and with no Event naming it.
+    // Column list read from the schema, so this plant does not go stale when a column is added.
+    let columns: Vec<String> = connection
+        .prepare("SELECT name FROM pragma_table_info('evaluations')")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let planted = "f".repeat(64);
+    let names = columns.join(", ");
+    let values = columns
+        .iter()
+        .map(|column| {
+            if column == "digest_value" {
+                "?1".to_owned()
+            } else {
+                column.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    connection
+        .execute(
+            &format!(
+                "INSERT INTO evaluations ({names}) SELECT {values} FROM evaluations
+                 WHERE digest_value = ?2"
+            ),
+            params![planted, existing],
+        )
+        .expect("the planted row inserts");
+
+    // The belt refuses it ON READ, so the planted fault is real and has a name of its own.
+    let read = fixture
+        .evaluations()
+        .get(&planted)
+        .expect_err("the reader trusted a row whose bytes do not hash to its digest");
+    assert!(
+        matches!(
+            read,
+            EvaluationError::Inconsistent(InconsistentEvaluation::DigestMismatch)
+        ),
+        "the planted fault is not the one this test is about: {read:?}"
+    );
+    drop(connection);
+
+    let refusal = astra_boot(&fixture)
+        .expect_err("a store holding an unaccounted Evaluation row reopened Ready");
+    assert!(
+        matches!(&refusal, beacond::SupervisorError::EvaluationStateMismatch),
+        "startup did not refuse the planted Evaluation: {refusal:?}"
+    );
+}
+
 /// R28.1 pass 1 of 5: a publication that does not re-prove is refused at startup, and the refusal
 /// names WHICH publication and carries the reader's own fault.
 ///
