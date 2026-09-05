@@ -1433,6 +1433,204 @@ impl PersistedEventKind {
     }
 }
 
+/// The production mapping for the Project startup pass, NAMED so a bar can drive it.
+///
+/// blue's HOLD at 4b57baf: a bar that builds `StartupEnumerationFailed` itself never reaches this
+/// code, so deleting the routing left it green. Naming the mapping is what lets a test run a real
+/// failed enumeration through the real arm.
+fn map_project_state_fault(fault: project::ProjectStateFault) -> SupervisorError {
+    match fault {
+        project::ProjectStateFault::Store(source) => SupervisorError::StartupEnumerationFailed {
+            pass: StartupPass::Project,
+            source,
+        },
+        project::ProjectStateFault::Row {
+            workspace_id,
+            project_id,
+            cause,
+        } => SupervisorError::ProjectStateMismatch {
+            workspace_id,
+            project_id,
+            cause,
+        },
+        project::ProjectStateFault::Totals(cause) => SupervisorError::ProjectTotalsMismatch(cause),
+        project::ProjectStateFault::Identity {
+            workspace_id,
+            project_id,
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "a Project row's identity is not readable",
+            raw: format!("Workspace {workspace_id}, Project {project_id}"),
+        },
+    }
+}
+
+/// The production mapping for the Mission startup pass, NAMED so a bar can drive it.
+///
+/// blue's HOLD at 4b57baf: a bar that builds `StartupEnumerationFailed` itself never reaches this
+/// code, so deleting the routing left it green. Naming the mapping is what lets a test run a real
+/// failed enumeration through the real arm.
+fn map_mission_state_fault(fault: mission::MissionStateFault) -> SupervisorError {
+    match fault {
+        mission::MissionStateFault::Store(source) => SupervisorError::StartupEnumerationFailed {
+            pass: StartupPass::Mission,
+            source,
+        },
+        mission::MissionStateFault::Row {
+            workspace_id,
+            mission_id,
+            cause,
+        } => SupervisorError::MissionStateMismatch {
+            workspace_id,
+            mission_id,
+            cause,
+        },
+        mission::MissionStateFault::Totals(cause) => SupervisorError::MissionTotalsMismatch(cause),
+        mission::MissionStateFault::Identity {
+            workspace_id,
+            mission_id,
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "a Mission row's identity is not readable",
+            raw: format!("Workspace {workspace_id}, Mission {mission_id}"),
+        },
+    }
+}
+
+/// The production mapping for the MissionCompletion startup pass, NAMED so a bar can drive it.
+///
+/// blue's HOLD at 4b57baf: a bar that builds `StartupEnumerationFailed` itself never reaches this
+/// code, so deleting the routing left it green. Naming the mapping is what lets a test run a real
+/// failed enumeration through the real arm.
+fn map_completion_state_fault(
+    fault: mission_completion_store::CompletionStateFault,
+) -> SupervisorError {
+    match fault {
+        mission_completion_store::CompletionStateFault::Store(source) => {
+            SupervisorError::StartupEnumerationFailed {
+                pass: StartupPass::MissionCompletion,
+                source,
+            }
+        }
+        mission_completion_store::CompletionStateFault::Row {
+            workspace_id,
+            digest_value,
+            cause,
+        } => SupervisorError::MissionCompletionStateMismatch {
+            workspace_id,
+            digest_value,
+            cause,
+        },
+        mission_completion_store::CompletionStateFault::Totals(cause) => {
+            SupervisorError::MissionCompletionTotalsMismatch(cause)
+        }
+        mission_completion_store::CompletionStateFault::Identity {
+            workspace_id,
+            digest_value,
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "a completion row's Workspace is not readable",
+            raw: format!("{workspace_id}, completion {digest_value}"),
+        },
+    }
+}
+
+/// The production mapping for the MissionImpactClassification startup pass, NAMED so a bar can drive it.
+///
+/// blue's HOLD at 4b57baf: a bar that builds `StartupEnumerationFailed` itself never reaches this
+/// code, so deleting the routing left it green. Naming the mapping is what lets a test run a real
+/// failed enumeration through the real arm.
+fn map_classification_state_fault(
+    fault: mission_impact::ClassificationStateFault,
+) -> SupervisorError {
+    match fault {
+        mission_impact::ClassificationStateFault::Store(source) => {
+            SupervisorError::StartupEnumerationFailed {
+                pass: StartupPass::MissionImpactClassification,
+                source,
+            }
+        }
+        mission_impact::ClassificationStateFault::Row {
+            workspace_id,
+            digest,
+            cause,
+        } => SupervisorError::MissionImpactClassificationStateMismatch {
+            workspace_id,
+            digest,
+            cause,
+        },
+    }
+}
+
+/// The production mapping for the OutcomeManifest startup pass, NAMED so a bar can drive it.
+///
+/// blue's HOLD at 4b57baf: a bar that builds `StartupEnumerationFailed` itself never reaches this
+/// code, so deleting the routing left it green. Naming the mapping is what lets a test run a real
+/// failed enumeration through the real arm.
+fn map_manifest_state_fault(fault: outcome_store::ManifestStateFault) -> SupervisorError {
+    match fault {
+        outcome_store::ManifestStateFault::Store(source) => {
+            SupervisorError::StartupEnumerationFailed {
+                pass: StartupPass::OutcomeManifest,
+                source,
+            }
+        }
+        outcome_store::ManifestStateFault::Row {
+            workspace_id,
+            manifest_digest,
+            cause,
+        } => SupervisorError::OutcomeManifestStateMismatch {
+            workspace_id,
+            manifest_digest,
+            cause,
+        },
+        outcome_store::ManifestStateFault::Identity {
+            workspace_id,
+            manifest_digest,
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "a manifest row's Workspace is not readable",
+            raw: format!("{workspace_id}, manifest {manifest_digest}"),
+        },
+    }
+}
+
+/// The production mapping for the OutcomePublication startup pass, NAMED so a bar can drive it.
+///
+/// blue's HOLD at 4b57baf: a bar that builds `StartupEnumerationFailed` itself never reaches this
+/// code, so deleting the routing left it green. Naming the mapping is what lets a test run a real
+/// failed enumeration through the real arm.
+fn map_publication_state_fault(
+    fault: outcome_publication::PublicationStateFault,
+) -> SupervisorError {
+    match fault {
+        outcome_publication::PublicationStateFault::Store(source) => {
+            SupervisorError::StartupEnumerationFailed {
+                pass: StartupPass::OutcomePublication,
+                source,
+            }
+        }
+        outcome_publication::PublicationStateFault::Row {
+            workspace_id,
+            mission_id,
+            version,
+            cause,
+        } => SupervisorError::OutcomePublicationStateMismatch {
+            workspace_id,
+            mission_id,
+            version,
+            cause,
+        },
+        // Unreachable while the foreign-key check and the Workspace and Mission passes run
+        // first; reported as what it is rather than folded into a row refusal that would have
+        // to invent the identity it is missing.
+        outcome_publication::PublicationStateFault::Identity {
+            workspace_id,
+            mission_id,
+            version,
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "a publication row's identity is not readable",
+            raw: format!("Workspace {workspace_id}, Mission {mission_id}, version {version}"),
+        },
+    }
+}
+
 fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, SupervisorError> {
     let schema_version = connection.query_row(
         "SELECT version FROM schema_meta WHERE singleton = 1",
@@ -1464,29 +1662,7 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     let persisted_event_count = verify_persisted_events(connection)?;
     starter_organization::verify_starter_state(connection)
         .map_err(|_| SupervisorError::StarterOrganizationStateMismatch)?;
-    project::verify_project_state(connection).map_err(|fault| match fault {
-        project::ProjectStateFault::Store(source) => SupervisorError::StartupEnumerationFailed {
-            pass: StartupPass::Project,
-            source,
-        },
-        project::ProjectStateFault::Row {
-            workspace_id,
-            project_id,
-            cause,
-        } => SupervisorError::ProjectStateMismatch {
-            workspace_id,
-            project_id,
-            cause,
-        },
-        project::ProjectStateFault::Totals(cause) => SupervisorError::ProjectTotalsMismatch(cause),
-        project::ProjectStateFault::Identity {
-            workspace_id,
-            project_id,
-        } => SupervisorError::StoredIdentityUnreadable {
-            what: "a Project row's identity is not readable",
-            raw: format!("Workspace {workspace_id}, Project {project_id}"),
-        },
-    })?;
+    project::verify_project_state(connection).map_err(map_project_state_fault)?;
     project_policy::verify_project_policy_state(connection)
         .map_err(|_| SupervisorError::ProjectPolicyStateMismatch)?;
     project_repository::verify_project_repository_state(connection)
@@ -1527,138 +1703,25 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     resident_configuration::verify_configuration_state(connection)
         .map_err(|_| SupervisorError::ResidentConfigurationStateMismatch)?;
     team::verify_team_state(connection).map_err(|_| SupervisorError::TeamStateMismatch)?;
-    mission::verify_mission_state(connection).map_err(|fault| match fault {
-        mission::MissionStateFault::Store(source) => SupervisorError::StartupEnumerationFailed {
-            pass: StartupPass::Mission,
-            source,
-        },
-        mission::MissionStateFault::Row {
-            workspace_id,
-            mission_id,
-            cause,
-        } => SupervisorError::MissionStateMismatch {
-            workspace_id,
-            mission_id,
-            cause,
-        },
-        mission::MissionStateFault::Totals(cause) => SupervisorError::MissionTotalsMismatch(cause),
-        mission::MissionStateFault::Identity {
-            workspace_id,
-            mission_id,
-        } => SupervisorError::StoredIdentityUnreadable {
-            what: "a Mission row's identity is not readable",
-            raw: format!("Workspace {workspace_id}, Mission {mission_id}"),
-        },
-    })?;
+    mission::verify_mission_state(connection).map_err(map_mission_state_fault)?;
     // After Mission state, because every completion re-derives its conditions from the Mission's own
     // rows and its boundary from the Mission's admission Event.
-    mission_completion_store::verify_completion_state(connection).map_err(|fault| match fault {
-        mission_completion_store::CompletionStateFault::Store(source) => {
-            SupervisorError::StartupEnumerationFailed {
-                pass: StartupPass::MissionCompletion,
-                source,
-            }
-        }
-        mission_completion_store::CompletionStateFault::Row {
-            workspace_id,
-            digest_value,
-            cause,
-        } => SupervisorError::MissionCompletionStateMismatch {
-            workspace_id,
-            digest_value,
-            cause,
-        },
-        mission_completion_store::CompletionStateFault::Totals(cause) => {
-            SupervisorError::MissionCompletionTotalsMismatch(cause)
-        }
-        mission_completion_store::CompletionStateFault::Identity {
-            workspace_id,
-            digest_value,
-        } => SupervisorError::StoredIdentityUnreadable {
-            what: "a completion row's Workspace is not readable",
-            raw: format!("{workspace_id}, completion {digest_value}"),
-        },
-    })?;
+    mission_completion_store::verify_completion_state(connection)
+        .map_err(map_completion_state_fault)?;
     // Last, because it is the only pass that re-proves records belonging to two other modules: an
     // Outcome manifest is accounted for by its candidate Artifact's Event and frozen on a
     // completion, so both of those have to have proved themselves first (R18.7).
     // Before the manifest pass, because a manifest cites a classification and re-checks the
     // high-impact bit against it: the classification has to have proved itself first, for the same
     // reason completions come before manifests.
-    mission_impact::verify_classification_state(connection).map_err(|fault| match fault {
-        mission_impact::ClassificationStateFault::Store(source) => {
-            SupervisorError::StartupEnumerationFailed {
-                pass: StartupPass::MissionImpactClassification,
-                source,
-            }
-        }
-        mission_impact::ClassificationStateFault::Row {
-            workspace_id,
-            digest,
-            cause,
-        } => SupervisorError::MissionImpactClassificationStateMismatch {
-            workspace_id,
-            digest,
-            cause,
-        },
-    })?;
-    outcome_store::verify_manifest_state(connection).map_err(|fault| match fault {
-        outcome_store::ManifestStateFault::Store(source) => {
-            SupervisorError::StartupEnumerationFailed {
-                pass: StartupPass::OutcomeManifest,
-                source,
-            }
-        }
-        outcome_store::ManifestStateFault::Row {
-            workspace_id,
-            manifest_digest,
-            cause,
-        } => SupervisorError::OutcomeManifestStateMismatch {
-            workspace_id,
-            manifest_digest,
-            cause,
-        },
-        outcome_store::ManifestStateFault::Identity {
-            workspace_id,
-            manifest_digest,
-        } => SupervisorError::StoredIdentityUnreadable {
-            what: "a manifest row's Workspace is not readable",
-            raw: format!("{workspace_id}, manifest {manifest_digest}"),
-        },
-    })?;
+    mission_impact::verify_classification_state(connection)
+        .map_err(map_classification_state_fault)?;
+    outcome_store::verify_manifest_state(connection).map_err(map_manifest_state_fault)?;
     // After the manifest pass, because a publication is proved THROUGH its manifest: the relation
     // cites a candidate, the candidate's manifest must verify, and the manifest's own pass has to
     // have run before this one can rely on it (R18.7).
-    outcome_publication::verify_publication_state(connection).map_err(|fault| match fault {
-        outcome_publication::PublicationStateFault::Store(source) => {
-            SupervisorError::StartupEnumerationFailed {
-                pass: StartupPass::OutcomePublication,
-                source,
-            }
-        }
-        outcome_publication::PublicationStateFault::Row {
-            workspace_id,
-            mission_id,
-            version,
-            cause,
-        } => SupervisorError::OutcomePublicationStateMismatch {
-            workspace_id,
-            mission_id,
-            version,
-            cause,
-        },
-        // Unreachable while the foreign-key check and the Workspace and Mission passes run
-        // first; reported as what it is rather than folded into a row refusal that would have
-        // to invent the identity it is missing.
-        outcome_publication::PublicationStateFault::Identity {
-            workspace_id,
-            mission_id,
-            version,
-        } => SupervisorError::StoredIdentityUnreadable {
-            what: "a publication row's identity is not readable",
-            raw: format!("Workspace {workspace_id}, Mission {mission_id}, version {version}"),
-        },
-    })?;
+    outcome_publication::verify_publication_state(connection)
+        .map_err(map_publication_state_fault)?;
 
     Ok(StoreDiagnostics {
         status: DiagnosticStatus::Ready,
@@ -1951,6 +2014,90 @@ fn count_rows(connection: &Connection, table: &str) -> Result<u64, SupervisorErr
 
 #[cfg(test)]
 mod tests {
+
+    /// blue's HOLD, answered: every pass's enumeration failure is DRIVEN through the production
+    /// mapping, not constructed beside it.
+    ///
+    /// A store with none of these tables makes each pass's own `prepare` fail for real -- the same
+    /// `rusqlite::Error` a broken store would produce -- and the fault goes through the same
+    /// `map_*_state_fault` function `inspect_store` calls. Restoring any generic mapping makes this
+    /// bar fail by that pass's name, which is what
+    /// `sol1_each_startup_pass_names_itself_when_its_enumeration_fails` could not do: it built the
+    /// variant itself and never reached the arm.
+    #[test]
+    fn every_pass_routes_its_real_enumeration_failure_through_its_own_name() {
+        let connection = Connection::open_in_memory().expect("an empty store");
+
+        let refusals: Vec<(&str, SupervisorError)> = vec![
+            (
+                "Project",
+                super::map_project_state_fault(
+                    crate::project::verify_project_state(&connection)
+                        .expect_err("no `projects` table, so the enumeration must fail"),
+                ),
+            ),
+            (
+                "Mission",
+                super::map_mission_state_fault(
+                    crate::mission::verify_mission_state(&connection)
+                        .expect_err("no `missions` table"),
+                ),
+            ),
+            (
+                "MissionCompletion",
+                super::map_completion_state_fault(
+                    crate::mission_completion_store::verify_completion_state(&connection)
+                        .expect_err("no `mission_completions` table"),
+                ),
+            ),
+            (
+                "MissionImpactClassification",
+                super::map_classification_state_fault(
+                    crate::mission_impact::verify_classification_state(&connection)
+                        .expect_err("no classification table"),
+                ),
+            ),
+            (
+                "OutcomeManifest",
+                super::map_manifest_state_fault(
+                    crate::outcome_store::verify_manifest_state(&connection)
+                        .expect_err("no `outcome_manifests` table"),
+                ),
+            ),
+            (
+                "OutcomePublication",
+                super::map_publication_state_fault(
+                    crate::outcome_publication::verify_publication_state(&connection)
+                        .expect_err("no `outcome_publications` table"),
+                ),
+            ),
+        ];
+        assert_eq!(refusals.len(), 6, "a pass was added without a fixture here");
+
+        let mut lines = std::collections::BTreeSet::new();
+        for (pass, refusal) in &refusals {
+            let line = refusal.to_string();
+            assert!(
+                line.contains(pass),
+                "the {pass} pass's real enumeration failure does not name it: {line}"
+            );
+            assert!(
+                !line.contains("no such table") && !line.contains("store operation failed"),
+                "the driver's text or the generic line reached the operator: {line}"
+            );
+            // ...and the driver's error is still reachable, as R28.4 requires.
+            assert!(
+                format!("{refusal:?}").contains("no such table"),
+                "the driver's error was thrown away: {refusal:?}"
+            );
+            lines.insert(line);
+        }
+        assert_eq!(
+            lines.len(),
+            6,
+            "two passes render the same line, so an operator cannot tell them apart: {lines:?}"
+        );
+    }
 
     /// The ROUTING, not the rendering: no startup pass maps its enumeration onto the generic arm.
     ///
