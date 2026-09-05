@@ -33,6 +33,7 @@ mod outcome_assembler;
 mod outcome_collector;
 mod outcome_publication;
 mod outcome_store;
+mod outcome_typst;
 mod platform_session;
 mod project;
 mod project_policy;
@@ -158,6 +159,7 @@ pub use outcome_store::{
     MAX_STORED_MANIFEST_BYTES, ManifestStoreRefusal, OutcomeCandidate, OutcomeService,
     PrepareRefusal, StoredOutcomeManifest, manifest_reference_id, verified_manifest_within,
 };
+pub use outcome_typst::{TypstRefusal, to_typst};
 pub use platform_session::{
     PlatformMonitorState, PlatformSessionMonitor, PlatformSessionMonitorStatus,
 };
