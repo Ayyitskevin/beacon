@@ -508,9 +508,12 @@ pub struct OutcomeManifestV1 {
     /// Every reference below must name this Workspace. A cross-Workspace reference aborts rather
     /// than rendering.
     pub workspace_id: Uuid,
-    /// The Mission whose outcome this is, cited like any other source: identity plus the immutable
-    /// declaration digest.
-    pub mission: SourceRef,
+    /// The Mission whose outcome this is, cited by IDENTITY (R18.4, gpt2 §2). A Mission has no
+    /// canonical bytes and no declaration digest on `main`, and v1's `mission: SourceRef` -- which
+    /// demanded one -- over-generalized the design; the field it demanded was, in practice, a
+    /// pass-through nothing could verify. The completion cited beside it is the verified anchor:
+    /// `prepare` proves this identity against the completion's own bytes.
+    pub mission_id: Uuid,
     /// The `MissionCompletionV1` record this document is frozen on.
     pub completion: SourceRef,
     /// The Policy classification that decides whether the appendix is mandatory.
@@ -1231,6 +1234,12 @@ fn decode_digest(decoder: &mut Decoder<'_>) -> Result<SourceDigest, MalformedOut
 }
 
 fn encode_source_ref(encoder: &mut Encoder, value: &SourceRef) -> Result<(), MalformedOutcome> {
+    // The tag stays assigned and is never reused (R13.8), but no reference may carry it: a Mission
+    // has no bytes to cite, so a `SourceRef` of this kind would be a digest nobody can verify --
+    // the field R18.4 removed, back in through a side door.
+    if value.kind == SourceKind::Mission {
+        return Err(MalformedOutcome::SourceKind);
+    }
     encoder.uuid(&value.workspace_id);
     encoder.tag(value.kind.tag());
     encoder.uuid(&value.object_id);
@@ -1254,6 +1263,9 @@ fn encode_source_ref(encoder: &mut Encoder, value: &SourceRef) -> Result<(), Mal
 fn decode_source_ref(decoder: &mut Decoder<'_>) -> Result<SourceRef, MalformedOutcome> {
     let workspace_id = decoder.uuid()?;
     let kind = SourceKind::parse(decoder.tag()?)?;
+    if kind == SourceKind::Mission {
+        return Err(MalformedOutcome::SourceKind);
+    }
     let object_id = decoder.uuid()?;
     let schema_version = decoder.u32()?;
     let digest = decode_digest(decoder)?;
@@ -1523,7 +1535,6 @@ fn encode(manifest: &OutcomeManifestV1) -> Result<Vec<u8>, MalformedOutcome> {
         return Err(MalformedOutcome::NoSuccessConditions);
     }
 
-    require_kind(&manifest.mission, SourceKind::Mission)?;
     require_kind(&manifest.completion, SourceKind::Completion)?;
     require_kind(&manifest.policy_classification, SourceKind::Policy)?;
 
@@ -1531,7 +1542,7 @@ fn encode(manifest: &OutcomeManifestV1) -> Result<Vec<u8>, MalformedOutcome> {
     encoder.string(&manifest.canonicalizer_version, MAX_TOKEN_BYTES)?;
     encoder.string(&manifest.renderer_version, MAX_TOKEN_BYTES)?;
     encoder.uuid(&manifest.workspace_id);
-    encode_source_ref(&mut encoder, &manifest.mission)?;
+    encoder.uuid(&manifest.mission_id);
     encode_source_ref(&mut encoder, &manifest.completion)?;
     encode_source_ref(&mut encoder, &manifest.policy_classification)?;
     encoder.u64(manifest.boundary_event_seq);
@@ -1601,10 +1612,9 @@ fn decode(input: &[u8]) -> Result<OutcomeManifestV1, MalformedOutcome> {
         return Err(MalformedOutcome::UnknownVersion);
     }
     let workspace_id = decoder.uuid()?;
-    let mission = decode_source_ref(&mut decoder)?;
+    let mission_id = decoder.uuid()?;
     let completion = decode_source_ref(&mut decoder)?;
     let policy_classification = decode_source_ref(&mut decoder)?;
-    require_kind(&mission, SourceKind::Mission)?;
     require_kind(&completion, SourceKind::Completion)?;
     require_kind(&policy_classification, SourceKind::Policy)?;
     let boundary_event_seq = decoder.u64()?;
@@ -1643,7 +1653,7 @@ fn decode(input: &[u8]) -> Result<OutcomeManifestV1, MalformedOutcome> {
 
     Ok(OutcomeManifestV1 {
         workspace_id,
-        mission,
+        mission_id,
         completion,
         policy_classification,
         boundary_event_seq,
@@ -1680,11 +1690,8 @@ fn decode(input: &[u8]) -> Result<OutcomeManifestV1, MalformedOutcome> {
 /// pointer for every citation past the bound. The appendix collects, but it runs after the census
 /// has already proved there are at most 256.
 fn cited_refs(manifest: &OutcomeManifestV1) -> impl Iterator<Item = &SourceRef> {
-    let identities = [
-        &manifest.mission,
-        &manifest.completion,
-        &manifest.policy_classification,
-    ];
+    // The Mission is an identity, not a citation: it has no bytes to cite (R18.4).
+    let identities = [&manifest.completion, &manifest.policy_classification];
     let conditions = manifest.success_conditions.iter().flat_map(|condition| {
         condition
             .citations
@@ -1984,8 +1991,8 @@ pub struct VerifiedArtifact {
 /// joined projection can never become a rendered claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedSources {
-    /// The Mission declaration's title, read through the Mission module and proved against
-    /// `manifest.mission.digest`.
+    /// The Mission declaration's title, read through the Mission module and proved against the completion the manifest
+    /// is frozen on (the Mission itself has no digest to prove against, R18.4).
     pub mission_title: String,
     /// One statement per manifest success condition, keyed by `condition_id`.
     pub condition_statements: Vec<VerifiedText>,
@@ -2371,10 +2378,7 @@ fn render_front_matter(
         "workspace_id: {}",
         uuid_key(&manifest.workspace_id)
     ))?;
-    document.line(&format!(
-        "mission_id: {}",
-        uuid_key(&manifest.mission.object_id)
-    ))?;
+    document.line(&format!("mission_id: {}", uuid_key(&manifest.mission_id)))?;
     document.line(&format!(
         "completion_id: {}",
         uuid_key(&manifest.completion.object_id)
@@ -2434,16 +2438,11 @@ fn render_body(
     ))?;
     document.line(&format!(
         "| Mission | `{}` |",
-        uuid_key(&manifest.mission.object_id)
+        uuid_key(&manifest.mission_id)
     ))?;
     document.line(&format!(
         "| Mission declaration | {} |",
         escape(&sources.mission_title)
-    ))?;
-    document.line(&format!(
-        "| Mission declaration digest | {} (`{}`) |",
-        digest_span(&manifest.mission.digest),
-        manifest.mission.digest.canonicalizer
     ))?;
     document.line(&format!(
         "| completion | `{}` |",

@@ -426,18 +426,8 @@ fn manifest_for(
 ) -> (OutcomeManifestV1, VerifiedSources) {
     let manifest = OutcomeManifestV1 {
         workspace_id: fixture.workspace_id,
-        // Identity-only, per R18.4: the Mission is cited by `object_id`, and the digest field --
-        // which slice 1's `SourceRef` requires and which no Mission on `main` can supply -- says
-        // so, carrying the completion digest as the anchor and the identity-only canonicalizer as
-        // the claim. It goes away with the R18.3-5 grammar revision.
-        mission: source(
-            SourceKind::Mission,
-            fixture.mission_id,
-            beacond::MISSION_IDENTITY_ONLY,
-            completion_digest,
-            1,
-            fixture.workspace_id,
-        ),
+        // By identity (R18.4): a Mission has no digest to cite; the completion is the anchor.
+        mission_id: fixture.mission_id,
         completion: source(
             SourceKind::Completion,
             completion.completion_id,
@@ -1021,14 +1011,7 @@ fn prepare_refuses_a_manifest_that_disagrees_with_its_completion() {
         (
             "mission",
             OutcomeManifestV1 {
-                mission: source(
-                    SourceKind::Mission,
-                    Uuid::new_v4(),
-                    beacond::MISSION_IDENTITY_ONLY,
-                    &completion_digest,
-                    1,
-                    fixture.workspace_id,
-                ),
+                mission_id: Uuid::new_v4(),
                 ..base.clone()
             },
         ),
@@ -1328,7 +1311,7 @@ fn insert_manifest_behind_the_ledger(
                 digest,
                 bytes,
                 manifest_id.to_string(),
-                manifest.mission.object_id.to_string(),
+                manifest.mission_id.to_string(),
                 manifest.completion.digest.value.as_str(),
                 manifest.canonicalizer_version.as_str(),
                 manifest.renderer_version.as_str(),
@@ -1413,95 +1396,6 @@ fn an_outcome_manifest_no_artifact_event_reaches_refuses_startup() {
 }
 
 #[test]
-fn a_fabricated_mission_digest_is_not_stored_read_back_or_rendered_as_verified() {
-    // gpt2's cold read, P1 #2. `main` has no Mission declaration digest, so nothing could verify
-    // this field -- and a fabricated value was accepted, returned by the reader, and printed in the
-    // candidate Markdown underneath "Every fact below was verified at boundary event N".
-    // gpt2's probe observed `read_back=true rendered=true blanket_verified=true`; at least one has
-    // to be false, and this asserts exactly those three.
-    let fixture = admitted_mission("mission-digest");
-    let accountable = (fixture.resident_id, fixture.configuration_id);
-    let (completion_digest, completion) = fixture.complete(accountable);
-    let classification = fixture.classify(ImpactLevel::Ordinary);
-    let (honest, sources) = manifest_for(
-        &fixture,
-        &completion_digest,
-        &completion,
-        &classification,
-        false,
-        AppendixRequest::PolicyDefault,
-    );
-    let fabricated = "de".repeat(32);
-    let lying = OutcomeManifestV1 {
-        mission: SourceRef {
-            digest: SourceDigest {
-                algorithm: "sha256".to_owned(),
-                canonicalizer: "beacon.mission.v1".to_owned(),
-                value: fabricated.clone(),
-            },
-            ..honest.mission.clone()
-        },
-        ..honest.clone()
-    };
-
-    let refusal = fixture
-        .outcomes
-        .prepare(&lying, &sources)
-        .expect_err("a fabricated Mission declaration digest was accepted by prepare");
-    assert!(
-        matches!(
-            refusal,
-            PrepareRefusal::Manifest(ManifestStoreRefusal::MissionCitationNotIdentityOnly)
-        ),
-        "{refusal:?}"
-    );
-
-    // read_back: nothing carries it.
-    let stored_digest =
-        data_encoding::HEXLOWER.encode(&sha2_256(&lying.canonical_bytes().unwrap()));
-    let read_back = fixture.outcomes.manifest(&stored_digest).is_ok();
-    // rendered / blanket_verified: no candidate exists to carry it.
-    let rendered = fixture
-        .store
-        .connect()
-        .query_row(
-            "SELECT count(*) FROM artifacts WHERE instr(CAST(content_inline AS TEXT), ?1) > 0",
-            params![fabricated],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap()
-        > 0;
-    assert!(!read_back, "the fabricated digest read back");
-    assert!(
-        !rendered,
-        "the fabricated digest reached a rendered document"
-    );
-
-    // The positive control, and what an honest citation says instead: the Mission is cited by
-    // IDENTITY, anchored on the completion digest, and the citation's own canonicalizer token says
-    // so beside the value in the rendered document -- so nothing claims a Mission declaration was
-    // hashed (R18.4; the field itself goes with the R18.3-5 grammar revision).
-    let candidate = fixture.outcomes.prepare(&honest, &sources).unwrap();
-    let document = String::from_utf8(
-        fixture
-            .outcomes
-            .candidate(&candidate.manifest_digest)
-            .unwrap()
-            .content()
-            .to_vec(),
-    )
-    .unwrap();
-    assert!(
-        document.contains(beacond::MISSION_IDENTITY_ONLY),
-        "the document does not say the Mission citation is identity-only:\n{document}"
-    );
-    assert!(
-        document.contains(&completion_digest),
-        "the Mission citation does not show its verified anchor"
-    );
-}
-
-#[test]
 fn a_manifest_cannot_exist_without_its_candidate() {
     // R18.6 rules that a prepared manifest is positioned by its candidate Artifact's
     // `artifact.recorded` Event rather than by an `outcome.prepared` kind of its own, and revisits
@@ -1540,7 +1434,7 @@ fn a_manifest_cannot_exist_without_its_candidate() {
                     digest,
                     bytes,
                     manifest_id.to_string(),
-                    orphan_manifest.mission.object_id.to_string(),
+                    orphan_manifest.mission_id.to_string(),
                     orphan_manifest.completion.digest.value.as_str(),
                     orphan_manifest.canonicalizer_version.as_str(),
                     orphan_manifest.renderer_version.as_str(),
