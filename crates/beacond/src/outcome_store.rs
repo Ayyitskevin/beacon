@@ -680,7 +680,12 @@ impl OutcomeService {
             }
 
             let completion = read_completion(&transaction, self.workspace_id, manifest)?;
-            recheck_policy(&transaction, self.workspace_id, manifest)?;
+            recheck_policy(
+                &transaction,
+                self.workspace_id,
+                manifest,
+                completion.mission_id,
+            )?;
 
             let markdown = render(manifest, sources)?;
             let candidate = record_artifact_within(
@@ -856,6 +861,7 @@ fn recheck_policy(
     connection: &Connection,
     workspace_id: Uuid,
     manifest: &OutcomeManifestV1,
+    completed_mission_id: Uuid,
 ) -> Result<(), PrepareRefusal> {
     if manifest.policy_classification.kind != SourceKind::Policy {
         return Err(PrepareRefusal::Irreconcilable {
@@ -873,6 +879,21 @@ fn recheck_policy(
         &manifest.policy_classification.digest.value,
     )?
     .ok_or(PrepareRefusal::ClassificationAbsent)?;
+    // The classification must be THIS Mission's. `verified_classification_for_citation` proves the
+    // record against its own bytes and its cited identity, and nothing proved the record was about
+    // the Mission being completed -- so another Mission's perfectly valid ORDINARY classification
+    // let a High-impact Mission prepare a document with the appendix omitted (astra's A4, the same
+    // class as sol1's #3). The Mission comes from the classification's canonical bytes, never from
+    // a column beside them.
+    if record.payload().mission_id != completed_mission_id {
+        return Err(PrepareRefusal::Irreconcilable {
+            detail: format!(
+                "the Policy classification is about Mission {} and the completion is about {}",
+                record.payload().mission_id,
+                completed_mission_id
+            ),
+        });
+    }
     record.recheck_copied_bit(manifest.policy_high_impact)?;
     Ok(())
 }
