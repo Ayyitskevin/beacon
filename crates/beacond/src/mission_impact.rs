@@ -1428,31 +1428,73 @@ mod display_tests {
         );
     }
 
-    /// Every named fault still reaches the message, so closing the text did not close the vocabulary.
+    /// The name each arm must put in the message.
+    ///
+    /// Exhaustive and wildcard-free ON PURPOSE: a new arm on `ClassificationStoreError` is a
+    /// compile error here, so "every named fault" stays a claim this test can keep. kimi's P2 was
+    /// that the first version named five of ten -- true of the five, and silent about the rest.
+    fn expected_name(error: &ClassificationStoreError) -> &'static str {
+        match error {
+            ClassificationStoreError::DigestMismatch => "digest_mismatch",
+            ClassificationStoreError::Malformed(_) => "malformed",
+            ClassificationStoreError::ColumnsDisagree => "columns_disagree",
+            ClassificationStoreError::CitedIdentityMismatch => "cited_identity_mismatch",
+            ClassificationStoreError::CrossWorkspace => "cross_workspace",
+            ClassificationStoreError::CopiedBitDisagrees => "copied_bit_disagrees",
+            ClassificationStoreError::PolicyProjectIsNotTheMissions => {
+                "policy_project_is_not_the_missions"
+            }
+            ClassificationStoreError::PolicyRevisionHasAnotherCharter => {
+                "policy_revision_has_another_charter"
+            }
+            ClassificationStoreError::Predecessor { .. } => "predecessor",
+            ClassificationStoreError::Store(_) => "store",
+        }
+    }
+
+    /// Every named fault reaches the message -- all ten arms, not the five that had a fixture.
+    ///
+    /// Closing the store's text did not close the vocabulary, and this is where that is checked.
+    /// Both directions are covered: `expected_name` fails to COMPILE if an arm is added, and the
+    /// distinct-name count below fails if an arm is added there without a fixture here.
+    ///
+    /// `PredecessorFault::NotStored` is the deliberate choice of payload: `Unverifiable(reason)`
+    /// interpolates a reason of its own (spend.rs), which is R37's question and tier 1's to answer.
+    /// Using it here would quietly make this bar assert something it was not given.
     #[test]
     fn a_classification_refusal_still_names_which_fault_it_was() {
-        let row = |cause| ClassificationStateFault::Row {
-            workspace_id: Uuid::new_v4(),
-            digest: "b".repeat(64),
-            cause,
-        };
-        for (cause, name) in [
-            (ClassificationStoreError::DigestMismatch, "digest_mismatch"),
-            (
-                ClassificationStoreError::ColumnsDisagree,
-                "columns_disagree",
-            ),
-            (ClassificationStoreError::CrossWorkspace, "cross_workspace"),
-            (
-                ClassificationStoreError::CopiedBitDisagrees,
-                "copied_bit_disagrees",
-            ),
-            (
-                ClassificationStoreError::Store("anything at all".to_owned()),
-                "store",
-            ),
-        ] {
-            let line = row(cause).to_string();
+        let every_arm = [
+            ClassificationStoreError::DigestMismatch,
+            ClassificationStoreError::Malformed(MalformedClassification::Magic),
+            ClassificationStoreError::ColumnsDisagree,
+            ClassificationStoreError::CitedIdentityMismatch,
+            ClassificationStoreError::CrossWorkspace,
+            ClassificationStoreError::CopiedBitDisagrees,
+            ClassificationStoreError::PolicyProjectIsNotTheMissions,
+            ClassificationStoreError::PolicyRevisionHasAnotherCharter,
+            ClassificationStoreError::Predecessor {
+                digest: "c".repeat(64),
+                fault: PredecessorFault::NotStored,
+            },
+            ClassificationStoreError::Store("anything at all".to_owned()),
+        ];
+
+        let names: std::collections::BTreeSet<&str> = every_arm.iter().map(expected_name).collect();
+        assert_eq!(
+            names.len(),
+            10,
+            "an arm was added to `ClassificationStoreError` without a fixture here, so this bar \
+             would have gone on claiming to cover the whole vocabulary: {names:?}"
+        );
+
+        for cause in every_arm {
+            let name = expected_name(&cause);
+            let line = ClassificationStateFault::Row {
+                workspace_id: Uuid::new_v4(),
+                digest: "b".repeat(64),
+                cause,
+            }
+            .to_string();
             assert!(line.contains(name), "the fault is not named: {line}");
         }
     }
