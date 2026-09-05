@@ -147,6 +147,7 @@ pub use outcome::{
     VerifiedSources, VerifiedText, compare_canonical_keys, render,
 };
 pub use outcome_assembler::{ARTIFACT_TITLE_ABSENT, AssemblyRefusal, SourcesRefusal};
+pub use outcome_collector::SPEND_BEARING_EVENT_KINDS;
 pub use outcome_collector::{
     CollectedClassification, CollectedCompletion, CollectedCondition, CollectedDigest,
     CollectedNarrative, CollectedSources, CollectedSpend, CollectedSupport, CollectedUncounted,

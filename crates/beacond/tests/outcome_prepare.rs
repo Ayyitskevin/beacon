@@ -5526,3 +5526,138 @@ fn a_spend_measured_after_the_last_run_reaches_the_manifest_as_measured() {
         "nothing spend-bearing is in the gap, so the measurement covers the Mission"
     );
 }
+
+/// Every kind in the closed list is witnessed, not just the one astra's bar happens to plant.
+///
+/// Fable's mutant on `8a60df2`: remove `"run.executed"` from `SPEND_BEARING_EVENT_KINDS` and the
+/// whole suite stays green. Two of the three kinds were claims nothing could see -- the same shape
+/// as the single-Workspace survivor on R21.5a, where a list was right and only one entry was
+/// exercised.
+///
+/// It iterates the REAL constant rather than a copy. That is the mechanism, not a detail: a fourth
+/// kind added to the list arrives here with no fixture and fails loudly, where a copied list would
+/// have kept passing and said nothing.
+///
+/// The Events are planted rather than produced. `run.preflighted` has a cheap production path and
+/// astra's bar uses it; `run.executed` and `proposal.dispatched` need a real worktree, a real
+/// Ruling and a real dispatch, and what is under test here is the collector's interval query --
+/// which kinds it counts -- not the producers, which the constant's doc comment cites by file.
+#[test]
+fn every_spend_bearing_kind_makes_a_window_partial() {
+    use beacond::{
+        MeasuredSpendService, MeasuredSpendV1, SpendCompleteness, SpendLine, SpendMeasurement,
+        SpendMeasurementKind, SpendOrigin, SpendSupersedes, SpendTotals,
+    };
+    // Iterating the real constant makes an ADDITION fail loudly -- a new kind arrives here with no
+    // fixture. It cannot make a REMOVAL fail, because the table shrinks with the list: Fable's
+    // mutant deleted `run.executed` and this test simply stopped testing it. So the membership is
+    // pinned too. This is not a tautology restating the constant: it is the gate that makes any
+    // change to a closed, spend-relevant vocabulary deliberate, and it names where each kind is
+    // produced so the next person edits both.
+    assert_eq!(
+        beacond::SPEND_BEARING_EVENT_KINDS,
+        [
+            "run.preflighted",     // check_preflight.rs, beside its INSERT INTO receipts
+            "run.executed",        // declared_checks.rs, likewise
+            "proposal.dispatched", // dispatch.rs, likewise
+        ],
+        "the spend-bearing kinds changed. Every kind written beside an `INSERT INTO receipts` \
+         belongs here and nothing else does; adding or removing one changes which documents \
+         report complete coverage, so it is a ruling, not an edit."
+    );
+    for kind in beacond::SPEND_BEARING_EVENT_KINDS {
+        let f = admitted_mission(&format!("r34-kind-{}", kind.replace('.', "-")));
+        f.classify(ImpactLevel::High);
+        let spend = MeasuredSpendV1 {
+            workspace_id: f.workspace_id,
+            mission_id: f.mission_id,
+            spend_id: Uuid::new_v4(),
+            version: 1,
+            origin: SpendOrigin::DaemonLedger,
+            measured_at_ms: 1_788_400_000_000,
+            coverage_from_event_seq: 1,
+            coverage_to_event_seq: f.latest_event_seq(),
+            measurement: SpendMeasurement::Measured(SpendTotals {
+                counted_units: 1,
+                lines: vec![SpendLine {
+                    unit: "USD".to_owned(),
+                    amount_minor: 1234,
+                    minor_units_exponent: 2,
+                }],
+            }),
+            supersedes: SpendSupersedes::None,
+        };
+        let stored = MeasuredSpendService::new(Arc::clone(&f.accounts), f.workspace_id)
+            .record(&spend.canonical_bytes().unwrap())
+            .expect("the spend records through its owner");
+
+        // Into the gap, after the spend's own Event and before the cut.
+        f.store
+            .connect()
+            .execute(
+                "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+                 VALUES (?1, ?2, '{}', 9000)",
+                params![f.workspace_id.to_string(), kind],
+            )
+            .expect("the Event plants");
+        let planted = f.latest_event_seq();
+
+        let record = c11d_completion(
+            &f,
+            SpendReference::Recorded {
+                spend_id: spend.spend_id,
+                spend_version: spend.version,
+                spend_sha256: digest_bytes(&stored.digest().value),
+            },
+            vec![],
+        );
+        assert!(
+            spend.coverage_to_event_seq < planted && planted <= record.boundary_event_seq,
+            "{kind} did not land in (coverage_to, boundary], so this case proves nothing"
+        );
+        let digest =
+            record_completion(&mut f.store.connect(), &record).expect("the completion records");
+
+        // The collector names it: kind and sequence, not just "the window was short".
+        let connection = f.store.connect();
+        let collected = Collector::new(&connection, f.workspace_id)
+            .collect(&CollectionRequest {
+                completion_digest: Some(digest),
+                ..CollectionRequest::default()
+            })
+            .expect("the completion collects");
+        let completeness = collected
+            .spend
+            .expect("the completion cited spend")
+            .completeness;
+        match &completeness {
+            SpendCompleteness::Partial(gaps) => {
+                assert_eq!(gaps.len(), 1, "{kind}: {gaps:?}");
+                assert!(
+                    gaps[0].detail.contains(*kind) && gaps[0].detail.contains(&planted.to_string()),
+                    "{kind}: the gap does not name the Event that caused it: {:?}",
+                    gaps[0]
+                );
+            }
+            other => panic!("{kind} did not make the window partial: {other:?}"),
+        }
+        drop(connection);
+
+        // ...and the document says so.
+        let candidate = f
+            .outcomes
+            .prepare_for_mission(f.mission_id, AppendixRequest::PolicyDefault)
+            .expect("the candidate prepares");
+        let manifest = f.outcomes.manifest(&candidate.manifest_digest).unwrap();
+        assert_eq!(
+            manifest
+                .manifest()
+                .spend_ref
+                .verified()
+                .unwrap()
+                .measurement,
+            SpendMeasurementKind::PartiallyMeasured,
+            "{kind} is in the closed list but does not reach the document"
+        );
+    }
+}

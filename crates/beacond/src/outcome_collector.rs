@@ -634,9 +634,12 @@ pub struct CollectedUncounted {
 /// the mutant that widens this to every kind is what says so.
 ///
 /// Everything else carries no spend and must not make a window partial: the spend's own
-/// `spend.recorded`, the Mission's `mission.admitted` and `mission.completed`, and every
+/// `spend.measured`, the Mission's `mission.admitted` and `mission.completed`, and every
 /// Project/Team/Artifact/Evaluation record.
-const SPEND_BEARING_EVENT_KINDS: &[&str] =
+/// Public so a test can iterate the REAL list rather than a copy of it: a copy is how a kind gets
+/// added here and witnessed nowhere (Fable's mutant on `8a60df2` -- removing `run.executed` left
+/// the suite green, because only one of the three had a fixture).
+pub const SPEND_BEARING_EVENT_KINDS: &[&str] =
     &["run.preflighted", "run.executed", "proposal.dispatched"];
 
 /// A counted amount in one unit, in stored integer minor units.
