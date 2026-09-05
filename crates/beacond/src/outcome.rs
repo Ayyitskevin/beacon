@@ -29,11 +29,22 @@ use crate::proposal::sha256;
 // Identities, limits, and the closed tag table -- the executable form of ADR 0040
 // ---------------------------------------------------------------------------------------------
 
-/// The canonicalizer identity. Any future grammar is a new canonicalizer; existing v1 bytes are
-/// never reinterpreted under v2 rules (ADR 0034's rule, kept).
-pub const CANONICALIZER: &str = "beacon.outcome.manifest.v1";
+/// The canonicalizer identity. Any future grammar is a new canonicalizer; existing bytes are never
+/// reinterpreted under a later grammar's rules (ADR 0034's rule, kept).
+///
+/// **v2 is the R18.3-5 grammar revision**, made before any manifest was persisted outside tests:
+/// the condition vocabulary widened to the completion's own, the Mission cited by identity, and
+/// Proposal / Ruling / Evaluation cited as `kind + workspace + digest` with typed identity present
+/// only where the owning record carries one inside its canonical bytes. v1 is RETIRED, not
+/// reinterpreted: [`RETIRED_CANONICALIZER`] bytes are refused by name, because no v1 manifest exists
+/// anywhere but a test fixture and pretending to read one would be a decoder lying about a grammar
+/// it does not hold.
+pub const CANONICALIZER: &str = "beacon.outcome.manifest.v2";
 /// The literal ASCII magic that starts every manifest, including its terminating NUL: 27 bytes.
-const MAGIC: &[u8] = b"beacon.outcome.manifest.v1\0";
+const MAGIC: &[u8] = b"beacon.outcome.manifest.v2\0";
+/// The retired v1 grammar, recognised only to be refused by name.
+pub const RETIRED_CANONICALIZER: &str = "beacon.outcome.manifest.v1";
+const RETIRED_MAGIC: &[u8] = b"beacon.outcome.manifest.v1\0";
 const DIGEST_ALGORITHM: &str = "sha256";
 
 /// The one renderer this version ships. `renderer_version` owns the escaping function: a document
@@ -564,6 +575,10 @@ pub enum MalformedOutcome {
     Token,
     /// A canonicalizer or renderer version this build does not implement.
     UnknownVersion,
+    /// Bytes under a canonicalizer this decoder once held and no longer does. Distinct from
+    /// `Magic` (not a manifest at all) and from `UnknownVersion` (a grammar this build has never
+    /// heard of): a retired grammar is a known thing, refused on purpose, and the refusal says so.
+    RetiredVersion,
     /// An array whose entries are not strictly ascending in canonical order, or that repeats a key.
     NonCanonicalOrder,
     /// A manifest with no declared success conditions.
@@ -599,6 +614,7 @@ impl MalformedOutcome {
             Self::LineBreakInLabel => "line_break_in_label",
             Self::Token => "token",
             Self::UnknownVersion => "unknown_version",
+            Self::RetiredVersion => "retired_version",
             Self::NonCanonicalOrder => "non_canonical_order",
             Self::NoSuccessConditions => "no_success_conditions",
             Self::MinorUnitsExponent => "minor_units_exponent",
@@ -1460,6 +1476,11 @@ fn decode_condition(decoder: &mut Decoder<'_>) -> Result<SuccessCondition, Malfo
 /// bytes equal what it returns. The field order, widths, and tag values are ADR 0040's table, and
 /// this is the executable form of it.
 fn encode(manifest: &OutcomeManifestV1) -> Result<Vec<u8>, MalformedOutcome> {
+    // Retired and unknown are two refusals on the encode side too: a value that still says v1 is a
+    // known thing this grammar chose to stop producing, not a grammar it has never heard of.
+    if manifest.canonicalizer_version == RETIRED_CANONICALIZER {
+        return Err(MalformedOutcome::RetiredVersion);
+    }
     if manifest.canonicalizer_version != CANONICALIZER {
         return Err(MalformedOutcome::UnknownVersion);
     }
@@ -1530,6 +1551,12 @@ fn encode(manifest: &OutcomeManifestV1) -> Result<Vec<u8>, MalformedOutcome> {
 }
 
 fn decode(input: &[u8]) -> Result<OutcomeManifestV1, MalformedOutcome> {
+    // The retired grammar is recognised BEFORE the magic check, so v1 bytes are refused as what
+    // they are rather than as garbage. A decoder that answered `Magic` here would be telling a
+    // caller their manifest is not a manifest, when it is one this build chose not to read.
+    if input.starts_with(RETIRED_MAGIC) {
+        return Err(MalformedOutcome::RetiredVersion);
+    }
     let mut decoder = Decoder::new(input);
     decoder.magic()?;
 

@@ -459,7 +459,7 @@ fn manifest_for(
         accountable_resident_id: completion.accountable_resident_id,
         policy_high_impact,
         appendix_request,
-        canonicalizer_version: "beacon.outcome.manifest.v1".to_owned(),
+        canonicalizer_version: "beacon.outcome.manifest.v2".to_owned(),
         renderer_version: "beacon.outcome.md.v1".to_owned(),
         success_conditions: vec![SuccessCondition {
             ordinal: 0,
@@ -652,8 +652,11 @@ fn a_decoy_projection_column_cannot_change_what_the_reader_returns() {
             Value::from("beacon.outcome.md.v2".to_owned()),
         ),
         (
+            // The lie is the RETIRED token: a plausible stale value, and one the v2 codec refuses
+            // by name -- the blanket v1->v2 rename of this file briefly made this lie the truth,
+            // and the decoy row read back as honest. A lie table has to keep lying.
             "canonicalizer_version",
-            Value::from("beacon.outcome.manifest.v2".to_owned()),
+            Value::from("beacon.outcome.manifest.v1".to_owned()),
         ),
         ("mission_id", Value::from(Uuid::new_v4().to_string())),
         ("manifest_id", Value::from(Uuid::new_v4().to_string())),
@@ -661,7 +664,7 @@ fn a_decoy_projection_column_cannot_change_what_the_reader_returns() {
         ("digest_algorithm", Value::from("sha512".to_owned())),
         (
             "digest_canonicalizer",
-            Value::from("beacon.outcome.manifest.v2".to_owned()),
+            Value::from("beacon.outcome.manifest.v1".to_owned()),
         ),
         // The candidate projection: astra's A2. Until it was checked, changing this column pointed
         // every read at an unrelated document. The lie is a REAL Artifact of this Mission by this
@@ -1318,7 +1321,7 @@ fn insert_manifest_behind_the_ledger(
                  canonical_bytes, manifest_id, mission_id, completion_digest,
                  canonicalizer_version, renderer_version, boundary_event_seq,
                  candidate_artifact_digest
-             ) VALUES (?1, 'sha256', 'beacon.outcome.manifest.v1', ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+             ) VALUES (?1, 'sha256', 'beacon.outcome.manifest.v2', ?2, ?3, ?4, ?5, ?6, ?7, ?8,
                        ?9, ?10)",
             params![
                 fixture.workspace_id.to_string(),
@@ -1530,7 +1533,7 @@ fn a_manifest_cannot_exist_without_its_candidate() {
                      canonical_bytes, manifest_id, mission_id, completion_digest,
                      canonicalizer_version, renderer_version, boundary_event_seq,
                      candidate_artifact_digest
-                 ) VALUES (?1, 'sha256', 'beacon.outcome.manifest.v1', ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                 ) VALUES (?1, 'sha256', 'beacon.outcome.manifest.v2', ?2, ?3, ?4, ?5, ?6, ?7, ?8,
                            ?9, ?10)",
                 params![
                     fixture.workspace_id.to_string(),
@@ -2109,7 +2112,7 @@ fn kimi_a_manifest_id_collision_is_a_loud_refusal_not_a_merge() {
              canonical_bytes, manifest_id, mission_id, completion_digest,
              canonicalizer_version, renderer_version, boundary_event_seq,
              candidate_artifact_digest
-         ) VALUES (?1, 'sha256', 'beacon.outcome.manifest.v1', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+         ) VALUES (?1, 'sha256', 'beacon.outcome.manifest.v2', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             fixture.workspace_id.to_string(),
             colliding,
