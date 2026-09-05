@@ -36,6 +36,24 @@
 -- at, because a guard that matches nothing is a silent no-op -- the failure the 0028 rollback test
 -- records, where an UPDATE stopped firing and surfaced downstream as a SchemaMismatch.
 --
+-- R21.5 IS NOT IN THIS MIGRATION, and the reason is measurable rather than a preference. The
+-- analogous key for supersession -- a projected `supersedes_digest` column with
+-- `(workspace_id, supersedes_digest) -> mission_impact_classifications` -- needs that column filled
+-- for the rows already stored, and its value lives at a VARIABLE offset inside `canonical_bytes`:
+-- `encode` writes `rule_id` (optional, variable) and `reason` (variable-length text) before
+-- `supersedes`, so no `substr()` can reach it and only the codec can compute it. The ladder applies
+-- pure SQL, so a migration that added the column would leave every existing row NULL -- and under
+-- MATCH SIMPLE a NULL component SATISFIES a composite foreign key, so those rows would be silently
+-- unconstrained while the schema looked fastened. That is worse than not shipping it yet.
+--
+-- It is also not schema-only: the writer must populate the column and the verified reader must
+-- re-derive it in `classification_columns_match`, where every projection is re-derived so that
+-- adding a column without adding a line there is a compile-time hole rather than a silent one.
+-- This migration needed no code change at all. So R21.5 is its own slice: a codec-side backfill,
+-- then the column and the key. Until then the belt is real and merged -- the reader judges a
+-- predecessor by its own bytes and refuses one that is absent, unreadable, of another Workspace or
+-- of another Mission (sol1's #9, `PredecessorFault`).
+--
 -- NO `events` REBUILD: no Event kind is added. The FIRST later migration that rebuilds `events`
 -- must still carry every kind `main` has, regenerated from its own parent.
 
