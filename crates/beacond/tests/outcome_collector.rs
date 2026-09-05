@@ -3752,62 +3752,93 @@ fn a_lie_in_the_completions_support_is_refused_while_the_owned_record_is_correct
     );
 }
 
-/// Support recorded AFTER the completion's boundary is not part of this Outcome: the record is
-/// real, verified and this Mission's, and it is refused as after the boundary -- an Evaluation by
-/// the Event that carries its bytes, an Artifact by the creation cursor its owner re-derives --
-/// never as absent.
-#[test]
-fn support_recorded_after_the_boundary_is_refused_by_name() {
-    let fixture = admitted(
-        "support-after-boundary-evaluation",
-        vec!["Gates pass".to_owned()],
-    );
+/// One late record per support kind, created AFTER the boundary is captured. Each returns the
+/// reference a completion would cite and the id the refusal must name.
+fn late_artifact(fixture: &Admitted) -> (SupportRef, String) {
+    let artifact = fixture.record_mission_artifact(b"# Delivered after the cut\n");
+    let id = artifact.digest().value.clone();
+    (SupportRef::Artifact(digest_bytes(&id)), id)
+}
+
+fn late_evaluation(fixture: &Admitted) -> (SupportRef, String) {
     fixture.repository_revision();
     fixture.policy_revision();
-    let boundary = newest_event(&fixture.store);
-    let (_, evaluation) = proposal_and_evaluation(&fixture);
-    let digest = record_completion_with_support(
-        &fixture,
-        boundary,
-        vec![SupportRef::Evaluation(digest_bytes(
-            &evaluation.digest().value,
-        ))],
-    );
-    match collect_completion(&fixture, digest).expect_err("after the boundary") {
-        CollectorRefusal::AfterBoundary {
-            kind: "evaluation",
-            id,
-            boundary_event_seq,
-            ..
-        } => {
-            assert_eq!(id, evaluation.digest().value);
-            assert_eq!(boundary_event_seq, boundary);
-        }
-        other => panic!("{other:?}"),
-    }
+    let (_, evaluation) = proposal_and_evaluation(fixture);
+    let id = evaluation.digest().value.clone();
+    (SupportRef::Evaluation(digest_bytes(&id)), id)
+}
 
-    let fixture = admitted(
-        "support-after-boundary-artifact",
-        vec!["Gates pass".to_owned()],
-    );
-    let boundary = newest_event(&fixture.store);
-    let late = fixture.record_mission_artifact(b"# Delivered after the cut\n");
-    let digest = record_completion_with_support(
-        &fixture,
-        boundary,
-        vec![SupportRef::Artifact(digest_bytes(&late.digest().value))],
-    );
-    match collect_completion(&fixture, digest).expect_err("after the boundary") {
-        CollectorRefusal::AfterBoundary {
-            kind: "artifact",
-            id,
-            boundary_event_seq,
-            ..
-        } => {
-            assert_eq!(id, late.digest().value);
-            assert_eq!(boundary_event_seq, boundary);
+fn late_ruling(fixture: &Admitted) -> (SupportRef, String) {
+    fixture.repository_revision();
+    fixture.policy_revision();
+    let proposal = ProposalService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+        .submit(&fixture.proposal_record().bytes())
+        .expect("the Proposal records");
+    let ruling = RulingService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+        .rule(
+            &proposal.digest().value,
+            RulingDecision::Approve,
+            "Approved after the cut.",
+            RulingSupersedes::None,
+        )
+        .expect("the Ruling records");
+    let id = ruling.digest().value.clone();
+    (SupportRef::Ruling(digest_bytes(&id)), id)
+}
+
+fn late_receipt(fixture: &Admitted) -> (SupportRef, String) {
+    fixture.repository_revision();
+    let (run_id, receipt_json) = real_preflight_receipt(fixture);
+    (
+        SupportRef::Receipt {
+            run_id,
+            receipt_version: 1,
+            receipt_bytes_sha256: sha256_bytes(&receipt_json),
+        },
+        run_id.hyphenated().to_string(),
+    )
+}
+
+/// Support recorded AFTER the completion's boundary is not part of this Outcome -- for EVERY kind
+/// the vocabulary has (kimi's P1: this covered only Evaluation and Artifact, so the boundary check
+/// could be deleted from the Ruling and Receipt arms with every test still green).
+///
+/// In each case the record is real, verified and this Mission's, and it was recorded after the cut:
+/// an Evaluation and a Ruling by the Event carrying their bytes, an Artifact by the creation cursor
+/// its owner re-derives, a Receipt by the run Events its owner vouches for. Never absent.
+#[test]
+fn support_recorded_after_the_boundary_is_refused_by_name() {
+    for (kind, late) in [
+        (
+            "artifact",
+            late_artifact as fn(&Admitted) -> (SupportRef, String),
+        ),
+        ("evaluation", late_evaluation),
+        ("ruling", late_ruling),
+        ("receipt", late_receipt),
+    ] {
+        let fixture = admitted(
+            &format!("support-after-boundary-{kind}"),
+            vec!["Gates pass".to_owned()],
+        );
+        let boundary = newest_event(&fixture.store);
+        let (reference, id) = late(&fixture);
+        let digest = record_completion_with_support(&fixture, boundary, vec![reference]);
+        match collect_completion(&fixture, digest)
+            .expect_err("support recorded after the cut is not inside this Outcome")
+        {
+            CollectorRefusal::AfterBoundary {
+                kind: refused,
+                id: named,
+                boundary_event_seq,
+                ..
+            } => {
+                assert_eq!(refused, kind);
+                assert_eq!(named, id);
+                assert_eq!(boundary_event_seq, boundary);
+            }
+            other => panic!("{kind}: {other:?}"),
         }
-        other => panic!("{other:?}"),
     }
 }
 
