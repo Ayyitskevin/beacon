@@ -146,9 +146,9 @@ pub use outcome::{
 pub use outcome_assembler::{ARTIFACT_TITLE_ABSENT, AssemblyRefusal, SourcesRefusal};
 pub use outcome_collector::{
     CollectedClassification, CollectedCompletion, CollectedCondition, CollectedDigest,
-    CollectedNarrative, CollectedSources, CollectedSpend, CollectedUncounted, CollectionRequest,
-    Collector, CollectorRefusal, OUTCOME_RECEIPT_CHECKSUM_LABEL, SpendAmount, SpendCompleteness,
-    positionable_sources,
+    CollectedNarrative, CollectedSources, CollectedSpend, CollectedSupport, CollectedUncounted,
+    CollectionRequest, Collector, CollectorRefusal, OUTCOME_RECEIPT_CHECKSUM_LABEL, SpendAmount,
+    SpendCompleteness, positionable_sources,
 };
 pub use outcome_store::{
     MAX_STORED_MANIFEST_BYTES, ManifestStoreRefusal, OutcomeCandidate, OutcomeService,
