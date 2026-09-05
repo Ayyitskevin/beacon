@@ -1663,7 +1663,12 @@ fn assert_refuses_startup(fixture: &Fixture, case: &str) {
     assert!(
         matches!(
             error,
-            SupervisorError::RulingEventMismatch(_) | SupervisorError::RulingStateMismatch
+            SupervisorError::RulingEventMismatch(_)
+                | SupervisorError::RulingStateMismatch { .. }
+                // R28.1 tier 2: the chains and the counts are facts about the store, not one row,
+                // so they refuse as their own variants rather than as a row refusal naming nothing.
+                | SupervisorError::RulingChainsMismatch(_)
+                | SupervisorError::RulingTotalsMismatch(_)
         ),
         "{case}: {error:?} / {error}"
     );
@@ -2280,7 +2285,7 @@ fn startup_refuses_a_ruling_whose_owner_account_is_gone() {
     assert!(
         matches!(
             error,
-            SupervisorError::RulingStateMismatch
+            SupervisorError::RulingStateMismatch { .. }
                 | SupervisorError::ProposalStateMismatch { .. }
                 // R28.1 tier 2: the owner-account check is a fact about the STORE, so it
                 // refuses as `Totals` rather than as a row refusal naming nothing.
@@ -2525,5 +2530,94 @@ fn the_store_refuses_a_second_predecessor_and_a_second_supersession() {
     assert_eq!(
         fixture.count("SELECT count(*) FROM ruling_supersessions"),
         2
+    );
+}
+
+/// R28 tier 2 pass 4 of 14: a Ruling row the log does not account for is refused at startup, and
+/// the refusal names WHICH Ruling and carries the reader's own fault.
+///
+/// Pass 1's plant shape: the event replay catches every column tamper first, so the plant is a row
+/// with no Event of its own. The planted digest is all `f`, so it sorts last by construction
+/// (R39.3), and the column list comes from `pragma_table_info`.
+#[test]
+fn startup_refuses_an_unaccounted_ruling_row_and_names_the_row() {
+    let fixture = admitted_mission("r28t2-ruling-startup");
+    let proposal_digest = fixture.submit("A Proposal for the planted Ruling to copy.");
+    fixture
+        .rulings
+        .rule(
+            &proposal_digest,
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .expect("the fixture records a Ruling");
+    let connection = fixture.store.connect();
+    let existing: String = connection
+        .query_row(
+            "SELECT digest_value FROM rulings ORDER BY digest_value LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the fixture recorded a Ruling");
+    let columns: Vec<String> = connection
+        .prepare("SELECT name FROM pragma_table_info('rulings')")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let planted = "f".repeat(64);
+    let names = columns.join(", ");
+    let values = columns
+        .iter()
+        .map(|column| {
+            if column == "digest_value" {
+                "?1".to_owned()
+            } else {
+                column.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    connection
+        .execute(
+            &format!(
+                "INSERT INTO rulings ({names}) SELECT {values} FROM rulings WHERE digest_value = ?2"
+            ),
+            rusqlite::params![planted, existing],
+        )
+        .expect("the planted row inserts");
+    drop(connection);
+
+    let refusal = fixture
+        .restart()
+        .expect_err("a store holding an unaccounted Ruling row reopened Ready");
+    assert!(
+        matches!(
+            &refusal,
+            SupervisorError::RulingStateMismatch {
+                workspace_id,
+                digest_value,
+                ..
+            } if *workspace_id == fixture.workspace_id && digest_value == &planted
+        ),
+        "refused for the wrong reason, or naming the wrong row: {refusal:?}"
+    );
+
+    // R28.4: the key and the fault's NAME, with the reader's own sentence absent (kimi's P3-2).
+    let line = refusal.to_string();
+    assert!(
+        line.contains(&planted) && line.contains(&fixture.workspace_id.to_string()),
+        "the refusal does not name the row it refused: {line}"
+    );
+    let named = line.rsplit(": ").next().unwrap().to_owned();
+    assert!(
+        !named.contains(' ') && !named.contains('{'),
+        "the tail of the line is a rendering, not a name: {line}"
+    );
+    assert!(
+        format!("{refusal:?}").contains(&named),
+        "the named fault is not reachable through Debug: {refusal:?}"
     );
 }
