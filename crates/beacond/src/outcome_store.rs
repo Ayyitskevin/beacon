@@ -1054,6 +1054,9 @@ pub(crate) fn verify_manifest_state(connection: &Connection) -> Result<(), Manif
                 })?;
 
         // Exactly one `artifact.recorded` Event names it, in this Workspace, and it is the cursor
+        // (masked today: the artifact pass at lib.rs ~1130 refuses a second recording Event before
+        // this arm runs, so no test can reach it while that ordering holds -- kept for when it changes;
+        // kimi's read, D-kimi-read-o3a.md P2)
         // the Artifact itself carries. One is the count: none is an unaccounted row, and two would
         // make "where this entered the ledger" a question with two answers.
         let mut statement = connection

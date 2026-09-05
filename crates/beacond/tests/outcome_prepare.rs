@@ -1889,3 +1889,238 @@ fn astra_control_reference_identity_is_exactly_the_first_sixteen_digest_bytes() 
         id
     );
 }
+
+// kimi's O-3a read probes (D-kimi-read-o3a.md): the two startup-only arms' missing witnesses,
+// the duplicate-Event case, and the derived-identity collision behaviour.
+
+#[test]
+fn kimi_startup_refuses_a_candidate_scoped_to_another_mission() {
+    let fixture = admitted_mission("kimi-scope-mission");
+
+    // A second, real Mission in the same Project, admitted BEFORE the completion so team
+    // eligibility is current, with the same Residents as members.
+    let team_id: String = fixture
+        .store
+        .connect()
+        .query_row(
+            "SELECT team_id FROM missions WHERE id = ?1",
+            params![fixture.mission_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let other = MissionService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .admit(MissionDraft {
+            project_id: fixture.project_id,
+            expected_charter_revision: fixture.charter_revision,
+            team_id: Uuid::parse_str(&team_id).unwrap(),
+            desired_outcome: "The decoy document's Mission".to_owned(),
+            success_conditions: vec![CONDITION_TEXT.to_owned()],
+            constraints: vec!["Keep changes reversible".to_owned()],
+            prohibitions: vec!["Do not deploy".to_owned()],
+            members: vec![
+                MissionMemberDraft {
+                    resident_id: fixture.resident_id,
+                    expected_configuration_id: fixture.configuration_id,
+                },
+                MissionMemberDraft {
+                    resident_id: fixture.other_resident_id,
+                    expected_configuration_id: fixture.other_configuration_id,
+                },
+            ],
+        })
+        .unwrap();
+
+    let accountable = (fixture.resident_id, fixture.configuration_id);
+    let (completion_digest, completion) = fixture.complete(accountable);
+    let classification = fixture.classify(ImpactLevel::Ordinary);
+    let (manifest, sources) = manifest_for(
+        &fixture,
+        &completion_digest,
+        &completion,
+        &classification,
+        false,
+        AppendixRequest::PolicyDefault,
+    );
+    fixture.outcomes.prepare(&manifest, &sources).unwrap();
+
+    // The planted manifest: same everything, appendix flipped, so its bytes/digest are its own.
+    let planted = OutcomeManifestV1 {
+        appendix_request: AppendixRequest::Include,
+        ..manifest.clone()
+    };
+    let planted_bytes = planted.canonical_bytes().unwrap();
+
+    // A REAL, ledger-accounted Outcome Document whose content DOES embed the planted manifest's
+    // exact bytes (so the reader's content binding passes) but whose own bytes scope it to the
+    // OTHER Mission -- the one thing only the startup pass checks.
+    let decoy_content = format!(
+        "# A decoy that embeds the manifest hex\n{}\n",
+        data_encoding::HEXLOWER.encode(&planted_bytes)
+    );
+    let decoy = fixture
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            decoy_content.as_bytes(),
+            ArtifactContext::Mission {
+                project_id: fixture.project_id,
+                mission_id: other.id,
+            },
+            fixture.resident_id,
+            fixture.configuration_id,
+            None,
+        )
+        .unwrap();
+    let planted_digest =
+        insert_manifest_behind_the_ledger(&fixture, &planted, &decoy.digest().value);
+
+    // The reader cannot see the scope mismatch: the content binding is all it has, and it holds.
+    fixture
+        .outcomes
+        .manifest(&planted_digest)
+        .expect("the reader's content binding passes; scope is the startup pass's job");
+
+    let boot = astra_boot(&fixture);
+    assert!(
+        matches!(
+            boot,
+            Err(beacond::SupervisorError::OutcomeManifestStateMismatch)
+        ),
+        "startup accepted a candidate scoped to another Mission: {boot:?}"
+    );
+}
+
+#[test]
+fn kimi_startup_refuses_a_candidate_authored_by_another_resident() {
+    let (fixture, manifest, sources) = ordinary("kimi-scope-resident");
+    fixture.outcomes.prepare(&manifest, &sources).unwrap();
+
+    let planted = OutcomeManifestV1 {
+        appendix_request: AppendixRequest::Include,
+        ..manifest.clone()
+    };
+    let planted_bytes = planted.canonical_bytes().unwrap();
+    // Same Mission, real ledger-accounted document, content embeds the planted manifest's hex --
+    // but the accountable Resident in the Artifact's own bytes is the OTHER team member.
+    let decoy_content = format!(
+        "# A decoy with the wrong author\n{}\n",
+        data_encoding::HEXLOWER.encode(&planted_bytes)
+    );
+    let decoy = fixture
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            decoy_content.as_bytes(),
+            ArtifactContext::Mission {
+                project_id: fixture.project_id,
+                mission_id: fixture.mission_id,
+            },
+            fixture.other_resident_id,
+            fixture.other_configuration_id,
+            None,
+        )
+        .unwrap();
+    let planted_digest =
+        insert_manifest_behind_the_ledger(&fixture, &planted, &decoy.digest().value);
+    fixture
+        .outcomes
+        .manifest(&planted_digest)
+        .expect("the reader's content binding passes; authorship is the startup pass's job");
+
+    let boot = astra_boot(&fixture);
+    assert!(
+        matches!(
+            boot,
+            Err(beacond::SupervisorError::OutcomeManifestStateMismatch)
+        ),
+        "startup accepted a candidate authored by another Resident: {boot:?}"
+    );
+}
+
+#[test]
+fn kimi_startup_refuses_a_candidate_with_two_recording_events() {
+    let (fixture, manifest, sources) = ordinary("kimi-dup-event");
+    let prepared = fixture.outcomes.prepare(&manifest, &sources).unwrap();
+    fixture.restart();
+
+    // A second `artifact.recorded` Event naming the candidate: two answers to "where did this
+    // enter the ledger".
+    fixture
+        .store
+        .connect()
+        .execute(
+            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+             SELECT workspace_id, kind, payload_json, occurred_at_ms + 1 FROM events
+             WHERE kind = 'artifact.recorded'
+               AND json_extract(payload_json, '$.artifact.digest.value') = ?1",
+            params![prepared.candidate_artifact_digest],
+        )
+        .unwrap();
+    let boot = astra_boot(&fixture);
+    eprintln!("KIMI_DUP_EVENT boot={boot:?}");
+    assert!(boot.is_err(), "startup accepted a doubly-recorded candidate");
+}
+
+#[test]
+fn kimi_a_manifest_id_collision_is_a_loud_refusal_not_a_merge() {
+    let (fixture, manifest, sources) = ordinary("kimi-id-collision");
+    let prepared = fixture.outcomes.prepare(&manifest, &sources).unwrap();
+    let connection = fixture.store.connect();
+    let row = |digest: &str| {
+        connection.query_row(
+            "SELECT canonical_bytes, manifest_id, mission_id, completion_digest,
+                    canonicalizer_version, renderer_version, boundary_event_seq,
+                    candidate_artifact_digest
+             FROM outcome_manifests WHERE manifest_digest = ?1",
+            params![digest],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            },
+        )
+        .unwrap()
+    };
+    let real = row(&prepared.manifest_digest);
+    // A second digest agreeing in its first sixteen bytes -- the derived manifest_id collides.
+    let colliding = format!("{}{}", &prepared.manifest_digest[..32], "f".repeat(32));
+    assert_ne!(colliding, prepared.manifest_digest);
+    assert_eq!(
+        beacond::manifest_reference_id(&colliding).unwrap().to_string(),
+        real.1,
+        "the probe's premise: the derived identity collides"
+    );
+    let result = connection.execute(
+        "INSERT INTO outcome_manifests (
+             workspace_id, digest_algorithm, digest_canonicalizer, manifest_digest,
+             canonical_bytes, manifest_id, mission_id, completion_digest,
+             canonicalizer_version, renderer_version, boundary_event_seq,
+             candidate_artifact_digest
+         ) VALUES (?1, 'sha256', 'beacon.outcome.manifest.v1', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            fixture.workspace_id.to_string(),
+            colliding,
+            real.0,
+            real.1,
+            real.2,
+            real.3,
+            real.4,
+            real.5,
+            real.6,
+            real.7,
+        ],
+    );
+    let error = result.expect_err("a manifest_id collision was stored");
+    eprintln!("KIMI_COLLISION error={error}");
+    assert!(
+        error.to_string().contains("UNIQUE"),
+        "the collision was refused for a reason other than uniqueness: {error}"
+    );
+}
