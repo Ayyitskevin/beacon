@@ -13,15 +13,17 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use beacond::{
-    AutonomyProfile, BeaconCapability, ClassificationStoreError, LocalModelActivationService,
-    LocalModelEndpoint, MeasuredSpendV1, MissionDraft, MissionImpactClassificationV1,
-    MissionMemberDraft, MissionService, OperatorAccountService, OperatorSessionPhase,
-    PredecessorFault, ProjectCharterDraft, ProjectDraft, ProjectService, ProjectView,
-    ProviderFeature, ResidentConfiguration, ResidentConfigurationService, ResidentLifecycleService,
-    SecretString, SpendStoreError, StarterOrganizationService, StarterResidentDraft, StarterRole,
-    StartupConfig, Supervisor, TeamDraft, TeamMemberDraft, TeamService, TeamView,
-    open_store_connection, verified_classification_for_citation, verified_classification_within,
-    verified_spend_for_citation, verified_spend_within,
+    AutonomyProfile, BeaconCapability, ClassificationStoreError, DiagnosticStatus,
+    LocalModelActivationService, LocalModelEndpoint, MeasuredSpendV1, MissionDraft,
+    MissionImpactClassificationV1, MissionMemberDraft, MissionService, OperatorAccountService,
+    OperatorSessionPhase, PredecessorFault, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft,
+    ProjectPolicyService, ProjectService, ProjectView, ProviderFeature, ResidentConfiguration,
+    ResidentConfigurationService, ResidentLifecycleService, SecretString, SpendStoreError,
+    StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig, Supervisor,
+    TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule,
+    TeamLeadSelectionPolicy, TeamMemberDraft, TeamService, TeamView, TrackRecordEvidenceKind,
+    TrackRecordRequirement, open_store_connection, verified_classification_for_citation,
+    verified_classification_within, verified_spend_for_citation, verified_spend_within,
 };
 use rusqlite::{Connection, params};
 use serde_json::json;
@@ -1737,5 +1739,126 @@ fn the_charter_check_reads_the_policys_charter_column_not_its_revision_number() 
             ClassificationRecordError::PolicyRevisionHasAnotherCharter
         ),
         "{error:?}"
+    );
+}
+
+/// 0032 rebuilds a table that already holds rows, so the migration is only correct if a store that
+/// crossed it keeps them: same bytes, same digest, still readable through the verified reader, and
+/// startup Ready afterwards.
+///
+/// The store is rolled BACK to 0025's classification shape and stamped 30 -- the shape and version
+/// a store written before this migration actually has -- and then started, so the ladder applies
+/// 0032 for real rather than a test re-running its SQL by hand.
+#[test]
+fn a_store_with_classifications_crosses_0032_and_keeps_them() {
+    let stored = stored("classification-across-0032");
+    // Published through its own service, not seeded: this test restarts the whole store, and
+    // startup re-verifies Project Policy against its Events -- a hand-written row fails that.
+    let revision =
+        ProjectPolicyService::new(Arc::clone(&stored.accounts), stored.store.workspace_id)
+            .publish(
+                stored.project_id,
+                stored.charter_revision,
+                None,
+                ProjectPolicyDraft {
+                    team_lead_selection: TeamLeadSelectionPolicy {
+                        required_capabilities: vec![BeaconCapability::WorkCoordinateMission],
+                        availability_rule: TeamLeadAvailabilityRule::CurrentTeamEligibility,
+                        track_record_requirements: vec![TrackRecordRequirement {
+                            evidence_kind: TrackRecordEvidenceKind::MissionOutcome,
+                            minimum_count: 1,
+                        }],
+                        conflict_rule: TeamLeadConflictRule::RequireNoDeclaredConflict,
+                        ambiguity_rule: TeamLeadAmbiguityRule::RequireOperatorDecision,
+                    },
+                },
+            )
+            .expect("the Project Policy publishes")
+            .revision;
+    let recorded = stored
+        .impact_service()
+        .classify(
+            &stored
+                .classification_record(Uuid::new_v4(), revision)
+                .canonical_bytes()
+                .unwrap(),
+        )
+        .expect("a classification is recorded before the migration");
+    let digest = recorded.digest().value.clone();
+    let bytes = recorded.canonical_bytes().to_vec();
+
+    // Back to the pre-0032 shape, from 0025's own text -- a rollback that retyped the DDL would be
+    // testing the test. Stamped 31, the version a store arrives at from the migration below this
+    // one: any other number describes a schema the store does not have.
+    let migration_0025 = include_str!("../migrations/0025_spend_and_impact.sql");
+    let classification_objects = &migration_0025[migration_0025
+        .find("CREATE TABLE mission_impact_classifications (")
+        .unwrap()
+        ..migration_0025.find("UPDATE schema_meta").unwrap()];
+    let connection = stored.connection();
+    connection
+        .execute_batch(
+            "CREATE TEMP TABLE classifications_snapshot AS
+                 SELECT * FROM mission_impact_classifications;
+             DROP TRIGGER mission_impact_classifications_no_update;
+             DROP TRIGGER mission_impact_classifications_no_delete;
+             DROP TABLE mission_impact_classifications;",
+        )
+        .unwrap();
+    connection.execute_batch(classification_objects).unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO mission_impact_classifications
+                 SELECT * FROM classifications_snapshot;
+             UPDATE schema_meta SET version = 31 WHERE singleton = 1;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let report = Supervisor::bootstrap(StartupConfig {
+        store_path: stored.store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .expect("a store written before 0032 migrates forward");
+    assert_eq!(report.diagnostics.status, DiagnosticStatus::Ready);
+    assert_eq!(report.diagnostics.schema_version, 32);
+
+    let connection = stored.connection();
+    let carried: Vec<u8> = connection
+        .query_row(
+            "SELECT canonical_bytes FROM mission_impact_classifications WHERE digest_value = ?1",
+            [&digest],
+            |row| row.get(0),
+        )
+        .expect("the row crossed the rebuild");
+    assert_eq!(carried, bytes, "the rebuild changed the stored bytes");
+    let reread = verified_classification_within(&connection, stored.store.workspace_id, &digest)
+        .expect("the carried row still verifies")
+        .expect("the carried row is still there");
+    assert_eq!(reread.canonical_bytes(), bytes.as_slice());
+
+    // And the key the migration exists for is fastened on the rebuilt table.
+    let error = connection
+        .execute(
+            "INSERT INTO mission_impact_classifications (
+                 workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+                 canonical_bytes, classification_id, mission_id, project_id, version, impact,
+                 basis, policy_revision, charter_revision, classified_at_ms
+             ) VALUES (?1, 'sha256', 'beacon.mission-impact.v1', ?2, ?3, ?4, ?5, ?6, 2, 'high',
+                       'operator_declared', 1, ?7, 1788400000000)",
+            params![
+                stored.store.workspace_id.to_string(),
+                "b".repeat(64),
+                bytes,
+                Uuid::new_v4().to_string(),
+                stored.mission_id.to_string(),
+                Uuid::new_v4().to_string(),
+                stored.charter_revision,
+            ],
+        )
+        .expect_err("a Project that owns no Mission cannot be named after the migration");
+    assert!(
+        error.to_string().contains("FOREIGN KEY constraint failed"),
+        "{error}"
     );
 }
