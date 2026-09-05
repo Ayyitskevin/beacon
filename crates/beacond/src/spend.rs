@@ -82,10 +82,10 @@ const TAG_SUPERSEDES_NONE: u8 = 0x00;
 const TAG_SUPERSEDES_RECORD: u8 = 0x01;
 
 // The literal spellings. They are closed-vocabulary tokens, never human text.
-const MEASURED: &str = "measured";
-const PARTIALLY_MEASURED: &str = "partially_measured";
-const UNMEASURED: &str = "unmeasured";
-const BROKEN: &str = "broken";
+pub(crate) const MEASURED: &str = "measured";
+pub(crate) const PARTIALLY_MEASURED: &str = "partially_measured";
+pub(crate) const UNMEASURED: &str = "unmeasured";
+pub(crate) const BROKEN: &str = "broken";
 
 // ---------------------------------------------------------------------------------------------
 // The measurement, with the amount inside it
