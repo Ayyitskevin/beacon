@@ -2280,7 +2280,11 @@ fn startup_refuses_a_ruling_whose_owner_account_is_gone() {
     assert!(
         matches!(
             error,
-            SupervisorError::RulingStateMismatch | SupervisorError::ProposalStateMismatch { .. }
+            SupervisorError::RulingStateMismatch
+                | SupervisorError::ProposalStateMismatch { .. }
+                // R28.1 tier 2: the owner-account check is a fact about the STORE, so it
+                // refuses as `Totals` rather than as a row refusal naming nothing.
+                | SupervisorError::ProposalTotalsMismatch(_)
         ),
         "{error:?} / {error}"
     );
