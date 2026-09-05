@@ -1793,6 +1793,30 @@ mod scope_tests {
     }
 
     #[test]
+    fn sol1_ten_thousand_support_refs_are_refused_before_any_reference_is_read() {
+        let references = vec![SupportRef::Evaluation([0x5a; 32]); 10_000];
+        let reads = std::cell::Cell::new(0_usize);
+        let refusal = collected_support(7, &references, |_| {
+            reads.set(reads.get() + 1);
+            Ok(CollectedSupport::Evaluation(CollectedDigest {
+                kind: SourceKind::Evaluation,
+                workspace_id: Uuid::nil(),
+                digest_value: String::new(),
+            }))
+        })
+        .expect_err("ten thousand references exceed the collector's own bound");
+        assert_eq!(
+            refusal,
+            CollectorRefusal::SupportOverBound {
+                ordinal: 7,
+                observed: 10_000,
+                bound: MAX_SUPPORT_REFS_PER_CONDITION,
+            }
+        );
+        assert_eq!(reads.get(), 0, "the bound ran after a reference read");
+    }
+
+    #[test]
     fn a_payload_naming_another_workspace_is_the_collectors_own_refusal() {
         let mine = Uuid::new_v4();
         let mission = Uuid::new_v4();

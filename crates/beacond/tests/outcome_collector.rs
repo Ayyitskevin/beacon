@@ -3946,3 +3946,179 @@ fn support_by_an_evaluation_or_ruling_of_another_missions_proposal_is_refused_by
         }
     );
 }
+
+/// sol1 probe: an identity-only Event before the cut cannot position bytes that were recorded
+/// after it. The honest control uses the same owner and succeeds when its real Event is before
+/// the cut.
+#[test]
+fn sol1_a_byte_less_early_event_cannot_pull_late_support_inside_the_cut() {
+    let honest = admitted(
+        "sol1-support-boundary-control",
+        vec!["Gates pass".to_owned()],
+    );
+    honest.repository_revision();
+    honest.policy_revision();
+    let (_, evaluation) = proposal_and_evaluation(&honest);
+    let digest = record_completion_with_support(
+        &honest,
+        newest_event(&honest.store),
+        vec![SupportRef::Evaluation(digest_bytes(
+            &evaluation.digest().value,
+        ))],
+    );
+    collect_completion(&honest, digest).expect("control: the real Event is before the cut");
+
+    let fixture = admitted("sol1-support-boundary-decoy", vec!["Gates pass".to_owned()]);
+    fixture.repository_revision();
+    fixture.policy_revision();
+    let cut = newest_event(&fixture.store);
+    let (_, evaluation) = proposal_and_evaluation(&fixture);
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO events (sequence, workspace_id, kind, payload_json, occurred_at_ms)
+             VALUES (0, ?1, 'evaluation.recorded', ?2, 0)",
+            params![
+                fixture.store.workspace_id.to_string(),
+                json!({"evaluation": {"digest": {"value": evaluation.digest().value}}}).to_string(),
+            ],
+        )
+        .unwrap();
+    let digest = record_completion_with_support(
+        &fixture,
+        cut,
+        vec![SupportRef::Evaluation(digest_bytes(
+            &evaluation.digest().value,
+        ))],
+    );
+    assert!(
+        matches!(
+            collect_completion(&fixture, digest),
+            Err(CollectorRefusal::AfterBoundary {
+                kind: "evaluation",
+                boundary_event_seq,
+                ..
+            }) if boundary_event_seq == cut
+        ),
+        "an Event without the verified canonical bytes must not position the Evaluation"
+    );
+}
+
+/// sol1 probe: a real Artifact whose own verified bytes scope it to another Mission is not support
+/// for this Mission merely because the completion places its digest under this condition.
+#[test]
+fn sol1_artifact_support_from_another_mission_is_refused_by_its_bytes() {
+    let fixture = admitted(
+        "sol1-support-other-mission-artifact",
+        vec!["Gates pass".to_owned()],
+    );
+    let other = second_mission(&fixture);
+    let member = &fixture.mission.members[0];
+    let artifact = ArtifactService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+        .record(
+            ArtifactKind::OutcomeDocument,
+            b"# The other Mission's document\n",
+            ArtifactContext::Mission {
+                project_id: fixture.project.id,
+                mission_id: other,
+            },
+            member.resident_id,
+            member.admission_configuration_id,
+            None,
+        )
+        .expect("control: a real Artifact for the other Mission records");
+    let digest = record_completion_with_support(
+        &fixture,
+        newest_event(&fixture.store),
+        vec![SupportRef::Artifact(digest_bytes(&artifact.digest().value))],
+    );
+    assert_eq!(
+        collect_completion(&fixture, digest)
+            .expect_err("the Artifact's bytes name another Mission"),
+        CollectorRefusal::ArtifactOutOfScope {
+            id: artifact.digest().value.clone(),
+            declared_mission: Some(other),
+            expected_mission: fixture.mission.id,
+        }
+    );
+}
+
+/// sol1 probe: owner corruption is a named refusal and cannot become broken/blank evidence.
+#[test]
+fn sol1_corrupt_evaluation_support_is_refused_through_its_owner() {
+    let fixture = admitted(
+        "sol1-support-corrupt-evaluation",
+        vec!["Gates pass".to_owned()],
+    );
+    fixture.repository_revision();
+    fixture.policy_revision();
+    let (_, evaluation) = proposal_and_evaluation(&fixture);
+    let connection = fixture.connection();
+    connection
+        .execute_batch("DROP TRIGGER evaluations_no_update;")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE evaluations
+             SET canonical_bytes = zeroblob(length(canonical_bytes))
+             WHERE digest_value = ?1",
+            [&evaluation.digest().value],
+        )
+        .unwrap();
+    drop(connection);
+    let digest = record_completion_with_support(
+        &fixture,
+        newest_event(&fixture.store),
+        vec![SupportRef::Evaluation(digest_bytes(
+            &evaluation.digest().value,
+        ))],
+    );
+    assert!(
+        matches!(
+            collect_completion(&fixture, digest),
+            Err(CollectorRefusal::Unverified {
+                kind: "evaluation",
+                ..
+            })
+        ),
+        "the owning reader's corruption refusal must abort collection"
+    );
+}
+
+/// sol1 probe: the existing Receipt owner rejects this row/Event pair, so the collector cannot
+/// bless it through its private checksum-only SQL reader.
+#[test]
+fn sol1_receipt_support_the_owner_refuses_is_not_collected() {
+    let fixture = admitted("sol1-support-receipt-owner", vec!["Gates pass".to_owned()]);
+    let (run_id, receipt_json) = receipt_for_support(&fixture, false);
+    let digest = record_completion_with_support(
+        &fixture,
+        newest_event(&fixture.store),
+        vec![SupportRef::Receipt {
+            run_id,
+            receipt_version: 1,
+            receipt_bytes_sha256: sha256_bytes(receipt_json.as_bytes()),
+        }],
+    );
+
+    let owner = Supervisor::bootstrap(StartupConfig {
+        store_path: fixture.store.path.clone(),
+        initial_workspace_name: "ignored on reopen".to_owned(),
+    });
+    match owner {
+        Err(error) => eprintln!("control owner refusal: {error:?}"),
+        Ok(_) => panic!("control: startup's Receipt owner unexpectedly accepted the decoy Event"),
+    }
+
+    let result = collect_completion(&fixture, digest);
+    assert!(
+        matches!(
+            result,
+            Err(CollectorRefusal::Unverified {
+                kind: "receipt",
+                ..
+            })
+        ),
+        "collector accepted a Receipt its owner refuses: {result:?}"
+    );
+}
