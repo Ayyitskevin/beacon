@@ -743,6 +743,32 @@ pub(crate) fn verified_mission_project(
     workspace_id: Uuid,
     mission_id: Uuid,
 ) -> Result<Option<Uuid>, MissionError> {
+    Ok(
+        verified_mission_declaration(connection, workspace_id, mission_id)?
+            .map(|declaration| declaration.project_id),
+    )
+}
+
+/// What a Mission declared, proved against its own admission Event.
+///
+/// The Outcome Document prints the Mission's title and each declared condition's statement, and
+/// gpt2 §2 requires that text to come through the owner's verified reader rather than off a column.
+/// `missions.desired_outcome` and `missions.success_conditions_json` are columns; this is the reader.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MissionDeclaration {
+    pub(crate) project_id: Uuid,
+    pub(crate) desired_outcome: String,
+    pub(crate) success_conditions: Vec<String>,
+}
+
+/// The Mission's declaration, proved the way startup proves it: the stored row must equal the
+/// `mission.admitted` Event payload that recorded it, whole. `Ok(None)` means this Workspace admitted
+/// no such Mission; a row and Event that disagree are `InvalidStore`.
+pub(crate) fn verified_mission_declaration(
+    connection: &Connection,
+    workspace_id: Uuid,
+    mission_id: Uuid,
+) -> Result<Option<MissionDeclaration>, MissionError> {
     let Some(stored) = load_stored_mission(connection, workspace_id, mission_id)? else {
         return Ok(None);
     };
@@ -765,7 +791,11 @@ pub(crate) fn verified_mission_project(
     };
     let occurred_at_ms = u64::try_from(*occurred_at_ms).map_err(|_| MissionError::InvalidStore)?;
     verify_mission_event(connection, workspace_id, occurred_at_ms, payload_json)?;
-    Ok(Some(stored.project_id))
+    Ok(Some(MissionDeclaration {
+        project_id: stored.project_id,
+        desired_outcome: stored.desired_outcome,
+        success_conditions: stored.success_conditions,
+    }))
 }
 
 pub(crate) fn verify_mission_event(
