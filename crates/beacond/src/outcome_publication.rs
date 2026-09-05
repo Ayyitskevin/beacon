@@ -407,6 +407,10 @@ impl PublishRefusal {
     /// without deciding what startup calls it.
     pub(crate) fn name(&self) -> &'static str {
         match self {
+            // Added by main's #92 (the PDF service). The exhaustive match is what made this a
+            // compile error rather than a silently unnamed refusal -- which is the whole point of
+            // `name()` being exhaustive (R28.4).
+            Self::Pdf(_) => "Pdf",
             Self::Seam(_) => "Seam",
             Self::NoManifestForCandidate => "NoManifestForCandidate",
             Self::Manifest(_) => "Manifest",
