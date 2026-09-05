@@ -1528,3 +1528,46 @@ fn classification_refuses_a_charter_revision_the_cited_policy_does_not_have() {
         "classification accepted a Charter revision absent from its Policy: {result:?}"
     );
 }
+
+/// The read-side half of #12, in the R20.3 shape: a classification row written PAST the Command,
+/// its `charter_revision` column agreeing with bytes that cite a Charter revision the Policy
+/// revision's own row does not record. The foreign key holds (it covers the Policy revision, not
+/// the Charter) and every column matches its bytes, so nothing but the comparison with the Policy's
+/// own record can refuse it.
+#[test]
+fn a_stored_classification_citing_a_charter_the_policy_never_had_is_refused_on_read() {
+    let stored = stored("classification-charter-read");
+    let policy_revision = stored.policy_revision();
+    let id = Uuid::new_v4();
+    let mut classification = stored.classification_record(id, policy_revision);
+    classification.policy.charter_revision = stored.charter_revision + 1;
+    let bytes = classification.canonical_bytes().unwrap();
+    let digest = classification.digest().unwrap().value;
+    let connection = stored.connection();
+    connection
+        .execute(
+            "INSERT INTO mission_impact_classifications (
+                 workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+                 canonical_bytes, classification_id, mission_id, project_id, version, impact,
+                 basis, policy_revision, charter_revision, classified_at_ms
+             ) VALUES (?1, 'sha256', 'beacon.mission-impact.v1', ?2, ?3, ?4, ?5, ?6, 1, 'high',
+                       'operator_declared', ?7, ?8, 1788400000000)",
+            params![
+                stored.store.workspace_id.to_string(),
+                digest,
+                bytes,
+                id.to_string(),
+                stored.mission_id.to_string(),
+                stored.project_id.to_string(),
+                policy_revision,
+                stored.charter_revision + 1,
+            ],
+        )
+        .expect("the row is storable: the foreign key does not cover the Charter revision");
+
+    assert_eq!(
+        verified_classification_within(&connection, stored.store.workspace_id, &digest)
+            .expect_err("a Charter revision the cited Policy never had must not read"),
+        ClassificationStoreError::PolicyRevisionHasAnotherCharter
+    );
+}
