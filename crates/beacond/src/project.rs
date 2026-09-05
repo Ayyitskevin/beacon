@@ -110,6 +110,123 @@ pub struct ProjectSummary {
     pub created_at_ms: u64,
 }
 
+/// Which fault the Project startup pass hit, and WHICH ROW hit it (R27.1's shape, R28.1).
+pub(crate) enum ProjectStateFault {
+    /// The enumeration itself failed: no row to name, because none was reached.
+    Store(rusqlite::Error),
+    /// One Project did not re-prove. `cause` is the owning reader's OWN error, carried whole.
+    ///
+    /// MEASURED LIMIT, the same one `mission` has: the Project's own record is compared against
+    /// its `project.created` event by an earlier pass, so a tampered column reopens as
+    /// `ProjectEventMismatch` and never reaches here. What this pass uniquely reaches -- a charter
+    /// history whose terminal revision disagrees, a non-monotonic authored_at, a wrong event count
+    /// -- is all `ProjectError::InvalidStore`.
+    Row {
+        workspace_id: Uuid,
+        project_id: Uuid,
+        cause: ProjectError,
+    },
+    /// Counts across the whole store: Projects against creation snapshots against events. No row
+    /// to name, and naming one with a nil UUID would be an invented identity.
+    Totals(ProjectError),
+    /// A row whose identity columns are not UUIDs. Unreachable while the foreign-key check and the
+    /// Workspace pass run first.
+    Identity {
+        workspace_id: String,
+        project_id: String,
+    },
+}
+
+impl ProjectError {
+    /// The variant's NAME, for R28.4's one-line startup message.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Account(_) => "Account",
+            Self::InvalidName => "InvalidName",
+            Self::InvalidPurpose => "InvalidPurpose",
+            Self::InvalidDesiredOutcomes => "InvalidDesiredOutcomes",
+            Self::InvalidConstraint => "InvalidConstraint",
+            Self::InvalidProhibition => "InvalidProhibition",
+            Self::DuplicateCharterEntry => "DuplicateCharterEntry",
+            Self::StaleCharterRevision { .. } => "StaleCharterRevision",
+            Self::UnchangedCharter => "UnchangedCharter",
+            Self::NotFound => "NotFound",
+            Self::InvalidStore => "InvalidStore",
+            Self::Store(_) => "Store",
+            Self::Json(_) => "Json",
+        }
+    }
+}
+
+impl fmt::Display for ProjectStateFault {
+    /// R28.4: the KEY and the fault's NAME, never the carried error's own text.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(_) => formatter.write_str("the Projects could not be read"),
+            Self::Row {
+                workspace_id,
+                project_id,
+                cause,
+            } => write!(
+                formatter,
+                "Project {project_id} in Workspace {workspace_id} does not re-prove: {}",
+                cause.name()
+            ),
+            Self::Totals(cause) => write!(
+                formatter,
+                "the Projects do not agree with the store as a whole: {}",
+                cause.name()
+            ),
+            Self::Identity {
+                workspace_id,
+                project_id,
+            } => write!(
+                formatter,
+                "a Project row's identity is not readable: Workspace {workspace_id}, Project \
+                 {project_id}"
+            ),
+        }
+    }
+}
+
+/// Hand-written and NOT delegating to `Display`: R28.4 keeps the carried text reachable here.
+impl fmt::Debug for ProjectStateFault {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => formatter.debug_tuple("Store").field(error).finish(),
+            Self::Totals(cause) => formatter.debug_tuple("Totals").field(cause).finish(),
+            Self::Row {
+                workspace_id,
+                project_id,
+                cause,
+            } => formatter
+                .debug_struct("Row")
+                .field("workspace_id", workspace_id)
+                .field("project_id", project_id)
+                .field("cause", cause)
+                .finish(),
+            Self::Identity {
+                workspace_id,
+                project_id,
+            } => formatter
+                .debug_struct("Identity")
+                .field("workspace_id", workspace_id)
+                .field("project_id", project_id)
+                .finish(),
+        }
+    }
+}
+
+impl std::error::Error for ProjectStateFault {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::Totals(cause) | Self::Row { cause, .. } => Some(cause),
+            Self::Identity { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum ProjectError {
     Account(OperatorAccountError),
@@ -795,18 +912,49 @@ pub(crate) fn verify_project_charter_revised_event(
     Ok(())
 }
 
-pub(crate) fn verify_project_state(connection: &rusqlite::Connection) -> Result<(), ProjectError> {
-    let mut statement =
-        connection.prepare("SELECT workspace_id, id FROM projects ORDER BY workspace_id, id")?;
+pub(crate) fn verify_project_state(
+    connection: &rusqlite::Connection,
+) -> Result<(), ProjectStateFault> {
+    let mut statement = connection
+        .prepare("SELECT workspace_id, id FROM projects ORDER BY workspace_id, id")
+        .map_err(ProjectStateFault::Store)?;
     let projects = statement
         .query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+        })
+        .map_err(ProjectStateFault::Store)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(ProjectStateFault::Store)?;
 
-    for (workspace_id, project_id) in projects {
-        let workspace_id = parse_uuid(workspace_id)?;
-        let project_id = parse_uuid(project_id)?;
+    for (workspace_id, project_id) in &projects {
+        let identity = || ProjectStateFault::Identity {
+            workspace_id: workspace_id.clone(),
+            project_id: project_id.clone(),
+        };
+        let parsed_workspace = Uuid::parse_str(workspace_id).map_err(|_| identity())?;
+        let parsed_project = Uuid::parse_str(project_id).map_err(|_| identity())?;
+        verify_one_project(connection, parsed_workspace, parsed_project).map_err(|cause| {
+            ProjectStateFault::Row {
+                workspace_id: parsed_workspace,
+                project_id: parsed_project,
+                cause,
+            }
+        })?;
+    }
+    verify_project_totals(connection).map_err(|cause| match cause {
+        ProjectError::Store(error) => ProjectStateFault::Store(error),
+        other => ProjectStateFault::Totals(other),
+    })?;
+    Ok(())
+}
+
+/// One stored Project, re-proved. Unchanged from what the loop held inline.
+fn verify_one_project(
+    connection: &rusqlite::Connection,
+    workspace_id: Uuid,
+    project_id: Uuid,
+) -> Result<(), ProjectError> {
+    {
         let current = load_project(connection, workspace_id, project_id)?;
         let creation = load_creation_project(connection, workspace_id, project_id)?;
         let updated_at_ms = connection.query_row(
@@ -859,7 +1007,11 @@ pub(crate) fn verify_project_state(connection: &rusqlite::Connection) -> Result<
             }
         }
     }
+    Ok(())
+}
 
+/// The checks that are about the STORE rather than one Project.
+fn verify_project_totals(connection: &rusqlite::Connection) -> Result<(), ProjectError> {
     let project_count: i64 =
         connection.query_row("SELECT count(*) FROM projects", [], |row| row.get(0))?;
     let snapshot_count: i64 = connection.query_row(
