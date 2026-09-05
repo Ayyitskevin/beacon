@@ -368,7 +368,7 @@ pub enum SupervisorError {
         cause: project::ProjectError,
     },
     /// The Projects do not agree with the store as a whole. No row to name.
-    ProjectTotalsMismatch(project::ProjectError),
+    ProjectTotalsMismatch(TotalsMismatch),
     LocalModelActivationEventMismatch(i64),
     LocalModelActivationStateMismatch,
     ResidentLifecycleEventMismatch(i64),
@@ -388,7 +388,7 @@ pub enum SupervisorError {
     },
     /// The Missions do not agree with the store as a whole: an orphaned condition row, or an
     /// admitted-event count that does not match the number of Missions. No row to name.
-    MissionTotalsMismatch(mission::MissionError),
+    MissionTotalsMismatch(TotalsMismatch),
     ProjectPolicyEventMismatch(i64),
     ProjectPolicyStateMismatch,
     ProjectRepositoryEventMismatch(i64),
@@ -430,7 +430,7 @@ pub enum SupervisorError {
         cause: mission_completion_store::CompletionReadRefusal,
     },
     /// The completions do not agree with the log as a whole. No row to name.
-    MissionCompletionTotalsMismatch(mission_completion_store::CompletionReadRefusal),
+    MissionCompletionTotalsMismatch(TotalsMismatch),
     ArtifactEventMismatch(i64),
     ArtifactStateMismatch,
     /// A stored Mission impact classification does not re-prove against its own bytes or the
@@ -482,6 +482,32 @@ pub enum SupervisorError {
         source: rusqlite::Error,
     },
     ForeignKeyViolations(u64),
+}
+
+/// A count across a whole table that does not match the log (sol1's P1-2).
+///
+/// The Totals arms used to carry the pass's own `InvalidStore` -- a name that says a count was
+/// wrong and not which count, which table, or by how much. One honest completion plus one
+/// duplicate reached `Totals(EventCount(2))` and the operator learned nothing actionable.
+///
+/// Numeric context, which R42 allows: the table, what the log says there should be, and what the
+/// store holds. In the line AND in `Debug`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TotalsMismatch {
+    /// The table or relation the count is over. A fixed string, never store text.
+    pub table: &'static str,
+    pub expected: u64,
+    pub observed: u64,
+}
+
+impl fmt::Display for TotalsMismatch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{}: the log accounts for {} but the store holds {}",
+            self.table, self.expected, self.observed
+        )
+    }
 }
 
 /// Which startup pass failed to ENUMERATE its rows (sol1's P1-3).
@@ -594,11 +620,12 @@ impl fmt::Display for SupervisorError {
                  charter history or the log: {}",
                 cause.name()
             ),
-            Self::ProjectTotalsMismatch(cause) => write!(
-                formatter,
-                "the Projects do not agree with the store as a whole: {}",
-                cause.name()
-            ),
+            Self::ProjectTotalsMismatch(totals) => {
+                write!(
+                    formatter,
+                    "the Projects do not agree with the store as a whole -- {totals}"
+                )
+            }
             Self::LocalModelActivationEventMismatch(sequence) => write!(
                 formatter,
                 "Event sequence {sequence} does not match local-model activation state"
@@ -649,11 +676,12 @@ impl fmt::Display for SupervisorError {
                  own record or its projections: {}",
                 cause.name()
             ),
-            Self::MissionTotalsMismatch(cause) => write!(
-                formatter,
-                "the Missions do not agree with the store as a whole: {}",
-                cause.name()
-            ),
+            Self::MissionTotalsMismatch(totals) => {
+                write!(
+                    formatter,
+                    "the Missions do not agree with the store as a whole -- {totals}"
+                )
+            }
             Self::ProjectPolicyEventMismatch(sequence) => write!(
                 formatter,
                 "Event sequence {sequence} does not match Project Policy state"
@@ -723,11 +751,12 @@ impl fmt::Display for SupervisorError {
                  its own bytes or the records it cites: {}",
                 cause.name()
             ),
-            Self::MissionCompletionTotalsMismatch(cause) => write!(
-                formatter,
-                "the Mission completions do not agree with the log as a whole: {}",
-                cause.name()
-            ),
+            Self::MissionCompletionTotalsMismatch(totals) => {
+                write!(
+                    formatter,
+                    "the Mission completions do not agree with the log as a whole -- {totals}"
+                )
+            }
             Self::EvaluationStateMismatch => {
                 write!(
                     formatter,
@@ -1917,6 +1946,42 @@ fn count_rows(connection: &Connection, table: &str) -> Result<u64, SupervisorErr
 
 #[cfg(test)]
 mod tests {
+
+    /// sol1 P1-2: a Totals refusal says WHICH table and BY HOW MUCH.
+    ///
+    /// One honest completion plus one duplicate used to reach `Totals(EventCount(2))`, whose line
+    /// was "the Mission completions do not agree with the log as a whole: EventCount" -- an
+    /// operator learned that a count was wrong and nothing else. R42 allows numeric context, so
+    /// the table and both counts are in the line and in Debug.
+    #[test]
+    fn sol1_a_totals_refusal_names_the_table_and_both_counts() {
+        let duplicate = super::TotalsMismatch {
+            table: "events (mission.completed)",
+            expected: 1,
+            observed: 2,
+        };
+        for refusal in [
+            SupervisorError::MissionCompletionTotalsMismatch(duplicate),
+            SupervisorError::MissionTotalsMismatch(duplicate),
+            SupervisorError::ProjectTotalsMismatch(duplicate),
+        ] {
+            let line = refusal.to_string();
+            assert!(
+                line.contains("events (mission.completed)"),
+                "the line does not name the table: {line}"
+            );
+            assert!(
+                line.contains('1') && line.contains('2'),
+                "the line does not carry both counts: {line}"
+            );
+            assert_eq!(line.lines().count(), 1, "{line}");
+            assert!(
+                format!("{refusal:?}").contains("expected: 1")
+                    && format!("{refusal:?}").contains("observed: 2"),
+                "the counts are not in Debug either: {refusal:?}"
+            );
+        }
+    }
     use super::StartupPass;
 
     /// sol1 P1-3: five enumeration failures used to be one line.

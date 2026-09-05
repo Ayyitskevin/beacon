@@ -147,7 +147,7 @@ pub(crate) enum MissionStateFault {
     /// admitted-event count that does not match the number of Missions. There is no row to name,
     /// and naming one with a nil UUID would be the invented identity this lane refuses everywhere
     /// else.
-    Totals(MissionError),
+    Totals(crate::TotalsMismatch),
     /// A row whose identity columns are not UUIDs. Unreachable while the foreign-key check and the
     /// Workspace pass run first.
     Identity {
@@ -186,10 +186,9 @@ impl fmt::Display for MissionStateFault {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Store(_) => formatter.write_str("the Missions could not be read"),
-            Self::Totals(cause) => write!(
+            Self::Totals(totals) => write!(
                 formatter,
-                "the Missions do not agree with the store as a whole: {}",
-                cause.name()
+                "the Missions do not agree with the store as a whole -- {totals}"
             ),
             Self::Row {
                 workspace_id,
@@ -217,7 +216,7 @@ impl fmt::Debug for MissionStateFault {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Store(error) => formatter.debug_tuple("Store").field(error).finish(),
-            Self::Totals(cause) => formatter.debug_tuple("Totals").field(cause).finish(),
+            Self::Totals(totals) => formatter.debug_tuple("Totals").field(totals).finish(),
             Self::Row {
                 workspace_id,
                 mission_id,
@@ -244,7 +243,9 @@ impl std::error::Error for MissionStateFault {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Store(error) => Some(error),
-            Self::Totals(cause) | Self::Row { cause, .. } => Some(cause),
+            Self::Row { cause, .. } => Some(cause),
+            // A `TotalsMismatch` is DATA, not a nested error: it has no source of its own.
+            Self::Totals(_) => None,
             Self::Identity { .. } => None,
         }
     }
@@ -1016,10 +1017,7 @@ pub(crate) fn verify_mission_state(connection: &Connection) -> Result<(), Missio
         })?;
     }
     // Whole-store checks: no row to name, so they are reported as the store fault they are.
-    verify_mission_totals(connection, ids.len()).map_err(|cause| match cause {
-        MissionError::Store(error) => MissionStateFault::Store(error),
-        other => MissionStateFault::Totals(other),
-    })?;
+    verify_mission_totals(connection, ids.len())?;
     Ok(())
 }
 
@@ -1057,29 +1055,41 @@ fn verify_one_mission(
 fn verify_mission_totals(
     connection: &Connection,
     mission_count: usize,
-) -> Result<(), MissionError> {
+) -> Result<(), MissionStateFault> {
     // A condition row for a Mission that does not exist cannot be stored -- the composite foreign
     // key forbids it -- so walking the Missions reaches every row there is.
-    let orphan_conditions: i64 = connection.query_row(
-        "SELECT count(*) FROM mission_success_conditions AS conditions
+    let orphan_conditions: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM mission_success_conditions AS conditions
          WHERE NOT EXISTS (
              SELECT 1 FROM missions
              WHERE missions.workspace_id = conditions.workspace_id
                AND missions.id = conditions.mission_id
          )",
-        [],
-        |row| row.get(0),
-    )?;
+            [],
+            |row| row.get(0),
+        )
+        .map_err(MissionStateFault::Store)?;
     if orphan_conditions != 0 {
-        return Err(MissionError::InvalidStore);
+        return Err(MissionStateFault::Totals(crate::TotalsMismatch {
+            table: "mission_success_conditions (rows whose Mission does not exist)",
+            expected: 0,
+            observed: orphan_conditions.unsigned_abs(),
+        }));
     }
-    let event_count = connection.query_row(
-        "SELECT count(*) FROM events WHERE kind = 'mission.admitted'",
-        [],
-        |row| row.get::<_, i64>(0),
-    )?;
+    let event_count = connection
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind = 'mission.admitted'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(MissionStateFault::Store)?;
     if usize::try_from(event_count) != Ok(mission_count) {
-        return Err(MissionError::InvalidStore);
+        return Err(MissionStateFault::Totals(crate::TotalsMismatch {
+            table: "events (mission.admitted)",
+            expected: mission_count as u64,
+            observed: event_count.unsigned_abs(),
+        }));
     }
     Ok(())
 }
