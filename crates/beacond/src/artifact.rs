@@ -675,7 +675,11 @@ pub(crate) enum ArtifactStateFault {
         cause: ArtifactError,
     },
     /// The supersession relation, which is about the store rather than one row.
-    Totals(ArtifactError),
+    /// A COUNT across the store that does not match the log: numbers, and named as such.
+    Totals(crate::TotalsMismatch),
+    /// The supersession relation itself does not re-prove. Not a count, so it carries no numbers
+    /// -- inventing an `expected`/`observed` for it would be the same lie as an invented row id.
+    Relation(ArtifactError),
     /// A row whose Workspace column is not a UUID. Unreachable while the foreign-key check and the
     /// Workspace pass run first.
     Identity {
@@ -715,9 +719,15 @@ impl fmt::Display for ArtifactStateFault {
                 "Artifact {digest_value} in Workspace {workspace_id} does not re-prove: {}",
                 cause.name()
             ),
-            Self::Totals(cause) => write!(
+            Self::Totals(totals) => {
+                write!(
+                    formatter,
+                    "the Artifacts do not agree with the log -- {totals}"
+                )
+            }
+            Self::Relation(cause) => write!(
                 formatter,
-                "the Artifact supersession relation does not agree with the store: {}",
+                "the Artifact supersession relation does not re-prove: {}",
                 cause.name()
             ),
             Self::Identity {
@@ -737,7 +747,8 @@ impl fmt::Debug for ArtifactStateFault {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Store(error) => formatter.debug_tuple("Store").field(error).finish(),
-            Self::Totals(cause) => formatter.debug_tuple("Totals").field(cause).finish(),
+            Self::Totals(totals) => formatter.debug_tuple("Totals").field(totals).finish(),
+            Self::Relation(cause) => formatter.debug_tuple("Relation").field(cause).finish(),
             Self::Row {
                 workspace_id,
                 digest_value,
@@ -764,7 +775,9 @@ impl std::error::Error for ArtifactStateFault {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Store(error) => Some(error),
-            Self::Totals(cause) | Self::Row { cause, .. } => Some(cause),
+            Self::Relation(cause) | Self::Row { cause, .. } => Some(cause),
+            // A `TotalsMismatch` is DATA, not a nested error.
+            Self::Totals(_) => None,
             Self::Identity { .. } => None,
         }
     }
@@ -1600,7 +1613,11 @@ pub(crate) fn verify_artifact_state(connection: &Connection) -> Result<(), Artif
     drop(statement);
 
     if !rows.is_empty() && !owner_account_exists(connection).map_err(ArtifactStateFault::Store)? {
-        return Err(ArtifactStateFault::Totals(ArtifactError::InvalidStore));
+        return Err(ArtifactStateFault::Totals(crate::TotalsMismatch {
+            table: "operator_accounts (an owner for the stored Artifacts)",
+            expected: 1,
+            observed: 0,
+        }));
     }
 
     for (workspace_id, digest_value) in &rows {
@@ -1619,7 +1636,7 @@ pub(crate) fn verify_artifact_state(connection: &Connection) -> Result<(), Artif
     }
     verify_artifact_supersessions(connection, rows.len()).map_err(|cause| match cause {
         ArtifactError::Store(error) => ArtifactStateFault::Store(error),
-        other => ArtifactStateFault::Totals(other),
+        other => ArtifactStateFault::Relation(other),
     })?;
     Ok(())
 }

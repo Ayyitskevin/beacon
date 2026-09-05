@@ -2451,4 +2451,15 @@ fn startup_refuses_an_unaccounted_proposal_row_and_names_the_row() {
         format!("{refusal:?}").contains(&named),
         "the named fault is not reachable through Debug: {refusal:?}"
     );
+    // kimi's P3-2: pin the fault, and assert the carried TEXT is absent -- the form the
+    // Evaluation and Artifact bars use. Reading the name out of the line proves it is
+    // name-SHAPED; this proves it is the RIGHT name and that no reader sentence rode in with it.
+    assert_eq!(
+        named, "InvalidStore",
+        "the planted row's fault is not the one this bar pins: {line}"
+    );
+    assert!(
+        !line.contains("the stored digest is not the hash"),
+        "a reader's own sentence reached the one-line message: {line}"
+    );
 }
