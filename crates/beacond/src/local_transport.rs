@@ -2128,7 +2128,10 @@ fn wire_error_from_outcome(error: PublishRefusal) -> WireError {
         // Everything below means a stored record did not prove, or a pairing was refused. They are
         // one code on the wire because they are one thing to an operator -- this document cannot be
         // served -- and the detail belongs in the log, not in a renderer string.
-        PublishRefusal::Seam(_)
+        // A document that will not render is the same sentence to an operator: this document
+        // cannot be served. The renderer's own refusal is named in the log, not on the wire.
+        PublishRefusal::Pdf(_)
+        | PublishRefusal::Seam(_)
         | PublishRefusal::NoManifestForCandidate
         | PublishRefusal::Manifest(_)
         | PublishRefusal::ManifestMissionDiffers { .. }

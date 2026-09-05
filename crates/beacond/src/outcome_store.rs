@@ -624,6 +624,48 @@ pub fn verified_manifest_within(
 ///
 /// **Preparing creates no authority.** It completes no Mission, opens no Gate, publishes nothing,
 /// and qualifies nothing for publication. No module may branch on a candidate's existence to
+/// One rendered PDF and the identity of the document it came from.
+///
+/// It carries no bytes of the Markdown: the PDF is the derivative, the export is the source, and a
+/// caller that wants both asks for both. `publication_version_count` rides along for R24.2's
+/// reason -- "version 2" alone cannot say whether it is the current one.
+#[derive(Debug, Clone)]
+pub struct RenderedPdf {
+    bytes: Vec<u8>,
+    candidate_digest: crate::artifact::ArtifactDigest,
+    publication_version: u32,
+    publication_version_count: u32,
+    profile: &'static str,
+}
+
+impl RenderedPdf {
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+
+    /// The candidate Artifact digest the publication CITES -- the document these bytes render.
+    pub fn candidate_digest(&self) -> &crate::artifact::ArtifactDigest {
+        &self.candidate_digest
+    }
+
+    pub fn publication_version(&self) -> u32 {
+        self.publication_version
+    }
+
+    pub fn publication_version_count(&self) -> u32 {
+        self.publication_version_count
+    }
+
+    /// The render profile's name, the same one the PDF's `Creator` carries (R30.2).
+    pub fn profile(&self) -> &'static str {
+        self.profile
+    }
+}
+
 /// derive any of those.
 pub struct OutcomeService {
     accounts: Arc<OperatorAccountService>,
@@ -857,6 +899,52 @@ impl OutcomeService {
                 self.workspace_id,
                 mission_id,
             )?))
+        })
+    }
+
+    /// One version's PDF, rendered from the bytes `export_markdown_version` would return (R30.3).
+    ///
+    /// The seam between 4a and 4b, and deliberately nothing more. The bytes are the export's, the
+    /// access check is the export's, and this method adds no rule of its own -- a second
+    /// authorization here would be a second thing to keep true, and a PDF rendered from anything
+    /// but the exported bytes would be a document that disagrees with the one an operator can save.
+    ///
+    /// The renderer version comes from the MANIFEST, not from a constant: the translator refuses a
+    /// version it does not read, and telling it "v1" regardless of what the document says would
+    /// defeat exactly that refusal. The manifest is the authority because `get_version_within`
+    /// re-proves it on this read.
+    ///
+    /// **The PDF is not stored.** It is a deletable derivative (ADR 0040): rendering is a function
+    /// of the exported bytes and the pinned profile, so there is nothing to cache and nothing to
+    /// invalidate when the profile changes.
+    pub fn render_pdf_version(
+        &self,
+        mission_id: Uuid,
+        publication_version: u32,
+    ) -> Result<RenderedPdf, PublishRefusal> {
+        self.accounts.with_authenticated_store(|connection, _now| {
+            let published = get_version_within(
+                connection,
+                self.workspace_id,
+                mission_id,
+                publication_version,
+            )?;
+            let renderer_version = published.manifest().manifest().renderer_version.clone();
+            let exported = ExportedOutcome::from(published);
+            let bytes = crate::outcome_pdf::render_pdf(
+                exported.bytes(),
+                &renderer_version,
+                &exported.digest().value,
+                &crate::outcome_pdf::BEACON_OUTCOME_1,
+            )
+            .map_err(PublishRefusal::Pdf)?;
+            Ok(RenderedPdf {
+                bytes,
+                candidate_digest: exported.digest().clone(),
+                publication_version: exported.publication_version(),
+                publication_version_count: exported.publication_version_count(),
+                profile: crate::outcome_pdf::BEACON_OUTCOME_1.name,
+            })
         })
     }
 

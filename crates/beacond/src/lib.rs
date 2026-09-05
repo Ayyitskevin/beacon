@@ -161,7 +161,8 @@ pub use outcome_publication::{
 };
 pub use outcome_store::{
     MAX_STORED_MANIFEST_BYTES, ManifestStoreRefusal, OutcomeCandidate, OutcomeService,
-    PrepareRefusal, StoredOutcomeManifest, manifest_reference_id, verified_manifest_within,
+    PrepareRefusal, RenderedPdf, StoredOutcomeManifest, manifest_reference_id,
+    verified_manifest_within,
 };
 pub use outcome_typst::{TypstRefusal, to_typst};
 pub use platform_session::{
