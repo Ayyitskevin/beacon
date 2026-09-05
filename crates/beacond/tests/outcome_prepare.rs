@@ -17,25 +17,25 @@ use std::thread::{self, JoinHandle};
 use beacond::{
     AccessOrigin, AppendixMode, AppendixRequest, ArtifactContext, ArtifactDigest, ArtifactKind,
     ArtifactService, AutonomyProfile, BeaconCapability, COMPLETION_CANONICALIZER,
-    ClassificationActor, ClassificationBasis, ClassificationStoreError, ClassificationSupersedes,
-    CollectionRequest, Collector, CompletionActor, CompletionDisposition, CompletionSupersedes,
-    ConditionOutcome, ConditionResult, ConditionResultRecord, Conflicts, DiagnosticStatus,
-    Evaluation, EvaluationDigest, EvaluationDraft, EvaluationError, EvaluationService,
-    EvaluationSubjectDraft, EvaluationSupersedes, Evaluator, Finding, FindingSeverity, ImpactLevel,
-    InconsistentEvaluation, LocalModelActivationService, LocalModelEndpoint,
-    MISSION_IMPACT_CANONICALIZER, ManifestStoreRefusal, MissionCompletionV1, MissionDraft,
-    MissionImpactClassificationV1, MissionImpactService, MissionMemberDraft, MissionService,
-    NarrativeItem, OperatorAccountService, OperatorSessionPhase, OutcomeCandidate,
+    CheckPreflightService, ClassificationActor, ClassificationBasis, ClassificationStoreError,
+    ClassificationSupersedes, CollectionRequest, Collector, CompletionActor, CompletionDisposition,
+    CompletionSupersedes, ConditionOutcome, ConditionResult, ConditionResultRecord, Conflicts,
+    DeclaredCheck, DiagnosticStatus, Evaluation, EvaluationDigest, EvaluationDraft,
+    EvaluationError, EvaluationService, EvaluationSubjectDraft, EvaluationSupersedes, Evaluator,
+    Finding, FindingSeverity, ImpactLevel, InconsistentEvaluation, LocalModelActivationService,
+    LocalModelEndpoint, MISSION_IMPACT_CANONICALIZER, ManifestStoreRefusal, MissionCompletionV1,
+    MissionDraft, MissionImpactClassificationV1, MissionImpactService, MissionMemberDraft,
+    MissionService, NarrativeItem, OperatorAccountService, OperatorSessionPhase, OutcomeCandidate,
     OutcomeManifestV1, OutcomeService, OutcomeState, PolicyRevisionRef, PredecessorFault,
     PrepareRefusal, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService,
-    ProjectService, Provenance, ProviderFeature, PublicationSeamRefusal, PublishRefusal,
-    ResidentConfigurationService, ResidentLifecycleService, RubricDeclaration, SecretString,
-    SourceDigest, SourceKind, SourceRef, SourcesRefusal, SpendReference,
-    StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig, SuccessCondition,
-    Supervisor, SupervisorError, SupportRef, TeamDraft, TeamLeadAmbiguityRule,
-    TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
-    TeamService, TrackRecordEvidenceKind, TrackRecordRequirement, UnfinishedKind, Verdict,
-    VerifiedSources, VerifiedText, declared_conditions_digest, publication_candidacy,
+    ProjectRepositoryService, ProjectService, Provenance, ProviderFeature, PublicationSeamRefusal,
+    PublishRefusal, RepositoryDraft, RepositorySourceKind, ResidentConfigurationService,
+    ResidentLifecycleService, RubricDeclaration, SecretString, SourceDigest, SourceKind, SourceRef,
+    SourcesRefusal, SpendReference, StarterOrganizationService, StarterResidentDraft, StarterRole,
+    StartupConfig, SuccessCondition, Supervisor, SupervisorError, SupportRef, TeamDraft,
+    TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy,
+    TeamMemberDraft, TeamService, TrackRecordEvidenceKind, TrackRecordRequirement, UnfinishedKind,
+    Verdict, VerifiedSources, VerifiedText, declared_conditions_digest, publication_candidacy,
     record_completion, render, verified_manifest_within,
 };
 use rusqlite::types::Value;
@@ -5292,6 +5292,41 @@ fn classify_in(
 // suite verbatim, names kept, because this is the suite whose fixture chain they were built on.
 // ---------------------------------------------------------------------------------------------
 
+/// A bound repository for this fixture's Project, through the bind path rather than a seeded row.
+///
+/// Only the two R34 spend bars need it: `CheckPreflightService::preflight` refuses
+/// `RepositoryNotBound` before writing anything, and what those bars need is a REAL spend-bearing
+/// Event. The bound path does not exist, so the preflight refuses -- a real outcome, with a real
+/// Receipt and a real `run.preflighted` Event, which is the whole point.
+fn bind_repository(f: &Fixture) {
+    ProjectRepositoryService::new(Arc::clone(&f.accounts), f.workspace_id)
+        .bind(
+            f.project_id,
+            f.charter_revision,
+            None,
+            RepositoryDraft {
+                source_kind: RepositorySourceKind::LocalPath,
+                source: "/home/operator/projects/does-not-exist".to_owned(),
+                base_revision: "0".repeat(40),
+                declared_checks: vec![DeclaredCheck {
+                    name: "cargo-test".to_owned(),
+                    argv: vec!["cargo".to_owned(), "test".to_owned()],
+                    working_directory: ".".to_owned(),
+                }],
+            },
+        )
+        .expect("the repository binds");
+}
+
+/// One real spend-bearing Event: the preflight service's own run, receipt and `run.preflighted`,
+/// written by the path that writes them in production rather than planted.
+fn spend_bearing_run(f: &Fixture) {
+    bind_repository(f);
+    CheckPreflightService::new(Arc::clone(&f.accounts), f.workspace_id)
+        .preflight(f.project_id)
+        .expect("the preflight writes a run, a receipt and its Event");
+}
+
 /// astra's completion builder, verbatim from its C11-D probe.
 fn c11d_completion(
     f: &Fixture,
@@ -5386,6 +5421,9 @@ fn c11d_short_spend_window_is_partial_in_document() {
     let stored = MeasuredSpendService::new(Arc::clone(&f.accounts), f.workspace_id)
         .record(&spend.canonical_bytes().unwrap())
         .expect("C11D.SETUP.SPEND_RECORDED");
+    // R34.4: a Run in the gap is what makes this window short in the sense that matters -- not the
+    // arithmetic distance to the cut, which R32.2 and R33 each got wrong in turn.
+    spend_bearing_run(&f);
     let record = c11d_completion(
         &f,
         SpendReference::Recorded {
@@ -5417,35 +5455,25 @@ fn c11d_short_spend_window_is_partial_in_document() {
     );
 }
 
-/// R32.2's required positive control, and the measurement that says it cannot be written.
+/// R34's positive control: `Measured` on the real path -- measure AFTER the last Run, then complete.
 ///
-/// R32.2 names `coverage_to == boundary` as the reachable `Measured` and requires it as the control
-/// that stops "always partial" from passing astra's bar. It is not reachable, and the reason is two
-/// rules that were already there, each right on its own:
+/// The gap then holds only the spend's own `spend.measured` Event and the completion's, and neither
+/// carries spend. Without this, "always partial" passes astra's bar above and R21.3's last sentence
+/// ("Absent / partial / complete stay distinct") is gone -- which is what R32.2's and R33's
+/// arithmetic each did in turn.
 ///
-/// * the spend owner refuses a window ending past the last stored Event
-///   (`CoverageBeyondStore`, `spend.rs:1401`), so `coverage_to <= S - 1`, where `S` is the sequence
-///   of the spend's own `spend.recorded` Event;
-/// * the collector refuses a spend recorded after the cut (`AfterBoundary`), so `S <= boundary`.
-///
-/// Together: `coverage_to <= S - 1 < S <= boundary`. **A measurement can never cover its own
-/// recording**, so with R32.2's comparison every `Measured` record is partial at the cut and
-/// `Measured` is unreachable in a manifest -- which is what R21.3's last sentence ("Absent /
-/// partial / complete stay distinct") forbids. Reported rather than worked around: pre-labelling a
-/// fixture, or comparing against something the ruling did not name, would hide the seam.
-///
-/// So this pins the impossibility instead. It goes RED the day either rule changes, which is
-/// exactly when `Measured` becomes reachable and R32.2's control can be written for real.
+/// It deliberately keeps `coverage_to < boundary`: under R34 that is not what makes a window
+/// partial, so a control that also closed the arithmetic gap would prove nothing about the rule.
 #[test]
-fn a_spend_window_cannot_reach_the_boundary_today() {
+fn a_spend_measured_after_the_last_run_reaches_the_manifest_as_measured() {
     use beacond::{
-        MeasuredSpendService, MeasuredSpendV1, SpendLine, SpendMeasurement, SpendOrigin,
-        SpendRecordError, SpendSupersedes, SpendTotals,
+        MeasuredSpendService, MeasuredSpendV1, SpendLine, SpendMeasurement, SpendMeasurementKind,
+        SpendOrigin, SpendSupersedes, SpendTotals,
     };
-    let f = admitted_mission("r32-spend-unreachable");
+    let f = admitted_mission("r34-measured-after-run");
     f.classify(ImpactLevel::High);
-    // The only sequence that could equal a boundary at or after this spend's own Event.
-    let cut = f.latest_event_seq() + 1;
+    // The Run comes FIRST: this is the ordering an honest ledger has -- measure what has happened.
+    spend_bearing_run(&f);
     let spend = MeasuredSpendV1 {
         workspace_id: f.workspace_id,
         mission_id: f.mission_id,
@@ -5454,7 +5482,7 @@ fn a_spend_window_cannot_reach_the_boundary_today() {
         origin: SpendOrigin::DaemonLedger,
         measured_at_ms: 1_788_400_000_000,
         coverage_from_event_seq: 1,
-        coverage_to_event_seq: cut,
+        coverage_to_event_seq: f.latest_event_seq(),
         measurement: SpendMeasurement::Measured(SpendTotals {
             counted_units: 1,
             lines: vec![SpendLine {
@@ -5465,18 +5493,36 @@ fn a_spend_window_cannot_reach_the_boundary_today() {
         }),
         supersedes: SpendSupersedes::None,
     };
-    let refusal = MeasuredSpendService::new(Arc::clone(&f.accounts), f.workspace_id)
+    let stored = MeasuredSpendService::new(Arc::clone(&f.accounts), f.workspace_id)
         .record(&spend.canonical_bytes().unwrap())
-        .expect_err("a window reaching the cut is refused by the spend owner");
+        .expect("the spend records through its owner");
+    let record = c11d_completion(
+        &f,
+        SpendReference::Recorded {
+            spend_id: spend.spend_id,
+            spend_version: spend.version,
+            spend_sha256: digest_bytes(&stored.digest().value),
+        },
+        vec![],
+    );
     assert!(
-        matches!(
-            refusal,
-            SpendRecordError::CoverageBeyondStore {
-                claimed_to_event_seq,
-                last_event_seq,
-            } if claimed_to_event_seq == cut && last_event_seq == cut - 1
-        ),
-        "the window was refused for some other reason, so the algebra above is not what blocks \
-         R32.2's control: {refusal:?}"
+        spend.coverage_to_event_seq < record.boundary_event_seq,
+        "the window must still end before the cut, or this control proves nothing about R34"
+    );
+    record_completion(&mut f.store.connect(), &record).expect("the completion records");
+    let candidate = f
+        .outcomes
+        .prepare_for_mission(f.mission_id, AppendixRequest::PolicyDefault)
+        .expect("the candidate prepares");
+    let manifest = f.outcomes.manifest(&candidate.manifest_digest).unwrap();
+    assert_eq!(
+        manifest
+            .manifest()
+            .spend_ref
+            .verified()
+            .unwrap()
+            .measurement,
+        SpendMeasurementKind::Measured,
+        "nothing spend-bearing is in the gap, so the measurement covers the Mission"
     );
 }
