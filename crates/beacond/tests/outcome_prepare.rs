@@ -5325,19 +5325,13 @@ fn c11d_completion(
     }
 }
 
-/// Today's behaviour, pinned before it changes (R32.1 removes it).
-///
-/// `record_completion` refuses ANY non-empty `delivered_artifacts` and examines nothing about them
-/// — not the digest's form, not the Artifact's kind, not its scope, not whether it resolves. This
-/// test is that sentence made executable: the Artifact it names is real, Mission-scoped, recorded
-/// through its own owner in the line above, and the refusal is identical to the one a garbage
-/// digest would get. So the refusal is not a verification that a caller could satisfy; it is a
-/// closed door, and astra's finding is not a fixture artefact.
-///
-/// It is deleted by the commit that opens the door, and replaced by astra's own probe.
+/// astra's C11-D probe, verbatim (OV1-opus2-report.md, R32.1). It was RED on main because
+/// `record_completion` refused every delivery unconditionally; the refusal is gone, and a cited
+/// delivery is now verified where the rule already lived — in the collector, at the boundary.
 #[test]
-fn record_completion_refuses_every_delivery_unconditionally() {
-    let f = admitted_mission("r32-delivery-today");
+fn c11d_recorded_delivery_can_complete_through_its_owner() {
+    let f = admitted_mission("c11d-delivery");
+    f.classify(ImpactLevel::High);
     let artifact = f
         .artifacts()
         .record(
@@ -5351,27 +5345,11 @@ fn record_completion_refuses_every_delivery_unconditionally() {
             f.configuration_id,
             None,
         )
-        .expect("a real Mission-scoped Artifact records through its owner");
-
-    let real = c11d_completion(
+        .expect("C11D.SETUP.ARTIFACT_RECORDED");
+    let record = c11d_completion(
         &f,
-        SpendReference::NotMeasured("not measured".to_owned()),
+        SpendReference::NotMeasured("not measured".into()),
         vec![digest_bytes(&artifact.digest().value)],
     );
-    let garbage = c11d_completion(
-        &f,
-        SpendReference::NotMeasured("not measured".to_owned()),
-        vec![[0x5a; 32]],
-    );
-
-    assert_eq!(
-        record_completion(&mut f.store.connect(), &real).unwrap_err(),
-        beacond::CompletionReadRefusal::NoArtifactEntity,
-        "a real, resolvable, Mission-scoped delivery was refused"
-    );
-    assert_eq!(
-        record_completion(&mut f.store.connect(), &garbage).unwrap_err(),
-        beacond::CompletionReadRefusal::NoArtifactEntity,
-        "and a digest that resolves to nothing gets the same answer, which is the point"
-    );
+    record_completion(&mut f.store.connect(), &record).expect("C11.04.DELIVERED_ARTIFACT_ACCEPTED");
 }

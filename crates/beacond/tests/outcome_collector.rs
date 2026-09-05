@@ -1765,10 +1765,10 @@ fn collector_refuses_unmeasured_spend_and_preserves_declared_coverage() {
 /// The arm nothing exercised is the one that separates **"we cannot read them yet"** from **"there
 /// were none"** — and the second is a claim an Outcome would render as fact.
 ///
-/// The row is inserted directly, and that is the finding underneath the finding: `NoArtifactEntity`
-/// is enforced on the WRITE path only (`record_completion`), never in `verified_completion_within`.
-/// A stored delivery therefore reads back as a perfectly valid completion, and this arm of the
-/// collector is the only thing between it and a rendered document.
+/// Since R32.1 the completion is written through the real writer: neither `record_completion` nor
+/// `verified_completion_within` has a delivered-Artifact rule, so a stored delivery reads back as a
+/// perfectly valid completion and this arm of the collector is the only thing between it and a
+/// rendered document.
 #[test]
 fn a_completion_that_delivered_artifacts_is_refused_rather_than_reported_as_delivering_none() {
     let fixture = admitted("delivered-artifact", vec!["Gates pass".to_owned()]);
@@ -1780,69 +1780,17 @@ fn a_completion_that_delivered_artifacts_is_refused_rather_than_reported_as_deli
     );
     record.delivered_artifacts = vec![[7_u8; 32]];
 
-    // The write path refuses it -- which is why no test had one, and why the read path has to be
-    // proved separately rather than assumed to be unreachable.
+    // The write path STORES it, without checking it (R19.1, R32.1). It used to refuse, and this
+    // test used to hand-insert the completion, its condition rows and its Event to get around
+    // that; going through the real writer is what R32.1 makes possible, and it removes three
+    // hand-written INSERTs that had to stay in step with the writer's own.
     let mut connection = fixture.connection();
-    record_completion(&mut connection, &record)
-        .expect_err("the write path refuses a delivery nothing can verify");
+    let digest = record_completion(&mut connection, &record)
+        .expect("the write path stores a cited delivery without checking it");
 
-    let bytes = record.canonical_bytes().unwrap();
-    let digest = sha256_hex(&bytes);
-    let member = &fixture.mission.members[0];
-    connection
-        .execute(
-            "INSERT INTO mission_completions (
-                 workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
-                 canonical_bytes, completion_id, mission_id, project_id, accountable_resident_id,
-                 accountable_configuration_id, boundary_event_seq, disposition, completed_at_ms
-             ) VALUES (?1, 'sha256', 'beacon.mission_completion.v1', ?2, ?3, ?4, ?5, ?6, ?7, ?8,
-                       ?9, 'concluded', 9000)",
-            params![
-                fixture.store.workspace_id.to_string(),
-                digest,
-                bytes,
-                record.completion_id.to_string(),
-                fixture.mission.id.to_string(),
-                fixture.mission.project_id.to_string(),
-                member.resident_id.to_string(),
-                member.admission_configuration_id.to_string(),
-                i64::try_from(boundary).unwrap(),
-            ],
-        )
-        .unwrap();
-    connection
-        .execute(
-            "INSERT INTO mission_completion_conditions (
-                 workspace_id, completion_digest, mission_id, condition_ordinal, outcome
-             ) VALUES (?1, ?2, ?3, 0, 'met')",
-            params![
-                fixture.store.workspace_id.to_string(),
-                digest,
-                fixture.mission.id.to_string(),
-            ],
-        )
-        .unwrap();
-    connection
-        .execute(
-            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-             VALUES (?1, 'mission.completed', ?2, 9000)",
-            params![
-                fixture.store.workspace_id.to_string(),
-                serde_json::json!({
-                    "workspaceId": fixture.store.workspace_id.to_string(),
-                    "missionId": fixture.mission.id.to_string(),
-                    "completionId": record.completion_id.to_string(),
-                    "digestValue": digest,
-                    "canonicalBytesBase64": data_encoding::BASE64.encode(&bytes),
-                })
-                .to_string(),
-            ],
-        )
-        .unwrap();
-
-    // The owning reader accepts it: `NoArtifactEntity` is a write-path rule, not a read-path one.
-    // Asserted rather than assumed, because if that ever changes this test stops proving the
-    // collector's arm and silently becomes a test of the reader instead.
+    // The owning reader has no delivered-Artifact rule either. Asserted rather than assumed,
+    // because if that ever changes this test stops proving the collector's arm and silently
+    // becomes a test of the reader instead.
     let read =
         beacond::verified_completion_within(&connection, fixture.store.workspace_id, &digest)
             .expect("the reader has no delivered-Artifact rule");
@@ -1860,6 +1808,59 @@ fn a_completion_that_delivered_artifacts_is_refused_rather_than_reported_as_deli
         CollectorRefusal::Absent {
             kind: "artifact",
             id: HEXLOWER.encode(&[7_u8; 32]),
+        }
+    );
+}
+
+/// R32.1's negative: the write path no longer verifies a delivery, so this arm carries the rule.
+///
+/// The test above covers a delivery that resolves to NOTHING. This one covers the case that only
+/// exists because deliveries are now writable: a digest that resolves perfectly well, to an
+/// Artifact of a DIFFERENT Mission. Nothing about it is malformed, and nothing on the write path
+/// looks — the completion records cleanly through `record_completion`, which is what makes this
+/// arm load-bearing rather than defensive.
+#[test]
+fn a_delivery_naming_another_missions_artifact_aborts_collection_by_name() {
+    let fixture = admitted("delivered-other-mission", vec!["Gates pass".to_owned()]);
+    let other = second_mission(&fixture);
+    let member = &fixture.mission.members[0];
+    let artifact = ArtifactService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+        .record(
+            ArtifactKind::OutcomeDocument,
+            b"# The other Mission's document\n",
+            ArtifactContext::Mission {
+                project_id: fixture.project.id,
+                mission_id: other,
+            },
+            member.resident_id,
+            member.admission_configuration_id,
+            None,
+        )
+        .expect("a real Artifact for the other Mission records");
+
+    let boundary = newest_event(&fixture.store);
+    let mut record = fixture.completion(
+        boundary,
+        vec![ConditionOutcome::Met],
+        SpendReference::NotMeasured("no ledger was read".to_owned()),
+    );
+    record.delivered_artifacts = vec![digest_bytes(&artifact.digest().value)];
+
+    let mut connection = fixture.connection();
+    let digest = beacond::record_completion(&mut connection, &record)
+        .expect("the write path stores a cited delivery without checking it (R19.1, R32.1)");
+
+    assert_eq!(
+        Collector::new(&connection, fixture.store.workspace_id)
+            .collect(&CollectionRequest {
+                completion_digest: Some(digest),
+                ..CollectionRequest::default()
+            })
+            .expect_err("the delivered Artifact belongs to another Mission"),
+        CollectorRefusal::ArtifactOutOfScope {
+            id: artifact.digest().value.clone(),
+            declared_mission: Some(other),
+            expected_mission: fixture.mission.id,
         }
     );
 }
@@ -2213,7 +2214,7 @@ fn collector_reconciles_delivered_artifacts_and_unfinished_work_with_completion(
     delivered.delivered_artifacts = vec![[7_u8; 32]];
     let mut connection = delivering.connection();
     record_completion(&mut connection, &delivered)
-        .expect_err("a delivered Artifact needs an Artifact entity to verify it against");
+        .expect("the write path stores a cited delivery without checking it (R19.1, R32.1)");
     assert_eq!(
         Collector::new(&connection, delivering.store.workspace_id)
             .artifact(&HEXLOWER.encode(&[7_u8; 32]), delivering.mission.id)
