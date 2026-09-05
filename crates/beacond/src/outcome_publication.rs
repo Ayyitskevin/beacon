@@ -750,3 +750,46 @@ fn load_row(
         evaluation_digest,
     })
 }
+
+/// Reconcile every stored publication at startup (R18.7 shape, sol1's P0).
+///
+/// **It enumerates `outcome_publications` by the relation's own key.** Enumerating Missions and
+/// asking each for its publications would visit only the Missions something already reaches, which
+/// is the one set that never contained the forged row -- a startup pass keyed on the wrong column
+/// is a pass that cannot fail. The same lesson `verify_manifest_state` records, applied to the
+/// relation.
+///
+/// What it re-proves is exactly what `get` re-proves, through the same function: the manifest, the
+/// candidate, the Evaluation and its subject, the qualifying verdict, the Mission binding of every
+/// cited record, and the contiguity of the history the row belongs to. There is no second spelling
+/// of those rules here -- a startup pass that restated them would be a second thing to keep true,
+/// and the two would drift.
+///
+/// Why it is needed even though `publish` refuses the same rows: `publish` is the writer, and a
+/// row nothing wrote through `publish` has never met it. Before this pass, a forged relation
+/// survived reopen as `Ready` while the public writer refused to create it -- the store agreeing
+/// with itself only for as long as nobody wrote to it directly.
+pub(crate) fn verify_publication_state(connection: &Connection) -> Result<(), PublishRefusal> {
+    let mut statement = connection.prepare(
+        "SELECT workspace_id, mission_id, publication_version FROM outcome_publications
+         ORDER BY workspace_id, mission_id, publication_version",
+    )?;
+    let rows: Vec<(String, String, i64)> = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+
+    for (workspace_id, mission_id, publication_version) in &rows {
+        let workspace_id = Uuid::parse_str(workspace_id).map_err(|_| {
+            PublishRefusal::Unverified("a publication's Workspace id is not a UUID".to_owned())
+        })?;
+        let mission_id = Uuid::parse_str(mission_id).map_err(|_| {
+            PublishRefusal::Unverified("a publication's Mission id is not a UUID".to_owned())
+        })?;
+        let version = u32::try_from(*publication_version).map_err(|_| {
+            PublishRefusal::Unverified("a publication version is out of range".to_owned())
+        })?;
+        get_version_within(connection, workspace_id, mission_id, version)?;
+    }
+    Ok(())
+}
