@@ -2058,7 +2058,10 @@ fn kimi_startup_refuses_a_candidate_with_two_recording_events() {
         .unwrap();
     let boot = astra_boot(&fixture);
     eprintln!("KIMI_DUP_EVENT boot={boot:?}");
-    assert!(boot.is_err(), "startup accepted a doubly-recorded candidate");
+    assert!(
+        boot.is_err(),
+        "startup accepted a doubly-recorded candidate"
+    );
 }
 
 #[test]
@@ -2067,33 +2070,36 @@ fn kimi_a_manifest_id_collision_is_a_loud_refusal_not_a_merge() {
     let prepared = fixture.outcomes.prepare(&manifest, &sources).unwrap();
     let connection = fixture.store.connect();
     let row = |digest: &str| {
-        connection.query_row(
-            "SELECT canonical_bytes, manifest_id, mission_id, completion_digest,
+        connection
+            .query_row(
+                "SELECT canonical_bytes, manifest_id, mission_id, completion_digest,
                     canonicalizer_version, renderer_version, boundary_event_seq,
                     candidate_artifact_digest
              FROM outcome_manifests WHERE manifest_digest = ?1",
-            params![digest],
-            |row| {
-                Ok((
-                    row.get::<_, Vec<u8>>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, i64>(6)?,
-                    row.get::<_, String>(7)?,
-                ))
-            },
-        )
-        .unwrap()
+                params![digest],
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, String>(7)?,
+                    ))
+                },
+            )
+            .unwrap()
     };
     let real = row(&prepared.manifest_digest);
     // A second digest agreeing in its first sixteen bytes -- the derived manifest_id collides.
     let colliding = format!("{}{}", &prepared.manifest_digest[..32], "f".repeat(32));
     assert_ne!(colliding, prepared.manifest_digest);
     assert_eq!(
-        beacond::manifest_reference_id(&colliding).unwrap().to_string(),
+        beacond::manifest_reference_id(&colliding)
+            .unwrap()
+            .to_string(),
         real.1,
         "the probe's premise: the derived identity collides"
     );
