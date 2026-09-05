@@ -3475,3 +3475,340 @@ fn a_real_evaluation_cited_under_a_condition_collects_with_its_envelope() {
     );
     assert_eq!(condition.support_count(), condition.support.len());
 }
+
+/// The digest bytes a `SupportRef` carries, from a verified record's hex digest.
+fn digest_bytes(hex: &str) -> [u8; 32] {
+    let mut bytes = [0_u8; 32];
+    bytes.copy_from_slice(&HEXLOWER.decode(hex.as_bytes()).unwrap());
+    bytes
+}
+
+/// A Receipt a completion can cite as support: `seeded_receipt`'s run and receipt rows, plus the
+/// `run.executed` Event that positions the run in the log -- the seeded rows alone have no Event,
+/// and a Receipt with no Event is `Unpositioned`, which is the wrong refusal to test against.
+/// `bound` says the fixture already bound repository revision 1 through `repository_revision()`,
+/// so only the run and receipt rows are inserted.
+fn receipt_for_support(fixture: &Admitted, bound: bool) -> (Uuid, String) {
+    let run_id = Uuid::new_v4();
+    let connection = fixture.connection();
+    if !bound {
+        connection
+            .execute(
+                "INSERT INTO project_repository_revisions (
+                     workspace_id, project_id, revision, charter_revision, source_kind, source,
+                     base_revision, declared_checks_json, author_kind, authored_at_ms
+                 ) VALUES (?1, ?2, 1, ?3, 'local_path', '/private/beacon/repo',
+                           '0123456789012345678901234567890123456789',
+                           '[{\"name\":\"unit\"}]', 'operator', 0)",
+                params![
+                    fixture.store.workspace_id.to_string(),
+                    fixture.project.id.to_string(),
+                    fixture.project.charter.revision
+                ],
+            )
+            .unwrap();
+    }
+    connection
+        .execute(
+            "INSERT INTO runs (
+                 workspace_id, id, project_id, kind, repository_revision, charter_revision,
+                 state, lease_expires_at_ms, started_at_ms, ended_at_ms
+             ) VALUES (?1, ?2, ?3, 'check_preflight', 1, ?4, 'verified', 0, 10, 11)",
+            params![
+                fixture.store.workspace_id.to_string(),
+                run_id.to_string(),
+                fixture.project.id.to_string(),
+                fixture.project.charter.revision
+            ],
+        )
+        .unwrap();
+    let receipt_json = receipt_body(fixture.store.workspace_id, fixture.project.id, run_id);
+    connection
+        .execute(
+            "INSERT INTO receipts (
+                 workspace_id, run_id, version, outcome, receipt_json, recorded_at_ms
+             ) VALUES (?1, ?2, 1, 'verified', ?3, 11)",
+            params![
+                fixture.store.workspace_id.to_string(),
+                run_id.to_string(),
+                receipt_json,
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+             VALUES (?1, 'run.executed', ?2, 11)",
+            params![
+                fixture.store.workspace_id.to_string(),
+                json!({ "runId": run_id.to_string() }).to_string(),
+            ],
+        )
+        .unwrap();
+    (run_id, receipt_json)
+}
+
+/// A completion for this Mission at `boundary` whose one condition cites `support`, recorded.
+/// One per fixture: the store admits one completion per Mission.
+fn record_completion_with_support(
+    fixture: &Admitted,
+    boundary: u64,
+    support: Vec<SupportRef>,
+) -> String {
+    let mut completion = fixture.completion(
+        boundary,
+        vec![ConditionOutcome::Met],
+        SpendReference::NotMeasured("no ledger was read".to_owned()),
+    );
+    completion.condition_results[0].support = support;
+    fixture.record(&completion)
+}
+
+fn collect_completion(
+    fixture: &Admitted,
+    digest: String,
+) -> Result<beacond::CollectedSources, CollectorRefusal> {
+    let connection = fixture.connection();
+    Collector::new(&connection, fixture.store.workspace_id).collect(&CollectionRequest {
+        completion_digest: Some(digest),
+        ..CollectionRequest::default()
+    })
+}
+
+/// A Proposal of this Mission and an Evaluation of it by the second member, recorded now.
+fn proposal_and_evaluation(fixture: &Admitted) -> (beacond::Proposal, beacond::Evaluation) {
+    let proposal = ProposalService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+        .submit(&fixture.proposal_record().bytes())
+        .expect("the Proposal records");
+    let evaluator = &fixture.mission.members[1];
+    let evaluation =
+        EvaluationService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+            .record(EvaluationDraft {
+                subject: EvaluationSubjectDraft::Proposal(proposal.digest().value.clone()),
+                evaluator: Evaluator {
+                    resident_id: evaluator.resident_id,
+                    configuration_id: evaluator.admission_configuration_id,
+                },
+                rubric: RubricDeclaration {
+                    id: "security-review-v1".to_owned(),
+                    version: 1,
+                    canonicalizer: "beacon.rubric.v1".to_owned(),
+                    sha256: sha256_hex(&[0x20_u8; 32]),
+                },
+                cited_runs: Vec::new(),
+                verdict: Verdict::Meets,
+                findings: vec![],
+                conflicts: Conflicts::None,
+                rationale: "The gate passed on the exact Proposal bytes.".to_owned(),
+                supersedes: EvaluationSupersedes::None,
+            })
+            .expect("the Evaluation records");
+    (proposal, evaluation)
+}
+
+/// Every kind the owner's vocabulary has, under one condition, each collected as the value its
+/// own reader returned: the three digest kinds as `CollectedDigest`, the Receipt as its own
+/// `(run, version, checksum)` identity. The record's order is the set's order (kind, then key).
+#[test]
+fn every_support_kind_collects_through_its_owner_under_one_condition() {
+    let fixture = admitted("support-every-kind", vec!["Gates pass".to_owned()]);
+    fixture.repository_revision();
+    fixture.policy_revision();
+    let artifact = fixture.record_mission_artifact(b"# The delivered document\n");
+    let (run_id, receipt_json) = receipt_for_support(&fixture, true);
+    let (proposal, evaluation) = proposal_and_evaluation(&fixture);
+    let ruling = RulingService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+        .rule(
+            &proposal.digest().value,
+            RulingDecision::Approve,
+            "The change is scoped to one test file and is reversible.",
+            RulingSupersedes::None,
+        )
+        .expect("the Ruling records");
+
+    let digest = record_completion_with_support(
+        &fixture,
+        newest_event(&fixture.store),
+        vec![
+            SupportRef::Artifact(digest_bytes(&artifact.digest().value)),
+            SupportRef::Receipt {
+                run_id,
+                receipt_version: 1,
+                receipt_bytes_sha256: sha256_bytes(receipt_json.as_bytes()),
+            },
+            SupportRef::Evaluation(digest_bytes(&evaluation.digest().value)),
+            SupportRef::Ruling(digest_bytes(&ruling.digest().value)),
+        ],
+    );
+    let collected = collect_completion(&fixture, digest).expect("every kind verifies");
+    let condition = &collected.completion.unwrap().condition_results[0];
+    let cited = |kind: SourceKind, digest_value: &str| CollectedDigest {
+        kind,
+        workspace_id: fixture.store.workspace_id,
+        digest_value: digest_value.to_owned(),
+    };
+    assert_eq!(
+        condition.support,
+        vec![
+            CollectedSupport::Artifact(cited(SourceKind::Artifact, &artifact.digest().value)),
+            CollectedSupport::Receipt(beacond::ReceiptRef {
+                workspace_id: fixture.store.workspace_id,
+                run_uuid: run_id,
+                receipt_version: 1,
+                outcome_checksum: sha256_hex(receipt_json.as_bytes()),
+            }),
+            CollectedSupport::Evaluation(cited(SourceKind::Evaluation, &evaluation.digest().value)),
+            CollectedSupport::Ruling(cited(SourceKind::Ruling, &ruling.digest().value)),
+        ]
+    );
+    assert_eq!(condition.support_count(), 4);
+}
+
+/// The decoy: the completion's word for its support disagrees with the owner's record while the
+/// record itself is correct. A cited Receipt whose checksum is over bytes the store never held, or
+/// whose version the store does not hold, is refused by name; an Evaluation digest nothing stored
+/// is absent, not blank. One store per case: the store admits one completion per Mission.
+#[test]
+fn a_lie_in_the_completions_support_is_refused_while_the_owned_record_is_correct() {
+    let fixture = admitted("support-decoy-checksum", vec!["Gates pass".to_owned()]);
+    let (run_id, _) = receipt_for_support(&fixture, false);
+    let digest = record_completion_with_support(
+        &fixture,
+        newest_event(&fixture.store),
+        vec![SupportRef::Receipt {
+            run_id,
+            receipt_version: 1,
+            receipt_bytes_sha256: sha256_bytes(b"{\"outcome\":\"verified\",\"forged\":true}"),
+        }],
+    );
+    assert_eq!(
+        collect_completion(&fixture, digest).expect_err("the completion lies about the Receipt"),
+        CollectorRefusal::CitedIdentityMismatch {
+            kind: "receipt",
+            id: run_id.hyphenated().to_string(),
+        }
+    );
+
+    let fixture = admitted("support-decoy-version", vec!["Gates pass".to_owned()]);
+    let (run_id, receipt_json) = receipt_for_support(&fixture, false);
+    let digest = record_completion_with_support(
+        &fixture,
+        newest_event(&fixture.store),
+        vec![SupportRef::Receipt {
+            run_id,
+            receipt_version: 2,
+            receipt_bytes_sha256: sha256_bytes(receipt_json.as_bytes()),
+        }],
+    );
+    assert_eq!(
+        collect_completion(&fixture, digest).expect_err("version 2 is not what the store holds"),
+        CollectorRefusal::CitedIdentityMismatch {
+            kind: "receipt",
+            id: run_id.hyphenated().to_string(),
+        }
+    );
+
+    let fixture = admitted("support-decoy-absent", vec!["Gates pass".to_owned()]);
+    let digest = record_completion_with_support(
+        &fixture,
+        newest_event(&fixture.store),
+        vec![SupportRef::Evaluation([0x5a; 32])],
+    );
+    assert_eq!(
+        collect_completion(&fixture, digest).expect_err("nothing stored has that digest"),
+        CollectorRefusal::Absent {
+            kind: "evaluation",
+            id: HEXLOWER.encode(&[0x5a; 32]),
+        }
+    );
+}
+
+/// Support recorded AFTER the completion's boundary is not part of this Outcome: the record is
+/// real, verified and this Mission's, and it is refused as after the boundary -- an Evaluation by
+/// the Event that carries its bytes, an Artifact by the creation cursor its owner re-derives --
+/// never as absent.
+#[test]
+fn support_recorded_after_the_boundary_is_refused_by_name() {
+    let fixture = admitted(
+        "support-after-boundary-evaluation",
+        vec!["Gates pass".to_owned()],
+    );
+    fixture.repository_revision();
+    fixture.policy_revision();
+    let boundary = newest_event(&fixture.store);
+    let (_, evaluation) = proposal_and_evaluation(&fixture);
+    let digest = record_completion_with_support(
+        &fixture,
+        boundary,
+        vec![SupportRef::Evaluation(digest_bytes(
+            &evaluation.digest().value,
+        ))],
+    );
+    match collect_completion(&fixture, digest).expect_err("after the boundary") {
+        CollectorRefusal::AfterBoundary {
+            kind: "evaluation",
+            id,
+            boundary_event_seq,
+            ..
+        } => {
+            assert_eq!(id, evaluation.digest().value);
+            assert_eq!(boundary_event_seq, boundary);
+        }
+        other => panic!("{other:?}"),
+    }
+
+    let fixture = admitted(
+        "support-after-boundary-artifact",
+        vec!["Gates pass".to_owned()],
+    );
+    let boundary = newest_event(&fixture.store);
+    let late = fixture.record_mission_artifact(b"# Delivered after the cut\n");
+    let digest = record_completion_with_support(
+        &fixture,
+        boundary,
+        vec![SupportRef::Artifact(digest_bytes(&late.digest().value))],
+    );
+    match collect_completion(&fixture, digest).expect_err("after the boundary") {
+        CollectorRefusal::AfterBoundary {
+            kind: "artifact",
+            id,
+            boundary_event_seq,
+            ..
+        } => {
+            assert_eq!(id, late.digest().value);
+            assert_eq!(boundary_event_seq, boundary);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Support scoped elsewhere is refused with the scope the record's own bytes declare: an Artifact
+/// with no Mission context cannot support this Mission's condition, and the refusal says so.
+#[test]
+fn support_about_another_mission_is_refused_by_its_own_bytes() {
+    let fixture = admitted("support-cross-mission", vec!["Gates pass".to_owned()]);
+    let member = &fixture.mission.members[0];
+    let unscoped = ArtifactService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+        .record(
+            ArtifactKind::OutcomeDocument,
+            b"# A Workspace-scoped document\n",
+            ArtifactContext::None,
+            member.resident_id,
+            member.admission_configuration_id,
+            None,
+        )
+        .expect("a Workspace-scoped Artifact is a valid Artifact");
+    let digest = record_completion_with_support(
+        &fixture,
+        newest_event(&fixture.store),
+        vec![SupportRef::Artifact(digest_bytes(&unscoped.digest().value))],
+    );
+    assert_eq!(
+        collect_completion(&fixture, digest).expect_err("nothing places it in this Mission"),
+        CollectorRefusal::ArtifactOutOfScope {
+            id: unscoped.digest().value.clone(),
+            declared_mission: None,
+            expected_mission: fixture.mission.id,
+        }
+    );
+}
