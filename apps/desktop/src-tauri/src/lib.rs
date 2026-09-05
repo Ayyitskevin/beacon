@@ -8,14 +8,15 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use beacond::{
-    AccessOrigin, BeaconCapability, BeaconCapabilityDescriptor, LiveDataEncryptionReport,
-    LocalErrorCode, LocalModelActivation, LocalModelActivationReview, LocalModelDiscoveryReport,
-    LocalSupervisorClient, LocalTransportError, MissionDraft, MissionView, OperatorSessionPolicy,
-    OperatorSessionStatus, PlatformSessionMonitorStatus, PreflightReceipt, ProjectCharter,
-    ProjectCharterDraft, ProjectDraft, ProjectPolicy, ProjectPolicyDraft, ProjectRepository,
-    ProjectSummary, ProjectView, ProviderFeature, RecentReceiptPage, RepositoryDraft,
-    ResidentAgentView, ResidentConfiguration, SampleProjectInstallResult, SampleProjectStatus,
-    SecretString, StarterOrganizationView, StarterResidentDraft, TeamDraft, TeamView,
+    AccessOrigin, BeaconCapability, BeaconCapabilityDescriptor, ExportedOutcome,
+    LiveDataEncryptionReport, LocalErrorCode, LocalModelActivation, LocalModelActivationReview,
+    LocalModelDiscoveryReport, LocalSupervisorClient, LocalTransportError, MissionDraft,
+    MissionView, OperatorSessionPolicy, OperatorSessionStatus, PlatformSessionMonitorStatus,
+    PreflightReceipt, ProjectCharter, ProjectCharterDraft, ProjectDraft, ProjectPolicy,
+    ProjectPolicyDraft, ProjectRepository, ProjectSummary, ProjectView, ProviderFeature,
+    PublicationSummary, RecentReceiptPage, RepositoryDraft, ResidentAgentView,
+    ResidentConfiguration, SampleProjectInstallResult, SampleProjectStatus, SecretString,
+    StarterOrganizationView, StarterResidentDraft, TeamDraft, TeamView,
     initialize_local_auth_token,
 };
 use serde::Serialize;
@@ -534,7 +535,8 @@ impl From<LocalTransportError> for CommandError {
             | LocalTransportError::RecentReceipt(_)
             | LocalTransportError::SampleProject(_)
             | LocalTransportError::ResourceDiscovery(_)
-            | LocalTransportError::LocalModelActivation(_) => (
+            | LocalTransportError::LocalModelActivation(_)
+            | LocalTransportError::Outcome(_) => (
                 "account_service_unavailable",
                 "The local account service is unavailable.",
                 None,
@@ -809,6 +811,27 @@ fn project_policy_history_value(
     state
         .supervisor
         .project_policy_history(project_id)
+        .map_err(Into::into)
+}
+
+fn mission_publications_value(
+    state: &DesktopState,
+    mission_id: uuid::Uuid,
+) -> Result<Vec<PublicationSummary>, CommandError> {
+    state
+        .supervisor
+        .mission_publications(mission_id)
+        .map_err(Into::into)
+}
+
+fn outcome_document_value(
+    state: &DesktopState,
+    mission_id: uuid::Uuid,
+    publication_version: Option<u32>,
+) -> Result<ExportedOutcome, CommandError> {
+    state
+        .supervisor
+        .outcome_document(mission_id, publication_version)
         .map_err(Into::into)
 }
 
@@ -1252,6 +1275,28 @@ fn project_policy_history(
 }
 
 #[tauri::command]
+fn mission_publications(
+    state: State<'_, DesktopState>,
+    mission_id: uuid::Uuid,
+) -> Result<Vec<PublicationSummary>, CommandError> {
+    mission_publications_value(&state, mission_id)
+}
+
+/// The exact stored Markdown of one published Outcome. `version` selects a superseded version; its
+/// absence means the current one.
+///
+/// The desktop layer adds no access check, in keeping with every other command: the check lives in
+/// `OutcomeService`, which scopes by Workspace and requires an authenticated session.
+#[tauri::command]
+fn outcome_document(
+    state: State<'_, DesktopState>,
+    mission_id: uuid::Uuid,
+    version: Option<u32>,
+) -> Result<ExportedOutcome, CommandError> {
+    outcome_document_value(&state, mission_id, version)
+}
+
+#[tauri::command]
 fn publish_project_policy(
     state: State<'_, DesktopState>,
     project_id: uuid::Uuid,
@@ -1645,6 +1690,8 @@ pub fn run() {
             revise_project_charter,
             project_policy,
             project_policy_history,
+            mission_publications,
+            outcome_document,
             publish_project_policy,
             current_project_repository,
             project_repository_history,

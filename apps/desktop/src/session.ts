@@ -829,6 +829,46 @@ export async function loadProjectPolicy(projectId: string): Promise<ProjectPolic
   );
 }
 
+/// One row of a Mission's publication history, as the relation holds it.
+export type PublicationSummary = {
+  publicationId: string;
+  publicationVersion: number;
+  candidateArtifactDigest: string;
+  evaluationDigest: string;
+  isCurrent: boolean;
+};
+
+/// One published Outcome's exact stored Markdown. `bytes` is the document byte for byte -- never a
+/// re-render, and never Markdown turned into HTML.
+export type ExportedOutcome = {
+  bytes: number[];
+  digest: { algorithm: string; canonicalizer: string; value: string };
+  publicationVersion: number;
+  publicationVersionCount: number;
+  mediaType: string;
+};
+
+export async function loadMissionPublications(missionId: string): Promise<PublicationSummary[]> {
+  return invokeAndValidate(
+    "mission_publications",
+    { missionId },
+    isPublicationHistory,
+    "Outcome publication history",
+  );
+}
+
+export async function loadOutcomeDocument(
+  missionId: string,
+  version: number | null,
+): Promise<ExportedOutcome> {
+  return invokeAndValidate(
+    "outcome_document",
+    { missionId, version },
+    isExportedOutcome,
+    "Outcome document",
+  );
+}
+
 export async function loadProjectPolicyHistory(projectId: string): Promise<ProjectPolicy[]> {
   return invokeAndValidate(
     "project_policy_history",
@@ -1668,6 +1708,61 @@ function isProjectPolicy(value: unknown): value is ProjectPolicy {
 
 function isProjectPolicyOrNull(value: unknown): value is ProjectPolicy | null {
   return value === null || isProjectPolicy(value);
+}
+
+function isPublicationSummary(value: unknown): value is PublicationSummary {
+  return (
+    hasExactKeys(value, [
+      "candidateArtifactDigest",
+      "evaluationDigest",
+      "isCurrent",
+      "publicationId",
+      "publicationVersion",
+    ]) &&
+    isUuid(value.publicationId) &&
+    isPositiveInteger(value.publicationVersion) &&
+    isDigestValue(value.candidateArtifactDigest) &&
+    isDigestValue(value.evaluationDigest) &&
+    typeof value.isCurrent === "boolean"
+  );
+}
+
+function isPublicationHistory(value: unknown): value is PublicationSummary[] {
+  if (!Array.isArray(value) || value.length > 512 || !value.every(isPublicationSummary)) {
+    return false;
+  }
+  // Newest first, contiguous down to 1, and exactly one current version. The service already
+  // guarantees this; the guard states it so a wire that ever disagreed is refused rather than drawn.
+  return value.every((summary, index) => {
+    if (summary.publicationVersion !== value.length - index) return false;
+    return summary.isCurrent === (index === 0);
+  });
+}
+
+function isExportedOutcome(value: unknown): value is ExportedOutcome {
+  return (
+    hasExactKeys(value, [
+      "bytes",
+      "digest",
+      "mediaType",
+      "publicationVersion",
+      "publicationVersionCount",
+    ]) &&
+    Array.isArray(value.bytes) &&
+    value.bytes.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255) &&
+    hasExactKeys(value.digest, ["algorithm", "canonicalizer", "value"]) &&
+    typeof value.digest.algorithm === "string" &&
+    typeof value.digest.canonicalizer === "string" &&
+    isDigestValue(value.digest.value) &&
+    isPositiveInteger(value.publicationVersion) &&
+    isPositiveInteger(value.publicationVersionCount) &&
+    value.publicationVersion <= value.publicationVersionCount &&
+    typeof value.mediaType === "string"
+  );
+}
+
+function isDigestValue(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 }
 
 function isProjectPolicyHistory(value: unknown): value is ProjectPolicy[] {
