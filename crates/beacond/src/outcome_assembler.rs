@@ -607,7 +607,7 @@ mod tests {
     //! may build one to feed it.
 
     use super::*;
-    use crate::outcome_collector::CollectorProof;
+    use crate::outcome_collector::{CollectedUncounted, CollectorProof, SpendCompleteness};
     use crate::{
         AppendixRequest, AssemblyRefusal, CollectedClassification, CollectedCompletion,
         CollectedCondition, CollectedDigest, CollectedNarrative, CollectedSources, CollectedSpend,
@@ -689,6 +689,8 @@ mod tests {
                 measurement: "not_measured".to_owned(),
                 coverage: None,
                 amount: OutcomeState::NotEvaluated("no ledger was read.".to_owned()),
+                // No record at all, so there is no count to be complete or incomplete.
+                completeness: SpendCompleteness::NoCount,
             }),
             boundary_event_seq: Some(40),
             proof: CollectorProof,
@@ -855,6 +857,13 @@ mod tests {
                 minor_units_exponent: 2,
                 counted_units: 400,
             }),
+            // A partial record names its gaps and the grammar refuses one that does not, so the
+            // list is never empty (`SpendCompleteness`). The manifest has nowhere to put them --
+            // see the note on the assertion below.
+            completeness: SpendCompleteness::Partial(vec![CollectedUncounted {
+                kind: "unpriced_model".to_owned(),
+                detail: "Two dispatches ran on a model with no price list entry.".to_owned(),
+            }]),
         });
         let manifest = assemble(&partial, workspace(), AppendixRequest::PolicyDefault).unwrap();
         let spend = manifest
@@ -862,6 +871,17 @@ mod tests {
             .verified()
             .expect("a partial measurement is a Verified state");
         assert_eq!(spend.measurement, SpendMeasurementKind::PartiallyMeasured);
+        // What the manifest CANNOT say, recorded where it is visible rather than left to be
+        // discovered: `SpendCompleteness::Partial` carries the record's named gaps whole, and
+        // `SpendRef` has no field to put them in, so the document says a measurement is partial
+        // without saying where. The collector's own note calls dropping them turning "usable and
+        // incomplete" into a figure that looks whole; the manifest does exactly that, one layer up.
+        // Closing it is a grammar change (a slot on `SpendRef`, so a canonicalizer bump) on a
+        // canonicalizer that just merged -- a ruling, not a fix to make here.
+        assert!(matches!(
+            partial.spend.as_ref().unwrap().completeness,
+            SpendCompleteness::Partial(ref gaps) if gaps.len() == 1
+        ));
         assert_eq!(
             (spend.coverage_from_event_seq, spend.coverage_to_event_seq),
             (1, 30)
