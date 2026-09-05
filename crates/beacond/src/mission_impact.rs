@@ -1227,3 +1227,55 @@ fn insert_classification(
     )?;
     Ok(())
 }
+
+/// Re-prove every stored classification at startup (R26.1), the shape `verify_manifest_state` uses.
+///
+/// **It walks every ROW, not every chain's newest version.** The Outcome path reads the newest
+/// classification at or before a completion's boundary, and `history()` is called from tests only,
+/// so a superseded version is a row nothing in the product reads again. Those are precisely the
+/// rows a forged supersession link can sit in undisturbed, so a pass that visited only the newest
+/// version of each Mission would skip the only rows it exists for -- the same lesson
+/// `verify_manifest_state` records about enumerating by the wrong key.
+///
+/// It re-proves by CALLING `verified_classification_within`, never by restating its rules: the
+/// digest over the stored bytes, the round trip through the codec, every projection column against
+/// the bytes, the Policy revision's Charter, the Project that owns the Mission, and the predecessor
+/// judged by its own bytes (`PredecessorFault`: absent, unverifiable, another Workspace, another
+/// Mission -- sol1's #9). A second copy of those rules here would be a second thing to keep true.
+///
+/// Where it runs: `inspect_store`, with its siblings, which is AFTER the startup transaction has
+/// committed. It holds no write lock (PR #77 / FF-49 moved the expensive arithmetic out of that
+/// lock; this pass was never in it).
+pub(crate) fn verify_classification_state(
+    connection: &Connection,
+) -> Result<(), ClassificationStoreError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT workspace_id, digest_value FROM mission_impact_classifications
+             ORDER BY workspace_id, digest_value",
+        )
+        .map_err(|error| ClassificationStoreError::Store(error.to_string()))?;
+    let rows: Vec<(String, String)> = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|error| ClassificationStoreError::Store(error.to_string()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| ClassificationStoreError::Store(error.to_string()))?;
+    drop(statement);
+
+    for (workspace_id, digest_value) in &rows {
+        let workspace_id = Uuid::parse_str(workspace_id).map_err(|_| {
+            ClassificationStoreError::Store(
+                "a classification's Workspace id is not a UUID".to_owned(),
+            )
+        })?;
+        // `Ok(None)` cannot happen for a digest this query just read, and it is not treated as
+        // success: a row that vanished between the two statements is a store changing under a
+        // pass that is supposed to be reading a fixed set.
+        if verified_classification_within(connection, workspace_id, digest_value)?.is_none() {
+            return Err(ClassificationStoreError::Store(format!(
+                "classification {digest_value} was enumerated and then could not be read"
+            )));
+        }
+    }
+    Ok(())
+}
