@@ -212,11 +212,9 @@ pub fn assemble(
             kind: SourceKind::Policy,
             identity: Some(ReferenceIdentity {
                 object_id: classification.classification_id,
-                // The owner's grammar is v1 and the collector's citation reader
-                // (`verified_classification_for_citation`) refuses any other version at
-                // collection; the collector does not carry the number separately. Stated rather
-                // than assumed.
-                schema_version: 1,
+                // The version the collector's owning read proved, copied -- never a constant
+                // (R23.5). `prepare` re-reads the classification by this exact identity.
+                schema_version: classification.version,
             }),
             digest: SourceDigest {
                 algorithm: DIGEST_ALGORITHM.to_owned(),

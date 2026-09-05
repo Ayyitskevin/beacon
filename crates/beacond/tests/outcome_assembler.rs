@@ -71,6 +71,7 @@ fn collected() -> CollectedSources {
         classification: Some(CollectedClassification {
             digest_value: hex("33"),
             classification_id: Uuid::from_u128(0x33),
+            version: 1,
             mission_id: Uuid::from_u128(0x11),
             project_id: Uuid::from_u128(0x10),
             policy_revision: 1,
@@ -287,6 +288,23 @@ fn a_partially_measured_spend_maps_to_its_own_state_with_its_coverage_intact() {
         (1, 40)
     );
     assert_eq!(spend.currency, "USD");
+}
+
+/// R23.5: the Policy citation's schema version is the version the collector's owning read proved,
+/// copied -- never a constant. A second classification of a Mission is version 2, and a citation
+/// that still said 1 would name a record that is not the one collected.
+#[test]
+fn the_policy_citation_carries_the_collected_classifications_version() {
+    let mut second = collected();
+    second.classification.as_mut().unwrap().version = 2;
+    let manifest = assemble(&second, workspace(), AppendixRequest::PolicyDefault).unwrap();
+    assert_eq!(
+        manifest
+            .policy_classification
+            .identity
+            .map(|identity| identity.schema_version),
+        Some(2)
+    );
 }
 
 #[test]
