@@ -23,6 +23,18 @@
 //! Outcome, qualify anything for publication, or make a success verdict. A candidate is a document
 //! that exists.
 //!
+//! **The Mission's digest field is NOT verified, and cannot be (R18.4).** `main` has no
+//! `MissionDeclarationV1`, no Mission canonical bytes and no Mission digest, so nothing exists to
+//! prove a Mission declaration digest against -- and slice 1's `mission: SourceRef`, which requires
+//! a digest, over-generalized a design that cites the Mission by identity. Until the R18.3-5
+//! grammar revision removes the field, this module refuses to let it carry a fabrication: a Mission
+//! citation must declare itself identity-only, through the canonicalizer token
+//! [`MISSION_IDENTITY_ONLY`] and the completion digest that R18.4 names as its verified anchor.
+//! The renderer already prints a citation's canonicalizer beside its value, so a reader of the
+//! document sees the token and knows no Mission declaration was hashed. `prepare` and the verified
+//! reader both enforce it, so neither a caller nor a row planted behind them can produce a
+//! Mission digest that is presented as verified.
+//!
 //! **There is no `outcome.prepared` Event kind (R18.6).** A prepared manifest is positioned in the
 //! log by its candidate Artifact's `artifact.recorded` Event -- the Artifact the row's foreign key
 //! requires -- so the ledger accounts for every row without a new kind and without rebuilding the
@@ -51,6 +63,18 @@ use crate::outcome::{
 use crate::proposal::sha256;
 
 const DIGEST_ALGORITHM: &str = "sha256";
+
+/// The canonicalizer a Mission citation must declare, because there is nothing to hash (R18.4).
+///
+/// A `SourceRef` requires a digest and a Mission has none, so the question is only what the field
+/// is allowed to say. It says this: the value beside it is not a Mission declaration digest, it is
+/// the completion digest that anchors the Mission citation, and the Mission itself is cited by
+/// `object_id`. The token lives in the manifest's canonical bytes and is rendered beside the value,
+/// so the claim travels with the document rather than living in a comment beside the code.
+///
+/// It is temporary by construction. The R18.3-5 grammar revision removes the digest from the
+/// Mission citation entirely, and this constant goes with it.
+pub const MISSION_IDENTITY_ONLY: &str = "beacon.outcome.mission-identity-only.v1";
 
 /// The largest manifest this store will hold, applied to the canonical bytes before the insert.
 ///
@@ -111,6 +135,12 @@ pub enum ManifestStoreRefusal {
     ManifestTooLarge { configured: u64, observed: u64 },
     /// The bytes cannot be a v1 manifest at all.
     Malformed(MalformedOutcome),
+    /// The Mission citation claims a digest instead of declaring itself identity-only (R18.4).
+    ///
+    /// Nothing on `main` can verify a Mission declaration digest, so a citation that carries one
+    /// is asserting something no reader can check -- and the renderer prints it beneath "Every
+    /// fact below was verified". Refused here rather than rendered.
+    MissionCitationNotIdentityOnly,
     /// The row is self-consistent and the ledger does not account for it (R18.7).
     ///
     /// A manifest's candidate Artifact is its position in the log -- there is no
@@ -149,6 +179,11 @@ impl std::fmt::Display for ManifestStoreRefusal {
             Self::Malformed(reason) => {
                 write!(formatter, "not a v1 outcome manifest: {}", reason.as_str())
             }
+            Self::MissionCitationNotIdentityOnly => write!(
+                formatter,
+                "the Mission citation must be identity-only: canonicalizer `{MISSION_IDENTITY_ONLY}` \
+                 over the completion digest, because no Mission declaration digest exists to verify"
+            ),
             Self::CandidateNotAccounted { reason } => write!(
                 formatter,
                 "the ledger does not account for this outcome manifest: {reason}"
@@ -341,6 +376,24 @@ struct StoredRow {
     candidate_artifact_digest: String,
 }
 
+/// A Mission citation may not carry a digest anything would have to take on trust (R18.4).
+///
+/// One function, called by both `prepare` and the verified reader, so a caller and a row planted
+/// behind the caller are held to the same rule. It is a check on the manifest's own bytes and
+/// needs no store.
+fn require_mission_identity_citation(
+    manifest: &OutcomeManifestV1,
+) -> Result<(), ManifestStoreRefusal> {
+    let digest = &manifest.mission.digest;
+    if digest.algorithm != DIGEST_ALGORITHM
+        || digest.canonicalizer != MISSION_IDENTITY_ONLY
+        || digest.value != manifest.completion.digest.value
+    {
+        return Err(ManifestStoreRefusal::MissionCitationNotIdentityOnly);
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------------------------
 // The verified reader
 // ---------------------------------------------------------------------------------------------
@@ -398,6 +451,9 @@ pub fn verified_manifest_within(
         return Err(ManifestStoreRefusal::BytesDisagree);
     }
     let manifest_id = manifest_reference_id(&recomputed)?;
+    // Before any column is compared: a row whose Mission citation asserts an unverifiable digest is
+    // not a differently-shaped record, it is one this module refuses to answer from.
+    require_mission_identity_citation(&manifest)?;
 
     // Every projection repeats what the bytes say. A decoy row -- one whose columns lie while its
     // bytes stay correct -- is refused here rather than answered from.
@@ -540,6 +596,7 @@ impl OutcomeService {
             }
             .into());
         }
+        require_mission_identity_citation(manifest)?;
         let manifest_digest = HEXLOWER.encode(&sha256(&canonical_bytes));
         let manifest_id = manifest_reference_id(&manifest_digest)?;
 
