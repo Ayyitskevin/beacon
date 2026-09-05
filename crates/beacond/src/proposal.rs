@@ -2496,7 +2496,10 @@ fn verify_one_proposal(
 }
 
 /// The counts across the store: no row to name.
-fn verify_proposal_totals(connection: &Connection, proposal_count: usize) -> Result<(), ProposalError> {
+fn verify_proposal_totals(
+    connection: &Connection,
+    proposal_count: usize,
+) -> Result<(), ProposalError> {
     let total_events: i64 = connection.query_row(
         "SELECT count(*) FROM events WHERE kind = 'proposal.submitted'",
         [],
