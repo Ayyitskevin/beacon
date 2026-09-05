@@ -62,8 +62,8 @@ use std::time::{Duration, Instant};
 use beacond::{
     AppendixRequest, ConditionResult, MalformedOutcome, NarrativeRef, OutcomeBound,
     OutcomeManifestV1, OutcomeRefusal, OutcomeState, PinnedRevision, ReceiptRef, RevisionKind,
-    SourceDigest, SourceKind, SourceRef, SpendRef, SuccessCondition, VerifiedArtifact,
-    VerifiedSources, VerifiedText, compare_canonical_keys, render,
+    SourceDigest, SourceKind, SourceRef, SpendMeasurementKind, SpendRef, SuccessCondition,
+    VerifiedArtifact, VerifiedSources, VerifiedText, compare_canonical_keys, render,
 };
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -872,6 +872,7 @@ fn outcome_never_turns_missing_spend_into_zero() {
         minor_units_exponent: 2,
         coverage_from_event_seq: 1,
         coverage_to_event_seq: BOUNDARY,
+        measurement: SpendMeasurementKind::Measured,
     });
     let measured = render(&manifest, &vector_sources()).expect("renders");
     let spend = section(&measured, "## 5. Actual spend", "## 6. Unfinished work");
@@ -1529,6 +1530,105 @@ fn sol1_v2_remaining_strictness_and_identity_matrix() {
             .expect_err("mixed version decoded"),
         MalformedOutcome::UnknownVersion
     );
+}
+
+/// R23.1: the spend owner's measurement token travels in the manifest, all four arms of it, and a
+/// partial measurement is rendered as its own state beside its amount and coverage -- never as a
+/// complete spend. An unassigned measurement tag is refused by name.
+#[test]
+fn a_partial_spend_measurement_is_its_own_state_beside_its_amount() {
+    let spend = |measurement: SpendMeasurementKind| SpendRef {
+        workspace_id: uuid(WORKSPACE),
+        spend_id: uuid(SPEND),
+        schema_version: 1,
+        digest: digest("beacon.spend.v1", hex32("88")),
+        amount_minor: 123_456,
+        currency: "USD".to_owned(),
+        minor_units_exponent: 2,
+        coverage_from_event_seq: 1,
+        coverage_to_event_seq: 3_000,
+        measurement,
+    };
+    // Every arm round-trips, and each changes the bytes: four tokens, four identities.
+    let mut seen = std::collections::BTreeSet::new();
+    for kind in [
+        SpendMeasurementKind::Measured,
+        SpendMeasurementKind::PartiallyMeasured,
+        SpendMeasurementKind::Unmeasured,
+        SpendMeasurementKind::Broken,
+    ] {
+        let mut manifest = vector_manifest();
+        manifest.spend_ref = OutcomeState::Verified(spend(kind));
+        let bytes = manifest.canonical_bytes().expect("encodes");
+        assert_eq!(
+            OutcomeManifestV1::from_canonical_bytes(&bytes).expect("decodes"),
+            manifest
+        );
+        assert!(
+            seen.insert(bytes),
+            "{kind:?} shares its bytes with another arm"
+        );
+    }
+
+    // The partial one says so in the document, beside its amount and coverage, and is not the
+    // complete one's word.
+    let mut partial = vector_manifest();
+    partial.spend_ref = OutcomeState::Verified(spend(SpendMeasurementKind::PartiallyMeasured));
+    let document = render(&partial, &vector_sources()).expect("renders");
+    let section = section(&document, "## 5. Actual spend", "## 6. Unfinished work");
+    assert!(
+        section.contains("| measurement | `partially_measured` |"),
+        "{section}"
+    );
+    assert!(
+        section.contains("| amount | `1234.56` `USD` |"),
+        "{section}"
+    );
+    assert!(
+        section.contains("| coverage | events `1` through `3000` |"),
+        "{section}"
+    );
+    assert!(section.contains("floor over that window"), "{section}");
+    assert!(
+        !section.contains("| measurement | `measured` |"),
+        "{section}"
+    );
+    let mut complete = vector_manifest();
+    complete.spend_ref = OutcomeState::Verified(spend(SpendMeasurementKind::Measured));
+    let complete_document = render(&complete, &vector_sources()).unwrap();
+    let complete_section = section_of(&complete_document);
+    assert!(
+        complete_section.contains("| measurement | `measured` |"),
+        "{complete_section}"
+    );
+    assert!(
+        !complete_section.contains("floor over that window"),
+        "{complete_section}"
+    );
+
+    // An unassigned measurement tag is refused by name. The tag is the one byte the two encodings
+    // above differ in.
+    let measured_bytes = complete.canonical_bytes().unwrap();
+    let partial_bytes = partial.canonical_bytes().unwrap();
+    assert_eq!(measured_bytes.len(), partial_bytes.len());
+    let differing: Vec<usize> = (0..measured_bytes.len())
+        .filter(|&i| measured_bytes[i] != partial_bytes[i])
+        .collect();
+    assert_eq!(
+        differing.len(),
+        1,
+        "the arms differ in more than the tag byte"
+    );
+    let mut unknown = measured_bytes.clone();
+    unknown[differing[0]] = 0x09;
+    assert_eq!(
+        OutcomeManifestV1::from_canonical_bytes(&unknown).expect_err("refuses"),
+        MalformedOutcome::UnknownTag
+    );
+}
+
+fn section_of(document: &str) -> &str {
+    section(document, "## 5. Actual spend", "## 6. Unfinished work")
 }
 
 #[test]

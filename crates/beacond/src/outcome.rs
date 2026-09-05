@@ -123,6 +123,15 @@ const TAG_REVISION_GIT_COMMIT: u8 = 0x01;
 const TAG_IDENTITY_NONE: u8 = 0x01;
 const TAG_IDENTITY_SOME: u8 = 0x02;
 
+// The spend owner's measurement vocabulary, copied whole (R23.1): four arms, four tags, none
+// collapsed. A `SpendRef` carries an amount, so in practice only the first two reach a manifest --
+// `Unmeasured` and `Broken` arrive as `OutcomeState`s with no amount to attach a token to -- but a
+// closed vocabulary is copied, not abridged, so the day an owner arm changes the codec notices.
+const TAG_SPEND_MEASURED: u8 = 0x01;
+const TAG_SPEND_PARTIALLY_MEASURED: u8 = 0x02;
+const TAG_SPEND_UNMEASURED: u8 = 0x03;
+const TAG_SPEND_BROKEN: u8 = 0x04;
+
 const TAG_FALSE: u8 = 0x00;
 const TAG_TRUE: u8 = 0x01;
 
@@ -448,6 +457,51 @@ pub struct NarrativeRef {
     pub item_id: String,
 }
 
+/// How much of the Mission's spend the cited record actually measured -- the owner's own word for
+/// it (`spend::SpendMeasurement`), carried into the manifest so a partial measurement is a STATE of
+/// the document and never presents as a complete one (R21.3, R23.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpendMeasurementKind {
+    /// The whole declared window was counted.
+    Measured,
+    /// Some entries in the window could not be counted; the amount is a floor over the window, not
+    /// the Mission's spend.
+    PartiallyMeasured,
+    Unmeasured,
+    Broken,
+}
+
+impl SpendMeasurementKind {
+    fn tag(self) -> u8 {
+        match self {
+            Self::Measured => TAG_SPEND_MEASURED,
+            Self::PartiallyMeasured => TAG_SPEND_PARTIALLY_MEASURED,
+            Self::Unmeasured => TAG_SPEND_UNMEASURED,
+            Self::Broken => TAG_SPEND_BROKEN,
+        }
+    }
+
+    fn parse(tag: u8) -> Result<Self, MalformedOutcome> {
+        match tag {
+            TAG_SPEND_MEASURED => Ok(Self::Measured),
+            TAG_SPEND_PARTIALLY_MEASURED => Ok(Self::PartiallyMeasured),
+            TAG_SPEND_UNMEASURED => Ok(Self::Unmeasured),
+            TAG_SPEND_BROKEN => Ok(Self::Broken),
+            _ => Err(MalformedOutcome::UnknownTag),
+        }
+    }
+
+    /// The owner's literal, verbatim -- the document prints the spend record's own word.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Measured => crate::spend::MEASURED,
+            Self::PartiallyMeasured => crate::spend::PARTIALLY_MEASURED,
+            Self::Unmeasured => crate::spend::UNMEASURED,
+            Self::Broken => crate::spend::BROKEN,
+        }
+    }
+}
+
 /// A measured actual-spend record. Absence is never `$0`: it is a state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpendRef {
@@ -465,6 +519,9 @@ pub struct SpendRef {
     /// The event range this measurement covers. Coverage is declared, not inferred.
     pub coverage_from_event_seq: u64,
     pub coverage_to_event_seq: u64,
+    /// The owner's measurement token. `PartiallyMeasured` means the amount is a floor over the
+    /// window, and the document says so beside it (R23.1).
+    pub measurement: SpendMeasurementKind,
 }
 
 /// What the caller asked for. There is deliberately no `omit` arm: a caller must not be able to
@@ -1555,6 +1612,7 @@ fn encode_spend(encoder: &mut Encoder, value: &SpendRef) -> Result<(), Malformed
     encoder.tag(value.minor_units_exponent);
     encoder.u64(value.coverage_from_event_seq);
     encoder.u64(value.coverage_to_event_seq);
+    encoder.tag(value.measurement.tag());
     Ok(())
 }
 
@@ -1575,6 +1633,7 @@ fn decode_spend(decoder: &mut Decoder<'_>) -> Result<SpendRef, MalformedOutcome>
     if coverage_to_event_seq < coverage_from_event_seq {
         return Err(MalformedOutcome::SpendCoverage);
     }
+    let measurement = SpendMeasurementKind::parse(decoder.tag()?)?;
     Ok(SpendRef {
         workspace_id,
         spend_id,
@@ -1585,6 +1644,7 @@ fn decode_spend(decoder: &mut Decoder<'_>) -> Result<SpendRef, MalformedOutcome>
         minor_units_exponent,
         coverage_from_event_seq,
         coverage_to_event_seq,
+        measurement,
     })
 }
 
@@ -2694,6 +2754,16 @@ fn render_body(
                 "| coverage | events `{}` through `{}` |",
                 spend.coverage_from_event_seq, spend.coverage_to_event_seq
             ))?;
+            document.line(&format!(
+                "| measurement | `{}` |",
+                spend.measurement.as_str()
+            ))?;
+            if spend.measurement == SpendMeasurementKind::PartiallyMeasured {
+                document.blank()?;
+                document.line(
+                    "This measurement is partial: entries inside the coverage window could not be counted, so the amount is a floor over that window and not the Mission's spend.",
+                )?;
+            }
         }
         other => {
             document.line(&state_cell(other.literal(), other.reason(), escape))?;
