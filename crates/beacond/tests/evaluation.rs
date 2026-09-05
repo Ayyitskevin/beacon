@@ -751,7 +751,7 @@ fn a_recorded_evaluation_is_immutable_and_survives_startup_verification() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .expect("startup verifies the Evaluation");
-    assert_eq!(report.diagnostics.schema_version, 31);
+    assert_eq!(report.diagnostics.schema_version, 32);
     assert_eq!(
         evaluations.get(&evaluation.digest().value).unwrap(),
         evaluation
@@ -2958,6 +2958,8 @@ fn migration_0028_preserves_preexisting_proposal_evaluation_bytes_and_chain() {
              CREATE TEMP TABLE findings_snapshot AS SELECT * FROM evaluation_findings;
              CREATE TEMP TABLE cited_runs_snapshot AS SELECT * FROM evaluation_cited_runs;
              CREATE TEMP TABLE supersessions_snapshot AS SELECT * FROM evaluation_supersessions;
+             CREATE TEMP TABLE classifications_snapshot AS
+                 SELECT * FROM mission_impact_classifications;
              -- A store at 27 does not have migration 0029's Outcome manifest store either, and
              -- startup verifies the schema a store CLAIMS before it migrates it: leaving a later
              -- migration's objects behind under a 27 stamp is a mis-stamped store, which is
@@ -2970,6 +2972,9 @@ fn migration_0028_preserves_preexisting_proposal_evaluation_bytes_and_chain() {
              DROP TRIGGER outcome_manifests_no_delete;
              DROP INDEX outcome_manifests_by_mission;
              DROP TABLE outcome_manifests;
+             DROP TRIGGER mission_impact_classifications_no_update;
+             DROP TRIGGER mission_impact_classifications_no_delete;
+             DROP TABLE mission_impact_classifications;
              DROP TABLE evaluation_supersessions;
              DROP TABLE evaluation_cited_runs;
              DROP TABLE evaluation_findings;
@@ -2981,6 +2986,22 @@ fn migration_0028_preserves_preexisting_proposal_evaluation_bytes_and_chain() {
         &migration_0023[migration_0023.find("CREATE TABLE evaluations (").unwrap()
             ..migration_0023.find("UPDATE schema_meta").unwrap()];
     connection.execute_batch(evaluation_objects).unwrap();
+    // 0032 rebuilt `mission_impact_classifications` to bind a Mission to its Project, so a store
+    // rolled back below it must carry 0025's shape or the version-27 signature will not match.
+    // Sliced out of 0025's own text for the reason the evaluation slice above gives: a rollback
+    // that retyped the DDL would be testing the test.
+    let migration_0025 = include_str!("../migrations/0025_spend_and_impact.sql");
+    let classification_objects = &migration_0025[migration_0025
+        .find("CREATE TABLE mission_impact_classifications (")
+        .unwrap()
+        ..migration_0025.find("UPDATE schema_meta").unwrap()];
+    connection.execute_batch(classification_objects).unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO mission_impact_classifications
+                 SELECT * FROM classifications_snapshot;",
+        )
+        .unwrap();
     connection
         .execute_batch(
             "INSERT INTO evaluations (
@@ -3006,7 +3027,7 @@ fn migration_0028_preserves_preexisting_proposal_evaluation_bytes_and_chain() {
              SELECT workspace_id, subject_digest, evaluation_digest,
                     supersedes_evaluation_digest
              FROM supersessions_snapshot;
-             UPDATE schema_meta SET version = 27 WHERE singleton = 1 AND version = 31;
+             UPDATE schema_meta SET version = 27 WHERE singleton = 1 AND version = 32;
              COMMIT;",
         )
         .unwrap();

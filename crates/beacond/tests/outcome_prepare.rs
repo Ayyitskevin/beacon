@@ -879,15 +879,22 @@ fn migration_0031_makes_the_publication_relation_append_only_and_scoped() {
     let fixture = admitted_mission("publication-relation-shape");
     let connection = fixture.store.connect();
 
-    assert_eq!(
-        connection
-            .query_row(
-                "SELECT version FROM schema_meta WHERE singleton = 1",
-                [],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-        31
+    // 0031 HAS BEEN APPLIED -- not "the ladder ends at 31". The two were the same number when
+    // this test was written and stopped being the same the moment a later migration landed, which
+    // red-gated CF-1 for a reason that had nothing to do with the publication relation. A test
+    // named for one migration should fail when THAT migration is broken, so this asserts the floor
+    // its subject needs; the seven pins in lib.rs are where the ladder head is pinned on purpose.
+    let version: i64 = connection
+        .query_row(
+            "SELECT version FROM schema_meta WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        version >= 31,
+        "this store is at schema {version}, before 0031: the publication relation it asserts on \
+         was never created"
     );
 
     let ddl: String = connection
