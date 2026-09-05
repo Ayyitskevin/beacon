@@ -327,6 +327,9 @@ pub enum PublishRefusal {
         relation: Uuid,
     },
     /// No publication exists for that Mission, or not at that version.
+    /// The stored document could not be rendered to PDF. The renderer's own refusal, carried whole
+    /// (R30.3): a v1 document that fails translation is a refusal by name, never an empty PDF.
+    Pdf(crate::outcome_pdf::PdfRefusal),
     Absent,
     /// The store could not be opened for this caller: no authenticated session.
     ///
@@ -386,6 +389,7 @@ impl fmt::Display for PublishRefusal {
                 "the {what} this publication cites is about Mission {named} and the publication is \
                  filed under Mission {relation}"
             ),
+            Self::Pdf(refusal) => write!(formatter, "the document did not render: {refusal}"),
             Self::Absent => formatter.write_str("this Mission has no published Outcome"),
             Self::Account(error) => write!(formatter, "{error}"),
             Self::Unverified(detail) => write!(formatter, "{detail}"),
