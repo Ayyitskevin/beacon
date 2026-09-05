@@ -469,7 +469,32 @@ pub enum SupervisorError {
     SchemaMismatch,
     UnsupportedSchemaVersion(i64),
     IntegrityCheckFailed(String),
+    /// A stored row whose identity columns are not readable text. Carries the RAW value; the
+    /// one-line `Display` bounds and escapes it (sol1's P1-1), and `Debug` keeps it whole.
+    StoredIdentityUnreadable {
+        what: &'static str,
+        raw: String,
+    },
     ForeignKeyViolations(u64),
+}
+
+/// Store-derived text, made safe for a ONE-LINE operator message (sol1's P1-1).
+///
+/// Bounded and escaped. A stored identifier is attacker-controlled in the only sense that matters
+/// at startup -- a row can hold any text at all -- and a newline in it forges an extra line in the
+/// operator's log, which is a claim the daemon never made. `{:?}` escapes the newline rather than
+/// obeying it, and the cap stops one row from pushing the rest of the line off the screen.
+///
+/// The RAW value is never lost: it stays in the variant, so `Debug` and `source()` still carry it
+/// whole. Only the one-line rendering is bounded.
+fn quoted_store_text(value: &str) -> String {
+    const CAP: usize = 120;
+    let count = value.chars().count();
+    if count <= CAP {
+        return format!("{value:?}");
+    }
+    let head: String = value.chars().take(CAP).collect();
+    format!("{head:?} (truncated from {count} characters)")
 }
 
 impl fmt::Display for SupervisorError {
@@ -497,7 +522,11 @@ impl fmt::Display for SupervisorError {
             Self::Store(_) => formatter.write_str("store operation failed"),
             Self::Json(error) => write!(formatter, "cannot encode an event payload: {error}"),
             Self::InvalidWorkspaceId(value) => {
-                write!(formatter, "store contains an invalid Workspace id: {value}")
+                write!(
+                    formatter,
+                    "store contains an invalid Workspace id: {}",
+                    quoted_store_text(value)
+                )
             }
             Self::InvalidEventKind(value) => {
                 write!(formatter, "store contains an unknown Event kind: {value}")
@@ -760,6 +789,9 @@ impl fmt::Display for SupervisorError {
             }
             Self::IntegrityCheckFailed(result) => {
                 write!(formatter, "SQLite integrity check failed: {result}")
+            }
+            Self::StoredIdentityUnreadable { what, raw } => {
+                write!(formatter, "{what}: {}", quoted_store_text(raw))
             }
             Self::ForeignKeyViolations(count) => {
                 write!(formatter, "store contains {count} foreign-key violation(s)")
@@ -1377,10 +1409,10 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
         project::ProjectStateFault::Identity {
             workspace_id,
             project_id,
-        } => SupervisorError::IntegrityCheckFailed(format!(
-            "a Project row's identity is not readable: Workspace {workspace_id}, Project \
-             {project_id}"
-        )),
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "a Project row's identity is not readable",
+            raw: format!("Workspace {workspace_id}, Project {project_id}"),
+        },
     })?;
     project_policy::verify_project_policy_state(connection)
         .map_err(|_| SupervisorError::ProjectPolicyStateMismatch)?;
@@ -1437,10 +1469,10 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
         mission::MissionStateFault::Identity {
             workspace_id,
             mission_id,
-        } => SupervisorError::IntegrityCheckFailed(format!(
-            "a Mission row's identity is not readable: Workspace {workspace_id}, Mission \
-             {mission_id}"
-        )),
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "a Mission row's identity is not readable",
+            raw: format!("Workspace {workspace_id}, Mission {mission_id}"),
+        },
     })?;
     // After Mission state, because every completion re-derives its conditions from the Mission's own
     // rows and its boundary from the Mission's admission Event.
@@ -1463,10 +1495,10 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
         mission_completion_store::CompletionStateFault::Identity {
             workspace_id,
             digest_value,
-        } => SupervisorError::IntegrityCheckFailed(format!(
-            "a completion row's Workspace is not readable: {workspace_id}, completion \
-             {digest_value}"
-        )),
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "a completion row's Workspace is not readable",
+            raw: format!("{workspace_id}, completion {digest_value}"),
+        },
     })?;
     // Last, because it is the only pass that re-proves records belonging to two other modules: an
     // Outcome manifest is accounted for by its candidate Artifact's Event and frozen on a
@@ -1500,9 +1532,10 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
         outcome_store::ManifestStateFault::Identity {
             workspace_id,
             manifest_digest,
-        } => SupervisorError::IntegrityCheckFailed(format!(
-            "a manifest row's Workspace is not readable: {workspace_id}, manifest {manifest_digest}"
-        )),
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "a manifest row's Workspace is not readable",
+            raw: format!("{workspace_id}, manifest {manifest_digest}"),
+        },
     })?;
     // After the manifest pass, because a publication is proved THROUGH its manifest: the relation
     // cites a candidate, the candidate's manifest must verify, and the manifest's own pass has to
@@ -1527,10 +1560,10 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
             workspace_id,
             mission_id,
             version,
-        } => SupervisorError::IntegrityCheckFailed(format!(
-            "a publication row's identity is not readable: Workspace {workspace_id}, Mission \
-                 {mission_id}, version {version}"
-        )),
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "a publication row's identity is not readable",
+            raw: format!("Workspace {workspace_id}, Mission {mission_id}, version {version}"),
+        },
     })?;
 
     Ok(StoreDiagnostics {
@@ -1824,6 +1857,67 @@ fn count_rows(connection: &Connection, table: &str) -> Result<u64, SupervisorErr
 
 #[cfg(test)]
 mod tests {
+
+    /// sol1 P1-1: store text cannot forge a second line in the operator's log.
+    ///
+    /// A stored identity column can hold anything. Interpolated raw, a newline in it puts a line
+    /// the daemon never wrote into the operator's log, and 4 KB of padding pushes the real message
+    /// out of view. The one-line message is bounded and escaped; the raw value stays whole in
+    /// `Debug`, which is where R28.4 already sends everything else.
+    #[test]
+    fn sol1_stored_identity_text_cannot_forge_a_startup_line() {
+        let forged = format!("\nSOL1_FORGED_STARTUP_LINE{}", "x".repeat(4096));
+        let refusal = SupervisorError::StoredIdentityUnreadable {
+            what: "a Mission row's identity is not readable",
+            raw: forged.clone(),
+        };
+
+        let line = refusal.to_string();
+        assert_eq!(
+            line.lines().count(),
+            1,
+            "the refusal spans more than one line, so the store wrote to the operator log: {line}"
+        );
+        assert!(
+            !line.contains('\n'),
+            "a raw newline reached the line: {line}"
+        );
+        assert!(
+            line.contains("\\n"),
+            "the newline is not escaped, only absent: {line}"
+        );
+        assert!(
+            line.contains("a Mission row's identity is not readable"),
+            "the refusal lost its name: {line}"
+        );
+        assert!(
+            line.chars().count() < 300,
+            "the line is not bounded: {} characters",
+            line.chars().count()
+        );
+        assert!(
+            line.contains("truncated from 4121 characters"),
+            "the line does not say it truncated: {line}"
+        );
+
+        // ...and nothing is thrown away: Debug still carries the whole value.
+        let debug = format!("{refusal:?}");
+        assert!(
+            debug.contains("SOL1_FORGED_STARTUP_LINE") && debug.chars().count() > 4096,
+            "the raw value is not reachable through Debug"
+        );
+    }
+
+    /// The same rule on the older arm sol1 also cited.
+    #[test]
+    fn sol1_an_invalid_workspace_id_is_bounded_and_escaped_too() {
+        let refusal =
+            SupervisorError::InvalidWorkspaceId(format!("\nSOL1_FORGED{}", "y".repeat(4096)));
+        let line = refusal.to_string();
+        assert_eq!(line.lines().count(), 1, "{line}");
+        assert!(!line.contains('\n') && line.contains("\\n"), "{line}");
+        assert!(line.chars().count() < 300, "{}", line.chars().count());
+    }
     use crate::SCHEMA_VERSION;
     use std::fs;
     #[cfg(unix)]
