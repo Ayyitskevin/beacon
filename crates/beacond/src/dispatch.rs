@@ -1176,11 +1176,6 @@ impl DispatchService {
                 {
                     Ok(Some(DispatchOutcome::AlreadyDispatched))
                 }
-                // Since migration 0029 the table's own insert guard refuses the duplicate before
-                // the unique index is consulted: the same race, lost one trigger earlier.
-                Err(ref error) if crate::is_identity_already_stored(error) => {
-                    Ok(Some(DispatchOutcome::AlreadyDispatched))
-                }
                 Err(error) => Err(DispatchError::Store(error)),
             }
         })
