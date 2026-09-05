@@ -401,8 +401,16 @@ fn source(
     SourceRef {
         workspace_id,
         kind,
-        object_id,
-        schema_version,
+        // R18.5: present for the kinds whose records carry one (Completion, Policy, Spend), and
+        // never minted for the rest.
+        identity: matches!(
+            kind,
+            SourceKind::Completion | SourceKind::Policy | SourceKind::Spend
+        )
+        .then_some(beacond::ReferenceIdentity {
+            object_id,
+            schema_version,
+        }),
         digest: SourceDigest {
             algorithm: "sha256".to_owned(),
             canonicalizer: canonicalizer.to_owned(),
@@ -1698,7 +1706,12 @@ fn astra_completion_citation_envelope_and_version_must_match_its_owner() {
     wrong_canonicalizer.completion.digest.canonicalizer =
         "beacon.mission_completion.v999".to_owned();
     let mut wrong_version = base;
-    wrong_version.completion.schema_version = 999;
+    wrong_version
+        .completion
+        .identity
+        .as_mut()
+        .unwrap()
+        .schema_version = 999;
     let mut accepted = Vec::new();
     for (name, manifest) in [
         ("canonicalizer", wrong_canonicalizer),
