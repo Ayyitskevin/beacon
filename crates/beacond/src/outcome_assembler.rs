@@ -811,7 +811,16 @@ mod tests {
         );
         // Support the collector counted but did not carry: a citation cannot come from a number.
         let mut counted = base.clone();
-        counted.completion.as_mut().unwrap().condition_results[0].support_count = 2;
+        counted.completion.as_mut().unwrap().condition_results[0].support = vec![
+            crate::outcome_collector::CollectedSupport::Evaluation(CollectedDigest {
+                kind: SourceKind::Evaluation,
+                workspace_id: workspace,
+                digest_algorithm: "sha256".to_owned(),
+                digest_canonicalizer: "beacon.evaluation.v1".to_owned(),
+                digest_value: "aa".repeat(32),
+            });
+            2
+        ];
         assert_eq!(
             assemble(&counted, workspace, AppendixRequest::PolicyDefault).unwrap_err(),
             AssemblyRefusal::SupportNotCollected {
