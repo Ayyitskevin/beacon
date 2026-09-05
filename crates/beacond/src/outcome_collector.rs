@@ -210,6 +210,25 @@ impl std::error::Error for CollectorRefusal {}
 /// and the boundary check reads only from here — so adding a citable source is one row rather than
 /// a literal buried in a query, and `every_positionable_source_has_a_locator` proves the table
 /// covers what the collector can cite.
+/// Where each positioning Event carries the record's EXACT canonical bytes.
+///
+/// Positioning keys on the bytes the record's own reader verified, not on any Event that happens to
+/// name its digest: a forged early Event naming a digest -- and nothing else -- positioned a
+/// classification recorded after the boundary INSIDE the frozen inputs (sol1's cold read, #8). An
+/// Event that carries the bytes is the Event that recorded them; one that only names them is a
+/// claim about a record it does not hold. One row per `EVENT_LOCATORS` label, and the unit test
+/// below refuses the two tables drifting apart.
+const EVENT_BYTES_PATHS: &[(&str, &str)] = &[
+    ("proposal", "$.proposal.canonicalBytesBase64"),
+    ("ruling", "$.ruling.canonicalBytesBase64"),
+    ("evaluation", "$.evaluation.canonical_bytes_base64"),
+    ("spend", "$.canonical_bytes_base64"),
+    ("classification", "$.canonical_bytes_base64"),
+    // The completion is positioned by its locator row for the table's own test; it is never
+    // filtered by the cut it defines, but its Event carries its bytes like every other.
+    ("completion", "$.canonicalBytesBase64"),
+];
+
 const EVENT_LOCATORS: &[(&str, &str, &str)] = &[
     ("proposal", "proposal.submitted", "$.proposal.digest.value"),
     ("ruling", "ruling.recorded", "$.ruling.digest.value"),
@@ -520,9 +539,10 @@ impl<'a> Collector<'a> {
         &self,
         kind: &'static str,
         id: &str,
+        canonical_bytes: &[u8],
         boundary_event_seq: u64,
     ) -> Result<(), CollectorRefusal> {
-        let Some(sequence) = self.event_sequence_of(kind, id)? else {
+        let Some(sequence) = self.event_sequence_of(kind, id, canonical_bytes)? else {
             return Err(CollectorRefusal::Unpositioned {
                 kind,
                 id: id.to_owned(),
@@ -548,6 +568,7 @@ impl<'a> Collector<'a> {
         &self,
         kind: &'static str,
         id: &str,
+        canonical_bytes: &[u8],
     ) -> Result<Option<i64>, CollectorRefusal> {
         let Some((_, event_kind, path)) = EVENT_LOCATORS
             .iter()
@@ -559,11 +580,33 @@ impl<'a> Collector<'a> {
                 id: id.to_owned(),
             });
         };
+        let Some((_, bytes_path)) = EVENT_BYTES_PATHS
+            .iter()
+            .find(|(label, _)| *label == kind)
+            .copied()
+        else {
+            return Err(CollectorRefusal::Unpositioned {
+                kind,
+                id: id.to_owned(),
+            });
+        };
+        // Identity AND bytes. The digest says which record; the bytes say this Event is the one
+        // that recorded it. A forged Event can name a digest it never held -- it cannot carry
+        // bytes the verified reader did not just prove.
         self.connection
             .query_row(
                 "SELECT MIN(sequence) FROM events
-                 WHERE workspace_id = ?1 AND kind = ?2 AND json_extract(payload_json, ?3) = ?4",
-                params![self.workspace_id.to_string(), event_kind, path, id],
+                 WHERE workspace_id = ?1 AND kind = ?2
+                   AND json_extract(payload_json, ?3) = ?4
+                   AND json_extract(payload_json, ?5) = ?6",
+                params![
+                    self.workspace_id.to_string(),
+                    event_kind,
+                    path,
+                    id,
+                    bytes_path,
+                    data_encoding::BASE64.encode(canonical_bytes)
+                ],
                 |row| row.get::<_, Option<i64>>(0),
             )
             .map_err(|error| CollectorRefusal::Unverified {
@@ -770,7 +813,12 @@ impl<'a> Collector<'a> {
                 id: digest_value,
             });
         }
-        self.at_or_before("spend", &digest_value, boundary_event_seq)?;
+        self.at_or_before(
+            "spend",
+            &digest_value,
+            record.canonical_bytes(),
+            boundary_event_seq,
+        )?;
 
         let payload = record.payload();
         // The cited record's own bytes must measure THIS completion's Mission. R15 proved the
@@ -857,7 +905,12 @@ impl<'a> Collector<'a> {
             }
         };
         if let Some(cut) = boundary {
-            self.at_or_before("classification", digest_value, cut)?;
+            self.at_or_before(
+                "classification",
+                digest_value,
+                record.canonical_bytes(),
+                cut,
+            )?;
         }
 
         // R13.7, and what this slice can and cannot honour of it.
@@ -911,7 +964,7 @@ impl<'a> Collector<'a> {
         ) {
             Ok(Some(proposal)) => {
                 if let Some(cut) = boundary {
-                    self.at_or_before("proposal", digest_value, cut)?;
+                    self.at_or_before("proposal", digest_value, proposal.canonical_bytes(), cut)?;
                 }
                 Ok(CollectedDigest {
                     kind: SourceKind::Proposal,
@@ -945,7 +998,7 @@ impl<'a> Collector<'a> {
         ) {
             Ok(Some(ruling)) => {
                 if let Some(cut) = boundary {
-                    self.at_or_before("ruling", digest_value, cut)?;
+                    self.at_or_before("ruling", digest_value, ruling.canonical_bytes(), cut)?;
                 }
                 Ok(CollectedDigest {
                     kind: SourceKind::Ruling,
@@ -977,7 +1030,12 @@ impl<'a> Collector<'a> {
         ) {
             Ok(Some(evaluation)) => {
                 if let Some(cut) = boundary {
-                    self.at_or_before("evaluation", digest_value, cut)?;
+                    self.at_or_before(
+                        "evaluation",
+                        digest_value,
+                        evaluation.canonical_bytes(),
+                        cut,
+                    )?;
                 }
                 Ok(CollectedDigest {
                     kind: SourceKind::Evaluation,
@@ -1231,6 +1289,28 @@ mod scope_tests {
             context,
             supersedes: None,
             recorded_at_ms: 0,
+        }
+    }
+
+    /// Every positionable label has a bytes path, and every bytes path has a label: two tables
+    /// that describe one Event each cannot be allowed to drift.
+    #[test]
+    fn every_locator_has_a_bytes_path_and_no_bytes_path_is_orphaned() {
+        for (label, _, _) in EVENT_LOCATORS {
+            assert!(
+                EVENT_BYTES_PATHS
+                    .iter()
+                    .any(|(bytes_label, _)| bytes_label == label),
+                "{label} can be positioned but its Event has no declared bytes path"
+            );
+        }
+        for (label, _) in EVENT_BYTES_PATHS {
+            assert!(
+                EVENT_LOCATORS
+                    .iter()
+                    .any(|(locator_label, _, _)| locator_label == label),
+                "{label} has a bytes path but is not a positionable source"
+            );
         }
     }
 
