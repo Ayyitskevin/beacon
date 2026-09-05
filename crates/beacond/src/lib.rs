@@ -402,7 +402,16 @@ pub enum SupervisorError {
         cause: project_repository::ProjectRepositoryError,
     },
     SampleProjectEventMismatch(i64),
-    SampleProjectStateMismatch,
+    /// A stored sample-Project installation does not re-prove.
+    ///
+    /// Names the Workspace it belongs to -- which is this pass's whole key -- and carries the
+    /// owning reader's own error (R28.1).
+    SampleProjectStateMismatch {
+        workspace_id: Uuid,
+        cause: sample_project::SampleProjectError,
+    },
+    /// The sample-Project installations do not agree with the log. No row to name.
+    SampleProjectTotalsMismatch(TotalsMismatch),
     RunEventMismatch(i64),
     RunStateMismatch,
     ProposalEventMismatch(i64),
@@ -587,6 +596,7 @@ pub enum StartupPass {
     Ruling,
     Candidate,
     ProjectRepository,
+    SampleProject,
 }
 
 impl StartupPass {
@@ -605,6 +615,7 @@ impl StartupPass {
             Self::Candidate => "Candidate",
             Self::Ruling => "Ruling",
             Self::ProjectRepository => "ProjectRepository",
+            Self::SampleProject => "SampleProject",
         }
     }
 }
@@ -779,12 +790,20 @@ impl fmt::Display for SupervisorError {
                 formatter,
                 "Event sequence {sequence} does not match Sample Project installation state"
             ),
-            Self::SampleProjectStateMismatch => {
-                write!(
-                    formatter,
-                    "Sample Project state has no exact installation audit Event"
-                )
-            }
+            // R28.4: the key and the fault's NAME.
+            Self::SampleProjectStateMismatch {
+                workspace_id,
+                cause,
+            } => write!(
+                formatter,
+                "the sample Project installation in Workspace {workspace_id} does not re-prove: \
+                 {}",
+                cause.name()
+            ),
+            Self::SampleProjectTotalsMismatch(totals) => write!(
+                formatter,
+                "the sample Project installations do not agree with the log -- {totals}"
+            ),
             Self::RunEventMismatch(sequence) => {
                 write!(
                     formatter,
@@ -1761,6 +1780,36 @@ fn map_publication_state_fault(
     }
 }
 
+/// The production mapping for the SampleProject startup pass, NAMED so a bar can drive it.
+fn map_sample_project_state_fault(
+    fault: sample_project::SampleProjectStateFault,
+) -> SupervisorError {
+    match fault {
+        sample_project::SampleProjectStateFault::Store(source) => {
+            SupervisorError::StartupEnumerationFailed {
+                pass: StartupPass::SampleProject,
+                source,
+            }
+        }
+        sample_project::SampleProjectStateFault::Row {
+            workspace_id,
+            cause,
+        } => SupervisorError::SampleProjectStateMismatch {
+            workspace_id,
+            cause,
+        },
+        sample_project::SampleProjectStateFault::Totals(totals) => {
+            SupervisorError::SampleProjectTotalsMismatch(totals)
+        }
+        sample_project::SampleProjectStateFault::Identity { workspace_id } => {
+            SupervisorError::StoredIdentityUnreadable {
+                what: "a sample Project row's Workspace is not readable",
+                raw: workspace_id,
+            }
+        }
+    }
+}
+
 fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, SupervisorError> {
     let schema_version = connection.query_row(
         "SELECT version FROM schema_meta WHERE singleton = 1",
@@ -1822,7 +1871,7 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
         },
     )?;
     sample_project::verify_sample_project_state(connection)
-        .map_err(|_| SupervisorError::SampleProjectStateMismatch)?;
+        .map_err(map_sample_project_state_fault)?;
     proposal::verify_proposal_state(connection).map_err(|fault| match fault {
         proposal::ProposalStateFault::Store(source) => SupervisorError::StartupEnumerationFailed {
             pass: StartupPass::Proposal,
