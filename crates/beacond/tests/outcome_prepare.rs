@@ -6429,6 +6429,13 @@ fn sol1_transport_preserves_nul_and_lone_cr_and_guards_the_session_and_input_typ
     let history = client.mission_publications(fixture.mission_id).unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].candidate_artifact_digest, planted.digest().value);
+    // ADOPTED PROBE, ONE ASSERTION CHANGED, deliberately: sol1 wrote this against my item-3
+    // mapping, which reused `MissionNotFound` for `Absent`. Fold 3 (blue's P1) gave the Outcome
+    // refusals their own codes, so `Absent` is now `OutcomeAbsent` -- and that is the point of the
+    // change: `MissionNotFound` says the Mission is gone, while `Absent` means it may well exist
+    // and have no publication. What sol1's probe actually pins is unchanged and still holds: one
+    // code covers a version that does not exist AND another Mission's version, so nothing here
+    // tells a caller which of the two it hit (R29.6).
     for (mission_id, version) in [
         (fixture.mission_id, 0),
         (fixture.mission_id, 2),
@@ -6437,7 +6444,7 @@ fn sol1_transport_preserves_nul_and_lone_cr_and_guards_the_session_and_input_typ
         assert!(matches!(
             client.outcome_document(mission_id, Some(version)),
             Err(LocalTransportError::Remote {
-                code: LocalErrorCode::MissionNotFound,
+                code: LocalErrorCode::OutcomeAbsent,
                 ..
             })
         ));
