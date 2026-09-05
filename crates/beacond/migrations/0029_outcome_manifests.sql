@@ -11,11 +11,13 @@
 -- 0029/0030 lands second renumbers at its final rebase, exactly as 0027 and 0028 each said the
 -- second lane would.
 --
--- NO `events` REBUILD, because this migration adds NO Event kind. A prepared Outcome enters the
--- ledger as its candidate Artifact's `artifact.recorded` Event -- the Artifact the manifest row's
--- foreign key requires -- so there is no record here the event log does not account for, and the
--- closed kind list is untouched. The FIRST later migration that rebuilds `events` must still carry
--- every kind `main` has, regenerated from its own parent.
+-- NO `events` REBUILD, because this migration adds NO Event kind, and R18.6 rules that none is
+-- coming in v1. A prepared Outcome enters the ledger as its candidate Artifact's
+-- `artifact.recorded` Event -- the Artifact the manifest row's foreign key requires -- so there is
+-- no record here the event log does not account for, and the closed kind list is untouched. That
+-- position is an invariant, not an assumption: `outcome_store::verify_manifest_state` re-proves it
+-- for every row at startup (R18.7). The FIRST later migration that rebuilds `events` must still
+-- carry every kind `main` has, regenerated from its own parent.
 
 -- One stored manifest: its exact canonical bytes, the identity those bytes hash to, and the
 -- candidate Artifact they were rendered into.
@@ -29,9 +31,10 @@
 -- the first sixteen bytes of `sha256(canonical_bytes)`, re-spelled as a UUID. `OutcomeManifestV1`
 -- carries no UUID inside its canonical bytes and its grammar is frozen (R12/R13), so a freshly
 -- minted UUID here would be a second identity the bytes do not carry -- exactly the decoy R15
--- exists to refuse. A derived one cannot disagree with the bytes it is derived from. Whether the
--- manifest should instead carry a UUID inside its canonical bytes -- a canonicalizer version, and
--- a new frozen vector -- is a question for the Steward, recorded in the build report.
+-- exists to refuse, and it would break `prepare`'s idempotency, which keys on the bytes. A derived
+-- one cannot disagree with the bytes it is derived from. Ruled in R18.2 as a recorded R15
+-- exception: an immutable, idempotent manifest wants content identity and reference identity to be
+-- one thing.
 CREATE TABLE outcome_manifests (
     workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
     digest_algorithm TEXT NOT NULL CHECK (digest_algorithm = 'sha256'),
@@ -57,6 +60,10 @@ CREATE TABLE outcome_manifests (
     -- The Artifact holding the exact Markdown these bytes rendered to. One manifest renders to one
     -- candidate under one renderer version, and one candidate belongs to one manifest: a second
     -- manifest claiming a recorded candidate would make the document's provenance ambiguous.
+    --
+    -- This column is also this row's POSITION IN THE LOG. There is no `outcome.prepared` Event
+    -- (R18.6), so the candidate's own `artifact.recorded` Event is what accounts for the manifest,
+    -- and `NOT NULL` plus the foreign key below is why a manifest cannot exist without one.
     candidate_artifact_digest TEXT NOT NULL CHECK (
         length(candidate_artifact_digest) = 64
         AND candidate_artifact_digest NOT GLOB '*[^0-9a-f]*'
