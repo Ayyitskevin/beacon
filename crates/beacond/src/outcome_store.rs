@@ -1657,3 +1657,68 @@ fn verify_one_manifest(
     // it, on this exact row, and one rule with two implementations is two rules.
     Ok(())
 }
+
+#[cfg(test)]
+mod name_witness {
+    use super::*;
+
+    /// Pinned independently of `name()`; see the note in `outcome_publication`'s twin.
+    fn expected_name(refusal: &ManifestStoreRefusal) -> &'static str {
+        match refusal {
+            ManifestStoreRefusal::Absent => "Absent",
+            ManifestStoreRefusal::CrossWorkspace => "CrossWorkspace",
+            ManifestStoreRefusal::BytesDisagree => "BytesDisagree",
+            ManifestStoreRefusal::ColumnDisagrees { .. } => "ColumnDisagrees",
+            ManifestStoreRefusal::ManifestTooLarge { .. } => "ManifestTooLarge",
+            ManifestStoreRefusal::Malformed(_) => "Malformed",
+            ManifestStoreRefusal::Irreconcilable { .. } => "Irreconcilable",
+            ManifestStoreRefusal::CandidateNotAccounted { .. } => "CandidateNotAccounted",
+            ManifestStoreRefusal::Store(_) => "Store",
+        }
+    }
+
+    #[test]
+    fn every_manifest_refusal_arm_has_its_own_pinned_name() {
+        let every_arm = [
+            ManifestStoreRefusal::Absent,
+            ManifestStoreRefusal::CrossWorkspace,
+            ManifestStoreRefusal::BytesDisagree,
+            ManifestStoreRefusal::ColumnDisagrees { column: "anything" },
+            ManifestStoreRefusal::ManifestTooLarge {
+                configured: 1,
+                observed: 2,
+            },
+            ManifestStoreRefusal::Malformed(crate::outcome::MalformedOutcome::Magic),
+            ManifestStoreRefusal::Irreconcilable {
+                detail: "anything at all".to_owned(),
+            },
+            ManifestStoreRefusal::CandidateNotAccounted { reason: "anything" },
+            ManifestStoreRefusal::Store("anything at all".to_owned()),
+        ];
+        assert_eq!(
+            every_arm.len(),
+            9,
+            "an arm was added to `ManifestStoreRefusal` without a fixture here"
+        );
+        for arm in &every_arm {
+            assert_eq!(
+                arm.name(),
+                expected_name(arm),
+                "the startup name does not match the pinned table: {arm:?}"
+            );
+        }
+        let names: std::collections::BTreeSet<&str> =
+            every_arm.iter().map(ManifestStoreRefusal::name).collect();
+        assert_eq!(
+            names.len(),
+            9,
+            "two arms share a startup name, so a swap between them is invisible: {names:?}"
+        );
+        for name in names {
+            assert!(
+                !name.contains(' ') && !name.contains('{'),
+                "a name is a name, not a rendering: {name}"
+            );
+        }
+    }
+}

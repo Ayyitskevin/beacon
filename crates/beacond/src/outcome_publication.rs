@@ -1112,3 +1112,103 @@ pub(crate) fn verify_publication_state(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod name_witness {
+    use super::*;
+
+    /// The name each arm must carry, pinned here rather than read off `name()`.
+    ///
+    /// Exhaustive and wildcard-free ON PURPOSE: a new arm is a compile error in BOTH tables, so
+    /// "every arm is named, and named its own thing" stays a claim these bars can keep. An
+    /// exhaustive `name()` alone catches additions; only a second, independent table catches a
+    /// name that is wrong or duplicated -- which is how Fable's `Pdf(_) => "Seam"` mutant survived
+    /// the whole suite.
+    fn expected_name(refusal: &PublishRefusal) -> &'static str {
+        match refusal {
+            PublishRefusal::Seam(_) => "Seam",
+            PublishRefusal::NoManifestForCandidate => "NoManifestForCandidate",
+            PublishRefusal::Manifest(_) => "Manifest",
+            PublishRefusal::ManifestMissionDiffers { .. } => "ManifestMissionDiffers",
+            PublishRefusal::Completion(_) => "Completion",
+            PublishRefusal::AppendixRequired => "AppendixRequired",
+            PublishRefusal::VersionGap { .. } => "VersionGap",
+            PublishRefusal::AlreadyPublished => "AlreadyPublished",
+            PublishRefusal::HistoryNotContiguous { .. } => "HistoryNotContiguous",
+            PublishRefusal::QualifyingVerdictNotMeets => "QualifyingVerdictNotMeets",
+            PublishRefusal::MissionBindingBroken { .. } => "MissionBindingBroken",
+            PublishRefusal::Pdf(_) => "Pdf",
+            PublishRefusal::Absent => "Absent",
+            PublishRefusal::Account(_) => "Account",
+            PublishRefusal::Unverified(_) => "Unverified",
+            PublishRefusal::Store(_) => "Store",
+        }
+    }
+
+    #[test]
+    fn every_publish_refusal_arm_has_its_own_pinned_name() {
+        let every_arm = [
+            PublishRefusal::Seam(PublicationSeamRefusal::EvaluationAbsent),
+            PublishRefusal::NoManifestForCandidate,
+            PublishRefusal::Manifest(ManifestStoreRefusal::Absent),
+            PublishRefusal::ManifestMissionDiffers {
+                manifest: Uuid::nil(),
+                requested: Uuid::nil(),
+            },
+            PublishRefusal::Completion("anything at all".to_owned()),
+            PublishRefusal::AppendixRequired,
+            PublishRefusal::VersionGap {
+                expected: 1,
+                found: 2,
+            },
+            PublishRefusal::AlreadyPublished,
+            PublishRefusal::HistoryNotContiguous {
+                expected: 1,
+                found: 2,
+            },
+            PublishRefusal::QualifyingVerdictNotMeets,
+            PublishRefusal::MissionBindingBroken {
+                what: "anything",
+                named: Uuid::nil(),
+                relation: Uuid::nil(),
+            },
+            PublishRefusal::Pdf(crate::outcome_pdf::PdfRefusal::NotUtf8),
+            PublishRefusal::Absent,
+            PublishRefusal::Account(
+                crate::operator_account::OperatorAccountError::PasswordTooShort,
+            ),
+            PublishRefusal::Unverified("anything at all".to_owned()),
+            PublishRefusal::Store(rusqlite::Error::QueryReturnedNoRows),
+        ];
+        assert_eq!(
+            every_arm.len(),
+            16,
+            "an arm was added to `PublishRefusal` without a fixture here"
+        );
+
+        for arm in &every_arm {
+            assert_eq!(
+                arm.name(),
+                expected_name(arm),
+                "the startup name does not match the pinned table: {arm:?}"
+            );
+        }
+
+        // The count is what kills a SWAP: `Pdf(_) => \"Seam\"` leaves every arm named and the
+        // exhaustive match satisfied, and shows up only as two arms sharing one name.
+        let names: std::collections::BTreeSet<&str> =
+            every_arm.iter().map(PublishRefusal::name).collect();
+        assert_eq!(
+            names.len(),
+            16,
+            "two arms share a startup name, so a swap between them is invisible: {names:?}"
+        );
+
+        for name in names {
+            assert!(
+                !name.contains(' ') && !name.contains('{'),
+                "a name is a name, not a rendering: {name}"
+            );
+        }
+    }
+}
