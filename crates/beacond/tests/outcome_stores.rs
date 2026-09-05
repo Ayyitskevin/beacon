@@ -20,7 +20,7 @@ use beacond::{
     ProviderFeature, ResidentConfiguration, ResidentConfigurationService, ResidentLifecycleService,
     SecretString, SpendStoreError, StarterOrganizationService, StarterResidentDraft, StarterRole,
     StartupConfig, Supervisor, TeamDraft, TeamMemberDraft, TeamService, TeamView,
-    verified_classification_for_citation, verified_classification_within,
+    open_store_connection, verified_classification_for_citation, verified_classification_within,
     verified_spend_for_citation, verified_spend_within,
 };
 use rusqlite::{Connection, params};
@@ -661,7 +661,10 @@ fn insert_or_replace_cannot_bypass_the_immutable_store_triggers() {
     let digest = record.digest().unwrap().value;
     stored.insert_spend(&bytes, &digest, spend_id, 1, "daemon_ledger");
 
-    let connection = stored.connection();
+    // Through the crate's opener, the way every production connection is opened (R21): the
+    // pragma it sets is what makes REPLACE meet the delete trigger. A bare `Connection::open`
+    // here would measure SQLite's default, not Beacon's.
+    let connection = open_store_connection(&stored.store.path).unwrap();
     let result = connection.execute(
         "INSERT OR REPLACE INTO measured_spend (
              workspace_id, digest_algorithm, digest_canonicalizer, digest_value,

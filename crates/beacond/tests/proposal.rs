@@ -663,9 +663,7 @@ impl Fixture {
         let mut statement = connection
             .prepare(
                 "SELECT sql FROM sqlite_schema
-                 WHERE type = 'trigger' AND tbl_name = 'proposals'
-                   AND name NOT LIKE '%\\_no\\_conflicting\\_insert' ESCAPE '\\'
-                 ORDER BY name",
+                 WHERE type = 'trigger' AND tbl_name = 'proposals' ORDER BY name",
             )
             .unwrap();
         let triggers = statement

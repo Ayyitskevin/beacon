@@ -505,7 +505,6 @@ impl Fixture {
                 "SELECT sql FROM sqlite_schema
                  WHERE type = 'trigger'
                    AND tbl_name IN ('rulings', 'ruling_supersessions', 'ruling_candidates')
-                 AND name NOT LIKE '%\\_no\\_conflicting\\_insert' ESCAPE '\\'
                  ORDER BY name",
             )
             .unwrap();
