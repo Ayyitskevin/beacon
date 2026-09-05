@@ -664,7 +664,11 @@ impl fmt::Display for ClassificationStoreError {
             Self::Predecessor { digest, fault } => {
                 write!(formatter, "predecessor {digest}: {fault}")
             }
-            Self::Store(reason) => write!(formatter, "store: {reason}"),
+            // The NAME only (R28.4). The reason is built from `rusqlite::Error::to_string()` at
+            // every site in this file that constructs this arm, and that text can name a column and
+            // a constraint value. It stays in the value and reaches a reader through `Debug`; it
+            // does not reach the one line a startup refusal prints.
+            Self::Store(_) => formatter.write_str("store"),
         }
     }
 }
@@ -1251,8 +1255,10 @@ pub(crate) enum ClassificationStateFault {
 impl fmt::Display for ClassificationStateFault {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Store(error) => {
-                write!(formatter, "the classifications could not be read: {error}")
+            // No row to name -- the enumeration itself failed, so none was reached -- and no store
+            // text (R28.4). `source()` carries the `rusqlite::Error` for anyone who needs it.
+            Self::Store(_) => {
+                formatter.write_str("the classifications could not be read: store (see source)")
             }
             Self::Row {
                 workspace_id,
@@ -1266,9 +1272,35 @@ impl fmt::Display for ClassificationStateFault {
     }
 }
 
+/// `Debug` is the channel R28.4 leaves open: it carries the store's own text, the cause's payload
+/// and everything else the value holds. Deliberately NOT `Display` -- that was the previous shape,
+/// and it left nowhere to look once the one line stopped saying enough.
 impl fmt::Debug for ClassificationStateFault {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, formatter)
+        match self {
+            Self::Store(error) => formatter.debug_tuple("Store").field(error).finish(),
+            Self::Row {
+                workspace_id,
+                digest,
+                cause,
+            } => formatter
+                .debug_struct("Row")
+                .field("workspace_id", workspace_id)
+                .field("digest", digest)
+                .field("cause", cause)
+                .finish(),
+        }
+    }
+}
+
+/// The other channel R28.4 leaves open. `Store` carries a real `rusqlite::Error`, so a caller that
+/// wants the driver's own words asks for them here rather than reading them off a message.
+impl std::error::Error for ClassificationStateFault {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::Row { cause, .. } => Some(cause),
+        }
     }
 }
 
@@ -1353,17 +1385,13 @@ mod display_tests {
     const STORE_TEXT: &str =
         "UNIQUE constraint failed: mission_impact_classifications.digest_value";
 
-    /// Today's behaviour, pinned before it changes (R28.4 changes it).
+    /// R28.4: the one line names the row and the fault, and nothing the store said.
     ///
-    /// `ClassificationStoreError::Store`'s Display is `store: {reason}`, and the reason is built
-    /// from `rusqlite::Error::to_string()` at five sites in this file. `ClassificationStateFault`'s
-    /// `Row` arm interpolates that cause, and `SupervisorError`'s widened variant interpolates it
-    /// again -- so the store's own text reaches the one line a startup refusal prints. R28.4 says
-    /// the key and the fault's NAME, and the text only through `Debug`/`source()`.
-    ///
-    /// It is deleted by the commit that closes this, and replaced by the bar for the new rule.
+    /// The needle is text only a store error carries. It must not be in the message an operator
+    /// sees, and it must still be reachable -- through `Debug`, and for the `Store` arm through
+    /// `source()`, which carries the `rusqlite::Error` itself.
     #[test]
-    fn a_classification_refusal_prints_the_store_text_in_its_one_line_message() {
+    fn a_classification_refusal_names_the_row_and_the_fault_and_not_the_store_text() {
         let workspace_id = Uuid::new_v4();
         let digest = "a".repeat(64);
         let fault = ClassificationStateFault::Row {
@@ -1371,16 +1399,91 @@ mod display_tests {
             digest: digest.clone(),
             cause: ClassificationStoreError::Store(STORE_TEXT.to_owned()),
         };
+
         let line = fault.to_string();
-        assert!(line.contains(&workspace_id.to_string()), "{line}");
-        assert!(line.contains(&digest), "{line}");
         assert!(
-            line.contains(STORE_TEXT),
-            "the store text is not in the one-line message, so this pins nothing: {line}"
+            line.contains(&workspace_id.to_string()),
+            "no Workspace: {line}"
+        );
+        assert!(line.contains(&digest), "no row key: {line}");
+        assert!(line.contains("store"), "no fault name: {line}");
+        assert!(
+            !line.contains(STORE_TEXT),
+            "the store's own text is in the one-line message: {line}"
+        );
+        assert!(
+            !line.contains("constraint"),
+            "part of the store's text survived: {line}"
         );
 
-        // And `Debug` is `Display`, so there is no channel that carries MORE than the one line --
-        // which is the other half of what R28.4 asks for.
-        assert_eq!(format!("{fault:?}"), line);
+        // And it is still reachable, which is the other half of the rule.
+        assert!(
+            format!("{fault:?}").contains(STORE_TEXT),
+            "Debug lost the store text, so there is nowhere to look: {fault:?}"
+        );
+        assert_ne!(
+            format!("{fault:?}"),
+            line,
+            "Debug is Display again, so the two channels are one"
+        );
+    }
+
+    /// Every named fault still reaches the message, so closing the text did not close the vocabulary.
+    #[test]
+    fn a_classification_refusal_still_names_which_fault_it_was() {
+        let row = |cause| ClassificationStateFault::Row {
+            workspace_id: Uuid::new_v4(),
+            digest: "b".repeat(64),
+            cause,
+        };
+        for (cause, name) in [
+            (ClassificationStoreError::DigestMismatch, "digest_mismatch"),
+            (
+                ClassificationStoreError::ColumnsDisagree,
+                "columns_disagree",
+            ),
+            (ClassificationStoreError::CrossWorkspace, "cross_workspace"),
+            (
+                ClassificationStoreError::CopiedBitDisagrees,
+                "copied_bit_disagrees",
+            ),
+            (
+                ClassificationStoreError::Store("anything at all".to_owned()),
+                "store",
+            ),
+        ] {
+            let line = row(cause).to_string();
+            assert!(line.contains(name), "the fault is not named: {line}");
+        }
+    }
+
+    /// The enumeration itself failing has no row to name, and still must not print the driver's
+    /// words. `source()` is where they live.
+    #[test]
+    fn an_enumeration_failure_names_no_row_and_carries_its_error_in_source() {
+        use std::error::Error;
+
+        let fault = ClassificationStateFault::Store(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(19),
+            Some(STORE_TEXT.to_owned()),
+        ));
+        let line = fault.to_string();
+        assert!(line.contains("store"), "no fault name: {line}");
+        assert!(
+            !line.contains(STORE_TEXT),
+            "the driver's words are in the one-line message: {line}"
+        );
+        assert!(
+            format!("{fault:?}").contains(STORE_TEXT),
+            "Debug lost the driver's words: {fault:?}"
+        );
+        assert!(
+            fault
+                .source()
+                .expect("the enumeration failure carries its error")
+                .to_string()
+                .contains(STORE_TEXT),
+            "source() did not carry the driver's words"
+        );
     }
 }
