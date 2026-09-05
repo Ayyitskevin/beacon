@@ -52,9 +52,12 @@ use uuid::Uuid;
 use crate::artifact::{
     ArtifactContext, ArtifactError, ArtifactKind, VerifiedArtifactRecord, record_artifact_within,
 };
-use crate::mission_completion::MissionCompletionV1;
+use crate::mission_completion::{COMPLETION_CANONICALIZER, MissionCompletionV1};
 use crate::mission_completion_store::{CompletionReadRefusal, verified_completion_within};
-use crate::mission_impact::{ClassificationStoreError, verified_classification_for_citation};
+use crate::mission_impact::{
+    CANONICALIZER as MISSION_IMPACT_CANONICALIZER, ClassificationStoreError,
+    verified_classification_for_citation,
+};
 use crate::operator_account::{OperatorAccountError, OperatorAccountService};
 use crate::outcome::{
     MalformedOutcome, OutcomeManifestV1, OutcomeRefusal, SourceDigest, SourceKind, VerifiedSources,
@@ -75,6 +78,13 @@ const DIGEST_ALGORITHM: &str = "sha256";
 /// It is temporary by construction. The R18.3-5 grammar revision removes the digest from the
 /// Mission citation entirely, and this constant goes with it.
 pub const MISSION_IDENTITY_ONLY: &str = "beacon.outcome.mission-identity-only.v1";
+
+/// The schema version a completion citation must carry.
+///
+/// `MissionCompletionV1` has no version field of its own -- its grammar version is the `v1` in its
+/// canonicalizer -- so the citation's `schema_version` has exactly one admissible value, and until
+/// astra's A5 it had none: a citation claiming version 999 was accepted.
+const COMPLETION_SCHEMA_VERSION: u32 = 1;
 
 /// The largest manifest this store will hold, applied to the canonical bytes before the insert.
 ///
@@ -788,6 +798,31 @@ fn read_completion(
             ),
         });
     }
+    // The whole envelope, not the value alone (R15, and astra's A5). A citation that names the
+    // right 64 hex characters under a canonicalizer or a schema version its owner does not have is
+    // different evidence, not the same evidence spelled differently -- and both were accepted:
+    // `beacon.mission_completion.v999` and schema version 999 both prepared successfully. The
+    // digest value is proved by the owning reader below; these two are the parts no reader saw.
+    if manifest.completion.digest.algorithm != DIGEST_ALGORITHM
+        || manifest.completion.digest.canonicalizer != COMPLETION_CANONICALIZER
+    {
+        return Err(PrepareRefusal::Irreconcilable {
+            detail: format!(
+                "the completion citation declares envelope {}:{} and a completion is \
+                 {DIGEST_ALGORITHM}:{COMPLETION_CANONICALIZER}",
+                manifest.completion.digest.algorithm, manifest.completion.digest.canonicalizer
+            ),
+        });
+    }
+    if manifest.completion.schema_version != COMPLETION_SCHEMA_VERSION {
+        return Err(PrepareRefusal::Irreconcilable {
+            detail: format!(
+                "the completion citation declares schema version {} and a completion is version \
+                 {COMPLETION_SCHEMA_VERSION}",
+                manifest.completion.schema_version
+            ),
+        });
+    }
     let record =
         verified_completion_within(connection, workspace_id, &manifest.completion.digest.value)?;
     reconcile_completion(manifest, &record)
@@ -868,6 +903,22 @@ fn recheck_policy(
             detail: format!(
                 "the manifest's policy reference is a {}",
                 manifest.policy_classification.kind.as_str()
+            ),
+        });
+    }
+    // Not one of astra's findings, and the same hole in the same shape one function away: the
+    // Policy citation's envelope was unchecked too. `verified_classification_for_citation` proves
+    // the id and the version, so only the envelope was open. Fixed here rather than left as a known
+    // instance of a class being closed elsewhere in the same commit.
+    if manifest.policy_classification.digest.algorithm != DIGEST_ALGORITHM
+        || manifest.policy_classification.digest.canonicalizer != MISSION_IMPACT_CANONICALIZER
+    {
+        return Err(PrepareRefusal::Irreconcilable {
+            detail: format!(
+                "the Policy citation declares envelope {}:{} and a classification is \
+                 {DIGEST_ALGORITHM}:{MISSION_IMPACT_CANONICALIZER}",
+                manifest.policy_classification.digest.algorithm,
+                manifest.policy_classification.digest.canonicalizer
             ),
         });
     }
