@@ -703,21 +703,19 @@ fn a_classification_cannot_bind_one_mission_to_another_projects_policy() {
     let own_policy = stored.policy_revision();
     assert_eq!(own_policy, 1);
 
-    let other_project = ProjectService::new(
-        Arc::clone(&stored.accounts),
-        stored.store.workspace_id,
-    )
-    .create(ProjectDraft {
-        name: "Unrelated Project".to_owned(),
-        charter: ProjectCharterDraft {
-            purpose: "Prove policy scoping.".to_owned(),
-            desired_outcomes: vec!["Stay unrelated".to_owned()],
-            constraints: vec!["Do not borrow another Mission".to_owned()],
-            prohibitions: vec!["No cross-Project binding".to_owned()],
-            autonomy_profile: AutonomyProfile::Supervised,
-        },
-    })
-    .unwrap();
+    let other_project =
+        ProjectService::new(Arc::clone(&stored.accounts), stored.store.workspace_id)
+            .create(ProjectDraft {
+                name: "Unrelated Project".to_owned(),
+                charter: ProjectCharterDraft {
+                    purpose: "Prove policy scoping.".to_owned(),
+                    desired_outcomes: vec!["Stay unrelated".to_owned()],
+                    constraints: vec!["Do not borrow another Mission".to_owned()],
+                    prohibitions: vec!["No cross-Project binding".to_owned()],
+                    autonomy_profile: AutonomyProfile::Supervised,
+                },
+            })
+            .unwrap();
     stored
         .connection()
         .execute(
