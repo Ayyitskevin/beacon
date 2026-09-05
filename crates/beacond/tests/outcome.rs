@@ -1437,6 +1437,101 @@ fn find_in(haystack: &[u8], needle: &[u8]) -> usize {
 }
 
 #[test]
+fn sol1_an_unknown_state_tag_is_named_before_its_non_reason_payload() {
+    let mut bytes = vector_manifest().canonical_bytes().unwrap();
+    let condition_id = find_in(&bytes, b"sc-alpha");
+    let outcome_state_tag = condition_id + b"sc-alpha".len();
+    assert_eq!(
+        bytes[outcome_state_tag], 0x01,
+        "probe missed verified state"
+    );
+    bytes[outcome_state_tag] = 0x09;
+
+    assert_eq!(
+        OutcomeManifestV1::from_canonical_bytes(&bytes).expect_err("unknown tag decoded"),
+        MalformedOutcome::UnknownTag,
+        "the decoder consumed a reason payload before classifying its closed state tag"
+    );
+}
+
+#[test]
+fn sol1_v2_remaining_strictness_and_identity_matrix() {
+    let manifest = vector_manifest();
+    let bytes = manifest.canonical_bytes().unwrap();
+
+    // An `identity: none` tag cannot make the following 20 identity bytes disappear: the kind's
+    // shape is rejected before those bytes can be reinterpreted as a digest.
+    let completion_canonicalizer = find_in(&bytes, b"beacon.completion.v1");
+    let completion_kind = completion_canonicalizer - (8 + 6 + 8 + 32 + 4 + 16 + 1 + 1);
+    assert_eq!(bytes[completion_kind], 0x02);
+    assert_eq!(bytes[completion_kind + 1], 0x02);
+    let mut identity_dropped_but_payload_left = bytes.clone();
+    identity_dropped_but_payload_left[completion_kind + 1] = 0x01;
+    assert_eq!(
+        OutcomeManifestV1::from_canonical_bytes(&identity_dropped_but_payload_left)
+            .expect_err("identity disappeared"),
+        MalformedOutcome::ReferenceIdentityRequired
+    );
+
+    // The last string gives a clean past-end length and a one-byte/non-fixed-width length attempt.
+    let final_id = find_in(&bytes, b"un-latency");
+    let mut past_end = bytes.clone();
+    past_end[final_id - 8..final_id].copy_from_slice(&11_u64.to_be_bytes());
+    assert_eq!(
+        OutcomeManifestV1::from_canonical_bytes(&past_end).expect_err("past-end length decoded"),
+        MalformedOutcome::Truncated
+    );
+    let mut short_length = bytes.clone();
+    short_length.drain(final_id - 8..final_id - 1);
+    assert!(OutcomeManifestV1::from_canonical_bytes(&short_length).is_err());
+
+    let mut invalid_statement_id = bytes.clone();
+    invalid_statement_id[find_in(&bytes, b"sc-alpha")] = 0xff;
+    assert_eq!(
+        OutcomeManifestV1::from_canonical_bytes(&invalid_statement_id)
+            .expect_err("non-UTF-8 condition id decoded"),
+        MalformedOutcome::InvalidUtf8
+    );
+
+    // Duplicate one complete canonical key (ordinal + equal-length id) without changing the
+    // following value, so only strict ordering can refuse it.
+    let gamma = find_in(&bytes, b"sc-gamma");
+    let mut duplicate = bytes.clone();
+    duplicate[gamma - 12..gamma - 8].copy_from_slice(&1_u32.to_be_bytes());
+    duplicate[gamma..gamma + 8].copy_from_slice(b"sc-alpha");
+    assert_eq!(
+        OutcomeManifestV1::from_canonical_bytes(&duplicate).expect_err("duplicate key decoded"),
+        MalformedOutcome::NonCanonicalOrder
+    );
+
+    let mut dropped = manifest.clone();
+    dropped.completion.identity = None;
+    assert_eq!(
+        dropped
+            .digest()
+            .expect_err("identity-free reference hashed"),
+        MalformedOutcome::ReferenceIdentityRequired
+    );
+    let mut changed = manifest.clone();
+    changed.completion.identity.as_mut().unwrap().object_id = Uuid::from_u128(0xabc123);
+    assert_ne!(manifest.digest().unwrap(), changed.digest().unwrap());
+
+    assert_eq!(
+        OutcomeManifestV1::from_canonical_bytes(b"beacon.outcome.manifest.v1\0")
+            .expect_err("retired magic decoded"),
+        MalformedOutcome::RetiredVersion
+    );
+    let mut v2_magic_v1_profile = bytes.clone();
+    let profile = MAGIC.len() + 8;
+    v2_magic_v1_profile[profile + CANONICALIZER.len() - 1] = b'1';
+    assert_eq!(
+        OutcomeManifestV1::from_canonical_bytes(&v2_magic_v1_profile)
+            .expect_err("mixed version decoded"),
+        MalformedOutcome::UnknownVersion
+    );
+}
+
+#[test]
 fn outcome_manifest_canonical_bytes_follow_adr_0034_0037_strict_round_trip_rules() {
     let manifest = vector_manifest();
     let bytes = manifest.canonical_bytes().expect("encodes");

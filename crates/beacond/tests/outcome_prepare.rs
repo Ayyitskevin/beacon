@@ -705,6 +705,47 @@ fn a_v2_manifest_row_is_refused_by_a_store_at_0029_and_admitted_after_the_ladder
     );
 }
 
+#[test]
+fn sol1_a_store_migrated_through_0029_and_0030_refuses_a_v1_manifest_row() {
+    let store = TestStore::new("v1-row-at-0030");
+    Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Personal".to_owned(),
+    })
+    .expect("the migration ladder reaches 0030");
+
+    let connection = store.connect();
+    connection
+        .pragma_update(None, "foreign_keys", "OFF")
+        .unwrap();
+    let error = connection
+        .execute(
+            "INSERT INTO outcome_manifests (
+                 workspace_id, digest_algorithm, digest_canonicalizer, manifest_digest,
+                 canonical_bytes, manifest_id, mission_id, completion_digest,
+                 canonicalizer_version, renderer_version, boundary_event_seq,
+                 candidate_artifact_digest
+             ) VALUES (?1, 'sha256', 'beacon.outcome.manifest.v1', ?2, ?3, ?4, ?5, ?6,
+                       'beacon.outcome.manifest.v1', 'beacon.outcome.md.v1', 1, ?7)",
+            params![
+                Uuid::new_v4().to_string(),
+                "ab".repeat(32),
+                vec![0_u8; 27],
+                Uuid::new_v4().to_string(),
+                Uuid::new_v4().to_string(),
+                "cd".repeat(32),
+                "ef".repeat(32),
+            ],
+        )
+        .expect_err("a store migrated through 0030 accepted a retired v1 row");
+    assert!(
+        error.to_string().contains(
+            "CHECK constraint failed: digest_canonicalizer = 'beacon.outcome.manifest.v2'"
+        ),
+        "the retired v1 row was refused for the wrong reason: {error}"
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // The verified reader
 // ---------------------------------------------------------------------------------------------
