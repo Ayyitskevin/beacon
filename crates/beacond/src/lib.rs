@@ -359,7 +359,16 @@ pub enum SupervisorError {
     StarterOrganizationEventMismatch(i64),
     StarterOrganizationStateMismatch,
     ProjectEventMismatch(i64),
-    ProjectStateMismatch,
+    /// A stored Project does not re-prove against its charter history or the log.
+    ///
+    /// Names the row and carries the owning reader's own error (R28.1).
+    ProjectStateMismatch {
+        workspace_id: Uuid,
+        project_id: Uuid,
+        cause: project::ProjectError,
+    },
+    /// The Projects do not agree with the store as a whole. No row to name.
+    ProjectTotalsMismatch(project::ProjectError),
     LocalModelActivationEventMismatch(i64),
     LocalModelActivationStateMismatch,
     ResidentLifecycleEventMismatch(i64),
@@ -502,9 +511,22 @@ impl fmt::Display for SupervisorError {
                 formatter,
                 "Event sequence {sequence} does not match Project creation state"
             ),
-            Self::ProjectStateMismatch => {
-                write!(formatter, "Project state has no exact creation audit Event")
-            }
+            // R28.4: the key and the fault's NAME.
+            Self::ProjectStateMismatch {
+                workspace_id,
+                project_id,
+                cause,
+            } => write!(
+                formatter,
+                "Project {project_id} in Workspace {workspace_id} does not re-prove against its \
+                 charter history or the log: {}",
+                cause.name()
+            ),
+            Self::ProjectTotalsMismatch(cause) => write!(
+                formatter,
+                "the Projects do not agree with the store as a whole: {}",
+                cause.name()
+            ),
             Self::LocalModelActivationEventMismatch(sequence) => write!(
                 formatter,
                 "Event sequence {sequence} does not match local-model activation state"
@@ -1318,7 +1340,26 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     let persisted_event_count = verify_persisted_events(connection)?;
     starter_organization::verify_starter_state(connection)
         .map_err(|_| SupervisorError::StarterOrganizationStateMismatch)?;
-    project::verify_project_state(connection).map_err(|_| SupervisorError::ProjectStateMismatch)?;
+    project::verify_project_state(connection).map_err(|fault| match fault {
+        project::ProjectStateFault::Store(error) => SupervisorError::Store(error),
+        project::ProjectStateFault::Row {
+            workspace_id,
+            project_id,
+            cause,
+        } => SupervisorError::ProjectStateMismatch {
+            workspace_id,
+            project_id,
+            cause,
+        },
+        project::ProjectStateFault::Totals(cause) => SupervisorError::ProjectTotalsMismatch(cause),
+        project::ProjectStateFault::Identity {
+            workspace_id,
+            project_id,
+        } => SupervisorError::IntegrityCheckFailed(format!(
+            "a Project row's identity is not readable: Workspace {workspace_id}, Project \
+             {project_id}"
+        )),
+    })?;
     project_policy::verify_project_policy_state(connection)
         .map_err(|_| SupervisorError::ProjectPolicyStateMismatch)?;
     project_repository::verify_project_repository_state(connection)

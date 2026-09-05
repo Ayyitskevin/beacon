@@ -361,7 +361,7 @@ fn restart_refuses_a_charter_revision_without_its_exact_event() {
             store_path: store.path.clone(),
             initial_workspace_name: "Ignored".to_owned(),
         }),
-        Err(beacond::SupervisorError::ProjectStateMismatch)
+        Err(beacond::SupervisorError::ProjectStateMismatch { .. })
     ));
 }
 
@@ -426,7 +426,7 @@ fn restart_refuses_project_update_time_that_does_not_match_current_intent() {
             store_path: store.path.clone(),
             initial_workspace_name: "Ignored".to_owned(),
         }),
-        Err(beacond::SupervisorError::ProjectStateMismatch)
+        Err(beacond::SupervisorError::ProjectStateMismatch { .. })
     ));
 }
 
@@ -503,7 +503,7 @@ fn restart_refuses_project_state_without_its_creation_event() {
             store_path: store.path.clone(),
             initial_workspace_name: "Ignored".to_owned(),
         }),
-        Err(beacond::SupervisorError::ProjectStateMismatch)
+        Err(beacond::SupervisorError::ProjectStateMismatch { .. })
     ));
 }
 
@@ -565,7 +565,7 @@ fn restart_refuses_a_discontinuous_charter_history() {
             store_path: store.path.clone(),
             initial_workspace_name: "Ignored".to_owned(),
         }),
-        Err(beacond::SupervisorError::ProjectStateMismatch)
+        Err(beacond::SupervisorError::ProjectStateMismatch { .. })
     ));
 }
 
@@ -600,6 +600,6 @@ fn restart_refuses_a_current_charter_pointer_behind_the_terminal_revision() {
             store_path: store.path.clone(),
             initial_workspace_name: "Ignored".to_owned(),
         }),
-        Err(beacond::SupervisorError::ProjectStateMismatch)
+        Err(beacond::SupervisorError::ProjectStateMismatch { .. })
     ));
 }
