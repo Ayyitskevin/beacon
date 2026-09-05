@@ -156,7 +156,8 @@ pub use outcome_collector::{
 };
 pub use outcome_pdf::{BEACON_OUTCOME_1, EmbeddedFace, PdfProfile, PdfRefusal, render_pdf};
 pub use outcome_publication::{
-    Provenance, PublishRefusal, PublishedOutcome, SupersessionAtReadTime,
+    ExportedOutcome, Provenance, PublicationSummary, PublishRefusal, PublishedOutcome,
+    SupersessionAtReadTime,
 };
 pub use outcome_store::{
     MAX_STORED_MANIFEST_BYTES, ManifestStoreRefusal, OutcomeCandidate, OutcomeService,

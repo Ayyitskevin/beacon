@@ -5661,3 +5661,366 @@ fn every_spend_bearing_kind_makes_a_window_partial() {
         );
     }
 }
+
+// Export: the stored bytes, copied (slice 4a, R29.1/R29.3)
+// ---------------------------------------------------------------------------------------------
+
+/// MEASUREMENT for R29.3, run before the bar was named: does the read path accept a candidate whose
+/// stored bytes are not what the current assembler would produce?
+///
+/// It does, under one condition the store already enforces: `verified_manifest_within` requires the
+/// candidate's content to CONTAIN the manifest's canonical bytes as hex
+/// (`candidate_proves_manifest`), and that check is on the `get` path, not only at startup. So a
+/// candidate of arbitrary bytes is refused, and a candidate that keeps the appendix and differs
+/// everywhere else is accepted. The plant below is the second kind, which is enough: the assembler
+/// renders one exact document for a manifest and would never emit this one.
+#[test]
+fn exported_bytes_are_the_stored_candidate_bytes_byte_for_byte() {
+    let fixture = admitted_mission("export-planted-candidate");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (candidate, candidate_digest, evaluation_digest) = fixture.publishable();
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
+        .expect("the honest pairing publishes");
+
+    let rendered = fixture
+        .artifacts()
+        .get(&candidate.candidate_artifact_digest)
+        .unwrap()
+        .content()
+        .to_vec();
+
+    // The planted document: the rendered bytes with a line the renderer would never emit, in front.
+    // The verification appendix rides along untouched, so the manifest binding still holds.
+    let mut planted_content = b"<!-- planted: not what the assembler renders -->\n".to_vec();
+    planted_content.extend_from_slice(&rendered);
+    assert_ne!(planted_content, rendered);
+    let planted = fixture
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            &planted_content,
+            ArtifactContext::Mission {
+                project_id: fixture.project_id,
+                mission_id: fixture.mission_id,
+            },
+            fixture.resident_id,
+            fixture.configuration_id,
+            None,
+        )
+        .expect("the planted candidate records");
+    let planted_evaluation = fixture.evaluate(&planted.digest().value, Verdict::Meets);
+
+    // Repoint the manifest and the publication at the planted candidate, past the Command, with the
+    // immutability triggers down -- the shape a restore or an older binary produces.
+    with_trigger_down(
+        &fixture.store,
+        "outcome_manifests_no_update",
+        "outcome_manifests",
+        "Outcome manifests are immutable",
+        |connection| {
+            connection
+                .execute(
+                    "UPDATE outcome_manifests SET candidate_artifact_digest = ?1
+                     WHERE workspace_id = ?2",
+                    params![planted.digest().value, fixture.workspace_id.to_string()],
+                )
+                .unwrap();
+        },
+    );
+    with_trigger_down(
+        &fixture.store,
+        "outcome_publications_no_update",
+        "outcome_publications",
+        "Outcome publications are immutable",
+        |connection| {
+            connection
+                .execute(
+                    "UPDATE outcome_publications
+                     SET candidate_artifact_digest = ?1, evaluation_digest = ?2
+                     WHERE workspace_id = ?3",
+                    params![
+                        planted.digest().value,
+                        planted_evaluation.digest().value,
+                        fixture.workspace_id.to_string()
+                    ],
+                )
+                .unwrap();
+        },
+    );
+
+    let exported = fixture
+        .outcomes
+        .export_markdown(fixture.mission_id)
+        .expect("the planted publication reads back, so the plant idiom holds here");
+    assert_eq!(
+        exported.bytes(),
+        planted_content.as_slice(),
+        "export did not return the STORED bytes"
+    );
+    assert!(
+        exported
+            .bytes()
+            .starts_with(b"<!-- planted: not what the assembler renders -->"),
+        "export returned bytes the assembler would produce, not the ones the store holds"
+    );
+    assert_eq!(exported.digest().value, planted.digest().value);
+    assert_eq!(exported.media_type(), "text/markdown; charset=utf-8");
+}
+
+/// A superseded version exports at its own number, and says a newer one exists (R24.2).
+#[test]
+fn a_superseded_version_exports_at_its_own_number_and_says_a_newer_exists() {
+    let fixture = admitted_mission("export-superseded-version");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (first_candidate, first_digest, first_evaluation) = fixture.publishable();
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &first_digest, &first_evaluation)
+        .expect("version 1 publishes");
+    let first_bytes = fixture
+        .artifacts()
+        .get(&first_candidate.candidate_artifact_digest)
+        .unwrap()
+        .content()
+        .to_vec();
+
+    let corrected = fixture
+        .outcomes
+        .prepare_for_mission(fixture.mission_id, AppendixRequest::Include)
+        .expect("the correction prepares");
+    let corrected_record = fixture
+        .artifacts()
+        .get(&corrected.candidate_artifact_digest)
+        .unwrap();
+    let corrected_evaluation =
+        fixture.evaluate(&corrected.candidate_artifact_digest, Verdict::Meets);
+    fixture
+        .outcomes
+        .publish(
+            fixture.mission_id,
+            corrected_record.digest(),
+            corrected_evaluation.digest(),
+        )
+        .expect("the correction publishes");
+
+    // Version 1, at its own number, with the count saying it is not the only one.
+    let superseded = fixture
+        .outcomes
+        .export_markdown_version(fixture.mission_id, 1)
+        .expect("a superseded version still exports");
+    assert_eq!(superseded.publication_version(), 1);
+    assert_eq!(
+        superseded.publication_version_count(),
+        2,
+        "a superseded export that reports 1 of 1 reads as the only document there is"
+    );
+    assert_eq!(superseded.bytes(), first_bytes.as_slice());
+    assert_eq!(superseded.digest().value, first_digest.value);
+
+    // And the current export is version 2 of 2, with different bytes.
+    let current = fixture
+        .outcomes
+        .export_markdown(fixture.mission_id)
+        .expect("the current version exports");
+    assert_eq!(
+        (
+            current.publication_version(),
+            current.publication_version_count()
+        ),
+        (2, 2)
+    );
+    assert_ne!(current.bytes(), superseded.bytes());
+}
+
+/// R29.6: a Mission in another Workspace exports as `Absent`, deliberately indistinguishable from
+/// "this Mission has no publication" -- so a caller who may not read this Workspace is not told
+/// whether the record exists.
+#[test]
+fn a_mission_in_another_workspace_exports_as_absent_so_existence_is_not_confirmed() {
+    let fixture = admitted_mission("export-cross-workspace");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, candidate_digest, evaluation_digest) = fixture.publishable();
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
+        .expect("the Mission publishes in its own Workspace");
+
+    // A service scoped to a Workspace that does not hold this Mission.
+    let elsewhere = OutcomeService::new(Arc::clone(&fixture.accounts), Uuid::new_v4());
+    let refusal = elsewhere
+        .export_markdown(fixture.mission_id)
+        .expect_err("another Workspace exported this Mission's document");
+    assert!(matches!(refusal, PublishRefusal::Absent), "{refusal:?}");
+
+    // The SAME answer a Mission with no publication gives, which is the point: the two are not
+    // distinguishable, so the refusal confirms nothing.
+    let unpublished = admitted_mission("export-cross-workspace-unpublished");
+    let never = fixture_outcomes(&unpublished)
+        .export_markdown(unpublished.mission_id)
+        .expect_err("an unpublished Mission exported");
+    assert!(matches!(never, PublishRefusal::Absent), "{never:?}");
+    assert_eq!(format!("{refusal}"), format!("{never}"));
+
+    // And the history is empty rather than a refusal, for the same reason.
+    assert!(
+        elsewhere
+            .publication_history(fixture.mission_id)
+            .expect("a cross-Workspace history is empty, not a refusal")
+            .is_empty()
+    );
+}
+
+/// A Mission with no publication exports as `Absent`.
+#[test]
+fn a_mission_with_no_publication_exports_as_absent() {
+    let fixture = admitted_mission("export-absent");
+    let refusal = fixture
+        .outcomes
+        .export_markdown(fixture.mission_id)
+        .expect_err("a Mission with no publication exported");
+    assert!(matches!(refusal, PublishRefusal::Absent), "{refusal:?}");
+    let versioned = fixture
+        .outcomes
+        .export_markdown_version(fixture.mission_id, 1)
+        .expect_err("version 1 of nothing exported");
+    assert!(matches!(versioned, PublishRefusal::Absent), "{versioned:?}");
+}
+
+/// The one condition the plant must respect, measured rather than assumed.
+///
+/// kimi's read lists what `read_publication_within` proves and concludes a self-consistent plant
+/// passes. It does -- with one more constraint than that list carries: `verified_manifest_within`
+/// requires the candidate's content to CONTAIN the manifest's canonical bytes as hex
+/// (`candidate_proves_manifest`), and that check is on the `get` path, not only at startup. A
+/// candidate of arbitrary bytes is therefore refused BY NAME, and the plant above works because it
+/// keeps the appendix and differs everywhere else. Recorded here so the next person building a
+/// plant against this path knows where the wall is.
+#[test]
+fn a_planted_candidate_that_drops_the_verification_appendix_is_refused_by_name() {
+    let fixture = admitted_mission("export-plant-without-appendix");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, candidate_digest, evaluation_digest) = fixture.publishable();
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
+        .expect("the honest pairing publishes");
+
+    // Arbitrary bytes: a real Artifact, really evaluated, that simply is not this manifest's
+    // document.
+    let unrelated = fixture
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            b"# Not this manifest's document.\n",
+            ArtifactContext::Mission {
+                project_id: fixture.project_id,
+                mission_id: fixture.mission_id,
+            },
+            fixture.resident_id,
+            fixture.configuration_id,
+            None,
+        )
+        .expect("the unrelated Artifact records");
+    let unrelated_evaluation = fixture.evaluate(&unrelated.digest().value, Verdict::Meets);
+    with_trigger_down(
+        &fixture.store,
+        "outcome_manifests_no_update",
+        "outcome_manifests",
+        "Outcome manifests are immutable",
+        |connection| {
+            connection
+                .execute(
+                    "UPDATE outcome_manifests SET candidate_artifact_digest = ?1
+                     WHERE workspace_id = ?2",
+                    params![unrelated.digest().value, fixture.workspace_id.to_string()],
+                )
+                .unwrap();
+        },
+    );
+    with_trigger_down(
+        &fixture.store,
+        "outcome_publications_no_update",
+        "outcome_publications",
+        "Outcome publications are immutable",
+        |connection| {
+            connection
+                .execute(
+                    "UPDATE outcome_publications
+                     SET candidate_artifact_digest = ?1, evaluation_digest = ?2
+                     WHERE workspace_id = ?3",
+                    params![
+                        unrelated.digest().value,
+                        unrelated_evaluation.digest().value,
+                        fixture.workspace_id.to_string()
+                    ],
+                )
+                .unwrap();
+        },
+    );
+
+    let refusal = fixture
+        .outcomes
+        .export_markdown(fixture.mission_id)
+        .expect_err("a candidate that does not carry its manifest's appendix exported");
+    assert!(
+        matches!(
+            refusal,
+            PublishRefusal::Manifest(ManifestStoreRefusal::ColumnDisagrees {
+                column: "candidate_artifact_digest"
+            })
+        ),
+        "{refusal:?}"
+    );
+}
+
+/// blue's access bar: export without an authenticated session is refused, and NOT as `Absent`.
+///
+/// The two refusals must stay distinguishable in this direction: a locked store that answered
+/// `Absent` would tell an unauthenticated caller that the Mission has no publication, which is a
+/// claim about the store's contents. `Absent` is the right answer for a Workspace the caller may
+/// not read (R29.6); it is the wrong answer for a caller who has not authenticated at all.
+#[test]
+fn export_without_an_authenticated_session_is_refused_and_not_as_absent() {
+    let fixture = admitted_mission("export-locked");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, candidate_digest, evaluation_digest) = fixture.publishable();
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
+        .expect("the pairing publishes while unlocked");
+    assert!(fixture.outcomes.export_markdown(fixture.mission_id).is_ok());
+
+    fixture.accounts.lock().unwrap();
+
+    for refusal in [
+        fixture
+            .outcomes
+            .export_markdown(fixture.mission_id)
+            .expect_err("a locked store exported"),
+        fixture
+            .outcomes
+            .export_markdown_version(fixture.mission_id, 1)
+            .expect_err("a locked store exported a version"),
+    ] {
+        assert!(
+            !matches!(refusal, PublishRefusal::Absent),
+            "a locked store answered `Absent`, which is a claim about its contents: {refusal:?}"
+        );
+    }
+    let history = fixture
+        .outcomes
+        .publication_history(fixture.mission_id)
+        .expect_err("a locked store listed the history");
+    assert!(!matches!(history, PublishRefusal::Absent), "{history:?}");
+}
+
+fn fixture_outcomes(fixture: &Fixture) -> OutcomeService {
+    OutcomeService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+}

@@ -182,6 +182,81 @@ impl PublishedOutcome {
     }
 }
 
+/// One published Outcome's exact Markdown, as the store holds it.
+///
+/// The bytes are COPIED from the stored candidate Artifact, never re-rendered: an export that
+/// re-ran the renderer would be a second path to the document, and the two would agree only for as
+/// long as nobody changed the renderer. What a reader gets here is what was published and what the
+/// qualifying Evaluation was about.
+///
+/// `digest` is the CITED candidate digest -- the bytes that were evaluated -- and not the chain
+/// tail; `publication_version_count` rides along for R24.2's reason, because "version 2" alone
+/// cannot tell a caller whether a version 3 exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportedOutcome {
+    bytes: Vec<u8>,
+    digest: ArtifactDigest,
+    publication_version: u32,
+    publication_version_count: u32,
+    media_type: String,
+}
+
+impl ExportedOutcome {
+    /// The exact stored Markdown. Owned, because the wire copies it anyway.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+
+    /// The digest of the bytes above: the candidate the relation cites.
+    pub fn digest(&self) -> &ArtifactDigest {
+        &self.digest
+    }
+
+    pub fn publication_version(&self) -> u32 {
+        self.publication_version
+    }
+
+    /// How many versions the Mission's publication history holds, as of this read (R24.2).
+    pub fn publication_version_count(&self) -> u32 {
+        self.publication_version_count
+    }
+
+    pub fn media_type(&self) -> &str {
+        &self.media_type
+    }
+}
+
+impl From<PublishedOutcome> for ExportedOutcome {
+    fn from(published: PublishedOutcome) -> Self {
+        Self {
+            bytes: published.candidate().content().to_vec(),
+            digest: published.cited_candidate_artifact_digest().clone(),
+            publication_version: published.publication_version(),
+            publication_version_count: published.publication_version_count(),
+            media_type: published.candidate().payload().media_type.clone(),
+        }
+    }
+}
+
+/// One row of a Mission's publication history, carrying what the RELATION itself holds.
+///
+/// Nothing here needs a manifest decoded or a document verified: drawing a list of versions must
+/// not cost one full verification per row (R29.5). The boundary event belongs to the document view,
+/// which reads one version through `get_version`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicationSummary {
+    pub publication_id: Uuid,
+    pub publication_version: u32,
+    pub candidate_artifact_digest: String,
+    pub evaluation_digest: String,
+    /// True for the highest version this Mission holds, as of this read.
+    pub is_current: bool,
+}
+
 /// Why a pairing was not published, or why a published one cannot be read back.
 #[derive(Debug)]
 pub enum PublishRefusal {
@@ -701,6 +776,57 @@ pub(crate) fn get_version_within(
         Some(publication_version),
     )?;
     read_publication_within(connection, workspace_id, row)
+}
+
+/// Every version of a Mission's publication history, newest first.
+///
+/// **A reader over the relation's own key, never a loop over `get_version`.** Each `get_version`
+/// re-proves a whole document -- manifest bytes, candidate bytes, Evaluation, subject, verdict,
+/// four Mission bindings and the history's contiguity -- so drawing an N-version list that way
+/// would cost N full verifications and would re-read the same manifest N times. This returns what
+/// the relation holds and nothing it would have to decode a manifest to learn (R29.5).
+///
+/// It enumerates by `(workspace_id, mission_id)`, the relation's own key, the same reason
+/// `verify_publication_state` enumerates by the relation's key rather than by any owner's.
+///
+/// Cross-Workspace is an EMPTY list, not a refusal, for the same reason export is `Absent`
+/// (R29.6): a caller who may not read this Workspace learns nothing about whether the Mission
+/// exists.
+pub(crate) fn publication_history_within(
+    connection: &Connection,
+    workspace_id: Uuid,
+    mission_id: Uuid,
+) -> Result<Vec<PublicationSummary>, PublishRefusal> {
+    let mut statement = connection.prepare(
+        "SELECT publication_id, publication_version, candidate_artifact_digest, evaluation_digest
+         FROM outcome_publications
+         WHERE workspace_id = ?1 AND mission_id = ?2
+         ORDER BY publication_version DESC",
+    )?;
+    let rows: Vec<(String, i64, String, String)> = statement
+        .query_map(
+            params![workspace_id.to_string(), mission_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?
+        .collect::<Result<_, _>>()?;
+    drop(statement);
+
+    // The highest version is the first row, because the query orders by version descending. Taken
+    // from the list rather than asked of the database again, so the two cannot disagree.
+    let highest = rows.first().map(|(_, version, _, _)| *version);
+    rows.into_iter()
+        .map(|(publication_id, version, candidate, evaluation)| {
+            Ok(PublicationSummary {
+                publication_id: Uuid::parse_str(&publication_id).map_err(|_| {
+                    PublishRefusal::Unverified("a publication id is not a UUID".to_owned())
+                })?,
+                publication_version: u32::try_from(version).unwrap_or(u32::MAX),
+                candidate_artifact_digest: candidate,
+                evaluation_digest: evaluation,
+                is_current: Some(version) == highest,
+            })
+        })
+        .collect()
 }
 
 fn load_row(
