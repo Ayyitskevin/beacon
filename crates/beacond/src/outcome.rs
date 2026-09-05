@@ -1240,18 +1240,22 @@ fn decode_state<T>(
     decoder: &mut Decoder<'_>,
     value: impl FnOnce(&mut Decoder<'_>) -> Result<T, MalformedOutcome>,
 ) -> Result<OutcomeState<T>, MalformedOutcome> {
+    // The tag decides what follows, so it is judged FIRST and by itself. Reading a reason before
+    // rejecting an unknown tag let the bytes after that tag -- which are not a reason, and were
+    // never promised to be one -- be parsed as a length and become the refusal a caller saw
+    // (`OverLimitLength`, not `UnknownTag`; sol1's cold read of the v2 grammar). A closed vocabulary
+    // refuses the unknown member by name before consuming anything after it.
     let tag = decoder.tag()?;
-    if tag == TAG_STATE_VERIFIED {
-        return Ok(OutcomeState::Verified(value(decoder)?));
-    }
+    let build: fn(String) -> OutcomeState<T> = match tag {
+        TAG_STATE_VERIFIED => return Ok(OutcomeState::Verified(value(decoder)?)),
+        TAG_STATE_ABSENT => OutcomeState::Absent,
+        TAG_STATE_BROKEN => OutcomeState::Broken,
+        TAG_STATE_NOT_EVALUATED => OutcomeState::NotEvaluated,
+        _ => return Err(MalformedOutcome::UnknownTag),
+    };
     let reason = decoder.string(MAX_TEXT_BYTES)?;
     require_label_text(&reason)?;
-    match tag {
-        TAG_STATE_ABSENT => Ok(OutcomeState::Absent(reason)),
-        TAG_STATE_BROKEN => Ok(OutcomeState::Broken(reason)),
-        TAG_STATE_NOT_EVALUATED => Ok(OutcomeState::NotEvaluated(reason)),
-        _ => Err(MalformedOutcome::UnknownTag),
-    }
+    Ok(build(reason))
 }
 
 fn encode_digest(encoder: &mut Encoder, digest: &SourceDigest) -> Result<(), MalformedOutcome> {
