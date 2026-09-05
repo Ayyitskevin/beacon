@@ -938,10 +938,10 @@ impl<'a> Collector<'a> {
         // completion's bytes said the Mission delivered these documents, and a manifest rendering
         // some of them is a document nobody could tell was incomplete.
         //
-        // Worth keeping visible: `NoArtifactEntity` is enforced on the WRITE path only
-        // (`record_completion`), never in `verified_completion_within`. A stored delivery reads
-        // back as a valid completion, so this arm is the only thing between one and a rendered
-        // document.
+        // Worth keeping visible: this is the ONLY verification a delivery gets. `record_completion`
+        // stores a cited digest without checking it (R19.1, R32.1) and the owning reader has no
+        // delivered-Artifact rule either, so a stored delivery reads back as a valid completion and
+        // this arm is the only thing between one and a rendered document.
         let delivered_artifacts = if record.delivered_artifacts.is_empty() {
             OutcomeState::Absent("the completion delivered no Artifacts".to_owned())
         } else {
