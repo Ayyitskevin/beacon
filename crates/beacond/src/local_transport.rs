@@ -2380,40 +2380,79 @@ mod tests {
     /// flattens that to `account_service_unavailable`. Four recorded flakes, all on
     /// `InstallSampleProject`, the one command that copies a tree and runs `git`.
     ///
-    /// The stub answers after the default deadline and well inside the slow-command one, so the
-    /// bar is deterministic without load: the install must come back with what the server sent, and
-    /// an ordinary command against the same stub must still time out -- which is what says the
-    /// longer budget is scoped to the slow command rather than relaxing every deadline.
+    /// # Two peers, because the two arms need different things
+    ///
+    /// The install arm needs an answer that arrives late: the stub waits 7.5 s, past the default
+    /// deadline and far inside the slow one, then replies.
+    ///
+    /// The ordinary arm needs the client's read to end for exactly one reason, and astra's cold
+    /// read caught the first version measuring the wrong interval. A stub that replies on a timer
+    /// starts that timer when it finishes READING the request, while the client's budget starts at
+    /// its own blocking read -- so any pause between the two (astra's probe uses 700 ms) leaves the
+    /// answer arriving INSIDE the budget and flips "it still times out" into a pass for the wrong
+    /// reason. The second peer therefore never replies at all. It holds the connection open, so the
+    /// read can only end by `SO_RCVTIMEO`, and the assertion holds however the scheduler behaves.
     #[test]
     fn a_command_slower_than_the_default_deadline_is_answered_not_refused() {
         use std::io::{Read as _, Write as _};
-        use std::os::unix::net::UnixListener;
+        use std::os::unix::net::{UnixListener, UnixStream};
+
+        /// Cleans up even when an assertion unwinds -- a failing run used to leave its socket
+        /// directory behind (astra's note).
+        struct Scratch(std::path::PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
 
         let root = std::env::temp_dir().join(format!("beacond-slow-command-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let scratch = Scratch(root.clone());
         let socket_path = root.join("supervisor.sock");
         let token_path = root.join("auth.token");
         super::initialize_local_auth_token(&token_path).unwrap();
 
+        // The constant reaches the socket as a READ timeout. Everything below rests on that, so it
+        // is read back from the kernel rather than assumed (astra's probe does the same).
+        let (probe, _probe_peer) = UnixStream::pair().unwrap();
+        super::configure_stream_deadlines(&probe, super::CLIENT_RESPONSE_TIMEOUT).unwrap();
+        assert_eq!(
+            probe.read_timeout().unwrap(),
+            Some(super::CLIENT_RESPONSE_TIMEOUT),
+            "the default deadline is not the socket's read timeout"
+        );
+
         let listener = UnixListener::bind(&socket_path).unwrap();
+        let holding = Arc::new(AtomicBool::new(true));
+        let stub_holding = Arc::clone(&holding);
         let stub = thread::spawn(move || {
-            for _ in 0..2 {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut request = Vec::new();
-                stream.read_to_end(&mut request).unwrap();
-                // Past `CLIENT_RESPONSE_TIMEOUT` (7 s), far inside `CLIENT_SLOW_COMMAND_TIMEOUT`.
-                thread::sleep(std::time::Duration::from_millis(7_500));
-                let response = super::ResponseEnvelope {
-                    protocol: super::PROTOCOL_VERSION,
-                    result: None,
-                    error: Some(super::WireError {
-                        code: LocalErrorCode::AccountMissing,
-                        retry_after_ms: None,
-                    }),
-                };
-                let _ = stream.write_all(&serde_json::to_vec(&response).unwrap());
+            // First connection: the install. Answer late, but answer.
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).unwrap();
+            thread::sleep(std::time::Duration::from_millis(7_500));
+            let response = super::ResponseEnvelope {
+                protocol: super::PROTOCOL_VERSION,
+                result: None,
+                error: Some(super::WireError {
+                    code: LocalErrorCode::AccountMissing,
+                    retry_after_ms: None,
+                }),
+            };
+            let _ = stream.write_all(&serde_json::to_vec(&response).unwrap());
+            drop(stream);
+
+            // Second connection: read the request and NEVER reply, holding it open so the client's
+            // read can end only by its own deadline.
+            let (held, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            (&held).read_to_end(&mut request).unwrap();
+            while stub_holding.load(Ordering::Acquire) {
+                thread::sleep(std::time::Duration::from_millis(25));
             }
+            drop(held);
         });
 
         let client = LocalSupervisorClient::connect(&socket_path, &token_path).unwrap();
@@ -2430,17 +2469,22 @@ mod tests {
             "the install did not survive its own deadline"
         );
 
-        // An ordinary command against the SAME stub still gives up on time.
+        // The ordinary command against a peer that never answers gives up on its own deadline --
+        // which is what says the longer budget is scoped to the slow command rather than relaxing
+        // every deadline.
+        let ordinary = client.sample_project_status();
+        holding.store(false, Ordering::Release);
         assert!(
             matches!(
-                client.sample_project_status(),
-                Err(LocalTransportError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock
+                ordinary,
+                Err(LocalTransportError::Io(ref error)) if error.kind() == std::io::ErrorKind::WouldBlock
             ),
-            "the default deadline was relaxed for every command, not just the slow one"
+            "the default deadline was relaxed for every command, not just the slow one: \
+             {ordinary:?}"
         );
 
         stub.join().unwrap();
-        fs::remove_dir_all(&root).unwrap();
+        drop(scratch);
     }
 
     /// Every arm of the wire vocabulary, read out of this file's own source.
