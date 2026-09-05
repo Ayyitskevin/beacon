@@ -106,6 +106,11 @@ pub enum CompletionReadRefusal {
     },
     /// The Mission's conditions are not the ones this completion was written against.
     DeclaredConditionsMoved,
+    /// The Mission this completion names has no `mission.admitted` Event in this Workspace.
+    ///
+    /// A corrupt-store state, named (R21.4): the boundary check has nothing to measure against.
+    /// Before this arm existed the state surfaced as a driver error a caller had to parse.
+    MissionNotAdmitted,
     /// The boundary is before the Mission's admission, or at/after this completion's own Event.
     BoundaryOutOfRange,
     /// Exactly one `mission.completed` Event must name this completion.
@@ -151,6 +156,9 @@ impl std::fmt::Display for CompletionReadRefusal {
             ),
             Self::DeclaredConditionsMoved => {
                 formatter.write_str("the mission's declared conditions are not the ones recorded")
+            }
+            Self::MissionNotAdmitted => {
+                formatter.write_str("the mission has no admission event in this workspace")
             }
             Self::BoundaryOutOfRange => formatter.write_str("boundary event sequence out of range"),
             Self::EventCount(count) => write!(formatter, "{count} completion events, expected 1"),
