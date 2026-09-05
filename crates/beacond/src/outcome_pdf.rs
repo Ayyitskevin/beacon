@@ -112,19 +112,41 @@ pub enum PdfRefusal {
     Serialize(String),
 }
 
+/// The translator refusal's NAME, for this caller's outward line (R42).
+///
+/// `TypstRefusal`'s own `Display` is a translator diagnostic: it prints the renderer version the
+/// document named, the offending source line, and the construct character. Useful to whoever is
+/// authoring the document; not something a render refusal should hand to whoever asked for a PDF.
+/// The exhaustive match is the point -- a new translator arm is a compile error here rather than a
+/// new sentence nobody read.
+///
+/// The row-width counts are the one permitted piece of context (R42's allowed-context list): two
+/// decimal cell counts, carrying no document text.
+fn typst_tag(refusal: &TypstRefusal) -> String {
+    match refusal {
+        TypstRefusal::UnknownRendererVersion(_) => "UnknownRendererVersion".to_owned(),
+        TypstRefusal::UnclosedFrontMatter => "UnclosedFrontMatter".to_owned(),
+        TypstRefusal::FrontMatterNotKeyValue(_) => "FrontMatterNotKeyValue".to_owned(),
+        TypstRefusal::UnclosedCodeFence => "UnclosedCodeFence".to_owned(),
+        TypstRefusal::HeadingTooDeep(_) => "HeadingTooDeep".to_owned(),
+        TypstRefusal::UnescapedConstruct { .. } => "UnescapedConstruct".to_owned(),
+        TypstRefusal::TableRowWidth { expected, observed } => {
+            format!("TableRowWidth(expected={expected}, observed={observed})")
+        }
+    }
+}
+
 impl fmt::Display for PdfRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotUtf8 => formatter.write_str("the exported document is not UTF-8"),
-            Self::Translate(refusal) => write!(formatter, "{refusal}"),
+            Self::Translate(refusal) => write!(formatter, "Translate.{}", typst_tag(refusal)),
             Self::EmbeddedFontSetEmpty => formatter.write_str(
                 "the render profile embeds no font, and this renderer never looks for one on the \
                  host",
             ),
-            Self::Compile(detail) => write!(formatter, "the document did not compile: {detail}"),
-            Self::Serialize(detail) => {
-                write!(formatter, "the document did not serialize: {detail}")
-            }
+            Self::Compile(_) => formatter.write_str("Compile"),
+            Self::Serialize(_) => formatter.write_str("Serialize"),
         }
     }
 }
@@ -273,4 +295,218 @@ pub fn render_pdf(
     };
     typst_pdf::pdf(&document, &options)
         .map_err(|errors| PdfRefusal::Serialize(format!("{errors:?}")))
+}
+
+#[cfg(test)]
+mod refusal_text_witness {
+    use super::*;
+
+    /// Two fixed synthetic markers, one per seed. Every diagnostic payload a case carries holds
+    /// one, so "did this line disclose the payload" is a substring search rather than an eyeball.
+    const NEEDLE_A: &str = "R42S1_PRIVATE_A";
+    const NEEDLE_B: &str = "R42S1_PRIVATE_B";
+
+    fn payload_a() -> String {
+        format!("{NEEDLE_A}|column=private_column|path=/home/example-user/private.txt\nsecond-line")
+    }
+
+    fn payload_b() -> String {
+        format!(
+            "{NEEDLE_B}|column=other_column|path=/home/example-user/other-note.txt\nsecond-line"
+        )
+    }
+
+    /// One declarative row table, expanded into BOTH the exhaustive expected match and the
+    /// constructed fixtures. The match is wildcard-free, so a new translator or PDF arm fails to
+    /// compile here until its row supplies a constructor, an independently written expected
+    /// literal, and the markers its payload carries. Nothing is read from `typst_tag`.
+    macro_rules! closed_table {
+        (
+            $expected_fn:ident / $rows_fn:ident : $ty:ty,
+            $( $case:literal | $pattern:pat => $line:expr , $build:expr , $markers:expr ; )+
+        ) => {
+            fn $expected_fn(value: &$ty) -> (&'static str, String) {
+                match value {
+                    $( $pattern => ($case, String::from($line)), )+
+                }
+            }
+
+            fn $rows_fn() -> Vec<(&'static str, $ty, &'static [&'static str])> {
+                vec![$(($case, $build, $markers)),+]
+            }
+        };
+    }
+
+    /// The row-width counts, chosen here before any refusal is built. They are approved outward
+    /// context, so they are asserted PRESENT.
+    const ROW_WIDTH_EXPECTED: usize = 3;
+    const ROW_WIDTH_OBSERVED: usize = 5;
+
+    closed_table! {
+        expected_typst / typst_rows: TypstRefusal,
+        "UNKNOWN_RENDERER_VERSION" | TypstRefusal::UnknownRendererVersion(_)
+            => "UnknownRendererVersion",
+            TypstRefusal::UnknownRendererVersion(payload_a()), &[NEEDLE_A];
+        "UNCLOSED_FRONT_MATTER" | TypstRefusal::UnclosedFrontMatter
+            => "UnclosedFrontMatter", TypstRefusal::UnclosedFrontMatter, &[];
+        "FRONT_MATTER_NOT_KEY_VALUE" | TypstRefusal::FrontMatterNotKeyValue(_)
+            => "FrontMatterNotKeyValue",
+            TypstRefusal::FrontMatterNotKeyValue(payload_a()), &[NEEDLE_A];
+        "UNCLOSED_CODE_FENCE" | TypstRefusal::UnclosedCodeFence
+            => "UnclosedCodeFence", TypstRefusal::UnclosedCodeFence, &[];
+        "HEADING_TOO_DEEP" | TypstRefusal::HeadingTooDeep(_)
+            => "HeadingTooDeep", TypstRefusal::HeadingTooDeep(payload_a()), &[NEEDLE_A];
+        "UNESCAPED_CONSTRUCT" | TypstRefusal::UnescapedConstruct { .. }
+            => "UnescapedConstruct",
+            TypstRefusal::UnescapedConstruct { character: '#', line: payload_a() }, &[NEEDLE_A];
+        "TABLE_ROW_WIDTH" | TypstRefusal::TableRowWidth { expected, observed }
+            => format!("TableRowWidth(expected={expected}, observed={observed})"),
+            TypstRefusal::TableRowWidth {
+                expected: ROW_WIDTH_EXPECTED,
+                observed: ROW_WIDTH_OBSERVED,
+            },
+            &[];
+    }
+
+    closed_table! {
+        expected_pdf / pdf_rows: PdfRefusal,
+        "R42S1.PDF.NOT_UTF8" | PdfRefusal::NotUtf8
+            => "the exported document is not UTF-8", PdfRefusal::NotUtf8, &[];
+        "R42S1.PDF.TRANSLATE" | PdfRefusal::Translate(refusal)
+            => format!("Translate.{}", expected_typst(refusal).1),
+            PdfRefusal::Translate(TypstRefusal::UnknownRendererVersion(payload_a())),
+            &[NEEDLE_A];
+        "R42S1.PDF.EMBEDDED_FONT_SET_EMPTY" | PdfRefusal::EmbeddedFontSetEmpty
+            => "the render profile embeds no font, and this renderer never looks for one on the \
+                host",
+            PdfRefusal::EmbeddedFontSetEmpty, &[];
+        "R42S1.PDF.COMPILE" | PdfRefusal::Compile(_)
+            => "Compile", PdfRefusal::Compile(payload_a()), &[NEEDLE_A];
+        "R42S1.PDF.SERIALIZE" | PdfRefusal::Serialize(_)
+            => "Serialize", PdfRefusal::Serialize(payload_b()), &[NEEDLE_B];
+    }
+
+    struct Case {
+        id: String,
+        value: PdfRefusal,
+        markers: &'static [&'static str],
+    }
+
+    /// The needle-bearing cases lead, so a mutant's FIRST failing label is predictable.
+    const LEAD_CASES: [&str; 3] = [
+        "R42S1.PDF.TRANSLATE.UNKNOWN_RENDERER_VERSION",
+        "R42S1.PDF.COMPILE",
+        "R42S1.PDF.SERIALIZE",
+    ];
+
+    fn pdf_cases() -> Vec<Case> {
+        let mut cases = Vec::new();
+        for (stem, value, markers) in pdf_rows() {
+            if stem == "R42S1.PDF.TRANSLATE" {
+                for (child, refusal, child_markers) in typst_rows() {
+                    cases.push(Case {
+                        id: format!("{stem}.{child}"),
+                        value: PdfRefusal::Translate(refusal),
+                        markers: child_markers,
+                    });
+                }
+            } else {
+                cases.push(Case {
+                    id: stem.to_owned(),
+                    value,
+                    markers,
+                });
+            }
+        }
+        cases.sort_by_key(|case| {
+            LEAD_CASES
+                .iter()
+                .position(|lead| *lead == case.id)
+                .unwrap_or(usize::MAX)
+        });
+        cases
+    }
+
+    /// R42 slice 1: every `PdfRefusal` line is the closed projection, and every translator
+    /// diagnostic it was built from is still in `Debug`.
+    ///
+    /// The three census sites are `Translate` (which forwarded the translator's whole diagnostic,
+    /// including the document line and the renderer version the document named), `Compile` and
+    /// `Serialize` (which forwarded Typst's compiler text). `NotUtf8` and `EmbeddedFontSetEmpty`
+    /// were already closed and are pinned here as regressions.
+    #[test]
+    fn r42_pdf_projection_is_closed() {
+        let cases = pdf_cases();
+
+        assert_eq!(typst_rows().len(), 7, "R42S1.PDF.CARDINALITY.TRANSLATOR");
+        assert_eq!(pdf_rows().len(), 5, "R42S1.PDF.CARDINALITY.ROOT");
+        assert_eq!(cases.len(), 11, "R42S1.PDF.CARDINALITY.CASES");
+        let ids: std::collections::BTreeSet<&str> =
+            cases.iter().map(|case| case.id.as_str()).collect();
+        assert_eq!(ids.len(), cases.len(), "R42S1.PDF.CASE_IDS_UNIQUE");
+        for lead in LEAD_CASES {
+            assert!(ids.contains(lead), "R42S1.PDF.LEAD_CASE_PRESENT: {lead}");
+        }
+
+        for case in &cases {
+            let Case { id, value, markers } = case;
+            let (stem, expected) = expected_pdf(value);
+            assert!(
+                id == stem || id.starts_with(&format!("{stem}.")),
+                "R42S1.PDF.PATTERN_ALIGNS: {id} was built as {stem}"
+            );
+
+            let line = value.to_string();
+            for marker in *markers {
+                assert!(!line.contains(marker), "{id}.NO_NEEDLE: {line}");
+            }
+            assert!(
+                !line.contains('\n') && !line.contains('\r'),
+                "{id}.ONE_LINE: {line:?}"
+            );
+
+            let debug = format!("{value:?}");
+            for marker in *markers {
+                assert!(debug.contains(marker), "{id}.DEBUG_RETAINS: {debug}");
+            }
+
+            assert_eq!(line, expected, "{id}.PROJECTION");
+        }
+
+        // Approved context: the two row-width counts are deliberately IN the line, and they are
+        // different from each other so a swapped pair cannot pass.
+        let widths = PdfRefusal::Translate(TypstRefusal::TableRowWidth {
+            expected: ROW_WIDTH_EXPECTED,
+            observed: ROW_WIDTH_OBSERVED,
+        });
+        assert_eq!(
+            widths.to_string(),
+            format!(
+                "Translate.TableRowWidth(expected={ROW_WIDTH_EXPECTED}, \
+                 observed={ROW_WIDTH_OBSERVED})"
+            ),
+            "R42S1.PDF.TRANSLATE.TABLE_ROW_WIDTH.CONTEXT"
+        );
+        let second_widths = PdfRefusal::Translate(TypstRefusal::TableRowWidth {
+            expected: 9,
+            observed: 2,
+        });
+        assert_eq!(
+            second_widths.to_string(),
+            "Translate.TableRowWidth(expected=9, observed=2)",
+            "R42S1.PDF.TRANSLATE.TABLE_ROW_WIDTH.SECOND_SEED"
+        );
+
+        // A second payload proves the projection is independent of the text it was handed.
+        let second = PdfRefusal::Compile(payload_b());
+        assert_eq!(
+            second.to_string(),
+            "Compile",
+            "R42S1.PDF.COMPILE.SECOND_SEED"
+        );
+        assert!(
+            format!("{second:?}").contains(NEEDLE_B),
+            "R42S1.PDF.COMPILE.SECOND_SEED_DEBUG_RETAINS"
+        );
+    }
 }
