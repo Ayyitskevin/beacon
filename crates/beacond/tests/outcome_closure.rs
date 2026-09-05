@@ -1,55 +1,46 @@
-//! Outcome Document slice 3-A: the immutable manifest store and `prepare` (ADR 0040, §7 slice 3).
+//! Criterion 11: one Outcome's owner-written path through collection, preparation, publication,
+//! correction, reopen, export, transport, and PDF derivation (ADR 0040).
 //!
-//! One test per bullet of the slice's list, plus the mutation gate's probes. The fixture chain down
-//! to `admitted_mission` is `tests/artifact.rs`'s, reused verbatim: the manifest store's foreign
-//! keys reach `missions`, `mission_completions` and `artifacts`, so a row cannot exist without the
-//! admission chain that produces one. Copied rather than shared, because the two suites must be
-//! able to disagree about what a Mission is -- a shared fixture is how two tests agree about
-//! something wrong.
+//! One ordered test retains the same store and primary Mission across all thirteen claims. Its
+//! expectations come from records returned by their owning writers, with the two explicitly
+//! labelled test-only plants isolated at the Workspace and distinguishable-export boundaries.
 
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
 use beacond::{
-    AccessOrigin, AppendixMode, AppendixRequest, ArtifactContext, ArtifactDigest, ArtifactKind,
-    ArtifactService, AutonomyProfile, BeaconCapability, COMPLETION_CANONICALIZER,
-    CheckPreflightService, ClassificationActor, ClassificationBasis, ClassificationStoreError,
-    ClassificationSupersedes, CollectionRequest, Collector, CompletionActor, CompletionDisposition,
-    CompletionSupersedes, ConditionOutcome, ConditionResult, ConditionResultRecord, Conflicts,
-    DeclaredCheck, DiagnosticStatus, Evaluation, EvaluationDigest, EvaluationDraft,
-    EvaluationError, EvaluationService, EvaluationSubject, EvaluationSubjectDraft,
-    EvaluationSupersedes, Evaluator, Finding, FindingSeverity, ImpactLevel, InconsistentEvaluation,
-    LocalErrorCode, LocalModelActivationService, LocalModelEndpoint, LocalServerConfig,
-    LocalSupervisorClient, LocalSupervisorServer, LocalTransportError,
-    MISSION_IMPACT_CANONICALIZER, ManifestStoreRefusal, MeasuredSpend, MeasuredSpendService,
-    MeasuredSpendV1, MissionCompletionV1, MissionDraft, MissionImpactClassification,
-    MissionImpactClassificationV1, MissionImpactService, MissionMemberDraft, MissionService,
-    NarrativeItem, OperatorAccountError, OperatorAccountService, OperatorSessionPhase,
-    OutcomeCandidate, OutcomeManifestV1, OutcomeService, OutcomeState, PolicyRevisionRef,
-    PredecessorFault, PrepareRefusal, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft,
-    ProjectPolicyService, ProjectRepositoryService, ProjectService, ProposalService, Provenance,
-    ProviderFeature, PublicationSeamRefusal, PublishRefusal, RepositoryDraft, RepositorySourceKind,
+    AccessOrigin, AppendixMode, AppendixRequest, ArtifactContext, ArtifactKind, ArtifactService,
+    AutonomyProfile, BeaconCapability, CheckPreflightService, ClassificationActor,
+    ClassificationBasis, ClassificationSupersedes, CollectionRequest, Collector, CompletionActor,
+    CompletionDisposition, CompletionSupersedes, ConditionOutcome, ConditionResult,
+    ConditionResultRecord, Conflicts, DeclaredCheck, Evaluation, EvaluationDigest, EvaluationDraft,
+    EvaluationService, EvaluationSubject, EvaluationSubjectDraft, EvaluationSupersedes, Evaluator,
+    Finding, FindingSeverity, ImpactLevel, LocalErrorCode, LocalModelActivationService,
+    LocalModelEndpoint, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
+    LocalTransportError, MeasuredSpend, MeasuredSpendService, MeasuredSpendV1, MissionCompletionV1,
+    MissionDraft, MissionImpactClassification, MissionImpactClassificationV1, MissionImpactService,
+    MissionMemberDraft, MissionService, NarrativeItem, OperatorAccountError,
+    OperatorAccountService, OperatorSessionPhase, OutcomeService, OutcomeState, PolicyRevisionRef,
+    PrepareRefusal, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService,
+    ProjectRepositoryService, ProjectService, ProposalService, Provenance, ProviderFeature,
+    PublicationSeamRefusal, PublishRefusal, RepositoryDraft, RepositorySourceKind,
     ResidentConfigurationService, ResidentLifecycleService, RubricDeclaration, RulingDecision,
-    RulingService, RulingSupersedes, SecretString, SourceDigest, SourceKind, SourceRef,
-    SourcesRefusal, SpendCompleteness, SpendLine, SpendMeasurement, SpendMeasurementKind,
-    SpendOrigin, SpendReference, SpendSupersedes, SpendTotals, StarterOrganizationService,
-    StarterResidentDraft, StarterRole, StartupConfig, SuccessCondition, Supervisor,
-    SupervisorError, SupportRef, TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
+    RulingService, RulingSupersedes, SecretString, SourceKind, SpendCompleteness, SpendLine,
+    SpendMeasurement, SpendMeasurementKind, SpendOrigin, SpendReference, SpendSupersedes,
+    SpendTotals, StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig,
+    Supervisor, SupportRef, TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
     TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft, TeamService,
     TrackRecordEvidenceKind, TrackRecordRequirement, UncertaintyKind, UnfinishedKind, Verdict,
-    VerifiedSources, VerifiedText, declared_conditions_digest, initialize_local_auth_token,
-    publication_candidacy, record_completion, render, verified_completion_within,
-    verified_manifest_within,
+    declared_conditions_digest, initialize_local_auth_token, record_completion,
+    verified_completion_within,
 };
-use rusqlite::types::Value;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -681,6 +672,7 @@ fn support_in_canonical_order(
     ]
 }
 
+#[allow(clippy::too_many_arguments)]
 fn completion_record(
     fixture: &Fixture,
     mission_id: Uuid,
@@ -734,26 +726,26 @@ fn completion_record(
             },
         ],
         delivered_artifacts,
-        unfinished_work: narratives
-            .then(|| {
-                vec![NarrativeItem {
-                    ordinal: 0,
-                    kind: UnfinishedKind::ConditionNotMet,
-                    condition_ordinal: Some(1),
-                    summary: "Correct the remaining declared-check failure.".to_owned(),
-                }]
-            })
-            .unwrap_or_default(),
-        uncertainty: narratives
-            .then(|| {
-                vec![NarrativeItem {
-                    ordinal: 0,
-                    kind: UncertaintyKind::ConflictingEvidence,
-                    condition_ordinal: Some(3),
-                    summary: "Two verified observations still disagree.".to_owned(),
-                }]
-            })
-            .unwrap_or_default(),
+        unfinished_work: if narratives {
+            vec![NarrativeItem {
+                ordinal: 0,
+                kind: UnfinishedKind::ConditionNotMet,
+                condition_ordinal: Some(1),
+                summary: "Correct the remaining declared-check failure.".to_owned(),
+            }]
+        } else {
+            Vec::new()
+        },
+        uncertainty: if narratives {
+            vec![NarrativeItem {
+                ordinal: 0,
+                kind: UncertaintyKind::ConflictingEvidence,
+                condition_ordinal: Some(3),
+                summary: "Two verified observations still disagree.".to_owned(),
+            }]
+        } else {
+            Vec::new()
+        },
         spend,
         supersedes: CompletionSupersedes::None,
         summary: "Criterion 11 records the Mission without inventing success.".to_owned(),
@@ -2277,9 +2269,9 @@ fn criterion_11_outcome_closure_on_one_store() {
         )
         .expect("C11.12.REUNLOCK");
 
-    let mut distinguishable_bytes =
-        b"<!-- C11 stored-byte witness; the renderer did not emit this line -->\n".to_vec();
-    distinguishable_bytes.extend_from_slice(&saved_v2_content);
+    let mut distinguishable_bytes = saved_v2_content.clone();
+    distinguishable_bytes
+        .extend_from_slice(b"\nC11 stored-byte witness the assembler did not emit.\n");
     let distinguishable_candidate =
         ArtifactService::new(Arc::clone(&reopened_accounts), saved_workspace_a)
             .record(
@@ -2523,14 +2515,157 @@ fn criterion_11_outcome_closure_on_one_store() {
         .expect("C11.12.TRANSPORT_SERVER");
     fs::remove_dir_all(&transport_root).expect("C11.12.TRANSPORT_CLEANUP");
 
-    let _ = (
-        saved_store,
-        reopened_accounts,
-        reopened_a,
-        reopened_b,
-        reopened_v1,
-        reopened_v2,
-        distinguishable_export,
+    // Step 13: PDF is a deletable derivative of each publication version's exact export.
+    let before_pdf = (
+        event_count(&saved_store, saved_workspace_a),
+        publication_count(&saved_store, saved_workspace_a, saved_mission),
+        table_count(&saved_store, "outcome_manifests", saved_workspace_a),
+        table_count(&saved_store, "artifacts", saved_workspace_a),
+        table_count(&saved_store, "evaluations", saved_workspace_a),
     );
-    panic!("C11.13.NOT_YET");
+    let pdf_v1 = reopened_a
+        .render_pdf_version(saved_mission, 1)
+        .expect("C11.13.PDF_FROM_EXACT_EXPORT");
+    let pdf_v2 = reopened_a
+        .render_pdf_version(saved_mission, 2)
+        .expect("C11.13.PDF_FROM_EXACT_EXPORT");
+    assert!(!pdf_v1.bytes().is_empty(), "C11.13.PDF_FROM_EXACT_EXPORT");
+    assert!(!pdf_v2.bytes().is_empty(), "C11.13.PDF_FROM_EXACT_EXPORT");
+    assert_eq!(
+        pdf_v1.bytes(),
+        beacond::render_pdf(
+            ordinary_v1_export.bytes(),
+            &reopened_v1.manifest().manifest().renderer_version,
+            &ordinary_v1_export.digest().value,
+            &beacond::BEACON_OUTCOME_1,
+        )
+        .expect("C11.13.PDF_FROM_EXACT_EXPORT")
+        .as_slice(),
+        "C11.13.PDF_FROM_EXACT_EXPORT"
+    );
+    assert_eq!(
+        pdf_v2.bytes(),
+        beacond::render_pdf(
+            distinguishable_export.bytes(),
+            &reopened_v2.manifest().manifest().renderer_version,
+            &distinguishable_export.digest().value,
+            &beacond::BEACON_OUTCOME_1,
+        )
+        .expect("C11.13.PDF_FROM_EXACT_EXPORT")
+        .as_slice(),
+        "C11.13.PDF_FROM_EXACT_EXPORT"
+    );
+    assert_eq!(
+        (
+            pdf_v1.candidate_digest(),
+            pdf_v1.publication_version(),
+            pdf_v1.publication_version_count(),
+            pdf_v1.profile(),
+        ),
+        (
+            ordinary_v1_export.digest(),
+            1,
+            2,
+            beacond::BEACON_OUTCOME_1.name,
+        ),
+        "C11.13.PDF_FROM_EXACT_EXPORT"
+    );
+    assert_eq!(
+        (
+            pdf_v2.candidate_digest(),
+            pdf_v2.publication_version(),
+            pdf_v2.publication_version_count(),
+            pdf_v2.profile(),
+        ),
+        (
+            distinguishable_export.digest(),
+            2,
+            2,
+            beacond::BEACON_OUTCOME_1.name,
+        ),
+        "C11.13.PDF_FROM_EXACT_EXPORT"
+    );
+    for rendered in [&pdf_v1, &pdf_v2] {
+        assert!(
+            rendered
+                .bytes()
+                .windows(b"Creator".len())
+                .any(|window| window == b"Creator")
+                && rendered
+                    .bytes()
+                    .windows(beacond::BEACON_OUTCOME_1.name.len())
+                    .any(|window| window == beacond::BEACON_OUTCOME_1.name.as_bytes())
+                && !rendered
+                    .bytes()
+                    .windows(b"Producer".len())
+                    .any(|window| window == b"Producer"),
+            "C11.13.PDF_PROFILE_METADATA"
+        );
+    }
+    assert_ne!(
+        pdf_v1.bytes(),
+        pdf_v2.bytes(),
+        "C11.13.PDF_FROM_EXACT_EXPORT"
+    );
+
+    let first_pdf_v1 = pdf_v1.bytes().to_vec();
+    let first_pdf_v2 = pdf_v2.bytes().to_vec();
+    let derivative_path = saved_store
+        .path
+        .with_extension(format!("c11-{}.pdf", Uuid::new_v4()));
+    fs::write(&derivative_path, &first_pdf_v2).expect("C11.13.PDF_DERIVATIVE_WRITE");
+    assert_eq!(
+        fs::read(&derivative_path).expect("C11.13.PDF_DERIVATIVE_READ"),
+        first_pdf_v2,
+        "C11.13.PDF_FROM_EXACT_EXPORT"
+    );
+    fs::remove_file(&derivative_path).expect("C11.13.PDF_DERIVATIVE_DELETE");
+    drop(pdf_v1);
+    drop(pdf_v2);
+
+    assert_eq!(
+        reopened_a
+            .export_markdown_version(saved_mission, 1)
+            .expect("C11.13.DELETE_DERIVATIVE_PRESERVES_SOURCE")
+            .bytes(),
+        ordinary_v1_export.bytes(),
+        "C11.13.DELETE_DERIVATIVE_PRESERVES_SOURCE"
+    );
+    assert_eq!(
+        reopened_a
+            .export_markdown_version(saved_mission, 2)
+            .expect("C11.13.DELETE_DERIVATIVE_PRESERVES_SOURCE")
+            .bytes(),
+        distinguishable_export.bytes(),
+        "C11.13.DELETE_DERIVATIVE_PRESERVES_SOURCE"
+    );
+    let regenerated_v1 = reopened_a
+        .render_pdf_version(saved_mission, 1)
+        .expect("C11.13.PDF_REGENERATES_IDENTICALLY");
+    let regenerated_v2 = reopened_a
+        .render_pdf_version(saved_mission, 2)
+        .expect("C11.13.PDF_REGENERATES_IDENTICALLY");
+    assert_eq!(
+        regenerated_v1.bytes(),
+        first_pdf_v1,
+        "C11.13.PDF_REGENERATES_IDENTICALLY"
+    );
+    assert_eq!(
+        regenerated_v2.bytes(),
+        first_pdf_v2,
+        "C11.13.PDF_REGENERATES_IDENTICALLY"
+    );
+    assert_eq!(
+        (
+            event_count(&saved_store, saved_workspace_a),
+            publication_count(&saved_store, saved_workspace_a, saved_mission),
+            table_count(&saved_store, "outcome_manifests", saved_workspace_a),
+            table_count(&saved_store, "artifacts", saved_workspace_a),
+            table_count(&saved_store, "evaluations", saved_workspace_a),
+        ),
+        before_pdf,
+        "C11.13.PDF_CREATES_NO_SOURCE_RECORD"
+    );
+
+    let _ = (reopened_accounts, reopened_b);
 }
