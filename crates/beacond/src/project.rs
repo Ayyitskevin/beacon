@@ -719,6 +719,43 @@ fn load_charter(
     })
 }
 
+/// Does this Workspace hold this Project, proved against its own `project.created` Event?
+///
+/// The mirror of `mission::verified_mission_project`, and added for the same finding: a completion
+/// names a Project in its canonical bytes and nothing established that the Project exists in the
+/// Workspace at all, let alone that it owns the Mission.
+pub(crate) fn verified_project_exists(
+    connection: &rusqlite::Connection,
+    workspace_id: Uuid,
+    project_id: Uuid,
+) -> Result<bool, ProjectError> {
+    let mut statement = connection.prepare(
+        "SELECT payload_json, occurred_at_ms FROM events
+         WHERE workspace_id = ?1 AND kind = 'project.created'
+           AND json_extract(payload_json, '$.project.id') = ?2",
+    )?;
+    let events: Vec<(String, i64)> = statement
+        .query_map(
+            rusqlite::params![workspace_id.to_string(), project_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    match events.as_slice() {
+        [] => Ok(false),
+        [(payload_json, occurred_at_ms)] => {
+            verify_project_event(
+                connection,
+                workspace_id,
+                nonnegative_u64(*occurred_at_ms)?,
+                payload_json,
+            )?;
+            Ok(true)
+        }
+        _ => Err(ProjectError::InvalidStore),
+    }
+}
+
 pub(crate) fn verify_project_event(
     connection: &rusqlite::Connection,
     workspace_id: Uuid,

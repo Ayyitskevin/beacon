@@ -71,6 +71,11 @@ pub enum CompletionReadRefusal {
     BytesDisagree,
     /// An indexed column says something the bytes do not.
     ColumnDisagrees(&'static str),
+    /// The Project this completion names does not own the Mission it names (sol1's #5).
+    ///
+    /// Two distinct ways to be wrong, one refusal with a reason: the Project is not in this
+    /// Workspace at all, or it is, and the Mission belongs to a different one.
+    MissionProjectDisagrees(&'static str),
     /// A stored condition row says something its completion's canonical bytes do not.
     ///
     /// Named by the ordinal and the column, because the parent row's `ColumnDisagrees` names its
@@ -104,6 +109,10 @@ impl std::fmt::Display for CompletionReadRefusal {
             Self::ColumnDisagrees(column) => {
                 write!(formatter, "column {column} disagrees with the bytes")
             }
+            Self::MissionProjectDisagrees(reason) => write!(
+                formatter,
+                "the completion's Project does not own its Mission: {reason}"
+            ),
             Self::ConditionProjectionDisagrees { ordinal, column } => write!(
                 formatter,
                 "the stored condition row for ordinal {ordinal} disagrees with the record's bytes \
@@ -289,6 +298,44 @@ pub fn verified_completion_within(
     }
     if u64::try_from(stored.completed_at_ms) != Ok(record.completed_at_ms) {
         return Err(CompletionReadRefusal::ColumnDisagrees("completed_at_ms"));
+    }
+
+    // 3b. The Project named in the bytes actually owns the Mission named in the bytes.
+    //
+    //     Migration 0026's comment says `project_id` is compared across the bytes, the column and
+    //     the Mission row; only the first two were ever compared, and the schema has no composite
+    //     key binding a Mission to a Project. sol1 recorded a completion whose Mission belongs to
+    //     Project A while its canonical `project_id` names unrelated Project B, and both the write
+    //     and the read-back accepted it.
+    //
+    //     Both owners are proved through their own verified readers, never joined: `missions` and
+    //     `projects` are projections like any other, and the whole point of this reader is that it
+    //     does not answer from one.
+    let owning_project =
+        crate::mission::verified_mission_project(connection, workspace_id, record.mission_id)
+            .map_err(|_| {
+                CompletionReadRefusal::MissionProjectDisagrees(
+                    "the Mission does not verify against its own admission Event",
+                )
+            })?
+            .ok_or(CompletionReadRefusal::MissionProjectDisagrees(
+                "this Workspace admitted no such Mission",
+            ))?;
+    if !crate::project::verified_project_exists(connection, workspace_id, record.project_id)
+        .map_err(|_| {
+            CompletionReadRefusal::MissionProjectDisagrees(
+                "the Project does not verify against its own creation Event",
+            )
+        })?
+    {
+        return Err(CompletionReadRefusal::MissionProjectDisagrees(
+            "this Workspace holds no such Project",
+        ));
+    }
+    if owning_project != record.project_id {
+        return Err(CompletionReadRefusal::MissionProjectDisagrees(
+            "the Mission's verified record names a different Project",
+        ));
     }
 
     // 4. Exactly once, against the Mission's own declaration -- and then every row read, not
