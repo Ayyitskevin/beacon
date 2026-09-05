@@ -1574,3 +1574,55 @@ fn a_stored_classification_citing_a_charter_the_policy_never_had_is_refused_on_r
         ClassificationStoreError::PolicyRevisionHasAnotherCharter
     );
 }
+
+/// kimi's P1 on #12: every fixture had Policy revision 1 under Charter revision 1, so a reader that
+/// compared the copied Charter with the Policy's `revision` NUMBER instead of its `charter_revision`
+/// column stayed GREEN. Two revisions of one Policy under one Charter tell the columns apart: at
+/// Policy revision 2 the copied Charter is still 1 (accepted), and a copied Charter of 2 -- equal to
+/// the revision number, unequal to the column -- is refused by name.
+#[test]
+fn the_charter_check_reads_the_policys_charter_column_not_its_revision_number() {
+    let stored = stored("classification-charter-column");
+    stored.policy_revision();
+    stored
+        .connection()
+        .execute(
+            "INSERT INTO project_policy_revisions (
+                 workspace_id, project_id, revision, charter_revision,
+                 required_capabilities_json, availability_rule, track_record_requirements_json,
+                 conflict_rule, ambiguity_rule, authored_by, authored_at_ms
+             ) VALUES (?1, ?2, 2, ?3, '[\"work.coordinate_mission\"]',
+                       'current_team_eligibility', '[{\"evidenceKind\":\"completed_mission\"}]',
+                       'require_no_declared_conflict', 'require_operator_decision', 'operator', 1)",
+            params![
+                stored.store.workspace_id.to_string(),
+                stored.project_id.to_string(),
+                stored.charter_revision,
+            ],
+        )
+        .expect("a second Policy revision under the same Charter");
+    let service = stored.impact_service();
+
+    // Policy revision 2, Charter revision 1: the column says 1, so this is accepted -- and a reader
+    // comparing against the revision number (2) would wrongly refuse it.
+    let honest = stored.classification_record(Uuid::new_v4(), 2);
+    assert_eq!(honest.policy.charter_revision, stored.charter_revision);
+    service
+        .classify(&honest.canonical_bytes().unwrap())
+        .expect("Policy revision 2 records Charter revision 1, and the record copies 1");
+
+    // Policy revision 2, copied Charter revision 2: equal to the revision number, not to the column.
+    let mut lying = stored.classification_record(Uuid::new_v4(), 2);
+    lying.version = 2;
+    lying.policy.charter_revision = 2;
+    let error = service
+        .classify(&lying.canonical_bytes().unwrap())
+        .expect_err("a copied Charter revision the Policy revision does not record is refused");
+    assert!(
+        matches!(
+            error,
+            ClassificationRecordError::PolicyRevisionHasAnotherCharter
+        ),
+        "{error:?}"
+    );
+}
