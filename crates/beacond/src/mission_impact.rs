@@ -24,6 +24,7 @@
 //! is the reader side, and the reader arrives with the store in slice 2. What slice 1 owes it is a
 //! record whose bit cannot be read without also reading the identity and digest it belongs to.
 
+use crate::spend::PredecessorFault;
 use std::fmt;
 
 use std::sync::Arc;
@@ -631,6 +632,12 @@ pub enum ClassificationStoreError {
     /// Policy revision exists -- and neither says the two belong together; this is the check that
     /// does, keyed on the Mission's own row.
     PolicyProjectIsNotTheMissions,
+    /// The record it says it supersedes is not the predecessor it claims (sol1's cold read, #9):
+    /// judged by the predecessor's own bytes, never by the successor's word.
+    Predecessor {
+        digest: String,
+        fault: PredecessorFault,
+    },
     Store(String),
 }
 
@@ -645,6 +652,9 @@ impl fmt::Display for ClassificationStoreError {
             Self::CopiedBitDisagrees => formatter.write_str("copied_bit_disagrees"),
             Self::PolicyProjectIsNotTheMissions => {
                 formatter.write_str("policy_project_is_not_the_missions")
+            }
+            Self::Predecessor { digest, fault } => {
+                write!(formatter, "predecessor {digest}: {fault}")
             }
             Self::Store(reason) => write!(formatter, "store: {reason}"),
         }
@@ -805,6 +815,11 @@ pub fn verified_classification_within(
     if owner != Some(payload.policy.project_id) {
         return Err(ClassificationStoreError::PolicyProjectIsNotTheMissions);
     }
+    // The record it says it supersedes is a classification of this Mission, in this Workspace,
+    // by the predecessor's OWN bytes (sol1's cold read, #9) -- on every read.
+    if let Some((digest, fault)) = predecessor_fault(connection, &payload)? {
+        return Err(ClassificationStoreError::Predecessor { digest, fault });
+    }
     Ok(Some(MissionImpactClassification {
         digest: ClassificationDigest {
             algorithm: DIGEST_ALGORITHM.to_owned(),
@@ -814,6 +829,45 @@ pub fn verified_classification_within(
         canonical_bytes: row.canonical_bytes,
         payload,
     }))
+}
+
+/// The fault, if any, in a classification's `supersedes` link, judged by the predecessor's own
+/// bytes -- looked up by digest alone, hashed and decoded rather than trusted, exactly as
+/// `spend::predecessor_fault` does for the other ladder.
+fn predecessor_fault(
+    connection: &Connection,
+    payload: &MissionImpactClassificationV1,
+) -> Result<Option<(String, PredecessorFault)>, ClassificationStoreError> {
+    let ClassificationSupersedes::Record(digest_value) = &payload.supersedes else {
+        return Ok(None);
+    };
+    let stored: Option<Vec<u8>> = connection
+        .query_row(
+            "SELECT canonical_bytes FROM mission_impact_classifications WHERE digest_value = ?1",
+            rusqlite::params![digest_value],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| ClassificationStoreError::Store(error.to_string()))?;
+    let fault = match stored {
+        None => PredecessorFault::NotStored,
+        Some(bytes) if HEXLOWER.encode(&sha256(&bytes)) != *digest_value => {
+            PredecessorFault::Unverifiable(ClassificationStoreError::DigestMismatch.to_string())
+        }
+        Some(bytes) => match decode(&bytes) {
+            Err(reason) => PredecessorFault::Unverifiable(
+                ClassificationStoreError::Malformed(reason).to_string(),
+            ),
+            Ok(predecessor) if predecessor.workspace_id != payload.workspace_id => {
+                PredecessorFault::InAnotherWorkspace
+            }
+            Ok(predecessor) if predecessor.mission_id != payload.mission_id => {
+                PredecessorFault::ForAnotherMission
+            }
+            Ok(_) => return Ok(None),
+        },
+    };
+    Ok(Some((digest_value.clone(), fault)))
 }
 
 /// The reader a citation uses: `(workspace_id, classification_id, version, digest)` (R15).
@@ -857,6 +911,13 @@ pub enum ClassificationRecordError {
     /// it before the row exists, and the reader refuses it on every read, for the same reason in
     /// the same words.
     PolicyProjectIsNotTheMissions,
+    /// The record it says it supersedes is not the predecessor it claims: refused by the verified
+    /// read-back inside the recording transaction and by the reader on every read after. No
+    /// separate Command-side copy, for the reason `SpendRecordError::Predecessor` gives.
+    Predecessor {
+        digest: String,
+        fault: PredecessorFault,
+    },
     Store(String),
 }
 
@@ -887,6 +948,9 @@ impl From<ClassificationStoreError> for ClassificationRecordError {
     fn from(error: ClassificationStoreError) -> Self {
         match error {
             ClassificationStoreError::Malformed(reason) => Self::Malformed(reason),
+            ClassificationStoreError::Predecessor { digest, fault } => {
+                Self::Predecessor { digest, fault }
+            }
             other => Self::Store(other.to_string()),
         }
     }
@@ -903,6 +967,9 @@ impl fmt::Display for ClassificationRecordError {
             Self::PolicyRevisionNotFound => formatter.write_str("policy_revision_not_found"),
             Self::PolicyProjectIsNotTheMissions => {
                 formatter.write_str("policy_project_is_not_the_missions")
+            }
+            Self::Predecessor { digest, fault } => {
+                write!(formatter, "predecessor {digest}: {fault}")
             }
             Self::Store(reason) => write!(formatter, "store: {reason}"),
         }
