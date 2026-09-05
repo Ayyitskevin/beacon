@@ -5354,21 +5354,15 @@ fn c11d_recorded_delivery_can_complete_through_its_owner() {
     record_completion(&mut f.store.connect(), &record).expect("C11.04.DELIVERED_ARTIFACT_ACCEPTED");
 }
 
-/// Today's behaviour, pinned before it changes (R32.2 changes it).
-///
-/// A spend whose measured window ends BEFORE the completion's boundary reaches the manifest as
-/// `Measured` -- complete coverage -- because `spend_for` reads the record's own tag and never
-/// compares `coverage_to_event_seq` against the cut. R21.3 says such a window is collected as
-/// `partially_measured`; this is the sentence the next commit makes false.
-///
-/// It is deleted by that commit and replaced by astra's own probe.
+/// astra's C11-D probe, verbatim (OV1-opus2-report.md, R32.1/R32.2). It was RED on main: the
+/// collector read the record's own tag and never compared the window's end to the cut.
 #[test]
-fn a_short_spend_window_reaches_the_manifest_as_measured() {
+fn c11d_short_spend_window_is_partial_in_document() {
     use beacond::{
         MeasuredSpendService, MeasuredSpendV1, SpendLine, SpendMeasurement, SpendMeasurementKind,
         SpendOrigin, SpendSupersedes, SpendTotals,
     };
-    let f = admitted_mission("r32-spend-today");
+    let f = admitted_mission("c11d-spend-window");
     f.classify(ImpactLevel::High);
     let spend = MeasuredSpendV1 {
         workspace_id: f.workspace_id,
@@ -5382,7 +5376,7 @@ fn a_short_spend_window_reaches_the_manifest_as_measured() {
         measurement: SpendMeasurement::Measured(SpendTotals {
             counted_units: 1,
             lines: vec![SpendLine {
-                unit: "USD".to_owned(),
+                unit: "USD".into(),
                 amount_minor: 1234,
                 minor_units_exponent: 2,
             }],
@@ -5391,7 +5385,7 @@ fn a_short_spend_window_reaches_the_manifest_as_measured() {
     };
     let stored = MeasuredSpendService::new(Arc::clone(&f.accounts), f.workspace_id)
         .record(&spend.canonical_bytes().unwrap())
-        .expect("the spend records through its owner");
+        .expect("C11D.SETUP.SPEND_RECORDED");
     let record = c11d_completion(
         &f,
         SpendReference::Recorded {
@@ -5403,13 +5397,13 @@ fn a_short_spend_window_reaches_the_manifest_as_measured() {
     );
     assert!(
         spend.coverage_to_event_seq < record.boundary_event_seq,
-        "the window does not end before the cut, so this proves nothing"
+        "C11D.SETUP.SHORT_WINDOW"
     );
-    record_completion(&mut f.store.connect(), &record).expect("the completion records");
+    record_completion(&mut f.store.connect(), &record).expect("C11D.SETUP.COMPLETION_RECORDED");
     let candidate = f
         .outcomes
         .prepare_for_mission(f.mission_id, AppendixRequest::PolicyDefault)
-        .expect("the candidate prepares");
+        .expect("C11D.SETUP.PREPARED");
     let manifest = f.outcomes.manifest(&candidate.manifest_digest).unwrap();
     assert_eq!(
         manifest
@@ -5418,7 +5412,71 @@ fn a_short_spend_window_reaches_the_manifest_as_measured() {
             .verified()
             .unwrap()
             .measurement,
-        SpendMeasurementKind::Measured,
-        "the short window is reported as complete coverage"
+        SpendMeasurementKind::PartiallyMeasured,
+        "C11.05.SPEND_WINDOW_IS_PARTIAL"
+    );
+}
+
+/// R32.2's required positive control, and the measurement that says it cannot be written.
+///
+/// R32.2 names `coverage_to == boundary` as the reachable `Measured` and requires it as the control
+/// that stops "always partial" from passing astra's bar. It is not reachable, and the reason is two
+/// rules that were already there, each right on its own:
+///
+/// * the spend owner refuses a window ending past the last stored Event
+///   (`CoverageBeyondStore`, `spend.rs:1401`), so `coverage_to <= S - 1`, where `S` is the sequence
+///   of the spend's own `spend.recorded` Event;
+/// * the collector refuses a spend recorded after the cut (`AfterBoundary`), so `S <= boundary`.
+///
+/// Together: `coverage_to <= S - 1 < S <= boundary`. **A measurement can never cover its own
+/// recording**, so with R32.2's comparison every `Measured` record is partial at the cut and
+/// `Measured` is unreachable in a manifest -- which is what R21.3's last sentence ("Absent /
+/// partial / complete stay distinct") forbids. Reported rather than worked around: pre-labelling a
+/// fixture, or comparing against something the ruling did not name, would hide the seam.
+///
+/// So this pins the impossibility instead. It goes RED the day either rule changes, which is
+/// exactly when `Measured` becomes reachable and R32.2's control can be written for real.
+#[test]
+fn a_spend_window_cannot_reach_the_boundary_today() {
+    use beacond::{
+        MeasuredSpendService, MeasuredSpendV1, SpendLine, SpendMeasurement, SpendOrigin,
+        SpendRecordError, SpendSupersedes, SpendTotals,
+    };
+    let f = admitted_mission("r32-spend-unreachable");
+    f.classify(ImpactLevel::High);
+    // The only sequence that could equal a boundary at or after this spend's own Event.
+    let cut = f.latest_event_seq() + 1;
+    let spend = MeasuredSpendV1 {
+        workspace_id: f.workspace_id,
+        mission_id: f.mission_id,
+        spend_id: Uuid::new_v4(),
+        version: 1,
+        origin: SpendOrigin::DaemonLedger,
+        measured_at_ms: 1_788_400_000_000,
+        coverage_from_event_seq: 1,
+        coverage_to_event_seq: cut,
+        measurement: SpendMeasurement::Measured(SpendTotals {
+            counted_units: 1,
+            lines: vec![SpendLine {
+                unit: "USD".to_owned(),
+                amount_minor: 1234,
+                minor_units_exponent: 2,
+            }],
+        }),
+        supersedes: SpendSupersedes::None,
+    };
+    let refusal = MeasuredSpendService::new(Arc::clone(&f.accounts), f.workspace_id)
+        .record(&spend.canonical_bytes().unwrap())
+        .expect_err("a window reaching the cut is refused by the spend owner");
+    assert!(
+        matches!(
+            refusal,
+            SpendRecordError::CoverageBeyondStore {
+                claimed_to_event_seq,
+                last_event_seq,
+            } if claimed_to_event_seq == cut && last_event_seq == cut - 1
+        ),
+        "the window was refused for some other reason, so the algebra above is not what blocks \
+         R32.2's control: {refusal:?}"
     );
 }
