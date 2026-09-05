@@ -1271,6 +1271,52 @@ fn verified_completion_refuses_a_condition_outcome_projection_that_disagrees_wit
 }
 
 #[test]
+fn a_completion_whose_mission_has_no_admission_event_is_refused_by_name() {
+    // R21.4 (fable2's O-P0b question 4). The reader's boundary check takes `min(sequence)` over the
+    // Mission's `mission.admitted` Events, and `min` over no rows is NULL -- which surfaced as a raw
+    // `Store("Invalid column type Null ...")`. A Mission with no admission Event is a corrupt store
+    // state, and a corrupt state is refused by NAME, never as a driver error a caller has to parse.
+    let store = TestStore::new("completion-mission-unadmitted");
+    let accounts = enrolled_accounts(&store);
+    let mission = admit_with_conditions(&store, &accounts, vec!["Gates pass".to_owned()]);
+    let boundary = admitted_sequence(&store, mission.id);
+    let record = completion_for(
+        &store,
+        &mission,
+        boundary,
+        vec![beacond::ConditionOutcome::Met],
+    );
+    let mut connection = Connection::open(&store.path).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .unwrap();
+    let digest = beacond::record_completion(&mut connection, &record).unwrap();
+
+    // The admission Event, removed behind the store. `events` has no immutability trigger, so no
+    // trigger has to come down to arrange it -- which is part of why the state is reachable.
+    let removed = connection
+        .execute(
+            "DELETE FROM events WHERE kind = 'mission.admitted'
+             AND json_extract(payload_json, '$.mission.id') = ?1",
+            rusqlite::params![mission.id.to_string()],
+        )
+        .unwrap();
+    assert_eq!(
+        removed, 1,
+        "the arrangement did not remove the admission Event"
+    );
+
+    let reread = beacond::verified_completion_within(&connection, store.workspace_id, &digest);
+    assert!(
+        matches!(
+            reread,
+            Err(beacond::CompletionReadRefusal::MissionNotAdmitted)
+        ),
+        "a Mission with no admission Event was not refused by name: {reread:?}"
+    );
+}
+
+#[test]
 fn a_gap_a_duplicate_and_an_ordinal_past_the_end_are_three_distinguishable_refusals() {
     // Bullet 2 and bullet 3. A duplicate and an ordinal past the end are refused by the STORE -- the
     // primary key and the foreign key to `mission_success_conditions` -- and a gap by the reader's
