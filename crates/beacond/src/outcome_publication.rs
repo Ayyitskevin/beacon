@@ -398,6 +398,34 @@ impl fmt::Display for PublishRefusal {
     }
 }
 
+impl PublishRefusal {
+    /// The variant's NAME, for R28.4's one-line startup message.
+    ///
+    /// A name, never a rendering: `Completion(String)` and `Unverified(String)` carry sentences
+    /// and `ManifestMissionDiffers` carries another Mission's identifier, none of which belongs in
+    /// a refusal about a different row. The match is exhaustive, so a new refusal cannot be added
+    /// without deciding what startup calls it.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Seam(_) => "Seam",
+            Self::NoManifestForCandidate => "NoManifestForCandidate",
+            Self::Manifest(_) => "Manifest",
+            Self::ManifestMissionDiffers { .. } => "ManifestMissionDiffers",
+            Self::Completion(_) => "Completion",
+            Self::AppendixRequired => "AppendixRequired",
+            Self::VersionGap { .. } => "VersionGap",
+            Self::AlreadyPublished => "AlreadyPublished",
+            Self::HistoryNotContiguous { .. } => "HistoryNotContiguous",
+            Self::QualifyingVerdictNotMeets => "QualifyingVerdictNotMeets",
+            Self::MissionBindingBroken { .. } => "MissionBindingBroken",
+            Self::Absent => "Absent",
+            Self::Account(_) => "Account",
+            Self::Unverified(_) => "Unverified",
+            Self::Store(_) => "Store",
+        }
+    }
+}
+
 impl std::error::Error for PublishRefusal {}
 
 impl From<crate::operator_account::OperatorAccountError> for PublishRefusal {
@@ -927,27 +955,157 @@ fn load_row(
 /// row nothing wrote through `publish` has never met it. Before this pass, a forged relation
 /// survived reopen as `Ready` while the public writer refused to create it -- the store agreeing
 /// with itself only for as long as nobody wrote to it directly.
-pub(crate) fn verify_publication_state(connection: &Connection) -> Result<(), PublishRefusal> {
-    let mut statement = connection.prepare(
-        "SELECT workspace_id, mission_id, publication_version FROM outcome_publications
-         ORDER BY workspace_id, mission_id, publication_version",
-    )?;
+/// Which fault the publication startup pass hit, and WHICH ROW hit it (R27.1's shape, R28.1).
+///
+/// The pass's own error type could not answer the second question: `PublishRefusal` says what went
+/// wrong with a publication and never which one, because a reader that was handed the identity has
+/// no reason to repeat it. So the row identity is added HERE, at the pass, where the loop knows it.
+pub(crate) enum PublicationStateFault {
+    /// The enumeration itself failed: no row to name, because none was reached.
+    Store(rusqlite::Error),
+    /// One row did not re-prove. `cause` is the owning reader's OWN refusal, carried whole rather
+    /// than re-described, so startup and a direct `get_version` give the same answer.
+    ///
+    /// `version` is the version AS STORED, an `i64`, and that is deliberate: a row whose version
+    /// does not fit `u32` is one of the faults this pass reports (sol1's P1-1), and a key that
+    /// cannot name the failing row is not a key.
+    Row {
+        workspace_id: Uuid,
+        mission_id: Uuid,
+        version: i64,
+        cause: PublishRefusal,
+    },
+    /// A row whose identity columns are not UUIDs. There is no `Uuid` to name it by, so it is
+    /// named by the text the relation holds.
+    ///
+    /// Unreachable while the passes before this one hold: `workspace_id` and `mission_id` are
+    /// foreign keys into `workspaces` and `missions`, the foreign-key check and the Workspace and
+    /// Mission passes all run earlier in `inspect_store`, and a non-UUID here means a non-UUID
+    /// there. Kept because "unreachable by ordering" is an argument about other code, and this
+    /// pass should still be able to say what it found.
+    Identity {
+        workspace_id: String,
+        mission_id: String,
+        version: i64,
+    },
+}
+
+impl fmt::Display for PublicationStateFault {
+    /// R28.4: the KEY and the fault's NAME. Never the carried refusal's own text -- that is what
+    /// `Debug` and `source()` are for. A one-line startup refusal that pastes a reader's sentence
+    /// into itself is how the same words end up meaning two different things.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(_) => formatter.write_str("the Outcome publications could not be read"),
+            Self::Row {
+                workspace_id,
+                mission_id,
+                version,
+                cause,
+            } => write!(
+                formatter,
+                "publication version {version} of Mission {mission_id} in Workspace \
+                 {workspace_id} does not re-prove: {}",
+                cause.name()
+            ),
+            Self::Identity {
+                workspace_id,
+                mission_id,
+                version,
+            } => write!(
+                formatter,
+                "a publication row's identity is not readable: Workspace {workspace_id}, Mission \
+                 {mission_id}, version {version}"
+            ),
+        }
+    }
+}
+
+/// Derived, NOT delegated to `Display`: the carried refusal's own text has to be reachable
+/// somewhere, and R28.4 says here rather than in the one-line message.
+impl fmt::Debug for PublicationStateFault {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => formatter.debug_tuple("Store").field(error).finish(),
+            Self::Row {
+                workspace_id,
+                mission_id,
+                version,
+                cause,
+            } => formatter
+                .debug_struct("Row")
+                .field("workspace_id", workspace_id)
+                .field("mission_id", mission_id)
+                .field("version", version)
+                .field("cause", cause)
+                .finish(),
+            Self::Identity {
+                workspace_id,
+                mission_id,
+                version,
+            } => formatter
+                .debug_struct("Identity")
+                .field("workspace_id", workspace_id)
+                .field("mission_id", mission_id)
+                .field("version", version)
+                .finish(),
+        }
+    }
+}
+
+impl std::error::Error for PublicationStateFault {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::Row { cause, .. } => Some(cause),
+            Self::Identity { .. } => None,
+        }
+    }
+}
+
+/// Re-prove every stored publication at startup, naming the row that fails (R28.1).
+pub(crate) fn verify_publication_state(
+    connection: &Connection,
+) -> Result<(), PublicationStateFault> {
+    let mut statement = connection
+        .prepare(
+            "SELECT workspace_id, mission_id, publication_version FROM outcome_publications
+             ORDER BY workspace_id, mission_id, publication_version",
+        )
+        .map_err(PublicationStateFault::Store)?;
     let rows: Vec<(String, String, i64)> = statement
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-        .collect::<Result<Vec<_>, _>>()?;
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .map_err(PublicationStateFault::Store)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(PublicationStateFault::Store)?;
     drop(statement);
 
     for (workspace_id, mission_id, publication_version) in &rows {
-        let workspace_id = Uuid::parse_str(workspace_id).map_err(|_| {
-            PublishRefusal::Unverified("a publication's Workspace id is not a UUID".to_owned())
-        })?;
-        let mission_id = Uuid::parse_str(mission_id).map_err(|_| {
-            PublishRefusal::Unverified("a publication's Mission id is not a UUID".to_owned())
-        })?;
+        let identity = || PublicationStateFault::Identity {
+            workspace_id: workspace_id.clone(),
+            mission_id: mission_id.clone(),
+            version: *publication_version,
+        };
+        let parsed_workspace = Uuid::parse_str(workspace_id).map_err(|_| identity())?;
+        let parsed_mission = Uuid::parse_str(mission_id).map_err(|_| identity())?;
         let version = u32::try_from(*publication_version).map_err(|_| {
-            PublishRefusal::Unverified("a publication version is out of range".to_owned())
+            PublicationStateFault::Row {
+                workspace_id: parsed_workspace,
+                mission_id: parsed_mission,
+                version: *publication_version,
+                cause: PublishRefusal::Unverified(
+                    "a publication version is out of range".to_owned(),
+                ),
+            }
         })?;
-        get_version_within(connection, workspace_id, mission_id, version)?;
+        get_version_within(connection, parsed_workspace, parsed_mission, version).map_err(
+            |cause| PublicationStateFault::Row {
+                workspace_id: parsed_workspace,
+                mission_id: parsed_mission,
+                version: i64::from(version),
+                cause,
+            },
+        )?;
     }
     Ok(())
 }

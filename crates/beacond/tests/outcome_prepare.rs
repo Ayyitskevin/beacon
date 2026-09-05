@@ -3875,6 +3875,29 @@ fn startup_refuses_a_swapped_publication_evaluation_and_names_the_row() {
         .publish(fixture.mission_id, &candidate, &evaluation)
         .expect("the control publishes");
 
+    // A SECOND version, through the real correction path, and the tamper lands on THAT one. With a
+    // single row the pass cannot tell "the row that failed" from "the first row": a mutant naming
+    // `rows[0]` SURVIVED the one-row fixture. Found by running the mutant R28.1 asks for, not by
+    // reading the code. Version 1 stays honest and is the positive control inside this test.
+    let corrected = fixture
+        .outcomes
+        .prepare_for_mission(fixture.mission_id, AppendixRequest::Include)
+        .expect("the correction prepares");
+    let (_, corrected_candidate, corrected_evaluation) = fixture.publishable_from(corrected);
+    let second = fixture
+        .outcomes
+        .publish(
+            fixture.mission_id,
+            &corrected_candidate,
+            &corrected_evaluation,
+        )
+        .expect("the correction publishes");
+    assert_eq!(
+        second.publication_version(),
+        2,
+        "the tamper has to land on a row that is not rows[0]"
+    );
+
     let sibling = fixture
         .artifacts()
         .record(
@@ -3897,7 +3920,8 @@ fn startup_refuses_a_swapped_publication_evaluation_and_names_the_row() {
         .unwrap();
     connection
         .execute(
-            "UPDATE outcome_publications SET evaluation_digest = ?1 WHERE workspace_id = ?2",
+            "UPDATE outcome_publications SET evaluation_digest = ?1
+             WHERE workspace_id = ?2 AND publication_version = 2",
             params![
                 sibling_evaluation.digest().value,
                 fixture.workspace_id.to_string()
@@ -3932,15 +3956,53 @@ END;",
     );
     drop(connection);
 
-    // And startup refuses it. Before the widening this is all it can say.
+    // And startup refuses it BY NAME, naming the row. Asserting only the variant would pass just
+    // as well if startup flattened every cause onto one name (R28.1).
     let refusal = Supervisor::bootstrap(StartupConfig {
         store_path: fixture.store.path.clone(),
         initial_workspace_name: "Personal".to_owned(),
     })
     .expect_err("a store holding a swapped publication Evaluation reopened Ready");
     assert!(
-        matches!(&refusal, SupervisorError::OutcomePublicationStateMismatch),
-        "startup did not refuse the swapped publication: {refusal:?}"
+        matches!(
+            &refusal,
+            SupervisorError::OutcomePublicationStateMismatch {
+                workspace_id,
+                mission_id,
+                version,
+                cause: PublishRefusal::Seam(PublicationSeamRefusal::SubjectIsNotTheCandidate),
+            } if *workspace_id == fixture.workspace_id
+                && *mission_id == fixture.mission_id
+                && *version == 2
+        ),
+        "refused for the wrong reason, with the cause flattened, or naming the wrong row: \
+         {refusal:?}"
+    );
+
+    // R28.4: the one-line message is the KEY and the fault's NAME. The carried refusal's own text
+    // is reachable through Debug and source(), and must not be pasted into this line -- without
+    // this assertion R28.4 is a rule the suite cannot enforce (kimi's pre-read).
+    let line = refusal.to_string();
+    assert!(
+        line.contains(&fixture.mission_id.to_string())
+            && line.contains(&fixture.workspace_id.to_string())
+            && line.contains("version 2"),
+        "the refusal does not name the row it refused: {line}"
+    );
+    assert!(
+        line.contains("Seam"),
+        "the refusal does not name the fault: {line}"
+    );
+    let carried =
+        PublishRefusal::Seam(PublicationSeamRefusal::SubjectIsNotTheCandidate).to_string();
+    assert!(
+        !line.contains(&carried),
+        "the carried refusal's own text reached the one-line message: {line}"
+    );
+    // ...and IS reachable, so nothing was thrown away.
+    assert!(
+        format!("{refusal:?}").contains("SubjectIsNotTheCandidate"),
+        "the carried fault is not reachable through Debug: {refusal:?}"
     );
 }
 

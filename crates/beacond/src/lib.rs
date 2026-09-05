@@ -420,7 +420,16 @@ pub enum SupervisorError {
     },
     OutcomeManifestStateMismatch,
     /// A stored Outcome publication does not re-prove against the records it cites.
-    OutcomePublicationStateMismatch,
+    ///
+    /// Names the row and carries the owning reader's own refusal (R28.1). `version` is the version
+    /// AS STORED: a row whose version does not fit `u32` is one of the faults this reports, so the
+    /// key has to be able to hold it.
+    OutcomePublicationStateMismatch {
+        workspace_id: Uuid,
+        mission_id: Uuid,
+        version: i64,
+        cause: outcome_publication::PublishRefusal,
+    },
     PauseEventMismatch(i64),
     SchemaMismatch,
     UnsupportedSchemaVersion(i64),
@@ -616,8 +625,18 @@ impl fmt::Display for SupervisorError {
                      in the log"
                 )
             }
-            Self::OutcomePublicationStateMismatch => formatter.write_str(
-                "a stored Outcome publication does not re-prove against the records it cites",
+            // R28.4: the key and the fault's NAME. The carried refusal's own text is reachable
+            // through `Debug` and `source()`, not pasted into this line.
+            Self::OutcomePublicationStateMismatch {
+                workspace_id,
+                mission_id,
+                version,
+                cause,
+            } => write!(
+                formatter,
+                "publication version {version} of Mission {mission_id} in Workspace \
+                 {workspace_id} does not re-prove against the records it cites: {}",
+                cause.name()
             ),
             Self::RulingStateMismatch => {
                 write!(
@@ -1334,7 +1353,31 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     // cites a candidate, the candidate's manifest must verify, and the manifest's own pass has to
     // have run before this one can rely on it (R18.7).
     outcome_publication::verify_publication_state(connection)
-        .map_err(|_| SupervisorError::OutcomePublicationStateMismatch)?;
+        .map_err(|fault| match fault {
+            outcome_publication::PublicationStateFault::Store(error) => SupervisorError::Store(error),
+            outcome_publication::PublicationStateFault::Row {
+                workspace_id,
+                mission_id,
+                version,
+                cause,
+            } => SupervisorError::OutcomePublicationStateMismatch {
+                workspace_id,
+                mission_id,
+                version,
+                cause,
+            },
+            // Unreachable while the foreign-key check and the Workspace and Mission passes run
+            // first; reported as what it is rather than folded into a row refusal that would have
+            // to invent the identity it is missing.
+            outcome_publication::PublicationStateFault::Identity {
+                workspace_id,
+                mission_id,
+                version,
+            } => SupervisorError::IntegrityCheckFailed(format!(
+                "a publication row's identity is not readable: Workspace {workspace_id}, Mission \
+                 {mission_id}, version {version}"
+            )),
+        })?;
 
     Ok(StoreDiagnostics {
         status: DiagnosticStatus::Ready,
