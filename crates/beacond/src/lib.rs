@@ -29,6 +29,7 @@ mod mission_completion_store;
 mod mission_impact;
 mod operator_account;
 mod outcome;
+mod outcome_assembler;
 mod outcome_collector;
 mod outcome_store;
 mod platform_session;
@@ -142,6 +143,7 @@ pub use outcome::{
     SourceMismatch, SourceRef, SpendMeasurementKind, SpendRef, SuccessCondition, VerifiedArtifact,
     VerifiedSources, VerifiedText, compare_canonical_keys, render,
 };
+pub use outcome_assembler::{AssemblyRefusal, assemble};
 pub use outcome_collector::{
     CollectedClassification, CollectedCompletion, CollectedCondition, CollectedDigest,
     CollectedNarrative, CollectedSources, CollectedSpend, CollectedUncounted, CollectionRequest,
