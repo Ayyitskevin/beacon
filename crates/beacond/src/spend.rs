@@ -291,6 +291,37 @@ pub enum SpendSupersedes {
     Record(String),
 }
 
+/// Why a `supersedes` digest cannot be the predecessor it claims to be (sol1's cold read, #9).
+///
+/// The predecessor is judged by ITS OWN canonical bytes -- the row is looked up by digest alone,
+/// with no Workspace predicate, so that "not here" and "somewhere else" stay two different
+/// answers -- and never by the successor's word for it. Shared by the spend and classification
+/// ladders, which have the same four ways to be wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PredecessorFault {
+    /// No stored bytes hash to the named digest.
+    NotStored,
+    /// A row is keyed by the digest, but its bytes do not verify as a record; `reason` is the
+    /// predecessor's own reader's word. Distinct from `NotStored`: something is there, and it is
+    /// wrong.
+    Unverifiable(String),
+    /// The predecessor's own bytes name another Workspace.
+    InAnotherWorkspace,
+    /// The predecessor's own bytes are about another Mission.
+    ForAnotherMission,
+}
+
+impl fmt::Display for PredecessorFault {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotStored => formatter.write_str("not_stored"),
+            Self::Unverifiable(reason) => write!(formatter, "unverifiable: {reason}"),
+            Self::InAnotherWorkspace => formatter.write_str("in_another_workspace"),
+            Self::ForAnotherMission => formatter.write_str("for_another_mission"),
+        }
+    }
+}
+
 /// The immutable v1 payload, exactly as its canonical bytes decode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MeasuredSpendV1 {
@@ -900,6 +931,12 @@ pub enum SpendStoreError {
     CitedIdentityMismatch,
     /// The row belongs to another Workspace.
     CrossWorkspace,
+    /// The record it says it supersedes is not the predecessor it claims (sol1's cold read, #9):
+    /// judged by the predecessor's own bytes, never by the successor's word.
+    Predecessor {
+        digest: String,
+        fault: PredecessorFault,
+    },
     Store(String),
 }
 
@@ -911,6 +948,9 @@ impl fmt::Display for SpendStoreError {
             Self::ColumnsDisagree => formatter.write_str("columns_disagree"),
             Self::CitedIdentityMismatch => formatter.write_str("cited_identity_mismatch"),
             Self::CrossWorkspace => formatter.write_str("cross_workspace"),
+            Self::Predecessor { digest, fault } => {
+                write!(formatter, "predecessor {digest}: {fault}")
+            }
             Self::Store(reason) => write!(formatter, "store: {reason}"),
         }
     }
@@ -1041,6 +1081,12 @@ pub fn verified_spend_within(
     if payload.workspace_id != workspace_id {
         return Err(SpendStoreError::CrossWorkspace);
     }
+    // 5. The record it says it supersedes is a record of this Mission, in this Workspace -- by the
+    //    predecessor's OWN bytes (sol1's cold read, #9). On every read, like the checks above: a
+    //    row written past the Command is still refused.
+    if let Some((digest, fault)) = predecessor_fault(connection, &payload)? {
+        return Err(SpendStoreError::Predecessor { digest, fault });
+    }
     Ok(MeasuredSpend {
         digest: SpendDigest {
             algorithm: DIGEST_ALGORITHM.to_owned(),
@@ -1051,6 +1097,48 @@ pub fn verified_spend_within(
         payload,
     }
     .into())
+}
+
+/// The fault, if any, in a record's `supersedes` link, judged by the predecessor's own bytes.
+///
+/// Looked up by digest ALONE: a Workspace predicate would make a foreign predecessor look absent,
+/// and "absent" and "somewhere else" are two different faults. The predecessor's bytes are hashed
+/// and decoded here rather than trusted, so a corrupt predecessor row is named as such and never
+/// read as a scope.
+fn predecessor_fault(
+    connection: &Connection,
+    payload: &MeasuredSpendV1,
+) -> Result<Option<(String, PredecessorFault)>, SpendStoreError> {
+    let SpendSupersedes::Record(digest_value) = &payload.supersedes else {
+        return Ok(None);
+    };
+    let stored: Option<Vec<u8>> = connection
+        .query_row(
+            "SELECT canonical_bytes FROM measured_spend WHERE digest_value = ?1",
+            rusqlite::params![digest_value],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| SpendStoreError::Store(error.to_string()))?;
+    let fault = match stored {
+        None => PredecessorFault::NotStored,
+        Some(bytes) if HEXLOWER.encode(&sha256(&bytes)) != *digest_value => {
+            PredecessorFault::Unverifiable(SpendStoreError::DigestMismatch.to_string())
+        }
+        Some(bytes) => match decode(&bytes) {
+            Err(reason) => {
+                PredecessorFault::Unverifiable(SpendStoreError::Malformed(reason).to_string())
+            }
+            Ok(predecessor) if predecessor.workspace_id != payload.workspace_id => {
+                PredecessorFault::InAnotherWorkspace
+            }
+            Ok(predecessor) if predecessor.mission_id != payload.mission_id => {
+                PredecessorFault::ForAnotherMission
+            }
+            Ok(_) => return Ok(None),
+        },
+    };
+    Ok(Some((digest_value.clone(), fault)))
 }
 
 /// The reader a citation uses: `(workspace_id, spend_id, version, digest)`.
@@ -1110,6 +1198,15 @@ pub enum SpendRecordError {
         claimed_to_event_seq: u64,
         last_event_seq: u64,
     },
+    /// The record it says it supersedes is not the predecessor it claims. Refused by the verified
+    /// read-back inside the recording transaction -- the row never commits -- and by the reader on
+    /// every read after, for the same reason in the same words. There is deliberately no separate
+    /// Command-side check: the read-back IS the write-time refusal, and a second copy of it would
+    /// be a check no test could fail.
+    Predecessor {
+        digest: String,
+        fault: PredecessorFault,
+    },
     Store(String),
 }
 
@@ -1134,6 +1231,7 @@ impl From<SpendStoreError> for SpendRecordError {
     fn from(error: SpendStoreError) -> Self {
         match error {
             SpendStoreError::Malformed(reason) => Self::Malformed(reason),
+            SpendStoreError::Predecessor { digest, fault } => Self::Predecessor { digest, fault },
             other => Self::Store(other.to_string()),
         }
     }
@@ -1155,6 +1253,9 @@ impl fmt::Display for SpendRecordError {
                 "coverage_beyond_store: window ends at {claimed_to_event_seq}, \
                  the last event in this workspace is {last_event_seq}"
             ),
+            Self::Predecessor { digest, fault } => {
+                write!(formatter, "predecessor {digest}: {fault}")
+            }
             Self::Store(reason) => write!(formatter, "store: {reason}"),
         }
     }

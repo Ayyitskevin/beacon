@@ -16,10 +16,10 @@ use beacond::{
     AutonomyProfile, BeaconCapability, ClassificationStoreError, LocalModelActivationService,
     LocalModelEndpoint, MeasuredSpendV1, MissionDraft, MissionImpactClassificationV1,
     MissionMemberDraft, MissionService, OperatorAccountService, OperatorSessionPhase,
-    ProjectCharterDraft, ProjectDraft, ProjectService, ProjectView, ProviderFeature,
-    ResidentConfiguration, ResidentConfigurationService, ResidentLifecycleService, SecretString,
-    SpendStoreError, StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig,
-    Supervisor, TeamDraft, TeamMemberDraft, TeamService, TeamView,
+    PredecessorFault, ProjectCharterDraft, ProjectDraft, ProjectService, ProjectView,
+    ProviderFeature, ResidentConfiguration, ResidentConfigurationService, ResidentLifecycleService,
+    SecretString, SpendStoreError, StarterOrganizationService, StarterResidentDraft, StarterRole,
+    StartupConfig, Supervisor, TeamDraft, TeamMemberDraft, TeamService, TeamView,
     verified_classification_for_citation, verified_classification_within,
     verified_spend_for_citation, verified_spend_within,
 };
@@ -415,6 +415,7 @@ impl Stored {
         bytes: &[u8],
         digest: &str,
         id: Uuid,
+        version: u32,
         policy_revision: u32,
         impact_column: &str,
     ) {
@@ -424,8 +425,8 @@ impl Stored {
                      workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
                      canonical_bytes, classification_id, mission_id, project_id, version, impact,
                      basis, policy_revision, charter_revision, classified_at_ms
-                 ) VALUES (?1, 'sha256', 'beacon.mission-impact.v1', ?2, ?3, ?4, ?5, ?6, 1, ?7,
-                           'operator_declared', ?8, ?9, 1788400000000)",
+                 ) VALUES (?1, 'sha256', 'beacon.mission-impact.v1', ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                           'operator_declared', ?9, ?10, 1788400000000)",
                 params![
                     self.store.workspace_id.to_string(),
                     digest,
@@ -433,6 +434,7 @@ impl Stored {
                     id.to_string(),
                     self.mission_id.to_string(),
                     self.project_id.to_string(),
+                    version,
                     impact_column,
                     policy_revision,
                     self.charter_revision,
@@ -510,7 +512,7 @@ fn the_classification_reader_refuses_a_row_whose_impact_column_disagrees_with_it
     let classification = stored.classification_record(id, revision);
     let bytes = classification.canonical_bytes().unwrap();
     let digest = classification.digest().unwrap().value;
-    stored.insert_classification(&bytes, &digest, id, revision, "ordinary");
+    stored.insert_classification(&bytes, &digest, id, 1, revision, "ordinary");
     let connection = stored.connection();
     assert_eq!(
         verified_classification_within(&connection, stored.store.workspace_id, &digest)
@@ -537,7 +539,7 @@ fn the_classification_reader_refuses_a_row_whose_bytes_do_not_hash_to_its_digest
     // check exists for, and the reason it has to be its own recomputation rather than a column read.
     let wrong = "b".repeat(64);
     assert_ne!(wrong, classification.digest().unwrap().value);
-    stored.insert_classification(&bytes, &wrong, id, revision, "high");
+    stored.insert_classification(&bytes, &wrong, id, 1, revision, "high");
 
     let connection = stored.connection();
     assert_eq!(
@@ -625,7 +627,7 @@ fn store_rows_are_immutable_under_update_and_delete() {
     let classification = stored.classification_record(id, revision);
     let impact_bytes = classification.canonical_bytes().unwrap();
     let impact_digest = classification.digest().unwrap().value;
-    stored.insert_classification(&impact_bytes, &impact_digest, id, revision, "high");
+    stored.insert_classification(&impact_bytes, &impact_digest, id, 1, revision, "high");
 
     let connection = stored.connection();
     for (statement, subject) in [
@@ -692,7 +694,7 @@ fn the_classification_reader_rechecks_the_copied_bit() {
     let classification = stored.classification_record(id, revision);
     let bytes = classification.canonical_bytes().unwrap();
     let digest = classification.digest().unwrap().value;
-    stored.insert_classification(&bytes, &digest, id, revision, "high");
+    stored.insert_classification(&bytes, &digest, id, 1, revision, "high");
 
     let connection = stored.connection();
     let found = verified_classification_for_citation(
@@ -1068,7 +1070,7 @@ fn the_readers_refuse_a_record_whose_bytes_name_another_workspace() {
     classification.workspace_id = other;
     let bytes = classification.canonical_bytes().unwrap();
     let digest = classification.digest().unwrap().value;
-    impact_side.insert_classification(&bytes, &digest, id, revision, "high");
+    impact_side.insert_classification(&bytes, &digest, id, 1, revision, "high");
 
     let connection = impact_side.connection();
     assert_eq!(
@@ -1227,4 +1229,286 @@ fn supersession_cannot_name_a_record_from_another_workspace() {
         spend_result.is_err() && classification_result.is_err(),
         "foreign predecessors were accepted: spend={spend_result:?}, classification={classification_result:?}"
     );
+}
+
+impl Stored {
+    /// A second admitted Mission in this Workspace, cloned from the first so that only its
+    /// identity differs: the same Project, Charter and Team, so every foreign key a record under it
+    /// needs already holds.
+    fn second_mission(&self) -> Uuid {
+        let id = Uuid::new_v4();
+        self.connection()
+            .execute(
+                "INSERT INTO missions (
+                     id, workspace_id, project_id, charter_revision, team_id, desired_outcome,
+                     success_conditions_json, constraints_json, prohibitions_json, lifecycle,
+                     admitted_by, admitted_at_ms
+                 ) SELECT ?1, workspace_id, project_id, charter_revision, team_id, desired_outcome,
+                          success_conditions_json, constraints_json, prohibitions_json, lifecycle,
+                          admitted_by, admitted_at_ms
+                   FROM missions WHERE workspace_id = ?2 AND id = ?3",
+                params![
+                    id.to_string(),
+                    self.store.workspace_id.to_string(),
+                    self.mission_id.to_string(),
+                ],
+            )
+            .unwrap();
+        id
+    }
+
+    /// A spend record whose BYTES name another, real Workspace of this store, filed under this
+    /// Workspace's columns (the row the foreign key allows) -- the Elsewhere pattern the reader's
+    /// own cross-Workspace test uses. What a `supersedes` link to it must see is the bytes.
+    fn spend_of_another_workspace(&self) -> String {
+        let elsewhere = Uuid::new_v4();
+        self.connection()
+            .execute(
+                "INSERT INTO workspaces (id, name, created_at_ms) VALUES (?1, 'Elsewhere', 1)",
+                params![elsewhere.to_string()],
+            )
+            .unwrap();
+        let spend_id = Uuid::new_v4();
+        let mut record = self.spend_record(spend_id, 1);
+        record.workspace_id = elsewhere;
+        record.origin = SpendOrigin::OperatorDeclared;
+        let bytes = record.canonical_bytes().unwrap();
+        let digest = record.digest().unwrap().value;
+        self.insert_spend(&bytes, &digest, spend_id, 1, "operator_declared");
+        digest
+    }
+
+    /// The classification twin of `spend_of_another_workspace`, at the given policy revision.
+    fn classification_of_another_workspace(&self, policy_revision: u32) -> String {
+        let elsewhere = Uuid::new_v4();
+        self.connection()
+            .execute(
+                "INSERT INTO workspaces (id, name, created_at_ms) VALUES (?1, 'Elsewhere', 1)",
+                params![elsewhere.to_string()],
+            )
+            .unwrap();
+        let id = Uuid::new_v4();
+        let mut record = self.classification_record(id, policy_revision);
+        record.workspace_id = elsewhere;
+        let bytes = record.canonical_bytes().unwrap();
+        let digest = record.digest().unwrap().value;
+        self.insert_classification(&bytes, &digest, id, 1, policy_revision, "high");
+        digest
+    }
+}
+
+/// The three ways a predecessor can be wrong, at the Command: no such record at all, a real
+/// record of another Mission in this Workspace, and a record whose own bytes name another
+/// Workspace of this store. Each is refused by its own name, on both ladders.
+///
+/// sol1's probe above stores its "other Workspace" in a separate store FILE, so the fault it
+/// reaches is `NotStored`; the Workspace arm needs a second Workspace in the SAME store, which is
+/// what the two `*_of_another_workspace` rows are.
+#[test]
+fn a_predecessor_that_is_unknown_or_about_another_mission_is_refused_by_name() {
+    let stored = stored("predecessor-unknown-or-other-mission");
+    let second = stored.second_mission();
+    let spend_service = stored.spend_service();
+    let impact_service = stored.impact_service();
+    let revision = stored.policy_revision();
+
+    let mut other_missions_spend = stored.spend_record(Uuid::new_v4(), 1);
+    other_missions_spend.mission_id = second;
+    let other_missions_spend = spend_service
+        .record(&other_missions_spend.canonical_bytes().unwrap())
+        .expect("the second Mission's own spend record stores");
+    let mut other_missions_classification = stored.classification_record(Uuid::new_v4(), revision);
+    other_missions_classification.mission_id = second;
+    let other_missions_classification = impact_service
+        .classify(&other_missions_classification.canonical_bytes().unwrap())
+        .expect("the second Mission's own classification stores");
+
+    let unknown = "f".repeat(64);
+    let foreign_spend = stored.spend_of_another_workspace();
+    let foreign_classification = stored.classification_of_another_workspace(revision);
+    for (label, predecessor, expected) in [
+        ("unknown", unknown.clone(), PredecessorFault::NotStored),
+        (
+            "another Mission's",
+            other_missions_spend.digest().value.clone(),
+            PredecessorFault::ForAnotherMission,
+        ),
+        (
+            "another Workspace's",
+            foreign_spend,
+            PredecessorFault::InAnotherWorkspace,
+        ),
+    ] {
+        let mut successor = stored.spend_record(Uuid::new_v4(), 2);
+        successor.supersedes = SpendSupersedes::Record(predecessor.clone());
+        let error = spend_service
+            .record(&successor.canonical_bytes().unwrap())
+            .expect_err(&format!(
+                "a spend record naming {label} predecessor is refused"
+            ));
+        assert!(
+            matches!(&error, SpendRecordError::Predecessor { digest, fault } if *digest == predecessor && *fault == expected),
+            "spend, {label} predecessor: {error:?}"
+        );
+    }
+    for (label, predecessor, expected) in [
+        ("unknown", unknown, PredecessorFault::NotStored),
+        (
+            "another Mission's",
+            other_missions_classification.digest().value.clone(),
+            PredecessorFault::ForAnotherMission,
+        ),
+        (
+            "another Workspace's",
+            foreign_classification,
+            PredecessorFault::InAnotherWorkspace,
+        ),
+    ] {
+        let mut successor = stored.classification_record(Uuid::new_v4(), revision);
+        successor.version = 2;
+        successor.supersedes = ClassificationSupersedes::Record(predecessor.clone());
+        let error = impact_service
+            .classify(&successor.canonical_bytes().unwrap())
+            .expect_err(&format!(
+                "a classification naming {label} predecessor is refused"
+            ));
+        assert!(
+            matches!(&error, ClassificationRecordError::Predecessor { digest, fault } if *digest == predecessor && *fault == expected),
+            "classification, {label} predecessor: {error:?}"
+        );
+    }
+}
+
+/// The read-side half, in the R20.3 shape: rows written PAST the Command, every column agreeing
+/// with bytes whose `supersedes` names a predecessor that is (a) in another Workspace, (b) not
+/// stored at all, (c) a record of another Mission, or (d) stored under this digest with bytes
+/// that no longer hash to it. Each is refused by the verified reader with the predecessor's own
+/// fault, so a restore or an older binary cannot put a foreign history back.
+#[test]
+fn the_verified_readers_refuse_a_stored_successor_by_its_predecessors_own_bytes() {
+    let local = stored("predecessor-reader-local-workspace");
+    let revision = local.policy_revision();
+    let foreign_spend = local.spend_of_another_workspace();
+    let foreign_classification = local.classification_of_another_workspace(revision);
+    let second = local.second_mission();
+    let other_missions_spend = local
+        .spend_service()
+        .record(&{
+            let mut record = local.spend_record(Uuid::new_v4(), 1);
+            record.mission_id = second;
+            record.canonical_bytes().unwrap()
+        })
+        .expect("the second Mission's own spend record stores");
+    // (d) A predecessor row keyed by a real digest whose bytes were altered after the fact: one
+    // byte of the stored slice flipped, the digest column left as it was.
+    let corrupt_id = Uuid::new_v4();
+    let corrupt = local.spend_record(corrupt_id, 1);
+    let corrupt_digest = corrupt.digest().unwrap().value;
+    let mut corrupt_bytes = corrupt.canonical_bytes().unwrap();
+    let last = corrupt_bytes.len() - 1;
+    corrupt_bytes[last] ^= 0x01;
+    local.insert_spend(
+        &corrupt_bytes,
+        &corrupt_digest,
+        corrupt_id,
+        1,
+        "daemon_ledger",
+    );
+
+    let connection = local.connection();
+    for (label, predecessor, expected) in [
+        (
+            "another Workspace's",
+            foreign_spend,
+            PredecessorFault::InAnotherWorkspace,
+        ),
+        ("unknown", "e".repeat(64), PredecessorFault::NotStored),
+        (
+            "another Mission's",
+            other_missions_spend.digest().value.clone(),
+            PredecessorFault::ForAnotherMission,
+        ),
+        (
+            "corrupt",
+            corrupt_digest.clone(),
+            PredecessorFault::Unverifiable("digest_mismatch".to_owned()),
+        ),
+    ] {
+        let id = Uuid::new_v4();
+        let mut successor = local.spend_record(id, 2);
+        successor.supersedes = SpendSupersedes::Record(predecessor.clone());
+        let bytes = successor.canonical_bytes().unwrap();
+        let digest = successor.digest().unwrap().value;
+        local.insert_spend(&bytes, &digest, id, 2, "daemon_ledger");
+        assert_eq!(
+            verified_spend_within(&connection, local.store.workspace_id, &digest).expect_err(
+                &format!("a stored spend successor of {label} predecessor is refused on read")
+            ),
+            SpendStoreError::Predecessor {
+                digest: predecessor,
+                fault: expected
+            },
+            "spend, {label} predecessor"
+        );
+        // The spend ladder is (workspace, mission, origin, version)-unique; make room for the next.
+        connection
+            .execute_batch("DROP TRIGGER measured_spend_no_delete;")
+            .unwrap();
+        connection
+            .execute(
+                "DELETE FROM measured_spend WHERE digest_value = ?1",
+                [&digest],
+            )
+            .unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER measured_spend_no_delete BEFORE DELETE ON measured_spend
+                 BEGIN SELECT RAISE(ABORT, 'Measured spend records are immutable'); END;",
+            )
+            .unwrap();
+    }
+
+    for (label, predecessor, expected) in [
+        (
+            "another Workspace's",
+            foreign_classification,
+            PredecessorFault::InAnotherWorkspace,
+        ),
+        ("unknown", "d".repeat(64), PredecessorFault::NotStored),
+    ] {
+        let id = Uuid::new_v4();
+        let mut successor = local.classification_record(id, revision);
+        successor.version = 2;
+        successor.supersedes = ClassificationSupersedes::Record(predecessor.clone());
+        let bytes = successor.canonical_bytes().unwrap();
+        let digest = successor.digest().unwrap().value;
+        local.insert_classification(&bytes, &digest, id, 2, revision, "high");
+        assert_eq!(
+            verified_classification_within(&connection, local.store.workspace_id, &digest)
+                .expect_err(&format!(
+                    "a stored classification successor of {label} predecessor is refused on read"
+                )),
+            ClassificationStoreError::Predecessor {
+                digest: predecessor,
+                fault: expected
+            },
+            "classification, {label} predecessor"
+        );
+        connection
+            .execute_batch("DROP TRIGGER mission_impact_classifications_no_delete;")
+            .unwrap();
+        connection
+            .execute(
+                "DELETE FROM mission_impact_classifications WHERE digest_value = ?1",
+                [&digest],
+            )
+            .unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER mission_impact_classifications_no_delete
+                 BEFORE DELETE ON mission_impact_classifications
+                 BEGIN SELECT RAISE(ABORT, 'Mission impact classifications are immutable'); END;",
+            )
+            .unwrap();
+    }
 }
