@@ -43,6 +43,8 @@ const COMMANDS: &[&str] = &[
     "missions",
     "mission",
     "admit_mission",
+    "mission_publications",
+    "outcome_document",
     "discover_local_models",
     "live_data_encryption_status",
     "inspect_local_model",

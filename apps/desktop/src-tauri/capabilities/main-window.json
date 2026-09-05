@@ -47,6 +47,8 @@
     "allow-missions",
     "allow-mission",
     "allow-admit-mission",
+    "allow-mission-publications",
+    "allow-outcome-document",
     "allow-discover-local-models",
     "allow-live-data-encryption-status",
     "allow-inspect-local-model",
