@@ -315,7 +315,13 @@ impl fmt::Display for PredecessorFault {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotStored => formatter.write_str("not_stored"),
-            Self::Unverifiable(reason) => write!(formatter, "unverifiable: {reason}"),
+            // kimi's boundary note (D-kimi-review-r284d): `reason` is NOT a name by construction
+            // -- it is built from `SpendStoreError::Malformed(reason).to_string()` and its
+            // classification twin (spend.rs:1130, mission_impact.rs:902), which carry a decoder's
+            // free text. Since this fault is interpolated into `ClassificationStateFault::Row`'s
+            // one-line message, printing the text here puts it in a startup refusal. The NAME is
+            // the line; the text is in `Debug`, which this enum derives.
+            Self::Unverifiable(_) => formatter.write_str("unverifiable"),
             Self::InAnotherWorkspace => formatter.write_str("in_another_workspace"),
             Self::ForAnotherMission => formatter.write_str("for_another_mission"),
         }

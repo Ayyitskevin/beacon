@@ -3857,6 +3857,62 @@ fn sol1_get_refuses_a_valid_evaluation_swapped_into_the_relation() {
     ));
 }
 
+/// R28.4 at the innermost point (Fable's addendum 2, from opus2's R28.4-D lane): the driver's own
+/// text never reaches a printed line, through ANY mapping onto `SupervisorError::Store`.
+///
+/// Every pass's `Store` fault maps onto that one arm, so fixing it there makes each outer mapping
+/// compliant for free -- and makes this one bar cover all five passes' enumeration failures rather
+/// than five near-identical ones.
+#[test]
+fn store_failures_do_not_print_the_drivers_text_in_the_one_line_message() {
+    let fixture = admitted_mission("r28-store-text-channel");
+    let connection = fixture.store.connect();
+    // A REAL driver error, not a hand-built one: whatever rusqlite says about this is exactly what
+    // a failing enumeration inside a pass would carry.
+    let driver = connection
+        .prepare("SELECT no_such_column_r28 FROM outcome_publications")
+        .expect_err("the query names a column that does not exist");
+    let text = driver.to_string();
+    assert!(
+        text.contains("no_such_column_r28"),
+        "the driver error does not carry the text this bar is about: {text}"
+    );
+
+    let refusal = SupervisorError::Store(driver);
+    let line = refusal.to_string();
+    assert!(
+        !line.contains("no_such_column_r28"),
+        "the driver's text reached the one-line message: {line}"
+    );
+    assert!(
+        line.contains("store operation failed"),
+        "the refusal does not name the fault: {line}"
+    );
+    // ...and it is not thrown away: Debug is the channel R28.4 leaves open.
+    assert!(
+        format!("{refusal:?}").contains("no_such_column_r28"),
+        "the driver's text is not reachable through Debug: {refusal:?}"
+    );
+}
+
+/// kimi's boundary note on the same lane: `PredecessorFault::Unverifiable` carries a decoder's free
+/// text, and it is interpolated into a startup refusal through `ClassificationStateFault::Row`.
+/// The name is the line; the text is in `Debug`.
+#[test]
+fn an_unverifiable_predecessors_reason_stays_out_of_the_one_line_message() {
+    let fault = PredecessorFault::Unverifiable("SENTINEL_DECODER_TEXT_R28".to_owned());
+    let line = fault.to_string();
+    assert!(
+        !line.contains("SENTINEL_DECODER_TEXT_R28"),
+        "the predecessor reader's free text reached the one-line message: {line}"
+    );
+    assert_eq!(line, "unverifiable", "the line is the fault's name: {line}");
+    assert!(
+        format!("{fault:?}").contains("SENTINEL_DECODER_TEXT_R28"),
+        "the reason is not reachable through Debug: {fault:?}"
+    );
+}
+
 /// R28.1 pass 1 of 5: a publication that does not re-prove is refused at startup, and the refusal
 /// names WHICH publication and carries the reader's own fault.
 ///

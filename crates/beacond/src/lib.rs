@@ -455,7 +455,11 @@ impl fmt::Display for SupervisorError {
                 write!(formatter, "system clock is before the Unix epoch")
             }
             Self::Io(error) => write!(formatter, "cannot prepare the store directory: {error}"),
-            Self::Store(error) => write!(formatter, "store operation failed: {error}"),
+            // R28.4 at the INNERMOST point: the driver's own words never reach a printed line.
+            // Every mapping onto this arm -- every pass's `Store` fault, `lib.rs`'s generic store
+            // failures -- becomes compliant here rather than at each call site. The text stays
+            // reachable through `Debug` (derived on this enum, so the `rusqlite::Error` is in it).
+            Self::Store(_) => formatter.write_str("store operation failed"),
             Self::Json(error) => write!(formatter, "cannot encode an event payload: {error}"),
             Self::InvalidWorkspaceId(value) => {
                 write!(formatter, "store contains an invalid Workspace id: {value}")
