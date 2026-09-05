@@ -30,7 +30,9 @@ use crate::outcome::{
     ReferenceIdentity, SourceDigest, SourceKind, SourceRef, SpendMeasurementKind, SpendRef,
     SuccessCondition, VerifiedArtifact, VerifiedSources, VerifiedText,
 };
-use crate::outcome_collector::{CollectedDigest, CollectedNarrative, CollectedSources};
+use crate::outcome_collector::{
+    CollectedCondition, CollectedDigest, CollectedNarrative, CollectedSources, CollectedSupport,
+};
 use crate::spend::CANONICALIZER as SPEND_CANONICALIZER;
 
 const DIGEST_ALGORITHM: &str = "sha256";
@@ -52,10 +54,20 @@ pub enum AssemblyRefusal {
     /// A collected source names a Workspace other than the one being assembled for. The collector
     /// refuses these already; the assembler checks that the values it was handed agree.
     CrossWorkspace { kind: &'static str, id: String },
-    /// The completion recorded supporting objects for a condition and the collector carried only
-    /// their count. The manifest cites objects, not counts, and a citation cannot be invented from
-    /// a number -- so this refuses rather than emit `Absent` for support that exists.
-    SupportNotCollected { ordinal: u32, count: usize },
+    /// A condition cites a support kind the manifest's citation shape cannot hold.
+    ///
+    /// `SuccessCondition.citations` is `Vec<SourceRef>`, and a `SourceRef` is identified by a
+    /// digest envelope. A Receipt has no digest: its identity is `(run, version)` plus an Outcome
+    /// checksum over its stored bytes, which is why the manifest carries Receipts in their own
+    /// `ReceiptRef` lane rather than as sources. A Receipt cited as a CONDITION's support therefore
+    /// has nowhere to go in v2, and it is refused by name rather than dropped -- a citation
+    /// silently missing from a condition is the document saying the completion supported it with
+    /// less than it did.
+    ///
+    /// Widening `citations` to hold a Receipt is a grammar change (a canonicalizer bump), not a fix
+    /// to make here. Until then this is the honest answer, and it is REACHABLE: the owner's
+    /// `SupportRef` vocabulary admits a Receipt and the collector carries it.
+    SupportKindNotCiteable { ordinal: u32, kind: &'static str },
     /// A spend was collected as measured, yet lacks the identity or coverage a measured record
     /// always carries. The collected set disagrees with itself.
     SpendInconsistent { detail: &'static str },
@@ -74,10 +86,10 @@ impl std::fmt::Display for AssemblyRefusal {
                     "the collected {kind} {id} names another Workspace"
                 )
             }
-            Self::SupportNotCollected { ordinal, count } => write!(
+            Self::SupportKindNotCiteable { ordinal, kind } => write!(
                 formatter,
-                "condition {ordinal} has {count} supporting object(s) the collector did not carry; \
-                 a citation cannot be assembled from a count"
+                "condition {ordinal} cites a {kind}, which the manifest's per-condition citations \
+                 cannot hold: a cited source is identified by a digest envelope and a {kind} is not"
             ),
             Self::SpendInconsistent { detail } => {
                 write!(
@@ -117,25 +129,20 @@ pub(crate) fn assemble(
 
     // Success conditions: the owner's ordinal IS the condition's stable identity, so the token is
     // its decimal spelling. The outcome maps through the owner's four arms without collapse
-    // (R18.3). Citations: the collector carries only a COUNT of supporting objects. Zero is
-    // `Absent` -- the completion recorded none, a fact about the Mission. More than zero is a
-    // refusal, because the objects exist and were not collected, and a state that says "none"
-    // would be a lie.
+    // (R18.3).
+    //
+    // Citations (R23.2): the collector carries the support itself now -- each reference read
+    // through its owning verified reader at the completion's boundary and scoped to this Workspace
+    // and Mission from its own bytes (#78) -- so the assembler CITES it instead of refusing that it
+    // cannot. Zero supporting objects stays `Absent`, which is a fact about the Mission rather than
+    // a lookup that did not happen.
     let mut success_conditions = Vec::with_capacity(completion.condition_results.len());
     for condition in &completion.condition_results {
-        if condition.support_count() > 0 {
-            return Err(AssemblyRefusal::SupportNotCollected {
-                ordinal: condition.ordinal,
-                count: condition.support_count(),
-            });
-        }
         success_conditions.push(SuccessCondition {
             ordinal: condition.ordinal,
             condition_id: condition.ordinal.to_string(),
             outcome: condition.outcome.into(),
-            citations: OutcomeState::Absent(
-                "the completion recorded no supporting object for this condition.".to_owned(),
-            ),
+            citations: condition_citations(condition, workspace_id)?,
         });
     }
 
@@ -265,6 +272,66 @@ fn narrative_state(items: &[CollectedNarrative], what: &str) -> OutcomeState<Vec
             })
             .collect(),
     )
+}
+
+/// One condition's support, as the manifest's citations (R23.2).
+///
+/// The three digest-identified kinds map onto `SourceRef` exactly as the top-level citations do --
+/// `kind + workspace + digest`, identity `None` because none of them carries a UUID inside its
+/// canonical bytes today (R18.5), envelope copied from the owner rather than spelled here. The
+/// fourth, a Receipt, has no digest to be identified by and no lane inside `citations`, so it is
+/// refused by name.
+///
+/// NOT SORTED HERE, deliberately. The canonicalizer sorts every array before it writes bytes
+/// (`encode_refs` calls `sorted(refs, source_ref_key)`), so a sort here would be a second spelling
+/// of one rule and the two could drift while both looked right. What this emits is the completion's
+/// own order, and the canonical bytes are identical either way -- a property with a test rather
+/// than a claim.
+fn condition_citations(
+    condition: &CollectedCondition,
+    workspace_id: Uuid,
+) -> Result<OutcomeState<Vec<SourceRef>>, AssemblyRefusal> {
+    if condition.support.is_empty() {
+        return Ok(OutcomeState::Absent(
+            "the completion recorded no supporting object for this condition.".to_owned(),
+        ));
+    }
+    let mut refs = Vec::with_capacity(condition.support.len());
+    for support in &condition.support {
+        let digest = match support {
+            CollectedSupport::Artifact(digest)
+            | CollectedSupport::Evaluation(digest)
+            | CollectedSupport::Ruling(digest) => digest,
+            // Closed vocabulary (the owner's decoder admits exactly four tags), and the fourth has
+            // no citation shape. Named, never dropped.
+            CollectedSupport::Receipt(_) => {
+                return Err(AssemblyRefusal::SupportKindNotCiteable {
+                    ordinal: condition.ordinal,
+                    kind: "Receipt",
+                });
+            }
+        };
+        if digest.workspace_id != workspace_id {
+            return Err(AssemblyRefusal::CrossWorkspace {
+                kind: "condition support",
+                id: digest.digest_value.clone(),
+            });
+        }
+        refs.push(SourceRef {
+            workspace_id,
+            kind: digest.kind,
+            identity: None,
+            digest: SourceDigest {
+                algorithm: digest.digest_algorithm.clone(),
+                canonicalizer: digest.digest_canonicalizer.clone(),
+                value: digest.digest_value.clone(),
+            },
+            pinned_revision: OutcomeState::Absent(
+                "this source type pins no content revision.".to_owned(),
+            ),
+        });
+    }
+    Ok(OutcomeState::Verified(refs))
 }
 
 /// Proposal, Ruling and Evaluation citations: `kind + workspace + digest`, identity `None` -- none
@@ -809,25 +876,91 @@ mod tests {
             assemble(&no_policy, workspace, AppendixRequest::PolicyDefault).unwrap_err(),
             AssemblyRefusal::NoClassification
         );
-        // Support the collector counted but did not carry: a citation cannot come from a number.
-        let mut counted = base.clone();
-        counted.completion.as_mut().unwrap().condition_results[0].support = vec![
-            crate::outcome_collector::CollectedSupport::Evaluation(CollectedDigest {
+        // Support the collector CARRIED is cited, not refused (R23.2). The decoy this replaces --
+        // a support reference whose owner refused it -- never reaches here at all: the collector
+        // aborts the collection rather than shortening the list, so a `CollectedSupport` in hand is
+        // one an owning reader already proved.
+        let mut carried = base.clone();
+        carried.completion.as_mut().unwrap().condition_results[0].support = vec![
+            CollectedSupport::Evaluation(CollectedDigest {
                 kind: SourceKind::Evaluation,
                 workspace_id: workspace,
                 digest_algorithm: "sha256".to_owned(),
                 digest_canonicalizer: "beacon.evaluation.v1".to_owned(),
-                digest_value: "aa".repeat(32),
-            });
-            2
+                digest_value: hex("aa"),
+            }),
+            CollectedSupport::Ruling(CollectedDigest {
+                kind: SourceKind::Ruling,
+                workspace_id: workspace,
+                digest_algorithm: "sha256".to_owned(),
+                digest_canonicalizer: "beacon.ruling.v2".to_owned(),
+                digest_value: hex("bb"),
+            }),
         ];
+        let cited = assemble(&carried, workspace, AppendixRequest::PolicyDefault)
+            .expect("carried support is cited");
+        let citations = cited.success_conditions[0]
+            .citations
+            .verified()
+            .expect("two carried references are a Verified citation list");
+        assert_eq!(citations.len(), 2);
+        // Each citation is the OWNER's envelope, all three parts, not a value under a guessed
+        // canonicalizer.
+        let by_value = |value: &str| {
+            citations
+                .iter()
+                .find(|entry| entry.digest.value == value)
+                .unwrap_or_else(|| panic!("no citation for {value}"))
+        };
+        let evaluation = by_value(&hex("aa"));
+        assert_eq!(evaluation.kind, SourceKind::Evaluation);
+        assert_eq!(evaluation.digest.canonicalizer, "beacon.evaluation.v1");
+        assert_eq!(evaluation.workspace_id, workspace);
+        // R18.5: an Evaluation carries no UUID in its canonical bytes, so it cites none.
+        assert!(evaluation.identity.is_none());
+        let ruling = by_value(&hex("bb"));
+        assert_eq!(ruling.kind, SourceKind::Ruling);
+        assert_eq!(ruling.digest.canonicalizer, "beacon.ruling.v2");
+        assert!(ruling.identity.is_none());
+
+        // A Receipt has no digest and no lane inside `citations`: refused BY NAME, never dropped.
+        let mut receipt = base.clone();
+        receipt.completion.as_mut().unwrap().condition_results[0].support =
+            vec![CollectedSupport::Receipt(ReceiptRef {
+                workspace_id: workspace,
+                run_uuid: Uuid::from_u128(0x99),
+                receipt_version: 1,
+                outcome_checksum: hex("cc"),
+            })];
         assert_eq!(
-            assemble(&counted, workspace, AppendixRequest::PolicyDefault).unwrap_err(),
-            AssemblyRefusal::SupportNotCollected {
+            assemble(&receipt, workspace, AppendixRequest::PolicyDefault).unwrap_err(),
+            AssemblyRefusal::SupportKindNotCiteable {
                 ordinal: 0,
-                count: 2
+                kind: "Receipt"
             }
         );
+
+        // Condition support from another Workspace disagrees with the set that carried it.
+        let mut foreign_support = base.clone();
+        foreign_support
+            .completion
+            .as_mut()
+            .unwrap()
+            .condition_results[0]
+            .support = vec![CollectedSupport::Evaluation(CollectedDigest {
+            kind: SourceKind::Evaluation,
+            workspace_id: Uuid::from_u128(0xdead),
+            digest_algorithm: "sha256".to_owned(),
+            digest_canonicalizer: "beacon.evaluation.v1".to_owned(),
+            digest_value: hex("aa"),
+        })];
+        assert!(matches!(
+            assemble(&foreign_support, workspace, AppendixRequest::PolicyDefault).unwrap_err(),
+            AssemblyRefusal::CrossWorkspace {
+                kind: "condition support",
+                ..
+            }
+        ));
         // A collected source from another Workspace: the set disagrees with itself.
         let mut foreign = base.clone();
         foreign.proposals.push(CollectedDigest {
@@ -844,6 +977,47 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// The citation order a condition is assembled in does not reach the bytes.
+    ///
+    /// The canonicalizer sorts every array before it writes (`encode_refs` -> `sorted`), so the
+    /// assembler deliberately does NOT sort: one rule, one place. This pins that, because the
+    /// alternative reading -- "the assembler happens to emit them in order" -- is true today and
+    /// would stop being true the moment a completion listed its support differently.
+    #[test]
+    fn the_order_a_conditions_support_arrives_in_does_not_reach_the_canonical_bytes() {
+        let support = |value: &str, kind: SourceKind, canonicalizer: &str| {
+            CollectedSupport::Evaluation(CollectedDigest {
+                kind,
+                workspace_id: workspace(),
+                digest_algorithm: "sha256".to_owned(),
+                digest_canonicalizer: canonicalizer.to_owned(),
+                digest_value: value.to_owned(),
+            })
+        };
+        let forward = vec![
+            support(&hex("aa"), SourceKind::Evaluation, "beacon.evaluation.v1"),
+            support(&hex("bb"), SourceKind::Evaluation, "beacon.evaluation.v1"),
+            support(&hex("cc"), SourceKind::Evaluation, "beacon.evaluation.v1"),
+        ];
+        let mut reversed = forward.clone();
+        reversed.reverse();
+        assert_ne!(forward, reversed, "the two orders must actually differ");
+
+        let bytes = |support: Vec<CollectedSupport>| {
+            let mut set = collected();
+            set.completion.as_mut().unwrap().condition_results[0].support = support;
+            assemble(&set, workspace(), AppendixRequest::PolicyDefault)
+                .expect("assembles")
+                .canonical_bytes()
+                .expect("encodes")
+        };
+        assert_eq!(
+            bytes(forward),
+            bytes(reversed),
+            "the input order reached the canonical bytes"
+        );
     }
 
     #[test]
