@@ -1455,6 +1455,18 @@ fn subject_successor(
     let EvaluationSubject::Artifact(subject) = &payload.subject else {
         return Ok(None);
     };
+    // The subject's OWN context, read through the Artifact module before the walk starts. Every hop
+    // is measured against this, not against the relation that named it (astra's S1): a successor
+    // may be a perfectly valid Artifact and still belong to another Mission, and a supersession
+    // ladder that crosses Missions is not this subject's history. The Workspace is proved by the
+    // reader itself, which refuses a digest belonging to another one.
+    let subject_context =
+        crate::artifact::verified_artifact_within(connection, workspace_id, &subject.digest.value)
+            .map_err(|_| EvaluationError::InvalidStore)?
+            .ok_or(EvaluationError::InvalidStore)?
+            .payload()
+            .context;
+
     let Some(tail) = supersession_tail(
         &subject.digest.value,
         |digest| {
@@ -1468,9 +1480,15 @@ fn subject_successor(
                 .optional()?)
         },
         |hop| {
-            crate::artifact::verified_artifact_within(connection, workspace_id, hop)
+            let record = crate::artifact::verified_artifact_within(connection, workspace_id, hop)
                 .map_err(|_| EvaluationError::InvalidStore)?
                 .ok_or(EvaluationError::InvalidStore)?;
+            // From the hop's own canonical bytes, never from the relation row or a column beside
+            // it. `ArtifactContext` is `Copy` and compares structurally, so "same Mission and
+            // Project" and "both Workspace-scoped" are one comparison.
+            if record.payload().context != subject_context {
+                return Err(EvaluationError::InvalidStore);
+            }
             Ok(())
         },
     )?
