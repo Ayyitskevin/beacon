@@ -360,6 +360,12 @@ pub struct CollectedSources {
 pub struct CollectedDigest {
     pub kind: SourceKind,
     pub workspace_id: Uuid,
+    /// The digest ENVELOPE as the owning reader returned it, all three parts. The assembler cites a
+    /// source as `algorithm:canonicalizer:value`, and a value alone would leave it to guess the
+    /// function that produced it -- which for a Ruling (two grammars on `main`) is not a guess it
+    /// can make. Carried from the owner, never assembled here.
+    pub digest_algorithm: String,
+    pub digest_canonicalizer: String,
     pub digest_value: String,
 }
 
@@ -1089,6 +1095,8 @@ impl<'a> Collector<'a> {
                     workspace_id: self.workspace_id,
                     // From the verified value, never from the caller's string: the reader is what
                     // proved this digest names these bytes.
+                    digest_algorithm: proposal.digest().algorithm.clone(),
+                    digest_canonicalizer: proposal.digest().canonicalizer.clone(),
                     digest_value: proposal.digest().value.clone(),
                 })
             }
@@ -1121,6 +1129,8 @@ impl<'a> Collector<'a> {
                 Ok(CollectedDigest {
                     kind: SourceKind::Ruling,
                     workspace_id: self.workspace_id,
+                    digest_algorithm: ruling.digest().algorithm.clone(),
+                    digest_canonicalizer: ruling.digest().canonicalizer.clone(),
                     digest_value: ruling.digest().value.clone(),
                 })
             }
@@ -1158,6 +1168,8 @@ impl<'a> Collector<'a> {
                 Ok(CollectedDigest {
                     kind: SourceKind::Evaluation,
                     workspace_id: self.workspace_id,
+                    digest_algorithm: evaluation.digest().algorithm.clone(),
+                    digest_canonicalizer: evaluation.digest().canonicalizer.clone(),
                     digest_value: evaluation.digest().value.clone(),
                 })
             }
@@ -1360,6 +1372,8 @@ impl<'a> Collector<'a> {
             workspace_id: self.workspace_id,
             // From the verified value, never from the caller's string: the reader is what proved
             // this digest names these bytes.
+            digest_algorithm: record.digest().algorithm.clone(),
+            digest_canonicalizer: record.digest().canonicalizer.clone(),
             digest_value: record.digest().value.clone(),
         };
         Ok((record, collected))
