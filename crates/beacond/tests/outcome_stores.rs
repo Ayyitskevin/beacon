@@ -650,6 +650,39 @@ fn store_rows_are_immutable_under_update_and_delete() {
     }
 }
 
+#[test]
+fn insert_or_replace_cannot_bypass_the_immutable_store_triggers() {
+    let stored = stored("immutable-replace");
+    let spend_id = Uuid::new_v4();
+    let record = stored.spend_record(spend_id, 1);
+    let bytes = record.canonical_bytes().unwrap();
+    let digest = record.digest().unwrap().value;
+    stored.insert_spend(&bytes, &digest, spend_id, 1, "daemon_ledger");
+
+    let connection = stored.connection();
+    let result = connection.execute(
+        "INSERT OR REPLACE INTO measured_spend (
+             workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+             canonical_bytes, spend_id, mission_id, version, origin, measurement,
+             coverage_from_event_seq, coverage_to_event_seq, measured_at_ms
+         ) VALUES (?1, 'sha256', 'beacon.spend.v1', ?2, ?3, ?4, ?5, 1,
+                   'daemon_ledger', 'broken', 1, ?6, 1788400000000)",
+        params![
+            stored.store.workspace_id.to_string(),
+            digest,
+            bytes,
+            spend_id.to_string(),
+            stored.mission_id.to_string(),
+            i64::try_from(stored.coverage_to).unwrap(),
+        ],
+    );
+
+    assert!(
+        result.is_err(),
+        "INSERT OR REPLACE bypassed UPDATE/DELETE immutability triggers: {result:?}"
+    );
+}
+
 /// R13.7's re-check, on the reader rather than in a caller.
 #[test]
 fn the_classification_reader_rechecks_the_copied_bit() {
