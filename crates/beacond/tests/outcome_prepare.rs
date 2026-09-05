@@ -17,19 +17,21 @@ use std::thread::{self, JoinHandle};
 use beacond::{
     AccessOrigin, AppendixMode, AppendixRequest, ArtifactContext, ArtifactKind, ArtifactService,
     AutonomyProfile, BeaconCapability, COMPLETION_CANONICALIZER, ClassificationActor,
-    ClassificationBasis, ClassificationSupersedes, CompletionActor, CompletionDisposition,
-    CompletionSupersedes, ConditionOutcome, ConditionResult, ConditionResultRecord, ImpactLevel,
-    LocalModelActivationService, LocalModelEndpoint, MISSION_IMPACT_CANONICALIZER,
-    ManifestStoreRefusal, MissionCompletionV1, MissionDraft, MissionImpactClassificationV1,
-    MissionImpactService, MissionMemberDraft, MissionService, OperatorAccountService,
-    OperatorSessionPhase, OutcomeManifestV1, OutcomeService, OutcomeState, PolicyRevisionRef,
-    PrepareRefusal, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService,
-    ProjectService, ProviderFeature, ResidentConfigurationService, ResidentLifecycleService,
-    SecretString, SourceDigest, SourceKind, SourceRef, SpendReference, StarterOrganizationService,
-    StarterResidentDraft, StarterRole, StartupConfig, SuccessCondition, Supervisor, TeamDraft,
-    TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy,
-    TeamMemberDraft, TeamService, TrackRecordEvidenceKind, TrackRecordRequirement, VerifiedSources,
-    VerifiedText, declared_conditions_digest, record_completion, render, verified_manifest_within,
+    ClassificationBasis, ClassificationSupersedes, CollectionRequest, Collector, CompletionActor,
+    CompletionDisposition, CompletionSupersedes, ConditionOutcome, ConditionResult,
+    ConditionResultRecord, ImpactLevel, LocalModelActivationService, LocalModelEndpoint,
+    MISSION_IMPACT_CANONICALIZER, ManifestStoreRefusal, MissionCompletionV1, MissionDraft,
+    MissionImpactClassificationV1, MissionImpactService, MissionMemberDraft, MissionService,
+    NarrativeItem, OperatorAccountService, OperatorSessionPhase, OutcomeManifestV1, OutcomeService,
+    OutcomeState, PolicyRevisionRef, PrepareRefusal, ProjectCharterDraft, ProjectDraft,
+    ProjectPolicyDraft, ProjectPolicyService, ProjectService, ProviderFeature,
+    ResidentConfigurationService, ResidentLifecycleService, SecretString, SourceDigest, SourceKind,
+    SourceRef, SourcesRefusal, SpendReference, StarterOrganizationService, StarterResidentDraft,
+    StarterRole, StartupConfig, SuccessCondition, Supervisor, TeamDraft, TeamLeadAmbiguityRule,
+    TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
+    TeamService, TrackRecordEvidenceKind, TrackRecordRequirement, UnfinishedKind, VerifiedSources,
+    VerifiedText, assemble, declared_conditions_digest, record_completion, render,
+    verified_manifest_within, verified_sources_for,
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -313,6 +315,16 @@ impl Fixture {
 
     /// One recorded completion, accountable to `resident_id` at its admission Configuration.
     fn complete(&self, accountable: (Uuid, Uuid)) -> (String, MissionCompletionV1) {
+        self.complete_with(accountable, Vec::new())
+    }
+
+    /// One recorded completion carrying the given unfinished-work items -- text the document must
+    /// read back through the completion's own record, never through a collected projection.
+    fn complete_with(
+        &self,
+        accountable: (Uuid, Uuid),
+        unfinished_work: Vec<NarrativeItem<UnfinishedKind>>,
+    ) -> (String, MissionCompletionV1) {
         let boundary = self.latest_event_seq();
         let record = MissionCompletionV1 {
             workspace_id: self.workspace_id,
@@ -332,7 +344,7 @@ impl Fixture {
                 note: None,
             }],
             delivered_artifacts: vec![],
-            unfinished_work: vec![],
+            unfinished_work,
             uncertainty: vec![],
             spend: SpendReference::NotMeasured(
                 "No spend record exists for this Mission.".to_owned(),
@@ -743,6 +755,98 @@ fn sol1_a_store_migrated_through_0029_and_0030_refuses_a_v1_manifest_row() {
             "CHECK constraint failed: digest_canonicalizer = 'beacon.outcome.manifest.v2'"
         ),
         "the retired v1 row was refused for the wrong reason: {error}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The assembler's text producer (slice 3b item 0b, item 2)
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn verified_sources_text_is_read_through_owners_not_narrative_projections() {
+    let fixture = admitted_mission("sources-through-owners");
+    // The classification BEFORE the completion: the collector freezes every source at the
+    // completion's boundary, so a classification recorded after it is `AfterBoundary` -- correctly.
+    // (`prepare` alone never showed this, because it re-checks the classification by citation
+    // rather than by position.)
+    let classification = fixture.classify(ImpactLevel::Ordinary);
+    let summary = "The second probe was deferred to the next Mission.";
+    let (completion_digest, _completion) = fixture.complete_with(
+        (fixture.resident_id, fixture.configuration_id),
+        vec![NarrativeItem {
+            ordinal: 0,
+            kind: UnfinishedKind::DeferredScope,
+            condition_ordinal: Some(0),
+            summary: summary.to_owned(),
+        }],
+    );
+    let connection = fixture.store.connect();
+    let collected = Collector::new(&connection, fixture.workspace_id)
+        .collect(&CollectionRequest {
+            completion_digest: Some(completion_digest),
+            classification_digest: Some(classification.2.clone()),
+            ..CollectionRequest::default()
+        })
+        .expect("collects");
+    // The collected narrative carries a kind and an ordinal and NO text -- which is the point: the
+    // text below cannot have come from it.
+    assert_eq!(
+        collected.completion.as_ref().unwrap().unfinished_work[0].kind,
+        "deferred_scope"
+    );
+
+    let manifest = assemble(
+        &collected,
+        fixture.workspace_id,
+        AppendixRequest::PolicyDefault,
+    )
+    .expect("assembles");
+    let sources =
+        verified_sources_for(&connection, fixture.workspace_id, &manifest).expect("produces");
+    assert_eq!(sources.mission_title, "Ship one reviewed Beacon feature.");
+    assert_eq!(sources.condition_statements[0].id, "0");
+    assert_eq!(sources.condition_statements[0].text, CONDITION_TEXT);
+    assert_eq!(sources.unfinished_work[0].id, "0");
+    assert_eq!(
+        sources.unfinished_work[0].text, summary,
+        "the narrative text did not come from the completion's own record"
+    );
+    assert!(sources.verified_source_bytes > 0);
+    let document = beacond::render(&manifest, &sources).expect("renders");
+    assert!(document.contains(summary), "{document}");
+    assert!(document.contains(CONDITION_TEXT), "{document}");
+
+    // The decoy: lie in the Mission row's own title column. The owner's reader proves the row
+    // against its admission Event, so the lie is refused by name, never printed -- a producer that
+    // read `missions.desired_outcome` off the column would serve it (acceptance mutant 1).
+    with_trigger_down(
+        &fixture.store,
+        "missions_no_update",
+        "missions",
+        "Missions are immutable at admission",
+        |connection| {
+            connection
+                .execute(
+                    "UPDATE missions SET desired_outcome = 'A title nobody admitted' WHERE id = ?1",
+                    params![fixture.mission_id.to_string()],
+                )
+                .unwrap();
+        },
+    );
+    let refusal = verified_sources_for(&connection, fixture.workspace_id, &manifest)
+        .expect_err("a tampered Mission title was served as the document's title");
+    // Two owners prove the same row against the same Event: the completion reader (its Mission's
+    // Project must own it, #71) and the Mission reader the producer calls. Whichever reads first
+    // names the lie; both names are the lie refused, and neither is the lie printed.
+    assert!(
+        matches!(
+            refusal,
+            SourcesRefusal::MissionUnverified
+                | SourcesRefusal::Completion(
+                    beacond::CompletionReadRefusal::MissionProjectDisagrees(_)
+                )
+        ),
+        "refused for the wrong reason: {refusal}"
     );
 }
 

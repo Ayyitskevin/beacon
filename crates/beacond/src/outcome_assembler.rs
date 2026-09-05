@@ -17,13 +17,18 @@
 //! (`verified_sources_for`), because text has to be re-read through an owner and this function must
 //! not need a connection.
 
+use rusqlite::Connection;
 use uuid::Uuid;
 
 use crate::mission_completion::COMPLETION_CANONICALIZER;
+use crate::mission_completion_store::{
+    CompletionReadRefusal, declared_conditions_digest, verified_completion_within,
+};
 use crate::mission_impact::CANONICALIZER as MISSION_IMPACT_CANONICALIZER;
 use crate::outcome::{
     AppendixRequest, CANONICALIZER, NarrativeRef, OutcomeManifestV1, OutcomeState, RENDERER_V1,
     ReferenceIdentity, SourceDigest, SourceKind, SourceRef, SpendRef, SuccessCondition,
+    VerifiedArtifact, VerifiedSources, VerifiedText,
 };
 use crate::outcome_collector::{CollectedDigest, CollectedNarrative, CollectedSources};
 use crate::spend::CANONICALIZER as SPEND_CANONICALIZER;
@@ -389,4 +394,215 @@ fn spend_state(
         coverage_from_event_seq: from,
         coverage_to_event_seq: to,
     }))
+}
+
+// ---------------------------------------------------------------------------------------------
+// The text: read through the owners, never a projection
+// ---------------------------------------------------------------------------------------------
+
+/// The literal an Artifact's title cell carries. `ArtifactV1` has no title field -- an Artifact is
+/// content-addressed bytes with a media type -- so there is nothing to read, and a blank is the one
+/// thing this document never prints for an absence.
+pub const ARTIFACT_TITLE_ABSENT: &str = "absent (an Artifact record carries no title)";
+
+/// Why the document's text could not be produced.
+///
+/// A text that cannot be re-read through its owner is refused by name. `VerifiedSources` carries
+/// plain strings, so there is no `Broken` slot inside it to fill; the honest alternative to a blank
+/// is to not produce the sources at all and say which text and why.
+#[derive(Debug)]
+pub enum SourcesRefusal {
+    /// The completion the manifest is frozen on was refused by its owning reader.
+    Completion(CompletionReadRefusal),
+    /// This Workspace admitted no Mission with the manifest's identity.
+    MissionNotAdmitted,
+    /// The Mission's stored row does not agree with the Event that admitted it.
+    MissionUnverified,
+    /// The Mission's declared conditions are not the ones the completion was written against: the
+    /// completion's own `declared_conditions_sha256` says so.
+    MissionDeclarationMoved,
+    /// The manifest cites a condition ordinal the Mission never declared.
+    ConditionStatementMissing { ordinal: u32 },
+    /// The manifest cites a narrative item the completion does not carry.
+    NarrativeMissing { what: &'static str, ordinal: u32 },
+    /// A delivered Artifact the manifest cites does not read back through its owner.
+    ArtifactUnreadable { digest: String, reason: String },
+    /// A delivered Artifact the manifest cites is not in this Workspace's store.
+    ArtifactAbsent { digest: String },
+    /// The completion's own bytes could not be re-encoded to be measured.
+    CompletionBytes,
+}
+
+impl std::fmt::Display for SourcesRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Completion(refusal) => write!(formatter, "the completion: {refusal}"),
+            Self::MissionNotAdmitted => {
+                formatter.write_str("this Workspace admitted no such Mission")
+            }
+            Self::MissionUnverified => {
+                formatter.write_str("the Mission's row disagrees with its admission Event")
+            }
+            Self::MissionDeclarationMoved => formatter.write_str(
+                "the Mission's declared conditions are not the ones the completion recorded",
+            ),
+            Self::ConditionStatementMissing { ordinal } => {
+                write!(
+                    formatter,
+                    "the Mission declares no condition at ordinal {ordinal}"
+                )
+            }
+            Self::NarrativeMissing { what, ordinal } => {
+                write!(
+                    formatter,
+                    "the completion carries no {what} item at ordinal {ordinal}"
+                )
+            }
+            Self::ArtifactUnreadable { digest, reason } => {
+                write!(
+                    formatter,
+                    "delivered Artifact {digest} does not read back: {reason}"
+                )
+            }
+            Self::ArtifactAbsent { digest } => {
+                write!(
+                    formatter,
+                    "delivered Artifact {digest} is not in this Workspace"
+                )
+            }
+            Self::CompletionBytes => formatter.write_str("the completion's bytes do not re-encode"),
+        }
+    }
+}
+
+impl std::error::Error for SourcesRefusal {}
+
+impl From<CompletionReadRefusal> for SourcesRefusal {
+    fn from(refusal: CompletionReadRefusal) -> Self {
+        Self::Completion(refusal)
+    }
+}
+
+/// The values the renderer prints beside the manifest, each read through its owner.
+///
+/// - the Mission title and every condition statement come from the Mission's admission record,
+///   proved against its Event (`mission::verified_mission_declaration`), and the statements are
+///   proved a second time against the completion's own `declared_conditions_sha256` -- the seam
+///   check nobody else makes, because it spans two owners;
+/// - every narrative summary comes from the completion's canonical bytes
+///   (`verified_completion_within`), never from `CollectedNarrative`, which carries no text;
+/// - every delivered Artifact's media type comes from its record through the Artifact reader; the
+///   title is the literal [`ARTIFACT_TITLE_ABSENT`], because the record has none.
+///
+/// `verified_source_bytes` counts what was actually read through owners: the completion's bytes,
+/// the Mission's title and statements, and each delivered Artifact's content. The renderer holds
+/// the bound; this reports the measurement.
+pub fn verified_sources_for(
+    connection: &Connection,
+    workspace_id: Uuid,
+    manifest: &OutcomeManifestV1,
+) -> Result<VerifiedSources, SourcesRefusal> {
+    let completion =
+        verified_completion_within(connection, workspace_id, &manifest.completion.digest.value)?;
+    let mut bytes_read: u64 = completion
+        .canonical_bytes()
+        .map_err(|_| SourcesRefusal::CompletionBytes)?
+        .len() as u64;
+
+    let declaration =
+        crate::mission::verified_mission_declaration(connection, workspace_id, manifest.mission_id)
+            .map_err(|_| SourcesRefusal::MissionUnverified)?
+            .ok_or(SourcesRefusal::MissionNotAdmitted)?;
+    // Two owners, one fact: the conditions the Mission declares must be the ones the completion
+    // was written against. The completion carries the digest; the Mission carries the text.
+    if declared_conditions_digest(&declaration.success_conditions)
+        != completion.declared_conditions_sha256
+    {
+        return Err(SourcesRefusal::MissionDeclarationMoved);
+    }
+    bytes_read += declaration.desired_outcome.len() as u64;
+
+    let mut condition_statements = Vec::with_capacity(manifest.success_conditions.len());
+    for condition in &manifest.success_conditions {
+        let text = declaration
+            .success_conditions
+            .get(condition.ordinal as usize)
+            .ok_or(SourcesRefusal::ConditionStatementMissing {
+                ordinal: condition.ordinal,
+            })?;
+        bytes_read += text.len() as u64;
+        condition_statements.push(VerifiedText {
+            id: condition.condition_id.clone(),
+            text: text.clone(),
+        });
+    }
+
+    let narrative = |refs: &OutcomeState<Vec<NarrativeRef>>,
+                     what: &'static str,
+                     summaries: &[(u32, &str)]|
+     -> Result<Vec<VerifiedText>, SourcesRefusal> {
+        let Some(refs) = refs.verified() else {
+            return Ok(Vec::new());
+        };
+        refs.iter()
+            .map(|reference| {
+                summaries
+                    .iter()
+                    .find(|(ordinal, _)| *ordinal == reference.ordinal)
+                    .map(|(_, summary)| VerifiedText {
+                        id: reference.item_id.clone(),
+                        text: (*summary).to_owned(),
+                    })
+                    .ok_or(SourcesRefusal::NarrativeMissing {
+                        what,
+                        ordinal: reference.ordinal,
+                    })
+            })
+            .collect()
+    };
+    let unfinished: Vec<(u32, &str)> = completion
+        .unfinished_work
+        .iter()
+        .map(|item| (item.ordinal, item.summary.as_str()))
+        .collect();
+    let uncertain: Vec<(u32, &str)> = completion
+        .uncertainty
+        .iter()
+        .map(|item| (item.ordinal, item.summary.as_str()))
+        .collect();
+    let unfinished_work = narrative(&manifest.unfinished_work, "unfinished work", &unfinished)?;
+    let uncertainty = narrative(&manifest.uncertainty, "uncertainty", &uncertain)?;
+
+    let mut artifacts = Vec::new();
+    if let Some(refs) = manifest.delivered_artifacts.verified() {
+        for reference in refs {
+            let record = crate::artifact::verified_artifact_within(
+                connection,
+                workspace_id,
+                &reference.digest.value,
+            )
+            .map_err(|error| SourcesRefusal::ArtifactUnreadable {
+                digest: reference.digest.value.clone(),
+                reason: format!("{error:?}"),
+            })?
+            .ok_or_else(|| SourcesRefusal::ArtifactAbsent {
+                digest: reference.digest.value.clone(),
+            })?;
+            bytes_read += record.content().len() as u64;
+            artifacts.push(VerifiedArtifact {
+                digest_value: record.digest().value.clone(),
+                media_type: record.payload().media_type.clone(),
+                title: ARTIFACT_TITLE_ABSENT.to_owned(),
+            });
+        }
+    }
+
+    Ok(VerifiedSources {
+        mission_title: declaration.desired_outcome,
+        condition_statements,
+        artifacts,
+        unfinished_work,
+        uncertainty,
+        verified_source_bytes: bytes_read,
+    })
 }
