@@ -141,8 +141,9 @@ pub use outcome::{
 };
 pub use outcome_collector::{
     CollectedClassification, CollectedCompletion, CollectedCondition, CollectedDigest,
-    CollectedNarrative, CollectedSources, CollectedSpend, CollectionRequest, Collector,
-    CollectorRefusal, OUTCOME_RECEIPT_CHECKSUM_LABEL, SpendAmount, positionable_sources,
+    CollectedNarrative, CollectedSources, CollectedSpend, CollectedUncounted, CollectionRequest,
+    Collector, CollectorRefusal, OUTCOME_RECEIPT_CHECKSUM_LABEL, SpendAmount, SpendCompleteness,
+    positionable_sources,
 };
 pub use outcome_store::{
     MAX_STORED_MANIFEST_BYTES, MISSION_IDENTITY_ONLY, ManifestStoreRefusal, OutcomeCandidate,
