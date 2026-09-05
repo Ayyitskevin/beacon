@@ -1182,3 +1182,49 @@ fn a_stored_classification_citing_another_projects_policy_is_refused_on_read() {
         ClassificationStoreError::PolicyProjectIsNotTheMissions
     );
 }
+
+#[test]
+fn supersession_cannot_name_a_record_from_another_workspace() {
+    let other = stored("supersession-other-workspace");
+    let other_spend = other.spend_record(Uuid::new_v4(), 1);
+    let other_spend =
+        MeasuredSpendService::new(Arc::clone(&other.accounts), other.store.workspace_id)
+            .record(&other_spend.canonical_bytes().unwrap())
+            .expect("the other Workspace stores its predecessor spend");
+    let other_revision = other.policy_revision();
+    let other_classification = other.classification_record(Uuid::new_v4(), other_revision);
+    let other_classification =
+        MissionImpactService::new(Arc::clone(&other.accounts), other.store.workspace_id)
+            .classify(&other_classification.canonical_bytes().unwrap())
+            .expect("the other Workspace stores its predecessor classification");
+
+    let local = stored("supersession-local-workspace");
+    let spend_service =
+        MeasuredSpendService::new(Arc::clone(&local.accounts), local.store.workspace_id);
+    let base_spend = local.spend_record(Uuid::new_v4(), 1);
+    spend_service
+        .record(&base_spend.canonical_bytes().unwrap())
+        .expect("the local spend ladder starts at version one");
+    let mut successor_spend = local.spend_record(Uuid::new_v4(), 2);
+    successor_spend.supersedes = SpendSupersedes::Record(other_spend.digest().value.clone());
+    let spend_result = spend_service.record(&successor_spend.canonical_bytes().unwrap());
+
+    let local_revision = local.policy_revision();
+    let impact_service =
+        MissionImpactService::new(Arc::clone(&local.accounts), local.store.workspace_id);
+    let base_classification = local.classification_record(Uuid::new_v4(), local_revision);
+    impact_service
+        .classify(&base_classification.canonical_bytes().unwrap())
+        .expect("the local classification ladder starts at version one");
+    let mut successor_classification = local.classification_record(Uuid::new_v4(), local_revision);
+    successor_classification.version = 2;
+    successor_classification.supersedes =
+        ClassificationSupersedes::Record(other_classification.digest().value.clone());
+    let classification_result =
+        impact_service.classify(&successor_classification.canonical_bytes().unwrap());
+
+    assert!(
+        spend_result.is_err() && classification_result.is_err(),
+        "foreign predecessors were accepted: spend={spend_result:?}, classification={classification_result:?}"
+    );
+}
