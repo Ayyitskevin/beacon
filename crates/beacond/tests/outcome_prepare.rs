@@ -18,31 +18,121 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
 use beacond::{
-    AccessOrigin, AppendixMode, AppendixRequest, ArtifactContext, ArtifactDigest, ArtifactKind,
-    ArtifactService, AutonomyProfile, BeaconCapability, COMPLETION_CANONICALIZER,
-    CheckPreflightService, ClassificationActor, ClassificationBasis, ClassificationStoreError,
-    ClassificationSupersedes, CollectionRequest, Collector, CompletionActor, CompletionDisposition,
-    CompletionReadRefusal, CompletionSupersedes, ConditionOutcome, ConditionResult,
-    ConditionResultRecord, Conflicts, DeclaredCheck, DiagnosticStatus, Evaluation,
-    EvaluationDigest, EvaluationDraft, EvaluationError, EvaluationService, EvaluationSubjectDraft,
-    EvaluationSupersedes, Evaluator, Finding, FindingSeverity, ImpactLevel, InconsistentEvaluation,
-    LocalErrorCode, LocalModelActivationService, LocalModelEndpoint, LocalServerConfig,
-    LocalSupervisorClient, LocalSupervisorServer, LocalTransportError,
-    MISSION_IMPACT_CANONICALIZER, ManifestStoreRefusal, MissionCompletionV1, MissionDraft,
-    MissionError, MissionImpactClassificationV1, MissionImpactService, MissionMemberDraft,
-    MissionService, NarrativeItem, OperatorAccountError, OperatorAccountService,
-    OperatorSessionPhase, OutcomeCandidate, OutcomeManifestV1, OutcomeService, OutcomeState,
-    PolicyRevisionRef, PredecessorFault, PrepareRefusal, ProjectCharterDraft, ProjectDraft,
-    ProjectError, ProjectPolicyDraft, ProjectPolicyService, ProjectRepositoryService,
-    ProjectService, Provenance, ProviderFeature, PublicationSeamRefusal, PublishRefusal,
-    RepositoryDraft, RepositorySourceKind, ResidentConfigurationService, ResidentLifecycleService,
-    RubricDeclaration, SecretString, SourceDigest, SourceKind, SourceRef, SourcesRefusal,
-    SpendReference, StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig,
-    SuccessCondition, Supervisor, SupervisorError, SupportRef, TeamDraft, TeamLeadAmbiguityRule,
-    TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
-    TeamService, TrackRecordEvidenceKind, TrackRecordRequirement, UnfinishedKind, Verdict,
-    VerifiedSources, VerifiedText, declared_conditions_digest, initialize_local_auth_token,
-    publication_candidacy, record_completion, render, verified_manifest_within,
+    AccessOrigin,
+    AppendixMode,
+    AppendixRequest,
+    ArtifactContext,
+    ArtifactDigest,
+    ArtifactKind,
+    ArtifactService,
+    AutonomyProfile,
+    BeaconCapability,
+    COMPLETION_CANONICALIZER,
+    CheckPreflightService,
+    ClassificationActor,
+    ClassificationBasis,
+    ClassificationStoreError,
+    ClassificationSupersedes,
+    CollectionRequest,
+    Collector,
+    CompletionActor,
+    CompletionDisposition,
+    CompletionReadRefusal,
+    CompletionSupersedes,
+    ConditionOutcome,
+    ConditionResult,
+    ConditionResultRecord,
+    Conflicts,
+    DeclaredCheck,
+    DiagnosticStatus,
+    Evaluation,
+    EvaluationDigest,
+    EvaluationDraft,
+    EvaluationError,
+    EvaluationService,
+    EvaluationSubjectDraft,
+    EvaluationSupersedes,
+    Evaluator,
+    Finding,
+    FindingSeverity,
+    ImpactLevel,
+    InconsistentEvaluation,
+    LocalErrorCode,
+    LocalModelActivationService,
+    LocalModelEndpoint,
+    LocalServerConfig,
+    LocalSupervisorClient,
+    LocalSupervisorServer,
+    LocalTransportError,
+    MISSION_IMPACT_CANONICALIZER,
+    ManifestStoreRefusal,
+    MissionCompletionV1,
+    MissionDraft,
+    MissionError,
+    MissionImpactClassificationV1,
+    MissionImpactService,
+    MissionMemberDraft,
+    MissionService,
+    NarrativeItem,
+    OperatorAccountError,
+    OperatorAccountService,
+    OperatorSessionPhase,
+    OutcomeCandidate,
+    OutcomeManifestV1,
+    OutcomeService,
+    OutcomeState,
+    PolicyRevisionRef,
+    PredecessorFault,
+    PrepareRefusal,
+    ProjectCharterDraft,
+    ProjectDraft,
+    ProjectError,
+    ProjectPolicyDraft,
+    ProjectPolicyService,
+    ProjectRepositoryService,
+    ProjectService,
+    Provenance,
+    ProviderFeature,
+    PublicationSeamRefusal,
+    PublishRefusal,
+    RepositoryDraft,
+    RepositorySourceKind,
+    ResidentConfigurationService,
+    ResidentLifecycleService,
+    RubricDeclaration,
+    SecretString,
+    SourceDigest,
+    SourceKind,
+    SourceRef,
+    SourcesRefusal,
+    SpendReference,
+    StarterOrganizationService,
+    StarterResidentDraft,
+    StarterRole,
+    StartupConfig,
+    SuccessCondition,
+    Supervisor,
+    SupervisorError,
+    SupportRef,
+    TeamDraft,
+    TeamLeadAmbiguityRule,
+    TeamLeadAvailabilityRule,
+    TeamLeadConflictRule,
+    TeamLeadSelectionPolicy,
+    TeamMemberDraft,
+    TeamService,
+    TrackRecordEvidenceKind,
+    TrackRecordRequirement,
+    UnfinishedKind,
+    Verdict,
+    VerifiedSources,
+    VerifiedText,
+    declared_conditions_digest,
+    initialize_local_auth_token,
+    publication_candidacy,
+    record_completion,
+    render,
+    verified_manifest_within,
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -4417,8 +4507,37 @@ fn startup_refuses_an_unaccounted_evaluation_row_and_names_the_row() {
     let refusal = astra_boot(&fixture)
         .expect_err("a store holding an unaccounted Evaluation row reopened Ready");
     assert!(
-        matches!(&refusal, beacond::SupervisorError::EvaluationStateMismatch),
-        "startup did not refuse the planted Evaluation: {refusal:?}"
+        matches!(
+            &refusal,
+            beacond::SupervisorError::EvaluationStateMismatch {
+                workspace_id,
+                digest_value,
+                cause: EvaluationError::Inconsistent(InconsistentEvaluation::DigestMismatch),
+            } if *workspace_id == fixture.workspace_id && digest_value == &planted
+        ),
+        "refused for the wrong reason, with the cause flattened, or naming the wrong row: \
+         {refusal:?}"
+    );
+
+    // R28.4: the key and the fault's NAME, and not the carried error's own text.
+    let line = refusal.to_string();
+    assert!(
+        line.contains(&planted) && line.contains(&fixture.workspace_id.to_string()),
+        "the refusal does not name the row it refused: {line}"
+    );
+    assert!(
+        line.contains("Inconsistent"),
+        "the refusal does not name the fault: {line}"
+    );
+    let carried =
+        EvaluationError::Inconsistent(InconsistentEvaluation::DigestMismatch).to_string();
+    assert!(
+        !line.contains(&carried),
+        "the carried error's own text reached the one-line message: {line}"
+    );
+    assert!(
+        format!("{refusal:?}").contains("DigestMismatch"),
+        "the carried fault is not reachable through Debug: {refusal:?}"
     );
 }
 

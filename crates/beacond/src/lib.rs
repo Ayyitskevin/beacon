@@ -419,7 +419,16 @@ pub enum SupervisorError {
     /// carried-cause change R27.2 holds for Kevin's timing -- not something to do in passing under
     /// a rename.
     DispatchRecoveryFailed,
-    EvaluationStateMismatch,
+    /// A stored Evaluation does not re-prove against its own bytes or the records it cites.
+    ///
+    /// Names the row and carries the owning reader's own error (R28.1).
+    EvaluationStateMismatch {
+        workspace_id: Uuid,
+        digest_value: String,
+        cause: evaluation::EvaluationError,
+    },
+    /// The Evaluation supersession chains do not agree with the store. No row to name.
+    EvaluationTotalsMismatch(evaluation::EvaluationError),
     MissionCompletionEventMismatch(i64),
     /// A stored Mission completion does not re-prove against its own bytes or the records it cites.
     ///
@@ -759,13 +768,22 @@ impl fmt::Display for SupervisorError {
                     "the Mission completions do not agree with the log as a whole -- {totals}"
                 )
             }
-            Self::EvaluationStateMismatch => {
-                write!(
-                    formatter,
-                    "Evaluation state does not agree with its bytes, the Proposal it binds, its \
-                     findings and cited Runs, or its audit Event"
-                )
-            }
+            // R28.4: the key and the fault's NAME.
+            Self::EvaluationStateMismatch {
+                workspace_id,
+                digest_value,
+                cause,
+            } => write!(
+                formatter,
+                "Evaluation {digest_value} in Workspace {workspace_id} does not re-prove against \
+                 its own bytes or the records it cites: {}",
+                cause.name()
+            ),
+            Self::EvaluationTotalsMismatch(cause) => write!(
+                formatter,
+                "the Evaluation supersession chains do not agree with the store: {}",
+                cause.name()
+            ),
             Self::ArtifactEventMismatch(sequence) => write!(
                 formatter,
                 "Event sequence {sequence} does not match its stored Artifact bytes"
@@ -1687,8 +1705,28 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     // Before the Run-state check, because that check reads the Runs this step finishes.
     dispatch::finish_prepared_dispatches(connection)
         .map_err(|_| SupervisorError::DispatchRecoveryFailed)?;
-    evaluation::verify_evaluation_state(connection)
-        .map_err(|_| SupervisorError::EvaluationStateMismatch)?;
+    evaluation::verify_evaluation_state(connection).map_err(|fault| match fault {
+        evaluation::EvaluationStateFault::Store(error) => SupervisorError::Store(error),
+        evaluation::EvaluationStateFault::Row {
+            workspace_id,
+            digest_value,
+            cause,
+        } => SupervisorError::EvaluationStateMismatch {
+            workspace_id,
+            digest_value,
+            cause,
+        },
+        evaluation::EvaluationStateFault::Totals(cause) => {
+            SupervisorError::EvaluationTotalsMismatch(cause)
+        }
+        evaluation::EvaluationStateFault::Identity {
+            workspace_id,
+            digest_value,
+        } => SupervisorError::IntegrityCheckFailed(format!(
+            "an Evaluation row's Workspace is not readable: {workspace_id}, Evaluation \
+             {digest_value}"
+        )),
+    })?;
     // The Artifact state stands alone: it binds no other module's record, and nothing else's
     // verification reads it.
     artifact::verify_artifact_state(connection)

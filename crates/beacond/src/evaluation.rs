@@ -585,6 +585,111 @@ impl fmt::Display for InconsistentEvaluation {
     }
 }
 
+/// Which fault the Evaluation startup pass hit, and WHICH ROW hit it (R27.1's shape, R28.1).
+pub(crate) enum EvaluationStateFault {
+    /// The enumeration itself failed: no row to name, because none was reached.
+    Store(rusqlite::Error),
+    /// One Evaluation did not re-prove. `cause` is the owning reader's OWN error, carried whole.
+    Row {
+        workspace_id: Uuid,
+        digest_value: String,
+        cause: EvaluationError,
+    },
+    /// The supersession chains, which are about the store rather than one row. No row to name.
+    Totals(EvaluationError),
+    /// A row whose Workspace column is not a UUID. Unreachable while the foreign-key check and the
+    /// Workspace pass run first.
+    Identity {
+        workspace_id: String,
+        digest_value: String,
+    },
+}
+
+impl EvaluationError {
+    /// The variant's NAME, for R28.4's one-line startup message.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Account(_) => "Account",
+            Self::Malformed(_) => "Malformed",
+            Self::Inconsistent(_) => "Inconsistent",
+            Self::NotFound => "NotFound",
+            Self::InvalidStore => "InvalidStore",
+            Self::SubjectNotStorable => "SubjectNotStorable",
+            Self::SupersessionTooLong { .. } => "SupersessionTooLong",
+            Self::Store(_) => "Store",
+        }
+    }
+}
+
+impl fmt::Display for EvaluationStateFault {
+    /// R28.4: the KEY and the fault's NAME, never the carried error's own text.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(_) => formatter.write_str("the Evaluations could not be read"),
+            Self::Row {
+                workspace_id,
+                digest_value,
+                cause,
+            } => write!(
+                formatter,
+                "Evaluation {digest_value} in Workspace {workspace_id} does not re-prove: {}",
+                cause.name()
+            ),
+            Self::Totals(cause) => write!(
+                formatter,
+                "the Evaluation supersession chains do not agree with the store: {}",
+                cause.name()
+            ),
+            Self::Identity {
+                workspace_id,
+                digest_value,
+            } => write!(
+                formatter,
+                "an Evaluation row's Workspace is not readable: {workspace_id}, Evaluation \
+                 {digest_value}"
+            ),
+        }
+    }
+}
+
+/// Hand-written and NOT delegating to `Display`: R28.4 keeps the carried text reachable here.
+impl fmt::Debug for EvaluationStateFault {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => formatter.debug_tuple("Store").field(error).finish(),
+            Self::Totals(cause) => formatter.debug_tuple("Totals").field(cause).finish(),
+            Self::Row {
+                workspace_id,
+                digest_value,
+                cause,
+            } => formatter
+                .debug_struct("Row")
+                .field("workspace_id", workspace_id)
+                .field("digest_value", digest_value)
+                .field("cause", cause)
+                .finish(),
+            Self::Identity {
+                workspace_id,
+                digest_value,
+            } => formatter
+                .debug_struct("Identity")
+                .field("workspace_id", workspace_id)
+                .field("digest_value", digest_value)
+                .finish(),
+        }
+    }
+}
+
+impl std::error::Error for EvaluationStateFault {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::Totals(cause) | Self::Row { cause, .. } => Some(cause),
+            Self::Identity { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum EvaluationError {
     Account(OperatorAccountError),
@@ -2260,10 +2365,14 @@ fn evaluated_at_ms_of(connection: &Connection, digest_value: &str) -> Result<u64
 
 /// Startup reconciliation: every stored Evaluation is re-verified against its own bytes, its bound
 /// Proposal, and its children, and every row must have exactly one `evaluation.recorded` Event.
-pub(crate) fn verify_evaluation_state(connection: &Connection) -> Result<(), EvaluationError> {
-    let mut statement = connection.prepare(&format!(
-        "SELECT workspace_id, {SELECT_COLUMNS} FROM evaluations ORDER BY digest_value"
-    ))?;
+pub(crate) fn verify_evaluation_state(
+    connection: &Connection,
+) -> Result<(), EvaluationStateFault> {
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT workspace_id, {SELECT_COLUMNS} FROM evaluations ORDER BY digest_value"
+        ))
+        .map_err(EvaluationStateFault::Store)?;
     let rows: Vec<(String, StoredRow)> = statement
         .query_map([], |row| {
             let workspace: String = row.get(0)?;
@@ -2293,12 +2402,42 @@ pub(crate) fn verify_evaluation_state(connection: &Connection) -> Result<(), Eva
                     evaluated_at_ms: row.get(21)?,
                 },
             ))
-        })?
-        .collect::<Result<_, _>>()?;
+        })
+        .map_err(EvaluationStateFault::Store)?
+        .collect::<Result<_, _>>()
+        .map_err(EvaluationStateFault::Store)?;
 
     for (workspace, row) in rows {
-        let workspace_id =
-            Uuid::parse_str(&workspace).map_err(|_| EvaluationError::InvalidStore)?;
+        let digest_value = row.digest_value.clone();
+        let workspace_id = Uuid::parse_str(&workspace).map_err(|_| {
+            EvaluationStateFault::Identity {
+                workspace_id: workspace.clone(),
+                digest_value: digest_value.clone(),
+            }
+        })?;
+        verify_one_evaluation(connection, workspace_id, &workspace, row).map_err(|cause| {
+            EvaluationStateFault::Row {
+                workspace_id,
+                digest_value: digest_value.clone(),
+                cause,
+            }
+        })?;
+    }
+    verify_evaluation_chains(connection).map_err(|cause| match cause {
+        EvaluationError::Store(error) => EvaluationStateFault::Store(error),
+        other => EvaluationStateFault::Totals(other),
+    })?;
+    Ok(())
+}
+
+/// One stored Evaluation, re-proved. Unchanged from what the loop held inline.
+fn verify_one_evaluation(
+    connection: &Connection,
+    workspace_id: Uuid,
+    workspace: &str,
+    row: StoredRow,
+) -> Result<(), EvaluationError> {
+    {
         let digest_value = row.digest_value.clone();
         verified_evaluation(connection, workspace_id, row)?;
         let events: Vec<(String, i64)> = connection
@@ -2319,6 +2458,11 @@ pub(crate) fn verify_evaluation_state(connection: &Connection) -> Result<(), Eva
             u64::try_from(*occurred_at_ms).map_err(|_| EvaluationError::InvalidStore)?;
         verify_evaluation_event(connection, workspace_id, occurred_at_ms, payload_json)?;
     }
+    Ok(())
+}
+
+/// The supersession chains: about the store, not one row.
+fn verify_evaluation_chains(connection: &Connection) -> Result<(), EvaluationError> {
 
     // Every supersession chain: one first link, one path, every Evaluation on it, and
     // `evaluated_at_ms` non-decreasing ALONG THE CHAIN -- chain order, never timestamp order.
@@ -3039,5 +3183,64 @@ mod tests {
             encode(&payload),
             Err(MalformedEvaluation::ProposalDigestEnvelope)
         );
+    }
+}
+
+#[cfg(test)]
+mod name_witness {
+    use super::*;
+
+    /// Pinned independently of `name()` (the fold at 30d2a20): an exhaustive `name()` catches an
+    /// added arm, only a second table catches a wrong or duplicated name.
+    fn expected_name(error: &EvaluationError) -> &'static str {
+        match error {
+            EvaluationError::Account(_) => "Account",
+            EvaluationError::Malformed(_) => "Malformed",
+            EvaluationError::Inconsistent(_) => "Inconsistent",
+            EvaluationError::NotFound => "NotFound",
+            EvaluationError::InvalidStore => "InvalidStore",
+            EvaluationError::SubjectNotStorable => "SubjectNotStorable",
+            EvaluationError::SupersessionTooLong { .. } => "SupersessionTooLong",
+            EvaluationError::Store(_) => "Store",
+        }
+    }
+
+    #[test]
+    fn every_evaluation_error_arm_has_its_own_pinned_name() {
+        let every_arm = [
+            EvaluationError::Account(crate::operator_account::OperatorAccountError::PasswordTooShort),
+            EvaluationError::Malformed(MalformedEvaluation::Magic),
+            EvaluationError::Inconsistent(InconsistentEvaluation::DigestMismatch),
+            EvaluationError::NotFound,
+            EvaluationError::InvalidStore,
+            EvaluationError::SubjectNotStorable,
+            EvaluationError::SupersessionTooLong { bound: 1 },
+            EvaluationError::Store(rusqlite::Error::QueryReturnedNoRows),
+        ];
+        assert_eq!(
+            every_arm.len(),
+            8,
+            "an arm was added to `EvaluationError` without a fixture here"
+        );
+        for arm in &every_arm {
+            assert_eq!(
+                arm.name(),
+                expected_name(arm),
+                "the startup name does not match the pinned table: {arm:?}"
+            );
+        }
+        let names: std::collections::BTreeSet<&str> =
+            every_arm.iter().map(EvaluationError::name).collect();
+        assert_eq!(
+            names.len(),
+            8,
+            "two arms share a startup name, so a swap between them is invisible: {names:?}"
+        );
+        for name in names {
+            assert!(
+                !name.contains(' ') && !name.contains('{'),
+                "a name is a name, not a rendering: {name}"
+            );
+        }
     }
 }
