@@ -966,7 +966,7 @@ fn insert_manifest(
                  canonical_bytes, manifest_id, mission_id, completion_digest,
                  canonicalizer_version, renderer_version, boundary_event_seq,
                  candidate_artifact_digest
-             ) VALUES (?1, 'sha256', 'beacon.outcome.manifest.v1', ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+             ) VALUES (?1, 'sha256', ?11, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
                        ?9, ?10)",
             params![
                 workspace_id.to_string(),
@@ -979,6 +979,10 @@ fn insert_manifest(
                 manifest.renderer_version.as_str(),
                 i64::try_from(manifest.boundary_event_seq).unwrap_or(i64::MAX),
                 candidate_artifact_digest,
+                // The digest envelope's canonicalizer is the manifest's own, from its bytes -- the
+                // codec pins it to `CANONICALIZER`, so a literal here was a second copy of that
+                // token, and the grammar revision is exactly when a second copy drifts.
+                manifest.canonicalizer_version.as_str(),
             ],
         )
         .map_err(store_error)?;

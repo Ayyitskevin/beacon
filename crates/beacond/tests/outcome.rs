@@ -68,9 +68,9 @@ use beacond::{
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-const CANONICALIZER: &str = "beacon.outcome.manifest.v1";
+const CANONICALIZER: &str = "beacon.outcome.manifest.v2";
 const RENDERER: &str = "beacon.outcome.md.v1";
-const MAGIC: &[u8] = b"beacon.outcome.manifest.v1\0";
+const MAGIC: &[u8] = b"beacon.outcome.manifest.v2\0";
 const RECEIPT_CHECKSUM_LABEL: &str = "beacon.outcome.receipt-checksum.v1";
 
 const WORKSPACE: &str = "00000000-0000-4000-8000-000000000001";
@@ -1311,11 +1311,24 @@ fn outcome_manifest_canonical_bytes_follow_adr_0034_0037_strict_round_trip_rules
         MalformedOutcome::DigestEnvelope
     );
 
+    // A grammar nobody has heard of is `UnknownVersion`; the grammar this one REPLACED is
+    // `RetiredVersion`. Two names, because a caller holding v1 bytes and a caller holding bytes
+    // from the future need different advice. (This probe used to spell "unknown" as `.v2` -- which
+    // became the truth under R18.3-5 and turned the probe into a no-op; the token is now one that
+    // will not be assigned.)
     let mut wrong_canonicalizer = manifest.clone();
-    wrong_canonicalizer.canonicalizer_version = "beacon.outcome.manifest.v2".to_owned();
+    wrong_canonicalizer.canonicalizer_version = "beacon.outcome.manifest.v9".to_owned();
     assert_eq!(
         wrong_canonicalizer.canonical_bytes().expect_err("refuses"),
         MalformedOutcome::UnknownVersion
+    );
+    let mut retired_canonicalizer = manifest.clone();
+    retired_canonicalizer.canonicalizer_version = beacond::RETIRED_CANONICALIZER.to_owned();
+    assert_eq!(
+        retired_canonicalizer
+            .canonical_bytes()
+            .expect_err("refuses"),
+        MalformedOutcome::RetiredVersion
     );
 
     // Non-canonical array order is refused rather than silently re-sorted: two orders of one
@@ -1873,27 +1886,77 @@ fn vector_path(name: &str) -> std::path::PathBuf {
 /// commit the new bytes only when the change to the renderer was intended.
 ///
 ///     cargo test -p beacond --test outcome -- --ignored --exact regenerate_outcome_vector
+///
+/// **The v2 slot is filled by a NON-AUTHOR seat** (the K-2 rule, kimi's slice-3 read §5, R18.3-5):
+/// the author of a grammar revision does not also author the bytes that prove it. The seat named
+/// for v2 is kimi. Until it runs, `vector-v2.md` does not exist and the frozen-vector test below
+/// fails, on purpose -- that failure is the slot, and an encoder that disagrees with the vector
+/// kimi builds is the proof the fold was read rather than assumed.
 #[test]
-#[ignore = "regenerates a frozen fixture; run deliberately, never as part of the suite"]
+#[ignore = "regenerates a frozen fixture; run deliberately, by a non-author seat, never as part of the suite"]
 fn regenerate_outcome_vector() {
     let document = rendered();
     std::fs::create_dir_all(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/outcome"),
     )
     .expect("fixture directory");
-    std::fs::write(vector_path("vector-v1.md"), &document).expect("write vector");
+    std::fs::write(vector_path("vector-v2.md"), &document).expect("write vector");
     std::fs::write(
-        vector_path("vector-v1.sha256"),
-        format!("{}  vector-v1.md\n", sha256_hex(document.as_bytes())),
+        vector_path("vector-v2.sha256"),
+        format!("{}  vector-v2.md\n", sha256_hex(document.as_bytes())),
     )
     .expect("write digest");
 }
 
+/// The v1 grammar is retired, and retired means refused by name: not `Magic` (these bytes ARE a
+/// manifest, under a grammar this build no longer holds) and not `UnknownVersion` (this build has
+/// heard of v1 -- it is the grammar it replaced).
+///
+/// The bytes are the real thing. `manifest-v1.bin` was extracted from the retired v1 vector's own
+/// verification appendix -- the proof block every document embeds so a reader can recompute the
+/// manifest digest -- and checked against that document's recorded digest and byte length before
+/// it was committed. Nothing here was produced by a v1 encoder this tree no longer has.
+#[test]
+fn retired_v1_manifest_bytes_are_refused_by_name() {
+    let bytes = std::fs::read(vector_path("manifest-v1.bin")).expect("the v1 bytes are committed");
+    assert!(
+        bytes.starts_with(b"beacon.outcome.manifest.v1\0"),
+        "the fixture is not v1 bytes"
+    );
+    assert_eq!(
+        OutcomeManifestV1::from_canonical_bytes(&bytes).expect_err("v1 bytes decoded under v2"),
+        MalformedOutcome::RetiredVersion,
+    );
+    // And the two neighbours stay distinct: garbage is `Magic`, a grammar nobody has heard of is
+    // `UnknownVersion`. Three states, three names.
+    assert_eq!(
+        OutcomeManifestV1::from_canonical_bytes(b"not a manifest at all").expect_err("garbage"),
+        MalformedOutcome::Magic,
+    );
+    let mut future = bytes.clone();
+    future[..b"beacon.outcome.manifest.v1\0".len()]
+        .copy_from_slice(b"beacon.outcome.manifest.v9\0");
+    assert!(
+        !matches!(
+            OutcomeManifestV1::from_canonical_bytes(&future),
+            Err(MalformedOutcome::RetiredVersion)
+        ),
+        "a grammar nobody has heard of was reported as the retired one"
+    );
+}
+
 #[test]
 fn independent_outcome_vector_matches_frozen_expected_markdown_bytes_and_sha256() {
-    let expected =
-        std::fs::read(vector_path("vector-v1.md")).expect("the frozen vector is committed");
-    let recorded = std::fs::read_to_string(vector_path("vector-v1.sha256"))
+    // THE EMPTY v2 SLOT. This fails until kimi -- a non-author seat -- runs `regenerate_outcome_vector`
+    // against its own read of the R18.3-5 grammar and commits `vector-v2.md` + `vector-v2.sha256`.
+    // A vector built by the grammar's author would agree with the author's encoder and prove
+    // nothing; the mismatch, if there is one, is the finding.
+    let expected = std::fs::read(vector_path("vector-v2.md")).expect(
+        "vector-v2.md is not committed: the v2 vector slot is EMPTY by design and is kimi's to fill \
+         (non-author seat, K-2 rule); run `cargo test -p beacond --test outcome -- --ignored --exact \
+         regenerate_outcome_vector` from an independent read of R18.3-5, review the bytes, commit",
+    );
+    let recorded = std::fs::read_to_string(vector_path("vector-v2.sha256"))
         .expect("the frozen digest is committed");
     let recorded = recorded
         .split_whitespace()
