@@ -376,7 +376,16 @@ pub enum SupervisorError {
     ResidentConfigurationEventMismatch(i64),
     ResidentConfigurationStateMismatch,
     TeamEventMismatch(i64),
-    TeamStateMismatch,
+    /// A stored Team does not re-prove against its own record or the log.
+    ///
+    /// Names the row and carries the owning reader's own error (R28.1).
+    TeamStateMismatch {
+        workspace_id: Uuid,
+        team_id: Uuid,
+        cause: team::TeamError,
+    },
+    /// The Teams do not agree with the log as a whole. No row to name.
+    TeamTotalsMismatch(TotalsMismatch),
     MissionEventMismatch(i64),
     /// A stored Mission does not re-prove against its own record or its projections.
     ///
@@ -597,6 +606,7 @@ pub enum StartupPass {
     Candidate,
     ProjectRepository,
     SampleProject,
+    Team,
 }
 
 impl StartupPass {
@@ -616,6 +626,7 @@ impl StartupPass {
             Self::Ruling => "Ruling",
             Self::ProjectRepository => "ProjectRepository",
             Self::SampleProject => "SampleProject",
+            Self::Team => "Team",
         }
     }
 }
@@ -738,8 +749,21 @@ impl fmt::Display for SupervisorError {
                     "Event sequence {sequence} does not match Team state"
                 )
             }
-            Self::TeamStateMismatch => {
-                write!(formatter, "Team state has no exact formation audit Event")
+            // R28.4: the key and the fault's NAME.
+            Self::TeamStateMismatch {
+                workspace_id,
+                team_id,
+                cause,
+            } => write!(
+                formatter,
+                "Team {team_id} in Workspace {workspace_id} does not re-prove: {}",
+                cause.name()
+            ),
+            Self::TeamTotalsMismatch(totals) => {
+                write!(
+                    formatter,
+                    "the Teams do not agree with the log as a whole -- {totals}"
+                )
             }
             Self::MissionEventMismatch(sequence) => {
                 write!(
@@ -1988,6 +2012,33 @@ fn map_project_repository_state_fault(
     }
 }
 
+/// The production mapping for the Team startup pass, NAMED so a bar can drive it.
+fn map_team_state_fault(fault: team::TeamStateFault) -> SupervisorError {
+    match fault {
+        team::TeamStateFault::Store(source) => SupervisorError::StartupEnumerationFailed {
+            pass: StartupPass::Team,
+            source,
+        },
+        team::TeamStateFault::Row {
+            workspace_id,
+            team_id,
+            cause,
+        } => SupervisorError::TeamStateMismatch {
+            workspace_id,
+            team_id,
+            cause,
+        },
+        team::TeamStateFault::Totals(totals) => SupervisorError::TeamTotalsMismatch(totals),
+        team::TeamStateFault::Identity {
+            workspace_id,
+            team_id,
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "a Team row's identity is not readable",
+            raw: format!("Workspace {workspace_id}, Team {team_id}"),
+        },
+    }
+}
+
 fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, SupervisorError> {
     let schema_version = connection.query_row(
         "SELECT version FROM schema_meta WHERE singleton = 1",
@@ -2055,7 +2106,7 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
         .map_err(|_| SupervisorError::ResidentLifecycleStateMismatch)?;
     resident_configuration::verify_configuration_state(connection)
         .map_err(|_| SupervisorError::ResidentConfigurationStateMismatch)?;
-    team::verify_team_state(connection).map_err(|_| SupervisorError::TeamStateMismatch)?;
+    team::verify_team_state(connection).map_err(map_team_state_fault)?;
     mission::verify_mission_state(connection).map_err(map_mission_state_fault)?;
     // After Mission state, because every completion re-derives its conditions from the Mission's own
     // rows and its boundary from the Mission's admission Event.
@@ -2467,6 +2518,12 @@ mod tests {
                 ),
             ),
             (
+                "Team",
+                super::map_team_state_fault(
+                    crate::team::verify_team_state(&connection).expect_err("no `teams` table"),
+                ),
+            ),
+            (
                 "SampleProject",
                 super::map_sample_project_state_fault(
                     crate::sample_project::verify_sample_project_state(&connection)
@@ -2476,7 +2533,7 @@ mod tests {
         ];
         assert_eq!(
             refusals.len(),
-            13,
+            14,
             "a pass was added without a fixture here"
         );
 
@@ -2500,7 +2557,7 @@ mod tests {
         }
         assert_eq!(
             lines.len(),
-            13,
+            14,
             "two passes render the same line, so an operator cannot tell them apart: {lines:?}"
         );
     }

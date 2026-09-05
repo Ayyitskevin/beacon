@@ -623,3 +623,83 @@ fn concurrent_accepted_formations_are_distinct_immutable_teams() {
         2
     );
 }
+
+/// R28 tier 2 pass 8 of 14: a Team the log does not account for is refused at startup, and the
+/// refusal names WHICH Team.
+#[test]
+fn startup_refuses_an_unaccounted_team_and_names_the_row() {
+    let store = TestStore::new("r28t2-team-startup");
+    let accounts = enrolled_accounts(&store);
+    let project_id = create_project(&accounts, store.workspace_id);
+    let resident_ids = admit_residents(&accounts, store.workspace_id);
+    let lifecycle = ResidentLifecycleService::new(Arc::clone(&accounts), store.workspace_id);
+    for resident_id in &resident_ids {
+        lifecycle.activate(*resident_id, None).unwrap();
+    }
+
+    let (models, activation_id) = activate_model(&store, &accounts);
+
+    let configurations =
+        ResidentConfigurationService::new(Arc::clone(&accounts), store.workspace_id);
+    let members = resident_ids
+        .iter()
+        .map(|resident_id| {
+            let configuration = configurations
+                .configure(
+                    *resident_id,
+                    None,
+                    activation_id,
+                    vec![BeaconCapability::WorkCreateMission],
+                )
+                .unwrap();
+            TeamMemberDraft {
+                resident_id: *resident_id,
+                expected_configuration_id: configuration.id,
+            }
+        })
+        .collect();
+
+    let teams = TeamService::new(Arc::clone(&accounts), store.workspace_id);
+    let formed = teams
+        .form(TeamDraft {
+            project_id,
+            name: "Alpha Team".to_owned(),
+            members,
+        })
+        .expect("the fixture forms a Team");
+
+    let connection = Connection::open(&store.path).unwrap();
+    let removed = connection
+        .execute(
+            "DELETE FROM events WHERE kind = 'team.formed' AND payload_json LIKE '%' || ?1 || '%'",
+            rusqlite::params![formed.id.to_string()],
+        )
+        .unwrap();
+    assert_eq!(removed, 1, "the plant removed the wrong number of Events");
+    drop(connection);
+
+    let refusal = Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .expect_err("a store holding a Team with no formation Event reopened Ready");
+    assert!(
+        matches!(
+            &refusal,
+            beacond::SupervisorError::TeamStateMismatch { team_id, .. } if *team_id == formed.id
+        ) || matches!(&refusal, beacond::SupervisorError::TeamTotalsMismatch(_)),
+        "refused for the wrong reason, or naming the wrong row: {refusal:?}"
+    );
+
+    // R28.4: the line is the key plus the fault's NAME (kimi's P3-2 form).
+    let line = refusal.to_string();
+    let named = line.rsplit(": ").next().unwrap().to_owned();
+    assert!(
+        !named.contains(' ') && !named.contains('{'),
+        "the tail of the line is a rendering, not a name: {line}"
+    );
+    assert!(
+        format!("{refusal:?}").contains(&named),
+        "the named fault is not reachable through Debug: {refusal:?}"
+    );
+}
