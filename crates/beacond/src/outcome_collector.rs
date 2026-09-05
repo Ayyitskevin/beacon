@@ -1057,10 +1057,11 @@ impl<'a> Collector<'a> {
         // The declared window must span the Mission: the spend owner says a window that does not
         // is the citing collector's refusal (sol1's cold read, #11), and it is keyed on the
         // Mission's own admission Event -- its record of beginning -- never on the record's word
-        // for it. Every measurement state declares a window, so every state is checked. The
-        // window's END is not checked here: the record's Event precedes the completion's, so
-        // `coverage_to` can never reach the boundary, and what the window failed to reach is the
-        // spend owner's word (`partially_measured`), not this collector's.
+        // for it. Every measurement state declares a window, so every state is checked. The window's
+        // END is checked below, against the completion's boundary (R21.3, R32.2): a measurement
+        // that stops short of the cut is `partially_measured` HERE, whatever the owner called it
+        // for its own window. The owner is right about what it measured; only this collector knows
+        // what the completion needed covered.
         // A Mission with no admission Event is `Unpositioned` here for the record; through
         // `collect()` the completion's owning reader fails first on the same missing Event, with a
         // store error rather than a name, so no test reaches this arm today (declared).
@@ -1083,7 +1084,32 @@ impl<'a> Collector<'a> {
         ));
         // The gaps come first and whole: the amount below folds the two counted arms together for
         // its number, and this is what keeps them apart (sol1's cold read, #14).
+        // R21.3 / R32.2: a window that ends before the completion's boundary is partial AT THE CUT,
+        // even though the owner measured its own window completely. The owner is right about what
+        // it measured; only this collector knows what the completion needed covered.
+        //
+        // It moves both fields together on purpose. `completeness` carries the gaps and
+        // `measurement` carries the token the assembler renders, and they are read by different
+        // callers -- a downgrade that moved only one would leave the document saying `measured`
+        // over a partial figure, which is the defect this closes (R32.2) wearing a different face.
+        // Only a fully `Measured` record downgrades: `PartiallyMeasured` already is one, and the
+        // uncounted states never claimed a count.
+        let short_of_boundary = matches!(payload.measurement, SpendMeasurement::Measured(_))
+            && payload.coverage_to_event_seq < boundary_event_seq;
         let completeness = match &payload.measurement {
+            SpendMeasurement::Measured(_) if short_of_boundary => {
+                // `(coverage_to, boundary)` -- what was covered and what needed covering. A partial
+                // figure that cannot say what it missed is the "usable and incomplete" number this
+                // module refuses elsewhere. `coverage_to == boundary` stays `Complete` and is
+                // reachable: a measurement with nothing recorded between its end and the cut.
+                SpendCompleteness::Partial(vec![CollectedUncounted {
+                    kind: "coverage_ends_before_boundary".to_owned(),
+                    detail: format!(
+                        "measured to event {}, the completion's boundary is event {}",
+                        payload.coverage_to_event_seq, boundary_event_seq
+                    ),
+                }])
+            }
             SpendMeasurement::Measured(_) => SpendCompleteness::Complete,
             SpendMeasurement::PartiallyMeasured(_, uncounted) => SpendCompleteness::Partial(
                 uncounted
@@ -1129,7 +1155,11 @@ impl<'a> Collector<'a> {
             digest_value: Some(digest_value),
             spend_id: Some(spend_id),
             version: Some(spend_version),
-            measurement: payload.measurement.literal().to_owned(),
+            measurement: if short_of_boundary {
+                crate::spend::PARTIALLY_MEASURED.to_owned()
+            } else {
+                payload.measurement.literal().to_owned()
+            },
             coverage,
             amount,
             completeness,
