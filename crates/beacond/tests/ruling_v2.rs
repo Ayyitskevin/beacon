@@ -871,7 +871,8 @@ fn a_row_claiming_v2_over_v1_bytes_fails_startup() {
     assert!(
         matches!(
             outcome,
-            Err(SupervisorError::RulingStateMismatch | SupervisorError::RulingEventMismatch(_))
+            Err(SupervisorError::RulingStateMismatch { .. }
+                | SupervisorError::RulingEventMismatch(_))
         ),
         "a row claiming a Candidate its bytes do not name started: {outcome:?}"
     );

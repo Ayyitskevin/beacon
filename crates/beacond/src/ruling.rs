@@ -440,6 +440,120 @@ impl InconsistentRuling {
     }
 }
 
+/// Which fault the Ruling startup pass hit, and WHICH ROW hit it (R27.1's shape, R28.1).
+pub(crate) enum RulingStateFault {
+    /// The enumeration itself failed: no row to name, because none was reached.
+    Store(rusqlite::Error),
+    /// One Ruling did not re-prove. `cause` is the owning reader's OWN error, carried whole.
+    Row {
+        workspace_id: Uuid,
+        digest_value: String,
+        cause: RulingError,
+    },
+    /// A COUNT across the store that does not match the log: numbers, never an invented row.
+    Totals(crate::TotalsMismatch),
+    /// The supersession chains do not re-prove. Structural, so no invented numbers.
+    Chains(RulingError),
+    /// A row whose Workspace column is not a UUID. Unreachable while the foreign-key check and
+    /// the Workspace pass run first.
+    Identity {
+        workspace_id: String,
+        digest_value: String,
+    },
+}
+
+impl RulingError {
+    /// The variant's NAME, for R28.4's one-line startup message.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Account(_) => "Account",
+            Self::Malformed(_) => "Malformed",
+            Self::Inconsistent(_) => "Inconsistent",
+            Self::NotFound => "NotFound",
+            Self::InvalidStore => "InvalidStore",
+            Self::Store(_) => "Store",
+            Self::Json(_) => "Json",
+        }
+    }
+}
+
+impl fmt::Display for RulingStateFault {
+    /// R28.4: the KEY and the fault's NAME, never the carried error's own text.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(_) => formatter.write_str("the Rulings could not be read"),
+            Self::Row {
+                workspace_id,
+                digest_value,
+                cause,
+            } => write!(
+                formatter,
+                "Ruling {digest_value} in Workspace {workspace_id} does not re-prove: {}",
+                cause.name()
+            ),
+            Self::Totals(totals) => {
+                write!(
+                    formatter,
+                    "the Rulings do not agree with the log as a whole -- {totals}"
+                )
+            }
+            Self::Chains(cause) => write!(
+                formatter,
+                "the Ruling chains do not re-prove: {}",
+                cause.name()
+            ),
+            Self::Identity {
+                workspace_id,
+                digest_value,
+            } => write!(
+                formatter,
+                "a Ruling row's Workspace is not readable: {workspace_id}, Ruling \
+                 {digest_value}"
+            ),
+        }
+    }
+}
+
+/// Hand-written and NOT delegating to `Display`: R28.4 keeps the carried text reachable here.
+impl fmt::Debug for RulingStateFault {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => formatter.debug_tuple("Store").field(error).finish(),
+            Self::Totals(totals) => formatter.debug_tuple("Totals").field(totals).finish(),
+            Self::Chains(cause) => formatter.debug_tuple("Chains").field(cause).finish(),
+            Self::Row {
+                workspace_id,
+                digest_value,
+                cause,
+            } => formatter
+                .debug_struct("Row")
+                .field("workspace_id", workspace_id)
+                .field("digest_value", digest_value)
+                .field("cause", cause)
+                .finish(),
+            Self::Identity {
+                workspace_id,
+                digest_value,
+            } => formatter
+                .debug_struct("Identity")
+                .field("workspace_id", workspace_id)
+                .field("digest_value", digest_value)
+                .finish(),
+        }
+    }
+}
+
+impl std::error::Error for RulingStateFault {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::Chains(cause) | Self::Row { cause, .. } => Some(cause),
+            // A `TotalsMismatch` is DATA, not a nested error.
+            Self::Totals(_) | Self::Identity { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum RulingError {
     Account(OperatorAccountError),
@@ -1694,11 +1808,13 @@ pub(crate) fn ruling_event_sequence(
 /// Force is derived along the way and never fails startup by itself: drift populates a list, it
 /// does not raise an error, so a historical Ruling does not become corrupt because the world moved.
 /// Everything that *does* refuse here is a store disagreeing with its own bytes.
-pub(crate) fn verify_ruling_state(connection: &Connection) -> Result<(), RulingError> {
-    let mut statement = connection.prepare(
-        "SELECT workspace_id, digest_value, proposal_digest FROM rulings
-         ORDER BY workspace_id, digest_value",
-    )?;
+pub(crate) fn verify_ruling_state(connection: &Connection) -> Result<(), RulingStateFault> {
+    let mut statement = connection
+        .prepare(
+            "SELECT workspace_id, digest_value, proposal_digest FROM rulings
+             ORDER BY workspace_id, digest_value",
+        )
+        .map_err(RulingStateFault::Store)?;
     let rows = statement
         .query_map([], |row| {
             Ok((
@@ -1706,18 +1822,53 @@ pub(crate) fn verify_ruling_state(connection: &Connection) -> Result<(), RulingE
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
             ))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+        })
+        .map_err(RulingStateFault::Store)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(RulingStateFault::Store)?;
     drop(statement);
 
     // A record naming `owner` as its decider basis is only truthful while that account exists.
-    if !rows.is_empty() && !owner_account_exists(connection)? {
-        return Err(RulingError::InvalidStore);
+    if !rows.is_empty() && !owner_account_exists(connection).map_err(RulingStateFault::Store)? {
+        return Err(RulingStateFault::Totals(crate::TotalsMismatch {
+            table: "operator_accounts (an owner for the stored Rulings)",
+            expected: 1,
+            observed: 0,
+        }));
     }
 
     let mut chains: Vec<(Uuid, String)> = Vec::new();
     for (workspace_id, digest_value, proposal_digest) in &rows {
-        let workspace_id = parse_uuid(workspace_id)?;
+        let identity = || RulingStateFault::Identity {
+            workspace_id: workspace_id.clone(),
+            digest_value: digest_value.clone(),
+        };
+        let parsed = Uuid::parse_str(workspace_id).map_err(|_| identity())?;
+        verify_one_ruling(connection, parsed, digest_value, proposal_digest).map_err(|cause| {
+            RulingStateFault::Row {
+                workspace_id: parsed,
+                digest_value: digest_value.clone(),
+                cause,
+            }
+        })?;
+
+        let chain_key = (parsed, proposal_digest.clone());
+        if !chains.contains(&chain_key) {
+            chains.push(chain_key);
+        }
+    }
+    verify_ruling_totals(connection, rows.len(), &chains)?;
+    Ok(())
+}
+
+/// One stored Ruling, re-proved. Unchanged from what the loop held inline.
+fn verify_one_ruling(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+    proposal_digest: &str,
+) -> Result<(), RulingError> {
+    {
         let stored = load_stored(connection, workspace_id, digest_value)?
             .ok_or(RulingError::InvalidStore)?;
         // Digest recomputed from the bytes, bytes decoded and re-encoded, every indexed column and
@@ -1740,7 +1891,7 @@ pub(crate) fn verify_ruling_state(connection: &Connection) -> Result<(), RulingE
             "SELECT count(*) FROM events
              WHERE workspace_id = ?1 AND kind = 'ruling.recorded'
                AND json_extract(payload_json, '$.ruling.digest.value') = ?2",
-            params![workspace_id.to_string(), digest_value.as_str()],
+            params![workspace_id.to_string(), digest_value],
             |row| row.get(0),
         )?;
         if event_count != 1 {
@@ -1764,36 +1915,47 @@ pub(crate) fn verify_ruling_state(connection: &Connection) -> Result<(), RulingE
                 }
             }
         }
-
-        let chain_key = (workspace_id, proposal_digest.clone());
-        if !chains.contains(&chain_key) {
-            chains.push(chain_key);
-        }
     }
+    Ok(())
+}
 
-    let total_events: i64 = connection.query_row(
-        "SELECT count(*) FROM events WHERE kind = 'ruling.recorded'",
-        [],
-        |row| row.get(0),
-    )?;
-    if usize::try_from(total_events) != Ok(rows.len()) {
-        return Err(RulingError::InvalidStore);
+/// The count across the store, and the chains: neither belongs to one row.
+fn verify_ruling_totals(
+    connection: &Connection,
+    ruling_count: usize,
+    chains: &[(Uuid, String)],
+) -> Result<(), RulingStateFault> {
+    let total_events: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind = 'ruling.recorded'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(RulingStateFault::Store)?;
+    if usize::try_from(total_events) != Ok(ruling_count) {
+        return Err(RulingStateFault::Totals(crate::TotalsMismatch {
+            table: "events (ruling.recorded)",
+            expected: ruling_count as u64,
+            observed: total_events.unsigned_abs(),
+        }));
     }
 
     // Every chain re-derived rather than trusted: one head, one path, every Ruling on it. The
     // store forbids citing two predecessors and being superseded twice, but nothing in SQL forbids
     // two independent chains under one Proposal or a cycle whose every link satisfies both.
-    for (workspace_id, proposal_digest) in &chains {
-        let chain = ruling_chain(connection, *workspace_id, proposal_digest)?;
+    for (workspace_id, proposal_digest) in chains {
+        let chain = ruling_chain(connection, *workspace_id, proposal_digest)
+            .map_err(RulingStateFault::Chains)?;
         let mut previous = 0_u64;
         for digest in &chain {
-            let ruled_at_ms = ruled_at_ms_of(connection, digest)?;
+            let ruled_at_ms =
+                ruled_at_ms_of(connection, digest).map_err(RulingStateFault::Chains)?;
             // Non-decreasing, equal allowed: two rulings can land in the same millisecond, and
             // refusing that would invent a constraint the clock does not support. The service
             // refuses a backwards step at write time; nothing else would notice a store that
             // holds one, so it is re-derived here.
             if ruled_at_ms < previous {
-                return Err(RulingError::InvalidStore);
+                return Err(RulingStateFault::Chains(RulingError::InvalidStore));
             }
             previous = ruled_at_ms;
         }
@@ -2438,5 +2600,62 @@ mod tests {
             bytes.len()
         );
         assert_eq!(decode(&bytes).unwrap(), largest);
+    }
+}
+
+#[cfg(test)]
+mod name_witness {
+    use super::*;
+
+    /// Pinned independently of `name()` (the fold at 30d2a20): an exhaustive `name()` catches an
+    /// added arm, only a second table catches a wrong or duplicated name.
+    fn expected_name(error: &RulingError) -> &'static str {
+        match error {
+            RulingError::Account(_) => "Account",
+            RulingError::Malformed(_) => "Malformed",
+            RulingError::Inconsistent(_) => "Inconsistent",
+            RulingError::NotFound => "NotFound",
+            RulingError::InvalidStore => "InvalidStore",
+            RulingError::Store(_) => "Store",
+            RulingError::Json(_) => "Json",
+        }
+    }
+
+    #[test]
+    fn every_ruling_error_arm_has_its_own_pinned_name() {
+        let every_arm = [
+            RulingError::Account(crate::operator_account::OperatorAccountError::PasswordTooShort),
+            RulingError::Malformed(MalformedRuling::Magic),
+            RulingError::Inconsistent(InconsistentRuling::ProposalNotFound),
+            RulingError::NotFound,
+            RulingError::InvalidStore,
+            RulingError::Store(rusqlite::Error::QueryReturnedNoRows),
+            RulingError::Json(serde_json::from_str::<u8>("\"x\"").unwrap_err()),
+        ];
+        assert_eq!(
+            every_arm.len(),
+            7,
+            "an arm was added to `RulingError` without a fixture here"
+        );
+        for arm in &every_arm {
+            assert_eq!(
+                arm.name(),
+                expected_name(arm),
+                "the startup name does not match the pinned table: {arm:?}"
+            );
+        }
+        let names: std::collections::BTreeSet<&str> =
+            every_arm.iter().map(RulingError::name).collect();
+        assert_eq!(
+            names.len(),
+            7,
+            "two arms share a startup name, so a swap between them is invisible: {names:?}"
+        );
+        for name in names {
+            assert!(
+                !name.contains(' ') && !name.contains('{'),
+                "a name is a name, not a rendering: {name}"
+            );
+        }
     }
 }
