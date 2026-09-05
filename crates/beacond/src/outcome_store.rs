@@ -376,6 +376,28 @@ struct StoredRow {
     candidate_artifact_digest: String,
 }
 
+/// Does this Artifact's content actually PROVE this manifest?
+///
+/// Every rendered Outcome Document embeds the exact canonical `OutcomeManifestV1` bytes as
+/// lowercase hexadecimal, in both appendix modes, precisely so a reader can recompute the manifest
+/// digest from the document in front of them (design §3, "Verification appendix"). That embedding
+/// is the binding between a manifest and its candidate, and it is the only one available without
+/// re-rendering: `VerifiedSources` does not survive `prepare`, so nothing after it can render the
+/// document again to compare.
+///
+/// The comparison strips newlines rather than reproducing the renderer's 64-character chunking. A
+/// second copy of that format here would be a second spelling of it, and the two would drift; the
+/// hex lines carry no other whitespace, so removing `\n` is enough and stays correct if the
+/// chunk width ever changes.
+fn candidate_proves_manifest(candidate_content: &[u8], manifest_bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(candidate_content) else {
+        return false;
+    };
+    let mut unwrapped = String::with_capacity(text.len());
+    unwrapped.extend(text.chars().filter(|character| *character != '\n'));
+    unwrapped.contains(&HEXLOWER.encode(manifest_bytes))
+}
+
 /// A Mission citation may not carry a digest anything would have to take on trust (R18.4).
 ///
 /// One function, called by both `prepare` and the verified reader, so a caller and a row planted
@@ -945,6 +967,18 @@ pub(crate) fn verify_manifest_state(connection: &Connection) -> Result<(), Manif
         if payload.accountable_resident_id != manifest.accountable_resident_id {
             return Err(ManifestStoreRefusal::CandidateNotAccounted {
                 reason: "the candidate Artifact's accountable Resident is not the manifest's",
+            });
+        }
+
+        // ...and its CONTENT proves this manifest, not merely its metadata. Kind, Mission and
+        // accountable Resident are properties a decoy shares with the real document: astra's probe
+        // recorded unrelated Markdown under the same Mission by the same Resident, pointed a
+        // manifest at it, and the store opened `Ready`. What a decoy cannot have is the manifest's
+        // own canonical bytes embedded in it.
+        if !candidate_proves_manifest(candidate.content(), stored.canonical_bytes()) {
+            return Err(ManifestStoreRefusal::CandidateNotAccounted {
+                reason: "the candidate Artifact's content does not embed this manifest's canonical \
+                         bytes, so it is not the document this manifest renders to",
             });
         }
     }
