@@ -1317,6 +1317,52 @@ fn a_completion_whose_mission_has_no_admission_event_is_refused_by_name() {
 }
 
 #[test]
+fn a_completion_cannot_use_an_unreadable_mission_admission_event_as_its_boundary() {
+    let store = TestStore::new("completion-unreadable-admission");
+    let accounts = enrolled_accounts(&store);
+    let mission = admit_with_conditions(&store, &accounts, vec!["Gates pass".to_owned()]);
+    let boundary = admitted_sequence(&store, mission.id);
+    let record = completion_for(
+        &store,
+        &mission,
+        boundary,
+        vec![beacond::ConditionOutcome::Met],
+    );
+    let mut connection = Connection::open(&store.path).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .unwrap();
+    let digest = beacond::record_completion(&mut connection, &record).unwrap();
+
+    let changed = connection
+        .execute(
+            "UPDATE events
+             SET payload_json = json_set(payload_json, '$.mission.projectId', ?1)
+             WHERE kind = 'mission.admitted'
+               AND json_extract(payload_json, '$.mission.id') = ?2",
+            rusqlite::params![Uuid::new_v4().to_string(), mission.id.to_string()],
+        )
+        .unwrap();
+    assert_eq!(
+        changed, 1,
+        "the arrangement did not corrupt the admission Event"
+    );
+    assert!(matches!(
+        Supervisor::bootstrap(StartupConfig {
+            store_path: store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        }),
+        Err(beacond::SupervisorError::MissionEventMismatch(_))
+    ));
+
+    let reread = beacond::verified_completion_within(&connection, store.workspace_id, &digest);
+    assert!(
+        reread.is_err(),
+        "the completion reader accepted a boundary from an admission Event its owning reader refuses"
+    );
+}
+
+#[test]
 fn a_gap_a_duplicate_and_an_ordinal_past_the_end_are_three_distinguishable_refusals() {
     // Bullet 2 and bullet 3. A duplicate and an ordinal past the end are refused by the STORE -- the
     // primary key and the foreign key to `mission_success_conditions` -- and a gap by the reader's
