@@ -220,7 +220,7 @@ pub use team::{
 pub use worktree::set_pinned_spawn_hook;
 pub use worktree::{CleanupOutcome, KeepReason, Worktree, WorktreeError};
 
-const SCHEMA_VERSION: i64 = 29;
+const SCHEMA_VERSION: i64 = 30;
 const MAX_WORKSPACE_NAME_CHARS: usize = 120;
 
 const SCHEMA_V1: &str = include_str!("../migrations/0001_initial.sql");
@@ -273,6 +273,10 @@ const MIGRATION_V28: &str = include_str!("../migrations/0028_evaluation_subjects
 // PROVISIONAL, for the same reason as 0028: `main` is at 0028 and more than one lane in this
 // window wants a number. This one adds NO Event kind, so it does not rebuild `events`.
 const MIGRATION_V29: &str = include_str!("../migrations/0029_outcome_manifests.sql");
+// PROVISIONAL (R22): the grammar revision landed after 0029 merged, so the CHECK that pins the
+// manifest canonicalizer moves by migration rather than by edit.
+const MIGRATION_V30: &str =
+    include_str!("../migrations/0030_outcome_manifest_canonicalizer_v2.sql");
 
 #[derive(Debug, Clone)]
 pub struct StartupConfig {
@@ -873,6 +877,7 @@ const MIGRATION_LADDER: &[(i64, &str)] = &[
     (27, MIGRATION_V27),
     (28, MIGRATION_V28),
     (29, MIGRATION_V29),
+    (30, MIGRATION_V30),
 ];
 
 /// Applies the ladder up to and including `version` -- a store at that schema, from nothing.

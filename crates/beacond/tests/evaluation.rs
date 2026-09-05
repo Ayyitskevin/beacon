@@ -751,7 +751,7 @@ fn a_recorded_evaluation_is_immutable_and_survives_startup_verification() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .expect("startup verifies the Evaluation");
-    assert_eq!(report.diagnostics.schema_version, 29);
+    assert_eq!(report.diagnostics.schema_version, 30);
     assert_eq!(
         evaluations.get(&evaluation.digest().value).unwrap(),
         evaluation
@@ -3002,7 +3002,7 @@ fn migration_0028_preserves_preexisting_proposal_evaluation_bytes_and_chain() {
              SELECT workspace_id, subject_digest, evaluation_digest,
                     supersedes_evaluation_digest
              FROM supersessions_snapshot;
-             UPDATE schema_meta SET version = 27 WHERE singleton = 1 AND version = 29;
+             UPDATE schema_meta SET version = 27 WHERE singleton = 1 AND version = 30;
              COMMIT;",
         )
         .unwrap();
