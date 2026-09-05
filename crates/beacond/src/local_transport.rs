@@ -2166,6 +2166,7 @@ fn wire_error_from_outcome(error: PublishRefusal) -> WireError {
         | PublishRefusal::VersionGap { .. }
         | PublishRefusal::AlreadyPublished
         | PublishRefusal::MissionBindingBroken { .. }
+        | PublishRefusal::CandidateIsNotMissionScoped { .. }
         | PublishRefusal::QualifyingVerdictNotMeets
         | PublishRefusal::HistoryNotContiguous { .. }
         | PublishRefusal::Unverified(_)
