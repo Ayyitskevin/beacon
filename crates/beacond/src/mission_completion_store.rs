@@ -304,14 +304,15 @@ pub fn verified_completion_within(
     // count below would report a missing row rather than the row that is actually wrong.
     let mut statement = connection
         .prepare(
-            "SELECT workspace_id, condition_ordinal, outcome FROM mission_completion_conditions
+            "SELECT workspace_id, mission_id, condition_ordinal, outcome
+             FROM mission_completion_conditions
              WHERE completion_digest = ?1
              ORDER BY condition_ordinal",
         )
         .map_err(store)?;
-    let stored_conditions: Vec<(String, i64, String)> = statement
+    let stored_conditions: Vec<(String, String, i64, String)> = statement
         .query_map(params![digest_value], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
         })
         .map_err(store)?
         .collect::<Result<Vec<_>, _>>()
@@ -328,9 +329,10 @@ pub fn verified_completion_within(
     // else -- and the rows come back in ordinal order, so the two line up positionally. Each pair
     // is compared field by field, and a disagreement names the row and the column: "a condition row
     // disagrees" and "which one, about what" are different amounts of help.
-    for ((stored_workspace, stored_ordinal, stored_outcome), result) in stored_conditions
-        .iter()
-        .zip(record.condition_results.iter())
+    for ((stored_workspace, stored_mission, stored_ordinal, stored_outcome), result) in
+        stored_conditions
+            .iter()
+            .zip(record.condition_results.iter())
     {
         if stored_workspace != &record.workspace_id.to_string() {
             return Err(CompletionReadRefusal::ConditionProjectionDisagrees {
@@ -351,6 +353,17 @@ pub fn verified_completion_within(
         // loud what it assumes about the pairing. Any change to the child key or that foreign key
         // makes this reachable, and then it needs a test. It is reported as unwitnessed rather than
         // counted as covered.
+        // The child's own `mission_id`. Its foreign key points at a Mission CONDITION, not at this
+        // completion's Mission, so a row can name a different Mission's ordinal and satisfy every
+        // key in the schema -- sol1 retargeted the one row to a real second Mission and the reader
+        // returned the first Mission's completion. The Mission compared against is the one in the
+        // completion's canonical bytes, never the column beside them.
+        if stored_mission != &record.mission_id.to_string() {
+            return Err(CompletionReadRefusal::ConditionProjectionDisagrees {
+                ordinal: result.ordinal,
+                column: "mission_id",
+            });
+        }
         if u32::try_from(*stored_ordinal) != Ok(result.ordinal) {
             return Err(CompletionReadRefusal::ConditionProjectionDisagrees {
                 ordinal: result.ordinal,
