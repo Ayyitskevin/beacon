@@ -68,6 +68,11 @@ const MAX_CONTENT_BYTES: u64 = 1024 * 1024;
 /// `sha256`, `beacon.raw.v1`, `text/markdown; charset=utf-8`: the limit bounds a declared length
 /// before any of it is read.
 const MAX_TOKEN_BYTES: usize = 64;
+/// The most hops a supersession walk follows before refusing by name (sol1's seams read, P1):
+/// the walk re-proves and retains one record per hop, so a chain with no bound is a chain-sized
+/// read and allocation before any refusal. Checked BEFORE each read; the Evaluation walk owns the
+/// same bound, by the same name, for the same reason.
+const MAX_SUPERSESSION_HOPS: usize = 256;
 const DIGEST_HEX_CHARS: usize = 64;
 
 // One-byte tags. Assigned explicitly and never renumbered. `0x00` is assigned only where absence is
@@ -663,6 +668,11 @@ pub enum ArtifactError {
     /// The digest exists and the bytes or content behind it differ. Never an idempotent match.
     DigestCollision,
     InvalidStore,
+    /// A supersession walk reached `MAX_SUPERSESSION_HOPS` without finding its tail: refused
+    /// there, by name, before the next record is read.
+    SupersessionTooLong {
+        bound: usize,
+    },
     Store(rusqlite::Error),
     Json(serde_json::Error),
 }
@@ -685,6 +695,10 @@ impl fmt::Display for ArtifactError {
                 "an Artifact with that digest exists and its bytes or content differ"
             ),
             Self::InvalidStore => write!(formatter, "Artifact state is invalid"),
+            Self::SupersessionTooLong { bound } => write!(
+                formatter,
+                "the supersession chain is longer than {bound} hops and was not followed"
+            ),
             Self::Store(error) => write!(formatter, "Artifact store failed: {error}"),
             Self::Json(error) => write!(formatter, "Artifact event is invalid: {error}"),
         }
@@ -1041,6 +1055,13 @@ pub(crate) fn supersession_tail(
     let mut chain = Vec::new();
     let mut current = digest_value.to_owned();
     loop {
+        // `chain` holds the records read so far, the cited one included; a walk about to read past
+        // `MAX_SUPERSESSION_HOPS` hops is refused by name BEFORE that read (sol1's seams read, P1).
+        if chain.len() > MAX_SUPERSESSION_HOPS {
+            return Err(ArtifactError::SupersessionTooLong {
+                bound: MAX_SUPERSESSION_HOPS,
+            });
+        }
         let Some(verified) = verified_artifact_within(connection, workspace_id, &current)? else {
             return Err(ArtifactError::InvalidStore);
         };

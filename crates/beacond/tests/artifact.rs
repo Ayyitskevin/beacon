@@ -1450,3 +1450,57 @@ fn digest_raw(hex: &str) -> [u8; 32] {
     bytes.copy_from_slice(&decoded);
     bytes
 }
+
+/// The Artifact tail walk owns the same bound as the Evaluation one (sol1's seams read, P1): a
+/// chain of exactly the bound's hops walks to its tail, one hop longer is refused by name. The
+/// chain is built through the writer, which checks only that each predecessor is the current tail
+/// and never walks, so the store CAN hold a chain the reader refuses -- which is the point.
+#[test]
+fn a_supersession_chain_past_the_bound_is_refused_by_name_before_it_is_walked() {
+    const BOUND: usize = 256;
+    let fixture = admitted_mission("artifact-tail-bound");
+    let first = fixture.record_doc(b"# v0\n");
+    let mut tail = first.digest().value.clone();
+    for hop in 1..=BOUND {
+        tail = fixture
+            .artifacts
+            .record(
+                ArtifactKind::OutcomeDocument,
+                format!("# v{hop}\n").as_bytes(),
+                ArtifactContext::None,
+                fixture.resident_id,
+                fixture.configuration_id,
+                Some(digest_raw(&tail)),
+            )
+            .unwrap()
+            .digest()
+            .value
+            .clone();
+    }
+    let walked = fixture
+        .artifacts
+        .list_supersession_tail(&first.digest().value)
+        .expect("a chain of exactly the bound walks");
+    assert_eq!(walked.len(), BOUND + 1);
+    assert_eq!(walked.last().unwrap().value, tail);
+
+    fixture
+        .artifacts
+        .record(
+            ArtifactKind::OutcomeDocument,
+            b"# one past the bound\n",
+            ArtifactContext::None,
+            fixture.resident_id,
+            fixture.configuration_id,
+            Some(digest_raw(&tail)),
+        )
+        .expect("the writer checks the current tail, it does not walk");
+    let error = fixture
+        .artifacts
+        .list_supersession_tail(&first.digest().value)
+        .expect_err("one hop past the bound is refused");
+    assert!(
+        matches!(error, ArtifactError::SupersessionTooLong { bound } if bound == BOUND),
+        "{error:?}"
+    );
+}
