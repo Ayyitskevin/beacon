@@ -717,6 +717,63 @@ impl Fixture {
         digest
     }
 
+    /// A second Mission in the SAME Workspace, Project and Team, reusing the admitted roster.
+    ///
+    /// `admit_mission_in` cannot be called twice for one Workspace -- it admits the starter
+    /// organization, and a Resident's initial Configuration decision is recorded once
+    /// (`DecisionAlreadyRecorded`). What a second Mission needs is a second `MissionService::admit`
+    /// over the roster that already exists.
+    fn admit_second_mission(&self, desired_outcome: &str) -> Fixture {
+        let team_id: Uuid = self
+            .store
+            .connect()
+            .query_row(
+                "SELECT id FROM teams WHERE workspace_id = ?1 AND project_id = ?2 LIMIT 1",
+                params![self.workspace_id.to_string(), self.project_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .map(|id| Uuid::parse_str(&id).unwrap())
+            .expect("the fixture's Team exists");
+        let members = vec![
+            MissionMemberDraft {
+                resident_id: self.resident_id,
+                expected_configuration_id: self.configuration_id,
+            },
+            MissionMemberDraft {
+                resident_id: self.other_resident_id,
+                expected_configuration_id: self.other_configuration_id,
+            },
+        ];
+        let mission = MissionService::new(Arc::clone(&self.accounts), self.workspace_id)
+            .admit(MissionDraft {
+                project_id: self.project_id,
+                expected_charter_revision: self.charter_revision,
+                team_id,
+                desired_outcome: desired_outcome.to_owned(),
+                success_conditions: vec![CONDITION_TEXT.to_owned()],
+                constraints: vec!["Keep the change reversible".to_owned()],
+                prohibitions: vec!["Do not deploy".to_owned()],
+                members,
+            })
+            .expect("a second Mission is admitted in the same Workspace");
+        Fixture {
+            outcomes: OutcomeService::new(Arc::clone(&self.accounts), self.workspace_id),
+            store: TestStore {
+                path: self.store.path.clone(),
+            },
+            accounts: Arc::clone(&self.accounts),
+            workspace_id: self.workspace_id,
+            project_id: self.project_id,
+            mission_id: mission.id,
+            resident_id: self.resident_id,
+            configuration_id: self.configuration_id,
+            other_resident_id: self.other_resident_id,
+            other_configuration_id: self.other_configuration_id,
+            policy_revision: self.policy_revision,
+            charter_revision: self.charter_revision,
+        }
+    }
+
     fn artifacts(&self) -> ArtifactService {
         ArtifactService::new(Arc::clone(&self.accounts), self.workspace_id)
     }
@@ -6202,5 +6259,121 @@ fn the_history_lists_a_version_whose_document_no_longer_verifies() {
     assert_eq!(
         history[0].candidate_artifact_digest,
         unrelated.digest().value
+    );
+}
+
+/// The history and the export are readers over ONE Mission's rows, and this is the test that can
+/// tell.
+///
+/// Fable's mutant relaxed `publication_history_within`'s filter to
+/// `(mission_id = ?2 OR 1 = 1)` and the whole suite stayed green: every other fixture publishes one
+/// Mission per Workspace, so "a reader over the relation's own key" was a claim nothing could see. A
+/// store with two published Missions would have listed the other Mission's versions under this one,
+/// with digests and an `is_current` belonging to someone else.
+///
+/// Two Missions in ONE Workspace, with DIFFERENT version counts (a: 1, b: 2) so a leak cannot hide
+/// behind matching shapes.
+#[test]
+fn the_history_and_the_export_read_one_missions_rows_and_not_another_missions() {
+    let fixture = admitted_mission("two-mission-history");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, a_digest, a_evaluation) = fixture.publishable();
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &a_digest, &a_evaluation)
+        .expect("Mission a publishes version 1");
+    let a_bytes = fixture
+        .outcomes
+        .export_markdown(fixture.mission_id)
+        .expect("Mission a exports")
+        .bytes()
+        .to_vec();
+
+    // A SECOND Mission in the SAME Workspace, published twice.
+    let b_fixture = fixture.admit_second_mission("Ship a second reviewed Beacon feature.");
+    b_fixture.classify(ImpactLevel::Ordinary);
+    b_fixture.complete((b_fixture.resident_id, b_fixture.configuration_id));
+    let (_, b_first_digest, b_first_evaluation) = b_fixture.publishable();
+    b_fixture
+        .outcomes
+        .publish(b_fixture.mission_id, &b_first_digest, &b_first_evaluation)
+        .expect("Mission b publishes version 1");
+    let b_corrected = b_fixture
+        .outcomes
+        .prepare_for_mission(b_fixture.mission_id, AppendixRequest::Include)
+        .expect("Mission b's correction prepares");
+    let b_corrected_record = b_fixture
+        .artifacts()
+        .get(&b_corrected.candidate_artifact_digest)
+        .unwrap();
+    let b_corrected_evaluation =
+        b_fixture.evaluate(&b_corrected.candidate_artifact_digest, Verdict::Meets);
+    b_fixture
+        .outcomes
+        .publish(
+            b_fixture.mission_id,
+            b_corrected_record.digest(),
+            b_corrected_evaluation.digest(),
+        )
+        .expect("Mission b publishes version 2");
+
+    // Mission a: ONE version, a's digests, a's count.
+    let a_history = fixture
+        .outcomes
+        .publication_history(fixture.mission_id)
+        .expect("Mission a's history reads");
+    assert_eq!(
+        a_history.len(),
+        1,
+        "Mission a's history carried another Mission's versions"
+    );
+    assert_eq!(a_history[0].publication_version, 1);
+    assert!(a_history[0].is_current);
+    assert_eq!(a_history[0].candidate_artifact_digest, a_digest.value);
+    assert_eq!(a_history[0].evaluation_digest, a_evaluation.value);
+
+    // Mission b: TWO versions, b's digests.
+    let b_history = b_fixture
+        .outcomes
+        .publication_history(b_fixture.mission_id)
+        .expect("Mission b's history reads");
+    assert_eq!(b_history.len(), 2);
+    assert_eq!(
+        (
+            b_history[0].publication_version,
+            b_history[1].publication_version
+        ),
+        (2, 1)
+    );
+    assert_eq!(
+        b_history[0].candidate_artifact_digest,
+        b_corrected_record.digest().value
+    );
+    assert_eq!(b_history[1].candidate_artifact_digest, b_first_digest.value);
+    // No row of one Mission's history belongs to the other.
+    for row in &b_history {
+        assert_ne!(row.candidate_artifact_digest, a_digest.value);
+    }
+
+    // And export: Mission a has no version 2, even though the Workspace does.
+    let missing = fixture
+        .outcomes
+        .export_markdown_version(fixture.mission_id, 2)
+        .expect_err("Mission a exported a version only Mission b has");
+    assert!(matches!(missing, PublishRefusal::Absent), "{missing:?}");
+    // Mission a's current export is still a's own bytes, and the count is a's.
+    let a_current = fixture
+        .outcomes
+        .export_markdown(fixture.mission_id)
+        .expect("Mission a still exports");
+    assert_eq!(a_current.bytes(), a_bytes.as_slice());
+    assert_eq!(
+        (
+            a_current.publication_version(),
+            a_current.publication_version_count()
+        ),
+        (1, 1),
+        "Mission a's count counted another Mission's publications"
     );
 }
