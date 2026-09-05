@@ -1185,6 +1185,66 @@ fn collector_reads_each_source_through_its_owning_verified_reader() {
     assert_eq!(collected_artifact.workspace_id, fixture.store.workspace_id);
 }
 
+#[test]
+fn verified_completion_refuses_condition_rows_belonging_to_another_mission() {
+    let fixture = admitted(
+        "completion-condition-cross-mission",
+        vec!["Gates pass".to_owned()],
+    );
+    let boundary = newest_event(&fixture.store);
+    let completion = fixture.completion(
+        boundary,
+        vec![ConditionOutcome::Met],
+        SpendReference::NotMeasured("no ledger was read".to_owned()),
+    );
+    let digest = fixture.record(&completion);
+
+    let other_mission = Uuid::new_v4();
+    let connection = fixture.connection();
+    connection
+        .execute(
+            "INSERT INTO missions SELECT ?1, workspace_id, project_id, charter_revision, team_id,
+                    desired_outcome, success_conditions_json, constraints_json, prohibitions_json,
+                    lifecycle, admitted_by, admitted_at_ms
+               FROM missions WHERE id = ?2",
+            params![other_mission.to_string(), fixture.mission.id.to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO mission_admission_members
+               SELECT workspace_id, ?1, team_id, position, resident_id, configuration_id
+               FROM mission_admission_members WHERE mission_id = ?2",
+            params![other_mission.to_string(), fixture.mission.id.to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO mission_success_conditions
+               SELECT workspace_id, ?1, ordinal, text
+               FROM mission_success_conditions WHERE mission_id = ?2",
+            params![other_mission.to_string(), fixture.mission.id.to_string()],
+        )
+        .unwrap();
+    connection
+        .execute_batch("DROP TRIGGER mission_completion_conditions_no_update;")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE mission_completion_conditions SET mission_id = ?1
+             WHERE completion_digest = ?2",
+            params![other_mission.to_string(), digest],
+        )
+        .unwrap();
+
+    let result =
+        beacond::verified_completion_within(&connection, fixture.store.workspace_id, &digest);
+    assert!(
+        result.is_err(),
+        "completion reader accepted condition rows owned by Mission {other_mission}: {result:?}",
+    );
+}
+
 /// §7 slice 2. A digest that exists is not a digest that is yours.
 ///
 /// The point of the test is the *second* Workspace being real: a random UUID would prove only that
