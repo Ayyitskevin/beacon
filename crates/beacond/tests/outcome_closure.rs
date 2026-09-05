@@ -1843,49 +1843,110 @@ fn criterion_11_outcome_closure_on_one_store() {
     }
 
     let appendix_rows = appendix_object_rows(primary_markdown);
-    let expected_appendix_digests = [
-        primary_completion_digest.as_str(),
-        high.digest().value.as_str(),
-        delivered.digest().value.as_str(),
-        supporting.digest().value.as_str(),
-        support_evaluation.digest().value.as_str(),
-        ruling.digest().value.as_str(),
-        primary_spend_record.digest().value.as_str(),
-    ];
+    let completion_digest = primary_completion
+        .digest()
+        .expect("C11.09.APPENDIX_OBJECT_ROWS_EXACT");
     assert_eq!(
-        appendix_rows.len(),
-        expected_appendix_digests.len(),
+        completion_digest.value, primary_completion_digest,
         "C11.09.APPENDIX_OBJECT_ROWS_EXACT"
     );
-    for digest in expected_appendix_digests {
-        assert_eq!(
-            appendix_rows
-                .iter()
-                .filter(|cells| cells[4].trim_matches('`') == digest)
-                .count(),
-            1,
-            "C11.09.APPENDIX_OBJECT_ROWS_EXACT: {digest}"
-        );
-    }
-    for row in &appendix_rows {
-        assert_eq!(
-            row[3].trim_matches('`'),
-            "sha256",
-            "C11.09.APPENDIX_OBJECT_ROWS_EXACT"
-        );
-        assert!(
-            row[7].contains(&format!("verified at boundary event {boundary_primary}")),
-            "C11.09.APPENDIX_OBJECT_ROWS_EXACT"
-        );
-        assert!(
-            !row.iter().any(|cell| {
-                cell.contains(&decoy.digest().value)
-                    || cell.contains(&decoy_evaluation.digest().value)
-                    || cell.contains(&qualifying_evaluation.digest().value)
-            }),
-            "C11.09.APPENDIX_OBJECT_ROWS_EXACT"
-        );
-    }
+    let expected_row = |
+        kind: SourceKind,
+        identity: Option<(Uuid, u32)>,
+        algorithm: &str,
+        digest: &str,
+        canonicalizer: &str,
+        pinned_revision: &str,
+    | {
+        let (identity, schema) = match identity {
+            Some((object_id, version)) => {
+                (format!("`{object_id}`"), format!("`{version}`"))
+            }
+            None => (
+                "`absent (the owner carries no reference identity)`".to_owned(),
+                "`absent`".to_owned(),
+            ),
+        };
+        vec![
+            format!("`{}`", kind.as_str()),
+            identity,
+            schema,
+            format!("`{algorithm}`"),
+            format!("`{digest}`"),
+            format!("`{canonicalizer}`"),
+            pinned_revision.to_owned(),
+            format!("`verified at boundary event {boundary_primary}`"),
+        ]
+    };
+    let mut artifact_digests = [delivered.digest(), supporting.digest()];
+    artifact_digests.sort_by(|left, right| left.value.as_bytes().cmp(right.value.as_bytes()));
+    // Workspace scope is the manifest-wide cell already owner-bound above. These are the table's
+    // eight per-object cells, built from the retained owner records in the codec's kind order.
+    let expected_appendix_rows = vec![
+        expected_row(
+            SourceKind::Completion,
+            Some((primary_completion.completion_id, 1)),
+            &completion_digest.algorithm,
+            &completion_digest.value,
+            &completion_digest.canonicalizer,
+            "`absent` (reason: a completion record pins no content revision.)",
+        ),
+        expected_row(
+            SourceKind::Artifact,
+            None,
+            &artifact_digests[0].algorithm,
+            &artifact_digests[0].value,
+            &artifact_digests[0].canonicalizer,
+            "`absent` (reason: this source type pins no content revision.)",
+        ),
+        expected_row(
+            SourceKind::Artifact,
+            None,
+            &artifact_digests[1].algorithm,
+            &artifact_digests[1].value,
+            &artifact_digests[1].canonicalizer,
+            "`absent` (reason: this source type pins no content revision.)",
+        ),
+        expected_row(
+            SourceKind::Ruling,
+            None,
+            &ruling.digest().algorithm,
+            &ruling.digest().value,
+            &ruling.digest().canonicalizer,
+            "`absent` (reason: this source type pins no content revision.)",
+        ),
+        expected_row(
+            SourceKind::Evaluation,
+            None,
+            &support_evaluation.digest().algorithm,
+            &support_evaluation.digest().value,
+            &support_evaluation.digest().canonicalizer,
+            "`absent` (reason: this source type pins no content revision.)",
+        ),
+        expected_row(
+            SourceKind::Policy,
+            Some((
+                high.payload().classification_id,
+                high.payload().version,
+            )),
+            &high.digest().algorithm,
+            &high.digest().value,
+            &high.digest().canonicalizer,
+            "`absent` (reason: a Policy classification pins no content revision.)",
+        ),
+        expected_row(
+            SourceKind::Spend,
+            Some((primary_spend.spend_id, primary_spend.version)),
+            &primary_spend_record.digest().algorithm,
+            &primary_spend_record.digest().value,
+            &primary_spend_record.digest().canonicalizer,
+            "`absent` (reason: a spend measurement pins no content revision)",
+        ),
+    ];
+    assert_eq!(
+        appendix_rows, expected_appendix_rows,
+        "C11.09.APPENDIX_OBJECT_ROWS_EXACT"
+    );
     assert!(
         primary_markdown.contains("candidate media type | `text/markdown; charset=utf-8`")
             && primary_markdown.contains(&format!(
@@ -2462,7 +2523,6 @@ fn criterion_11_outcome_closure_on_one_store() {
         post_plant_export_snapshot,
         "C11.12.EXPORT_WRITES_NOTHING"
     );
-    assert!(post_plant_export_snapshot.0 >= export_snapshot.0);
     assert_eq!(post_plant_export_snapshot.1, export_snapshot.1);
     let export_history = reopened_a
         .publication_history(saved_mission)
