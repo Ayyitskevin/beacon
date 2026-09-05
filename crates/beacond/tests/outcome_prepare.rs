@@ -3252,3 +3252,173 @@ fn publish_refuses_mission_mismatch_from_the_envelope_not_a_join() {
         "{refusal:?}"
     );
 }
+
+/// A correction is version n+1 BESIDE version n, never an edit of it (R12.11).
+///
+/// The corrected Outcome goes through the real path end to end: a second `prepare` with a different
+/// appendix request renders different Markdown, so it is a different manifest and a different
+/// candidate, and a second independent Evaluation qualifies it. Publishing it leaves version 1
+/// exactly where it was -- same publication id, same cited digests. `get` follows the newest;
+/// `get_version` still answers for the old one, which is what "preserves" has to mean.
+#[test]
+fn correction_creates_new_version_and_preserves_superseded_outcome() {
+    let fixture = admitted_mission("outcome-correction");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, first_digest, first_evaluation) = fixture.publishable();
+    let first = fixture
+        .outcomes
+        .publish(fixture.mission_id, &first_digest, &first_evaluation)
+        .expect("the first publication");
+    assert_eq!(first.publication_version(), 1);
+
+    // The correction, through `prepare`: a different appendix request is a different manifest and
+    // therefore a different candidate. No planted row anywhere.
+    let corrected = fixture
+        .outcomes
+        .prepare_for_mission(fixture.mission_id, AppendixRequest::Include)
+        .expect("the correction prepares");
+    assert_ne!(
+        corrected.candidate_artifact_digest, first_digest.value,
+        "the correction rendered the same bytes, so it is not a second candidate"
+    );
+    let corrected_record = fixture
+        .artifacts()
+        .get(&corrected.candidate_artifact_digest)
+        .unwrap();
+    let corrected_evaluation =
+        fixture.evaluate(&corrected.candidate_artifact_digest, Verdict::Meets);
+
+    let second = fixture
+        .outcomes
+        .publish(
+            fixture.mission_id,
+            corrected_record.digest(),
+            corrected_evaluation.digest(),
+        )
+        .expect("the correction publishes");
+    assert_eq!(second.publication_version(), 2);
+    assert_ne!(second.publication_id(), first.publication_id());
+
+    // Version 1 is untouched: same identity, same cited digests, still readable at its own number.
+    let preserved = fixture
+        .outcomes
+        .get_version(fixture.mission_id, 1)
+        .expect("version 1 still reads");
+    assert_eq!(preserved.publication_id(), first.publication_id());
+    assert_eq!(
+        preserved.cited_candidate_artifact_digest().value,
+        first_digest.value
+    );
+    assert_eq!(
+        preserved.cited_evaluation_digest().value,
+        first_evaluation.value
+    );
+    assert_eq!(
+        fixture
+            .outcomes
+            .get(fixture.mission_id)
+            .expect("the Mission has a current Outcome")
+            .publication_version(),
+        2
+    );
+}
+
+/// Versions are contiguous from 1, and a gap is refused by name.
+///
+/// A "version 4" whose version 2 nobody can produce is a claim about a history that does not exist.
+/// The store enforces uniqueness and the floor; contiguity needs the current maximum read inside the
+/// same transaction, so `publish` enforces it. The gap is planted directly because `publish` is
+/// exactly what cannot create one -- the shape has to come from somewhere else to be refused.
+#[test]
+fn publication_version_gap_is_refused() {
+    let fixture = admitted_mission("publication-version-gap");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, candidate_digest, evaluation_digest) = fixture.publishable();
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
+        .expect("version 1 publishes");
+
+    let planted = fixture
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            b"# Outcome (planted)\n",
+            ArtifactContext::Mission {
+                project_id: fixture.project_id,
+                mission_id: fixture.mission_id,
+            },
+            fixture.resident_id,
+            fixture.configuration_id,
+            None,
+        )
+        .expect("the planted candidate records");
+    let planted_evaluation = fixture.evaluate(&planted.digest().value, Verdict::Meets);
+    fixture
+        .store
+        .connect()
+        .execute(
+            "INSERT INTO outcome_publications (
+                 workspace_id, mission_id, publication_id, candidate_artifact_digest,
+                 evaluation_digest, publication_version
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 3)",
+            params![
+                fixture.workspace_id.to_string(),
+                fixture.mission_id.to_string(),
+                Uuid::new_v4().to_string(),
+                planted.digest().value,
+                planted_evaluation.digest().value,
+            ],
+        )
+        .expect("the planted row inserts");
+
+    let corrected = fixture
+        .outcomes
+        .prepare_for_mission(fixture.mission_id, AppendixRequest::Include)
+        .expect("the correction prepares");
+    let corrected_record = fixture
+        .artifacts()
+        .get(&corrected.candidate_artifact_digest)
+        .unwrap();
+    let corrected_evaluation =
+        fixture.evaluate(&corrected.candidate_artifact_digest, Verdict::Meets);
+    let refusal = fixture
+        .outcomes
+        .publish(
+            fixture.mission_id,
+            corrected_record.digest(),
+            corrected_evaluation.digest(),
+        )
+        .expect_err("a version was written over a gap");
+    assert!(
+        matches!(refusal, PublishRefusal::VersionGap { .. }),
+        "{refusal:?}"
+    );
+}
+
+/// A publication is a historical fact: the relation refuses an in-place edit and a delete.
+#[test]
+fn a_published_outcome_is_never_edited_or_deleted_in_place() {
+    let fixture = admitted_mission("publication-immutable");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, candidate_digest, evaluation_digest) = fixture.publishable();
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
+        .expect("the pairing publishes");
+
+    let connection = fixture.store.connect();
+    let edited = connection.execute(
+        "UPDATE outcome_publications SET publication_version = 9 WHERE workspace_id = ?1",
+        params![fixture.workspace_id.to_string()],
+    );
+    assert!(edited.is_err(), "a publication was edited in place");
+    let deleted = connection.execute(
+        "DELETE FROM outcome_publications WHERE workspace_id = ?1",
+        params![fixture.workspace_id.to_string()],
+    );
+    assert!(deleted.is_err(), "a publication was deleted");
+}
