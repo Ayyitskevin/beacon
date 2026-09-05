@@ -5353,3 +5353,72 @@ fn c11d_recorded_delivery_can_complete_through_its_owner() {
     );
     record_completion(&mut f.store.connect(), &record).expect("C11.04.DELIVERED_ARTIFACT_ACCEPTED");
 }
+
+/// Today's behaviour, pinned before it changes (R32.2 changes it).
+///
+/// A spend whose measured window ends BEFORE the completion's boundary reaches the manifest as
+/// `Measured` -- complete coverage -- because `spend_for` reads the record's own tag and never
+/// compares `coverage_to_event_seq` against the cut. R21.3 says such a window is collected as
+/// `partially_measured`; this is the sentence the next commit makes false.
+///
+/// It is deleted by that commit and replaced by astra's own probe.
+#[test]
+fn a_short_spend_window_reaches_the_manifest_as_measured() {
+    use beacond::{
+        MeasuredSpendService, MeasuredSpendV1, SpendLine, SpendMeasurement, SpendMeasurementKind,
+        SpendOrigin, SpendSupersedes, SpendTotals,
+    };
+    let f = admitted_mission("r32-spend-today");
+    f.classify(ImpactLevel::High);
+    let spend = MeasuredSpendV1 {
+        workspace_id: f.workspace_id,
+        mission_id: f.mission_id,
+        spend_id: Uuid::new_v4(),
+        version: 1,
+        origin: SpendOrigin::DaemonLedger,
+        measured_at_ms: 1_788_400_000_000,
+        coverage_from_event_seq: 1,
+        coverage_to_event_seq: f.latest_event_seq(),
+        measurement: SpendMeasurement::Measured(SpendTotals {
+            counted_units: 1,
+            lines: vec![SpendLine {
+                unit: "USD".to_owned(),
+                amount_minor: 1234,
+                minor_units_exponent: 2,
+            }],
+        }),
+        supersedes: SpendSupersedes::None,
+    };
+    let stored = MeasuredSpendService::new(Arc::clone(&f.accounts), f.workspace_id)
+        .record(&spend.canonical_bytes().unwrap())
+        .expect("the spend records through its owner");
+    let record = c11d_completion(
+        &f,
+        SpendReference::Recorded {
+            spend_id: spend.spend_id,
+            spend_version: spend.version,
+            spend_sha256: digest_bytes(&stored.digest().value),
+        },
+        vec![],
+    );
+    assert!(
+        spend.coverage_to_event_seq < record.boundary_event_seq,
+        "the window does not end before the cut, so this proves nothing"
+    );
+    record_completion(&mut f.store.connect(), &record).expect("the completion records");
+    let candidate = f
+        .outcomes
+        .prepare_for_mission(f.mission_id, AppendixRequest::PolicyDefault)
+        .expect("the candidate prepares");
+    let manifest = f.outcomes.manifest(&candidate.manifest_digest).unwrap();
+    assert_eq!(
+        manifest
+            .manifest()
+            .spend_ref
+            .verified()
+            .unwrap()
+            .measurement,
+        SpendMeasurementKind::Measured,
+        "the short window is reported as complete coverage"
+    );
+}
