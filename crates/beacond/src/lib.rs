@@ -136,9 +136,9 @@ pub use operator_account::{
 pub use outcome::{
     AppendixMode, AppendixRequest, BoundRefusal, ConditionResult, MalformedOutcome, NarrativeRef,
     OutcomeBound, OutcomeManifestV1, OutcomeRefusal, OutcomeState, PinnedRevision,
-    RETIRED_CANONICALIZER, ReceiptRef, RevisionKind, SourceDigest, SourceKind, SourceMismatch,
-    SourceRef, SpendRef, SuccessCondition, VerifiedArtifact, VerifiedSources, VerifiedText,
-    compare_canonical_keys, render,
+    RETIRED_CANONICALIZER, ReceiptRef, ReferenceIdentity, RevisionKind, SourceDigest, SourceKind,
+    SourceMismatch, SourceRef, SpendRef, SuccessCondition, VerifiedArtifact, VerifiedSources,
+    VerifiedText, compare_canonical_keys, render,
 };
 pub use outcome_collector::{
     CollectedClassification, CollectedCompletion, CollectedCondition, CollectedDigest,

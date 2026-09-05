@@ -113,12 +113,26 @@ fn digest(canonicalizer: &str, value: String) -> SourceDigest {
     }
 }
 
+/// R18.5: the identity is present exactly where the owning record carries one. The helper keeps
+/// its arguments so call sites read as they did; for a kind whose records have no UUID the `id` and
+/// `version` are simply not cited, because the manifest never mints one.
+fn identity_for(kind: SourceKind, id: &str, version: u32) -> Option<beacond::ReferenceIdentity> {
+    match kind {
+        SourceKind::Completion | SourceKind::Policy | SourceKind::Spend => {
+            Some(beacond::ReferenceIdentity {
+                object_id: uuid(id),
+                schema_version: version,
+            })
+        }
+        _ => None,
+    }
+}
+
 fn source(kind: SourceKind, id: &str, canonicalizer: &str, byte: &str, version: u32) -> SourceRef {
     SourceRef {
         workspace_id: uuid(WORKSPACE),
         kind,
-        object_id: uuid(id),
-        schema_version: version,
+        identity: identity_for(kind, id, version),
         digest: digest(canonicalizer, hex32(byte)),
         pinned_revision: OutcomeState::Absent(
             "this source type pins no content revision.".to_owned(),
@@ -251,7 +265,7 @@ fn vector_sources() -> VerifiedSources {
             text("sc-gamma", "The check harness runs on a clean host."),
         ],
         artifacts: vec![VerifiedArtifact {
-            object_id: uuid(ARTIFACT),
+            digest_value: hex32("44"),
             media_type: "text/markdown; charset=utf-8".to_owned(),
             title: "Exporter design note (v3)".to_owned(),
         }],
@@ -329,8 +343,15 @@ fn push_source(
 ) {
     out.extend_from_slice(uuid(WORKSPACE).as_bytes());
     out.push(kind);
-    out.extend_from_slice(uuid(id).as_bytes());
-    out.extend_from_slice(&version.to_be_bytes());
+    // Presence tag, then the identity only for the kinds whose records carry one: 0x02 completion,
+    // 0x07 policy, 0x08 spend.
+    if matches!(kind, 0x02 | 0x07 | 0x08) {
+        out.push(0x02);
+        out.extend_from_slice(uuid(id).as_bytes());
+        out.extend_from_slice(&version.to_be_bytes());
+    } else {
+        out.push(0x01);
+    }
     push_digest(out, canonicalizer, &hex32(byte));
     push_absent(out, "this source type pins no content revision.");
 }
@@ -338,8 +359,8 @@ fn push_source(
 fn push_pinned_artifact(out: &mut Vec<u8>) {
     out.extend_from_slice(uuid(WORKSPACE).as_bytes());
     out.push(0x03);
-    out.extend_from_slice(uuid(ARTIFACT).as_bytes());
-    out.extend_from_slice(&1_u32.to_be_bytes());
+    // v2: presence tag, none -- an Artifact carries no reference identity (R16, R18.5).
+    out.push(0x01);
     push_digest(out, "beacon.artifact.v1", &hex32("44"));
     out.push(0x01);
     out.push(0x01);
@@ -447,8 +468,7 @@ fn bounded_manifest(artifacts: usize) -> (OutcomeManifestV1, VerifiedSources) {
         .map(|index| SourceRef {
             workspace_id: uuid(WORKSPACE),
             kind: SourceKind::Artifact,
-            object_id: Uuid::from_u128(0x1000_0000_u128 + index as u128),
-            schema_version: 1,
+            identity: None,
             digest: digest("beacon.artifact.v1", format!("{index:064x}")),
             pinned_revision: OutcomeState::Absent("no revision.".to_owned()),
         })
@@ -456,7 +476,7 @@ fn bounded_manifest(artifacts: usize) -> (OutcomeManifestV1, VerifiedSources) {
     let values: Vec<VerifiedArtifact> = refs
         .iter()
         .map(|reference| VerifiedArtifact {
-            object_id: reference.object_id,
+            digest_value: reference.digest.value.clone(),
             media_type: "text/plain".to_owned(),
             title: "delivered".to_owned(),
         })
@@ -528,8 +548,9 @@ fn outcome_markdown_is_byte_identical_for_same_manifest_across_insertion_orders(
     }
 
     // A second delivered Artifact, inserted in each order, so reversing is observable.
+    // Distinct from the first delivered Artifact by its DIGEST, which is an Artifact's whole
+    // identity (R16); v1 also overrode a UUID here that the record never carried.
     let extra = SourceRef {
-        object_id: uuid(SPEND),
         digest: digest("beacon.artifact.v1", hex32("aa")),
         ..source(
             SourceKind::Artifact,
@@ -548,8 +569,9 @@ fn outcome_markdown_is_byte_identical_for_same_manifest_across_insertion_orders(
         refs.insert(0, extra.clone());
     }
 
-    // Two references to one object id that differ only by digest. The digest is part of the sort
-    // key, so dropping it from the key would leave these two in insertion order.
+    // Two references that differ only by digest. With no object id to share (an Artifact's identity
+    // IS its digest, R16), the digest is the whole key, and dropping it from the key would leave
+    // these two in insertion order.
     let superseded = SourceRef {
         digest: digest("beacon.artifact.v1", hex32("bb")),
         ..extra.clone()
@@ -563,9 +585,16 @@ fn outcome_markdown_is_byte_identical_for_same_manifest_across_insertion_orders(
 
     let mut sources = vector_sources();
     sources.artifacts.push(VerifiedArtifact {
-        object_id: extra.object_id,
+        digest_value: extra.digest.value.clone(),
         media_type: "text/plain".to_owned(),
         title: "Second delivered Artifact".to_owned(),
+    });
+    // One verified value per cited digest: in v1 these two shared an object id and one value served
+    // both, which was the join this renderer no longer has.
+    sources.artifacts.push(VerifiedArtifact {
+        digest_value: hex32("bb"),
+        media_type: "text/plain".to_owned(),
+        title: "Second delivered Artifact, superseded".to_owned(),
     });
 
     let left = ascending.canonical_bytes().expect("encodes");
@@ -605,7 +634,7 @@ fn outcome_source_identity_includes_the_whole_digest_envelope() {
     manifest.delivered_artifacts = OutcomeState::Verified(vec![first.clone(), second.clone()]);
     let mut sources = vector_sources();
     sources.artifacts = vec![VerifiedArtifact {
-        object_id: uuid(ARTIFACT),
+        digest_value: hex32("44"),
         media_type: "text/plain".to_owned(),
         title: "One object, two canonicalizers".to_owned(),
     }];
@@ -646,7 +675,7 @@ fn outcome_source_identity_includes_the_whole_digest_envelope() {
         refs.push(twin);
     }
     bounded_sources.artifacts.push(VerifiedArtifact {
-        object_id: base.object_id,
+        digest_value: base.digest.value.clone(),
         media_type: "text/plain".to_owned(),
         title: "twin".to_owned(),
     });
@@ -1275,6 +1304,95 @@ fn owner_condition_outcomes_map_without_collapsing_inconclusive_into_not_evaluat
 /// can verify, which is the very field the grammar revision removed. The tag stays assigned and is
 /// never reused (R13.8); no reference may carry it. Refused by name on encode AND on decode, so a
 /// byte sequence built by hand cannot get in either.
+/// R18.5, and R15's "never minted": a reference carries a UUID + schema version exactly when the
+/// owning record carries them inside its own canonical bytes. Proposal, Ruling, Evaluation and
+/// Artifact records carry none today, so a manifest that cites one WITH an identity has invented
+/// it; Completion, Policy and Spend records carry one, so a citation WITHOUT it has dropped it.
+/// Both directions, both codec sides, each refusal by name -- and presence is a tag in the bytes,
+/// so the day a record gains its UUID under R15 the rule flips without a byte moving.
+#[test]
+fn reference_identity_is_present_exactly_where_the_owner_carries_one() {
+    let minted = beacond::ReferenceIdentity {
+        object_id: uuid(PROPOSAL),
+        schema_version: 1,
+    };
+    for kind in [
+        SourceKind::Proposal,
+        SourceKind::Ruling,
+        SourceKind::Evaluation,
+        SourceKind::Artifact,
+    ] {
+        let mut manifest = vector_manifest();
+        let mut reference = source(kind, PROPOSAL, "beacon.proposal.v1", "55", 1);
+        assert!(
+            reference.identity.is_none(),
+            "{kind:?} should cite no identity"
+        );
+        reference.identity = Some(minted);
+        manifest.success_conditions[0].citations = OutcomeState::Verified(vec![reference]);
+        assert_eq!(
+            manifest
+                .canonical_bytes()
+                .expect_err("a minted identity encoded"),
+            MalformedOutcome::ReferenceIdentityNotCarried,
+            "{kind:?}"
+        );
+    }
+    for kind in [
+        SourceKind::Completion,
+        SourceKind::Policy,
+        SourceKind::Spend,
+    ] {
+        let mut manifest = vector_manifest();
+        let mut reference = source(kind, COMPLETION, "beacon.completion.v1", "22", 1);
+        assert!(
+            reference.identity.is_some(),
+            "{kind:?} should cite its identity"
+        );
+        reference.identity = None;
+        manifest.success_conditions[0].citations = OutcomeState::Verified(vec![reference]);
+        assert_eq!(
+            manifest
+                .canonical_bytes()
+                .expect_err("a dropped identity encoded"),
+            MalformedOutcome::ReferenceIdentityRequired,
+            "{kind:?}"
+        );
+    }
+
+    // Decode side: flip the presence tag of the vector's Proposal citation from none (0x01) to
+    // some (0x02). The bytes that follow are then read as a UUID + version the record never had,
+    // and the shape rule refuses before the digest is even looked at.
+    let bytes = vector_manifest().canonical_bytes().unwrap();
+    let proposal_kind_tag = find_in(&bytes, b"beacon.proposal.v1") - (32 + 8 + 6 + 8) - 1 - 1;
+    assert_eq!(
+        bytes[proposal_kind_tag], 0x04,
+        "the probe did not land on the Proposal kind tag"
+    );
+    assert_eq!(
+        bytes[proposal_kind_tag + 1],
+        0x01,
+        "the Proposal citation should carry no identity"
+    );
+    let mut minted_bytes = bytes.clone();
+    minted_bytes[proposal_kind_tag + 1] = 0x02;
+    assert!(
+        matches!(
+            OutcomeManifestV1::from_canonical_bytes(&minted_bytes),
+            Err(MalformedOutcome::ReferenceIdentityNotCarried) | Err(MalformedOutcome::Truncated)
+        ),
+        "a decoder that reads a minted identity: {:?}",
+        OutcomeManifestV1::from_canonical_bytes(&minted_bytes)
+    );
+    // An unassigned presence tag is refused as such.
+    let mut bad_tag = bytes.clone();
+    bad_tag[proposal_kind_tag + 1] = 0x07;
+    assert_eq!(
+        OutcomeManifestV1::from_canonical_bytes(&bad_tag).expect_err("refuses"),
+        MalformedOutcome::UnknownTag
+    );
+}
+
 #[test]
 fn a_mission_kind_source_ref_is_refused_anywhere_a_citation_can_appear() {
     let mut manifest = vector_manifest();
@@ -1296,7 +1414,9 @@ fn a_mission_kind_source_ref_is_refused_anywhere_a_citation_can_appear() {
     // Mission. The tag byte is the one right after that reference's Workspace UUID.
     let good = vector_manifest();
     let bytes = good.canonical_bytes().unwrap();
-    let artifact_tag = find_in(&bytes, b"beacon.artifact.v1") - (32 + 8 + 6 + 8) - 4 - 16 - 1;
+    // v2 layout: kind tag, identity presence tag (1 byte, none for an Artifact), sha256 (32),
+    // algorithm token (8 + 6), canonicalizer token prefix (8), then the text found here.
+    let artifact_tag = find_in(&bytes, b"beacon.artifact.v1") - (8 + 6 + 8 + 32) - 1 - 1;
     assert_eq!(
         bytes[artifact_tag], 0x03,
         "the probe did not land on the Artifact kind tag"
@@ -1568,7 +1688,12 @@ fn outcome_manifest_digest_changes_for_each_identity_version_digest_or_boundary_
         (
             "completion schema version",
             Box::new(|manifest: &mut OutcomeManifestV1| {
-                manifest.completion.schema_version = 2;
+                manifest
+                    .completion
+                    .identity
+                    .as_mut()
+                    .unwrap()
+                    .schema_version = 2;
             }),
         ),
         (
@@ -1717,8 +1842,10 @@ fn outcome_renderer_refuses_257th_citation_with_observed_at_least_count() {
     // (v1 staged this on the Mission reference; v2 cites the Mission by identity, so the completion
     // plays the part.)
     let (mut collide, mut collide_sources) = bounded_manifest(254);
-    collide.completion.object_id = uuid(RUN);
-    collide.completion.schema_version = 2;
+    collide.completion.identity = Some(beacond::ReferenceIdentity {
+        object_id: uuid(RUN),
+        schema_version: 2,
+    });
     collide.completion.digest = digest("beacon.outcome.receipt-checksum.v1", hex32("77"));
     collide.receipt_refs = OutcomeState::Verified(vec![ReceiptRef {
         workspace_id: uuid(WORKSPACE),

@@ -755,12 +755,20 @@ fn read_completion(
             ),
         });
     }
-    if manifest.completion.schema_version != COMPLETION_SCHEMA_VERSION {
+    // A completion carries its reference identity inside its bytes, so the citation must carry
+    // one too; the codec already refused a manifest without it, and this names the seam if a
+    // decoded value ever reaches here otherwise.
+    let Some(completion_identity) = manifest.completion.identity else {
+        return Err(PrepareRefusal::Irreconcilable {
+            detail: "the completion citation carries no reference identity".to_owned(),
+        });
+    };
+    if completion_identity.schema_version != COMPLETION_SCHEMA_VERSION {
         return Err(PrepareRefusal::Irreconcilable {
             detail: format!(
                 "the completion citation declares schema version {} and a completion is version \
                  {COMPLETION_SCHEMA_VERSION}",
-                manifest.completion.schema_version
+                completion_identity.schema_version
             ),
         });
     }
@@ -790,7 +798,11 @@ fn reconcile_completion(
     let mismatches: [(&str, String, String); 6] = [
         (
             "completion reference identity",
-            manifest.completion.object_id.to_string(),
+            manifest
+                .completion
+                .identity
+                .map(|identity| identity.object_id.to_string())
+                .unwrap_or_default(),
             record.completion_id.to_string(),
         ),
         (
@@ -863,11 +875,16 @@ fn recheck_policy(
             ),
         });
     }
+    let Some(policy_identity) = manifest.policy_classification.identity else {
+        return Err(PrepareRefusal::Irreconcilable {
+            detail: "the Policy citation carries no reference identity".to_owned(),
+        });
+    };
     let record = verified_classification_for_citation(
         connection,
         workspace_id,
-        manifest.policy_classification.object_id,
-        manifest.policy_classification.schema_version,
+        policy_identity.object_id,
+        policy_identity.schema_version,
         &manifest.policy_classification.digest.value,
     )?
     .ok_or(PrepareRefusal::ClassificationAbsent)?;
