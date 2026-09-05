@@ -1169,6 +1169,11 @@ fn criterion_11_outcome_closure_on_one_store() {
         primary_manifest.policy_high_impact,
         "C11.05.HIGH_AT_BOUNDARY"
     );
+    assert!(
+        coverage_to_primary < boundary_primary,
+        "C11.05.PRIMARY_WINDOW_ENDS_BEFORE_THE_CUT: coverage ended at event \
+         {coverage_to_primary}, boundary is event {boundary_primary}"
+    );
     let primary_manifest_spend = primary_manifest
         .spend_ref
         .verified()
@@ -1250,9 +1255,12 @@ fn criterion_11_outcome_closure_on_one_store() {
                 gaps[0].kind, "spend_bearing_event_after_coverage",
                 "C11.05.GAP_NAMES_CAUSE"
             );
-            assert!(
-                gaps[0].detail.contains("run.preflighted")
-                    && gaps[0].detail.contains(&gap_run_seq.to_string()),
+            assert_eq!(
+                gaps[0].detail,
+                format!(
+                    "measured to event {coverage_to_gap}, but run.preflighted at event \
+                     {gap_run_seq} is inside the completion's boundary of event {boundary_gap}"
+                ),
                 "C11.05.GAP_NAMES_EVENT"
             );
         }
@@ -1422,6 +1430,31 @@ fn criterion_11_outcome_closure_on_one_store() {
             "C11.06.CONDITION_TEXT: {statement}"
         );
     }
+    let condition_section = primary_markdown
+        .split_once("## 2. Success conditions\n")
+        .and_then(|(_, rest)| rest.split_once("## 3. Delivered Artifacts\n"))
+        .map(|(section, _)| section)
+        .expect("C11.06.CONDITION_STATES_EXACT");
+    let rendered_condition_states = condition_section
+        .split("\n### 2.")
+        .skip(1)
+        .map(|condition| {
+            condition
+                .lines()
+                .find(|line| line.starts_with("- state: "))
+                .expect("C11.06.CONDITION_STATES_EXACT")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rendered_condition_states,
+        [
+            "- state: `verified` (`met`)",
+            "- state: `verified` (`not_met`)",
+            "- state: `not_evaluated` (reason: not\\_assessed)",
+            "- state: `verified` (`assessment_inconclusive`)",
+        ],
+        "C11.06.CONDITION_STATES_EXACT"
+    );
     assert!(
         primary_markdown.contains("Correct the remaining declared-check failure.")
             && primary_markdown.contains("Two verified observations still disagree."),
@@ -1514,14 +1547,25 @@ fn criterion_11_outcome_closure_on_one_store() {
         .expect("C11.06.BROKEN_CANDIDATE_READ");
     let broken_markdown =
         std::str::from_utf8(broken_record.content()).expect("C11.06.BROKEN_MARKDOWN_UTF8");
+    let broken_spend_section = broken_markdown
+        .split_once("## 5. Actual spend and coverage\n")
+        .and_then(|(_, rest)| rest.split_once("## 6. Unfinished work\n"))
+        .map(|(section, _)| section)
+        .expect("C11.06.BROKEN_SPEND_HAS_NO_AMOUNT");
     assert!(
-        broken_markdown.contains("`broken`") && broken_markdown.contains(broken_reason),
+        broken_spend_section.contains(&format!("`broken` (reason: {broken_reason})")),
         "C11.06.BROKEN_IS_A_DOMAIN_STATE"
     );
     assert!(
-        broken_markdown.contains("Manifest proof")
-            && !broken_markdown.contains("Cited objects")
-            && !broken_markdown.contains("1234"),
+        broken_spend_section.contains(
+            "No amount is stated. An unmeasured or absent spend record is not zero spend."
+        ) && !broken_spend_section
+            .lines()
+            .any(|line| line.starts_with("| amount |")),
+        "C11.06.BROKEN_SPEND_HAS_NO_AMOUNT"
+    );
+    assert!(
+        broken_markdown.contains("Manifest proof") && !broken_markdown.contains("Cited objects"),
         "C11.06.ORDINARY_PROOF_REMAINS"
     );
     assert!(
@@ -1757,6 +1801,7 @@ fn criterion_11_outcome_closure_on_one_store() {
         qualifying_evaluation.digest(),
         "C11.09.GET_REPROVES_PUBLISHED_BINDINGS"
     );
+    // This enum currently has only the boundary arm; the assertion exercises its live payload.
     assert_eq!(
         read_v1.citation_provenance(),
         Provenance::VerifiedAtBoundary {
