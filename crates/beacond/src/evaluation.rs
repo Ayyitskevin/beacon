@@ -79,6 +79,13 @@ const MAX_DESCRIPTOR_TOKEN_BYTES: usize = 64;
 const MAX_CANONICAL_BYTES: usize = 65_536;
 const MAX_CITED_RUNS: usize = 64;
 const MAX_FINDINGS: usize = 64;
+/// The most hops a supersession walk follows before refusing by name (sol1's seams read, P1).
+///
+/// The walk retains one digest per hop -- the cycle guard needs the set -- so a chain with no
+/// bound is a chain-sized allocation before any refusal. No honest chain is hundreds of
+/// corrections long; one that is has been written past the relation's rules, and the reader
+/// says so before it reads it. Checked BEFORE each read, so nothing past the bound is fetched.
+const MAX_SUPERSESSION_HOPS: usize = 256;
 const DIGEST_HEX_CHARS: usize = 64;
 
 // One-byte tags. Assigned explicitly and never renumbered. `conflicts` and `supersedes` are the two
@@ -589,6 +596,11 @@ pub enum EvaluationError {
     /// columns arrive with its migration (slice E2); until then the codec accepts the record and
     /// the store refuses it by name, which is a seam rather than a silent wrong row.
     SubjectNotStorable,
+    /// A supersession walk reached `MAX_SUPERSESSION_HOPS` without finding its tail: refused
+    /// there, by name, before the next hop is read.
+    SupersessionTooLong {
+        bound: usize,
+    },
     Store(rusqlite::Error),
 }
 
@@ -605,6 +617,10 @@ impl fmt::Display for EvaluationError {
             Self::SubjectNotStorable => {
                 formatter.write_str("this store cannot hold an Evaluation of that subject kind yet")
             }
+            Self::SupersessionTooLong { bound } => write!(
+                formatter,
+                "the supersession chain is longer than {bound} hops and was not followed"
+            ),
             Self::Store(error) => write!(formatter, "{error}"),
         }
     }
@@ -1544,7 +1560,19 @@ fn supersession_tail(
     let mut seen: HashSet<String> = HashSet::from([start.to_owned()]);
     let mut current = start.to_owned();
     let mut tail = None;
-    while let Some(successor) = next(&current)? {
+    let mut hops = 0_usize;
+    loop {
+        // The bound is applied BEFORE the next read: a chain past it is refused by name with
+        // nothing beyond the bound fetched, cloned or retained (sol1's seams read, P1).
+        if hops == MAX_SUPERSESSION_HOPS {
+            return Err(EvaluationError::SupersessionTooLong {
+                bound: MAX_SUPERSESSION_HOPS,
+            });
+        }
+        let Some(successor) = next(&current)? else {
+            break;
+        };
+        hops += 1;
         if !seen.insert(successor.clone()) {
             return Err(EvaluationError::InvalidStore);
         }
@@ -2409,6 +2437,47 @@ mod tests {
             result.is_err() && followed.get() < 10_000,
             "the reader followed and retained the whole unbounded chain: followed={}, result={result:?}",
             followed.get()
+        );
+    }
+
+    /// The bound, from both sides: a chain of `MAX_SUPERSESSION_HOPS - 1` hops walks to its
+    /// tail, and one of exactly `MAX_SUPERSESSION_HOPS` is refused by name with exactly that many
+    /// reads -- the refusal comes before the read that would have found the end.
+    #[test]
+    fn a_chain_at_the_bound_is_refused_by_name_and_one_below_it_walks() {
+        let walk = |hops: usize| {
+            let followed = std::cell::Cell::new(0_usize);
+            let result = supersession_tail(
+                "0",
+                |current| {
+                    let current = current.parse::<usize>().unwrap();
+                    followed.set(followed.get() + 1);
+                    Ok((current < hops).then(|| (current + 1).to_string()))
+                },
+                |_| Ok(()),
+            );
+            (result, followed.get())
+        };
+        let (below, reads) = walk(MAX_SUPERSESSION_HOPS - 1);
+        assert_eq!(
+            below.unwrap().as_deref(),
+            Some((MAX_SUPERSESSION_HOPS - 1).to_string().as_str())
+        );
+        assert_eq!(
+            reads, MAX_SUPERSESSION_HOPS,
+            "one read per hop and one to find the end"
+        );
+        let (at, reads) = walk(MAX_SUPERSESSION_HOPS);
+        assert!(
+            matches!(
+                at,
+                Err(EvaluationError::SupersessionTooLong { bound }) if bound == MAX_SUPERSESSION_HOPS
+            ),
+            "{at:?}"
+        );
+        assert_eq!(
+            reads, MAX_SUPERSESSION_HOPS,
+            "refused before the read past the bound"
         );
     }
 
