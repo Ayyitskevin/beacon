@@ -111,6 +111,14 @@ pub enum CompletionReadRefusal {
     /// A corrupt-store state, named (R21.4): the boundary check has nothing to measure against.
     /// Before this arm existed the state surfaced as a driver error a caller had to parse.
     MissionNotAdmitted,
+    /// The Mission's admission Event is present and its OWNER refuses it: the Mission module's
+    /// verifier -- the one startup runs -- finds the Event's bytes disagree with the stored
+    /// Mission (sol1's seams read, P0). Distinct from `MissionNotAdmitted`: absent, unreadable
+    /// and verified are three states, and the second used to be reported as the third, because
+    /// the boundary query trusted `kind` and a projected id instead of the Event's bytes.
+    MissionAdmissionUnreadable {
+        sequence: i64,
+    },
     /// The boundary is before the Mission's admission, or at/after this completion's own Event.
     BoundaryOutOfRange,
     /// Exactly one `mission.completed` Event must name this completion.
@@ -160,6 +168,11 @@ impl std::fmt::Display for CompletionReadRefusal {
             Self::MissionNotAdmitted => {
                 formatter.write_str("the mission has no admission event in this workspace")
             }
+            Self::MissionAdmissionUnreadable { sequence } => write!(
+                formatter,
+                "the mission's admission event at sequence {sequence} does not verify against the \
+                 stored mission"
+            ),
             Self::BoundaryOutOfRange => formatter.write_str("boundary event sequence out of range"),
             Self::EventCount(count) => write!(formatter, "{count} completion events, expected 1"),
             Self::NoArtifactEntity => formatter
@@ -486,22 +499,39 @@ fn verified_completion_on_path(
     // 6. The boundary: at or after the Mission's admission, and strictly before this completion's
     //    own Event. Two invariants, two scenarios -- a backdated boundary, and a record that claims
     //    a cut at or after the moment it was itself written.
-    // `min` over no rows is NULL, not an error, and a NULL read into an `i64` was the driver
-    // error R21.4 names. Read it as the absence it is, and refuse it by name: a Mission with no
-    // admission Event is a corrupt store, and "corrupt" is a fact this reader states, not a
-    // message it lets a caller parse out of `Store(..)`.
-    let admitted: Option<i64> = connection
+    // Three states, three answers. ABSENT: no row at all -- `min` over no rows was a NULL read
+    // into an `i64`, the driver error R21.4 names, and is refused by name. UNREADABLE: a row is
+    // there and the Mission owner's verifier -- the one startup runs -- refuses its bytes; until
+    // this check the query trusted `kind` and a projected id, so a corrupted admission Event
+    // still positioned a boundary while startup refused the whole store (sol1's seams read, P0).
+    // VERIFIED: the Event's bytes agree with the stored Mission, and only then is its sequence a
+    // fact this reader may measure against.
+    let admission: Option<(i64, i64, String)> = connection
         .query_row(
-            "SELECT min(sequence) FROM events
+            "SELECT sequence, occurred_at_ms, payload_json FROM events
              WHERE workspace_id = ?1 AND kind = 'mission.admitted'
-               AND json_extract(payload_json, '$.mission.id') = ?2",
+               AND json_extract(payload_json, '$.mission.id') = ?2
+             ORDER BY sequence LIMIT 1",
             params![workspace_id.to_string(), record.mission_id.to_string()],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
+        .optional()
         .map_err(store)?;
-    let Some(admitted) = admitted else {
+    let Some((admitted, occurred_at_ms, payload_json)) = admission else {
         return Err(CompletionReadRefusal::MissionNotAdmitted);
     };
+    let readable = u64::try_from(occurred_at_ms).is_ok_and(|occurred_at_ms| {
+        crate::mission::verify_mission_event(
+            connection,
+            workspace_id,
+            occurred_at_ms,
+            &payload_json,
+        )
+        .is_ok()
+    });
+    if !readable {
+        return Err(CompletionReadRefusal::MissionAdmissionUnreadable { sequence: admitted });
+    }
     let completed: Option<i64> = connection
         .query_row(
             "SELECT sequence FROM events
