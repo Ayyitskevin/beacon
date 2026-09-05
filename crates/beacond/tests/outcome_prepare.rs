@@ -360,11 +360,17 @@ impl Fixture {
 
     /// One recorded Mission impact classification at the requested impact level.
     fn classify(&self, impact: ImpactLevel) -> (Uuid, u32, String) {
+        self.classify_version(impact, 1)
+    }
+
+    /// A classification at an explicit version -- a Mission classified twice has a version 2, and
+    /// which one an Outcome cites depends on where the completion's boundary falls (R23.4).
+    fn classify_version(&self, impact: ImpactLevel, version: u32) -> (Uuid, u32, String) {
         let classification = MissionImpactClassificationV1 {
             workspace_id: self.workspace_id,
             mission_id: self.mission_id,
             classification_id: Uuid::new_v4(),
-            version: 1,
+            version,
             impact,
             basis: ClassificationBasis::OperatorDeclared,
             policy: PolicyRevisionRef {
@@ -974,6 +980,66 @@ fn prepare_for_mission_refuses_by_name_when_the_mission_has_nothing_to_freeze_on
         .expect_err("an unclassified Mission prepared");
     assert!(
         matches!(refusal, PrepareRefusal::MissionNotClassified { mission_id } if mission_id == fixture.mission_id),
+        "{refusal:?}"
+    );
+}
+
+/// R23.4: "current classification" is the newest version whose Event is at or before the
+/// completion's boundary. A Mission classified at v1, completed, then reclassified at v2 cites v1
+/// -- the newest row in the table is a later classification, not the current one.
+#[test]
+fn prepare_for_mission_cites_the_newest_classification_at_or_before_the_boundary() {
+    let fixture = admitted_mission("current-at-boundary");
+    let (first_id, _, _) = fixture.classify_version(ImpactLevel::Ordinary, 1);
+    let (_, completion) = fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (second_id, _, _) = fixture.classify_version(ImpactLevel::High, 2);
+    assert_ne!(first_id, second_id);
+
+    let candidate = fixture
+        .outcomes
+        .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+        .expect("the classification current at the boundary is cited");
+    let stored = fixture
+        .outcomes
+        .manifest(&candidate.manifest_digest)
+        .unwrap();
+    let cited = stored
+        .manifest()
+        .policy_classification
+        .identity
+        .expect("a Policy citation carries its reference identity");
+    assert_eq!(
+        (cited.object_id, cited.schema_version),
+        (first_id, 1),
+        "cited the v2 recorded after the boundary (event {})",
+        completion.boundary_event_seq
+    );
+}
+
+/// R23.4, the other side: every classification of the Mission was recorded after the completion's
+/// boundary. None was current when the Mission completed, and the refusal says so by name rather
+/// than reaching forward in the log.
+#[test]
+fn prepare_for_mission_refuses_a_mission_whose_only_classifications_follow_the_boundary() {
+    let fixture = admitted_mission("classified-after-boundary");
+    let (_, completion) = fixture.complete((fixture.resident_id, fixture.configuration_id));
+    fixture.classify_version(ImpactLevel::Ordinary, 1);
+    fixture.classify_version(ImpactLevel::High, 2);
+
+    let refusal = fixture
+        .outcomes
+        .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+        .expect_err("a Mission classified only after its boundary prepared");
+    assert!(
+        matches!(
+            refusal,
+            PrepareRefusal::MissionNotClassifiedAtBoundary {
+                mission_id,
+                boundary_event_seq,
+                classifications_after: 2,
+            } if mission_id == fixture.mission_id
+                && boundary_event_seq == completion.boundary_event_seq
+        ),
         "{refusal:?}"
     );
 }
