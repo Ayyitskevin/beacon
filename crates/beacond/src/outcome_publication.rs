@@ -354,6 +354,64 @@ pub enum PublishRefusal {
     Store(rusqlite::Error),
 }
 
+/// The account fault's NAME, for this caller's outward line (R42).
+///
+/// Deliberately a second copy of the selector `mission_impact.rs` owns, not a shared helper: each
+/// caller owns the projection it emits, and one shared function would let a change made for one
+/// caller's audience travel to the other's without anyone reading the second line. The two are
+/// pinned to one independent 18-row contract in their witnesses, which is where the duplication is
+/// held honest.
+fn account_tag(error: &crate::operator_account::OperatorAccountError) -> &'static str {
+    use crate::operator_account::OperatorAccountError as Fault;
+    match error {
+        Fault::PasswordTooShort => "PasswordTooShort",
+        Fault::PasswordTooLong => "PasswordTooLong",
+        Fault::PasswordConfirmationMismatch => "PasswordConfirmationMismatch",
+        Fault::RecoveryNotConfirmed => "RecoveryNotConfirmed",
+        Fault::SetupNotStarted => "SetupNotStarted",
+        Fault::AccountAlreadyExists => "AccountAlreadyExists",
+        Fault::AccountMissing => "AccountMissing",
+        Fault::AuthenticationFailed => "AuthenticationFailed",
+        Fault::AuthenticationThrottled { .. } => "AuthenticationThrottled",
+        Fault::CredentialDisabled => "CredentialDisabled",
+        Fault::RemotePasswordNotAllowed => "RemotePasswordNotAllowed",
+        Fault::NotAuthenticated => "NotAuthenticated",
+        Fault::InvalidSessionTimeout => "InvalidSessionTimeout",
+        Fault::CredentialProcessing => "CredentialProcessing",
+        Fault::InvalidStore => "InvalidStore",
+        Fault::ClockBeforeUnixEpoch => "ClockBeforeUnixEpoch",
+        Fault::Store(_) => "Store",
+        Fault::StateUnavailable => "StateUnavailable",
+    }
+}
+
+/// The manifest refusal's NAME, plus the two pieces of context R42 permits.
+///
+/// `ManifestStoreRefusal::name()` is already a closed vocabulary and is reused for the names. What
+/// it does not carry is the two approved details: the size ceiling that was configured against
+/// what was observed, and WHICH malformation -- `MalformedOutcome` being a closed token vocabulary
+/// of its own, safe to forward.
+///
+/// `ColumnDisagrees`'s column and `CandidateNotAccounted`'s reason are deliberately dropped even
+/// though both are `&'static str`. A static lifetime says where a string lives, not that its
+/// content was written for this audience.
+fn manifest_tag(refusal: &ManifestStoreRefusal) -> String {
+    match refusal {
+        ManifestStoreRefusal::ManifestTooLarge {
+            configured,
+            observed,
+        } => format!("ManifestTooLarge(configured={configured}, observed={observed})"),
+        ManifestStoreRefusal::Malformed(reason) => format!("Malformed.{reason}"),
+        named @ (ManifestStoreRefusal::Absent
+        | ManifestStoreRefusal::CrossWorkspace
+        | ManifestStoreRefusal::BytesDisagree
+        | ManifestStoreRefusal::ColumnDisagrees { .. }
+        | ManifestStoreRefusal::Irreconcilable { .. }
+        | ManifestStoreRefusal::CandidateNotAccounted { .. }
+        | ManifestStoreRefusal::Store(_)) => named.name().to_owned(),
+    }
+}
+
 impl fmt::Display for PublishRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -361,16 +419,17 @@ impl fmt::Display for PublishRefusal {
             Self::NoManifestForCandidate => {
                 formatter.write_str("no prepared manifest names that candidate Artifact")
             }
-            Self::Manifest(refusal) => write!(formatter, "{refusal}"),
-            Self::ManifestMissionDiffers {
-                manifest,
-                requested,
-            } => write!(
-                formatter,
-                "the candidate's manifest is about Mission {manifest} and publication was \
-                 requested for Mission {requested}"
-            ),
-            Self::Completion(detail) => write!(formatter, "{detail}"),
+            Self::Manifest(refusal) => {
+                write!(
+                    formatter,
+                    "outcome manifest refused: {}",
+                    manifest_tag(refusal)
+                )
+            }
+            Self::ManifestMissionDiffers { .. } => {
+                formatter.write_str("publication refused: ManifestMissionDiffers")
+            }
+            Self::Completion(_) => formatter.write_str("publication refused: Completion"),
             Self::AppendixRequired => formatter.write_str(
                 "Policy classified this Mission high-impact and the candidate carries no \
                  verification appendix",
@@ -391,25 +450,29 @@ impl fmt::Display for PublishRefusal {
             Self::QualifyingVerdictNotMeets => formatter.write_str(
                 "the Evaluation this publication cites does not carry a `meets` verdict",
             ),
-            Self::MissionBindingBroken {
-                what,
-                named,
-                relation,
-            } => write!(
-                formatter,
-                "the {what} this publication cites is about Mission {named} and the publication is \
-                 filed under Mission {relation}"
-            ),
-            Self::CandidateIsNotMissionScoped { relation } => write!(
-                formatter,
-                "the candidate Artifact is not scoped to a Mission, and the publication names \
-                 Mission {relation}"
-            ),
+            Self::MissionBindingBroken { .. } => {
+                formatter.write_str("publication refused: MissionBindingBroken")
+            }
+            // Not in the R42 census, because it did not exist when the census was taken: #98 added
+            // this arm after the baseline. Closed here for the reason the two arms above it are --
+            // it printed a Mission UUID outward. R39.2 asked that the id not be INVENTED; it is
+            // still carried, typed, in `relation` and in `Debug`. Flagged in the build report as a
+            // deliberate step past the specified 16 sites, since the alternative is a Display where
+            // sixteen arms are closed and the seventeenth is the hole they were closed against.
+            Self::CandidateIsNotMissionScoped { .. } => {
+                formatter.write_str("publication refused: CandidateIsNotMissionScoped")
+            }
             Self::Pdf(refusal) => write!(formatter, "the document did not render: {refusal}"),
             Self::Absent => formatter.write_str("this Mission has no published Outcome"),
-            Self::Account(error) => write!(formatter, "{error}"),
-            Self::Unverified(detail) => write!(formatter, "{detail}"),
-            Self::Store(error) => write!(formatter, "{error}"),
+            Self::Account(error) => {
+                write!(
+                    formatter,
+                    "publication refused: Account.{}",
+                    account_tag(error)
+                )
+            }
+            Self::Unverified(_) => formatter.write_str("publication refused: Unverified"),
+            Self::Store(_) => formatter.write_str("publication refused: Store"),
         }
     }
 }
@@ -1227,6 +1290,658 @@ mod name_witness {
             assert!(
                 !name.contains(' ') && !name.contains('{'),
                 "a name is a name, not a rendering: {name}"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // R42 slice 1, commit 3: the publisher's outward projection is closed.
+    // ---------------------------------------------------------------------------------------
+
+    use crate::operator_account::OperatorAccountError;
+    use crate::outcome::MalformedOutcome;
+    use crate::outcome_pdf::PdfRefusal;
+    use crate::outcome_typst::TypstRefusal;
+
+    /// Two fixed synthetic markers, one per seed.
+    const NEEDLE_A: &str = "R42S1_PRIVATE_A";
+    const NEEDLE_B: &str = "R42S1_PRIVATE_B";
+
+    /// A marker in a `&'static str` field. `ColumnDisagrees`'s column, `CandidateNotAccounted`'s
+    /// reason and `MissionBindingBroken`'s `what` are all static, and this is what proves a static
+    /// lifetime is not a content whitelist: the literal is as private as any String.
+    const STATIC_NEEDLE_A: &str = "R42S1_PRIVATE_A|column=private_column";
+
+    /// Approved context, all chosen here before any refusal is built, and all pairwise different
+    /// so a swapped pair cannot pass.
+    const ROW_WIDTH_EXPECTED: usize = 3;
+    const ROW_WIDTH_OBSERVED: usize = 5;
+    const CEILING_CONFIGURED: u64 = 1024;
+    const CEILING_OBSERVED: u64 = 1025;
+    const GAP_EXPECTED: u32 = 2;
+    const GAP_FOUND: u32 = 4;
+    const HISTORY_EXPECTED: u32 = 7;
+    const HISTORY_FOUND: u32 = 3;
+
+    /// Two reference identities. Neither may appear in an identity refusal's line.
+    fn first_uuid() -> Uuid {
+        Uuid::parse_str("11111111-1111-4111-8111-111111111111").expect("a fixture UUID parses")
+    }
+
+    fn second_uuid() -> Uuid {
+        Uuid::parse_str("22222222-2222-4222-8222-222222222222").expect("a fixture UUID parses")
+    }
+
+    fn payload_a() -> String {
+        format!("{NEEDLE_A}|column=private_column|path=/home/example-user/private.txt\nsecond-line")
+    }
+
+    fn payload_b() -> String {
+        format!(
+            "{NEEDLE_B}|column=other_column|path=/home/example-user/other-note.txt\nsecond-line"
+        )
+    }
+
+    fn driver_error(needle: &str) -> rusqlite::Error {
+        rusqlite::Error::InvalidParameterName(format!("{needle}|:private_binding"))
+    }
+
+    /// One declarative row table per vocabulary, expanded into BOTH the exhaustive expected match
+    /// and the constructed fixtures. Wildcard-free on purpose: a new variant anywhere in this
+    /// seven-vocabulary tree fails to compile until its row supplies a constructor, an
+    /// independently written expected literal, and its declared markers. No table reads
+    /// `PublishRefusal::name()`, `manifest_tag`, `account_tag` or any child `Display`.
+    macro_rules! closed_table {
+        (
+            $expected_fn:ident / $rows_fn:ident : $ty:ty,
+            $( $case:literal | $pattern:pat => $line:expr , $build:expr , $markers:expr ; )+
+        ) => {
+            fn $expected_fn(value: &$ty) -> (&'static str, String) {
+                match value {
+                    $( $pattern => ($case, String::from($line)), )+
+                }
+            }
+
+            fn $rows_fn() -> Vec<(&'static str, $ty, &'static [&'static str])> {
+                vec![$(($case, $build, $markers)),+]
+            }
+        };
+    }
+
+    closed_table! {
+        expected_seam / seam_rows: PublicationSeamRefusal,
+        "EVALUATION_ABSENT" | PublicationSeamRefusal::EvaluationAbsent
+            => "no Evaluation in this Workspace has that digest",
+            PublicationSeamRefusal::EvaluationAbsent, &[];
+        "CANDIDATE_ABSENT" | PublicationSeamRefusal::CandidateAbsent
+            => "no Artifact in this Workspace has that digest",
+            PublicationSeamRefusal::CandidateAbsent, &[];
+        "SUBJECT_IS_NOT_AN_ARTIFACT" | PublicationSeamRefusal::SubjectIsNotAnArtifact
+            => "the Evaluation's subject is not an Artifact",
+            PublicationSeamRefusal::SubjectIsNotAnArtifact, &[];
+        "SUBJECT_IS_NOT_THE_CANDIDATE" | PublicationSeamRefusal::SubjectIsNotTheCandidate
+            => "the Evaluation is about different bytes than the candidate",
+            PublicationSeamRefusal::SubjectIsNotTheCandidate, &[];
+        "VERDICT_IS_NOT_MEETS" | PublicationSeamRefusal::VerdictIsNotMeets
+            => "the Evaluation's verdict is not `meets`",
+            PublicationSeamRefusal::VerdictIsNotMeets, &[];
+        "MISSION_DIFFERS" | PublicationSeamRefusal::MissionDiffers
+            => "the Evaluation's Mission is not this Outcome's Mission",
+            PublicationSeamRefusal::MissionDiffers, &[];
+        "CITED_ENVELOPE_DISAGREES" | PublicationSeamRefusal::CitedEnvelopeDisagrees
+            => "the supplied digest envelope is not the one the owning module verified",
+            PublicationSeamRefusal::CitedEnvelopeDisagrees, &[];
+        "UNVERIFIED" | PublicationSeamRefusal::Unverified
+            => "a cited record did not verify",
+            PublicationSeamRefusal::Unverified, &[];
+    }
+
+    closed_table! {
+        expected_malformed_outcome / malformed_outcome_rows: MalformedOutcome,
+        "MAGIC" | MalformedOutcome::Magic
+            => "magic",
+            MalformedOutcome::Magic, &[];
+        "TRUNCATED" | MalformedOutcome::Truncated
+            => "truncated",
+            MalformedOutcome::Truncated, &[];
+        "TRAILING_BYTES" | MalformedOutcome::TrailingBytes
+            => "trailing_bytes",
+            MalformedOutcome::TrailingBytes, &[];
+        "UNKNOWN_TAG" | MalformedOutcome::UnknownTag
+            => "unknown_tag",
+            MalformedOutcome::UnknownTag, &[];
+        "OVER_LIMIT_LENGTH" | MalformedOutcome::OverLimitLength
+            => "over_limit_length",
+            MalformedOutcome::OverLimitLength, &[];
+        "INVALID_UTF8" | MalformedOutcome::InvalidUtf8
+            => "invalid_utf8",
+            MalformedOutcome::InvalidUtf8, &[];
+        "DIGEST_VALUE" | MalformedOutcome::DigestValue
+            => "digest_value",
+            MalformedOutcome::DigestValue, &[];
+        "DIGEST_ENVELOPE" | MalformedOutcome::DigestEnvelope
+            => "digest_envelope",
+            MalformedOutcome::DigestEnvelope, &[];
+        "PINNED_REVISION" | MalformedOutcome::PinnedRevision
+            => "pinned_revision",
+            MalformedOutcome::PinnedRevision, &[];
+        "EMPTY_TEXT" | MalformedOutcome::EmptyText
+            => "empty_text",
+            MalformedOutcome::EmptyText, &[];
+        "UNTRIMMED_TEXT" | MalformedOutcome::UntrimmedText
+            => "untrimmed_text",
+            MalformedOutcome::UntrimmedText, &[];
+        "TEXT_TOO_LONG" | MalformedOutcome::TextTooLong
+            => "text_too_long",
+            MalformedOutcome::TextTooLong, &[];
+        "CONTROL_CHARACTER" | MalformedOutcome::ControlCharacter
+            => "control_character",
+            MalformedOutcome::ControlCharacter, &[];
+        "LINE_BREAK_IN_LABEL" | MalformedOutcome::LineBreakInLabel
+            => "line_break_in_label",
+            MalformedOutcome::LineBreakInLabel, &[];
+        "TOKEN" | MalformedOutcome::Token
+            => "token",
+            MalformedOutcome::Token, &[];
+        "UNKNOWN_VERSION" | MalformedOutcome::UnknownVersion
+            => "unknown_version",
+            MalformedOutcome::UnknownVersion, &[];
+        "REFERENCE_IDENTITY_REQUIRED" | MalformedOutcome::ReferenceIdentityRequired
+            => "reference_identity_required",
+            MalformedOutcome::ReferenceIdentityRequired, &[];
+        "REFERENCE_IDENTITY_NOT_CARRIED" | MalformedOutcome::ReferenceIdentityNotCarried
+            => "reference_identity_not_carried",
+            MalformedOutcome::ReferenceIdentityNotCarried, &[];
+        "RETIRED_VERSION" | MalformedOutcome::RetiredVersion
+            => "retired_version",
+            MalformedOutcome::RetiredVersion, &[];
+        "NON_CANONICAL_ORDER" | MalformedOutcome::NonCanonicalOrder
+            => "non_canonical_order",
+            MalformedOutcome::NonCanonicalOrder, &[];
+        "NO_SUCCESS_CONDITIONS" | MalformedOutcome::NoSuccessConditions
+            => "no_success_conditions",
+            MalformedOutcome::NoSuccessConditions, &[];
+        "MINOR_UNITS_EXPONENT" | MalformedOutcome::MinorUnitsExponent
+            => "minor_units_exponent",
+            MalformedOutcome::MinorUnitsExponent, &[];
+        "SPEND_COVERAGE" | MalformedOutcome::SpendCoverage
+            => "spend_coverage",
+            MalformedOutcome::SpendCoverage, &[];
+        "SOURCE_KIND" | MalformedOutcome::SourceKind
+            => "source_kind",
+            MalformedOutcome::SourceKind, &[];
+        "CROSS_WORKSPACE" | MalformedOutcome::CrossWorkspace
+            => "cross_workspace",
+            MalformedOutcome::CrossWorkspace, &[];
+    }
+
+    closed_table! {
+        expected_typst / typst_rows: TypstRefusal,
+        "UNKNOWN_RENDERER_VERSION" | TypstRefusal::UnknownRendererVersion(_)
+            => "UnknownRendererVersion",
+            TypstRefusal::UnknownRendererVersion(payload_a()), &[NEEDLE_A];
+        "UNCLOSED_FRONT_MATTER" | TypstRefusal::UnclosedFrontMatter
+            => "UnclosedFrontMatter",
+            TypstRefusal::UnclosedFrontMatter, &[];
+        "FRONT_MATTER_NOT_KEY_VALUE" | TypstRefusal::FrontMatterNotKeyValue(_)
+            => "FrontMatterNotKeyValue",
+            TypstRefusal::FrontMatterNotKeyValue(payload_a()), &[NEEDLE_A];
+        "UNCLOSED_CODE_FENCE" | TypstRefusal::UnclosedCodeFence
+            => "UnclosedCodeFence",
+            TypstRefusal::UnclosedCodeFence, &[];
+        "HEADING_TOO_DEEP" | TypstRefusal::HeadingTooDeep(_)
+            => "HeadingTooDeep",
+            TypstRefusal::HeadingTooDeep(payload_a()), &[NEEDLE_A];
+        "UNESCAPED_CONSTRUCT" | TypstRefusal::UnescapedConstruct { .. }
+            => "UnescapedConstruct",
+            TypstRefusal::UnescapedConstruct { character: '#', line: payload_a() }, &[NEEDLE_A];
+        "TABLE_ROW_WIDTH" | TypstRefusal::TableRowWidth { expected, observed }
+            => format!("TableRowWidth(expected={expected}, observed={observed})"),
+            TypstRefusal::TableRowWidth { expected: ROW_WIDTH_EXPECTED, observed: ROW_WIDTH_OBSERVED }, &[];
+    }
+
+    closed_table! {
+        expected_pdf / pdf_rows: PdfRefusal,
+        "NOT_UTF8" | PdfRefusal::NotUtf8
+            => "the exported document is not UTF-8",
+            PdfRefusal::NotUtf8, &[];
+        "TRANSLATE" | PdfRefusal::Translate(refusal)
+            => format!("Translate.{}", expected_typst(refusal).1),
+            PdfRefusal::Translate(TypstRefusal::UnknownRendererVersion(payload_a())), &[NEEDLE_A];
+        "EMBEDDED_FONT_SET_EMPTY" | PdfRefusal::EmbeddedFontSetEmpty
+            => "the render profile embeds no font, and this renderer never looks for one on the \
+                host",
+            PdfRefusal::EmbeddedFontSetEmpty, &[];
+        "COMPILE" | PdfRefusal::Compile(_)
+            => "Compile",
+            PdfRefusal::Compile(payload_a()), &[NEEDLE_A];
+        "SERIALIZE" | PdfRefusal::Serialize(_)
+            => "Serialize",
+            PdfRefusal::Serialize(payload_b()), &[NEEDLE_B];
+    }
+
+    closed_table! {
+        expected_account / account_rows: OperatorAccountError,
+        "PASSWORD_TOO_SHORT" | OperatorAccountError::PasswordTooShort
+            => "PasswordTooShort",
+            OperatorAccountError::PasswordTooShort, &[];
+        "PASSWORD_TOO_LONG" | OperatorAccountError::PasswordTooLong
+            => "PasswordTooLong",
+            OperatorAccountError::PasswordTooLong, &[];
+        "PASSWORD_CONFIRMATION_MISMATCH" | OperatorAccountError::PasswordConfirmationMismatch
+            => "PasswordConfirmationMismatch",
+            OperatorAccountError::PasswordConfirmationMismatch, &[];
+        "RECOVERY_NOT_CONFIRMED" | OperatorAccountError::RecoveryNotConfirmed
+            => "RecoveryNotConfirmed",
+            OperatorAccountError::RecoveryNotConfirmed, &[];
+        "SETUP_NOT_STARTED" | OperatorAccountError::SetupNotStarted
+            => "SetupNotStarted",
+            OperatorAccountError::SetupNotStarted, &[];
+        "ACCOUNT_ALREADY_EXISTS" | OperatorAccountError::AccountAlreadyExists
+            => "AccountAlreadyExists",
+            OperatorAccountError::AccountAlreadyExists, &[];
+        "ACCOUNT_MISSING" | OperatorAccountError::AccountMissing
+            => "AccountMissing",
+            OperatorAccountError::AccountMissing, &[];
+        "AUTHENTICATION_FAILED" | OperatorAccountError::AuthenticationFailed
+            => "AuthenticationFailed",
+            OperatorAccountError::AuthenticationFailed, &[];
+        "AUTHENTICATION_THROTTLED" | OperatorAccountError::AuthenticationThrottled { .. }
+            => "AuthenticationThrottled",
+            OperatorAccountError::AuthenticationThrottled { retry_after_ms: 1001 }, &[];
+        "CREDENTIAL_DISABLED" | OperatorAccountError::CredentialDisabled
+            => "CredentialDisabled",
+            OperatorAccountError::CredentialDisabled, &[];
+        "REMOTE_PASSWORD_NOT_ALLOWED" | OperatorAccountError::RemotePasswordNotAllowed
+            => "RemotePasswordNotAllowed",
+            OperatorAccountError::RemotePasswordNotAllowed, &[];
+        "NOT_AUTHENTICATED" | OperatorAccountError::NotAuthenticated
+            => "NotAuthenticated",
+            OperatorAccountError::NotAuthenticated, &[];
+        "INVALID_SESSION_TIMEOUT" | OperatorAccountError::InvalidSessionTimeout
+            => "InvalidSessionTimeout",
+            OperatorAccountError::InvalidSessionTimeout, &[];
+        "CREDENTIAL_PROCESSING" | OperatorAccountError::CredentialProcessing
+            => "CredentialProcessing",
+            OperatorAccountError::CredentialProcessing, &[];
+        "INVALID_STORE" | OperatorAccountError::InvalidStore
+            => "InvalidStore",
+            OperatorAccountError::InvalidStore, &[];
+        "CLOCK_BEFORE_UNIX_EPOCH" | OperatorAccountError::ClockBeforeUnixEpoch
+            => "ClockBeforeUnixEpoch",
+            OperatorAccountError::ClockBeforeUnixEpoch, &[];
+        "STORE" | OperatorAccountError::Store(_)
+            => "Store",
+            OperatorAccountError::Store(driver_error(NEEDLE_A)), &[NEEDLE_A];
+        "STATE_UNAVAILABLE" | OperatorAccountError::StateUnavailable
+            => "StateUnavailable",
+            OperatorAccountError::StateUnavailable, &[];
+    }
+
+    closed_table! {
+        expected_manifest / manifest_rows: ManifestStoreRefusal,
+        "ABSENT" | ManifestStoreRefusal::Absent
+            => "Absent",
+            ManifestStoreRefusal::Absent, &[];
+        "CROSS_WORKSPACE" | ManifestStoreRefusal::CrossWorkspace
+            => "CrossWorkspace",
+            ManifestStoreRefusal::CrossWorkspace, &[];
+        "BYTES_DISAGREE" | ManifestStoreRefusal::BytesDisagree
+            => "BytesDisagree",
+            ManifestStoreRefusal::BytesDisagree, &[];
+        "COLUMN_DISAGREES" | ManifestStoreRefusal::ColumnDisagrees { .. }
+            => "ColumnDisagrees",
+            ManifestStoreRefusal::ColumnDisagrees { column: STATIC_NEEDLE_A }, &[NEEDLE_A];
+        "MANIFEST_TOO_LARGE" | ManifestStoreRefusal::ManifestTooLarge { configured, observed }
+            => format!("ManifestTooLarge(configured={configured}, observed={observed})"),
+            ManifestStoreRefusal::ManifestTooLarge { configured: CEILING_CONFIGURED, observed: CEILING_OBSERVED }, &[];
+        "MALFORMED" | ManifestStoreRefusal::Malformed(reason)
+            => format!("Malformed.{}", expected_malformed_outcome(reason).1),
+            ManifestStoreRefusal::Malformed(MalformedOutcome::Magic), &[];
+        "IRRECONCILABLE" | ManifestStoreRefusal::Irreconcilable { .. }
+            => "Irreconcilable",
+            ManifestStoreRefusal::Irreconcilable { detail: payload_a() }, &[NEEDLE_A];
+        "CANDIDATE_NOT_ACCOUNTED" | ManifestStoreRefusal::CandidateNotAccounted { .. }
+            => "CandidateNotAccounted",
+            ManifestStoreRefusal::CandidateNotAccounted { reason: STATIC_NEEDLE_A }, &[NEEDLE_A];
+        "STORE" | ManifestStoreRefusal::Store(_)
+            => "Store",
+            ManifestStoreRefusal::Store(payload_a()), &[NEEDLE_A];
+    }
+
+    closed_table! {
+        expected_publish / publish_rows: PublishRefusal,
+        "R42S1.PUBLISH.SEAM" | PublishRefusal::Seam(refusal)
+            => expected_seam(refusal).1,
+            PublishRefusal::Seam(PublicationSeamRefusal::EvaluationAbsent), &[];
+        "R42S1.PUBLISH.NO_MANIFEST_FOR_CANDIDATE" | PublishRefusal::NoManifestForCandidate
+            => "no prepared manifest names that candidate Artifact",
+            PublishRefusal::NoManifestForCandidate, &[];
+        "R42S1.PUBLISH.MANIFEST" | PublishRefusal::Manifest(refusal)
+            => format!("outcome manifest refused: {}", expected_manifest(refusal).1),
+            PublishRefusal::Manifest(ManifestStoreRefusal::Store(payload_a())), &[NEEDLE_A];
+        "R42S1.PUBLISH.MANIFEST_MISSION_DIFFERS" | PublishRefusal::ManifestMissionDiffers { .. }
+            => "publication refused: ManifestMissionDiffers",
+            PublishRefusal::ManifestMissionDiffers { manifest: first_uuid(), requested: second_uuid() }, &[];
+        "R42S1.PUBLISH.COMPLETION" | PublishRefusal::Completion(_)
+            => "publication refused: Completion",
+            PublishRefusal::Completion(payload_a()), &[NEEDLE_A];
+        "R42S1.PUBLISH.APPENDIX_REQUIRED" | PublishRefusal::AppendixRequired
+            => "Policy classified this Mission high-impact and the candidate carries no \
+                verification appendix",
+            PublishRefusal::AppendixRequired, &[];
+        "R42S1.PUBLISH.VERSION_GAP" | PublishRefusal::VersionGap { expected, found }
+            => format!("the next publication version for this Mission is {expected} and {found} was about to be written"),
+            PublishRefusal::VersionGap { expected: GAP_EXPECTED, found: GAP_FOUND }, &[];
+        "R42S1.PUBLISH.ALREADY_PUBLISHED" | PublishRefusal::AlreadyPublished
+            => "that candidate or Evaluation is already published",
+            PublishRefusal::AlreadyPublished, &[];
+        "R42S1.PUBLISH.HISTORY_NOT_CONTIGUOUS" | PublishRefusal::HistoryNotContiguous { expected, found }
+            => format!("this Mission's publication history is not contiguous from 1: version {expected} is missing and {found} versions are stored"),
+            PublishRefusal::HistoryNotContiguous { expected: HISTORY_EXPECTED, found: HISTORY_FOUND }, &[];
+        "R42S1.PUBLISH.QUALIFYING_VERDICT_NOT_MEETS" | PublishRefusal::QualifyingVerdictNotMeets
+            => "the Evaluation this publication cites does not carry a `meets` verdict",
+            PublishRefusal::QualifyingVerdictNotMeets, &[];
+        "R42S1.PUBLISH.MISSION_BINDING_BROKEN" | PublishRefusal::MissionBindingBroken { .. }
+            => "publication refused: MissionBindingBroken",
+            PublishRefusal::MissionBindingBroken { what: STATIC_NEEDLE_A, named: first_uuid(), relation: second_uuid() }, &[NEEDLE_A];
+        "R42S1.PUBLISH.PDF" | PublishRefusal::Pdf(refusal)
+            => format!("the document did not render: {}", expected_pdf(refusal).1),
+            PublishRefusal::Pdf(PdfRefusal::Compile(payload_a())), &[NEEDLE_A];
+        "R42S1.PUBLISH.ABSENT" | PublishRefusal::Absent
+            => "this Mission has no published Outcome",
+            PublishRefusal::Absent, &[];
+        "R42S1.PUBLISH.ACCOUNT" | PublishRefusal::Account(error)
+            => format!("publication refused: Account.{}", expected_account(error).1),
+            PublishRefusal::Account(OperatorAccountError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "R42S1.PUBLISH.UNVERIFIED" | PublishRefusal::Unverified(_)
+            => "publication refused: Unverified",
+            PublishRefusal::Unverified(payload_a()), &[NEEDLE_A];
+        "R42S1.PUBLISH.STORE" | PublishRefusal::Store(_)
+            => "publication refused: Store",
+            PublishRefusal::Store(driver_error(NEEDLE_A)), &[NEEDLE_A];
+        "R42S1.PUBLISH.CANDIDATE_IS_NOT_MISSION_SCOPED"
+            | PublishRefusal::CandidateIsNotMissionScoped { .. }
+            => "publication refused: CandidateIsNotMissionScoped",
+            PublishRefusal::CandidateIsNotMissionScoped { relation: second_uuid() }, &[];
+    }
+
+    struct Case {
+        id: String,
+        value: PublishRefusal,
+        markers: &'static [&'static str],
+    }
+
+    /// The needle-bearing cases lead, in the spec's order, so a mutant's FIRST failing label is
+    /// predictable rather than an accident of table order.
+    const LEAD_CASES: [&str; 6] = [
+        "R42S1.PUBLISH.STORE",
+        "R42S1.PUBLISH.COMPLETION",
+        "R42S1.PUBLISH.UNVERIFIED",
+        "R42S1.PUBLISH.ACCOUNT.STORE",
+        "R42S1.PUBLISH.MANIFEST.STORE",
+        "R42S1.PUBLISH.PDF.TRANSLATE.UNKNOWN_RENDERER_VERSION",
+    ];
+
+    /// The 82 cases: 12 leaf roots, plus every child of the four nested roots -- and, two levels
+    /// down, every malformation a manifest can name and every refusal the translator can raise.
+    fn publish_cases() -> Vec<Case> {
+        let mut cases = Vec::new();
+        for (stem, value, markers) in publish_rows() {
+            match stem {
+                "R42S1.PUBLISH.SEAM" => {
+                    for (child, refusal, child_markers) in seam_rows() {
+                        cases.push(Case {
+                            id: format!("{stem}.{child}"),
+                            value: PublishRefusal::Seam(refusal),
+                            markers: child_markers,
+                        });
+                    }
+                }
+                "R42S1.PUBLISH.MANIFEST" => {
+                    for (child, refusal, child_markers) in manifest_rows() {
+                        if child == "MALFORMED" {
+                            for (reason_case, reason, reason_markers) in malformed_outcome_rows() {
+                                cases.push(Case {
+                                    id: format!("{stem}.{child}.{reason_case}"),
+                                    value: PublishRefusal::Manifest(
+                                        ManifestStoreRefusal::Malformed(reason),
+                                    ),
+                                    markers: reason_markers,
+                                });
+                            }
+                        } else {
+                            cases.push(Case {
+                                id: format!("{stem}.{child}"),
+                                value: PublishRefusal::Manifest(refusal),
+                                markers: child_markers,
+                            });
+                        }
+                    }
+                }
+                "R42S1.PUBLISH.PDF" => {
+                    for (child, refusal, child_markers) in pdf_rows() {
+                        if child == "TRANSLATE" {
+                            for (typst_case, typst, typst_markers) in typst_rows() {
+                                cases.push(Case {
+                                    id: format!("{stem}.{child}.{typst_case}"),
+                                    value: PublishRefusal::Pdf(PdfRefusal::Translate(typst)),
+                                    markers: typst_markers,
+                                });
+                            }
+                        } else {
+                            cases.push(Case {
+                                id: format!("{stem}.{child}"),
+                                value: PublishRefusal::Pdf(refusal),
+                                markers: child_markers,
+                            });
+                        }
+                    }
+                }
+                "R42S1.PUBLISH.ACCOUNT" => {
+                    for (child, error, child_markers) in account_rows() {
+                        cases.push(Case {
+                            id: format!("{stem}.{child}"),
+                            value: PublishRefusal::Account(error),
+                            markers: child_markers,
+                        });
+                    }
+                }
+                leaf => cases.push(Case {
+                    id: leaf.to_owned(),
+                    value,
+                    markers,
+                }),
+            }
+        }
+        cases.sort_by_key(|case| {
+            LEAD_CASES
+                .iter()
+                .position(|lead| *lead == case.id)
+                .unwrap_or(usize::MAX)
+        });
+        cases
+    }
+
+    /// R42 slice 1: every `PublishRefusal` line is the closed projection, and every diagnostic it
+    /// was built from is still in `Debug`.
+    ///
+    /// Eight census sites, and the reason there are eight rather than two: this enum is where a
+    /// publication's refusal reaches an in-process caller, and six of its arms forwarded a child's
+    /// own `Display` -- a manifest store's, an account fault's, a rusqlite error's -- while two
+    /// interpolated Mission UUIDs into the sentence itself.
+    ///
+    /// `Pdf` keeps its forwarding expression: after commit 2 the child it forwards is closed, and
+    /// a parent delegating to a closed child is the shape R37.4 asks for. It is witnessed THROUGH
+    /// the publisher here, so "the child is closed" is not taken on trust.
+    #[test]
+    fn r42_caller_projection_is_closed() {
+        let cases = publish_cases();
+
+        // Reviewed cardinalities, not read from production.
+        assert_eq!(seam_rows().len(), 8, "R42S1.PUBLISH.CARDINALITY.SEAM");
+        assert_eq!(
+            malformed_outcome_rows().len(),
+            25,
+            "R42S1.PUBLISH.CARDINALITY.MALFORMED_OUTCOME"
+        );
+        assert_eq!(
+            typst_rows().len(),
+            7,
+            "R42S1.PUBLISH.CARDINALITY.TRANSLATOR"
+        );
+        assert_eq!(pdf_rows().len(), 5, "R42S1.PUBLISH.CARDINALITY.PDF_ROOT");
+        assert_eq!(
+            account_rows().len(),
+            18,
+            "R42S1.PUBLISH.CARDINALITY.ACCOUNT"
+        );
+        assert_eq!(
+            manifest_rows().len(),
+            9,
+            "R42S1.PUBLISH.CARDINALITY.MANIFEST"
+        );
+        assert_eq!(publish_rows().len(), 17, "R42S1.PUBLISH.CARDINALITY.ROOT");
+        assert_eq!(cases.len(), 83, "R42S1.PUBLISH.CARDINALITY.CASES");
+        let ids: std::collections::BTreeSet<&str> =
+            cases.iter().map(|case| case.id.as_str()).collect();
+        assert_eq!(ids.len(), cases.len(), "R42S1.PUBLISH.CASE_IDS_UNIQUE");
+        for lead in LEAD_CASES {
+            assert!(
+                ids.contains(lead),
+                "R42S1.PUBLISH.LEAD_CASE_PRESENT: {lead}"
+            );
+        }
+        assert!(
+            format!("{:?}", driver_error(NEEDLE_A)).contains(NEEDLE_A),
+            "R42S1.FIXTURE.DRIVER_NEEDLE"
+        );
+
+        for case in &cases {
+            let Case { id, value, markers } = case;
+            let (stem, expected) = expected_publish(value);
+            assert!(
+                id == stem || id.starts_with(&format!("{stem}.")),
+                "R42S1.PUBLISH.PATTERN_ALIGNS: {id} was built as {stem}"
+            );
+
+            let line = value.to_string();
+            for marker in *markers {
+                assert!(!line.contains(marker), "{id}.NO_NEEDLE: {line}");
+            }
+            assert!(
+                !line.contains('\n') && !line.contains('\r'),
+                "{id}.ONE_LINE: {line:?}"
+            );
+
+            let debug = format!("{value:?}");
+            for marker in *markers {
+                assert!(debug.contains(marker), "{id}.DEBUG_RETAINS: {debug}");
+            }
+
+            assert_eq!(line, expected, "{id}.PROJECTION");
+        }
+
+        // The two identity refusals: no UUID in the line, both UUIDs still in Debug. This runs
+        // AFTER every projection above, which is why a wrong line fails as PROJECTION first.
+        for (id, refusal, carried) in [
+            (
+                "R42S1.PUBLISH.MANIFEST_MISSION_DIFFERS",
+                PublishRefusal::ManifestMissionDiffers {
+                    manifest: first_uuid(),
+                    requested: second_uuid(),
+                },
+                vec![first_uuid(), second_uuid()],
+            ),
+            (
+                "R42S1.PUBLISH.MISSION_BINDING_BROKEN",
+                PublishRefusal::MissionBindingBroken {
+                    what: STATIC_NEEDLE_A,
+                    named: first_uuid(),
+                    relation: second_uuid(),
+                },
+                vec![first_uuid(), second_uuid()],
+            ),
+            // #98's arm carries one Mission and is held to the same rule.
+            (
+                "R42S1.PUBLISH.CANDIDATE_IS_NOT_MISSION_SCOPED",
+                PublishRefusal::CandidateIsNotMissionScoped {
+                    relation: second_uuid(),
+                },
+                vec![second_uuid()],
+            ),
+        ] {
+            let line = refusal.to_string();
+            let debug = format!("{refusal:?}");
+            // Every UUID, not only the ones this arm carries: a refusal must not print an identity
+            // it was never given either.
+            for uuid in [first_uuid(), second_uuid()] {
+                assert!(
+                    !line.contains(&uuid.to_string()),
+                    "{id}.IDENTITY_PRIVATE: {line}"
+                );
+            }
+            for uuid in carried {
+                assert!(
+                    debug.contains(&uuid.to_string()),
+                    "{id}.IDENTITY_IN_DEBUG: {debug}"
+                );
+            }
+        }
+
+        // Approved context, asserted PRESENT: two counts per refusal, each pair different.
+        assert_eq!(
+            PublishRefusal::VersionGap {
+                expected: GAP_EXPECTED,
+                found: GAP_FOUND,
+            }
+            .to_string(),
+            format!(
+                "the next publication version for this Mission is {GAP_EXPECTED} and {GAP_FOUND} \
+                 was about to be written"
+            ),
+            "R42S1.PUBLISH.VERSION_GAP.CONTEXT"
+        );
+        assert_eq!(
+            PublishRefusal::Manifest(ManifestStoreRefusal::ManifestTooLarge {
+                configured: CEILING_CONFIGURED,
+                observed: CEILING_OBSERVED,
+            })
+            .to_string(),
+            format!(
+                "outcome manifest refused: ManifestTooLarge(configured={CEILING_CONFIGURED}, \
+                 observed={CEILING_OBSERVED})"
+            ),
+            "R42S1.PUBLISH.MANIFEST.MANIFEST_TOO_LARGE.CONTEXT"
+        );
+
+        // A second payload proves each projection is independent of the text it was handed.
+        for (id, refusal) in [
+            (
+                "R42S1.PUBLISH.COMPLETION",
+                PublishRefusal::Completion(payload_b()),
+            ),
+            (
+                "R42S1.PUBLISH.UNVERIFIED",
+                PublishRefusal::Unverified(payload_b()),
+            ),
+            (
+                "R42S1.PUBLISH.MANIFEST.STORE",
+                PublishRefusal::Manifest(ManifestStoreRefusal::Store(payload_b())),
+            ),
+            (
+                "R42S1.PUBLISH.PDF.SERIALIZE",
+                PublishRefusal::Pdf(PdfRefusal::Serialize(payload_b())),
+            ),
+        ] {
+            let line = refusal.to_string();
+            assert!(
+                !line.contains(NEEDLE_B),
+                "{id}.SECOND_SEED_NO_NEEDLE: {line}"
+            );
+            assert!(
+                format!("{refusal:?}").contains(NEEDLE_B),
+                "{id}.SECOND_SEED_DEBUG_RETAINS"
             );
         }
     }
