@@ -941,7 +941,11 @@ fn a_stored_digest_that_does_not_name_its_bytes_is_refused_not_matched() {
     assert!(
         matches!(
             error,
-            SupervisorError::ProposalEventMismatch(_) | SupervisorError::ProposalStateMismatch
+            SupervisorError::ProposalEventMismatch(_)
+                | SupervisorError::ProposalStateMismatch { .. }
+                // R28.1 tier 2: the owner-account check is about the STORE, not one row,
+                // so it is now `Totals` rather than a row refusal that names nothing.
+                | SupervisorError::ProposalTotalsMismatch(_)
         ),
         "{error:?} / {error}"
     );
@@ -1360,7 +1364,11 @@ fn a_tampered_context_manifest_is_rejected_by_get_list_and_startup() {
     assert!(
         matches!(
             error,
-            SupervisorError::ProposalEventMismatch(_) | SupervisorError::ProposalStateMismatch
+            SupervisorError::ProposalEventMismatch(_)
+                | SupervisorError::ProposalStateMismatch { .. }
+                // R28.1 tier 2: the owner-account check is about the STORE, not one row,
+                // so it is now `Totals` rather than a row refusal that names nothing.
+                | SupervisorError::ProposalTotalsMismatch(_)
         ),
         "{error:?}"
     );
@@ -2062,7 +2070,11 @@ fn assert_refuses_startup(fixture: &Fixture, case: &str) {
     assert!(
         matches!(
             error,
-            SupervisorError::ProposalEventMismatch(_) | SupervisorError::ProposalStateMismatch
+            SupervisorError::ProposalEventMismatch(_)
+                | SupervisorError::ProposalStateMismatch { .. }
+                // R28.1 tier 2: the owner-account check is about the STORE, not one row,
+                // so it is now `Totals` rather than a row refusal that names nothing.
+                | SupervisorError::ProposalTotalsMismatch(_)
         ),
         "{case}: {error:?} / {error}"
     );
@@ -2338,4 +2350,102 @@ fn startup_refuses_when_the_owner_account_is_gone() {
         .unwrap();
 
     assert_refuses_startup(&fixture, "no owner account");
+}
+
+/// R28 tier 2 pass 3 of 14: a Proposal row the log does not account for is refused at startup, and
+/// the refusal names WHICH Proposal and carries the reader's own fault.
+///
+/// Pass 1's plant shape: the event replay catches every column tamper first, so the plant is a row
+/// with no Event of its own. The planted digest is all `f`, so it sorts last in the pass's own
+/// `ORDER BY` by construction (R39.3), and the column list comes from `pragma_table_info` so the
+/// plant does not go stale when a column is added.
+#[test]
+fn startup_refuses_an_unaccounted_proposal_row_and_names_the_row() {
+    let fixture = admitted_mission("r28t2-proposal-startup");
+    fixture.proposals.submit(&fixture.record().bytes()).unwrap();
+
+    let connection = fixture.store.connect();
+    let existing: String = connection
+        .query_row(
+            "SELECT digest_value FROM proposals ORDER BY digest_value LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the fixture recorded a Proposal");
+    let columns: Vec<String> = connection
+        .prepare("SELECT name FROM pragma_table_info('proposals')")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let planted = "f".repeat(64);
+    let names = columns.join(", ");
+    let values = columns
+        .iter()
+        .map(|column| {
+            if column == "digest_value" {
+                "?1".to_owned()
+            } else {
+                column.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    connection
+        .execute(
+            &format!(
+                "INSERT INTO proposals ({names}) SELECT {values} FROM proposals
+                 WHERE digest_value = ?2"
+            ),
+            rusqlite::params![planted, existing],
+        )
+        .expect("the planted row inserts");
+    drop(connection);
+
+    // The belt refuses it ON READ, so the planted fault is real and has a name of its own.
+    let read = fixture
+        .proposals
+        .get(&planted)
+        .expect_err("the reader trusted a row whose bytes do not hash to its digest");
+    assert!(
+        matches!(read, ProposalError::InvalidStore | ProposalError::Inconsistent(_)),
+        "the planted fault is not the one this test is about: {read:?}"
+    );
+
+    let refusal = fixture
+        .restart()
+        .expect_err("a store holding an unaccounted Proposal row reopened Ready");
+    assert!(
+        matches!(
+            &refusal,
+            SupervisorError::ProposalStateMismatch {
+                workspace_id,
+                digest_value,
+                ..
+            } if *workspace_id == fixture.workspace_id && digest_value == &planted
+        ),
+        "refused for the wrong reason, or naming the wrong row: {refusal:?}"
+    );
+    // R28.4: the key and the fault's NAME. `name()` is `pub(crate)`, so this bar reads the name
+    // out of the line itself and checks `Debug` agrees -- which is the property that matters: the
+    // one-line message names a fault the Debug channel can be opened on.
+    let line = refusal.to_string();
+    assert!(
+        line.contains(&planted) && line.contains(&fixture.workspace_id.to_string()),
+        "the refusal does not name the row it refused: {line}"
+    );
+    let named = line
+        .rsplit(": ")
+        .next()
+        .expect("the line ends with the fault's name")
+        .to_owned();
+    assert!(
+        !named.is_empty() && !named.contains(' ') && !named.contains('{'),
+        "the tail of the line is a rendering, not a name: {line}"
+    );
+    assert!(
+        format!("{refusal:?}").contains(&named),
+        "the named fault is not reachable through Debug: {refusal:?}"
+    );
 }
