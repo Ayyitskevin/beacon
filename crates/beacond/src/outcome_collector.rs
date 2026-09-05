@@ -87,6 +87,16 @@ pub enum CollectorRefusal {
     /// The collector will not pick a line and will not add across units, so this is a refusal rather
     /// than an arithmetic decision made where nobody can see it. See the report's seam note.
     SpendUnitsNotSingular { units: usize },
+    /// A cited record verifies, and its own bytes say it is about a DIFFERENT Mission than the
+    /// completion it was collected beside. Never a join: the completion's `mission_id` and the
+    /// record's `mission_id` are both read from canonical bytes through their owning readers, and
+    /// the refusal names both so the reader knows which record disagreed.
+    RecordForAnotherMission {
+        kind: &'static str,
+        id: String,
+        declared_mission: Uuid,
+        expected_mission: Uuid,
+    },
     /// A delivered Artifact's own bytes name another Workspace (R19.2: the collector's own arm,
     /// like the other sources', never `Unverified` with a reason).
     ///
@@ -153,6 +163,16 @@ impl fmt::Display for CollectorRefusal {
                 formatter,
                 "the measured spend record carries {units} units and a manifest spend reference \
                  holds one"
+            ),
+            Self::RecordForAnotherMission {
+                kind,
+                id,
+                declared_mission,
+                expected_mission,
+            } => write!(
+                formatter,
+                "the {kind} {id} is about Mission {declared_mission}; this Outcome is about \
+                 Mission {expected_mission}"
             ),
             Self::ArtifactInAnotherWorkspace { id } => write!(
                 formatter,
@@ -354,6 +374,10 @@ pub struct CollectedNarrative {
 pub struct CollectedClassification {
     pub digest_value: String,
     pub classification_id: Uuid,
+    /// The Mission the record's own bytes classify. Carried, not dropped: without it the
+    /// completion/classification mismatch this collector refuses would be erased before the
+    /// `prepare` seam could ever check it (sol1's cold read, #3).
+    pub mission_id: Uuid,
     pub project_id: Uuid,
     pub policy_revision: u32,
     pub charter_revision: u32,
@@ -448,7 +472,10 @@ impl<'a> Collector<'a> {
 
         let mut classification = None;
         if let Some(digest) = &request.classification_digest {
-            classification = Some(self.classification(digest, boundary)?);
+            let expected_mission = completion
+                .as_ref()
+                .map(|collected: &CollectedCompletion| collected.mission_id);
+            classification = Some(self.classification(digest, boundary, expected_mission)?);
         }
 
         let mut proposals = Vec::new();
@@ -796,6 +823,7 @@ impl<'a> Collector<'a> {
         &self,
         digest_value: &str,
         boundary: Option<u64>,
+        expected_mission: Option<Uuid>,
     ) -> Result<CollectedClassification, CollectorRefusal> {
         let record = match crate::mission_impact::verified_classification_within(
             self.connection,
@@ -834,9 +862,23 @@ impl<'a> Collector<'a> {
         let policy_high_impact = record.payload().appendix_is_mandatory();
 
         let payload = record.payload();
+        // Its own bytes must classify the Mission this Outcome is about. Both sides of the
+        // comparison come from canonical bytes through their owning readers; nothing here joins a
+        // column to a column.
+        if let Some(expected) = expected_mission
+            && payload.mission_id != expected
+        {
+            return Err(CollectorRefusal::RecordForAnotherMission {
+                kind: "classification",
+                id: digest_value.to_owned(),
+                declared_mission: payload.mission_id,
+                expected_mission: expected,
+            });
+        }
         Ok(CollectedClassification {
             digest_value: record.digest().value.clone(),
             classification_id: payload.classification_id,
+            mission_id: payload.mission_id,
             project_id: payload.policy.project_id,
             policy_revision: payload.policy.policy_revision,
             charter_revision: payload.policy.charter_revision,
