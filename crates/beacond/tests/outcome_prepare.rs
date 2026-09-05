@@ -34,7 +34,8 @@ use beacond::{
     SuccessCondition, Supervisor, TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
     TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft, TeamService,
     TrackRecordEvidenceKind, TrackRecordRequirement, UnfinishedKind, Verdict, VerifiedSources,
-    VerifiedText, declared_conditions_digest, record_completion, render, verified_manifest_within,
+    VerifiedText, declared_conditions_digest, publication_candidacy, record_completion, render,
+    verified_manifest_within,
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -3421,4 +3422,172 @@ fn a_published_outcome_is_never_edited_or_deleted_in_place() {
         params![fixture.workspace_id.to_string()],
     );
     assert!(deleted.is_err(), "a publication was deleted");
+}
+
+/// R24.1: the seam's non-authorship arm, exercised directly against the row the Evaluation module
+/// would have refused.
+///
+/// `publication_candidacy` is called with a stored Evaluation whose evaluator IS the candidate's
+/// accountable Resident -- planted, because no path records one. The row is made SELF-CONSISTENT
+/// (canonical bytes rebuilt through the real codec, digest recomputed over them), so the reader's
+/// byte and digest checks pass and the read reaches the checks that judge the record's content.
+///
+/// What this measures, rather than what it assumes: which refusal comes back, and therefore which
+/// layer is load-bearing.
+#[test]
+fn the_seam_refuses_a_candidacy_whose_evaluator_authored_the_candidate() {
+    let fixture = admitted_mission("seam-non-authorship-direct");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (candidate, candidate_digest, honest_digest) = fixture.publishable();
+
+    // The control: the honest pairing is a candidacy.
+    {
+        let connection = fixture.store.connect();
+        publication_candidacy(
+            &connection,
+            fixture.workspace_id,
+            &honest_digest,
+            &candidate_digest,
+            fixture.mission_id,
+        )
+        .expect("the honest pairing must be a candidacy");
+    }
+
+    // The planted row: the same Evaluation, re-authored so its evaluator is the candidate's
+    // accountable Resident. Bytes and digest are rebuilt together, so the row is exactly what a
+    // store would hold if the Evaluation module's guard had not been there.
+    let honest = fixture.evaluations().get(&honest_digest.value).unwrap();
+    let mut payload = honest.payload().clone();
+    payload.evaluator = Evaluator {
+        resident_id: fixture.resident_id,
+        configuration_id: fixture.configuration_id,
+    };
+    let planted_bytes = payload
+        .canonical_bytes()
+        .expect("the re-authored record encodes");
+    let planted_value = data_encoding::HEXLOWER.encode(sha2_256(&planted_bytes).as_slice());
+
+    // Inserted as a SIBLING row rather than an edit: the digest is the primary key the findings
+    // reference, so re-stamping it in place would orphan them. The column list is read from the
+    // live schema so this keeps working when `evaluations` gains a column.
+    //
+    // The insert trigger has to come down for it: non-authorship is enforced at THREE layers --
+    // `record`'s draft check, this trigger, and the verified reader -- and the row a seam-level
+    // test needs is precisely the one all three exist to prevent.
+    let connection = fixture.store.connect();
+    connection
+        .execute_batch("DROP TRIGGER evaluations_evaluator_is_not_the_artifact_author;")
+        .unwrap();
+    let columns: Vec<String> = connection
+        .prepare("SELECT name FROM pragma_table_info('evaluations')")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let projected = columns
+        .iter()
+        .map(|column| match column.as_str() {
+            "digest_value" => "?1".to_owned(),
+            "canonical_bytes" => "?2".to_owned(),
+            "evaluator_resident_id" => "?3".to_owned(),
+            "evaluator_configuration_id" => "?6".to_owned(),
+            other => other.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    connection
+        .execute(
+            &format!(
+                "INSERT INTO evaluations ({}) SELECT {projected} FROM evaluations
+                 WHERE workspace_id = ?4 AND digest_value = ?5",
+                columns.join(", ")
+            ),
+            params![
+                planted_value,
+                planted_bytes,
+                fixture.resident_id.to_string(),
+                fixture.workspace_id.to_string(),
+                honest_digest.value,
+                fixture.configuration_id.to_string()
+            ],
+        )
+        .expect("the planted row inserts");
+    connection
+        .execute(
+            "INSERT INTO evaluation_findings (
+                 workspace_id, evaluation_digest, ordinal, severity, summary
+             )
+             SELECT workspace_id, ?1, ordinal, severity, summary FROM evaluation_findings
+             WHERE workspace_id = ?2 AND evaluation_digest = ?3",
+            params![
+                planted_value,
+                fixture.workspace_id.to_string(),
+                honest_digest.value
+            ],
+        )
+        .expect("its findings come with it");
+    // Restored exactly as migration 0028 wrote it, so the store's schema signature is unchanged.
+    connection
+        .execute_batch(
+            "CREATE TRIGGER evaluations_evaluator_is_not_the_artifact_author
+BEFORE INSERT ON evaluations
+WHEN NEW.subject_kind = 'artifact'
+  AND EXISTS (
+      SELECT 1 FROM artifacts
+      WHERE artifacts.workspace_id = NEW.workspace_id
+        AND artifacts.digest_value = NEW.artifact_digest
+        AND artifacts.accountable_resident_id = NEW.evaluator_resident_id
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'The evaluator is the accountable Resident of the subject Artifact');
+END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let planted_digest = EvaluationDigest {
+        algorithm: honest_digest.algorithm.clone(),
+        canonicalizer: honest_digest.canonicalizer.clone(),
+        value: planted_value,
+    };
+    let connection = fixture.store.connect();
+    let refusal = publication_candidacy(
+        &connection,
+        fixture.workspace_id,
+        &planted_digest,
+        &candidate_digest,
+        fixture.mission_id,
+    )
+    .expect_err("the candidate's own author qualified it");
+
+    // The seam refuses it. WHICH name comes back is the measurement: the Evaluation module
+    // re-derives non-authorship from the canonical bytes on every read
+    // (`evaluation.rs` `verified_evaluation`), and the seam calls that reader FIRST and maps its
+    // error to `Unverified` -- so the seam's own `EvaluatorAuthoredTheCandidate` arm sits behind a
+    // wall that never lets a self-evaluation through. Both are refusals of the same fact; the arm
+    // is a second wall, not the one that fires.
+    assert!(
+        matches!(
+            refusal,
+            PublicationSeamRefusal::Unverified
+                | PublicationSeamRefusal::EvaluatorAuthoredTheCandidate
+        ),
+        "{refusal:?}"
+    );
+    assert_eq!(
+        refusal,
+        PublicationSeamRefusal::Unverified,
+        "the seam's own arm fired, so it is reachable after all -- update the report's acceptance \
+         row 1, which records it as unreachable"
+    );
+    // And publishing that pairing refuses too, so nothing downstream is more permissive.
+    assert!(
+        fixture
+            .outcomes
+            .publish(fixture.mission_id, &candidate_digest, &planted_digest)
+            .is_err()
+    );
+    let _ = candidate;
 }
