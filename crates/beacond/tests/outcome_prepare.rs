@@ -583,6 +583,78 @@ fn stored_manifests_are_immutable_under_update_and_delete() {
         .expect("the manifest still reads");
 }
 
+#[test]
+fn a_v2_manifest_row_is_refused_by_a_store_at_0029_and_admitted_after_the_ladder() {
+    // R22. Migration 0029 merged with `digest_canonicalizer` pinned to the v1 token, and 0029 is
+    // applied history now -- immutable. The v2 grammar (R18.3-5) therefore needs a migration of its
+    // own to repoint that CHECK, or every row `prepare` writes is refused by the store's own guard.
+    //
+    // RED: a store migrated through 0029 ONLY (the files, applied by hand, exactly as
+    // `a_store_at_the_previous_version_migrates_forward_and_reconciles` does) refuses a v2 row,
+    // and so does the same store after startup while the ladder still ends at 0029. GREEN once the
+    // ladder carries 0030 and startup applies it.
+    let store = TestStore::new("v2-row-at-0029");
+    let migrations_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    let mut files: Vec<String> = std::fs::read_dir(&migrations_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".sql") && &name[..4] <= "0029")
+        .collect();
+    files.sort();
+    assert_eq!(files.last().map(|name| &name[..4]), Some("0029"));
+    {
+        let connection = store.connect();
+        connection
+            .pragma_update(None, "foreign_keys", "OFF")
+            .unwrap();
+        for name in &files {
+            connection
+                .execute_batch(&std::fs::read_to_string(migrations_dir.join(name)).unwrap())
+                .unwrap();
+        }
+    }
+    // Foreign keys stay OFF for the probe: the column under test is the CHECK, not the relations,
+    // and a real parent chain would only move the failure somewhere else.
+    let insert = |connection: &Connection| {
+        connection
+            .pragma_update(None, "foreign_keys", "OFF")
+            .unwrap();
+        connection.execute(
+            "INSERT INTO outcome_manifests (
+                 workspace_id, digest_algorithm, digest_canonicalizer, manifest_digest,
+                 canonical_bytes, manifest_id, mission_id, completion_digest,
+                 canonicalizer_version, renderer_version, boundary_event_seq,
+                 candidate_artifact_digest
+             ) VALUES (?1, 'sha256', 'beacon.outcome.manifest.v2', ?2, ?3, ?4, ?5, ?6,
+                       'beacon.outcome.manifest.v2', 'beacon.outcome.md.v1', 1, ?7)",
+            params![
+                Uuid::new_v4().to_string(),
+                "ab".repeat(32),
+                vec![0_u8; 27],
+                Uuid::new_v4().to_string(),
+                Uuid::new_v4().to_string(),
+                "cd".repeat(32),
+                "ef".repeat(32),
+            ],
+        )
+    };
+    let refused = insert(&store.connect()).expect_err("a store at 0029 accepted a v2 row");
+    assert!(
+        refused.to_string().contains("CHECK constraint failed"),
+        "refused for the wrong reason: {refused}"
+    );
+
+    Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Personal".to_owned(),
+    })
+    .expect("a store at 0029 migrates forward");
+    insert(&store.connect()).expect(
+        "after the ladder a v2 manifest row is still refused: migration 0030 has not repointed \
+         the digest_canonicalizer CHECK to the grammar the codec emits",
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // The verified reader
 // ---------------------------------------------------------------------------------------------
