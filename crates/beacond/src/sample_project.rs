@@ -416,8 +416,7 @@ impl SampleProjectService {
     ) -> Result<T, SampleProjectError> {
         #[cfg(test)]
         if let Some(store_path) = &self.test_store_path {
-            let mut connection = Connection::open(store_path)?;
-            connection.pragma_update(None, "foreign_keys", "ON")?;
+            let mut connection = crate::open_store_connection(store_path)?;
             return operation(&mut connection, 1);
         }
         self.accounts.with_authenticated_store(operation)

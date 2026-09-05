@@ -521,6 +521,7 @@ impl Fixture {
             .prepare(
                 "SELECT sql FROM sqlite_schema
                  WHERE type = 'trigger' AND tbl_name IN ('rulings', 'ruling_supersessions')
+                 AND name NOT LIKE '%\\_no\\_conflicting\\_insert' ESCAPE '\\'
                  ORDER BY name",
             )
             .unwrap();
@@ -2500,7 +2501,9 @@ fn the_store_refuses_a_second_predecessor_and_a_second_supersession() {
             ],
         )
         .unwrap_err();
-    assert!(error.to_string().contains("UNIQUE"), "{error}");
+    // Since 0029 the table's insert guard, generated from this very unique index, refuses the
+    // duplicate before the index is consulted; the refusal names the stored identity.
+    assert!(error.to_string().contains("already stored"), "{error}");
 
     // The second Ruling is already superseded by the third. Superseding it again is refused by the
     // unique index, so "the effective Ruling is the last link" always has one answer.
@@ -2517,7 +2520,9 @@ fn the_store_refuses_a_second_predecessor_and_a_second_supersession() {
             ],
         )
         .unwrap_err();
-    assert!(error.to_string().contains("UNIQUE"), "{error}");
+    // Since 0029 the table's insert guard, generated from this very unique index, refuses the
+    // duplicate before the index is consulted; the refusal names the stored identity.
+    assert!(error.to_string().contains("already stored"), "{error}");
     assert_eq!(
         fixture.count("SELECT count(*) FROM ruling_supersessions"),
         2

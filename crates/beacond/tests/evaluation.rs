@@ -2895,6 +2895,29 @@ fn an_artifact_evaluation_surface_reports_the_subject_artifacts_successor() {
     assert_eq!(reread.force().superseded_by(), None);
 }
 
+/// The rollback undoes migration 0029 too: a store at an earlier version carries none of its
+/// insert guards, and startup compares a store's schema with its declared version BEFORE it
+/// migrates -- a rolled-back store that still carried them was refused as a schema mismatch.
+fn drop_0029_insert_guards(connection: &Connection) {
+    let mut statement = connection
+        .prepare(
+            r"SELECT name FROM sqlite_schema
+              WHERE type = 'trigger' AND name LIKE '%\_no\_conflicting\_insert' ESCAPE '\'",
+        )
+        .unwrap();
+    let guards: Vec<String> = statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    drop(statement);
+    for guard in guards {
+        connection
+            .execute_batch(&format!("DROP TRIGGER {guard};"))
+            .unwrap();
+    }
+}
+
 /// sol1's rekey probe, committed as its test: a v1 Evaluation chain recorded BEFORE the migration
 /// survives the real 27 -> 28 startup byte-identically.
 ///
@@ -2903,7 +2926,6 @@ fn an_artifact_evaluation_surface_reports_the_subject_artifacts_successor() {
 /// migration. This one reconstructs the exact 0023 Evaluation objects, stamps version 27, and lets
 /// the real ladder run -- and sol1 proved it reaches the migration by making the copied
 /// `canonical_bytes` equal-length zeroes and watching it go RED.
-
 #[test]
 fn migration_0028_preserves_preexisting_proposal_evaluation_bytes_and_chain() {
     let fixture = admitted_mission("proposal-evaluation-rekey-migration");
@@ -3021,13 +3043,14 @@ fn migration_0028_preserves_preexisting_proposal_evaluation_bytes_and_chain() {
         27,
         "the rollback did not stamp the store at 27 -- update its guard for the new ladder head"
     );
+    drop_0029_insert_guards(&connection);
     drop(connection);
 
     Supervisor::bootstrap(StartupConfig {
         store_path: fixture.store.path.clone(),
         initial_workspace_name: "Ignored".to_owned(),
     })
-    .expect("the real 27-to-28 startup migration succeeds");
+    .expect("the real 27-to-29 startup migration succeeds");
 
     let connection = fixture.store.connect();
     for (digest, bytes) in &pinned {
