@@ -418,7 +418,14 @@ pub enum SupervisorError {
         digest: String,
         cause: mission_impact::ClassificationStoreError,
     },
-    OutcomeManifestStateMismatch,
+    /// A stored Outcome manifest does not re-prove against its own bytes or the records it cites.
+    ///
+    /// Names the row and carries the owning reader's own refusal (R28.1).
+    OutcomeManifestStateMismatch {
+        workspace_id: Uuid,
+        manifest_digest: String,
+        cause: outcome_store::ManifestStoreRefusal,
+    },
     /// A stored Outcome publication does not re-prove against the records it cites.
     ///
     /// Names the row and carries the owning reader's own refusal (R28.1). `version` is the version
@@ -621,14 +628,18 @@ impl fmt::Display for SupervisorError {
                 "Mission impact classification {digest} in Workspace {workspace_id} does not \
                  re-prove: {cause}"
             ),
-            Self::OutcomeManifestStateMismatch => {
-                write!(
-                    formatter,
-                    "stored Outcome manifests do not agree with their bytes, the completion they \
-                     are frozen on, or the candidate Artifact whose audit Event is their position \
-                     in the log"
-                )
-            }
+            // R28.4: the key and the fault's NAME. The carried refusal's own text is
+            // reachable through `Debug` and `source()`, not pasted into this line.
+            Self::OutcomeManifestStateMismatch {
+                workspace_id,
+                manifest_digest,
+                cause,
+            } => write!(
+                formatter,
+                "manifest {manifest_digest} in Workspace {workspace_id} does not re-prove \
+                 against its own bytes or the records it cites: {}",
+                cause.name()
+            ),
             // R28.4: the key and the fault's NAME. The carried refusal's own text is reachable
             // through `Debug` and `source()`, not pasted into this line.
             Self::OutcomePublicationStateMismatch {
@@ -1351,8 +1362,24 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
             cause,
         },
     })?;
-    outcome_store::verify_manifest_state(connection)
-        .map_err(|_| SupervisorError::OutcomeManifestStateMismatch)?;
+outcome_store::verify_manifest_state(connection).map_err(|fault| match fault {
+        outcome_store::ManifestStateFault::Store(error) => SupervisorError::Store(error),
+        outcome_store::ManifestStateFault::Row {
+            workspace_id,
+            manifest_digest,
+            cause,
+        } => SupervisorError::OutcomeManifestStateMismatch {
+            workspace_id,
+            manifest_digest,
+            cause,
+        },
+        outcome_store::ManifestStateFault::Identity {
+            workspace_id,
+            manifest_digest,
+        } => SupervisorError::IntegrityCheckFailed(format!(
+            "a manifest row's Workspace is not readable: {workspace_id}, manifest {manifest_digest}"
+        )),
+    })?;
     // After the manifest pass, because a publication is proved THROUGH its manifest: the relation
     // cites a candidate, the candidate's manifest must verify, and the manifest's own pass has to
     // have run before this one can rely on it (R18.7).
