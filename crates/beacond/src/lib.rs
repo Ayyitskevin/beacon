@@ -441,7 +441,16 @@ pub enum SupervisorError {
     /// The completions do not agree with the log as a whole. No row to name.
     MissionCompletionTotalsMismatch(TotalsMismatch),
     ArtifactEventMismatch(i64),
-    ArtifactStateMismatch,
+    /// A stored Artifact does not re-prove against its own bytes or the records it cites.
+    ///
+    /// Names the row and carries the owning reader's own error (R28.1).
+    ArtifactStateMismatch {
+        workspace_id: Uuid,
+        digest_value: String,
+        cause: artifact::ArtifactError,
+    },
+    /// The Artifact supersession relation does not agree with the store. No row to name.
+    ArtifactTotalsMismatch(artifact::ArtifactError),
     /// A stored Mission impact classification does not re-prove against its own bytes or the
     /// predecessor it names -- WITH the row and the owning reader's own fault (R27.1).
     ///
@@ -788,13 +797,22 @@ impl fmt::Display for SupervisorError {
                 formatter,
                 "Event sequence {sequence} does not match its stored Artifact bytes"
             ),
-            Self::ArtifactStateMismatch => {
-                write!(
-                    formatter,
-                    "Artifact state does not agree with its bytes, its content, its supersession \
-                     chain, or its audit Event"
-                )
-            }
+            // R28.4: the key and the fault's NAME.
+            Self::ArtifactStateMismatch {
+                workspace_id,
+                digest_value,
+                cause,
+            } => write!(
+                formatter,
+                "Artifact {digest_value} in Workspace {workspace_id} does not re-prove against \
+                 its own bytes: {}",
+                cause.name()
+            ),
+            Self::ArtifactTotalsMismatch(cause) => write!(
+                formatter,
+                "the Artifact supersession relation does not agree with the store: {}",
+                cause.name()
+            ),
             Self::MissionImpactClassificationStateMismatch {
                 workspace_id,
                 digest,
@@ -1729,8 +1747,25 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     })?;
     // The Artifact state stands alone: it binds no other module's record, and nothing else's
     // verification reads it.
-    artifact::verify_artifact_state(connection)
-        .map_err(|_| SupervisorError::ArtifactStateMismatch)?;
+    artifact::verify_artifact_state(connection).map_err(|fault| match fault {
+        artifact::ArtifactStateFault::Store(error) => SupervisorError::Store(error),
+        artifact::ArtifactStateFault::Row {
+            workspace_id,
+            digest_value,
+            cause,
+        } => SupervisorError::ArtifactStateMismatch {
+            workspace_id,
+            digest_value,
+            cause,
+        },
+        artifact::ArtifactStateFault::Totals(cause) => SupervisorError::ArtifactTotalsMismatch(cause),
+        artifact::ArtifactStateFault::Identity {
+            workspace_id,
+            digest_value,
+        } => SupervisorError::IntegrityCheckFailed(format!(
+            "an Artifact row's Workspace is not readable: {workspace_id}, Artifact {digest_value}"
+        )),
+    })?;
     // A Run whose lease expired without a terminal Receipt becomes unconfirmed
     // here. Lease expiry is what proves that state; the Run is never removed.
     check_preflight::verify_run_state(connection).map_err(|_| SupervisorError::RunStateMismatch)?;

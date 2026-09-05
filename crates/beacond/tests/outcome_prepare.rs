@@ -4510,8 +4510,30 @@ fn startup_refuses_an_unaccounted_artifact_row_and_names_the_row() {
     let refusal = astra_boot(&fixture)
         .expect_err("a store holding an unaccounted Artifact row reopened Ready");
     assert!(
-        matches!(&refusal, beacond::SupervisorError::ArtifactStateMismatch),
-        "startup did not refuse the planted Artifact: {refusal:?}"
+        matches!(
+            &refusal,
+            beacond::SupervisorError::ArtifactStateMismatch {
+                workspace_id,
+                digest_value,
+                cause: ArtifactError::InvalidStore,
+            } if *workspace_id == fixture.workspace_id && digest_value == &planted
+        ),
+        "refused for the wrong reason, or naming the wrong row: {refusal:?}"
+    );
+
+    // R28.4: the key and the fault's NAME.
+    let line = refusal.to_string();
+    assert!(
+        line.contains(&planted) && line.contains(&fixture.workspace_id.to_string()),
+        "the refusal does not name the row it refused: {line}"
+    );
+    assert!(
+        line.contains("InvalidStore"),
+        "the refusal does not name the fault: {line}"
+    );
+    assert!(
+        format!("{refusal:?}").contains("InvalidStore"),
+        "the carried fault is not reachable through Debug: {refusal:?}"
     );
 }
 

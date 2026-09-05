@@ -659,6 +659,117 @@ impl InconsistentArtifact {
     }
 }
 
+/// Which fault the Artifact startup pass hit, and WHICH ROW hit it (R27.1's shape, R28.1).
+pub(crate) enum ArtifactStateFault {
+    /// The enumeration itself failed: no row to name, because none was reached.
+    Store(rusqlite::Error),
+    /// One Artifact did not re-prove. `cause` is the owning reader's OWN error, carried whole.
+    ///
+    /// MEASURED LIMIT (R41.1): the reader answers a row whose bytes do not hash to its digest with
+    /// the flat `InvalidStore`, so this pass ships row-identity-only. The domain faults
+    /// `ArtifactError` carries are reachable through the recording path, not through anything a
+    /// startup plant can build without the codec.
+    Row {
+        workspace_id: Uuid,
+        digest_value: String,
+        cause: ArtifactError,
+    },
+    /// The supersession relation, which is about the store rather than one row.
+    Totals(ArtifactError),
+    /// A row whose Workspace column is not a UUID. Unreachable while the foreign-key check and the
+    /// Workspace pass run first.
+    Identity {
+        workspace_id: String,
+        digest_value: String,
+    },
+}
+
+impl ArtifactError {
+    /// The variant's NAME, for R28.4's one-line startup message.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Account(_) => "Account",
+            Self::Malformed(_) => "Malformed",
+            Self::Inconsistent(_) => "Inconsistent",
+            Self::NotFound => "NotFound",
+            Self::DigestCollision => "DigestCollision",
+            Self::InvalidStore => "InvalidStore",
+            Self::SupersessionTooLong { .. } => "SupersessionTooLong",
+            Self::Store(_) => "Store",
+            Self::Json(_) => "Json",
+        }
+    }
+}
+
+impl fmt::Display for ArtifactStateFault {
+    /// R28.4: the KEY and the fault's NAME, never the carried error's own text.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(_) => formatter.write_str("the Artifacts could not be read"),
+            Self::Row {
+                workspace_id,
+                digest_value,
+                cause,
+            } => write!(
+                formatter,
+                "Artifact {digest_value} in Workspace {workspace_id} does not re-prove: {}",
+                cause.name()
+            ),
+            Self::Totals(cause) => write!(
+                formatter,
+                "the Artifact supersession relation does not agree with the store: {}",
+                cause.name()
+            ),
+            Self::Identity {
+                workspace_id,
+                digest_value,
+            } => write!(
+                formatter,
+                "an Artifact row's Workspace is not readable: {workspace_id}, Artifact \
+                 {digest_value}"
+            ),
+        }
+    }
+}
+
+/// Hand-written and NOT delegating to `Display`: R28.4 keeps the carried text reachable here.
+impl fmt::Debug for ArtifactStateFault {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => formatter.debug_tuple("Store").field(error).finish(),
+            Self::Totals(cause) => formatter.debug_tuple("Totals").field(cause).finish(),
+            Self::Row {
+                workspace_id,
+                digest_value,
+                cause,
+            } => formatter
+                .debug_struct("Row")
+                .field("workspace_id", workspace_id)
+                .field("digest_value", digest_value)
+                .field("cause", cause)
+                .finish(),
+            Self::Identity {
+                workspace_id,
+                digest_value,
+            } => formatter
+                .debug_struct("Identity")
+                .field("workspace_id", workspace_id)
+                .field("digest_value", digest_value)
+                .finish(),
+        }
+    }
+}
+
+impl std::error::Error for ArtifactStateFault {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::Totals(cause) | Self::Row { cause, .. } => Some(cause),
+            Self::Identity { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum ArtifactError {
     Account(OperatorAccountError),
@@ -1473,32 +1584,70 @@ pub(crate) fn verify_artifact_event(
 /// Startup reconciliation: every Artifact row re-proved against its bytes, its content, its Event,
 /// its cursor, its references, and its chain. The world is not re-derived -- a later Mission or a
 /// retired Resident does not corrupt a recorded Artifact.
-pub(crate) fn verify_artifact_state(connection: &Connection) -> Result<(), ArtifactError> {
-    let mut statement = connection.prepare(
-        "SELECT workspace_id, digest_value FROM artifacts ORDER BY workspace_id, digest_value",
-    )?;
+pub(crate) fn verify_artifact_state(connection: &Connection) -> Result<(), ArtifactStateFault> {
+    let mut statement = connection
+        .prepare(
+            "SELECT workspace_id, digest_value FROM artifacts ORDER BY workspace_id, digest_value",
+        )
+        .map_err(ArtifactStateFault::Store)?;
     let rows = statement
         .query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+        })
+        .map_err(ArtifactStateFault::Store)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(ArtifactStateFault::Store)?;
     drop(statement);
 
-    if !rows.is_empty() && !owner_account_exists(connection)? {
-        return Err(ArtifactError::InvalidStore);
+    if !rows.is_empty()
+        && !owner_account_exists(connection).map_err(ArtifactStateFault::Store)?
+    {
+        return Err(ArtifactStateFault::Totals(ArtifactError::InvalidStore));
     }
 
     for (workspace_id, digest_value) in &rows {
-        let workspace_id = parse_uuid(workspace_id)?;
-        let stored = load_stored(connection, workspace_id, digest_value)?
-            .ok_or(ArtifactError::InvalidStore)?;
-        let payload = verified_payload(connection, &stored)?;
-        validate_references(connection, workspace_id, &payload)?;
-        let event_sequence = paired_event_sequence(connection, &stored)?;
-        if event_sequence != stored.creation_event_seq {
-            return Err(ArtifactError::InvalidStore);
-        }
+        let identity = || ArtifactStateFault::Identity {
+            workspace_id: workspace_id.clone(),
+            digest_value: digest_value.clone(),
+        };
+        let parsed = Uuid::parse_str(workspace_id).map_err(|_| identity())?;
+        verify_one_artifact(connection, parsed, digest_value).map_err(|cause| {
+            ArtifactStateFault::Row {
+                workspace_id: parsed,
+                digest_value: digest_value.clone(),
+                cause,
+            }
+        })?;
     }
+    verify_artifact_supersessions(connection, rows.len()).map_err(|cause| match cause {
+        ArtifactError::Store(error) => ArtifactStateFault::Store(error),
+        other => ArtifactStateFault::Totals(other),
+    })?;
+    Ok(())
+}
+
+/// One stored Artifact, re-proved. Unchanged from what the loop held inline.
+fn verify_one_artifact(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+) -> Result<(), ArtifactError> {
+    let stored = load_stored(connection, workspace_id, digest_value)?
+        .ok_or(ArtifactError::InvalidStore)?;
+    let payload = verified_payload(connection, &stored)?;
+    validate_references(connection, workspace_id, &payload)?;
+    let event_sequence = paired_event_sequence(connection, &stored)?;
+    if event_sequence != stored.creation_event_seq {
+        return Err(ArtifactError::InvalidStore);
+    }
+    Ok(())
+}
+
+/// The supersession relation: about the store, not one row.
+fn verify_artifact_supersessions(
+    connection: &Connection,
+    artifact_count: usize,
+) -> Result<(), ArtifactError> {
 
     // The relation re-derived against the bytes: every supersession row's successor must name that
     // predecessor in its canonical bytes, no Artifact may be superseded twice (the store's UNIQUE
@@ -1556,8 +1705,68 @@ pub(crate) fn verify_artifact_state(connection: &Connection) -> Result<(), Artif
         [],
         |row| row.get(0),
     )?;
-    if usize::try_from(total_events) != Ok(rows.len()) {
+    if usize::try_from(total_events) != Ok(artifact_count) {
         return Err(ArtifactError::InvalidStore);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod name_witness {
+    use super::*;
+
+    /// Pinned independently of `name()` (the fold at 30d2a20).
+    fn expected_name(error: &ArtifactError) -> &'static str {
+        match error {
+            ArtifactError::Account(_) => "Account",
+            ArtifactError::Malformed(_) => "Malformed",
+            ArtifactError::Inconsistent(_) => "Inconsistent",
+            ArtifactError::NotFound => "NotFound",
+            ArtifactError::DigestCollision => "DigestCollision",
+            ArtifactError::InvalidStore => "InvalidStore",
+            ArtifactError::SupersessionTooLong { .. } => "SupersessionTooLong",
+            ArtifactError::Store(_) => "Store",
+            ArtifactError::Json(_) => "Json",
+        }
+    }
+
+    #[test]
+    fn every_artifact_error_arm_has_its_own_pinned_name() {
+        let every_arm = [
+            ArtifactError::Account(crate::operator_account::OperatorAccountError::PasswordTooShort),
+            ArtifactError::Malformed(MalformedArtifact::Magic),
+            ArtifactError::Inconsistent(InconsistentArtifact::WorkspaceScope),
+            ArtifactError::NotFound,
+            ArtifactError::DigestCollision,
+            ArtifactError::InvalidStore,
+            ArtifactError::SupersessionTooLong { bound: 1 },
+            ArtifactError::Store(rusqlite::Error::QueryReturnedNoRows),
+            ArtifactError::Json(serde_json::from_str::<u8>("\"x\"").unwrap_err()),
+        ];
+        assert_eq!(
+            every_arm.len(),
+            9,
+            "an arm was added to `ArtifactError` without a fixture here"
+        );
+        for arm in &every_arm {
+            assert_eq!(
+                arm.name(),
+                expected_name(arm),
+                "the startup name does not match the pinned table: {arm:?}"
+            );
+        }
+        let names: std::collections::BTreeSet<&str> =
+            every_arm.iter().map(ArtifactError::name).collect();
+        assert_eq!(
+            names.len(),
+            9,
+            "two arms share a startup name, so a swap between them is invisible: {names:?}"
+        );
+        for name in names {
+            assert!(
+                !name.contains(' ') && !name.contains('{'),
+                "a name is a name, not a rendering: {name}"
+            );
+        }
+    }
 }
