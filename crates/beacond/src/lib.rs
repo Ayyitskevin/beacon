@@ -382,6 +382,8 @@ pub enum SupervisorError {
     ArtifactEventMismatch(i64),
     ArtifactStateMismatch,
     OutcomeManifestStateMismatch,
+    /// A stored Outcome publication does not re-prove against the records it cites.
+    OutcomePublicationStateMismatch,
     PauseEventMismatch(i64),
     SchemaMismatch,
     UnsupportedSchemaVersion(i64),
@@ -568,6 +570,9 @@ impl fmt::Display for SupervisorError {
                      in the log"
                 )
             }
+            Self::OutcomePublicationStateMismatch => formatter.write_str(
+                "a stored Outcome publication does not re-prove against the records it cites",
+            ),
             Self::RulingStateMismatch => {
                 write!(
                     formatter,
@@ -1258,6 +1263,11 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     // completion, so both of those have to have proved themselves first (R18.7).
     outcome_store::verify_manifest_state(connection)
         .map_err(|_| SupervisorError::OutcomeManifestStateMismatch)?;
+    // After the manifest pass, because a publication is proved THROUGH its manifest: the relation
+    // cites a candidate, the candidate's manifest must verify, and the manifest's own pass has to
+    // have run before this one can rely on it (R18.7).
+    outcome_publication::verify_publication_state(connection)
+        .map_err(|_| SupervisorError::OutcomePublicationStateMismatch)?;
 
     Ok(StoreDiagnostics {
         status: DiagnosticStatus::Ready,
