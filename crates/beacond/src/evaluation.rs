@@ -2392,6 +2392,26 @@ mod tests {
     use super::*;
     use data_encoding::BASE64;
 
+    #[test]
+    fn a_ten_thousand_hop_supersession_walk_is_refused_before_allocating_the_chain() {
+        let followed = std::cell::Cell::new(0_usize);
+        let result = supersession_tail(
+            "0",
+            |current| {
+                let current = current.parse::<usize>().unwrap();
+                followed.set(followed.get() + 1);
+                Ok((current < 10_000).then(|| (current + 1).to_string()))
+            },
+            |_| Ok(()),
+        );
+
+        assert!(
+            result.is_err() && followed.get() < 10_000,
+            "the reader followed and retained the whole unbounded chain: followed={}, result={result:?}",
+            followed.get()
+        );
+    }
+
     /// gpt2 built these values, and the bytes below, from ADR 0038's field table alone -- no
     /// Beacon encoder, decoder, fixture or constant took part -- and cross-checked the result
     /// through coreutils. That is the only order in which a vector proves anything: the grammar
