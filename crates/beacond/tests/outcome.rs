@@ -285,6 +285,32 @@ fn rendered() -> String {
     render(&vector_manifest(), &vector_sources()).expect("the vector manifest renders")
 }
 
+/// The vector manifest's spend record: a verified measurement with a real coverage window, in the
+/// four arms the owner's closed vocabulary allows. The frozen spend vectors below carry the two
+/// arms a document can be read as complete under -- `measured` and `partially_measured`.
+fn vector_spend(measurement: SpendMeasurementKind) -> SpendRef {
+    SpendRef {
+        workspace_id: uuid(WORKSPACE),
+        spend_id: uuid(SPEND),
+        schema_version: 1,
+        digest: digest("beacon.spend.v1", hex32("88")),
+        amount_minor: 123_456,
+        currency: "USD".to_owned(),
+        minor_units_exponent: 2,
+        coverage_from_event_seq: 1,
+        coverage_to_event_seq: 3_000,
+        measurement,
+    }
+}
+
+/// The vector manifest with its spend slot verified instead of NotEvaluated. One manifest carries
+/// one spend ref, so each measurement arm is its own frozen vector.
+fn vector_manifest_with_spend(measurement: SpendMeasurementKind) -> OutcomeManifestV1 {
+    let mut manifest = vector_manifest();
+    manifest.spend_ref = OutcomeState::Verified(vector_spend(measurement));
+    manifest
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -369,6 +395,44 @@ fn push_pinned_artifact(out: &mut Vec<u8>) {
 
 /// The vector manifest's canonical bytes, assembled from ADR 0040's table by hand.
 fn manifest_bytes_by_hand() -> Vec<u8> {
+    manifest_bytes_by_hand_spend_slot(|out| {
+        push_absent_not_evaluated_spend(out);
+    })
+}
+
+/// The spend-vector manifests' canonical bytes, assembled by hand with the spend slot verified.
+fn manifest_bytes_by_hand_with_spend(measurement: SpendMeasurementKind) -> Vec<u8> {
+    manifest_bytes_by_hand_spend_slot(|out| push_spend_by_hand(out, measurement))
+}
+
+fn push_absent_not_evaluated_spend(out: &mut Vec<u8>) {
+    out.push(0x04);
+    push_string(out, "the spend owner has not measured this Mission.");
+}
+
+/// The verified spend slot, by hand: workspace and spend identities, the digest envelope, the
+/// integer amount with its unit and exponent, the declared coverage window, and the measurement
+/// token's tag (measured 0x01, partially_measured 0x02, unmeasured 0x03, broken 0x04).
+fn push_spend_by_hand(out: &mut Vec<u8>, measurement: SpendMeasurementKind) {
+    out.push(0x01);
+    out.extend_from_slice(uuid(WORKSPACE).as_bytes());
+    out.extend_from_slice(uuid(SPEND).as_bytes());
+    out.extend_from_slice(&1_u32.to_be_bytes());
+    push_digest(out, "beacon.spend.v1", &hex32("88"));
+    out.extend_from_slice(&123_456_i64.to_be_bytes());
+    push_string(out, "USD");
+    out.push(2);
+    out.extend_from_slice(&1_u64.to_be_bytes());
+    out.extend_from_slice(&3_000_u64.to_be_bytes());
+    out.push(match measurement {
+        SpendMeasurementKind::Measured => 0x01,
+        SpendMeasurementKind::PartiallyMeasured => 0x02,
+        SpendMeasurementKind::Unmeasured => 0x03,
+        SpendMeasurementKind::Broken => 0x04,
+    });
+}
+
+fn manifest_bytes_by_hand_spend_slot(spend_slot: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
     let mut out = MAGIC.to_vec();
     push_string(&mut out, CANONICALIZER);
     push_string(&mut out, RENDERER);
@@ -440,8 +504,7 @@ fn manifest_bytes_by_hand() -> Vec<u8> {
     push_string(&mut out, "sha256");
     push_string(&mut out, RECEIPT_CHECKSUM_LABEL);
 
-    out.push(0x04);
-    push_string(&mut out, "the spend owner has not measured this Mission.");
+    spend_slot(&mut out);
 
     out.push(0x01);
     out.extend_from_slice(&1_u32.to_be_bytes());
@@ -2406,4 +2469,96 @@ fn independent_outcome_vector_matches_frozen_expected_markdown_bytes_and_sha256(
          regenerate_outcome_vector"
     );
     assert_eq!(sha256_hex(document.as_bytes()), recorded);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The frozen spend vectors: the measurement token under a frozen document
+// ---------------------------------------------------------------------------------------------
+
+/// Regenerates the frozen spend vectors. Not part of the suite: run it deliberately, read the
+/// diff, and commit the new bytes only when the change to the renderer was intended.
+///
+///     cargo test -p beacond --test outcome -- --ignored --exact regenerate_outcome_spend_vectors
+///
+/// The base vector's spend is NotEvaluated, so without these the verified `SpendRef` bytes -- the
+/// amount, the declared coverage window, and the R23.1 measurement token -- were exercised by no
+/// frozen document. One manifest carries one spend ref, so each arm is its own vector; the two a
+/// document can be read as complete under are frozen here. Filled by a NON-AUTHOR seat (kimi,
+/// R22.2-3): the author of the grammar does not also author the bytes that prove it.
+#[test]
+#[ignore = "regenerates frozen fixtures; run deliberately, by a non-author seat, never as part of the suite"]
+fn regenerate_outcome_spend_vectors() {
+    std::fs::create_dir_all(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/outcome"),
+    )
+    .expect("fixture directory");
+    for (name, measurement) in [
+        (
+            "vector-v2-spend-partial",
+            SpendMeasurementKind::PartiallyMeasured,
+        ),
+        ("vector-v2-spend-measured", SpendMeasurementKind::Measured),
+    ] {
+        let document = render(&vector_manifest_with_spend(measurement), &vector_sources())
+            .expect("the spend vector manifest renders");
+        std::fs::write(vector_path(&format!("{name}.md")), &document).expect("write vector");
+        std::fs::write(
+            vector_path(&format!("{name}.sha256")),
+            format!("{}  {name}.md\n", sha256_hex(document.as_bytes())),
+        )
+        .expect("write digest");
+    }
+}
+
+/// The shared shape of the frozen spend-vector tests: the recorded digest covers the frozen bytes
+/// (never a fresh render), the by-hand assembly of ADR 0040's table agrees with Beacon's encoder
+/// byte for byte, and the renderer still produces the frozen document exactly.
+fn assert_frozen_spend_vector(name: &str, measurement: SpendMeasurementKind) {
+    let expected = std::fs::read(vector_path(&format!("{name}.md"))).expect(
+        "the frozen spend vector is not committed; a non-author seat fills the slot with \
+         `cargo test -p beacond --test outcome -- --ignored --exact regenerate_outcome_spend_vectors`",
+    );
+    let recorded = std::fs::read_to_string(vector_path(&format!("{name}.sha256")))
+        .expect("the frozen digest is committed");
+    let recorded = recorded
+        .split_whitespace()
+        .next()
+        .expect("digest line")
+        .to_owned();
+
+    assert_eq!(
+        sha256_hex(&expected),
+        recorded,
+        "the frozen vector and its recorded SHA-256 disagree"
+    );
+
+    let manifest = vector_manifest_with_spend(measurement);
+    assert_eq!(
+        manifest.canonical_bytes().expect("encodes"),
+        manifest_bytes_by_hand_with_spend(measurement),
+        "Beacon's encoder and ADR 0040's published table disagree on the verified spend slot"
+    );
+
+    let document = render(&manifest, &vector_sources()).expect("renders");
+    assert_eq!(
+        String::from_utf8(expected).expect("utf-8"),
+        document,
+        "the renderer no longer produces the frozen vector bytes; if the change was intended, \
+         regenerate with: cargo test -p beacond --test outcome -- --ignored --exact \
+         regenerate_outcome_spend_vectors"
+    );
+    assert_eq!(sha256_hex(document.as_bytes()), recorded);
+}
+
+#[test]
+fn independent_outcome_spend_partial_vector_matches_frozen_expected_markdown_bytes_and_sha256() {
+    assert_frozen_spend_vector(
+        "vector-v2-spend-partial",
+        SpendMeasurementKind::PartiallyMeasured,
+    );
+}
+
+#[test]
+fn independent_outcome_spend_measured_vector_matches_frozen_expected_markdown_bytes_and_sha256() {
+    assert_frozen_spend_vector("vector-v2-spend-measured", SpendMeasurementKind::Measured);
 }
