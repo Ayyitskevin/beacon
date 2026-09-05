@@ -4762,33 +4762,66 @@ mod tests {
         assert!(result.is_err(), "an unscoped Event was persisted");
     }
 
+    /// How many supervisors start against one store file at once in the test below.
+    ///
+    /// Two proved the mutual exclusion and nothing about the queue behind it. Every waiter is
+    /// serialized behind the holder's write transaction, so the last one waits N times the
+    /// hold -- and when that product passes the busy timeout the wait becomes
+    /// `SQLITE_BUSY`, which is FF-49. Two threads reach that product only when the box is
+    /// loaded, which is why FF-49 read as a load flake for weeks: three gates in a row failed
+    /// here while every isolated run passed. This many threads reach it on an idle box.
+    const CONCURRENT_BOOTSTRAP_SUPERVISORS: usize = 32;
+
     #[test]
     fn concurrent_bootstrap_creates_exactly_one_workspace_and_event() {
         let store = TestStore::new("concurrent");
-        let barrier = Arc::new(Barrier::new(2));
-        let handles = (0..2)
+        let barrier = Arc::new(Barrier::new(CONCURRENT_BOOTSTRAP_SUPERVISORS));
+        let handles = (0..CONCURRENT_BOOTSTRAP_SUPERVISORS)
             .map(|_| {
                 let path = store.path.clone();
                 let barrier = Arc::clone(&barrier);
                 thread::spawn(move || {
                     barrier.wait();
-                    Supervisor::bootstrap(config(&path, "Personal")).unwrap()
+                    // The refusal is the evidence, so it is returned rather than unwrapped: a
+                    // panicking thread reports "the main thread saw a JoinError", which is what
+                    // FF-49 looked like from the outside for weeks.
+                    Supervisor::bootstrap(config(&path, "Personal"))
+                        .map_err(|error| format!("{error:?}"))
                 })
             })
             .collect::<Vec<_>>();
-        let reports = handles
+        let results = handles
             .into_iter()
-            .map(|handle| handle.join().unwrap())
+            .map(|handle| handle.join().expect("a bootstrap thread panicked"))
             .collect::<Vec<_>>();
 
+        let refused: Vec<&String> = results
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .collect();
+        assert!(
+            refused.is_empty(),
+            "{} of {CONCURRENT_BOOTSTRAP_SUPERVISORS} supervisors were refused by the store they \
+             were waiting for: {refused:?}",
+            refused.len()
+        );
+        let reports: Vec<&crate::StartupReport> = results
+            .iter()
+            .filter_map(|result| result.as_ref().ok())
+            .collect();
         assert_eq!(
             reports
                 .iter()
                 .filter(|report| report.workspace.created)
                 .count(),
-            1
+            1,
+            "exactly one supervisor may create the first Workspace"
         );
-        assert_eq!(reports[0].workspace.id, reports[1].workspace.id);
+        assert!(
+            reports
+                .iter()
+                .all(|report| report.workspace.id == reports[0].workspace.id)
+        );
         assert!(
             reports
                 .iter()
