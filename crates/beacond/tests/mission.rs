@@ -1362,6 +1362,66 @@ fn a_completion_cannot_use_an_unreadable_mission_admission_event_as_its_boundary
     );
 }
 
+/// The three states, by name. sol1's probe above proves the unreadable Event is refused; this
+/// proves it is refused as UNREADABLE -- `MissionAdmissionUnreadable` carrying the Event's own
+/// sequence -- and not as the absence R21.4 named. Absent, unreadable and verified are three
+/// answers about the same Mission, and a reader that collapsed the middle one into either
+/// neighbour would tell a caller the wrong thing about their store.
+#[test]
+fn an_unreadable_admission_event_is_refused_as_unreadable_not_as_absent() {
+    let store = TestStore::new("completion-admission-three-states");
+    let accounts = enrolled_accounts(&store);
+    let mission = admit_with_conditions(&store, &accounts, vec!["Gates pass".to_owned()]);
+    let admitted = admitted_sequence(&store, mission.id);
+    let record = completion_for(
+        &store,
+        &mission,
+        admitted,
+        vec![beacond::ConditionOutcome::Met],
+    );
+    let mut connection = Connection::open(&store.path).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .unwrap();
+    let digest = beacond::record_completion(&mut connection, &record).unwrap();
+
+    // VERIFIED: the honest store reads.
+    beacond::verified_completion_within(&connection, store.workspace_id, &digest)
+        .expect("an admission Event the Mission owner verifies positions the boundary");
+
+    // UNREADABLE: the same Event with one field of its bytes rewritten.
+    connection
+        .execute(
+            "UPDATE events
+             SET payload_json = json_set(payload_json, '$.mission.projectId', ?1)
+             WHERE kind = 'mission.admitted'
+               AND json_extract(payload_json, '$.mission.id') = ?2",
+            rusqlite::params![Uuid::new_v4().to_string(), mission.id.to_string()],
+        )
+        .unwrap();
+    assert_eq!(
+        beacond::verified_completion_within(&connection, store.workspace_id, &digest)
+            .expect_err("the Mission owner refuses the Event, so the boundary is unpositioned"),
+        beacond::CompletionReadRefusal::MissionAdmissionUnreadable {
+            sequence: i64::try_from(admitted).unwrap(),
+        }
+    );
+
+    // ABSENT: no Event at all is still the other name.
+    connection
+        .execute(
+            "DELETE FROM events WHERE kind = 'mission.admitted'
+             AND json_extract(payload_json, '$.mission.id') = ?1",
+            rusqlite::params![mission.id.to_string()],
+        )
+        .unwrap();
+    assert_eq!(
+        beacond::verified_completion_within(&connection, store.workspace_id, &digest)
+            .expect_err("no admission Event"),
+        beacond::CompletionReadRefusal::MissionNotAdmitted
+    );
+}
+
 #[test]
 fn a_gap_a_duplicate_and_an_ordinal_past_the_end_are_three_distinguishable_refusals() {
     // Bullet 2 and bullet 3. A duplicate and an ordinal past the end are refused by the STORE -- the
