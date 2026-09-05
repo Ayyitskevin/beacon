@@ -803,7 +803,11 @@ impl<'a> Collector<'a> {
         } else {
             let mut delivered = Vec::with_capacity(record.delivered_artifacts.len());
             for cited in &record.delivered_artifacts {
-                let collected = self.artifact(&HEXLOWER.encode(cited), record.mission_id)?;
+                let collected = self.delivered_artifact(
+                    &HEXLOWER.encode(cited),
+                    record.mission_id,
+                    record.boundary_event_seq,
+                )?;
                 delivered.push(collected.digest_value);
             }
             OutcomeState::Verified(delivered)
@@ -1287,6 +1291,43 @@ impl<'a> Collector<'a> {
         digest_value: &str,
         mission_id: Uuid,
     ) -> Result<CollectedDigest, CollectorRefusal> {
+        Ok(self.verified_artifact(digest_value, mission_id)?.1)
+    }
+
+    /// One delivered Artifact at the completion's cut: `artifact`, plus the boundary freeze.
+    ///
+    /// The module doc has claimed the freeze for every source since slice 2-B, and the delivered
+    /// Artifact was the one source it was never applied to: an Artifact recorded AFTER the
+    /// completion's boundary came back `Verified` in a completion frozen before it existed (astra's
+    /// S5). Its position is the creation cursor its owning reader re-derives against the Event
+    /// that carries its exact bytes on every read -- the #8 rule already paid for, so no second
+    /// query is made here and no second spelling of the rule exists to drift.
+    fn delivered_artifact(
+        &self,
+        digest_value: &str,
+        mission_id: Uuid,
+        boundary_event_seq: u64,
+    ) -> Result<CollectedDigest, CollectorRefusal> {
+        let (record, collected) = self.verified_artifact(digest_value, mission_id)?;
+        let recorded_at_seq = record.creation_event_seq();
+        if recorded_at_seq > boundary_event_seq {
+            return Err(CollectorRefusal::AfterBoundary {
+                kind: "artifact",
+                id: digest_value.to_owned(),
+                recorded_at_seq: i64::try_from(recorded_at_seq).unwrap_or(i64::MAX),
+                boundary_event_seq,
+            });
+        }
+        Ok(collected)
+    }
+
+    /// The owner's verified read plus the two scope facts the owner cannot know, with the record
+    /// kept for the caller that needs its cursor.
+    fn verified_artifact(
+        &self,
+        digest_value: &str,
+        mission_id: Uuid,
+    ) -> Result<(crate::artifact::VerifiedArtifactRecord, CollectedDigest), CollectorRefusal> {
         let record = match crate::artifact::verified_artifact_within(
             self.connection,
             self.workspace_id,
@@ -1314,13 +1355,14 @@ impl<'a> Collector<'a> {
             mission_id,
         )?;
 
-        Ok(CollectedDigest {
+        let collected = CollectedDigest {
             kind: SourceKind::Artifact,
             workspace_id: self.workspace_id,
             // From the verified value, never from the caller's string: the reader is what proved
             // this digest names these bytes.
             digest_value: record.digest().value.clone(),
-        })
+        };
+        Ok((record, collected))
     }
 }
 
