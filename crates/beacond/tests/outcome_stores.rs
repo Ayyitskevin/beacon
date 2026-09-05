@@ -697,6 +697,58 @@ impl Stored {
     }
 }
 
+#[test]
+fn a_classification_cannot_bind_one_mission_to_another_projects_policy() {
+    let stored = stored("classification-cross-project-policy");
+    let own_policy = stored.policy_revision();
+    assert_eq!(own_policy, 1);
+
+    let other_project = ProjectService::new(
+        Arc::clone(&stored.accounts),
+        stored.store.workspace_id,
+    )
+    .create(ProjectDraft {
+        name: "Unrelated Project".to_owned(),
+        charter: ProjectCharterDraft {
+            purpose: "Prove policy scoping.".to_owned(),
+            desired_outcomes: vec!["Stay unrelated".to_owned()],
+            constraints: vec!["Do not borrow another Mission".to_owned()],
+            prohibitions: vec!["No cross-Project binding".to_owned()],
+            autonomy_profile: AutonomyProfile::Supervised,
+        },
+    })
+    .unwrap();
+    stored
+        .connection()
+        .execute(
+            r#"INSERT INTO project_policy_revisions (
+                 workspace_id, project_id, revision, charter_revision,
+                 required_capabilities_json, availability_rule, track_record_requirements_json,
+                 conflict_rule, ambiguity_rule, authored_by, authored_at_ms
+             ) VALUES (?1, ?2, 1, 1, '["work.coordinate_mission"]',
+                       'current_team_eligibility', '[{"evidenceKind":"completed_mission"}]',
+                       'require_no_declared_conflict', 'require_operator_decision', 'operator', 0)"#,
+            params![
+                stored.store.workspace_id.to_string(),
+                other_project.id.to_string(),
+            ],
+        )
+        .unwrap();
+
+    let mut classification = stored.classification_record(Uuid::new_v4(), 1);
+    classification.policy.project_id = other_project.id;
+    classification.policy.charter_revision = other_project.charter.revision;
+    let result = stored
+        .impact_service()
+        .classify(&classification.canonical_bytes().unwrap());
+    assert!(
+        result.is_err(),
+        "classification for Mission {} accepted unrelated Project {} policy: {result:?}",
+        stored.mission_id,
+        other_project.id,
+    );
+}
+
 /// The submit contract: a caller supplies bytes, and the digest names exactly those bytes.
 ///
 /// There is no `record(payload)` and no `record(payload, digest)` to test, because neither exists --
