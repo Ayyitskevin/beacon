@@ -8,6 +8,13 @@ description = "Internal supervisor foundation for Beacon"
 publish = false
 
 [dependencies]
+# Slice 4b (R29.7a: Kevin approved typst). Exact pins, no ranges: the PDF bytes are a function of
+# the engine version, so a patch bump is a new render profile rather than a free upgrade.
+# `typst-layout` is named only to spell `PagedDocument`, the type `typst_pdf::pdf` takes; it is
+# already in the tree as typst's own dependency, so it adds no crates.
+typst = "=0.15.1"
+typst-layout = "=0.15.1"
+typst-pdf = "=0.15.1"
 argon2.workspace = true
 data-encoding.workspace = true
 flate2.workspace = true
