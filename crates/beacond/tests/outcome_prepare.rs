@@ -31,6 +31,7 @@ use beacond::{
     TeamMemberDraft, TeamService, TrackRecordEvidenceKind, TrackRecordRequirement, VerifiedSources,
     VerifiedText, declared_conditions_digest, record_completion, render, verified_manifest_within,
 };
+use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
@@ -643,17 +644,28 @@ fn a_decoy_projection_column_cannot_change_what_the_reader_returns() {
     // Every projection lies; the bytes stay correct. The reader must follow the object, never the
     // column -- and here "follow the object" means refuse and name the column, because a row that
     // disagrees with its own bytes is invalid state rather than a differently-shaped record.
+    // The digest-envelope pair is here because 0029 PERSISTS it: a reader that hard-codes the
+    // envelope it returns cannot refuse a lie in either column, and hands back a v1 envelope over
+    // bytes filed under something else (gpt2's cold read, P1 #1).
     for (column, lie) in [
-        ("renderer_version", "beacon.outcome.md.v2".to_owned()),
+        (
+            "renderer_version",
+            Value::from("beacon.outcome.md.v2".to_owned()),
+        ),
         (
             "canonicalizer_version",
-            "beacon.outcome.manifest.v2".to_owned(),
+            Value::from("beacon.outcome.manifest.v2".to_owned()),
         ),
-        ("mission_id", Uuid::new_v4().to_string()),
-        ("manifest_id", Uuid::new_v4().to_string()),
-        ("completion_digest", "aa".repeat(32)),
+        ("mission_id", Value::from(Uuid::new_v4().to_string())),
+        ("manifest_id", Value::from(Uuid::new_v4().to_string())),
+        ("completion_digest", Value::from("aa".repeat(32))),
+        ("digest_algorithm", Value::from("sha512".to_owned())),
+        (
+            "digest_canonicalizer",
+            Value::from("beacon.outcome.manifest.v2".to_owned()),
+        ),
     ] {
-        let previous: String = fixture
+        let previous: Value = fixture
             .store
             .connect()
             .query_row(
@@ -670,6 +682,9 @@ fn a_decoy_projection_column_cannot_change_what_the_reader_returns() {
             |connection| {
                 connection
                     .pragma_update(None, "foreign_keys", "OFF")
+                    .unwrap();
+                connection
+                    .pragma_update(None, "ignore_check_constraints", "ON")
                     .unwrap();
                 connection
                     .execute(
@@ -698,6 +713,9 @@ fn a_decoy_projection_column_cannot_change_what_the_reader_returns() {
             |connection| {
                 connection
                     .pragma_update(None, "foreign_keys", "OFF")
+                    .unwrap();
+                connection
+                    .pragma_update(None, "ignore_check_constraints", "ON")
                     .unwrap();
                 connection
                     .execute(
