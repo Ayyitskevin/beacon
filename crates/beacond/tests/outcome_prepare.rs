@@ -4685,12 +4685,21 @@ fn a_superseded_classification_citing_a_predecessor_the_store_does_not_hold_fail
         initial_workspace_name: "Personal".to_owned(),
     })
     .expect_err("a store holding a forged supersession link reopened Ready");
+    // R27.1: the refusal names the ROW and carries the owning reader's own fault. Asserting only
+    // the variant would pass just as well if startup flattened every cause onto one name.
     assert!(
         matches!(
-            refusal,
-            SupervisorError::MissionImpactClassificationStateMismatch
+            &refusal,
+            SupervisorError::MissionImpactClassificationStateMismatch {
+                workspace_id,
+                digest,
+                cause: ClassificationStoreError::Predecessor {
+                    fault: PredecessorFault::NotStored,
+                    ..
+                },
+            } if *workspace_id == fixture.workspace_id && digest == &planted
         ),
-        "refused for the wrong reason: {refusal:?}"
+        "refused for the wrong reason, or with the cause flattened: {refusal:?}"
     );
 }
 
@@ -4729,6 +4738,402 @@ fn a_store_that_never_held_a_classification_reopens_ready() {
         initial_workspace_name: "Personal".to_owned(),
     })
     .expect("a store with a Mission but no classification reopens");
+    assert_eq!(report.diagnostics.status, DiagnosticStatus::Ready);
+}
+
+fn sol1_classification_record(
+    fixture: &Fixture,
+    mission_id: Uuid,
+    version: u32,
+    supersedes: ClassificationSupersedes,
+    reason: &str,
+) -> MissionImpactClassificationV1 {
+    MissionImpactClassificationV1 {
+        workspace_id: fixture.workspace_id,
+        mission_id,
+        classification_id: Uuid::new_v4(),
+        version,
+        impact: ImpactLevel::Ordinary,
+        basis: ClassificationBasis::OperatorDeclared,
+        policy: PolicyRevisionRef {
+            project_id: fixture.project_id,
+            policy_revision: fixture.policy_revision,
+            charter_revision: fixture.charter_revision,
+        },
+        rule_id: None,
+        reason: reason.to_owned(),
+        classified_by: ClassificationActor::Operator,
+        classified_at_ms: 1_788_400_000_000 + u64::from(version),
+        supersedes,
+    }
+}
+
+fn sol1_classification_snapshot(fixture: &Fixture) -> (Vec<(String, Vec<u8>)>, i64, i64) {
+    let connection = fixture.store.connect();
+    let rows = connection
+        .prepare(
+            "SELECT digest_value, canonical_bytes FROM mission_impact_classifications
+             ORDER BY digest_value",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let events = connection
+        .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
+        .unwrap();
+    let schema = connection
+        .query_row(
+            "SELECT version FROM schema_meta WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    (rows, events, schema)
+}
+
+#[test]
+fn sol1_startup_visits_the_hidden_first_version_of_the_second_mission() {
+    let fixture = admitted_mission("sol1-classification-two-missions");
+    let first_a = fixture.plant_classification(&sol1_classification_record(
+        &fixture,
+        fixture.mission_id,
+        1,
+        ClassificationSupersedes::None,
+        "Mission A version one",
+    ));
+    fixture.plant_classification(&sol1_classification_record(
+        &fixture,
+        fixture.mission_id,
+        2,
+        ClassificationSupersedes::Record(first_a),
+        "Mission A version two",
+    ));
+    let mission_b = sol1_admit_other_mission(&fixture, "The second classified Mission");
+    let forged_b = fixture.plant_classification(&sol1_classification_record(
+        &fixture,
+        mission_b,
+        1,
+        ClassificationSupersedes::Record("ab".repeat(32)),
+        "Mission B hidden forged version one",
+    ));
+    fixture.plant_classification(&sol1_classification_record(
+        &fixture,
+        mission_b,
+        2,
+        ClassificationSupersedes::Record(forged_b),
+        "Mission B version two",
+    ));
+    let refusal = Supervisor::bootstrap(StartupConfig {
+        store_path: fixture.store.path.clone(),
+        initial_workspace_name: "Personal".to_owned(),
+    })
+    .expect_err("the hidden forged row in the second Mission reopened Ready");
+    assert!(
+        matches!(
+            &refusal,
+            SupervisorError::MissionImpactClassificationStateMismatch {
+                cause: ClassificationStoreError::Predecessor {
+                    fault: PredecessorFault::NotStored,
+                    ..
+                },
+                ..
+            }
+        ),
+        "refused for the wrong reason, or with the cause flattened: {refusal:?}"
+    );
+}
+
+#[test]
+fn sol1_fk_orphan_is_refused_before_the_classification_pass() {
+    let fixture = admitted_mission("sol1-classification-orphan-workspace");
+    let workspace_id = Uuid::new_v4();
+    let record = MissionImpactClassificationV1 {
+        workspace_id,
+        mission_id: Uuid::new_v4(),
+        classification_id: Uuid::new_v4(),
+        version: 1,
+        impact: ImpactLevel::Ordinary,
+        basis: ClassificationBasis::OperatorDeclared,
+        policy: PolicyRevisionRef {
+            project_id: Uuid::new_v4(),
+            policy_revision: 1,
+            charter_revision: 1,
+        },
+        rule_id: None,
+        reason: "No Mission or Policy exists in this Workspace.".to_owned(),
+        classified_by: ClassificationActor::Operator,
+        classified_at_ms: 1_788_400_000_000,
+        supersedes: ClassificationSupersedes::None,
+    };
+    let bytes = record.canonical_bytes().unwrap();
+    let digest = record.digest().unwrap().value;
+    let connection = fixture.store.connect();
+    connection
+        .pragma_update(None, "foreign_keys", "OFF")
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO workspaces (id, name, created_at_ms) VALUES (?1, 'No policy rows', 1)",
+            params![workspace_id.to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO mission_impact_classifications (
+                 workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+                 canonical_bytes, classification_id, mission_id, project_id, version, impact,
+                 basis, policy_revision, charter_revision, classified_at_ms
+             ) VALUES (?1, 'sha256', 'beacon.mission-impact.v1', ?2, ?3, ?4, ?5, ?6, 1,
+                       'ordinary', 'operator_declared', 1, 1, ?7)",
+            params![
+                workspace_id.to_string(),
+                digest,
+                bytes,
+                record.classification_id.to_string(),
+                record.mission_id.to_string(),
+                record.policy.project_id.to_string(),
+                i64::try_from(record.classified_at_ms).unwrap(),
+            ],
+        )
+        .unwrap();
+    drop(connection);
+    let refusal = Supervisor::bootstrap(StartupConfig {
+        store_path: fixture.store.path.clone(),
+        initial_workspace_name: "Personal".to_owned(),
+    })
+    .expect_err("an orphaned classification reopened Ready");
+    assert!(matches!(refusal, SupervisorError::ForeignKeyViolations(_)));
+}
+
+#[test]
+fn sol1_an_old_honest_classification_survives_a_later_policy_revision() {
+    let fixture = admitted_mission("sol1-classification-old-policy");
+    fixture.classify_superseding(1, ClassificationSupersedes::None);
+    ProjectPolicyService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .publish(
+            fixture.project_id,
+            fixture.charter_revision,
+            Some(fixture.policy_revision),
+            ProjectPolicyDraft {
+                team_lead_selection: TeamLeadSelectionPolicy {
+                    required_capabilities: vec![
+                        BeaconCapability::WorkCoordinateMission,
+                        BeaconCapability::WorkCreateMission,
+                    ],
+                    availability_rule: TeamLeadAvailabilityRule::CurrentTeamEligibility,
+                    track_record_requirements: vec![TrackRecordRequirement {
+                        evidence_kind: TrackRecordEvidenceKind::MissionOutcome,
+                        minimum_count: 1,
+                    }],
+                    conflict_rule: TeamLeadConflictRule::RequireNoDeclaredConflict,
+                    ambiguity_rule: TeamLeadAmbiguityRule::RequireOperatorDecision,
+                },
+            },
+        )
+        .expect("the later Policy revision records");
+    let report = Supervisor::bootstrap(StartupConfig {
+        store_path: fixture.store.path.clone(),
+        initial_workspace_name: "Personal".to_owned(),
+    })
+    .expect("a later Policy revision must not invalidate an honest old classification");
+    assert_eq!(report.diagnostics.status, DiagnosticStatus::Ready);
+}
+
+#[test]
+fn sol1_unreadable_classification_startup_error_carries_the_reader_fault() {
+    let fixture = admitted_mission("sol1-classification-unreadable-name");
+    let record = sol1_classification_record(
+        &fixture,
+        fixture.mission_id,
+        1,
+        ClassificationSupersedes::None,
+        "The projections are valid but the bytes are unreadable",
+    );
+    let bytes = vec![0xff; 25];
+    let digest = data_encoding::HEXLOWER.encode(&sha2_256(&bytes));
+    fixture
+        .store
+        .connect()
+        .execute(
+            "INSERT INTO mission_impact_classifications (
+                 workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+                 canonical_bytes, classification_id, mission_id, project_id, version, impact,
+                 basis, policy_revision, charter_revision, classified_at_ms
+             ) VALUES (?1, 'sha256', 'beacon.mission-impact.v1', ?2, ?3, ?4, ?5, ?6, 1,
+                       'ordinary', 'operator_declared', ?7, ?8, ?9)",
+            params![
+                fixture.workspace_id.to_string(),
+                digest,
+                bytes,
+                record.classification_id.to_string(),
+                fixture.mission_id.to_string(),
+                fixture.project_id.to_string(),
+                fixture.policy_revision,
+                fixture.charter_revision,
+                i64::try_from(record.classified_at_ms).unwrap(),
+            ],
+        )
+        .unwrap();
+    let direct = beacond::verified_classification_within(
+        &fixture.store.connect(),
+        fixture.workspace_id,
+        &digest,
+    )
+    .expect_err("the unreadable row read successfully");
+    assert!(matches!(direct, ClassificationStoreError::Malformed(_)));
+    let refusal = Supervisor::bootstrap(StartupConfig {
+        store_path: fixture.store.path.clone(),
+        initial_workspace_name: "Personal".to_owned(),
+    })
+    .expect_err("the unreadable row reopened Ready");
+    assert!(
+        matches!(
+            &refusal,
+            SupervisorError::MissionImpactClassificationStateMismatch {
+                cause: ClassificationStoreError::Malformed(_),
+                ..
+            }
+        ),
+        "startup flattened the owner's fault: {refusal:?}"
+    );
+    assert!(
+        format!("{refusal:?}").contains("Malformed"),
+        "startup flattened the owner's fault: {refusal:?}"
+    );
+}
+
+#[test]
+fn sol1_cross_mission_predecessor_startup_error_carries_the_fault_and_writes_nothing() {
+    let fixture = admitted_mission("sol1-classification-cross-mission-name");
+    let other_mission = sol1_admit_other_mission(&fixture, "Own the predecessor");
+    let predecessor = fixture.plant_classification(&sol1_classification_record(
+        &fixture,
+        other_mission,
+        1,
+        ClassificationSupersedes::None,
+        "A valid classification of the other Mission",
+    ));
+    let successor = fixture.plant_classification(&sol1_classification_record(
+        &fixture,
+        fixture.mission_id,
+        1,
+        ClassificationSupersedes::Record(predecessor),
+        "A forged link across Missions in one Project",
+    ));
+    let connection = fixture.store.connect();
+    let violations: i64 = connection
+        .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(violations, 0, "0032, not the belt, refused the fixture");
+    let direct =
+        beacond::verified_classification_within(&connection, fixture.workspace_id, &successor)
+            .expect_err("the cross-Mission predecessor read successfully");
+    assert!(matches!(
+        direct,
+        ClassificationStoreError::Predecessor {
+            fault: PredecessorFault::ForAnotherMission,
+            ..
+        }
+    ));
+    drop(connection);
+    let before = sol1_classification_snapshot(&fixture);
+    let refusal = Supervisor::bootstrap(StartupConfig {
+        store_path: fixture.store.path.clone(),
+        initial_workspace_name: "Personal".to_owned(),
+    })
+    .expect_err("the cross-Mission predecessor reopened Ready");
+    let after = sol1_classification_snapshot(&fixture);
+    assert_eq!(after, before, "the refusing startup changed stored state");
+    assert!(
+        matches!(
+            &refusal,
+            SupervisorError::MissionImpactClassificationStateMismatch {
+                cause: ClassificationStoreError::Predecessor {
+                    fault: PredecessorFault::ForAnotherMission,
+                    ..
+                },
+                ..
+            }
+        ),
+        "startup flattened PredecessorFault::ForAnotherMission: {refusal:?}"
+    );
+    assert!(
+        format!("{refusal:?}").contains("ForAnotherMission"),
+        "startup flattened PredecessorFault::ForAnotherMission: {refusal:?}"
+    );
+}
+
+#[test]
+fn sol1_concurrent_supervisors_are_not_refused_while_the_classification_pass_runs() {
+    const SUPERVISORS: usize = 8;
+    let fixture = admitted_mission("sol1-classification-concurrent-startup");
+    for version in 1..=128 {
+        fixture.plant_classification(&sol1_classification_record(
+            &fixture,
+            fixture.mission_id,
+            version,
+            ClassificationSupersedes::None,
+            &format!("Independent classification row {version}"),
+        ));
+    }
+    let barrier = Arc::new(std::sync::Barrier::new(SUPERVISORS));
+    let handles = (0..SUPERVISORS)
+        .map(|_| {
+            let path = fixture.store.path.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                Supervisor::bootstrap(StartupConfig {
+                    store_path: path,
+                    initial_workspace_name: "Personal".to_owned(),
+                })
+                .map_err(|error| format!("{error:?}"))
+            })
+        })
+        .collect::<Vec<_>>();
+    let results = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("a supervisor thread panicked"))
+        .collect::<Vec<_>>();
+    assert!(
+        results.iter().all(Result::is_ok),
+        "concurrent supervisors were refused: {results:?}"
+    );
+}
+
+#[test]
+fn sol1_a_forked_classification_chain_reopens_ready_by_ruling() {
+    let fixture = admitted_mission("sol1-classification-fork-known-nonfinding");
+    let first = fixture.plant_classification(&sol1_classification_record(
+        &fixture,
+        fixture.mission_id,
+        1,
+        ClassificationSupersedes::None,
+        "The common root",
+    ));
+    fixture.plant_classification(&sol1_classification_record(
+        &fixture,
+        fixture.mission_id,
+        2,
+        ClassificationSupersedes::Record(first.clone()),
+        "The first child",
+    ));
+    fixture.plant_classification(&sol1_classification_record(
+        &fixture,
+        fixture.mission_id,
+        3,
+        ClassificationSupersedes::Record(first),
+        "The second child of the same root",
+    ));
+    let report = Supervisor::bootstrap(StartupConfig {
+        store_path: fixture.store.path.clone(),
+        initial_workspace_name: "Personal".to_owned(),
+    })
+    .expect("R26.7 leaves fork/continuity to the later structural slice");
     assert_eq!(report.diagnostics.status, DiagnosticStatus::Ready);
 }
 
@@ -4830,12 +5235,21 @@ fn a_forged_link_in_a_second_workspace_that_max_would_skip_fails_startup() {
         initial_workspace_name: "Personal".to_owned(),
     })
     .expect_err("a forged link in a second Workspace reopened Ready");
+    // The row named is the one in the SKIPPED Workspace, which is the whole point of this test:
+    // asserting the variant alone would pass even if the pass had refused the other Workspace's.
     assert!(
         matches!(
-            refusal,
-            SupervisorError::MissionImpactClassificationStateMismatch
+            &refusal,
+            SupervisorError::MissionImpactClassificationStateMismatch {
+                workspace_id,
+                digest,
+                cause: ClassificationStoreError::Predecessor {
+                    fault: PredecessorFault::NotStored,
+                    ..
+                },
+            } if *workspace_id == fixture.workspace_id && digest == &planted
         ),
-        "refused for the wrong reason: {refusal:?}"
+        "refused for the wrong reason, or named the wrong Workspace: {refusal:?}"
     );
 }
 

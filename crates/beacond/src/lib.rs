@@ -386,8 +386,18 @@ pub enum SupervisorError {
     ArtifactEventMismatch(i64),
     ArtifactStateMismatch,
     /// A stored Mission impact classification does not re-prove against its own bytes or the
-    /// predecessor it names.
-    MissionImpactClassificationStateMismatch,
+    /// predecessor it names -- WITH the row and the owning reader's own fault (R27.1).
+    ///
+    /// Deliberately unlike its fourteen siblings, which are unit variants fed by `.map_err(|_| ..)`.
+    /// A refusal that says only "a classification does not re-prove" cannot tell an operator a
+    /// corrupt store from a forged link from a bug in the reader, and cannot say which row. This is
+    /// the shape the others move to (R27.2), taken pass by pass; it is a surfaced break from the
+    /// convention, not a silent fork (R11).
+    MissionImpactClassificationStateMismatch {
+        workspace_id: Uuid,
+        digest: String,
+        cause: mission_impact::ClassificationStoreError,
+    },
     OutcomeManifestStateMismatch,
     /// A stored Outcome publication does not re-prove against the records it cites.
     OutcomePublicationStateMismatch,
@@ -569,9 +579,14 @@ impl fmt::Display for SupervisorError {
                      chain, or its audit Event"
                 )
             }
-            Self::MissionImpactClassificationStateMismatch => formatter.write_str(
-                "a stored Mission impact classification does not re-prove against its own bytes \
-                 or the predecessor it names",
+            Self::MissionImpactClassificationStateMismatch {
+                workspace_id,
+                digest,
+                cause,
+            } => write!(
+                formatter,
+                "Mission impact classification {digest} in Workspace {workspace_id} does not \
+                 re-prove: {cause}"
             ),
             Self::OutcomeManifestStateMismatch => {
                 write!(
@@ -1276,8 +1291,18 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     // Before the manifest pass, because a manifest cites a classification and re-checks the
     // high-impact bit against it: the classification has to have proved itself first, for the same
     // reason completions come before manifests.
-    mission_impact::verify_classification_state(connection)
-        .map_err(|_| SupervisorError::MissionImpactClassificationStateMismatch)?;
+    mission_impact::verify_classification_state(connection).map_err(|fault| match fault {
+        mission_impact::ClassificationStateFault::Store(error) => SupervisorError::Store(error),
+        mission_impact::ClassificationStateFault::Row {
+            workspace_id,
+            digest,
+            cause,
+        } => SupervisorError::MissionImpactClassificationStateMismatch {
+            workspace_id,
+            digest,
+            cause,
+        },
+    })?;
     outcome_store::verify_manifest_state(connection)
         .map_err(|_| SupervisorError::OutcomeManifestStateMismatch)?;
     // After the manifest pass, because a publication is proved THROUGH its manifest: the relation
