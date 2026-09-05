@@ -3140,3 +3140,64 @@ fn insert_or_replace_is_refused_on_every_immutable_outcome_store() {
         }
     }
 }
+
+#[test]
+fn collector_refuses_measured_spend_whose_coverage_starts_after_mission_admission() {
+    let fixture = admitted("late-spend-coverage", vec!["Gates pass".to_owned()]);
+    let admission = admitted_sequence(&fixture.store, fixture.mission.id);
+    fixture.classify(ImpactLevel::Ordinary);
+    let late_start = newest_event(&fixture.store);
+    assert!(
+        late_start > admission,
+        "the probe needs an event after admission"
+    );
+
+    let spend = MeasuredSpendV1 {
+        workspace_id: fixture.store.workspace_id,
+        mission_id: fixture.mission.id,
+        spend_id: Uuid::new_v4(),
+        version: 1,
+        origin: SpendOrigin::DaemonLedger,
+        measured_at_ms: 1_788_400_000_000,
+        coverage_from_event_seq: late_start,
+        coverage_to_event_seq: late_start,
+        measurement: SpendMeasurement::Measured(SpendTotals {
+            counted_units: 1,
+            lines: vec![SpendLine {
+                unit: "USD".to_owned(),
+                amount_minor: 100,
+                minor_units_exponent: 2,
+            }],
+        }),
+        supersedes: SpendSupersedes::None,
+    };
+    MeasuredSpendService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+        .record(&spend.canonical_bytes().unwrap())
+        .expect("the spend store delegates Mission-span reconciliation to the collector");
+
+    let completion = fixture.completion(
+        newest_event(&fixture.store),
+        vec![ConditionOutcome::Met],
+        SpendReference::Recorded {
+            spend_id: spend.spend_id,
+            spend_version: spend.version,
+            spend_sha256: sha256_bytes(&spend.canonical_bytes().unwrap()),
+        },
+    );
+    let digest = fixture.record(&completion);
+    let connection = fixture.connection();
+    let collected = Collector::new(&connection, fixture.store.workspace_id)
+        .collect(&CollectionRequest {
+            completion_digest: Some(digest),
+            ..CollectionRequest::default()
+        })
+        .expect("the current collector accepts the incomplete window");
+    let coverage = collected.spend.unwrap().coverage.unwrap();
+
+    assert!(
+        coverage.0 <= admission,
+        "verified actual spend starts at event {}, after Mission admission {}",
+        coverage.0,
+        admission
+    );
+}
