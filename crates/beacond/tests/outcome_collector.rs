@@ -2641,3 +2641,73 @@ fn an_artifact_whose_bytes_name_another_workspace_is_refused_by_its_owning_reade
         }
     );
 }
+
+#[test]
+fn collector_refuses_a_classification_for_a_different_mission_than_the_completion() {
+    let fixture = admitted("classification-cross-mission", vec!["Gates pass".to_owned()]);
+    let policy_revision = fixture.policy_revision();
+
+    let other_mission = Uuid::new_v4();
+    let connection = fixture.connection();
+    connection
+        .execute(
+            "INSERT INTO missions SELECT ?1, workspace_id, project_id, charter_revision, team_id,
+                    desired_outcome, success_conditions_json, constraints_json, prohibitions_json,
+                    lifecycle, admitted_by, admitted_at_ms
+               FROM missions WHERE id = ?2",
+            params![other_mission.to_string(), fixture.mission.id.to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO mission_admission_members
+               SELECT workspace_id, ?1, team_id, position, resident_id, configuration_id
+               FROM mission_admission_members WHERE mission_id = ?2",
+            params![other_mission.to_string(), fixture.mission.id.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+
+    let classification = MissionImpactClassificationV1 {
+        workspace_id: fixture.store.workspace_id,
+        mission_id: other_mission,
+        classification_id: Uuid::new_v4(),
+        version: 1,
+        impact: ImpactLevel::High,
+        basis: ClassificationBasis::OperatorDeclared,
+        policy: PolicyRevisionRef {
+            project_id: fixture.project.id,
+            policy_revision,
+            charter_revision: fixture.project.charter.revision,
+        },
+        rule_id: None,
+        reason: "A different Mission was classified.".to_owned(),
+        classified_by: ClassificationActor::Operator,
+        classified_at_ms: 1_788_400_000_000,
+        supersedes: ClassificationSupersedes::None,
+    };
+    MissionImpactService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+        .classify(&classification.canonical_bytes().unwrap())
+        .unwrap();
+
+    let boundary = newest_event(&fixture.store);
+    let completion = fixture.completion(
+        boundary,
+        vec![ConditionOutcome::Met],
+        SpendReference::NotMeasured("no ledger was read".to_owned()),
+    );
+    let completion_digest = fixture.record(&completion);
+    let connection = fixture.connection();
+    let result = Collector::new(&connection, fixture.store.workspace_id).collect(
+        &CollectionRequest {
+            completion_digest: Some(completion_digest),
+            classification_digest: Some(classification.digest().unwrap().value),
+            ..CollectionRequest::default()
+        },
+    );
+    assert!(
+        result.is_err(),
+        "collector joined Mission A's completion to Mission B's classification: {result:?}",
+    );
+}
+
