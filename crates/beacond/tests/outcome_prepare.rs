@@ -37,7 +37,6 @@ use uuid::Uuid;
 
 const CONDITION_TEXT: &str = "Relevant gates pass";
 const CONDITION_ID: &str = "sc-gates";
-const MISSION_CANONICALIZER: &str = "beacon.mission.v1";
 
 struct TestStore {
     path: PathBuf,
@@ -417,10 +416,6 @@ fn source(
 
 /// A manifest frozen on one recorded completion and one recorded classification, plus the verified
 /// values its references name.
-///
-/// `mission.digest` is a fixture value, not a verified one: `main` has no Mission declaration
-/// digest to read, which is why `prepare` proves the Mission by IDENTITY against the completion and
-/// leaves the digest to the slice that gives a Mission one. Named in the build report.
 fn manifest_for(
     fixture: &Fixture,
     completion_digest: &str,
@@ -431,11 +426,15 @@ fn manifest_for(
 ) -> (OutcomeManifestV1, VerifiedSources) {
     let manifest = OutcomeManifestV1 {
         workspace_id: fixture.workspace_id,
+        // Identity-only, per R18.4: the Mission is cited by `object_id`, and the digest field --
+        // which slice 1's `SourceRef` requires and which no Mission on `main` can supply -- says
+        // so, carrying the completion digest as the anchor and the identity-only canonicalizer as
+        // the claim. It goes away with the R18.3-5 grammar revision.
         mission: source(
             SourceKind::Mission,
             fixture.mission_id,
-            MISSION_CANONICALIZER,
-            &"11".repeat(32),
+            beacond::MISSION_IDENTITY_ONLY,
+            completion_digest,
             1,
             fixture.workspace_id,
         ),
@@ -989,8 +988,8 @@ fn prepare_refuses_a_manifest_that_disagrees_with_its_completion() {
                 mission: source(
                     SourceKind::Mission,
                     Uuid::new_v4(),
-                    MISSION_CANONICALIZER,
-                    &"11".repeat(32),
+                    beacond::MISSION_IDENTITY_ONLY,
+                    &completion_digest,
                     1,
                     fixture.workspace_id,
                 ),
@@ -1362,6 +1361,95 @@ fn an_outcome_manifest_no_artifact_event_reaches_refuses_startup() {
     assert!(
         format!("{refusal:?}").contains("OutcomeManifestStateMismatch"),
         "the orphan was not refused by name: {refusal:?}"
+    );
+}
+
+#[test]
+fn a_fabricated_mission_digest_is_not_stored_read_back_or_rendered_as_verified() {
+    // gpt2's cold read, P1 #2. `main` has no Mission declaration digest, so nothing could verify
+    // this field -- and a fabricated value was accepted, returned by the reader, and printed in the
+    // candidate Markdown underneath "Every fact below was verified at boundary event N".
+    // gpt2's probe observed `read_back=true rendered=true blanket_verified=true`; at least one has
+    // to be false, and this asserts exactly those three.
+    let fixture = admitted_mission("mission-digest");
+    let accountable = (fixture.resident_id, fixture.configuration_id);
+    let (completion_digest, completion) = fixture.complete(accountable);
+    let classification = fixture.classify(ImpactLevel::Ordinary);
+    let (honest, sources) = manifest_for(
+        &fixture,
+        &completion_digest,
+        &completion,
+        &classification,
+        false,
+        AppendixRequest::PolicyDefault,
+    );
+    let fabricated = "de".repeat(32);
+    let lying = OutcomeManifestV1 {
+        mission: SourceRef {
+            digest: SourceDigest {
+                algorithm: "sha256".to_owned(),
+                canonicalizer: "beacon.mission.v1".to_owned(),
+                value: fabricated.clone(),
+            },
+            ..honest.mission.clone()
+        },
+        ..honest.clone()
+    };
+
+    let refusal = fixture
+        .outcomes
+        .prepare(&lying, &sources)
+        .expect_err("a fabricated Mission declaration digest was accepted by prepare");
+    assert!(
+        matches!(
+            refusal,
+            PrepareRefusal::Manifest(ManifestStoreRefusal::MissionCitationNotIdentityOnly)
+        ),
+        "{refusal:?}"
+    );
+
+    // read_back: nothing carries it.
+    let stored_digest =
+        data_encoding::HEXLOWER.encode(&sha2_256(&lying.canonical_bytes().unwrap()));
+    let read_back = fixture.outcomes.manifest(&stored_digest).is_ok();
+    // rendered / blanket_verified: no candidate exists to carry it.
+    let rendered = fixture
+        .store
+        .connect()
+        .query_row(
+            "SELECT count(*) FROM artifacts WHERE instr(CAST(content_inline AS TEXT), ?1) > 0",
+            params![fabricated],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+        > 0;
+    assert!(!read_back, "the fabricated digest read back");
+    assert!(
+        !rendered,
+        "the fabricated digest reached a rendered document"
+    );
+
+    // The positive control, and what an honest citation says instead: the Mission is cited by
+    // IDENTITY, anchored on the completion digest, and the citation's own canonicalizer token says
+    // so beside the value in the rendered document -- so nothing claims a Mission declaration was
+    // hashed (R18.4; the field itself goes with the R18.3-5 grammar revision).
+    let candidate = fixture.outcomes.prepare(&honest, &sources).unwrap();
+    let document = String::from_utf8(
+        fixture
+            .outcomes
+            .candidate(&candidate.manifest_digest)
+            .unwrap()
+            .content()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        document.contains(beacond::MISSION_IDENTITY_ONLY),
+        "the document does not say the Mission citation is identity-only:\n{document}"
+    );
+    assert!(
+        document.contains(&completion_digest),
+        "the Mission citation does not show its verified anchor"
     );
 }
 

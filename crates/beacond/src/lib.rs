@@ -145,8 +145,9 @@ pub use outcome_collector::{
     CollectorRefusal, OUTCOME_RECEIPT_CHECKSUM_LABEL, SpendAmount, positionable_sources,
 };
 pub use outcome_store::{
-    MAX_STORED_MANIFEST_BYTES, ManifestStoreRefusal, OutcomeCandidate, OutcomeService,
-    PrepareRefusal, StoredOutcomeManifest, manifest_reference_id, verified_manifest_within,
+    MAX_STORED_MANIFEST_BYTES, MISSION_IDENTITY_ONLY, ManifestStoreRefusal, OutcomeCandidate,
+    OutcomeService, PrepareRefusal, StoredOutcomeManifest, manifest_reference_id,
+    verified_manifest_within,
 };
 pub use platform_session::{
     PlatformMonitorState, PlatformSessionMonitor, PlatformSessionMonitorStatus,
