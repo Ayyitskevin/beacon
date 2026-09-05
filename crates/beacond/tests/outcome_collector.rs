@@ -3186,18 +3186,77 @@ fn collector_refuses_measured_spend_whose_coverage_starts_after_mission_admissio
     );
     let digest = fixture.record(&completion);
     let connection = fixture.connection();
+    // sol1's probe ended "collect succeeds, and the window starts at or before admission" -- a
+    // shape that could only go GREEN by rewriting the record's declared window. The fix refuses
+    // by name instead, so the probe's tail says so; the relation it measures is the same.
+    let refusal = Collector::new(&connection, fixture.store.workspace_id)
+        .collect(&CollectionRequest {
+            completion_digest: Some(digest),
+            ..CollectionRequest::default()
+        })
+        .expect_err("a window that starts after the Mission was admitted does not span it");
+    assert_eq!(
+        refusal,
+        CollectorRefusal::SpendCoverageStartsAfterMission {
+            id: HEXLOWER.encode(&sha256_bytes(&spend.canonical_bytes().unwrap())),
+            coverage_from_event_seq: late_start,
+            mission_admitted_at_seq: admission,
+        },
+        "verified actual spend starts at event {late_start}, after Mission admission {admission}"
+    );
+}
+
+/// The boundary of #11, from the other side: a window that begins AT the admission Event spans
+/// the Mission from its first moment and collects as Verified. `<` would refuse it; the check is
+/// `>`.
+#[test]
+fn a_spend_window_that_starts_at_admission_spans_the_mission() {
+    let fixture = admitted("spend-coverage-at-admission", vec!["Gates pass".to_owned()]);
+    let admission = admitted_sequence(&fixture.store, fixture.mission.id);
+    let spend = MeasuredSpendV1 {
+        workspace_id: fixture.store.workspace_id,
+        mission_id: fixture.mission.id,
+        spend_id: Uuid::new_v4(),
+        version: 1,
+        origin: SpendOrigin::DaemonLedger,
+        measured_at_ms: 1_788_400_000_000,
+        coverage_from_event_seq: admission,
+        coverage_to_event_seq: newest_event(&fixture.store),
+        measurement: SpendMeasurement::Measured(SpendTotals {
+            counted_units: 1,
+            lines: vec![SpendLine {
+                unit: "USD".to_owned(),
+                amount_minor: 100,
+                minor_units_exponent: 2,
+            }],
+        }),
+        supersedes: SpendSupersedes::None,
+    };
+    MeasuredSpendService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+        .record(&spend.canonical_bytes().unwrap())
+        .expect("the spend record is written");
+    let completion = fixture.completion(
+        newest_event(&fixture.store),
+        vec![ConditionOutcome::Met],
+        SpendReference::Recorded {
+            spend_id: spend.spend_id,
+            spend_version: spend.version,
+            spend_sha256: sha256_bytes(&spend.canonical_bytes().unwrap()),
+        },
+    );
+    let digest = fixture.record(&completion);
+    let connection = fixture.connection();
     let collected = Collector::new(&connection, fixture.store.workspace_id)
         .collect(&CollectionRequest {
             completion_digest: Some(digest),
             ..CollectionRequest::default()
         })
-        .expect("the current collector accepts the incomplete window");
-    let coverage = collected.spend.unwrap().coverage.unwrap();
-
+        .expect("a window from the admission Event spans the Mission");
+    let spend = collected.spend.expect("the completion cited spend");
+    assert_eq!(spend.coverage, Some((admission, spend.coverage.unwrap().1)));
     assert!(
-        coverage.0 <= admission,
-        "verified actual spend starts at event {}, after Mission admission {}",
-        coverage.0,
-        admission
+        matches!(spend.amount, OutcomeState::Verified(_)),
+        "{:?}",
+        spend.amount
     );
 }
