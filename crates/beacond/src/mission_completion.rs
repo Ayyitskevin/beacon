@@ -126,7 +126,7 @@ const MAX_CANONICAL_BYTES: usize = 65_536;
 /// `mission::MAX_MISSION_ITEMS`, repeated because this grammar owns its own bounds and a bound
 /// borrowed from another module drifts when that module's changes.
 const MAX_CONDITIONS: usize = 20;
-const MAX_SUPPORT_PER_CONDITION: usize = 8;
+pub(crate) const MAX_SUPPORT_PER_CONDITION: usize = 8;
 const MAX_DELIVERED_ARTIFACTS: usize = 32;
 const MAX_NARRATIVE_ITEMS: usize = 32;
 const MAX_SHORT_TEXT_SCALARS: usize = 500;
