@@ -4299,6 +4299,39 @@ mod tests {
         );
     }
 
+    /// R21 (b): no production SQL in this crate spells a conflict clause. The pragma makes REPLACE
+    /// meet the delete trigger and UPSERT already meets the update trigger, but `INSERT OR IGNORE`
+    /// is a silent `Ok(0)` and none of the three has a place in a store whose rows are immutable
+    /// by declaration: a duplicate identity is a refusal to hand back, never a row to write over
+    /// or a write to swallow. Read from the production half of every file under `src/` (up to its
+    /// test module), comment lines skipped because the opener's doc names REPLACE by name; a test
+    /// module may spell them, since proving the pragma requires one to.
+    #[test]
+    fn no_production_sql_spells_a_conflict_clause() {
+        let clauses = ["OR REPLACE", "OR IGNORE", "ON CONFLICT"];
+        let found: Vec<String> = production_source()
+            .into_iter()
+            .flat_map(|(file, lines)| {
+                lines
+                    .into_iter()
+                    .filter(|(_, line)| !line.trim_start().starts_with("//"))
+                    .flat_map(move |(number, line)| {
+                        let file = file.clone();
+                        clauses
+                            .iter()
+                            .filter(move |clause| line.to_ascii_uppercase().contains(*clause))
+                            .map(move |clause| format!("{file}:{number}: {clause}"))
+                            .collect::<Vec<_>>()
+                    })
+            })
+            .collect();
+        assert!(
+            found.is_empty(),
+            "production SQL spells a conflict clause:\n{}",
+            found.join("\n")
+        );
+    }
+
     /// R20.4's connection half (sol1's #13): every store connection opens with `recursive_triggers`
     /// on, so SQLite's REPLACE fires the delete trigger it otherwise skips. Proven on a table that
     /// has ONLY the old-shape trigger pair -- no `BEFORE INSERT` refusal to hide behind -- so what
