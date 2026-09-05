@@ -3285,3 +3285,124 @@ fn a_broken_measurement_has_no_count_to_be_complete() {
         OutcomeState::Broken("the ledger for this window is unreadable".to_owned())
     );
 }
+
+fn astra_artifact_evaluation(
+    fixture: &Admitted,
+    artifact: &beacond::VerifiedArtifactRecord,
+) -> beacond::Evaluation {
+    let evaluator = &fixture.mission.members[1];
+    EvaluationService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+        .record(EvaluationDraft {
+            subject: EvaluationSubjectDraft::Artifact(artifact.digest().value.clone()),
+            evaluator: Evaluator {
+                resident_id: evaluator.resident_id,
+                configuration_id: evaluator.admission_configuration_id,
+            },
+            rubric: RubricDeclaration {
+                id: "astra-seam-v1".to_owned(),
+                version: 1,
+                canonicalizer: "beacon.rubric.v1".to_owned(),
+                sha256: HEXLOWER.encode(&[0x31; 32]),
+            },
+            cited_runs: vec![],
+            verdict: Verdict::Meets,
+            findings: vec![],
+            conflicts: Conflicts::None,
+            rationale: "The exact candidate bytes meet this rubric.".to_owned(),
+            supersedes: EvaluationSupersedes::None,
+        })
+        .unwrap()
+}
+
+#[test]
+fn astra_s5_delivered_artifact_must_exist_at_the_completions_boundary() {
+    for deliver_late in [false, true] {
+        let f = admitted("astra-late-delivery", vec!["Gates pass".to_owned()]);
+        let early = f.record_mission_artifact(b"# Before the boundary\n");
+        let boundary = newest_event(&f.store);
+        assert_eq!(early.creation_event_seq(), boundary);
+        let late = f.record_mission_artifact(b"# After the boundary\n");
+        assert!(late.creation_event_seq() > boundary);
+        let delivered = if deliver_late { &late } else { &early };
+        let digest: [u8; 32] = HEXLOWER
+            .decode(delivered.digest().value.as_bytes())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let completion = store_completion_with_delivery(&f, boundary, vec![digest]);
+        let conn = f.connection();
+        let result = Collector::new(&conn, f.store.workspace_id).collect(&CollectionRequest {
+            completion_digest: Some(completion),
+            ..CollectionRequest::default()
+        });
+        eprintln!(
+            "S5 late={deliver_late} cut={boundary} delivered_cursor={} result={result:?}",
+            delivered.creation_event_seq()
+        );
+        if deliver_late {
+            assert!(
+                result.is_err(),
+                "a post-boundary Artifact became a frozen Verified delivery"
+            );
+        } else {
+            assert_eq!(
+                result.unwrap().completion.unwrap().delivered_artifacts,
+                OutcomeState::Verified(vec![early.digest().value.clone()])
+            );
+        }
+    }
+}
+
+#[test]
+fn astra_s6_unverified_evaluation_event_cannot_move_a_late_citation_before_the_cut() {
+    let f = admitted("astra-evaluation-locator", vec!["Gates pass".to_owned()]);
+    let artifact = f.record_mission_artifact(b"# Cited Artifact\n");
+    let boundary = newest_event(&f.store);
+    let completion = f.completion(
+        boundary,
+        vec![ConditionOutcome::Met],
+        SpendReference::NotMeasured("no ledger was read".to_owned()),
+    );
+    let completion_digest = f.record(&completion);
+    let evaluation = astra_artifact_evaluation(&f, &artifact);
+    let conn = f.connection();
+    let collector = Collector::new(&conn, f.store.workspace_id);
+    let request = CollectionRequest {
+        completion_digest: Some(completion_digest),
+        evaluation_digests: vec![evaluation.digest().value.clone()],
+        ..CollectionRequest::default()
+    };
+    let before = collector.collect(&request).unwrap_err();
+    assert!(matches!(
+        before,
+        CollectorRefusal::AfterBoundary {
+            kind: "evaluation",
+            ..
+        }
+    ));
+    // Re-type an earlier Event as a locator-only decoy; it carries no Evaluation bytes at all.
+    // The valid, later evaluation.recorded Event remains byte-identical in the ledger.
+    let decoy_seq: u64 = conn
+        .query_row(
+            "SELECT MIN(sequence) FROM events WHERE kind='workspace.created'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|s| u64::try_from(s).unwrap())
+        .unwrap();
+    assert!(decoy_seq < boundary);
+    conn.execute(
+        "UPDATE events SET kind = 'evaluation.recorded', payload_json = ?1 WHERE sequence = ?2",
+        params![
+            json!({"evaluation": {"digest": {"value": evaluation.digest().value}}}).to_string(),
+            i64::try_from(decoy_seq).unwrap()
+        ],
+    )
+    .unwrap();
+    let after = collector.collect(&request);
+    eprintln!("S6 decoy_seq={decoy_seq} cut={boundary} before={before:?} after={after:?}");
+    assert!(
+        after.is_err(),
+        "an unverified locator decoy laundered a late Evaluation into the frozen collection"
+    );
+}
