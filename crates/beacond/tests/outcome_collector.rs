@@ -3249,3 +3249,39 @@ fn a_whole_count_a_partial_count_and_no_count_are_three_distinct_states() {
     assert_eq!(spend.measurement, "not_measured");
     assert_eq!(spend.completeness, SpendCompleteness::NoCount);
 }
+
+/// kimi's P1 on #14: the distinctness test covered measured, partial, unmeasured and no record, and
+/// not `broken` -- the one state where reporting `Complete` would be the exact collapse the enum
+/// forbids (someone tried, and the ledger is unusable). A broken measurement has no count to be
+/// complete or incomplete: `NoCount`, beside an amount that says `Broken` in the record's words.
+#[test]
+fn a_broken_measurement_has_no_count_to_be_complete() {
+    let fixture = admitted("completeness-broken", vec!["Gates pass".to_owned()]);
+    let spend = fixture.measure_spend(SpendMeasurement::Broken(
+        "the ledger for this window is unreadable".to_owned(),
+    ));
+    let completion = fixture.completion(
+        newest_event(&fixture.store),
+        vec![ConditionOutcome::Met],
+        SpendReference::Recorded {
+            spend_id: spend.spend_id,
+            spend_version: spend.version,
+            spend_sha256: sha256_bytes(&spend.canonical_bytes().unwrap()),
+        },
+    );
+    let digest = fixture.record(&completion);
+    let connection = fixture.connection();
+    let collected = Collector::new(&connection, fixture.store.workspace_id)
+        .collect(&CollectionRequest {
+            completion_digest: Some(digest),
+            ..CollectionRequest::default()
+        })
+        .expect("a broken measurement is a valid verified record");
+    let spend = collected.spend.expect("the completion cited spend");
+    assert_eq!(spend.measurement, "broken");
+    assert_eq!(spend.completeness, SpendCompleteness::NoCount);
+    assert_eq!(
+        spend.amount,
+        OutcomeState::Broken("the ledger for this window is unreadable".to_owned())
+    );
+}
