@@ -773,6 +773,18 @@ impl<'a> Collector<'a> {
         self.at_or_before("spend", &digest_value, boundary_event_seq)?;
 
         let payload = record.payload();
+        // The cited record's own bytes must measure THIS completion's Mission. R15 proved the
+        // citation names these bytes; this proves the bytes are about the Mission the completion
+        // says they are -- a completion for Mission A citing Mission B's ledger as its own is a
+        // verified record in the wrong document (sol1's cold read, #4).
+        if payload.mission_id != completion.mission_id {
+            return Err(CollectorRefusal::RecordForAnotherMission {
+                kind: "spend",
+                id: digest_value,
+                declared_mission: payload.mission_id,
+                expected_mission: completion.mission_id,
+            });
+        }
         let coverage = Some((
             payload.coverage_from_event_seq,
             payload.coverage_to_event_seq,
