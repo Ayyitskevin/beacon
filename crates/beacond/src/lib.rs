@@ -421,7 +421,16 @@ pub enum SupervisorError {
     DispatchRecoveryFailed,
     EvaluationStateMismatch,
     MissionCompletionEventMismatch(i64),
-    MissionCompletionStateMismatch,
+    /// A stored Mission completion does not re-prove against its own bytes or the records it cites.
+    ///
+    /// Names the row and carries the owning reader's own refusal (R28.1).
+    MissionCompletionStateMismatch {
+        workspace_id: Uuid,
+        digest_value: String,
+        cause: mission_completion_store::CompletionReadRefusal,
+    },
+    /// The completions do not agree with the log as a whole. No row to name.
+    MissionCompletionTotalsMismatch(mission_completion_store::CompletionReadRefusal),
     ArtifactEventMismatch(i64),
     ArtifactStateMismatch,
     /// A stored Mission impact classification does not re-prove against its own bytes or the
@@ -640,9 +649,22 @@ impl fmt::Display for SupervisorError {
                 formatter,
                 "mission completion event {sequence} does not match its stored record"
             ),
-            Self::MissionCompletionStateMismatch => {
-                formatter.write_str("stored mission completions do not verify")
-            }
+            // R28.4: the key and the fault's NAME.
+            Self::MissionCompletionStateMismatch {
+                workspace_id,
+                digest_value,
+                cause,
+            } => write!(
+                formatter,
+                "completion {digest_value} in Workspace {workspace_id} does not re-prove against \
+                 its own bytes or the records it cites: {}",
+                cause.name()
+            ),
+            Self::MissionCompletionTotalsMismatch(cause) => write!(
+                formatter,
+                "the Mission completions do not agree with the log as a whole: {}",
+                cause.name()
+            ),
             Self::EvaluationStateMismatch => {
                 write!(
                     formatter,
@@ -1422,8 +1444,28 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     })?;
     // After Mission state, because every completion re-derives its conditions from the Mission's own
     // rows and its boundary from the Mission's admission Event.
-    mission_completion_store::verify_completion_state(connection)
-        .map_err(|_| SupervisorError::MissionCompletionStateMismatch)?;
+    mission_completion_store::verify_completion_state(connection).map_err(|fault| match fault {
+        mission_completion_store::CompletionStateFault::Store(error) => SupervisorError::Store(error),
+        mission_completion_store::CompletionStateFault::Row {
+            workspace_id,
+            digest_value,
+            cause,
+        } => SupervisorError::MissionCompletionStateMismatch {
+            workspace_id,
+            digest_value,
+            cause,
+        },
+        mission_completion_store::CompletionStateFault::Totals(cause) => {
+            SupervisorError::MissionCompletionTotalsMismatch(cause)
+        }
+        mission_completion_store::CompletionStateFault::Identity {
+            workspace_id,
+            digest_value,
+        } => SupervisorError::IntegrityCheckFailed(format!(
+            "a completion row's Workspace is not readable: {workspace_id}, completion \
+             {digest_value}"
+        )),
+    })?;
     // Last, because it is the only pass that re-proves records belonging to two other modules: an
     // Outcome manifest is accounted for by its candidate Artifact's Event and frozen on a
     // completion, so both of those have to have proved themselves first (R18.7).

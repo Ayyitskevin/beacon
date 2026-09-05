@@ -1702,7 +1702,7 @@ fn a_row_that_disagrees_with_its_own_bytes_fails_the_reader_and_fails_startup() 
             store_path: store.path.clone(),
             initial_workspace_name: "Ignored".to_owned(),
         }),
-        Err(beacond::SupervisorError::MissionCompletionStateMismatch)
+        Err(beacond::SupervisorError::MissionCompletionStateMismatch { .. })
     ));
 }
 
