@@ -901,3 +901,89 @@ pub fn record_completion(
     transaction.commit().map_err(store)?;
     Ok(digest.value)
 }
+
+#[cfg(test)]
+mod name_witness {
+    use super::*;
+
+    /// Pinned independently of `name()`; see the note in `outcome_publication`'s twin.
+    fn expected_name(refusal: &CompletionReadRefusal) -> &'static str {
+        match refusal {
+            CompletionReadRefusal::Absent => "Absent",
+            CompletionReadRefusal::CrossWorkspace => "CrossWorkspace",
+            CompletionReadRefusal::BytesDisagree => "BytesDisagree",
+            CompletionReadRefusal::ColumnDisagrees(_) => "ColumnDisagrees",
+            CompletionReadRefusal::SupersessionAbsent => "SupersessionAbsent",
+            CompletionReadRefusal::SupersessionUnverified(_) => "SupersessionUnverified",
+            CompletionReadRefusal::SupersessionOtherMission => "SupersessionOtherMission",
+            CompletionReadRefusal::SupersessionCycle => "SupersessionCycle",
+            CompletionReadRefusal::MissionProjectDisagrees(_) => "MissionProjectDisagrees",
+            CompletionReadRefusal::ConditionProjectionDisagrees { .. } => {
+                "ConditionProjectionDisagrees"
+            }
+            CompletionReadRefusal::ConditionsNotExactlyOnce { .. } => "ConditionsNotExactlyOnce",
+            CompletionReadRefusal::DeclaredConditionsMoved => "DeclaredConditionsMoved",
+            CompletionReadRefusal::MissionNotAdmitted => "MissionNotAdmitted",
+            CompletionReadRefusal::MissionAdmissionUnreadable { .. } => {
+                "MissionAdmissionUnreadable"
+            }
+            CompletionReadRefusal::BoundaryOutOfRange => "BoundaryOutOfRange",
+            CompletionReadRefusal::EventCount(_) => "EventCount",
+            CompletionReadRefusal::Store(_) => "Store",
+        }
+    }
+
+    #[test]
+    fn every_completion_refusal_arm_has_its_own_pinned_name() {
+        let every_arm = [
+            CompletionReadRefusal::Absent,
+            CompletionReadRefusal::CrossWorkspace,
+            CompletionReadRefusal::BytesDisagree,
+            CompletionReadRefusal::ColumnDisagrees("anything"),
+            CompletionReadRefusal::SupersessionAbsent,
+            CompletionReadRefusal::SupersessionUnverified("anything at all".to_owned()),
+            CompletionReadRefusal::SupersessionOtherMission,
+            CompletionReadRefusal::SupersessionCycle,
+            CompletionReadRefusal::MissionProjectDisagrees("anything"),
+            CompletionReadRefusal::ConditionProjectionDisagrees {
+                ordinal: 0,
+                column: "anything",
+            },
+            CompletionReadRefusal::ConditionsNotExactlyOnce {
+                declared: 1,
+                stored: 2,
+            },
+            CompletionReadRefusal::DeclaredConditionsMoved,
+            CompletionReadRefusal::MissionNotAdmitted,
+            CompletionReadRefusal::MissionAdmissionUnreadable { sequence: 1 },
+            CompletionReadRefusal::BoundaryOutOfRange,
+            CompletionReadRefusal::EventCount(1),
+            CompletionReadRefusal::Store("anything at all".to_owned()),
+        ];
+        assert_eq!(
+            every_arm.len(),
+            17,
+            "an arm was added to `CompletionReadRefusal` without a fixture here"
+        );
+        for arm in &every_arm {
+            assert_eq!(
+                arm.name(),
+                expected_name(arm),
+                "the startup name does not match the pinned table: {arm:?}"
+            );
+        }
+        let names: std::collections::BTreeSet<&str> =
+            every_arm.iter().map(CompletionReadRefusal::name).collect();
+        assert_eq!(
+            names.len(),
+            17,
+            "two arms share a startup name, so a swap between them is invisible: {names:?}"
+        );
+        for name in names {
+            assert!(
+                !name.contains(' ') && !name.contains('{'),
+                "a name is a name, not a rendering: {name}"
+            );
+        }
+    }
+}
