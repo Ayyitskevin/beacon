@@ -2806,6 +2806,65 @@ fn an_interruption_after_the_swap_is_finished_as_applied_at_startup() {
 }
 
 #[test]
+fn a_recovery_that_cannot_name_its_run_is_a_failed_write() {
+    // `finish_prepared_dispatches` is the one step in `inspect_store` that WRITES: it turns an
+    // interrupted attempt into a Run with a terminal Receipt. Nothing here asserted what startup
+    // says when that write cannot complete, so the name it reported was never compile-checked by
+    // anything -- which is how it kept a `...StateMismatch` name while not being a verification
+    // pass (R28.1).
+    //
+    // The failure is driven, not argued: both sides of the preparation-to-Run join are given an id
+    // that is not a UUID, so the recovery reads a Run it cannot name. Both immutability triggers
+    // are dropped and restored around the write, and BOTH sides are changed together -- changing
+    // only the Run leaves the preparation dangling, and `PRAGMA foreign_key_check` then refuses the
+    // store before this pass is ever reached.
+    let fixture = admitted_mission("recovery-unnameable");
+    let (_repository, ruling_digest) = fixture.approved("recovery-unnameable");
+    fixture.dispatch_until_death(&ruling_digest, "after_swap");
+    assert_eq!(fixture.count("SELECT count(*) FROM receipts"), 0);
+
+    let connection = fixture.store.connect();
+    connection
+        .pragma_update(None, "foreign_keys", "OFF")
+        .unwrap();
+    let triggers: Vec<String> = [
+        "runs_single_terminal_transition",
+        "dispatch_preparations_no_update",
+    ]
+    .iter()
+    .map(|name| {
+        connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = ?1",
+                [name],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+    })
+    .collect();
+    connection
+        .execute_batch(
+            "DROP TRIGGER runs_single_terminal_transition;
+             DROP TRIGGER dispatch_preparations_no_update;
+             UPDATE runs SET id = 'not-a-uuid' WHERE kind = 'proposal_dispatch';
+             UPDATE dispatch_preparations SET run_id = 'not-a-uuid';",
+        )
+        .unwrap();
+    for trigger in &triggers {
+        connection.execute_batch(trigger).unwrap();
+    }
+    drop(connection);
+
+    assert!(
+        matches!(
+            fixture.restart(),
+            Err(SupervisorError::DispatchStateMismatch)
+        ),
+        "a recovery write that could not complete did not say so at startup"
+    );
+}
+
+#[test]
 fn an_interruption_between_the_claim_and_the_swap_is_finished_as_refused() {
     // The same boundary one step earlier: the claim is committed and the swap never ran. "Refused"
     // is read off the ref, not guessed -- and telling it from the case above is the whole reason
