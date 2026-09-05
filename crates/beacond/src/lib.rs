@@ -523,6 +523,7 @@ pub enum StartupPass {
     MissionImpactClassification,
     OutcomeManifest,
     OutcomePublication,
+    MissionCompletion,
 }
 
 impl StartupPass {
@@ -534,6 +535,7 @@ impl StartupPass {
             Self::MissionImpactClassification => "MissionImpactClassification",
             Self::OutcomeManifest => "OutcomeManifest",
             Self::OutcomePublication => "OutcomePublication",
+            Self::MissionCompletion => "MissionCompletion",
         }
     }
 }
@@ -1551,8 +1553,11 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     // After Mission state, because every completion re-derives its conditions from the Mission's own
     // rows and its boundary from the Mission's admission Event.
     mission_completion_store::verify_completion_state(connection).map_err(|fault| match fault {
-        mission_completion_store::CompletionStateFault::Store(error) => {
-            SupervisorError::Store(error)
+        mission_completion_store::CompletionStateFault::Store(source) => {
+            SupervisorError::StartupEnumerationFailed {
+                pass: StartupPass::MissionCompletion,
+                source,
+            }
         }
         mission_completion_store::CompletionStateFault::Row {
             workspace_id,
@@ -1947,6 +1952,48 @@ fn count_rows(connection: &Connection, table: &str) -> Result<u64, SupervisorErr
 #[cfg(test)]
 mod tests {
 
+    /// The ROUTING, not the rendering: no startup pass maps its enumeration onto the generic arm.
+    ///
+    /// `sol1_each_startup_pass_names_itself_when_its_enumeration_fails` proves the six lines are
+    /// distinct -- it constructs the variant directly, so it says nothing about whether any pass
+    /// REACHES it. Collapsing the completion pass back onto `SupervisorError::Store` left that bar
+    /// green, which is how sol1 found the sixth site by reading rather than by running.
+    ///
+    /// Reading our own source is a blunt instrument and deliberate: the property is syntactic
+    /// ("no `*StateFault::Store(..) => SupervisorError::Store(..)` remains"), a broken store is not
+    /// plantable per pass, and sol1's own probe is the same shape.
+    #[test]
+    fn no_startup_pass_maps_its_enumeration_onto_the_generic_store_arm() {
+        let source: String = include_str!("lib.rs")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        for fault in [
+            "ProjectStateFault",
+            "MissionStateFault",
+            "ClassificationStateFault",
+            "ManifestStateFault",
+            "PublicationStateFault",
+            "CompletionStateFault",
+        ] {
+            for binding in ["error", "source"] {
+                let arrow = format!("{fault}::Store({binding})=>");
+                // The arm body may or may not be braced, so look just past the arrow rather than
+                // matching one spelling -- the first version of this bar matched only the
+                // unbraced form and the mutant walked through it.
+                if let Some(at) = source.find(&arrow) {
+                    let body = &source[at + arrow.len()..];
+                    let body = body.strip_prefix('{').unwrap_or(body);
+                    assert!(
+                        !body.starts_with("SupervisorError::Store("),
+                        "{fault} still maps its enumeration onto the generic Store arm, so its \
+                         failure renders as `store operation failed`"
+                    );
+                }
+            }
+        }
+    }
+
     /// sol1 P1-2: a Totals refusal says WHICH table and BY HOW MUCH.
     ///
     /// One honest completion plus one duplicate used to reach `Totals(EventCount(2))`, whose line
@@ -1997,10 +2044,12 @@ mod tests {
             StartupPass::MissionImpactClassification,
             StartupPass::OutcomeManifest,
             StartupPass::OutcomePublication,
+            // sol1's re-read: the completion pass was the sixth enumerator, still generic.
+            StartupPass::MissionCompletion,
         ];
         assert_eq!(
             every_pass.len(),
-            5,
+            6,
             "a pass was added to `StartupPass` without a fixture here"
         );
 
@@ -2018,7 +2067,7 @@ mod tests {
         let distinct: std::collections::BTreeSet<&str> = lines.iter().map(String::as_str).collect();
         assert_eq!(
             distinct.len(),
-            5,
+            6,
             "two passes share a line, so an operator cannot tell them apart: {distinct:?}"
         );
         for (pass, line) in every_pass.iter().zip(&lines) {
