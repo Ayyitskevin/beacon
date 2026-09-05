@@ -1114,7 +1114,7 @@ function boundedText(value: string, maxCharacters: number): [string, boolean] {
 
 export function describeLocalAccountError(error: unknown): string {
   if (typeof error !== "object" || error === null || Array.isArray(error)) {
-    return "Beacon could not complete that local account action.";
+    return "Beacon could not complete that local request.";
   }
   const code = (error as Record<string, unknown>).code;
   const retry = (error as Record<string, unknown>).retryAfterMs;
@@ -1205,6 +1205,8 @@ export function describeLocalAccountError(error: unknown): string {
       return "That Mission is no longer available in this Workspace.";
     case "not_authenticated":
       return "Unlock Beacon to continue.";
+    case "account_service_unavailable":
+      return "The local account service is unavailable.";
     case "outcome_absent":
       return "This Mission has no published Outcome Document.";
     case "outcome_unverified":
@@ -1230,7 +1232,7 @@ export function describeLocalAccountError(error: unknown): string {
     case "local_model_activation_unavailable":
       return "Beacon could not verify local-model activation state.";
     default:
-      return "Beacon could not complete that local account action.";
+      return "Beacon could not complete that local request.";
   }
 }
 
