@@ -1228,53 +1228,117 @@ fn insert_classification(
     Ok(())
 }
 
+/// Why the classification startup pass refused, with the row that caused it (R27.1).
+///
+/// The pass used to return `ClassificationStoreError` and startup flattened it with
+/// `.map_err(|_| ..)` onto a unit variant, so a refused reopen said "a classification does not
+/// re-prove" and nothing else -- not which row, and not whether the cause was malformed bytes or a
+/// predecessor of another Mission. An operator could not tell a corrupt store from a forged link
+/// from a bug in the reader (sol1's P1).
+pub(crate) enum ClassificationStateFault {
+    /// The enumeration itself failed: no row to name, because none was reached.
+    Store(rusqlite::Error),
+    /// One row did not re-prove. `cause` is the owning reader's OWN error, which already carries
+    /// `PredecessorFault` -- carried whole rather than re-described, so startup and a direct read
+    /// give the same answer to the same question.
+    Row {
+        workspace_id: Uuid,
+        digest: String,
+        cause: ClassificationStoreError,
+    },
+}
+
+impl fmt::Display for ClassificationStateFault {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => {
+                write!(formatter, "the classifications could not be read: {error}")
+            }
+            Self::Row {
+                workspace_id,
+                digest,
+                cause,
+            } => write!(
+                formatter,
+                "classification {digest} in Workspace {workspace_id} does not re-prove: {cause}"
+            ),
+        }
+    }
+}
+
+impl fmt::Debug for ClassificationStateFault {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
+}
+
 /// Re-prove every stored classification at startup (R26.1), the shape `verify_manifest_state` uses.
 ///
-/// **It walks every ROW, not every chain's newest version.** The Outcome path reads the newest
-/// classification at or before a completion's boundary, and `history()` is called from tests only,
-/// so a superseded version is a row nothing in the product reads again. Those are precisely the
-/// rows a forged supersession link can sit in undisturbed, so a pass that visited only the newest
-/// version of each Mission would skip the only rows it exists for -- the same lesson
-/// `verify_manifest_state` records about enumerating by the wrong key.
+/// **It walks every ROW, in every Workspace**, not each chain's newest version and not one
+/// Workspace. The Outcome path reads the newest classification at or before a completion's
+/// boundary, and `history()` is called from tests only, so a superseded version is a row nothing in
+/// the product reads again -- which is exactly where a forged supersession link sits undisturbed. A
+/// pass that visited only the newest version of each Mission, or only one Workspace, would skip the
+/// only rows it exists for. Both shapes are pinned by tests, because both were live mutants that
+/// the suite could not see until someone wrote one.
 ///
 /// It re-proves by CALLING `verified_classification_within`, never by restating its rules: the
-/// digest over the stored bytes, the round trip through the codec, every projection column against
-/// the bytes, the Policy revision's Charter, the Project that owns the Mission, and the predecessor
-/// judged by its own bytes (`PredecessorFault`: absent, unverifiable, another Workspace, another
-/// Mission -- sol1's #9). A second copy of those rules here would be a second thing to keep true.
+/// digest over the stored bytes, the codec round trip, every projection column against the bytes,
+/// the Policy revision's Charter, the Project that owns the Mission, and the predecessor judged by
+/// its own bytes (`PredecessorFault`: absent, unverifiable, another Workspace, another Mission --
+/// sol1's #9). A second copy of those rules here would be a second thing to keep true.
+///
+/// It CARRIES the reader's fault rather than flattening it (R27.1) -- see
+/// [`ClassificationStateFault`].
 ///
 /// Where it runs: `inspect_store`, with its siblings, which is AFTER the startup transaction has
 /// committed. It holds no write lock (PR #77 / FF-49 moved the expensive arithmetic out of that
 /// lock; this pass was never in it).
 pub(crate) fn verify_classification_state(
     connection: &Connection,
-) -> Result<(), ClassificationStoreError> {
+) -> Result<(), ClassificationStateFault> {
     let mut statement = connection
         .prepare(
             "SELECT workspace_id, digest_value FROM mission_impact_classifications
              ORDER BY workspace_id, digest_value",
         )
-        .map_err(|error| ClassificationStoreError::Store(error.to_string()))?;
+        .map_err(ClassificationStateFault::Store)?;
     let rows: Vec<(String, String)> = statement
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-        .map_err(|error| ClassificationStoreError::Store(error.to_string()))?
+        .map_err(ClassificationStateFault::Store)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| ClassificationStoreError::Store(error.to_string()))?;
+        .map_err(ClassificationStateFault::Store)?;
     drop(statement);
 
     for (workspace_id, digest_value) in &rows {
-        let workspace_id = Uuid::parse_str(workspace_id).map_err(|_| {
-            ClassificationStoreError::Store(
-                "a classification's Workspace id is not a UUID".to_owned(),
-            )
+        let parsed = Uuid::parse_str(workspace_id).map_err(|_| ClassificationStateFault::Row {
+            workspace_id: Uuid::nil(),
+            digest: digest_value.clone(),
+            cause: ClassificationStoreError::Store(format!(
+                "the Workspace id {workspace_id} is not a UUID"
+            )),
         })?;
         // `Ok(None)` cannot happen for a digest this query just read, and it is not treated as
-        // success: a row that vanished between the two statements is a store changing under a
-        // pass that is supposed to be reading a fixed set.
-        if verified_classification_within(connection, workspace_id, digest_value)?.is_none() {
-            return Err(ClassificationStoreError::Store(format!(
-                "classification {digest_value} was enumerated and then could not be read"
-            )));
+        // success: a row that vanished between the two statements is a store changing under a pass
+        // that is supposed to be reading a fixed set.
+        match verified_classification_within(connection, parsed, digest_value) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return Err(ClassificationStateFault::Row {
+                    workspace_id: parsed,
+                    digest: digest_value.clone(),
+                    cause: ClassificationStoreError::Store(
+                        "the row was enumerated and then could not be read".to_owned(),
+                    ),
+                });
+            }
+            Err(cause) => {
+                return Err(ClassificationStateFault::Row {
+                    workspace_id: parsed,
+                    digest: digest_value.clone(),
+                    cause,
+                });
+            }
         }
     }
     Ok(())
