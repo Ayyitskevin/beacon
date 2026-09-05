@@ -851,6 +851,134 @@ fn verified_sources_text_is_read_through_owners_not_narrative_projections() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The real path: prepare_for_mission (slice 3b item 0b, item 3)
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn a_completed_mission_becomes_a_candidate_outcome() {
+    // The first time anything outside a hand-built fixture reaches `prepare`: classify, complete,
+    // and ask for the Mission's Outcome by identity. Collector, assembler, owner-read text and
+    // `prepare` run in one transaction; what comes back is a candidate whose document carries the
+    // Mission's own words, read through their owners.
+    let fixture = admitted_mission("mission-to-candidate");
+    fixture.classify(ImpactLevel::Ordinary);
+    let summary = "One probe is deferred to the follow-up Mission.";
+    let (completion_digest, completion) = fixture.complete_with(
+        (fixture.resident_id, fixture.configuration_id),
+        vec![NarrativeItem {
+            ordinal: 0,
+            kind: UnfinishedKind::DeferredScope,
+            condition_ordinal: Some(0),
+            summary: summary.to_owned(),
+        }],
+    );
+
+    let candidate = fixture
+        .outcomes
+        .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+        .expect("a completed, classified Mission prepares");
+
+    let stored = fixture
+        .outcomes
+        .manifest(&candidate.manifest_digest)
+        .unwrap();
+    assert_eq!(stored.manifest().mission_id, fixture.mission_id);
+    assert_eq!(stored.manifest().completion.digest.value, completion_digest);
+    assert_eq!(
+        stored.manifest().boundary_event_seq,
+        completion.boundary_event_seq
+    );
+    assert_eq!(
+        stored.manifest().accountable_resident_id,
+        completion.accountable_resident_id
+    );
+    let record = fixture
+        .outcomes
+        .candidate(&candidate.manifest_digest)
+        .unwrap();
+    assert_eq!(
+        record.payload().accountable_resident_id,
+        fixture.resident_id
+    );
+    let document = String::from_utf8(record.content().to_vec()).unwrap();
+    assert!(
+        document.contains("Ship one reviewed Beacon feature."),
+        "{document}"
+    );
+    assert!(document.contains(CONDITION_TEXT), "{document}");
+    assert!(document.contains(summary), "{document}");
+    assert!(
+        document.contains("appendix_mode: policy_state_not_high_impact"),
+        "{document}"
+    );
+}
+
+#[test]
+fn prepare_for_mission_is_idempotent_through_the_real_path() {
+    let fixture = admitted_mission("mission-idempotent");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let rows = |table: &str| -> i64 {
+        fixture
+            .store
+            .connect()
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
+    let first = fixture
+        .outcomes
+        .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+        .unwrap();
+    let after_first = (rows("outcome_manifests"), rows("artifacts"), rows("events"));
+    let second = fixture
+        .outcomes
+        .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+        .unwrap();
+    assert_eq!(
+        first, second,
+        "the same completion assembled to different identities"
+    );
+    assert_eq!(
+        (rows("outcome_manifests"), rows("artifacts"), rows("events")),
+        after_first,
+        "a second prepare_for_mission wrote something"
+    );
+    // A different appendix request is a different manifest, by design: the request is inside the
+    // canonical bytes.
+    let included = fixture
+        .outcomes
+        .prepare_for_mission(fixture.mission_id, AppendixRequest::Include)
+        .unwrap();
+    assert_ne!(included.manifest_digest, first.manifest_digest);
+}
+
+#[test]
+fn prepare_for_mission_refuses_by_name_when_the_mission_has_nothing_to_freeze_on() {
+    // No completion: nothing to freeze on. No classification: no appendix bit to key on. Neither is
+    // guessed, and each names the Mission.
+    let fixture = admitted_mission("mission-nothing-to-freeze");
+    let refusal = fixture
+        .outcomes
+        .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+        .expect_err("an uncompleted Mission prepared");
+    assert!(
+        matches!(refusal, PrepareRefusal::MissionNotCompleted { mission_id } if mission_id == fixture.mission_id),
+        "{refusal:?}"
+    );
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let refusal = fixture
+        .outcomes
+        .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+        .expect_err("an unclassified Mission prepared");
+    assert!(
+        matches!(refusal, PrepareRefusal::MissionNotClassified { mission_id } if mission_id == fixture.mission_id),
+        "{refusal:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
 // The verified reader
 // ---------------------------------------------------------------------------------------------
 
