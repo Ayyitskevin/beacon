@@ -6024,3 +6024,170 @@ fn export_without_an_authenticated_session_is_refused_and_not_as_absent() {
 fn fixture_outcomes(fixture: &Fixture) -> OutcomeService {
     OutcomeService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
 }
+
+// ---------------------------------------------------------------------------------------------
+// Publication history: a reader over the relation's own key (slice 4a, R29.5)
+// ---------------------------------------------------------------------------------------------
+
+/// The history lists every version, newest first, with the current one marked.
+#[test]
+fn publication_history_lists_every_version_newest_first_with_the_current_one_marked() {
+    let fixture = admitted_mission("history-lists-versions");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, first_digest, first_evaluation) = fixture.publishable();
+    let first = fixture
+        .outcomes
+        .publish(fixture.mission_id, &first_digest, &first_evaluation)
+        .expect("version 1 publishes");
+
+    let corrected = fixture
+        .outcomes
+        .prepare_for_mission(fixture.mission_id, AppendixRequest::Include)
+        .expect("the correction prepares");
+    let corrected_record = fixture
+        .artifacts()
+        .get(&corrected.candidate_artifact_digest)
+        .unwrap();
+    let corrected_evaluation =
+        fixture.evaluate(&corrected.candidate_artifact_digest, Verdict::Meets);
+    let second = fixture
+        .outcomes
+        .publish(
+            fixture.mission_id,
+            corrected_record.digest(),
+            corrected_evaluation.digest(),
+        )
+        .expect("the correction publishes");
+
+    let history = fixture
+        .outcomes
+        .publication_history(fixture.mission_id)
+        .expect("the history reads");
+    assert_eq!(history.len(), 2);
+    // Newest first.
+    assert_eq!(history[0].publication_version, 2);
+    assert_eq!(history[1].publication_version, 1);
+    assert!(history[0].is_current);
+    assert!(
+        !history[1].is_current,
+        "a superseded version marked current reads as the only document there is"
+    );
+    // Each row carries what the RELATION holds, and it agrees with what `get_version` proves.
+    assert_eq!(history[0].publication_id, second.publication_id());
+    assert_eq!(history[1].publication_id, first.publication_id());
+    assert_eq!(
+        history[1].candidate_artifact_digest,
+        first_digest.value.clone()
+    );
+    assert_eq!(history[1].evaluation_digest, first_evaluation.value.clone());
+    assert_eq!(
+        history[0].candidate_artifact_digest,
+        corrected_record.digest().value
+    );
+
+    // A Mission with no publication has an empty history, not a refusal.
+    let none = admitted_mission("history-empty");
+    assert!(
+        none.outcomes
+            .publication_history(none.mission_id)
+            .expect("an unpublished Mission has an empty history")
+            .is_empty()
+    );
+}
+
+/// R29.5, as behaviour rather than as a stopwatch: the history is a reader over the RELATION, so a
+/// version whose document no longer verifies is still a version.
+///
+/// This is the bar that kills a `get_version` loop, and it kills it for the right reason. A loop
+/// re-proves every document, so one unreadable version makes the whole list refuse -- the operator
+/// who most needs to see that a version exists is exactly the one who cannot. Counting statements
+/// would have needed rusqlite's `trace` feature, which is a dependency change (R29.1), and a
+/// wall-clock ratio would be a flake waiting to happen. This asserts the difference that matters.
+#[test]
+fn the_history_lists_a_version_whose_document_no_longer_verifies() {
+    let fixture = admitted_mission("history-unverifiable-version");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, first_digest, first_evaluation) = fixture.publishable();
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &first_digest, &first_evaluation)
+        .expect("version 1 publishes");
+
+    // Break version 1's document: repoint the manifest at an Artifact that does not carry its
+    // appendix, which the read path refuses by name (proved by the export bar above).
+    let unrelated = fixture
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            b"# Not this manifest's document.\n",
+            ArtifactContext::Mission {
+                project_id: fixture.project_id,
+                mission_id: fixture.mission_id,
+            },
+            fixture.resident_id,
+            fixture.configuration_id,
+            None,
+        )
+        .expect("the unrelated Artifact records");
+    let unrelated_evaluation = fixture.evaluate(&unrelated.digest().value, Verdict::Meets);
+    with_trigger_down(
+        &fixture.store,
+        "outcome_manifests_no_update",
+        "outcome_manifests",
+        "Outcome manifests are immutable",
+        |connection| {
+            connection
+                .execute(
+                    "UPDATE outcome_manifests SET candidate_artifact_digest = ?1
+                     WHERE workspace_id = ?2",
+                    params![unrelated.digest().value, fixture.workspace_id.to_string()],
+                )
+                .unwrap();
+        },
+    );
+    with_trigger_down(
+        &fixture.store,
+        "outcome_publications_no_update",
+        "outcome_publications",
+        "Outcome publications are immutable",
+        |connection| {
+            connection
+                .execute(
+                    "UPDATE outcome_publications
+                     SET candidate_artifact_digest = ?1, evaluation_digest = ?2
+                     WHERE workspace_id = ?3",
+                    params![
+                        unrelated.digest().value,
+                        unrelated_evaluation.digest().value,
+                        fixture.workspace_id.to_string()
+                    ],
+                )
+                .unwrap();
+        },
+    );
+
+    // The document does NOT read -- that is the premise, asserted so this test cannot pass because
+    // the break failed to take.
+    assert!(
+        fixture
+            .outcomes
+            .export_markdown_version(fixture.mission_id, 1)
+            .is_err(),
+        "the version was supposed to be unreadable"
+    );
+
+    // The history still lists it, because the relation still holds it.
+    let history = fixture
+        .outcomes
+        .publication_history(fixture.mission_id)
+        .expect("a version whose document is broken is still a version");
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].publication_version, 1);
+    assert!(history[0].is_current);
+    assert_eq!(
+        history[0].candidate_artifact_digest,
+        unrelated.digest().value
+    );
+}
