@@ -46,7 +46,7 @@ use uuid::Uuid;
 use crate::artifact::{
     ArtifactContext, ArtifactError, ArtifactKind, VerifiedArtifactRecord, record_artifact_within,
 };
-use crate::mission_completion::{COMPLETION_CANONICALIZER, MissionCompletionV1};
+use crate::mission_completion::{COMPLETION_CANONICALIZER, MissionCompletionV1, SupportRef};
 use crate::mission_completion_store::{CompletionReadRefusal, verified_completion_within};
 use crate::mission_impact::{
     CANONICALIZER as MISSION_IMPACT_CANONICALIZER, ClassificationStoreError,
@@ -54,9 +54,11 @@ use crate::mission_impact::{
 };
 use crate::operator_account::{OperatorAccountError, OperatorAccountService};
 use crate::outcome::{
-    MalformedOutcome, OutcomeManifestV1, OutcomeRefusal, SourceDigest, SourceKind, VerifiedSources,
-    render,
+    AppendixRequest, MalformedOutcome, OutcomeManifestV1, OutcomeRefusal, SourceDigest, SourceKind,
+    VerifiedSources, render,
 };
+use crate::outcome_assembler::{AssemblyRefusal, SourcesRefusal, assemble, verified_sources_for};
+use crate::outcome_collector::{CollectionRequest, Collector, CollectorRefusal};
 use crate::proposal::sha256;
 
 const DIGEST_ALGORITHM: &str = "sha256";
@@ -226,6 +228,18 @@ pub enum PrepareRefusal {
     Artifact(ArtifactError),
     /// The Operator is not authenticated.
     Account(OperatorAccountError),
+    /// `prepare_for_mission`: this Workspace holds no completion for the Mission. There is nothing
+    /// to freeze on, and a manifest is not assembled from defaults.
+    MissionNotCompleted { mission_id: Uuid },
+    /// `prepare_for_mission`: the Mission has no impact classification, so the appendix policy has
+    /// no bit to key on.
+    MissionNotClassified { mission_id: Uuid },
+    /// The collector refused, in its own words.
+    Collector(CollectorRefusal),
+    /// The assembler refused to guess, in its own words.
+    Assembly(AssemblyRefusal),
+    /// A text the document prints could not be re-read through its owner.
+    Sources(SourcesRefusal),
 }
 
 impl std::fmt::Display for PrepareRefusal {
@@ -249,11 +263,44 @@ impl std::fmt::Display for PrepareRefusal {
             Self::Render(detail) => write!(formatter, "the renderer refused: {detail}"),
             Self::Artifact(error) => write!(formatter, "the candidate Artifact: {error:?}"),
             Self::Account(error) => write!(formatter, "{error}"),
+            Self::MissionNotCompleted { mission_id } => {
+                write!(
+                    formatter,
+                    "Mission {mission_id} has no completion in this Workspace"
+                )
+            }
+            Self::MissionNotClassified { mission_id } => {
+                write!(
+                    formatter,
+                    "Mission {mission_id} has no impact classification"
+                )
+            }
+            Self::Collector(refusal) => write!(formatter, "the collector: {refusal}"),
+            Self::Assembly(refusal) => write!(formatter, "the assembler: {refusal}"),
+            Self::Sources(refusal) => write!(formatter, "the document's sources: {refusal}"),
         }
     }
 }
 
 impl std::error::Error for PrepareRefusal {}
+
+impl From<CollectorRefusal> for PrepareRefusal {
+    fn from(refusal: CollectorRefusal) -> Self {
+        Self::Collector(refusal)
+    }
+}
+
+impl From<AssemblyRefusal> for PrepareRefusal {
+    fn from(refusal: AssemblyRefusal) -> Self {
+        Self::Assembly(refusal)
+    }
+}
+
+impl From<SourcesRefusal> for PrepareRefusal {
+    fn from(refusal: SourcesRefusal) -> Self {
+        Self::Sources(refusal)
+    }
+}
 
 impl From<ManifestStoreRefusal> for PrepareRefusal {
     fn from(refusal: ManifestStoreRefusal) -> Self {
@@ -596,93 +643,86 @@ impl OutcomeService {
         manifest: &OutcomeManifestV1,
         sources: &VerifiedSources,
     ) -> Result<OutcomeCandidate, PrepareRefusal> {
-        if manifest.workspace_id != self.workspace_id {
-            return Err(PrepareRefusal::CrossWorkspace);
-        }
-        // The bytes and the bound first, before a transaction is opened and before anything is
-        // read: a bound that exists to prevent work must run before the work.
-        let canonical_bytes = manifest
-            .canonical_bytes()
-            .map_err(ManifestStoreRefusal::from)?;
-        let observed = canonical_bytes.len() as u64;
-        if observed > MAX_STORED_MANIFEST_BYTES {
-            return Err(ManifestStoreRefusal::ManifestTooLarge {
-                configured: MAX_STORED_MANIFEST_BYTES,
-                observed,
-            }
-            .into());
-        }
-        let manifest_digest = HEXLOWER.encode(&sha256(&canonical_bytes));
-        let manifest_id = manifest_reference_id(&manifest_digest)?;
-
         self.accounts.with_authenticated_store(|connection, now| {
-            let recorded_at_ms = u64::try_from(now).map_err(|_| {
-                PrepareRefusal::Manifest(ManifestStoreRefusal::Store(
-                    "the service clock is before the Unix epoch".to_owned(),
-                ))
-            })?;
+            let recorded_at_ms = service_clock(now)?;
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-
-            // Already prepared. Read it back through the verified reader rather than trusting the
-            // row that answered the existence question, and write nothing.
-            match verified_manifest_within(&transaction, self.workspace_id, &manifest_digest) {
-                Ok(stored) => {
-                    return Ok(OutcomeCandidate {
-                        manifest_id: stored.manifest_id(),
-                        manifest_digest,
-                        candidate_artifact_digest: stored.candidate_artifact_digest().to_owned(),
-                    });
-                }
-                Err(ManifestStoreRefusal::Absent) => {}
-                Err(refusal) => return Err(refusal.into()),
-            }
-
-            let completion = read_completion(&transaction, self.workspace_id, manifest)?;
-            recheck_policy(
-                &transaction,
-                self.workspace_id,
-                manifest,
-                completion.mission_id,
-            )?;
-
-            let markdown = render(manifest, sources)?;
-            let candidate = record_artifact_within(
+            let candidate = prepare_within(
                 &transaction,
                 self.workspace_id,
                 recorded_at_ms,
-                ArtifactKind::OutcomeDocument,
-                markdown.as_bytes(),
-                ArtifactContext::Mission {
-                    project_id: completion.project_id,
-                    mission_id: completion.mission_id,
-                },
-                completion.accountable_resident_id,
-                completion.accountable_resident_configuration_id,
-                None,
-            )?;
-            let candidate_artifact_digest = candidate.digest().value.clone();
-
-            insert_manifest(
-                &transaction,
-                self.workspace_id,
                 manifest,
-                &canonical_bytes,
-                &manifest_digest,
-                manifest_id,
-                &candidate_artifact_digest,
+                sources,
             )?;
+            transaction.commit()?;
+            Ok(candidate)
+        })
+    }
 
-            // Read the record back through the verified reader, inside the transaction, before
-            // committing -- `record_completion`'s rule. Without it a write can leave the store in a
-            // state its own reader refuses, and the caller is told it succeeded.
-            let stored =
-                verified_manifest_within(&transaction, self.workspace_id, &manifest_digest)?;
-            let candidate = OutcomeCandidate {
-                manifest_id: stored.manifest_id(),
-                manifest_digest: stored.digest().value.clone(),
-                candidate_artifact_digest: stored.candidate_artifact_digest().to_owned(),
+    /// The whole path, for one Mission: collector -> assembler -> owner-read text -> `prepare`,
+    /// inside ONE transaction at the completion's boundary (slice 3b item 0b, item 3).
+    ///
+    /// Still an authenticated service method and not a Command (R18.1): the admission check and
+    /// the transport arrive with the presentation surface. What this adds over `prepare` is that
+    /// nothing outside a test has to build a manifest by hand any more.
+    ///
+    /// The two lookups by Mission -- its completion and its newest classification -- identify
+    /// CANDIDATE digests only (gpt2 §2: a relation may identify, never supply a claim). Everything
+    /// they name is then read through its owner by the collector, and the collection request's
+    /// citations come from the verified completion's own support references, not from a query.
+    /// Idempotent through `prepare`'s identity: the same completion assembles to the same bytes.
+    pub fn prepare_for_mission(
+        &self,
+        mission_id: Uuid,
+        appendix_request: AppendixRequest,
+    ) -> Result<OutcomeCandidate, PrepareRefusal> {
+        self.accounts.with_authenticated_store(|connection, now| {
+            let recorded_at_ms = service_clock(now)?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let workspace_id = self.workspace_id;
+
+            let completion_digest: Option<String> = transaction
+                .query_row(
+                    "SELECT digest_value FROM mission_completions
+                     WHERE workspace_id = ?1 AND mission_id = ?2",
+                    params![workspace_id.to_string(), mission_id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(completion_digest) = completion_digest else {
+                return Err(PrepareRefusal::MissionNotCompleted { mission_id });
             };
+            let classification_digest: Option<String> = transaction
+                .query_row(
+                    "SELECT digest_value FROM mission_impact_classifications
+                     WHERE workspace_id = ?1 AND mission_id = ?2
+                     ORDER BY version DESC LIMIT 1",
+                    params![workspace_id.to_string(), mission_id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(classification_digest) = classification_digest else {
+                return Err(PrepareRefusal::MissionNotClassified { mission_id });
+            };
+
+            // What the document cites is what the completion says supported its conditions -- read
+            // from the completion's bytes through its owner, then handed to the collector to read
+            // each one through ITS owner at the boundary.
+            let completion =
+                verified_completion_within(&transaction, workspace_id, &completion_digest)?;
+            let request = request_from(&completion, &completion_digest, &classification_digest);
+
+            let collected = Collector::new(&transaction, workspace_id).collect(&request)?;
+            let manifest = assemble(&collected, workspace_id, appendix_request)?;
+            let sources = verified_sources_for(&transaction, workspace_id, &manifest)?;
+            let candidate = prepare_within(
+                &transaction,
+                workspace_id,
+                recorded_at_ms,
+                &manifest,
+                &sources,
+            )?;
             transaction.commit()?;
             Ok(candidate)
         })
@@ -714,6 +754,128 @@ impl OutcomeService {
             .ok_or(ArtifactError::NotFound)?)
         })
     }
+}
+
+fn service_clock(now: i64) -> Result<u64, PrepareRefusal> {
+    u64::try_from(now).map_err(|_| {
+        PrepareRefusal::Manifest(ManifestStoreRefusal::Store(
+            "the service clock is before the Unix epoch".to_owned(),
+        ))
+    })
+}
+
+/// The collection request a completion implies: its own digest, the Mission's classification, and
+/// every Evaluation, Ruling and Receipt its condition results cite as support. Artifact support is
+/// a per-condition citation and is not a collector lane; the assembler refuses a condition whose
+/// support was counted but not carried, so nothing is silently dropped here.
+fn request_from(
+    completion: &MissionCompletionV1,
+    completion_digest: &str,
+    classification_digest: &str,
+) -> CollectionRequest {
+    let mut request = CollectionRequest {
+        completion_digest: Some(completion_digest.to_owned()),
+        classification_digest: Some(classification_digest.to_owned()),
+        ..CollectionRequest::default()
+    };
+    for result in &completion.condition_results {
+        for support in &result.support {
+            match support {
+                SupportRef::Evaluation(digest) => {
+                    request.evaluation_digests.push(HEXLOWER.encode(digest));
+                }
+                SupportRef::Ruling(digest) => request.ruling_digests.push(HEXLOWER.encode(digest)),
+                SupportRef::Receipt { run_id, .. } => request.receipt_run_uuids.push(*run_id),
+                SupportRef::Artifact(_) => {}
+            }
+        }
+    }
+    request
+}
+
+/// `prepare`, inside a caller's transaction: the manifest's bytes and bound, the already-prepared
+/// short-circuit, the completion and Policy re-checks, the render, the candidate Artifact, the
+/// manifest row, and the read-back -- everything but the authentication and the commit.
+fn prepare_within(
+    transaction: &Transaction<'_>,
+    workspace_id: Uuid,
+    recorded_at_ms: u64,
+    manifest: &OutcomeManifestV1,
+    sources: &VerifiedSources,
+) -> Result<OutcomeCandidate, PrepareRefusal> {
+    if manifest.workspace_id != workspace_id {
+        return Err(PrepareRefusal::CrossWorkspace);
+    }
+    // The bytes and the bound first, before a transaction is opened and before anything is
+    // read: a bound that exists to prevent work must run before the work.
+    let canonical_bytes = manifest
+        .canonical_bytes()
+        .map_err(ManifestStoreRefusal::from)?;
+    let observed = canonical_bytes.len() as u64;
+    if observed > MAX_STORED_MANIFEST_BYTES {
+        return Err(ManifestStoreRefusal::ManifestTooLarge {
+            configured: MAX_STORED_MANIFEST_BYTES,
+            observed,
+        }
+        .into());
+    }
+    let manifest_digest = HEXLOWER.encode(&sha256(&canonical_bytes));
+    let manifest_id = manifest_reference_id(&manifest_digest)?;
+
+    // Already prepared. Read it back through the verified reader rather than trusting the
+    // row that answered the existence question, and write nothing.
+    match verified_manifest_within(transaction, workspace_id, &manifest_digest) {
+        Ok(stored) => {
+            return Ok(OutcomeCandidate {
+                manifest_id: stored.manifest_id(),
+                manifest_digest,
+                candidate_artifact_digest: stored.candidate_artifact_digest().to_owned(),
+            });
+        }
+        Err(ManifestStoreRefusal::Absent) => {}
+        Err(refusal) => return Err(refusal.into()),
+    }
+
+    let completion = read_completion(transaction, workspace_id, manifest)?;
+    recheck_policy(transaction, workspace_id, manifest, completion.mission_id)?;
+
+    let markdown = render(manifest, sources)?;
+    let candidate = record_artifact_within(
+        transaction,
+        workspace_id,
+        recorded_at_ms,
+        ArtifactKind::OutcomeDocument,
+        markdown.as_bytes(),
+        ArtifactContext::Mission {
+            project_id: completion.project_id,
+            mission_id: completion.mission_id,
+        },
+        completion.accountable_resident_id,
+        completion.accountable_resident_configuration_id,
+        None,
+    )?;
+    let candidate_artifact_digest = candidate.digest().value.clone();
+
+    insert_manifest(
+        transaction,
+        workspace_id,
+        manifest,
+        &canonical_bytes,
+        &manifest_digest,
+        manifest_id,
+        &candidate_artifact_digest,
+    )?;
+
+    // Read the record back through the verified reader, inside the transaction, before
+    // committing -- `record_completion`'s rule. Without it a write can leave the store in a
+    // state its own reader refuses, and the caller is told it succeeded.
+    let stored = verified_manifest_within(transaction, workspace_id, &manifest_digest)?;
+    let candidate = OutcomeCandidate {
+        manifest_id: stored.manifest_id(),
+        manifest_digest: stored.digest().value.clone(),
+        candidate_artifact_digest: stored.candidate_artifact_digest().to_owned(),
+    };
+    Ok(candidate)
 }
 
 /// The completion this manifest is frozen on, read through its owning verified reader, and then
