@@ -37,6 +37,8 @@
 //! `a_manifest_cannot_exist_without_its_candidate` says so, because R18.6 revisits this only if
 //! one ever can. `verify_manifest_state` is what turns that position into an invariant (R18.7).
 
+use std::fmt;
+
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -1429,23 +1431,151 @@ fn insert_manifest(
 /// an Outcome Document scoped to the manifest's Mission and authored by the manifest's accountable
 /// Resident. Without those last three, a manifest could name any Artifact in the Workspace and
 /// borrow its Event as a position.
-pub(crate) fn verify_manifest_state(connection: &Connection) -> Result<(), ManifestStoreRefusal> {
+/// Which fault the manifest startup pass hit, and WHICH ROW hit it (R27.1's shape, R28.1).
+///
+/// `ManifestStoreRefusal` says what is wrong with a manifest and never which one: the reader is
+/// handed the digest, so it has no reason to repeat it. The row identity is added HERE, at the
+/// pass, where the loop knows it.
+pub(crate) enum ManifestStateFault {
+    /// The enumeration itself failed: no row to name, because none was reached.
+    Store(rusqlite::Error),
+    /// One row did not re-prove. `cause` is the owning reader's OWN refusal, carried whole.
+    Row {
+        workspace_id: Uuid,
+        manifest_digest: String,
+        cause: ManifestStoreRefusal,
+    },
+    /// A row whose Workspace column is not a UUID. Unreachable while the passes before this one
+    /// hold -- `workspace_id` is a foreign key into `workspaces`, and the foreign-key check and
+    /// the Workspace pass both run earlier -- but reported as what it is rather than folded into
+    /// a row refusal that would have to invent the identity it is missing.
+    Identity {
+        workspace_id: String,
+        manifest_digest: String,
+    },
+}
+
+impl ManifestStoreRefusal {
+    /// The variant's NAME, for R28.4's one-line startup message. `Irreconcilable { detail }`,
+    /// `Malformed(..)` and `CandidateNotAccounted { reason }` all carry sentences; none of them
+    /// belongs in a refusal line. Exhaustive, so a new refusal cannot be added without deciding
+    /// what startup calls it.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Absent => "Absent",
+            Self::CrossWorkspace => "CrossWorkspace",
+            Self::BytesDisagree => "BytesDisagree",
+            Self::ColumnDisagrees { .. } => "ColumnDisagrees",
+            Self::ManifestTooLarge { .. } => "ManifestTooLarge",
+            Self::Malformed(_) => "Malformed",
+            Self::Irreconcilable { .. } => "Irreconcilable",
+            Self::CandidateNotAccounted { .. } => "CandidateNotAccounted",
+            Self::Store(_) => "Store",
+        }
+    }
+}
+
+impl fmt::Display for ManifestStateFault {
+    /// R28.4: the KEY and the fault's NAME, never the carried refusal's own text.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(_) => formatter.write_str("the Outcome manifests could not be read"),
+            Self::Row {
+                workspace_id,
+                manifest_digest,
+                cause,
+            } => write!(
+                formatter,
+                "manifest {manifest_digest} in Workspace {workspace_id} does not re-prove: {}",
+                cause.name()
+            ),
+            Self::Identity {
+                workspace_id,
+                manifest_digest,
+            } => write!(
+                formatter,
+                "a manifest row's Workspace is not readable: {workspace_id}, manifest \
+                 {manifest_digest}"
+            ),
+        }
+    }
+}
+
+/// Hand-written and NOT delegating to `Display`: R28.4 keeps the carried text reachable here.
+impl fmt::Debug for ManifestStateFault {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => formatter.debug_tuple("Store").field(error).finish(),
+            Self::Row {
+                workspace_id,
+                manifest_digest,
+                cause,
+            } => formatter
+                .debug_struct("Row")
+                .field("workspace_id", workspace_id)
+                .field("manifest_digest", manifest_digest)
+                .field("cause", cause)
+                .finish(),
+            Self::Identity {
+                workspace_id,
+                manifest_digest,
+            } => formatter
+                .debug_struct("Identity")
+                .field("workspace_id", workspace_id)
+                .field("manifest_digest", manifest_digest)
+                .finish(),
+        }
+    }
+}
+
+impl std::error::Error for ManifestStateFault {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::Row { cause, .. } => Some(cause),
+            Self::Identity { .. } => None,
+        }
+    }
+}
+
+pub(crate) fn verify_manifest_state(connection: &Connection) -> Result<(), ManifestStateFault> {
     let mut statement = connection
         .prepare(
             "SELECT workspace_id, manifest_digest FROM outcome_manifests
              ORDER BY workspace_id, manifest_digest",
         )
-        .map_err(store_error)?;
+        .map_err(ManifestStateFault::Store)?;
     let rows: Vec<(String, String)> = statement
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-        .map_err(store_error)?
+        .map_err(ManifestStateFault::Store)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(store_error)?;
+        .map_err(ManifestStateFault::Store)?;
     drop(statement);
 
     for (workspace_id, manifest_digest) in &rows {
-        let workspace_id =
-            Uuid::parse_str(workspace_id).map_err(|_| ManifestStoreRefusal::BytesDisagree)?;
+        let parsed = Uuid::parse_str(workspace_id).map_err(|_| ManifestStateFault::Identity {
+            workspace_id: workspace_id.clone(),
+            manifest_digest: manifest_digest.clone(),
+        })?;
+        verify_one_manifest(connection, parsed, manifest_digest).map_err(|cause| {
+            ManifestStateFault::Row {
+                workspace_id: parsed,
+                manifest_digest: manifest_digest.clone(),
+                cause,
+            }
+        })?;
+    }
+    Ok(())
+}
+
+/// One stored manifest, re-proved. Unchanged from what the loop used to hold inline: keeping the
+/// reader's own error type here is what lets the pass add the row identity around it without
+/// rewriting a single check.
+fn verify_one_manifest(
+    connection: &Connection,
+    workspace_id: Uuid,
+    manifest_digest: &str,
+) -> Result<(), ManifestStoreRefusal> {
         // The bytes first, through the same reader every caller uses: a row that cannot prove
         // itself is refused before anything is asked of the log about it.
         let stored = verified_manifest_within(connection, workspace_id, manifest_digest)?;
@@ -1525,6 +1655,5 @@ pub(crate) fn verify_manifest_state(connection: &Connection) -> Result<(), Manif
 
         // The CONTENT binding is not repeated here: `verified_manifest_within` above already made
         // it, on this exact row, and one rule with two implementations is two rules.
-    }
     Ok(())
 }
