@@ -1273,6 +1273,11 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     // Last, because it is the only pass that re-proves records belonging to two other modules: an
     // Outcome manifest is accounted for by its candidate Artifact's Event and frozen on a
     // completion, so both of those have to have proved themselves first (R18.7).
+    // Before the manifest pass, because a manifest cites a classification and re-checks the
+    // high-impact bit against it: the classification has to have proved itself first, for the same
+    // reason completions come before manifests.
+    mission_impact::verify_classification_state(connection)
+        .map_err(|_| SupervisorError::MissionImpactClassificationStateMismatch)?;
     outcome_store::verify_manifest_state(connection)
         .map_err(|_| SupervisorError::OutcomeManifestStateMismatch)?;
     // After the manifest pass, because a publication is proved THROUGH its manifest: the relation
