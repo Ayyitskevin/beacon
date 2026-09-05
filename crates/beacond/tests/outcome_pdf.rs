@@ -382,3 +382,87 @@ fn the_pdf_names_nothing_about_the_host() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Fold — the quote
+// ---------------------------------------------------------------------------------------------
+
+/// The other half of the two-character escape surface.
+///
+/// `typst_string` escapes `\` and `"`. Only the backslash half was proven: `escape_v1` escapes
+/// neither quote nor anything that produces one, `vector-v2.md` contains **zero** double quotes,
+/// and no other text run in this suite carries one — so removing `|| character == '"'` left the
+/// whole suite green (Fable's mutant at `565f149`).
+///
+/// The input is what `escape_v1` would emit for prose containing every character that matters
+/// here: `"` bare, because `escape_v1` escapes neither `"` nor anything that yields one; and
+/// `\ # [ * ` + backslash-escaped, because it escapes those. A quote sits at the very end of the
+/// run, where an off-by-one in the escaper shows up first.
+///
+/// # Why this asserts the translated source and a differential render, not extracted PDF text
+///
+/// Typst compresses content streams, so pulling text back out means decompressing and parsing PDF
+/// text operators — a second decoder, in a test, whose bugs would produce a confident wrong
+/// answer. Instead: the source assertion kills the mutant deterministically, the render proves the
+/// escaped form is valid Typst, and rendering the same document *without* the quotes and asserting
+/// the bytes differ proves the quote reaches the output rather than only the source. Three cheap
+/// facts beat one fragile decoder.
+#[test]
+fn a_text_run_carrying_quotes_and_backslashes_survives_translation_and_renders() {
+    let quoted = "A quote \" and a backslash \\\\ and a hash \\# and a bracket \\[ \
+                  and a star \\* and a tick \\` and trailing \"\n";
+    let typst = to_typst(V1, quoted).expect("bare quotes are ordinary prose in v1");
+
+    // The escaped forms, spelled out. With `"` unescaped the source reads `#"A quote " and ...`,
+    // which is a different string and usually not a string at all.
+    assert!(
+        typst.contains(r#"A quote \" and"#),
+        "the quote was not escaped for the Typst string literal: {typst}"
+    );
+    assert!(
+        typst.contains(r#"and trailing \""#),
+        "a quote at the end of a run was not escaped: {typst}"
+    );
+    assert!(
+        typst.contains(r#"a backslash \\ and"#),
+        "the backslash was not escaped: {typst}"
+    );
+    // The characters `escape_v1` escaped are text again, and are NOT re-escaped: they have no
+    // meaning inside a string literal, which is the whole point of using one.
+    assert!(
+        typst.contains("a hash # and a bracket [ and a star * and a tick ` and"),
+        "an escaped construct character did not come back as text: {typst}"
+    );
+
+    // The escaped form is valid Typst.
+    let pdf = render(quoted, DIGEST, &BEACON_OUTCOME_1);
+
+    // And the quotes reach the rendered bytes: the same document without them renders differently.
+    let unquoted = quoted.replace('"', "");
+    assert_ne!(
+        quoted, unquoted,
+        "the input had no quotes, so this proves nothing"
+    );
+    assert_ne!(
+        pdf,
+        render(&unquoted, DIGEST, &BEACON_OUTCOME_1),
+        "the quotes did not reach the rendered document"
+    );
+}
+
+/// The same blind spot, checked in the other direction and found absent.
+///
+/// `escape_v1` escapes [`ESCAPE_ANYWHERE`] and [`ESCAPE_AT_START`], and `"` is in neither, so it
+/// **cannot emit `\"`** — the fixture's twelve backslash escapes are all inside those sets. So
+/// `unescape_checked` has no quote-shaped blind spot to have. It is exercised here anyway, because
+/// "cannot happen" is worth one assertion: a `\"` unescapes to a quote like any other escape, and
+/// that quote is then escaped again on the way into the string literal.
+#[test]
+fn an_escaped_quote_unescapes_to_a_quote_and_is_escaped_again() {
+    let typst = to_typst(V1, "He said \\\"hello\\\" once\n").unwrap();
+    assert!(
+        typst.contains(r#"He said \"hello\" once"#),
+        "a backslash-escaped quote did not round-trip: {typst}"
+    );
+    render("He said \\\"hello\\\" once\n", DIGEST, &BEACON_OUTCOME_1);
+}
