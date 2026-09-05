@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 #[cfg(unix)]
@@ -5,7 +6,8 @@ use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -645,9 +647,20 @@ pub fn open_store_connection(path: &Path) -> rusqlite::Result<Connection> {
     let connection = Connection::open(path)?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
     connection.pragma_update(None, "recursive_triggers", "ON")?;
-    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    connection.busy_timeout(Duration::from_millis(STORE_BUSY_TIMEOUT_MS.into()))?;
     Ok(connection)
 }
+
+/// How long a store connection waits for another connection's write transaction before it gives up
+/// with `SQLITE_BUSY` -- `PRAGMA busy_timeout`, set here because this is the one opener.
+///
+/// It is a ceiling on WAITING, never a budget for work: a waiter is refused when the holders ahead
+/// of it hold the write lock for longer than this in total, so the fix for a refusal is to hold the
+/// lock for less time, not to wait longer. FF-49 was exactly that -- the value was already five
+/// seconds and startup held the lock for ~195ms per supervisor, so the thirty-second waiter in a
+/// queue was refused. `expected_schema` took the computation out of the lock; this stays where it
+/// was, now named and with its reason written down.
+const STORE_BUSY_TIMEOUT_MS: u32 = 5_000;
 
 /// Owns store startup, first-Workspace creation, and the diagnostic report behind one interface.
 pub struct Supervisor;
@@ -934,15 +947,78 @@ fn verify_schema(connection: &Connection, version: i64) -> Result<(), Supervisor
         return Err(SupervisorError::UnsupportedSchemaVersion(version));
     }
     // The expectation is built from the same one list startup applies, so "what this version should
-    // look like" and "what startup produces" cannot drift apart.
-    let expected_connection = Connection::open_in_memory()?;
-    apply_migrations_through(&expected_connection, version)?;
-    let expected = schema_signature(&expected_connection)?;
+    // look like" and "what startup produces" cannot drift apart. It is memoized because it is a
+    // function of the compiled-in ladder and nothing else -- see `expected_schema`.
+    let expected = expected_schema(version)?;
     let actual = schema_signature(connection)?;
-    if actual != expected {
+    if actual != *expected {
         return Err(SupervisorError::SchemaMismatch);
     }
     Ok(())
+}
+
+/// The schema one ladder version produces, replayed into an in-memory database ONCE per process.
+///
+/// This is the half of `verify_schema` that needs no store and no lock: `MIGRATION_LADDER` is
+/// compiled in, so a version's expected shape is the same answer every time. Startup called it
+/// inside its write transaction -- twice for an existing store -- and each replay of the
+/// twenty-nine-step ladder took ~95ms, so a supervisor held the store's write lock for ~195ms of
+/// which ~190ms was arithmetic nobody else could proceed through. Concurrent supervisors queued at
+/// that rate and the tail passed `STORE_BUSY_TIMEOUT_MS` (FF-49).
+///
+/// A version is replayed at most once per process: the cache lock is held across the replay, so a
+/// cold queue waits for one answer instead of computing the same one N times.
+static EXPECTED_SCHEMA: OnceLock<Mutex<HashMap<i64, Arc<Vec<SchemaObject>>>>> = OnceLock::new();
+
+/// Test-only: how many times each version's ladder has actually been replayed in this process.
+///
+/// A version's count can only ever reach one, and once it does no thread can move it again -- which
+/// is what makes the witness below deterministic rather than a race with the clock.
+#[cfg(test)]
+static EXPECTED_SCHEMA_REPLAYS: OnceLock<Mutex<HashMap<i64, usize>>> = OnceLock::new();
+
+#[cfg(test)]
+fn note_ladder_replay(version: i64) {
+    *EXPECTED_SCHEMA_REPLAYS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(version)
+        .or_insert(0) += 1;
+}
+
+#[cfg(not(test))]
+fn note_ladder_replay(_version: i64) {}
+
+#[cfg(test)]
+fn expected_schema_replays(version: i64) -> usize {
+    EXPECTED_SCHEMA_REPLAYS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&version)
+        .copied()
+        .unwrap_or(0)
+}
+
+fn expected_schema(version: i64) -> Result<Arc<Vec<SchemaObject>>, SupervisorError> {
+    // The lock is held across the replay on purpose. A version is computed at most ONCE in a
+    // process: without that, every supervisor in a cold queue burns the same ~95ms of arithmetic in
+    // parallel, and the count a test can assert on becomes a race. A hit is a map lookup; the one
+    // caller that misses makes the others wait for the answer instead of duplicating it.
+    let mut cache = EXPECTED_SCHEMA
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if let Some(signature) = cache.get(&version) {
+        return Ok(Arc::clone(signature));
+    }
+    note_ladder_replay(version);
+    let expected_connection = Connection::open_in_memory()?;
+    apply_migrations_through(&expected_connection, version)?;
+    let signature = Arc::new(schema_signature(&expected_connection)?);
+    cache.insert(version, Arc::clone(&signature));
+    Ok(signature)
 }
 
 fn schema_signature(connection: &Connection) -> Result<Vec<SchemaObject>, SupervisorError> {
@@ -4246,11 +4322,17 @@ mod tests {
                 .query_row(&format!("PRAGMA {name}"), [], |row| row.get(0))
                 .unwrap()
         };
+        let busy_timeout_ms = i64::from(crate::STORE_BUSY_TIMEOUT_MS);
 
         // 1. The opener.
         let opened = crate::open_store_connection(&path).unwrap();
         assert_eq!(pragma(&opened, "recursive_triggers"), 1, "the opener");
         assert_eq!(pragma(&opened, "foreign_keys"), 1, "the opener");
+        assert_eq!(
+            pragma(&opened, "busy_timeout"),
+            busy_timeout_ms,
+            "the opener"
+        );
         drop(opened);
 
         // 2. Bootstrap (its connection is the opener's; see the source assertion) so that ...
@@ -4270,6 +4352,11 @@ mod tests {
         assert_eq!(
             accounts.store_pragma("foreign_keys"),
             1,
+            "OperatorAccountService::open"
+        );
+        assert_eq!(
+            accounts.store_pragma("busy_timeout"),
+            busy_timeout_ms,
             "OperatorAccountService::open"
         );
         drop(accounts);
@@ -4335,6 +4422,37 @@ mod tests {
             "production SQL spells a conflict clause:\n{}",
             found.join("\n")
         );
+    }
+
+    /// FF-49's fix, witnessed without a clock: startup does not replay the ladder inside its
+    /// write transaction for a version this process has already computed.
+    ///
+    /// This is the assertion that actually guards the lock hold. The concurrent test below can only
+    /// catch a slow hold by racing the busy timeout, which makes it a measure of how loaded the box
+    /// is; this counts the work instead. A version's replay count reaches one and can never move
+    /// again, so sampling it around a bootstrap is race-free even with the whole suite running.
+    #[test]
+    fn startup_does_not_replay_the_ladder_for_a_version_already_computed() {
+        let store = TestStore::new("expected-schema-memoized");
+        Supervisor::bootstrap(config(&store.path, "Personal")).unwrap();
+        let first = crate::expected_schema(SCHEMA_VERSION).unwrap();
+        let replays = crate::expected_schema_replays(SCHEMA_VERSION);
+        assert_eq!(replays, 1, "the current version's ladder is replayed once");
+
+        // A second startup against the same store verifies the schema twice -- once for the
+        // version it claims, once for the version it ends at -- and must replay neither.
+        Supervisor::bootstrap(config(&store.path, "Personal")).unwrap();
+        assert_eq!(
+            crate::expected_schema_replays(SCHEMA_VERSION),
+            replays,
+            "startup replayed the ladder inside its write transaction for a version already computed"
+        );
+        let second = crate::expected_schema(SCHEMA_VERSION).unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "the cached signature is not shared"
+        );
+        assert!(!first.is_empty(), "the expected schema is empty");
     }
 
     /// R20.4's connection half (sol1's #13): every store connection opens with `recursive_triggers`
@@ -4764,13 +4882,17 @@ mod tests {
 
     /// How many supervisors start against one store file at once in the test below.
     ///
-    /// Two proved the mutual exclusion and nothing about the queue behind it. Every waiter is
-    /// serialized behind the holder's write transaction, so the last one waits N times the
-    /// hold -- and when that product passes the busy timeout the wait becomes
-    /// `SQLITE_BUSY`, which is FF-49. Two threads reach that product only when the box is
-    /// loaded, which is why FF-49 read as a load flake for weeks: three gates in a row failed
-    /// here while every isolated run passed. This many threads reach it on an idle box.
-    const CONCURRENT_BOOTSTRAP_SUPERVISORS: usize = 32;
+    /// Two proved the mutual exclusion and nothing about the queue behind it: every waiter is
+    /// serialized behind the holder's write transaction, so the last one waits N times the hold,
+    /// and when that product passes the busy timeout the wait becomes `SQLITE_BUSY` -- FF-49.
+    /// Thirty-two reproduced it on an idle box while the fix was being measured (7 to 11 refused
+    /// per run, recorded in that commit), and thirty-two is NOT what this test settles at: with the
+    /// hold fixed it still failed 2 runs in 3 inside the full suite, because thirty-two threads on
+    /// top of the suite's own thirty-two make the assertion a measure of the box rather than of the
+    /// store. Eight is a queue the store owns. What guards the hold is
+    /// `startup_does_not_replay_the_ladder_for_a_version_already_computed`, which counts the work
+    /// instead of racing a clock.
+    const CONCURRENT_BOOTSTRAP_SUPERVISORS: usize = 8;
 
     #[test]
     fn concurrent_bootstrap_creates_exactly_one_workspace_and_event() {
