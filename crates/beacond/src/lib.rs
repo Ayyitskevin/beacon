@@ -398,7 +398,16 @@ pub enum SupervisorError {
     RunEventMismatch(i64),
     RunStateMismatch,
     ProposalEventMismatch(i64),
-    ProposalStateMismatch,
+    /// A stored Proposal does not re-prove against its own bytes or the records it cites.
+    ///
+    /// Names the row and carries the owning reader's own error (R28.1).
+    ProposalStateMismatch {
+        workspace_id: Uuid,
+        digest_value: String,
+        cause: proposal::ProposalError,
+    },
+    /// The Proposals do not agree with the log as a whole. No row to name.
+    ProposalTotalsMismatch(proposal::ProposalError),
     RulingEventMismatch(i64),
     EvaluationEventMismatch(i64),
     RulingStateMismatch,
@@ -742,12 +751,22 @@ impl fmt::Display for SupervisorError {
                 formatter,
                 "Event sequence {sequence} does not match its stored Proposal bytes"
             ),
-            Self::ProposalStateMismatch => {
-                write!(
-                    formatter,
-                    "Proposal state does not agree with its bytes, references, or audit Event"
-                )
-            }
+            // R28.4: the key and the fault's NAME.
+            Self::ProposalStateMismatch {
+                workspace_id,
+                digest_value,
+                cause,
+            } => write!(
+                formatter,
+                "Proposal {digest_value} in Workspace {workspace_id} does not re-prove against \
+                 the records it cites: {}",
+                cause.name()
+            ),
+            Self::ProposalTotalsMismatch(cause) => write!(
+                formatter,
+                "the Proposals do not agree with the log as a whole: {}",
+                cause.name()
+            ),
             Self::RulingEventMismatch(sequence) => write!(
                 formatter,
                 "Event sequence {sequence} does not match its stored Ruling bytes"
@@ -1705,8 +1724,25 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
         .map_err(|_| SupervisorError::ProjectRepositoryStateMismatch)?;
     sample_project::verify_sample_project_state(connection)
         .map_err(|_| SupervisorError::SampleProjectStateMismatch)?;
-    proposal::verify_proposal_state(connection)
-        .map_err(|_| SupervisorError::ProposalStateMismatch)?;
+    proposal::verify_proposal_state(connection).map_err(|fault| match fault {
+        proposal::ProposalStateFault::Store(error) => SupervisorError::Store(error),
+        proposal::ProposalStateFault::Row {
+            workspace_id,
+            digest_value,
+            cause,
+        } => SupervisorError::ProposalStateMismatch {
+            workspace_id,
+            digest_value,
+            cause,
+        },
+        proposal::ProposalStateFault::Totals(cause) => SupervisorError::ProposalTotalsMismatch(cause),
+        proposal::ProposalStateFault::Identity {
+            workspace_id,
+            digest_value,
+        } => SupervisorError::IntegrityCheckFailed(format!(
+            "a Proposal row's Workspace is not readable: {workspace_id}, Proposal {digest_value}"
+        )),
+    })?;
     // After Proposal state, because every Ruling binds one and re-verifies what it copied against
     // that Proposal's own bytes.
     ruling::verify_ruling_state(connection).map_err(|_| SupervisorError::RulingStateMismatch)?;
