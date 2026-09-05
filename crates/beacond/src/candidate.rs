@@ -265,6 +265,105 @@ impl InconsistentCandidate {
     }
 }
 
+/// Which fault the Candidate startup pass hit, and WHICH ROW hit it (R27.1's shape, R28.1).
+pub(crate) enum CandidateStateFault {
+    /// The enumeration itself failed: no row to name, because none was reached.
+    Store(rusqlite::Error),
+    /// One Candidate did not re-prove. `cause` is the owning reader's OWN error, carried whole.
+    Row {
+        workspace_id: Uuid,
+        digest_value: String,
+        cause: CandidateError,
+    },
+    // NO `Totals` ARM. This pass has no whole-table comparison, deliberately and with its own
+    // comment saying why: an Event naming a digest no row carries is refused by the replay. A
+    // variant nothing can construct is a promise the type cannot keep -- evaluation taught this.
+    /// A row whose Workspace column is not a UUID. Unreachable while the foreign-key check and
+    /// the Workspace pass run first.
+    Identity {
+        workspace_id: String,
+        digest_value: String,
+    },
+}
+
+impl CandidateError {
+    /// The variant's NAME, for R28.4's one-line startup message.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Account(_) => "Account",
+            Self::Malformed(_) => "Malformed",
+            Self::Inconsistent(_) => "Inconsistent",
+            Self::NotFound => "NotFound",
+            Self::InvalidStore => "InvalidStore",
+            Self::Store(_) => "Store",
+            Self::Json(_) => "Json",
+        }
+    }
+}
+
+impl fmt::Display for CandidateStateFault {
+    /// R28.4: the KEY and the fault's NAME, never the carried error's own text.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(_) => formatter.write_str("the Candidates could not be read"),
+            Self::Row {
+                workspace_id,
+                digest_value,
+                cause,
+            } => write!(
+                formatter,
+                "Candidate {digest_value} in Workspace {workspace_id} does not re-prove: {}",
+                cause.name()
+            ),
+            Self::Identity {
+                workspace_id,
+                digest_value,
+            } => write!(
+                formatter,
+                "a Candidate row's Workspace is not readable: {workspace_id}, Candidate \
+                 {digest_value}"
+            ),
+        }
+    }
+}
+
+/// Hand-written and NOT delegating to `Display`: R28.4 keeps the carried text reachable here.
+impl fmt::Debug for CandidateStateFault {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => formatter.debug_tuple("Store").field(error).finish(),
+            Self::Row {
+                workspace_id,
+                digest_value,
+                cause,
+            } => formatter
+                .debug_struct("Row")
+                .field("workspace_id", workspace_id)
+                .field("digest_value", digest_value)
+                .field("cause", cause)
+                .finish(),
+            Self::Identity {
+                workspace_id,
+                digest_value,
+            } => formatter
+                .debug_struct("Identity")
+                .field("workspace_id", workspace_id)
+                .field("digest_value", digest_value)
+                .finish(),
+        }
+    }
+}
+
+impl std::error::Error for CandidateStateFault {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::Row { cause, .. } => Some(cause),
+            Self::Identity { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum CandidateError {
     Account(OperatorAccountError),
@@ -1233,11 +1332,13 @@ fn agrees_with_proposal(facts: &ProposalIntentFacts, payload: &CandidateV1) -> b
 /// What it deliberately does not do is re-derive anything about the world: a Candidate records what
 /// a change would do to a tree at one revision, and that record does not become invalid because the
 /// tree moved. Dispatch re-establishes every live fact itself, at dispatch time.
-pub(crate) fn verify_candidate_state(connection: &Connection) -> Result<(), CandidateError> {
-    let mut statement = connection.prepare(
-        "SELECT workspace_id, digest_value, proposal_digest FROM candidates
+pub(crate) fn verify_candidate_state(connection: &Connection) -> Result<(), CandidateStateFault> {
+    let mut statement = connection
+        .prepare(
+            "SELECT workspace_id, digest_value, proposal_digest FROM candidates
          ORDER BY workspace_id, digest_value",
-    )?;
+        )
+        .map_err(CandidateStateFault::Store)?;
     let rows = statement
         .query_map([], |row| {
             Ok((
@@ -1245,13 +1346,44 @@ pub(crate) fn verify_candidate_state(connection: &Connection) -> Result<(), Cand
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
             ))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+        })
+        .map_err(CandidateStateFault::Store)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(CandidateStateFault::Store)?;
     drop(statement);
 
     for (workspace_id, digest_value, proposal_digest) in &rows {
-        let workspace_id =
-            Uuid::parse_str(workspace_id).map_err(|_| CandidateError::InvalidStore)?;
+        let identity = || CandidateStateFault::Identity {
+            workspace_id: workspace_id.clone(),
+            digest_value: digest_value.clone(),
+        };
+        let parsed = Uuid::parse_str(workspace_id).map_err(|_| identity())?;
+        verify_one_candidate(connection, parsed, digest_value, proposal_digest).map_err(
+            |cause| CandidateStateFault::Row {
+                workspace_id: parsed,
+                digest_value: digest_value.clone(),
+                cause,
+            },
+        )?;
+    }
+    // No whole-table population comparison here, deliberately -- which is why this pass has no
+    // `Totals` arm. An Event naming a digest no row carries is refused by
+    // `verify_candidate_event` during the startup replay, which walks every event row, so a second
+    // count could not be reached by any store this code can produce, and a guard nothing can
+    // exercise is a claim rather than a check (gpt1, twice).
+    // `an_event_whose_digest_names_no_candidate_is_refused_by_the_replay` pins the guard that does
+    // the work.
+    Ok(())
+}
+
+/// One stored Candidate, re-proved. Unchanged from what the loop held inline.
+fn verify_one_candidate(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+    proposal_digest: &str,
+) -> Result<(), CandidateError> {
+    {
         let stored = load_stored_by_digest(connection, workspace_id, digest_value)?
             .ok_or(CandidateError::InvalidStore)?;
         let candidate = verified_candidate(stored)?;
@@ -1269,13 +1401,6 @@ pub(crate) fn verify_candidate_state(connection: &Connection) -> Result<(), Cand
 
         require_one_event(connection, workspace_id, digest_value)?;
     }
-
-    // No whole-table population comparison here, deliberately. An Event naming a digest no row
-    // carries is refused by `verify_candidate_event` during the startup replay, which walks every
-    // event row -- so a second count could not be reached by any store this code can produce, and
-    // a guard nothing can exercise is a claim rather than a check (gpt1, twice).
-    // `an_event_whose_digest_names_no_candidate_is_refused_by_the_replay` pins the guard that does
-    // the work.
     Ok(())
 }
 
@@ -1729,6 +1854,65 @@ mod tests {
                 encode(&payload),
                 Err(MalformedCandidate::TargetPath),
                 "{path:?} encoded"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod name_witness {
+    use super::*;
+
+    /// Pinned independently of `name()` (the fold at 30d2a20): an exhaustive `name()` catches an
+    /// added arm, only a second table catches a wrong or duplicated name.
+    fn expected_name(error: &CandidateError) -> &'static str {
+        match error {
+            CandidateError::Account(_) => "Account",
+            CandidateError::Malformed(_) => "Malformed",
+            CandidateError::Inconsistent(_) => "Inconsistent",
+            CandidateError::NotFound => "NotFound",
+            CandidateError::InvalidStore => "InvalidStore",
+            CandidateError::Store(_) => "Store",
+            CandidateError::Json(_) => "Json",
+        }
+    }
+
+    #[test]
+    fn every_candidate_error_arm_has_its_own_pinned_name() {
+        let every_arm = [
+            CandidateError::Account(
+                crate::operator_account::OperatorAccountError::PasswordTooShort,
+            ),
+            CandidateError::Malformed(MalformedCandidate::Magic),
+            CandidateError::Inconsistent(InconsistentCandidate::ProposalNotFound),
+            CandidateError::NotFound,
+            CandidateError::InvalidStore,
+            CandidateError::Store(rusqlite::Error::QueryReturnedNoRows),
+            CandidateError::Json(serde_json::from_str::<u8>("\"x\"").unwrap_err()),
+        ];
+        assert_eq!(
+            every_arm.len(),
+            7,
+            "an arm was added to `CandidateError` without a fixture here"
+        );
+        for arm in &every_arm {
+            assert_eq!(
+                arm.name(),
+                expected_name(arm),
+                "the startup name does not match the pinned table: {arm:?}"
+            );
+        }
+        let names: std::collections::BTreeSet<&str> =
+            every_arm.iter().map(CandidateError::name).collect();
+        assert_eq!(
+            names.len(),
+            7,
+            "two arms share a startup name, so a swap between them is invisible: {names:?}"
+        );
+        for name in names {
+            assert!(
+                !name.contains(' ') && !name.contains('{'),
+                "a name is a name, not a rendering: {name}"
             );
         }
     }

@@ -423,7 +423,15 @@ pub enum SupervisorError {
     /// The Ruling chains do not re-prove. Structural, so no counts.
     RulingChainsMismatch(ruling::RulingError),
     CandidateEventMismatch(i64),
-    CandidateStateMismatch,
+    /// A stored Candidate does not re-prove against its own bytes or the records it cites.
+    ///
+    /// Names the row and carries the owning reader's own error (R28.1).
+    CandidateStateMismatch {
+        workspace_id: Uuid,
+        digest_value: String,
+        cause: candidate::CandidateError,
+    },
+    // NO `CandidateTotalsMismatch`: that pass has no whole-table comparison, by its own design.
     DispatchEventMismatch(i64),
     /// The startup step that FINISHES an interrupted dispatch could not complete its write.
     ///
@@ -569,6 +577,7 @@ pub enum StartupPass {
     Evaluation,
     Artifact,
     Ruling,
+    Candidate,
 }
 
 impl StartupPass {
@@ -584,6 +593,7 @@ impl StartupPass {
             Self::Proposal => "Proposal",
             Self::Evaluation => "Evaluation",
             Self::Artifact => "Artifact",
+            Self::Candidate => "Candidate",
             Self::Ruling => "Ruling",
         }
     }
@@ -923,13 +933,17 @@ impl fmt::Display for SupervisorError {
                 formatter,
                 "Event sequence {sequence} does not match its stored Candidate bytes"
             ),
-            Self::CandidateStateMismatch => {
-                write!(
-                    formatter,
-                    "Candidate state does not agree with its bytes, the Proposal it binds, or \
-                     its audit Event"
-                )
-            }
+            // R28.4: the key and the fault's NAME.
+            Self::CandidateStateMismatch {
+                workspace_id,
+                digest_value,
+                cause,
+            } => write!(
+                formatter,
+                "Candidate {digest_value} in Workspace {workspace_id} does not re-prove \
+                 against its own bytes or the records it cites: {}",
+                cause.name()
+            ),
             Self::DispatchEventMismatch(sequence) => write!(
                 formatter,
                 "Event sequence {sequence} does not match its stored dispatch Receipt"
@@ -1823,8 +1837,30 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     })?;
     // After Proposal state for the same reason a Ruling is: a Candidate copies one Proposal's
     // declared effects and re-verifies them against that Proposal's own bytes.
-    candidate::verify_candidate_state(connection)
-        .map_err(|_| SupervisorError::CandidateStateMismatch)?;
+    candidate::verify_candidate_state(connection).map_err(|fault| match fault {
+        candidate::CandidateStateFault::Store(source) => {
+            SupervisorError::StartupEnumerationFailed {
+                pass: StartupPass::Candidate,
+                source,
+            }
+        }
+        candidate::CandidateStateFault::Row {
+            workspace_id,
+            digest_value,
+            cause,
+        } => SupervisorError::CandidateStateMismatch {
+            workspace_id,
+            digest_value,
+            cause,
+        },
+        candidate::CandidateStateFault::Identity {
+            workspace_id,
+            digest_value,
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "a Candidate row's Workspace is not readable",
+            raw: format!("Workspace {workspace_id}, Candidate {digest_value}"),
+        },
+    })?;
     // THIS STEP WRITES. It is the one call in this sequence that is not a verification pass: the
     // other nineteen re-prove stored records and refuse, while this one turns an interrupted
     // attempt into a Run that HAS a terminal Receipt, from its durable preparation and the
