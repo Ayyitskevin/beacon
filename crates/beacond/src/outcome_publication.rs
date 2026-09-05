@@ -106,6 +106,7 @@ pub struct PublishedOutcome {
     publication_id: Uuid,
     mission_id: Uuid,
     publication_version: u32,
+    publication_version_count: u32,
     manifest: StoredOutcomeManifest,
     candidate: VerifiedArtifactRecord,
     cited_candidate_artifact_digest: ArtifactDigest,
@@ -127,6 +128,21 @@ impl PublishedOutcome {
     /// 1 for the first publication of a Mission, n+1 for each correction. Contiguous.
     pub fn publication_version(&self) -> u32 {
         self.publication_version
+    }
+
+    /// How many versions this Mission's publication history holds, as of this read (R24.2).
+    ///
+    /// Beside `publication_version`, never instead of it: "version 2" alone cannot tell a reader
+    /// whether they are holding the current Outcome or a superseded one, and a corrected Outcome
+    /// that reads as the only one is the same misreading R12.10 forbids one layer down. Read-time
+    /// state -- a later correction changes it and changes nothing about this version.
+    pub fn publication_version_count(&self) -> u32 {
+        self.publication_version_count
+    }
+
+    /// True when this version is the newest the Mission has, as of this read.
+    pub fn is_current_version(&self) -> bool {
+        self.publication_version == self.publication_version_count
     }
 
     /// The manifest, re-proved against its own stored bytes on this read.
@@ -518,6 +534,8 @@ fn read_publication_within(
 
     // Read-time state, derived now and labelled as such. The Artifact chain comes back cited-first,
     // so the cited digest is in the chain rather than replaced by it.
+    let publication_version_count = count_versions(connection, workspace_id, row.mission_id)?;
+
     let supersession = SupersessionAtReadTime {
         candidate: supersession_tail(connection, workspace_id, &row.candidate_artifact_digest)?,
         evaluation: evaluation.force().superseded_by().cloned(),
@@ -527,6 +545,7 @@ fn read_publication_within(
         publication_id: row.publication_id,
         mission_id: row.mission_id,
         publication_version: row.publication_version,
+        publication_version_count,
         manifest,
         cited_candidate_artifact_digest: candidate.digest().clone(),
         cited_evaluation_digest: evaluation.digest().clone(),

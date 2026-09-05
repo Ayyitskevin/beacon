@@ -3591,3 +3591,74 @@ END;",
     );
     let _ = candidate;
 }
+
+/// R24.2: a published Outcome says which version it is AND how many there are.
+///
+/// "Version 2" alone cannot tell a reader whether they are holding the current Outcome or a
+/// superseded one. After one correction, `get` reports version 2 of 2 and `get_version(.., 1)`
+/// reports version 1 of 2 -- the same count from both, because the count is a fact about the
+/// Mission's history and not about which version you asked for.
+#[test]
+fn a_corrected_outcome_reports_which_version_it_is_and_how_many_there_are() {
+    let fixture = admitted_mission("outcome-version-count");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, first_digest, first_evaluation) = fixture.publishable();
+    let first = fixture
+        .outcomes
+        .publish(fixture.mission_id, &first_digest, &first_evaluation)
+        .expect("the first publication");
+    assert_eq!(
+        (
+            first.publication_version(),
+            first.publication_version_count()
+        ),
+        (1, 1),
+        "the only version is version 1 of 1"
+    );
+    assert!(first.is_current_version());
+
+    let corrected = fixture
+        .outcomes
+        .prepare_for_mission(fixture.mission_id, AppendixRequest::Include)
+        .expect("the correction prepares");
+    let corrected_record = fixture
+        .artifacts()
+        .get(&corrected.candidate_artifact_digest)
+        .unwrap();
+    let corrected_evaluation =
+        fixture.evaluate(&corrected.candidate_artifact_digest, Verdict::Meets);
+    fixture
+        .outcomes
+        .publish(
+            fixture.mission_id,
+            corrected_record.digest(),
+            corrected_evaluation.digest(),
+        )
+        .expect("the correction publishes");
+
+    // The current Outcome: version 2 of 2.
+    let current = fixture.outcomes.get(fixture.mission_id).unwrap();
+    assert_eq!(
+        (
+            current.publication_version(),
+            current.publication_version_count()
+        ),
+        (2, 2)
+    );
+    assert!(current.is_current_version());
+
+    // The superseded one, read at its own number: version 1 OF 2, and it says it is not current.
+    let superseded = fixture.outcomes.get_version(fixture.mission_id, 1).unwrap();
+    assert_eq!(
+        (
+            superseded.publication_version(),
+            superseded.publication_version_count()
+        ),
+        (1, 2),
+        "a superseded Outcome that reports 1 of 1 reads as the only one there is"
+    );
+    assert!(!superseded.is_current_version());
+    // And it is still the same publication, not a re-derived one.
+    assert_eq!(superseded.publication_id(), first.publication_id());
+}
