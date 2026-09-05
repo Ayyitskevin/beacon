@@ -718,7 +718,7 @@ pub(crate) enum ProposalStateFault {
         cause: ProposalError,
     },
     /// Counts across the store: no row to name (R39.2).
-    Totals(ProposalError),
+    Totals(crate::TotalsMismatch),
     /// A row whose Workspace column is not a UUID. Unreachable while the foreign-key check and the
     /// Workspace pass run first.
     Identity {
@@ -759,10 +759,9 @@ impl fmt::Display for ProposalStateFault {
                 "Proposal {digest_value} in Workspace {workspace_id} does not re-prove: {}",
                 cause.name()
             ),
-            Self::Totals(cause) => write!(
+            Self::Totals(totals) => write!(
                 formatter,
-                "the Proposals do not agree with the log as a whole: {}",
-                cause.name()
+                "the Proposals do not agree with the log as a whole -- {totals}"
             ),
             Self::Identity {
                 workspace_id,
@@ -781,7 +780,7 @@ impl fmt::Debug for ProposalStateFault {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Store(error) => formatter.debug_tuple("Store").field(error).finish(),
-            Self::Totals(cause) => formatter.debug_tuple("Totals").field(cause).finish(),
+            Self::Totals(totals) => formatter.debug_tuple("Totals").field(totals).finish(),
             Self::Row {
                 workspace_id,
                 digest_value,
@@ -808,7 +807,9 @@ impl std::error::Error for ProposalStateFault {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Store(error) => Some(error),
-            Self::Totals(cause) | Self::Row { cause, .. } => Some(cause),
+            Self::Row { cause, .. } => Some(cause),
+            // A `TotalsMismatch` is DATA, not a nested error.
+            Self::Totals(_) => None,
             Self::Identity { .. } => None,
         }
     }
@@ -2446,7 +2447,11 @@ pub(crate) fn verify_proposal_state(connection: &Connection) -> Result<(), Propo
     drop(statement);
 
     if !rows.is_empty() && !owner_account_exists(connection).map_err(ProposalStateFault::Store)? {
-        return Err(ProposalStateFault::Totals(ProposalError::InvalidStore));
+        return Err(ProposalStateFault::Totals(crate::TotalsMismatch {
+            table: "operator_accounts (an owner for the stored Proposals)",
+            expected: 1,
+            observed: 0,
+        }));
     }
 
     for (workspace_id, digest_value) in &rows {
@@ -2463,10 +2468,7 @@ pub(crate) fn verify_proposal_state(connection: &Connection) -> Result<(), Propo
             }
         })?;
     }
-    verify_proposal_totals(connection, rows.len()).map_err(|cause| match cause {
-        ProposalError::Store(error) => ProposalStateFault::Store(error),
-        other => ProposalStateFault::Totals(other),
-    })?;
+    verify_proposal_totals(connection, rows.len())?;
     Ok(())
 }
 
@@ -2499,14 +2501,20 @@ fn verify_one_proposal(
 fn verify_proposal_totals(
     connection: &Connection,
     proposal_count: usize,
-) -> Result<(), ProposalError> {
-    let total_events: i64 = connection.query_row(
-        "SELECT count(*) FROM events WHERE kind = 'proposal.submitted'",
-        [],
-        |row| row.get(0),
-    )?;
+) -> Result<(), ProposalStateFault> {
+    let total_events: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind = 'proposal.submitted'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(ProposalStateFault::Store)?;
     if usize::try_from(total_events) != Ok(proposal_count) {
-        return Err(ProposalError::InvalidStore);
+        return Err(ProposalStateFault::Totals(crate::TotalsMismatch {
+            table: "events (proposal.submitted)",
+            expected: proposal_count as u64,
+            observed: total_events.unsigned_abs(),
+        }));
     }
     Ok(())
 }

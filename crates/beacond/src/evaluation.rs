@@ -596,7 +596,12 @@ pub(crate) enum EvaluationStateFault {
         cause: EvaluationError,
     },
     /// The supersession chains, which are about the store rather than one row. No row to name.
-    Totals(EvaluationError),
+    // NO `Totals` ARM. This pass has no store-wide count of its own: the per-row loop checks each
+    // Evaluation's own Event, and what is left is the supersession chains, which are structural.
+    // A variant nothing can construct is a promise the type makes and the code cannot keep --
+    // clippy said so, and it was right.
+    /// The supersession chains do not re-prove. Not a count, so no invented numbers.
+    Chains(EvaluationError),
     /// A row whose Workspace column is not a UUID. Unreachable while the foreign-key check and the
     /// Workspace pass run first.
     Identity {
@@ -635,9 +640,9 @@ impl fmt::Display for EvaluationStateFault {
                 "Evaluation {digest_value} in Workspace {workspace_id} does not re-prove: {}",
                 cause.name()
             ),
-            Self::Totals(cause) => write!(
+            Self::Chains(cause) => write!(
                 formatter,
-                "the Evaluation supersession chains do not agree with the store: {}",
+                "the Evaluation supersession chains do not re-prove: {}",
                 cause.name()
             ),
             Self::Identity {
@@ -657,7 +662,7 @@ impl fmt::Debug for EvaluationStateFault {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Store(error) => formatter.debug_tuple("Store").field(error).finish(),
-            Self::Totals(cause) => formatter.debug_tuple("Totals").field(cause).finish(),
+            Self::Chains(cause) => formatter.debug_tuple("Chains").field(cause).finish(),
             Self::Row {
                 workspace_id,
                 digest_value,
@@ -684,7 +689,7 @@ impl std::error::Error for EvaluationStateFault {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Store(error) => Some(error),
-            Self::Totals(cause) | Self::Row { cause, .. } => Some(cause),
+            Self::Chains(cause) | Self::Row { cause, .. } => Some(cause),
             Self::Identity { .. } => None,
         }
     }
@@ -2422,7 +2427,7 @@ pub(crate) fn verify_evaluation_state(connection: &Connection) -> Result<(), Eva
     }
     verify_evaluation_chains(connection).map_err(|cause| match cause {
         EvaluationError::Store(error) => EvaluationStateFault::Store(error),
-        other => EvaluationStateFault::Totals(other),
+        other => EvaluationStateFault::Chains(other),
     })?;
     Ok(())
 }
