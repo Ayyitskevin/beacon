@@ -1073,3 +1073,79 @@ fn a_store_holding_spend_or_classification_events_restarts() {
     })
     .expect("a store holding spend and classification Events must restart");
 }
+
+/// The read-side half of #2, which the probe could not reach: `classify` refuses a cross-Project
+/// policy at the Command, so the reader's identical check had no test that failed when it was
+/// deleted (my own mutant table found it). This row is written PAST the Command -- the shape a
+/// restore or an older binary produces -- with every projection column agreeing with its bytes, so
+/// the only thing left that can refuse it is the ownership check on the read.
+#[test]
+fn a_stored_classification_citing_another_projects_policy_is_refused_on_read() {
+    let stored = stored("classification-cross-project-read");
+    stored.policy_revision();
+    let other_project =
+        ProjectService::new(Arc::clone(&stored.accounts), stored.store.workspace_id)
+            .create(ProjectDraft {
+                name: "Unrelated Project".to_owned(),
+                charter: ProjectCharterDraft {
+                    purpose: "Prove read-side policy scoping.".to_owned(),
+                    desired_outcomes: vec!["Stay unrelated".to_owned()],
+                    constraints: vec!["Do not borrow another Mission".to_owned()],
+                    prohibitions: vec!["No cross-Project binding".to_owned()],
+                    autonomy_profile: AutonomyProfile::Supervised,
+                },
+            })
+            .unwrap();
+    let connection = stored.connection();
+    connection
+        .execute(
+            r#"INSERT INTO project_policy_revisions (
+                 workspace_id, project_id, revision, charter_revision,
+                 required_capabilities_json, availability_rule, track_record_requirements_json,
+                 conflict_rule, ambiguity_rule, authored_by, authored_at_ms
+             ) VALUES (?1, ?2, 1, 1, '["work.coordinate_mission"]',
+                       'current_team_eligibility', '[{"evidenceKind":"completed_mission"}]',
+                       'require_no_declared_conflict', 'require_operator_decision', 'operator', 0)"#,
+            params![
+                stored.store.workspace_id.to_string(),
+                other_project.id.to_string(),
+            ],
+        )
+        .unwrap();
+
+    let id = Uuid::new_v4();
+    let mut classification = stored.classification_record(id, 1);
+    classification.policy.project_id = other_project.id;
+    classification.policy.charter_revision = other_project.charter.revision;
+    let bytes = classification.canonical_bytes().unwrap();
+    let digest = classification.digest().unwrap().value;
+    // Every column derived from these bytes -- including the OTHER Project -- so the row is honest
+    // about itself and both foreign keys hold; nothing but the ownership check can refuse it.
+    connection
+        .execute(
+            "INSERT INTO mission_impact_classifications (
+                 workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+                 canonical_bytes, classification_id, mission_id, project_id, version, impact,
+                 basis, policy_revision, charter_revision, classified_at_ms
+             ) VALUES (?1, 'sha256', 'beacon.mission-impact.v1', ?2, ?3, ?4, ?5, ?6, 1, 'high',
+                       'operator_declared', 1, ?7, ?8)",
+            params![
+                stored.store.workspace_id.to_string(),
+                digest,
+                bytes,
+                id.to_string(),
+                stored.mission_id.to_string(),
+                other_project.id.to_string(),
+                other_project.charter.revision,
+                i64::try_from(classification.classified_at_ms).unwrap(),
+            ],
+        )
+        .expect("the row is storable: both foreign keys hold on their own");
+
+    assert_eq!(
+        verified_classification_within(&connection, stored.store.workspace_id, &digest).expect_err(
+            "a classification under a Project that does not own its Mission must not read"
+        ),
+        ClassificationStoreError::PolicyProjectIsNotTheMissions
+    );
+}
