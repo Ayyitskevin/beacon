@@ -528,6 +528,18 @@ impl OperatorAccountService {
         operation(&mut state.connection, now)
     }
 
+    /// Test-only: a pragma's value on this service's own connection, so a test can prove that the
+    /// one connection every service reaches through `with_authenticated_store` carries the state
+    /// `open_store_connection` sets (R21).
+    #[cfg(test)]
+    pub(crate) fn store_pragma(&self, name: &str) -> i64 {
+        let state = self.lock_state().expect("the account state lock");
+        state
+            .connection
+            .query_row(&format!("PRAGMA {name}"), [], |row| row.get(0))
+            .expect("a pragma reads")
+    }
+
     fn lock_state(&self) -> Result<std::sync::MutexGuard<'_, AccountState>, OperatorAccountError> {
         self.state
             .lock()

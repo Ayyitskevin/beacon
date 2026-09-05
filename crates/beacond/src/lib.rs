@@ -4162,6 +4162,143 @@ mod tests {
         ));
     }
 
+    /// The production half of every `.rs` file under `src/`: its lines up to the file's test module
+    /// (a line that is exactly `#[cfg(test)]` followed by `mod ...`), with the file's path relative
+    /// to `src/`. Files with no test module are production throughout. The source assertions of
+    /// R21 read this rather than trusting a grep somebody ran once.
+    fn production_source() -> Vec<(String, Vec<(usize, String)>)> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("src is readable") {
+                let path = entry.expect("an entry").path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&root, &mut files);
+        files.sort();
+        files
+            .into_iter()
+            .map(|path| {
+                let text = std::fs::read_to_string(&path).expect("a source file reads");
+                let lines: Vec<&str> = text.lines().collect();
+                let end = (0..lines.len())
+                    .find(|&i| {
+                        lines[i].trim() == "#[cfg(test)]"
+                            && lines
+                                .get(i + 1)
+                                .is_some_and(|next| next.starts_with("mod "))
+                    })
+                    .unwrap_or(lines.len());
+                (
+                    path.strip_prefix(&root)
+                        .expect("under src")
+                        .to_string_lossy()
+                        .into_owned(),
+                    lines[..end]
+                        .iter()
+                        .enumerate()
+                        .map(|(i, line)| (i + 1, (*line).to_owned()))
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// R21: the pragma is the fix, so every path that opens a store connection must come through
+    /// `open_store_connection`. The paths this crate offers, and how each is proven here:
+    ///
+    /// - `open_store_connection` itself, the public opener: opened and asserted live.
+    /// - `Supervisor::bootstrap`, which opens the store to migrate it and create the first
+    ///   Workspace and drops its connection when done: not reachable from a test, so proven by the
+    ///   source assertion at the end -- the only `Connection::open(` outside a test module in this
+    ///   crate is the opener's own line.
+    /// - `OperatorAccountService::open`, the one long-lived connection every service reaches
+    ///   through `with_authenticated_store`: opened on a bootstrapped store and asserted live
+    ///   through a test-only accessor.
+    /// - `SampleProjectService`'s test-store path (a `#[cfg(test)]` block inside a production
+    ///   function): routes through the opener, and is covered by the same source assertion.
+    /// - `verify_schema`'s in-memory expectation connection is not a store and not a path;
+    ///   `Connection::open_in_memory` is a different name and is not counted.
+    ///
+    /// A path that opens a store some other way is a finding, not something to allow here.
+    ///
+    /// R21.6: `runs` and `beacon_repositories` have no unconditional update/delete pair and got no
+    /// schema guard in any version of this fix; the pragma is connection state, so their own
+    /// `BEFORE DELETE` triggers meet REPLACE exactly as the paired tables' do.
+    #[test]
+    fn every_path_that_opens_a_store_sets_recursive_triggers() {
+        let path = std::env::temp_dir().join(format!(
+            "beacon-every-opener-{}.sqlite3",
+            uuid::Uuid::new_v4()
+        ));
+        let pragma = |connection: &rusqlite::Connection, name: &str| -> i64 {
+            connection
+                .query_row(&format!("PRAGMA {name}"), [], |row| row.get(0))
+                .unwrap()
+        };
+
+        // 1. The opener.
+        let opened = crate::open_store_connection(&path).unwrap();
+        assert_eq!(pragma(&opened, "recursive_triggers"), 1, "the opener");
+        assert_eq!(pragma(&opened, "foreign_keys"), 1, "the opener");
+        drop(opened);
+
+        // 2. Bootstrap (its connection is the opener's; see the source assertion) so that ...
+        crate::Supervisor::bootstrap(crate::StartupConfig {
+            store_path: path.clone(),
+            initial_workspace_name: "Personal".to_owned(),
+        })
+        .unwrap();
+
+        // 3. ... the account service can open the store: the connection every service uses.
+        let accounts = crate::OperatorAccountService::open(&path).unwrap();
+        assert_eq!(
+            accounts.store_pragma("recursive_triggers"),
+            1,
+            "OperatorAccountService::open"
+        );
+        assert_eq!(
+            accounts.store_pragma("foreign_keys"),
+            1,
+            "OperatorAccountService::open"
+        );
+        drop(accounts);
+        let _ = std::fs::remove_file(&path);
+
+        // 4. Source: outside test modules, the only `Connection::open(` in the crate is the
+        //    opener's own line, so bootstrap and the sample-project test path cannot bypass it.
+        let source = production_source();
+        let opens: Vec<(String, usize)> = source
+            .iter()
+            .flat_map(|(file, lines)| {
+                lines
+                    .iter()
+                    .filter(|(_, line)| line.contains("Connection::open("))
+                    .map(move |(number, _)| (file.clone(), *number))
+            })
+            .collect();
+        let opener_line = source
+            .iter()
+            .find(|(file, _)| file == "lib.rs")
+            .and_then(|(_, lines)| {
+                lines
+                    .iter()
+                    .find(|(_, line)| line.contains("let connection = Connection::open(path)?;"))
+                    .map(|(number, _)| *number)
+            })
+            .expect("the opener's own open");
+        assert_eq!(
+            opens,
+            vec![("lib.rs".to_owned(), opener_line)],
+            "a store is opened somewhere other than `open_store_connection`"
+        );
+    }
+
     /// R20.4's connection half (sol1's #13): every store connection opens with `recursive_triggers`
     /// on, so SQLite's REPLACE fires the delete trigger it otherwise skips. Proven on a table that
     /// has ONLY the old-shape trigger pair -- no `BEFORE INSERT` refusal to hide behind -- so what
