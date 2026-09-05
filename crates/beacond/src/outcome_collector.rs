@@ -87,6 +87,15 @@ pub enum CollectorRefusal {
     /// The collector will not pick a line and will not add across units, so this is a refusal rather
     /// than an arithmetic decision made where nobody can see it. See the report's seam note.
     SpendUnitsNotSingular { units: usize },
+    /// A delivered Artifact's own bytes name another Workspace (R19.2: the collector's own arm,
+    /// like the other sources', never `Unverified` with a reason).
+    ///
+    /// Defence in depth, and said so: the owning reader refuses such a row first -- by its digest,
+    /// its column comparison AND its Event pairing, all three measured -- so a realistic store
+    /// never lets one reach here. The check stays because it is one line and the owner's guards are
+    /// somebody else's to keep; it is tested as a pure function over the payload, because a test
+    /// that reached it through the owner would have to bypass three of the owner's own rules.
+    ArtifactInAnotherWorkspace { id: String },
     /// A delivered Artifact's own bytes place it outside this Outcome: another Mission, or no
     /// Mission scope at all.
     ///
@@ -144,6 +153,10 @@ impl fmt::Display for CollectorRefusal {
                 formatter,
                 "the measured spend record carries {units} units and a manifest spend reference \
                  holds one"
+            ),
+            Self::ArtifactInAnotherWorkspace { id } => write!(
+                formatter,
+                "the delivered Artifact {id}'s own bytes name another Workspace"
             ),
             Self::ArtifactOutOfScope {
                 id,
@@ -1068,37 +1081,12 @@ impl<'a> Collector<'a> {
             }
         };
 
-        // The Workspace comes from the DECODED BYTES, not from the query predicate that found the
-        // row: a filter says which rows were looked at, and this says whose the record is.
-        if record.payload().workspace_id != self.workspace_id {
-            return Err(CollectorRefusal::Unverified {
-                kind: "artifact",
-                reason: "the record's own bytes name another Workspace".to_owned(),
-            });
-        }
-        match record.payload().context {
-            crate::artifact::ArtifactContext::Mission {
-                mission_id: declared,
-                ..
-            } if declared == mission_id => {}
-            crate::artifact::ArtifactContext::Mission {
-                mission_id: declared,
-                ..
-            } => {
-                return Err(CollectorRefusal::ArtifactOutOfScope {
-                    id: digest_value.to_owned(),
-                    declared_mission: Some(declared),
-                    expected_mission: mission_id,
-                });
-            }
-            crate::artifact::ArtifactContext::None => {
-                return Err(CollectorRefusal::ArtifactOutOfScope {
-                    id: digest_value.to_owned(),
-                    declared_mission: None,
-                    expected_mission: mission_id,
-                });
-            }
-        }
+        artifact_scope(
+            record.payload(),
+            digest_value,
+            self.workspace_id,
+            mission_id,
+        )?;
 
         Ok(CollectedDigest {
             kind: SourceKind::Artifact,
@@ -1107,6 +1095,44 @@ impl<'a> Collector<'a> {
             // this digest names these bytes.
             digest_value: record.digest().value.clone(),
         })
+    }
+}
+
+/// The two things the owning reader cannot know about a delivered Artifact: that it is THIS
+/// Workspace's and scoped to THIS Mission. Pure over the decoded payload, so both refusals are
+/// reachable by a unit test without bypassing the owner's own guards.
+///
+/// The Workspace comes from the DECODED BYTES, not from the query predicate that found the row: a
+/// filter says which rows were looked at, and this says whose the record is.
+fn artifact_scope(
+    payload: &crate::artifact::ArtifactV1,
+    digest_value: &str,
+    workspace_id: Uuid,
+    mission_id: Uuid,
+) -> Result<(), CollectorRefusal> {
+    if payload.workspace_id != workspace_id {
+        return Err(CollectorRefusal::ArtifactInAnotherWorkspace {
+            id: digest_value.to_owned(),
+        });
+    }
+    match payload.context {
+        crate::artifact::ArtifactContext::Mission {
+            mission_id: declared,
+            ..
+        } if declared == mission_id => Ok(()),
+        crate::artifact::ArtifactContext::Mission {
+            mission_id: declared,
+            ..
+        } => Err(CollectorRefusal::ArtifactOutOfScope {
+            id: digest_value.to_owned(),
+            declared_mission: Some(declared),
+            expected_mission: mission_id,
+        }),
+        crate::artifact::ArtifactContext::None => Err(CollectorRefusal::ArtifactOutOfScope {
+            id: digest_value.to_owned(),
+            declared_mission: None,
+            expected_mission: mission_id,
+        }),
     }
 }
 
@@ -1129,3 +1155,68 @@ pub fn positionable_sources() -> BTreeMap<&'static str, (&'static str, &'static 
 /// exact stored `receipt_json` bytes, not a Receipt content digest: ADR 0027 and Receipt v2 define
 /// none, and minting one would contradict them (Kevin's ruling 5).
 pub const OUTCOME_RECEIPT_CHECKSUM_LABEL: &str = RECEIPT_CHECKSUM_LABEL;
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+    use crate::artifact::{ArtifactContext, ArtifactDigest, ArtifactKind, ArtifactV1};
+
+    fn payload(workspace_id: Uuid, context: ArtifactContext) -> ArtifactV1 {
+        ArtifactV1 {
+            workspace_id,
+            kind: ArtifactKind::OutcomeDocument,
+            media_type: "text/markdown".to_owned(),
+            content_digest: ArtifactDigest {
+                algorithm: "sha256".to_owned(),
+                canonicalizer: "beacon.raw.v1".to_owned(),
+                value: "0".repeat(64),
+            },
+            content_bytes: 1,
+            accountable_resident_id: Uuid::nil(),
+            accountable_configuration_id: Uuid::nil(),
+            context,
+            supersedes: None,
+            recorded_at_ms: 0,
+        }
+    }
+
+    /// Acceptance row 0. The realistic row never reaches this line -- the owning reader refuses it
+    /// three ways first -- so the arm is proved here, on the payload, where a mutant that disables
+    /// the comparison has nowhere to hide behind the owner.
+    #[test]
+    fn a_payload_naming_another_workspace_is_the_collectors_own_refusal() {
+        let mine = Uuid::new_v4();
+        let mission = Uuid::new_v4();
+        let theirs = payload(
+            Uuid::new_v4(),
+            ArtifactContext::Mission {
+                project_id: Uuid::new_v4(),
+                mission_id: mission,
+            },
+        );
+        assert_eq!(
+            artifact_scope(&theirs, "d", mine, mission),
+            Err(CollectorRefusal::ArtifactInAnotherWorkspace { id: "d".to_owned() })
+        );
+        // The control: same payload, its own Workspace, its own Mission.
+        let ours = payload(
+            mine,
+            ArtifactContext::Mission {
+                project_id: Uuid::new_v4(),
+                mission_id: mission,
+            },
+        );
+        assert_eq!(artifact_scope(&ours, "d", mine, mission), Ok(()));
+        // ...and the Workspace is checked BEFORE the Mission: a foreign record scoped to "our"
+        // Mission id is still foreign.
+        let mut foreign_same_mission = theirs.clone();
+        foreign_same_mission.context = ArtifactContext::Mission {
+            project_id: Uuid::new_v4(),
+            mission_id: mission,
+        };
+        assert!(matches!(
+            artifact_scope(&foreign_same_mission, "d", mine, mission),
+            Err(CollectorRefusal::ArtifactInAnotherWorkspace { .. })
+        ));
+    }
+}
