@@ -899,7 +899,7 @@ impl<'a> Collector<'a> {
         } else {
             let mut delivered = Vec::with_capacity(record.delivered_artifacts.len());
             for cited in &record.delivered_artifacts {
-                let collected = self.delivered_artifact(
+                let collected = self.artifact_at_or_before(
                     &HEXLOWER.encode(cited),
                     record.mission_id,
                     record.boundary_event_seq,
@@ -1183,20 +1183,11 @@ impl<'a> Collector<'a> {
         let expected_mission = completion.mission_id;
         match reference {
             SupportRef::Artifact(digest) => {
-                let digest_value = HEXLOWER.encode(digest);
-                let (record, collected) =
-                    self.verified_artifact(&digest_value, expected_mission)?;
-                // Positioned by the record's own creation cursor, which the owner re-derives
-                // against the Event that carries its bytes on every read.
-                let recorded_at_seq = record.creation_event_seq();
-                if recorded_at_seq > cut {
-                    return Err(CollectorRefusal::AfterBoundary {
-                        kind: "artifact",
-                        id: digest_value,
-                        recorded_at_seq: i64::try_from(recorded_at_seq).unwrap_or(i64::MAX),
-                        boundary_event_seq: cut,
-                    });
-                }
+                // The same rule the delivery list is held to, through the same function: an
+                // Artifact cited by this completion, positioned by the creation cursor its owner
+                // re-derives, refused if it is after the cut.
+                let collected =
+                    self.artifact_at_or_before(&HEXLOWER.encode(digest), expected_mission, cut)?;
                 Ok(CollectedSupport::Artifact(collected))
             }
             SupportRef::Evaluation(digest) => {
@@ -1567,7 +1558,7 @@ impl<'a> Collector<'a> {
         Ok(self.verified_artifact(digest_value, mission_id)?.1)
     }
 
-    /// One delivered Artifact at the completion's cut: `artifact`, plus the boundary freeze.
+    /// One Artifact this completion cites, at its cut: `artifact`, plus the boundary freeze.
     ///
     /// The module doc has claimed the freeze for every source since slice 2-B, and the delivered
     /// Artifact was the one source it was never applied to: an Artifact recorded AFTER the
@@ -1575,7 +1566,11 @@ impl<'a> Collector<'a> {
     /// S5). Its position is the creation cursor its owning reader re-derives against the Event
     /// that carries its exact bytes on every read -- the #8 rule already paid for, so no second
     /// query is made here and no second spelling of the rule exists to drift.
-    fn delivered_artifact(
+    ///
+    /// Both callers cite an Artifact under one completion's cut and are held to the same rule: the
+    /// delivery list, and the Artifact arm of a condition's support (R23.2). Named for the rule
+    /// rather than for the first caller, like `at_or_before` and `receipt_at_or_before`.
+    fn artifact_at_or_before(
         &self,
         digest_value: &str,
         mission_id: Uuid,
@@ -1595,10 +1590,9 @@ impl<'a> Collector<'a> {
     }
 
     /// The owner's verified read plus the two scope facts the owner cannot know, with the record
-    /// kept for the caller that needs its cursor: `delivered_artifact` for the completion's own
-    /// delivery, and the Artifact arm of `support` for a reference cited under a condition. One
-    /// read, one place the scope facts are checked, and the boundary applied by each caller against
-    /// the cut it owns.
+    /// kept for the caller that needs its cursor -- `artifact_at_or_before`, which both the
+    /// delivery list and a condition's support reach. One read, and one place the scope facts are
+    /// checked.
     fn verified_artifact(
         &self,
         digest_value: &str,
