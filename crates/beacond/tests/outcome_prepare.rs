@@ -17,21 +17,22 @@ use std::thread::{self, JoinHandle};
 use beacond::{
     AccessOrigin, AppendixMode, AppendixRequest, ArtifactContext, ArtifactDigest, ArtifactKind,
     ArtifactService, AutonomyProfile, BeaconCapability, COMPLETION_CANONICALIZER,
-    ClassificationActor, ClassificationBasis, ClassificationSupersedes, CollectionRequest,
-    Collector, CompletionActor, CompletionDisposition, CompletionSupersedes, ConditionOutcome,
-    ConditionResult, ConditionResultRecord, Conflicts, Evaluation, EvaluationDigest,
-    EvaluationDraft, EvaluationError, EvaluationService, EvaluationSubjectDraft,
-    EvaluationSupersedes, Evaluator, Finding, FindingSeverity, ImpactLevel, InconsistentEvaluation,
-    LocalModelActivationService, LocalModelEndpoint, MISSION_IMPACT_CANONICALIZER,
-    ManifestStoreRefusal, MissionCompletionV1, MissionDraft, MissionImpactClassificationV1,
-    MissionImpactService, MissionMemberDraft, MissionService, NarrativeItem,
-    OperatorAccountService, OperatorSessionPhase, OutcomeCandidate, OutcomeManifestV1,
-    OutcomeService, OutcomeState, PolicyRevisionRef, PrepareRefusal, ProjectCharterDraft,
-    ProjectDraft, ProjectPolicyDraft, ProjectPolicyService, ProjectService, Provenance,
-    ProviderFeature, PublicationSeamRefusal, PublishRefusal, ResidentConfigurationService,
-    ResidentLifecycleService, RubricDeclaration, SecretString, SourceDigest, SourceKind, SourceRef,
-    SourcesRefusal, SpendReference, StarterOrganizationService, StarterResidentDraft, StarterRole,
-    StartupConfig, SuccessCondition, Supervisor, SupportRef, TeamDraft, TeamLeadAmbiguityRule,
+    ClassificationActor, ClassificationBasis, ClassificationStoreError, ClassificationSupersedes,
+    CollectionRequest, Collector, CompletionActor, CompletionDisposition, CompletionSupersedes,
+    ConditionOutcome, ConditionResult, ConditionResultRecord, Conflicts, DiagnosticStatus,
+    Evaluation, EvaluationDigest, EvaluationDraft, EvaluationError, EvaluationService,
+    EvaluationSubjectDraft, EvaluationSupersedes, Evaluator, Finding, FindingSeverity, ImpactLevel,
+    InconsistentEvaluation, LocalModelActivationService, LocalModelEndpoint,
+    MISSION_IMPACT_CANONICALIZER, ManifestStoreRefusal, MissionCompletionV1, MissionDraft,
+    MissionImpactClassificationV1, MissionImpactService, MissionMemberDraft, MissionService,
+    NarrativeItem, OperatorAccountService, OperatorSessionPhase, OutcomeCandidate,
+    OutcomeManifestV1, OutcomeService, OutcomeState, PolicyRevisionRef, PredecessorFault,
+    PrepareRefusal, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService,
+    ProjectService, Provenance, ProviderFeature, PublicationSeamRefusal, PublishRefusal,
+    ResidentConfigurationService, ResidentLifecycleService, RubricDeclaration, SecretString,
+    SourceDigest, SourceKind, SourceRef, SourcesRefusal, SpendReference,
+    StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig, SuccessCondition,
+    Supervisor, SupervisorError, SupportRef, TeamDraft, TeamLeadAmbiguityRule,
     TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
     TeamService, TrackRecordEvidenceKind, TrackRecordRequirement, UnfinishedKind, Verdict,
     VerifiedSources, VerifiedText, declared_conditions_digest, publication_candidacy,
@@ -617,6 +618,71 @@ impl Fixture {
         let evaluation = self.evaluate(&candidate.candidate_artifact_digest, Verdict::Meets);
         let evaluation_digest = evaluation.digest().clone();
         (candidate, record.digest().clone(), evaluation_digest)
+    }
+
+    /// A classification at an explicit version that supersedes an explicit predecessor, recorded
+    /// through the Command like any other.
+    fn classify_superseding(&self, version: u32, supersedes: ClassificationSupersedes) -> String {
+        let classification = MissionImpactClassificationV1 {
+            workspace_id: self.workspace_id,
+            mission_id: self.mission_id,
+            classification_id: Uuid::new_v4(),
+            version,
+            impact: ImpactLevel::Ordinary,
+            basis: ClassificationBasis::OperatorDeclared,
+            policy: PolicyRevisionRef {
+                project_id: self.project_id,
+                policy_revision: self.policy_revision,
+                charter_revision: self.charter_revision,
+            },
+            rule_id: None,
+            reason: "The Mission writes to the Operator's own repository.".to_owned(),
+            classified_by: ClassificationActor::Operator,
+            classified_at_ms: 1_788_400_000_000,
+            supersedes,
+        };
+        MissionImpactService::new(Arc::clone(&self.accounts), self.workspace_id)
+            .classify(&classification.canonical_bytes().unwrap())
+            .expect("the classification records")
+            .digest()
+            .value
+            .clone()
+    }
+
+    /// One classification written PAST the Command with foreign keys off -- the shape a restore, an
+    /// older binary or a hand-run INSERT produces. Every projection column agrees with its bytes,
+    /// so nothing but a reader can refuse it.
+    fn plant_classification(&self, record: &MissionImpactClassificationV1) -> String {
+        let bytes = record.canonical_bytes().unwrap();
+        let digest = record.digest().unwrap().value;
+        let connection = self.store.connect();
+        connection
+            .pragma_update(None, "foreign_keys", "OFF")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO mission_impact_classifications (
+                     workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+                     canonical_bytes, classification_id, mission_id, project_id, version, impact,
+                     basis, policy_revision, charter_revision, classified_at_ms
+                 ) VALUES (?1, 'sha256', 'beacon.mission-impact.v1', ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                           'operator_declared', ?9, ?10, ?11)",
+                params![
+                    self.workspace_id.to_string(),
+                    digest,
+                    bytes,
+                    record.classification_id.to_string(),
+                    record.mission_id.to_string(),
+                    record.policy.project_id.to_string(),
+                    record.version,
+                    record.impact.as_str(),
+                    record.policy.policy_revision,
+                    record.policy.charter_revision,
+                    i64::try_from(record.classified_at_ms).unwrap(),
+                ],
+            )
+            .expect("the row is storable: every projection agrees with its bytes");
+        digest
     }
 
     fn artifacts(&self) -> ArtifactService {
@@ -4522,4 +4588,115 @@ fn a_condition_with_support_becomes_a_document_that_cites_it() {
         !document.contains("the completion recorded no supporting object for this condition"),
         "a condition WITH support printed the absent sentence:\n{document}"
     );
+}
+// ---------------------------------------------------------------------------------------------
+// verify_classification_state: the classification startup pass (R26.1)
+// ---------------------------------------------------------------------------------------------
+
+/// RED bar: a superseded classification whose bytes cite a predecessor this store does not hold
+/// reopens `Ready` before this slice, and must not after.
+///
+/// The forged row is planted PAST the Command with foreign keys off, and it is version 3 of a chain
+/// whose newest version is 3 -- no. Read that again, because the placement is the whole point: the
+/// forgery is version 1, and versions 2 and 3 sit above it. The Outcome path reads only the newest
+/// classification at or before the completion's boundary, and `history()` is called from tests
+/// only, so NOTHING in the product reads version 1 again. The belt runs on read; for this row there
+/// is no read. That is the gap the pass closes.
+#[test]
+fn a_superseded_classification_citing_a_predecessor_the_store_does_not_hold_fails_startup() {
+    let fixture = admitted_mission("classification-pass-forged-predecessor");
+
+    // Version 1, planted, citing a predecessor nothing stored.
+    let mut forged = MissionImpactClassificationV1 {
+        workspace_id: fixture.workspace_id,
+        mission_id: fixture.mission_id,
+        classification_id: Uuid::new_v4(),
+        version: 1,
+        impact: ImpactLevel::Ordinary,
+        basis: ClassificationBasis::OperatorDeclared,
+        policy: PolicyRevisionRef {
+            project_id: fixture.project_id,
+            policy_revision: fixture.policy_revision,
+            charter_revision: fixture.charter_revision,
+        },
+        rule_id: None,
+        reason: "The Mission writes to the Operator's own repository.".to_owned(),
+        classified_by: ClassificationActor::Operator,
+        classified_at_ms: 1_788_400_000_000,
+        supersedes: ClassificationSupersedes::Record("ab".repeat(32)),
+    };
+    let planted = fixture.plant_classification(&forged);
+
+    // Versions 2 and 3, honest, recorded through the Command. From here nothing reads version 1.
+    let second = fixture.classify_superseding(2, ClassificationSupersedes::Record(planted.clone()));
+    fixture.classify_superseding(3, ClassificationSupersedes::Record(second));
+
+    // The belt still refuses version 1 ON READ, so the fault is real and has a name.
+    let connection = fixture.store.connect();
+    let read = beacond::verified_classification_within(&connection, fixture.workspace_id, &planted)
+        .expect_err("a classification citing a predecessor nothing stored must not read");
+    assert!(
+        matches!(
+            read,
+            ClassificationStoreError::Predecessor {
+                fault: PredecessorFault::NotStored,
+                ..
+            }
+        ),
+        "the planted fault is not the one this test is about: {read:?}"
+    );
+    drop(connection);
+    forged.version = 1;
+
+    // And startup refuses it BY NAME. Before this slice, this reopened Ready.
+    let refusal = Supervisor::bootstrap(StartupConfig {
+        store_path: fixture.store.path.clone(),
+        initial_workspace_name: "Personal".to_owned(),
+    })
+    .expect_err("a store holding a forged supersession link reopened Ready");
+    assert!(
+        matches!(
+            refusal,
+            SupervisorError::MissionImpactClassificationStateMismatch
+        ),
+        "refused for the wrong reason: {refusal:?}"
+    );
+}
+
+/// Positive control: an honest chain of three versions reopens `Ready`.
+#[test]
+fn an_honest_classification_chain_reopens_ready() {
+    let fixture = admitted_mission("classification-pass-honest-chain");
+    let first = fixture.classify_superseding(1, ClassificationSupersedes::None);
+    let second = fixture.classify_superseding(2, ClassificationSupersedes::Record(first));
+    fixture.classify_superseding(3, ClassificationSupersedes::Record(second));
+
+    let report = Supervisor::bootstrap(StartupConfig {
+        store_path: fixture.store.path.clone(),
+        initial_workspace_name: "Personal".to_owned(),
+    })
+    .expect("an honest chain reopens");
+    assert_eq!(report.diagnostics.status, DiagnosticStatus::Ready);
+}
+
+/// Positive control (R26.5): the pass runs for a store that never held a classification, and for a
+/// freshly bootstrapped one. A pass that only runs when the table is non-empty is a pass whose
+/// absence nobody would notice.
+#[test]
+fn a_store_that_never_held_a_classification_reopens_ready() {
+    let store = TestStore::new("classification-pass-empty");
+    let report = Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Personal".to_owned(),
+    })
+    .expect("an empty store reopens");
+    assert_eq!(report.diagnostics.status, DiagnosticStatus::Ready);
+
+    let fixture = admitted_mission("classification-pass-none-stored");
+    let report = Supervisor::bootstrap(StartupConfig {
+        store_path: fixture.store.path.clone(),
+        initial_workspace_name: "Personal".to_owned(),
+    })
+    .expect("a store with a Mission but no classification reopens");
+    assert_eq!(report.diagnostics.status, DiagnosticStatus::Ready);
 }

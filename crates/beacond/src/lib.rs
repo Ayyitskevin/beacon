@@ -385,6 +385,9 @@ pub enum SupervisorError {
     MissionCompletionStateMismatch,
     ArtifactEventMismatch(i64),
     ArtifactStateMismatch,
+    /// A stored Mission impact classification does not re-prove against its own bytes or the
+    /// predecessor it names.
+    MissionImpactClassificationStateMismatch,
     OutcomeManifestStateMismatch,
     /// A stored Outcome publication does not re-prove against the records it cites.
     OutcomePublicationStateMismatch,
@@ -566,6 +569,10 @@ impl fmt::Display for SupervisorError {
                      chain, or its audit Event"
                 )
             }
+            Self::MissionImpactClassificationStateMismatch => formatter.write_str(
+                "a stored Mission impact classification does not re-prove against its own bytes \
+                 or the predecessor it names",
+            ),
             Self::OutcomeManifestStateMismatch => {
                 write!(
                     formatter,
