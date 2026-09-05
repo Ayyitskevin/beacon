@@ -31,7 +31,7 @@ use beacond::{
     ProviderFeature, PublicationSeamRefusal, PublishRefusal, ResidentConfigurationService,
     ResidentLifecycleService, RubricDeclaration, SecretString, SourceDigest, SourceKind, SourceRef,
     SourcesRefusal, SpendReference, StarterOrganizationService, StarterResidentDraft, StarterRole,
-    StartupConfig, SuccessCondition, Supervisor, TeamDraft, TeamLeadAmbiguityRule,
+    StartupConfig, SuccessCondition, Supervisor, SupportRef, TeamDraft, TeamLeadAmbiguityRule,
     TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
     TeamService, TrackRecordEvidenceKind, TrackRecordRequirement, UnfinishedKind, Verdict,
     VerifiedSources, VerifiedText, declared_conditions_digest, publication_candidacy,
@@ -443,6 +443,49 @@ impl Fixture {
                 supersedes: EvaluationSupersedes::None,
             })
             .expect("the Evaluation records")
+    }
+
+    /// A completion whose one declared condition cites real supporting objects.
+    ///
+    /// The support is recorded in the completion's own bytes as `SupportRef`s, which is the only
+    /// way it can be: the collector reads each one through its owning verified reader at the
+    /// boundary, so a reference the completion did not record is not a reference at all.
+    fn complete_with_support(
+        &self,
+        accountable: (Uuid, Uuid),
+        support: Vec<SupportRef>,
+    ) -> (String, MissionCompletionV1) {
+        let boundary = self.latest_event_seq();
+        let record = MissionCompletionV1 {
+            workspace_id: self.workspace_id,
+            project_id: self.project_id,
+            mission_id: self.mission_id,
+            completion_id: Uuid::new_v4(),
+            actor: CompletionActor::Operator,
+            accountable_resident_id: accountable.0,
+            accountable_resident_configuration_id: accountable.1,
+            boundary_event_seq: boundary,
+            disposition: CompletionDisposition::Concluded,
+            declared_conditions_sha256: declared_conditions_digest(&[CONDITION_TEXT.to_owned()]),
+            condition_results: vec![ConditionResultRecord {
+                ordinal: 0,
+                outcome: ConditionOutcome::Met,
+                support,
+                note: None,
+            }],
+            delivered_artifacts: vec![],
+            unfinished_work: vec![],
+            uncertainty: vec![],
+            spend: SpendReference::NotMeasured(
+                "No spend record exists for this Mission.".to_owned(),
+            ),
+            supersedes: CompletionSupersedes::None,
+            summary: "One reviewed feature shipped, with its evidence cited.".to_owned(),
+            completed_at_ms: 1_788_400_000_000,
+        };
+        let mut connection = self.store.connect();
+        let digest = record_completion(&mut connection, &record).expect("the completion records");
+        (digest, record)
     }
 
     /// A completion that is NOT a success: abandoned, with its one declared condition not met.
@@ -4390,4 +4433,86 @@ fn published_outcome_existence_is_never_permission_completion_or_success_authori
         .unwrap();
     let reread = MissionCompletionV1::from_canonical_bytes(&reread).unwrap();
     assert_eq!(reread.disposition, CompletionDisposition::Abandoned);
+}
+
+/// R23.2 end to end: a Mission whose condition cites real evidence produces a document that lists
+/// it.
+///
+/// Every layer is the real one -- a recorded Evaluation and a recorded Ruling, cited by the
+/// completion's own bytes, read by the collector through their owning verified readers at the
+/// boundary, mapped to citations by the assembler, and rendered. The assertion is on the candidate
+/// Artifact's Markdown, because that is what a reader actually gets.
+#[test]
+fn a_condition_with_support_becomes_a_document_that_cites_it() {
+    let fixture = admitted_mission("condition-support-cited");
+    fixture.classify(ImpactLevel::Ordinary);
+
+    // A recorded Artifact, independently evaluated, plus a Ruling: two citeable kinds.
+    let evidence = fixture
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            b"# The gate run that proves the condition.\n",
+            ArtifactContext::Mission {
+                project_id: fixture.project_id,
+                mission_id: fixture.mission_id,
+            },
+            fixture.resident_id,
+            fixture.configuration_id,
+            None,
+        )
+        .expect("the evidence Artifact records");
+    let evaluation = fixture.evaluate(&evidence.digest().value, Verdict::Meets);
+
+    let (_, completion) = fixture.complete_with_support(
+        (fixture.resident_id, fixture.configuration_id),
+        vec![SupportRef::Evaluation(digest_bytes(
+            &evaluation.digest().value,
+        ))],
+    );
+    assert_eq!(completion.condition_results[0].support.len(), 1);
+
+    let candidate = fixture
+        .outcomes
+        .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+        .expect("a Mission whose condition cites evidence prepares");
+
+    // The manifest cites it, with the owner's whole envelope.
+    let stored = fixture
+        .outcomes
+        .manifest(&candidate.manifest_digest)
+        .expect("the manifest reads");
+    let citations = stored.manifest().success_conditions[0]
+        .citations
+        .verified()
+        .expect("the condition's citations are Verified, not Absent");
+    assert_eq!(citations.len(), 1);
+    assert_eq!(citations[0].kind, SourceKind::Evaluation);
+    assert_eq!(citations[0].digest.value, evaluation.digest().value);
+    assert_eq!(
+        citations[0].digest.canonicalizer,
+        evaluation.digest().canonicalizer
+    );
+    assert_eq!(citations[0].workspace_id, fixture.workspace_id);
+
+    // And the document a reader gets lists it under the condition, not merely in the manifest.
+    let document = String::from_utf8(
+        fixture
+            .outcomes
+            .candidate(&candidate.manifest_digest)
+            .expect("the candidate reads")
+            .content()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(document.contains("- citations:"), "{document}");
+    assert!(
+        document.contains(&evaluation.digest().value),
+        "the cited Evaluation digest is not in the document:\n{document}"
+    );
+    // The "no supporting object" sentence belongs to a condition that has none, and this one does.
+    assert!(
+        !document.contains("the completion recorded no supporting object for this condition"),
+        "a condition WITH support printed the absent sentence:\n{document}"
+    );
 }
