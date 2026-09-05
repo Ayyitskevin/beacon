@@ -151,7 +151,7 @@ fn vector_manifest() -> OutcomeManifestV1 {
     };
     OutcomeManifestV1 {
         workspace_id: uuid(WORKSPACE),
-        mission: source(SourceKind::Mission, MISSION, "beacon.mission.v1", "11", 1),
+        mission_id: uuid(MISSION),
         completion: source(
             SourceKind::Completion,
             COMPLETION,
@@ -352,7 +352,7 @@ fn manifest_bytes_by_hand() -> Vec<u8> {
     push_string(&mut out, CANONICALIZER);
     push_string(&mut out, RENDERER);
     out.extend_from_slice(uuid(WORKSPACE).as_bytes());
-    push_source(&mut out, 0x01, MISSION, "beacon.mission.v1", "11", 1);
+    out.extend_from_slice(uuid(MISSION).as_bytes());
     push_source(&mut out, 0x02, COMPLETION, "beacon.completion.v1", "22", 1);
     push_source(&mut out, 0x07, POLICY, "beacon.policy.v1", "33", 1);
     out.extend_from_slice(&BOUNDARY.to_be_bytes());
@@ -439,8 +439,9 @@ fn manifest_bytes_by_hand() -> Vec<u8> {
 // Shapes for the bound tests
 // ---------------------------------------------------------------------------------------------
 
-/// A manifest citing exactly `artifacts` delivered Artifacts on top of the three identities every
-/// manifest cites: Mission, completion, and Policy classification.
+/// A manifest citing exactly `artifacts` delivered Artifacts on top of the two identities every
+/// manifest cites: completion and Policy classification. (v1 also cited the Mission; v2 cites it by
+/// identity, outside the census -- R18.4.)
 fn bounded_manifest(artifacts: usize) -> (OutcomeManifestV1, VerifiedSources) {
     let refs: Vec<SourceRef> = (0..artifacts)
         .map(|index| SourceRef {
@@ -628,7 +629,7 @@ fn outcome_source_identity_includes_the_whole_digest_envelope() {
     assert!(objects.contains("`beacon.artifact.v2`"));
 
     // The census bound sees two objects where a value-only key would see one.
-    let (mut bounded, mut bounded_sources) = bounded_manifest(252);
+    let (mut bounded, mut bounded_sources) = bounded_manifest(253);
     let base = source(
         SourceKind::Artifact,
         PROPOSAL,
@@ -649,7 +650,7 @@ fn outcome_source_identity_includes_the_whole_digest_envelope() {
         media_type: "text/plain".to_owned(),
         title: "twin".to_owned(),
     });
-    // 3 identities + 252 + 2 = 257.
+    // 2 identities + 253 + 2 = 257.
     let refusal = bound_refusal(render(&bounded, &bounded_sources).expect_err("257 refuse"));
     assert_eq!(refusal.bound, OutcomeBound::CitationCount);
     assert_eq!(
@@ -1269,6 +1270,52 @@ fn owner_condition_outcomes_map_without_collapsing_inconclusive_into_not_evaluat
     assert!(document.contains("`not_evaluated`"), "{document}");
 }
 
+/// R18.4 closed the front door -- `mission: SourceRef` is gone -- and this closes the side door: a
+/// `SourceRef` of kind Mission inside a condition's citations would carry a Mission digest nothing
+/// can verify, which is the very field the grammar revision removed. The tag stays assigned and is
+/// never reused (R13.8); no reference may carry it. Refused by name on encode AND on decode, so a
+/// byte sequence built by hand cannot get in either.
+#[test]
+fn a_mission_kind_source_ref_is_refused_anywhere_a_citation_can_appear() {
+    let mut manifest = vector_manifest();
+    manifest.success_conditions[0].citations = OutcomeState::Verified(vec![source(
+        SourceKind::Mission,
+        MISSION,
+        "beacon.mission.v1",
+        "11",
+        1,
+    )]);
+    assert_eq!(
+        manifest
+            .canonical_bytes()
+            .expect_err("a Mission citation encoded"),
+        MalformedOutcome::SourceKind
+    );
+
+    // The decode side: take the frozen-shape bytes and retag one delivered Artifact citation as a
+    // Mission. The tag byte is the one right after that reference's Workspace UUID.
+    let good = vector_manifest();
+    let bytes = good.canonical_bytes().unwrap();
+    let artifact_tag = find_in(&bytes, b"beacon.artifact.v1") - (32 + 8 + 6 + 8) - 4 - 16 - 1;
+    assert_eq!(
+        bytes[artifact_tag], 0x03,
+        "the probe did not land on the Artifact kind tag"
+    );
+    let mut retagged = bytes.clone();
+    retagged[artifact_tag] = 0x01;
+    assert_eq!(
+        OutcomeManifestV1::from_canonical_bytes(&retagged).expect_err("a Mission citation decoded"),
+        MalformedOutcome::SourceKind
+    );
+}
+
+fn find_in(haystack: &[u8], needle: &[u8]) -> usize {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .expect("needle present")
+}
+
 #[test]
 fn outcome_manifest_canonical_bytes_follow_adr_0034_0037_strict_round_trip_rules() {
     let manifest = vector_manifest();
@@ -1333,7 +1380,7 @@ fn outcome_manifest_canonical_bytes_follow_adr_0034_0037_strict_round_trip_rules
     );
 
     let mut invalid_utf8 = bytes.clone();
-    invalid_utf8[find(b"beacon.mission.v1")] = 0xff;
+    invalid_utf8[find(b"beacon.completion.v1")] = 0xff;
     assert_eq!(
         OutcomeManifestV1::from_canonical_bytes(&invalid_utf8).expect_err("refuses"),
         MalformedOutcome::InvalidUtf8
@@ -1351,13 +1398,13 @@ fn outcome_manifest_canonical_bytes_follow_adr_0034_0037_strict_round_trip_rules
     // that validation an uppercase or punctuated spelling encodes, and two spellings of one
     // canonicalizer become two identities.
     let mut folded_canonicalizer = manifest.clone();
-    folded_canonicalizer.mission.digest.canonicalizer = "Beacon.Mission.V1".to_owned();
+    folded_canonicalizer.completion.digest.canonicalizer = "Beacon.Completion.V1".to_owned();
     assert_eq!(
         folded_canonicalizer.canonical_bytes().expect_err("refuses"),
         MalformedOutcome::DigestEnvelope
     );
     let mut spaced_canonicalizer = manifest.clone();
-    spaced_canonicalizer.mission.digest.canonicalizer = "beacon mission v1".to_owned();
+    spaced_canonicalizer.completion.digest.canonicalizer = "beacon completion v1".to_owned();
     assert_eq!(
         spaced_canonicalizer.canonical_bytes().expect_err("refuses"),
         MalformedOutcome::DigestEnvelope
@@ -1460,7 +1507,7 @@ fn outcome_manifest_canonical_bytes_follow_adr_0034_0037_strict_round_trip_rules
 
     // A reference that reaches outside the manifest's Workspace aborts rather than rendering.
     let mut foreign = manifest.clone();
-    foreign.mission.workspace_id = Uuid::from_u128(0xdead_beef);
+    foreign.completion.workspace_id = Uuid::from_u128(0xdead_beef);
     assert_eq!(
         render(&foreign, &vector_sources()).expect_err("refuses"),
         OutcomeRefusal::Malformed(MalformedOutcome::CrossWorkspace)
@@ -1481,7 +1528,6 @@ fn outcome_manifest_digest_changes_for_each_identity_version_digest_or_boundary_
             Box::new(|manifest: &mut OutcomeManifestV1| {
                 let other = Uuid::from_u128(0xfeed);
                 manifest.workspace_id = other;
-                manifest.mission.workspace_id = other;
                 manifest.completion.workspace_id = other;
                 manifest.policy_classification.workspace_id = other;
                 if let OutcomeState::Verified(refs) = &mut manifest.delivered_artifacts {
@@ -1516,7 +1562,7 @@ fn outcome_manifest_digest_changes_for_each_identity_version_digest_or_boundary_
         (
             "mission identity",
             Box::new(|manifest: &mut OutcomeManifestV1| {
-                manifest.mission.object_id = Uuid::from_u128(0xabc1);
+                manifest.mission_id = Uuid::from_u128(0xabc1);
             }),
         ),
         (
@@ -1647,12 +1693,15 @@ fn outcome_manifest_digest_changes_for_each_identity_version_digest_or_boundary_
 
 #[test]
 fn outcome_renderer_refuses_257th_citation_with_observed_at_least_count() {
-    // Three identities are always cited: Mission, completion, and Policy classification.
-    let (manifest, sources) = bounded_manifest(253);
+    // Two identities are always cited: completion and Policy classification (the Mission is an
+    // identity, not a citation, since v2).
+    let (manifest, sources) = bounded_manifest(254);
     let document = render(&manifest, &sources).expect("256 cited objects render");
     assert!(document.contains("## 3. Delivered Artifacts"));
 
-    let (manifest, sources) = bounded_manifest(254);
+    // 2 identities (completion, Policy) + 255 artifacts = 257. The Mission left the census with the
+    // v2 grammar: it is an identity, not a citation.
+    let (manifest, sources) = bounded_manifest(255);
     let refusal = bound_refusal(render(&manifest, &sources).expect_err("257 refuse"));
     assert_eq!(refusal.bound, OutcomeBound::CitationCount);
     assert_eq!(refusal.bound.as_str(), "citation_count");
@@ -1663,12 +1712,14 @@ fn outcome_renderer_refuses_257th_citation_with_observed_at_least_count() {
     );
 
     // R13.8 and gpt2's M23: Receipts are their own census lane, not a borrowed `0x00`. The
-    // counterexample is a Receipt and a Mission that agree on every other part of the key, so a
+    // counterexample is a Receipt and a completion that agree on every other part of the key, so a
     // census that put them in one lane would count them as one cited object and let 257 through.
-    let (mut collide, mut collide_sources) = bounded_manifest(253);
-    collide.mission.object_id = uuid(RUN);
-    collide.mission.schema_version = 2;
-    collide.mission.digest = digest("beacon.outcome.receipt-checksum.v1", hex32("77"));
+    // (v1 staged this on the Mission reference; v2 cites the Mission by identity, so the completion
+    // plays the part.)
+    let (mut collide, mut collide_sources) = bounded_manifest(254);
+    collide.completion.object_id = uuid(RUN);
+    collide.completion.schema_version = 2;
+    collide.completion.digest = digest("beacon.outcome.receipt-checksum.v1", hex32("77"));
     collide.receipt_refs = OutcomeState::Verified(vec![ReceiptRef {
         workspace_id: uuid(WORKSPACE),
         run_uuid: uuid(RUN),
@@ -1676,16 +1727,16 @@ fn outcome_renderer_refuses_257th_citation_with_observed_at_least_count() {
         outcome_checksum: hex32("77"),
     }]);
     collide_sources.mission_title = "One Mission, one Receipt, one key apart".to_owned();
-    // 3 identities + 253 artifacts + 1 Receipt = 257, and only a distinct Receipt lane keeps it so.
+    // 2 identities + 254 artifacts + 1 Receipt = 257, and only a distinct Receipt lane keeps it so.
     let refusal = bound_refusal(render(&collide, &collide_sources).expect_err("257 refuse"));
     assert_eq!(refusal.bound, OutcomeBound::CitationCount);
     assert_eq!(
         refusal.observed_at_least, 257,
-        "the Receipt was counted in a source lane and merged with the Mission"
+        "the Receipt was counted in a source lane and merged with the completion"
     );
 
     // One object cited twice is one cited object: the census counts objects, not rows.
-    let (mut manifest, sources) = bounded_manifest(253);
+    let (mut manifest, sources) = bounded_manifest(254);
     if let OutcomeState::Verified(refs) = &manifest.delivered_artifacts {
         let repeated = refs[0].clone();
         manifest.success_conditions[0].citations = OutcomeState::Verified(vec![repeated]);
@@ -1742,7 +1793,7 @@ fn outcome_renderer_refuses_markdown_over_1_mib_without_partial_output() {
 #[test]
 fn outcome_bounds_are_checked_before_the_work_they_prevent() {
     // The citation bound runs before canonicalization.
-    let (mut manifest, sources) = bounded_manifest(254);
+    let (mut manifest, sources) = bounded_manifest(255);
     manifest.renderer_version = "beacon.outcome.md.v99".to_owned();
     assert_eq!(
         manifest
@@ -1769,7 +1820,7 @@ fn outcome_bounds_are_checked_before_the_work_they_prevent() {
     );
 
     // And the two keep their order relative to each other: the cheaper one bites first.
-    let (mut manifest, mut sources) = bounded_manifest(254);
+    let (mut manifest, mut sources) = bounded_manifest(255);
     manifest.renderer_version = "beacon.outcome.md.v99".to_owned();
     sources.verified_source_bytes = 16 * 1024 * 1024 + 1;
     assert_eq!(
@@ -1787,7 +1838,7 @@ fn outcome_bounds_are_checked_before_the_work_they_prevent() {
 /// path and nothing else.
 #[test]
 fn outcome_citation_bound_refuses_without_walking_past_it() {
-    let (just_over, just_over_sources) = bounded_manifest(254);
+    let (just_over, just_over_sources) = bounded_manifest(255);
     let (far_over, far_over_sources) = bounded_manifest(50_000);
 
     // One warm-up so a lazily initialized static is not charged to the first measurement.
@@ -1846,11 +1897,11 @@ fn outcome_each_bound_names_itself_and_is_distinct_from_other_bounds_and_absence
 
     // Absence of a refusal is distinguishable from every bound: a manifest just under all three
     // renders.
-    let (manifest, sources) = bounded_manifest(253);
+    let (manifest, sources) = bounded_manifest(254);
     render(&manifest, &sources).expect("under every bound");
 
     // Each over-limit input names its own bound, and never one of the other two.
-    let (over_citations, sources) = bounded_manifest(254);
+    let (over_citations, sources) = bounded_manifest(255);
     assert_eq!(
         bound_refusal(render(&over_citations, &sources).expect_err("refuses")).bound,
         OutcomeBound::CitationCount
@@ -1871,7 +1922,7 @@ fn outcome_each_bound_names_itself_and_is_distinct_from_other_bounds_and_absence
 
     // Two bounds exhausted at once still name the one that bit, not a blend of the two. The
     // citation census runs first and says so.
-    let (mut both, mut sources) = bounded_manifest(254);
+    let (mut both, mut sources) = bounded_manifest(255);
     sources.verified_source_bytes = 16 * 1024 * 1024 + 1;
     both.uncertainty = OutcomeState::Absent("none.".to_owned());
     let refusal = bound_refusal(render(&both, &sources).expect_err("refuses"));
