@@ -2644,7 +2644,10 @@ fn an_artifact_whose_bytes_name_another_workspace_is_refused_by_its_owning_reade
 
 #[test]
 fn collector_refuses_a_classification_for_a_different_mission_than_the_completion() {
-    let fixture = admitted("classification-cross-mission", vec!["Gates pass".to_owned()]);
+    let fixture = admitted(
+        "classification-cross-mission",
+        vec!["Gates pass".to_owned()],
+    );
     let policy_revision = fixture.policy_revision();
 
     let other_mission = Uuid::new_v4();
@@ -2698,19 +2701,17 @@ fn collector_refuses_a_classification_for_a_different_mission_than_the_completio
     );
     let completion_digest = fixture.record(&completion);
     let connection = fixture.connection();
-    let result = Collector::new(&connection, fixture.store.workspace_id).collect(
-        &CollectionRequest {
+    let result =
+        Collector::new(&connection, fixture.store.workspace_id).collect(&CollectionRequest {
             completion_digest: Some(completion_digest),
             classification_digest: Some(classification.digest().unwrap().value),
             ..CollectionRequest::default()
-        },
-    );
+        });
     assert!(
         result.is_err(),
         "collector joined Mission A's completion to Mission B's classification: {result:?}",
     );
 }
-
 
 #[test]
 fn collector_refuses_a_spend_record_for_a_different_mission_than_the_completion() {
@@ -2771,22 +2772,23 @@ fn collector_refuses_a_spend_record_for_a_different_mission_than_the_completion(
     );
     let completion_digest = fixture.record(&completion);
     let connection = fixture.connection();
-    let result = Collector::new(&connection, fixture.store.workspace_id).collect(
-        &CollectionRequest {
+    let result =
+        Collector::new(&connection, fixture.store.workspace_id).collect(&CollectionRequest {
             completion_digest: Some(completion_digest),
             ..CollectionRequest::default()
-        },
-    );
+        });
     assert!(
         result.is_err(),
         "collector joined Mission A's completion to Mission B's spend: {result:?}",
     );
 }
 
-
 #[test]
 fn a_forged_early_event_cannot_pull_a_post_boundary_classification_into_the_outcome() {
-    let fixture = admitted("classification-forged-boundary", vec!["Gates pass".to_owned()]);
+    let fixture = admitted(
+        "classification-forged-boundary",
+        vec!["Gates pass".to_owned()],
+    );
     let policy_revision = fixture.policy_revision();
     let classification = MissionImpactClassificationV1 {
         workspace_id: fixture.store.workspace_id,
@@ -2831,16 +2833,20 @@ fn a_forged_early_event_cannot_pull_a_post_boundary_classification_into_the_outc
         .unwrap();
 
     let connection = fixture.connection();
-    let result = Collector::new(&connection, fixture.store.workspace_id).collect(
-        &CollectionRequest {
+    let result =
+        Collector::new(&connection, fixture.store.workspace_id).collect(&CollectionRequest {
             completion_digest: Some(completion_digest),
             classification_digest: Some(classification_digest),
             ..CollectionRequest::default()
-        },
-    );
+        });
     assert!(
-        matches!(result, Err(CollectorRefusal::AfterBoundary { kind: "classification", .. })),
+        matches!(
+            result,
+            Err(CollectorRefusal::AfterBoundary {
+                kind: "classification",
+                ..
+            })
+        ),
         "a forged early event made a post-boundary classification visible: {result:?}",
     );
 }
-

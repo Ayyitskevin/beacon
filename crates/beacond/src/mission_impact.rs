@@ -626,6 +626,11 @@ pub enum ClassificationStoreError {
     CrossWorkspace,
     /// R13.7: the bit a caller copied into a manifest disagrees with the record it cites.
     CopiedBitDisagrees,
+    /// The policy the record cites belongs to a Project that does not own the record's Mission
+    /// (sol1's cold read, #2). Both foreign keys held on their own -- the Mission exists, the
+    /// Policy revision exists -- and neither says the two belong together; this is the check that
+    /// does, keyed on the Mission's own row.
+    PolicyProjectIsNotTheMissions,
     Store(String),
 }
 
@@ -638,6 +643,9 @@ impl fmt::Display for ClassificationStoreError {
             Self::CitedIdentityMismatch => formatter.write_str("cited_identity_mismatch"),
             Self::CrossWorkspace => formatter.write_str("cross_workspace"),
             Self::CopiedBitDisagrees => formatter.write_str("copied_bit_disagrees"),
+            Self::PolicyProjectIsNotTheMissions => {
+                formatter.write_str("policy_project_is_not_the_missions")
+            }
             Self::Store(reason) => write!(formatter, "store: {reason}"),
         }
     }
@@ -749,6 +757,23 @@ fn uuid_column(value: String) -> Uuid {
 }
 
 /// One classification, verified, by digest within a Workspace.
+/// The Project that owns a Mission, from the Mission's own row. `None` is "no such Mission", which
+/// the foreign key already refuses on write and which a reader treats as a corrupt store.
+fn mission_project_of(
+    connection: &Connection,
+    workspace_id: Uuid,
+    mission_id: Uuid,
+) -> Result<Option<Uuid>, rusqlite::Error> {
+    connection
+        .query_row(
+            "SELECT project_id FROM missions WHERE workspace_id = ?1 AND id = ?2",
+            rusqlite::params![workspace_id.to_string(), mission_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map(|found| found.and_then(|value| Uuid::parse_str(&value).ok()))
+}
+
 pub fn verified_classification_within(
     connection: &Connection,
     workspace_id: Uuid,
@@ -771,6 +796,14 @@ pub fn verified_classification_within(
     }
     if payload.workspace_id != workspace_id {
         return Err(ClassificationStoreError::CrossWorkspace);
+    }
+    // The policy's Project must OWN the Mission. Both foreign keys hold on their own and neither
+    // ties the two together, so a Mission of Project A classified under Project B's valid policy
+    // read back as verified until this check existed.
+    let owner = mission_project_of(connection, workspace_id, payload.mission_id)
+        .map_err(|error| ClassificationStoreError::Store(error.to_string()))?;
+    if owner != Some(payload.policy.project_id) {
+        return Err(ClassificationStoreError::PolicyProjectIsNotTheMissions);
     }
     Ok(Some(MissionImpactClassification {
         digest: ClassificationDigest {
@@ -820,6 +853,10 @@ pub enum ClassificationRecordError {
     /// The composite foreign key refused: this Workspace's Project has no such Policy revision.
     /// The store answers it, so it cannot be a check a caller forgets.
     PolicyRevisionNotFound,
+    /// The cited policy's Project does not own the Mission being classified. The Command refuses
+    /// it before the row exists, and the reader refuses it on every read, for the same reason in
+    /// the same words.
+    PolicyProjectIsNotTheMissions,
     Store(String),
 }
 
@@ -864,6 +901,9 @@ impl fmt::Display for ClassificationRecordError {
             Self::CrossWorkspace => formatter.write_str("cross_workspace"),
             Self::IdentityTaken => formatter.write_str("identity_taken"),
             Self::PolicyRevisionNotFound => formatter.write_str("policy_revision_not_found"),
+            Self::PolicyProjectIsNotTheMissions => {
+                formatter.write_str("policy_project_is_not_the_missions")
+            }
             Self::Store(reason) => write!(formatter, "store: {reason}"),
         }
     }
@@ -932,6 +972,12 @@ impl MissionImpactService {
                 return Err(ClassificationRecordError::CrossWorkspace);
             }
             let digest_value = HEXLOWER.encode(&sha256(canonical_bytes));
+            // The Command says it first, so a caller gets the reason rather than a read-back
+            // refusal after a row that the reader would never return.
+            let owner = mission_project_of(connection, self.workspace_id, payload.mission_id)?;
+            if owner != Some(payload.policy.project_id) {
+                return Err(ClassificationRecordError::PolicyProjectIsNotTheMissions);
+            }
 
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
