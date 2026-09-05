@@ -1082,3 +1082,74 @@ fn positive_u32(value: i64) -> Result<u32, ProjectError> {
 fn nonnegative_u64(value: i64) -> Result<u64, ProjectError> {
     u64::try_from(value).map_err(|_| ProjectError::InvalidStore)
 }
+
+#[cfg(test)]
+mod name_witness {
+    use super::*;
+
+    /// Pinned independently of `name()`; see the note in `outcome_publication`'s twin.
+    fn expected_name(error: &ProjectError) -> &'static str {
+        match error {
+            ProjectError::Account(_) => "Account",
+            ProjectError::InvalidName => "InvalidName",
+            ProjectError::InvalidPurpose => "InvalidPurpose",
+            ProjectError::InvalidDesiredOutcomes => "InvalidDesiredOutcomes",
+            ProjectError::InvalidConstraint => "InvalidConstraint",
+            ProjectError::InvalidProhibition => "InvalidProhibition",
+            ProjectError::DuplicateCharterEntry => "DuplicateCharterEntry",
+            ProjectError::StaleCharterRevision { .. } => "StaleCharterRevision",
+            ProjectError::UnchangedCharter => "UnchangedCharter",
+            ProjectError::NotFound => "NotFound",
+            ProjectError::InvalidStore => "InvalidStore",
+            ProjectError::Store(_) => "Store",
+            ProjectError::Json(_) => "Json",
+        }
+    }
+
+    #[test]
+    fn every_project_error_arm_has_its_own_pinned_name() {
+        let every_arm = [
+            ProjectError::Account(OperatorAccountError::PasswordTooShort),
+            ProjectError::InvalidName,
+            ProjectError::InvalidPurpose,
+            ProjectError::InvalidDesiredOutcomes,
+            ProjectError::InvalidConstraint,
+            ProjectError::InvalidProhibition,
+            ProjectError::DuplicateCharterEntry,
+            ProjectError::StaleCharterRevision {
+                expected: 1,
+                current: 2,
+            },
+            ProjectError::UnchangedCharter,
+            ProjectError::NotFound,
+            ProjectError::InvalidStore,
+            ProjectError::Store(rusqlite::Error::QueryReturnedNoRows),
+            ProjectError::Json(serde_json::from_str::<u8>("\"x\"").unwrap_err()),
+        ];
+        assert_eq!(
+            every_arm.len(),
+            13,
+            "an arm was added to `ProjectError` without a fixture here"
+        );
+        for arm in &every_arm {
+            assert_eq!(
+                arm.name(),
+                expected_name(arm),
+                "the startup name does not match the pinned table: {arm:?}"
+            );
+        }
+        let names: std::collections::BTreeSet<&str> =
+            every_arm.iter().map(ProjectError::name).collect();
+        assert_eq!(
+            names.len(),
+            13,
+            "two arms share a startup name, so a swap between them is invisible: {names:?}"
+        );
+        for name in names {
+            assert!(
+                !name.contains(' ') && !name.contains('{'),
+                "a name is a name, not a rendering: {name}"
+            );
+        }
+    }
+}

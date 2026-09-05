@@ -1083,3 +1083,80 @@ fn verify_mission_totals(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod name_witness {
+    use super::*;
+
+    /// Pinned independently of `name()`; see the note in `outcome_publication`'s twin.
+    fn expected_name(error: &MissionError) -> &'static str {
+        match error {
+            MissionError::Account(_) => "Account",
+            MissionError::ProjectNotFound => "ProjectNotFound",
+            MissionError::TeamNotFound => "TeamNotFound",
+            MissionError::MissionNotFound => "MissionNotFound",
+            MissionError::StaleCharterRevision { .. } => "StaleCharterRevision",
+            MissionError::InvalidDesiredOutcome => "InvalidDesiredOutcome",
+            MissionError::InvalidSuccessConditions => "InvalidSuccessConditions",
+            MissionError::InvalidConstraint => "InvalidConstraint",
+            MissionError::InvalidProhibition => "InvalidProhibition",
+            MissionError::DuplicateMissionEntry => "DuplicateMissionEntry",
+            MissionError::InvalidMembers => "InvalidMembers",
+            MissionError::StaleTeamEligibility => "StaleTeamEligibility",
+            MissionError::ResidentIneligible(_) => "ResidentIneligible",
+            MissionError::InvalidStore => "InvalidStore",
+            MissionError::Store(_) => "Store",
+            MissionError::Json(_) => "Json",
+        }
+    }
+
+    #[test]
+    fn every_mission_error_arm_has_its_own_pinned_name() {
+        let every_arm = [
+            MissionError::Account(OperatorAccountError::PasswordTooShort),
+            MissionError::ProjectNotFound,
+            MissionError::TeamNotFound,
+            MissionError::MissionNotFound,
+            MissionError::StaleCharterRevision {
+                expected: 1,
+                current: 2,
+            },
+            MissionError::InvalidDesiredOutcome,
+            MissionError::InvalidSuccessConditions,
+            MissionError::InvalidConstraint,
+            MissionError::InvalidProhibition,
+            MissionError::DuplicateMissionEntry,
+            MissionError::InvalidMembers,
+            MissionError::StaleTeamEligibility,
+            MissionError::ResidentIneligible(Uuid::nil()),
+            MissionError::InvalidStore,
+            MissionError::Store(rusqlite::Error::QueryReturnedNoRows),
+            MissionError::Json(serde_json::from_str::<u8>("\"x\"").unwrap_err()),
+        ];
+        assert_eq!(
+            every_arm.len(),
+            16,
+            "an arm was added to `MissionError` without a fixture here"
+        );
+        for arm in &every_arm {
+            assert_eq!(
+                arm.name(),
+                expected_name(arm),
+                "the startup name does not match the pinned table: {arm:?}"
+            );
+        }
+        let names: std::collections::BTreeSet<&str> =
+            every_arm.iter().map(MissionError::name).collect();
+        assert_eq!(
+            names.len(),
+            16,
+            "two arms share a startup name, so a swap between them is invisible: {names:?}"
+        );
+        for name in names {
+            assert!(
+                !name.contains(' ') && !name.contains('{'),
+                "a name is a name, not a rendering: {name}"
+            );
+        }
+    }
+}
