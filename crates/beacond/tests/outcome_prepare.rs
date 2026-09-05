@@ -856,6 +856,56 @@ fn verified_sources_text_is_read_through_owners_not_narrative_projections() {
     );
 }
 
+#[test]
+fn sol1_hand_built_collected_sources_cannot_invent_a_delivered_artifact() {
+    let fixture = admitted_mission("invented-delivery");
+    let classification = fixture.classify(ImpactLevel::Ordinary);
+    let (completion_digest, _) = fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let undelivered = fixture
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            b"# This Artifact was never delivered by the completion.\n",
+            ArtifactContext::Mission {
+                project_id: fixture.project_id,
+                mission_id: fixture.mission_id,
+            },
+            fixture.resident_id,
+            fixture.configuration_id,
+            None,
+        )
+        .expect("the decoy Artifact records");
+    let connection = fixture.store.connect();
+    let mut collected = Collector::new(&connection, fixture.workspace_id)
+        .collect(&CollectionRequest {
+            completion_digest: Some(completion_digest),
+            classification_digest: Some(classification.2),
+            ..CollectionRequest::default()
+        })
+        .expect("the honest set collects");
+    assert!(matches!(
+        collected.completion.as_ref().unwrap().delivered_artifacts,
+        OutcomeState::Absent(_)
+    ));
+    collected.completion.as_mut().unwrap().delivered_artifacts =
+        OutcomeState::Verified(vec![undelivered.digest().value.clone()]);
+    let manifest = assemble(
+        &collected,
+        fixture.workspace_id,
+        AppendixRequest::PolicyDefault,
+    )
+    .expect("the inconsistent set passed the assembler");
+    let sources = verified_sources_for(&connection, fixture.workspace_id, &manifest)
+        .expect("the producer accepted the invented delivery");
+    drop(connection);
+
+    let result = fixture.outcomes.prepare(&manifest, &sources);
+    assert!(
+        result.is_err(),
+        "prepare stored a manifest that says an Artifact was delivered although the verified completion says none: {result:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // The real path: prepare_for_mission (slice 3b item 0b, item 3)
 // ---------------------------------------------------------------------------------------------
@@ -917,6 +967,103 @@ fn a_completed_mission_becomes_a_candidate_outcome() {
         document.contains("appendix_mode: policy_state_not_high_impact"),
         "{document}"
     );
+}
+
+#[test]
+fn sol1_a_post_boundary_classification_cannot_change_which_record_is_frozen() {
+    let control = admitted_mission("boundary-classification-control");
+    control.classify(ImpactLevel::Ordinary);
+    control.complete((control.resident_id, control.configuration_id));
+    assert!(
+        control
+            .outcomes
+            .prepare_for_mission(control.mission_id, AppendixRequest::PolicyDefault)
+            .is_ok(),
+        "the no-decoy control must prepare"
+    );
+
+    let fixture = admitted_mission("boundary-classification-decoy");
+    let first = fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let later = MissionImpactClassificationV1 {
+        workspace_id: fixture.workspace_id,
+        mission_id: fixture.mission_id,
+        classification_id: Uuid::new_v4(),
+        version: 2,
+        impact: ImpactLevel::High,
+        basis: ClassificationBasis::OperatorDeclared,
+        policy: PolicyRevisionRef {
+            project_id: fixture.project_id,
+            policy_revision: fixture.policy_revision,
+            charter_revision: fixture.charter_revision,
+        },
+        rule_id: None,
+        reason: "This reclassification happened after completion.".to_owned(),
+        classified_by: ClassificationActor::Operator,
+        classified_at_ms: 1_788_400_000_001,
+        supersedes: ClassificationSupersedes::Record(first.2.clone()),
+    };
+    MissionImpactService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .classify(&later.canonical_bytes().unwrap())
+        .expect("the post-boundary revision records");
+
+    let candidate = fixture
+        .outcomes
+        .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+        .expect("a later classification must not hide the newest one at the stored boundary");
+    let stored = fixture
+        .outcomes
+        .manifest(&candidate.manifest_digest)
+        .unwrap();
+    assert_eq!(
+        stored.manifest().policy_classification.digest.value,
+        first.2
+    );
+    assert!(!stored.manifest().policy_high_impact);
+}
+
+#[test]
+fn sol1_a_real_path_candidate_reopens_with_its_v2_digest() {
+    let fixture = admitted_mission("real-path-restart-v2");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let candidate = fixture
+        .outcomes
+        .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+        .expect("the real path prepares");
+    let before = fixture
+        .outcomes
+        .manifest(&candidate.manifest_digest)
+        .unwrap();
+    assert_eq!(
+        before.manifest().canonicalizer_version,
+        "beacon.outcome.manifest.v2"
+    );
+    assert_eq!(
+        data_encoding::HEXLOWER.encode(&sha2_256(before.canonical_bytes())),
+        candidate.manifest_digest
+    );
+
+    fixture.restart();
+    let accounts = Arc::new(OperatorAccountService::open(&fixture.store.path).unwrap());
+    accounts
+        .authenticate_password(
+            SecretString::new("a long local passphrase".to_owned()),
+            AccessOrigin::SameMachine,
+        )
+        .expect("the reopened store unlocks");
+    let outcomes = OutcomeService::new(accounts, fixture.workspace_id);
+    let reopened = outcomes
+        .manifest(&candidate.manifest_digest)
+        .expect("the startup pass accepts the real-path manifest");
+    assert_eq!(reopened.canonical_bytes(), before.canonical_bytes());
+    assert_eq!(
+        data_encoding::HEXLOWER.encode(&sha2_256(reopened.canonical_bytes())),
+        candidate.manifest_digest
+    );
+    outcomes
+        .candidate(&candidate.manifest_digest)
+        .expect("the real-path candidate reads after restart");
 }
 
 #[test]

@@ -231,6 +231,37 @@ fn assembler_refuses_to_guess_an_absent_field() {
 }
 
 #[test]
+fn sol1_assembler_refuses_a_classification_for_another_mission() {
+    let mut inconsistent = collected();
+    assert!(
+        assemble(&inconsistent, workspace(), AppendixRequest::PolicyDefault).is_ok(),
+        "the consistent control must assemble"
+    );
+    inconsistent.classification.as_mut().unwrap().mission_id = Uuid::from_u128(0xdead);
+
+    let result = assemble(&inconsistent, workspace(), AppendixRequest::PolicyDefault);
+    assert!(
+        result.is_err(),
+        "the assembler accepted a completion for Mission 0x11 with a classification whose verified owner says Mission 0xdead: {result:?}"
+    );
+}
+
+#[test]
+fn sol1_assembler_cannot_relabel_a_collected_set_to_another_workspace() {
+    let collected = collected();
+    let foreign_workspace = Uuid::from_u128(0xdead);
+    let result = assemble(
+        &collected,
+        foreign_workspace,
+        AppendixRequest::PolicyDefault,
+    );
+    assert!(
+        result.is_err(),
+        "the assembler relabelled collected completion/classification digests as Workspace 0xdead: {result:?}"
+    );
+}
+
+#[test]
 fn a_partially_measured_spend_maps_to_its_own_state_with_its_coverage_intact() {
     // R21.3 by way of R23.1: a window that ends before the boundary is `partially_measured`, a
     // state of its own. Until the grammar carried the token the assembler refused this shape by
