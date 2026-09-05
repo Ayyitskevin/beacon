@@ -637,7 +637,7 @@ fn startup_refuses_an_unaccounted_team_and_names_the_row() {
         lifecycle.activate(*resident_id, None).unwrap();
     }
 
-    let (models, activation_id) = activate_model(&store, &accounts);
+    let (_models, activation_id) = activate_model(&store, &accounts);
 
     let configurations =
         ResidentConfigurationService::new(Arc::clone(&accounts), store.workspace_id);

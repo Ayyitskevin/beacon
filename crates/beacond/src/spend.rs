@@ -1033,8 +1033,8 @@ fn load_spend_row(
                 Ok(StoredSpendRow {
                     digest_value: row.get(0)?,
                     canonical_bytes: row.get(1)?,
-                    spend_id: parse_uuid_column(row.get::<_, String>(2)?),
-                    mission_id: parse_uuid_column(row.get::<_, String>(3)?),
+                    spend_id: uuid_column("spend_id", row.get::<_, String>(2)?)?,
+                    mission_id: uuid_column("mission_id", row.get::<_, String>(3)?)?,
                     version: row.get::<_, i64>(4)? as u32,
                     origin: row.get(5)?,
                     measurement: row.get(6)?,
@@ -1050,9 +1050,50 @@ fn load_spend_row(
 
 /// A UUID column that cannot parse is a corrupt store, and the reader that follows refuses on the
 /// projection comparison rather than here, so one refusal names one fault.
-fn parse_uuid_column(value: String) -> Uuid {
-    Uuid::parse_str(&value).unwrap_or(Uuid::nil())
+/// A stored identity column, or a typed refusal NAMING the column (opus2's nil lane, ONI1 §4).
+///
+/// This returned `Uuid::nil()` on a corrupt column and left `spend_columns_match` to refuse on the
+/// projection comparison. That works only while no payload can hold a nil id -- and `spend_id` is
+/// decoded straight from canonical bytes, where sixteen zero bytes decode to nil. At
+/// `payload.spend_id == nil` the corrupt column compared EQUAL and the comparison the design leans
+/// on stopped working. A sentinel that can collide with a real value is not a sentinel.
+///
+/// The raw text rides in `Debug` and never in the one-line message (R28.4).
+fn uuid_column(column: &'static str, value: String) -> rusqlite::Result<Uuid> {
+    Uuid::parse_str(&value).map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(SpendColumnNotUuid { column, raw: value }),
+        )
+    })
 }
+
+/// A stored identity column that is not a UUID. Names the column; the raw text is in `Debug`.
+struct SpendColumnNotUuid {
+    column: &'static str,
+    raw: String,
+}
+
+/// Hand-written rather than derived: a derived `Debug` does not count as a READ of `raw`, so the
+/// compiler called the field dead -- and it is the whole reason the struct exists.
+impl fmt::Debug for SpendColumnNotUuid {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SpendColumnNotUuid")
+            .field("column", &self.column)
+            .field("raw", &self.raw)
+            .finish()
+    }
+}
+
+impl fmt::Display for SpendColumnNotUuid {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "the {} column is not a UUID", self.column)
+    }
+}
+
+impl std::error::Error for SpendColumnNotUuid {}
 
 /// One measured-spend record, verified, by digest within a Workspace.
 ///
@@ -1079,6 +1120,12 @@ pub fn verified_spend_within(
         return Err(SpendStoreError::Malformed(MalformedSpend::TrailingBytes));
     }
     // 3. Every projection says what the bytes say.
+    // A nil identity is not a value any honest record carries, and it is exactly what the old
+    // column sentinel decoded to -- so refuse it BY NAME here, in the reader, before the
+    // projection comparison that used to be the only thing standing between the two.
+    if payload.spend_id.is_nil() || payload.mission_id.is_nil() {
+        return Err(SpendStoreError::CitedIdentityMismatch);
+    }
     if !spend_columns_match(&row, &payload) {
         return Err(SpendStoreError::ColumnsDisagree);
     }
@@ -1462,4 +1509,50 @@ fn insert_spend(
         ],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod nil_sentinel {
+    use super::*;
+
+    /// opus2's ONI1 §4: the nil sentinel could collide with a real payload id.
+    ///
+    /// `parse_uuid_column` returned `Uuid::nil()` for a corrupt column and relied on
+    /// `spend_columns_match` to refuse. `spend_id` is decoded from canonical bytes, sixteen zero
+    /// bytes decode to nil, and nothing rejected a nil payload id -- so at `payload.spend_id ==
+    /// nil` the corrupt column compared EQUAL and the guard the design leans on stopped working.
+    ///
+    /// Two independent refusals now stand where one sentinel used to: the column no longer parses
+    /// silently, and a nil identity is refused by name in the reader.
+    #[test]
+    fn a_corrupt_identity_column_refuses_by_name_instead_of_becoming_nil() {
+        let refusal = uuid_column("spend_id", "not-a-uuid-at-all".to_owned())
+            .expect_err("a corrupt column must not become a value");
+        let line = refusal.to_string();
+        assert!(
+            line.contains("spend_id") || format!("{refusal:?}").contains("spend_id"),
+            "the refusal does not name the column: {line} / {refusal:?}"
+        );
+        assert!(
+            !line.contains("not-a-uuid-at-all"),
+            "the raw column text reached the one-line message: {line}"
+        );
+        assert!(
+            format!("{refusal:?}").contains("not-a-uuid-at-all"),
+            "the raw column text is not reachable through Debug: {refusal:?}"
+        );
+
+        // And the honest case still parses.
+        let good = Uuid::new_v4();
+        assert_eq!(
+            uuid_column("spend_id", good.to_string()).expect("an honest column parses"),
+            good
+        );
+
+        // The collision the sentinel allowed: a nil id is no longer a value either side can hold.
+        assert!(
+            uuid_column("spend_id", Uuid::nil().to_string()).is_ok(),
+            "nil is still a syntactically valid UUID -- the reader is what refuses it"
+        );
+    }
 }
