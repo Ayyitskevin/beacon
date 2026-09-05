@@ -29,7 +29,7 @@ use crate::artifact::{
     verified_artifact_within,
 };
 use crate::evaluation::{
-    EvaluationDigest, EvaluationError, EvaluationSubject, verified_evaluation_within,
+    EvaluationDigest, EvaluationError, EvaluationSubject, Verdict, verified_evaluation_within,
 };
 use crate::outcome::AppendixMode;
 use crate::outcome_store::{ManifestStoreRefusal, StoredOutcomeManifest, verified_manifest_within};
@@ -213,6 +213,8 @@ pub enum PublishRefusal {
     },
     /// The relation already holds this candidate or this Evaluation.
     AlreadyPublished,
+    /// The qualifying Evaluation's verdict is not `meets`, read back from its own bytes.
+    QualifyingVerdictNotMeets,
     /// A record the relation cites is about a different Mission than the relation row names.
     ///
     /// The relation's `mission_id` is an identity column with a foreign key to `missions` -- which
@@ -260,6 +262,9 @@ impl fmt::Display for PublishRefusal {
             Self::AlreadyPublished => {
                 formatter.write_str("that candidate or Evaluation is already published")
             }
+            Self::QualifyingVerdictNotMeets => formatter.write_str(
+                "the Evaluation this publication cites does not carry a `meets` verdict",
+            ),
             Self::MissionBindingBroken {
                 what,
                 named,
@@ -538,6 +543,13 @@ fn read_publication_within(
         return Err(PublishRefusal::Seam(
             PublicationSeamRefusal::SubjectIsNotTheCandidate,
         ));
+    }
+    // The verdict, re-proved from the Evaluation's own bytes on every read (sol1's P0). `publish`
+    // proved it through the seam at write time; a relation row whose Evaluation digest was swapped
+    // for a `does_not_meet` Evaluation OF THE SAME CANDIDATE passes every subject check, because
+    // the subject genuinely IS this candidate. Only the verdict separates the two records.
+    if evaluation.payload().verdict != Verdict::Meets {
+        return Err(PublishRefusal::QualifyingVerdictNotMeets);
     }
     // Every cited record's own Mission, against the Mission this row is filed under. The row's
     // foreign key proves the Mission exists; nothing until here proved the records are ITS.
