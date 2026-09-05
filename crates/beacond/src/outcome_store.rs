@@ -535,6 +535,29 @@ pub fn verified_manifest_within(
         }
     }
 
+    // The candidate projection is a projection like every other, and until astra's A2 it was the
+    // one column nothing checked: changing it pointed `manifest()`, `candidate()` and the
+    // idempotent `prepare` retry at an unrelated document, and all three accepted it. It cannot be
+    // compared against the manifest's own bytes -- a content-addressed document cannot name itself
+    // (R13.1) -- so it is proved the other way round: the Artifact it names must embed these exact
+    // canonical bytes, which is the binding the document already carries for its readers.
+    let candidate = crate::artifact::verified_artifact_within(
+        connection,
+        workspace_id,
+        &stored.candidate_artifact_digest,
+    )
+    .map_err(|_| ManifestStoreRefusal::CandidateNotAccounted {
+        reason: "the candidate Artifact does not verify against its own bytes",
+    })?
+    .ok_or(ManifestStoreRefusal::CandidateNotAccounted {
+        reason: "no candidate Artifact in this Workspace carries that digest",
+    })?;
+    if !candidate_proves_manifest(candidate.content(), &stored.canonical_bytes) {
+        return Err(ManifestStoreRefusal::ColumnDisagrees {
+            column: "candidate_artifact_digest",
+        });
+    }
+
     Ok(StoredOutcomeManifest {
         manifest_id,
         // The envelope returned is the STORED one, now proved equal to what the bytes and this
@@ -970,17 +993,8 @@ pub(crate) fn verify_manifest_state(connection: &Connection) -> Result<(), Manif
             });
         }
 
-        // ...and its CONTENT proves this manifest, not merely its metadata. Kind, Mission and
-        // accountable Resident are properties a decoy shares with the real document: astra's probe
-        // recorded unrelated Markdown under the same Mission by the same Resident, pointed a
-        // manifest at it, and the store opened `Ready`. What a decoy cannot have is the manifest's
-        // own canonical bytes embedded in it.
-        if !candidate_proves_manifest(candidate.content(), stored.canonical_bytes()) {
-            return Err(ManifestStoreRefusal::CandidateNotAccounted {
-                reason: "the candidate Artifact's content does not embed this manifest's canonical \
-                         bytes, so it is not the document this manifest renders to",
-            });
-        }
+        // The CONTENT binding is not repeated here: `verified_manifest_within` above already made
+        // it, on this exact row, and one rule with two implementations is two rules.
     }
     Ok(())
 }
