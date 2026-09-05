@@ -632,6 +632,11 @@ pub enum ClassificationStoreError {
     /// Policy revision exists -- and neither says the two belong together; this is the check that
     /// does, keyed on the Mission's own row.
     PolicyProjectIsNotTheMissions,
+    /// The Charter revision the record copies beside its Policy citation is not the one that Policy
+    /// revision's own row records (sol1's cold read, #12). The foreign key covers `(project,
+    /// policy_revision)` and the column comparison only proves the bytes and the row repeat the
+    /// same copied number; this compares the number with the Policy's own record.
+    PolicyRevisionHasAnotherCharter,
     /// The record it says it supersedes is not the predecessor it claims (sol1's cold read, #9):
     /// judged by the predecessor's own bytes, never by the successor's word.
     Predecessor {
@@ -652,6 +657,9 @@ impl fmt::Display for ClassificationStoreError {
             Self::CopiedBitDisagrees => formatter.write_str("copied_bit_disagrees"),
             Self::PolicyProjectIsNotTheMissions => {
                 formatter.write_str("policy_project_is_not_the_missions")
+            }
+            Self::PolicyRevisionHasAnotherCharter => {
+                formatter.write_str("policy_revision_has_another_charter")
             }
             Self::Predecessor { digest, fault } => {
                 write!(formatter, "predecessor {digest}: {fault}")
@@ -784,6 +792,28 @@ fn mission_project_of(
         .map(|found| found.and_then(|value| Uuid::parse_str(&value).ok()))
 }
 
+/// The Charter revision a Policy revision's own row records. `None` is "no such Policy revision",
+/// which the composite foreign key refuses on write and a reader treats as a corrupt store.
+fn policy_charter_revision(
+    connection: &Connection,
+    workspace_id: Uuid,
+    policy: &PolicyRevisionRef,
+) -> Result<Option<u32>, rusqlite::Error> {
+    connection
+        .query_row(
+            "SELECT charter_revision FROM project_policy_revisions
+             WHERE workspace_id = ?1 AND project_id = ?2 AND revision = ?3",
+            rusqlite::params![
+                workspace_id.to_string(),
+                policy.project_id.to_string(),
+                i64::from(policy.policy_revision)
+            ],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map(|found| found.and_then(|value| u32::try_from(value).ok()))
+}
+
 pub fn verified_classification_within(
     connection: &Connection,
     workspace_id: Uuid,
@@ -814,6 +844,20 @@ pub fn verified_classification_within(
         .map_err(|error| ClassificationStoreError::Store(error.to_string()))?;
     if owner != Some(payload.policy.project_id) {
         return Err(ClassificationStoreError::PolicyProjectIsNotTheMissions);
+    }
+    // The Charter revision copied beside the Policy citation must be the one that Policy
+    // revision's own row records (sol1's cold read, #12). A missing row is not "another charter":
+    // the foreign key refused it on write, so here it is a corrupt store.
+    match policy_charter_revision(connection, workspace_id, &payload.policy)
+        .map_err(|error| ClassificationStoreError::Store(error.to_string()))?
+    {
+        Some(charter) if charter == payload.policy.charter_revision => {}
+        Some(_) => return Err(ClassificationStoreError::PolicyRevisionHasAnotherCharter),
+        None => {
+            return Err(ClassificationStoreError::Store(
+                "the cited Policy revision is not stored".to_owned(),
+            ));
+        }
     }
     // The record it says it supersedes is a classification of this Mission, in this Workspace,
     // by the predecessor's OWN bytes (sol1's cold read, #9) -- on every read.
@@ -911,6 +955,10 @@ pub enum ClassificationRecordError {
     /// it before the row exists, and the reader refuses it on every read, for the same reason in
     /// the same words.
     PolicyProjectIsNotTheMissions,
+    /// The Charter revision copied beside the Policy citation is not the one that Policy revision
+    /// records. Refused by the verified read-back inside the recording transaction, like
+    /// `Predecessor`, and for the same reason without a Command-side twin.
+    PolicyRevisionHasAnotherCharter,
     /// The record it says it supersedes is not the predecessor it claims: refused by the verified
     /// read-back inside the recording transaction and by the reader on every read after. No
     /// separate Command-side copy, for the reason `SpendRecordError::Predecessor` gives.
@@ -948,6 +996,9 @@ impl From<ClassificationStoreError> for ClassificationRecordError {
     fn from(error: ClassificationStoreError) -> Self {
         match error {
             ClassificationStoreError::Malformed(reason) => Self::Malformed(reason),
+            ClassificationStoreError::PolicyRevisionHasAnotherCharter => {
+                Self::PolicyRevisionHasAnotherCharter
+            }
             ClassificationStoreError::Predecessor { digest, fault } => {
                 Self::Predecessor { digest, fault }
             }
@@ -967,6 +1018,9 @@ impl fmt::Display for ClassificationRecordError {
             Self::PolicyRevisionNotFound => formatter.write_str("policy_revision_not_found"),
             Self::PolicyProjectIsNotTheMissions => {
                 formatter.write_str("policy_project_is_not_the_missions")
+            }
+            Self::PolicyRevisionHasAnotherCharter => {
+                formatter.write_str("policy_revision_has_another_charter")
             }
             Self::Predecessor { digest, fault } => {
                 write!(formatter, "predecessor {digest}: {fault}")
