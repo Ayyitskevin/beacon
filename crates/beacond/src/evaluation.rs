@@ -1547,7 +1547,11 @@ fn superseded_by(
                 )
                 .optional()?)
         },
-        |_| Ok(()),
+        |hop| {
+            verified_evaluation_within(connection, workspace_id, hop)?
+                .ok_or(EvaluationError::InvalidStore)?;
+            Ok(())
+        },
     )?
     else {
         return Ok(None);
