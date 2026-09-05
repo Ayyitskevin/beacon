@@ -1107,8 +1107,27 @@ fn run_git_bounded_raw(
         command.stdin(Stdio::null());
     }
     command.stdout(Stdio::piped()).stderr(Stdio::null());
-    let Ok(mut child) = command.spawn() else {
-        return BoundedRaw::Failed;
+    // One clock for the whole invocation: a start that cannot be reached inside the budget is a
+    // check that did not finish, and counting it from after the spawn would let a retry below add
+    // a second budget's worth of waiting to every call.
+    let started = Instant::now();
+    let mut child = loop {
+        match command.spawn() {
+            Ok(child) => break child,
+            // `ETXTBSY` is not an answer about this worktree. The kernel refuses to exec a file
+            // that any process holds open for writing, and Beacon is multi-threaded: a thread that
+            // forks while a sibling holds a freshly written program open hands that write
+            // descriptor to its child, and the program stays busy until the child reaches its own
+            // exec (rust-lang/rust#114554). Wait it out inside the budget rather than record a
+            // failure. Every other spawn error is the answer.
+            Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) => {
+                if started.elapsed() >= budget {
+                    return BoundedRaw::TimedOut;
+                }
+                thread::sleep(POLL_INTERVAL);
+            }
+            Err(_) => return BoundedRaw::Failed,
+        }
     };
     if let Some(bytes) = stdin_bytes {
         let Some(mut pipe) = child.stdin.take() else {
@@ -1121,7 +1140,6 @@ fn run_git_bounded_raw(
         }
         drop(pipe);
     }
-    let started = Instant::now();
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
