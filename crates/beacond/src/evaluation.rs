@@ -1455,16 +1455,25 @@ fn subject_successor(
     let EvaluationSubject::Artifact(subject) = &payload.subject else {
         return Ok(None);
     };
-    let Some(tail) = supersession_tail(&subject.digest.value, |digest| {
-        Ok(connection
-            .query_row(
-                "SELECT artifact_digest FROM artifact_supersessions
+    let Some(tail) = supersession_tail(
+        &subject.digest.value,
+        |digest| {
+            Ok(connection
+                .query_row(
+                    "SELECT artifact_digest FROM artifact_supersessions
                      WHERE workspace_id = ?1 AND supersedes_digest = ?2",
-                params![workspace_id.to_string(), digest],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?)
-    })?
+                    params![workspace_id.to_string(), digest],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?)
+        },
+        |hop| {
+            crate::artifact::verified_artifact_within(connection, workspace_id, hop)
+                .map_err(|_| EvaluationError::InvalidStore)?
+                .ok_or(EvaluationError::InvalidStore)?;
+            Ok(())
+        },
+    )?
     else {
         return Ok(None);
     };
@@ -1490,6 +1499,7 @@ fn subject_successor(
 fn supersession_tail(
     start: &str,
     mut next: impl FnMut(&str) -> Result<Option<String>, EvaluationError>,
+    mut verify: impl FnMut(&str) -> Result<(), EvaluationError>,
 ) -> Result<Option<String>, EvaluationError> {
     let mut seen: HashSet<String> = HashSet::from([start.to_owned()]);
     let mut current = start.to_owned();
@@ -1498,6 +1508,13 @@ fn supersession_tail(
         if !seen.insert(successor.clone()) {
             return Err(EvaluationError::InvalidStore);
         }
+        // EVERY hop, not only the last one. The walk reads relation ROWS, and a relation row is a
+        // projection like any other: it says a record exists and says nothing about whether that
+        // record still proves itself. Verifying only the terminal node meant a corrupt middle was
+        // stepped over -- astra's S2 and S3 -- and the tail it led to was reported as verified while
+        // the middle node's own reader, and startup, refused it. A tail is verified only if every
+        // node on the way to it is.
+        verify(&successor)?;
         current = successor.clone();
         tail = Some(successor);
     }
@@ -1513,21 +1530,25 @@ fn superseded_by(
     workspace_id: Uuid,
     row: &StoredRow,
 ) -> Result<Option<EvaluationDigest>, EvaluationError> {
-    let Some(tail) = supersession_tail(&row.digest_value, |digest| {
-        Ok(connection
-            .query_row(
-                "SELECT evaluation_digest FROM evaluation_supersessions
+    let Some(tail) = supersession_tail(
+        &row.digest_value,
+        |digest| {
+            Ok(connection
+                .query_row(
+                    "SELECT evaluation_digest FROM evaluation_supersessions
                  WHERE workspace_id = ?1 AND subject_digest = ?2
                    AND supersedes_evaluation_digest = ?3",
-                params![
-                    workspace_id.to_string(),
-                    row.subject_digest.as_str(),
-                    digest
-                ],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?)
-    })?
+                    params![
+                        workspace_id.to_string(),
+                        row.subject_digest.as_str(),
+                        digest
+                    ],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?)
+        },
+        |_| Ok(()),
+    )?
     else {
         return Ok(None);
     };
