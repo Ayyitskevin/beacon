@@ -22,11 +22,11 @@ use std::thread::{self, JoinHandle};
 
 use beacond::{
     ArtifactContext, ArtifactKind, ArtifactService, AutonomyProfile, BeaconCapability,
-    ClassificationActor, ClassificationBasis, ClassificationSupersedes, CollectedDigest,
-    CollectedSupport, CollectedUncounted, CollectionRequest, Collector, CollectorRefusal,
-    CompletionActor, CompletionDisposition, ConditionOutcome, ConditionResultRecord, Conflicts,
-    DeclaredCheck, EvaluationDraft, EvaluationService, EvaluationSubjectDraft,
-    EvaluationSupersedes, Evaluator, Finding, FindingSeverity, ImpactLevel,
+    CheckPreflightService, ClassificationActor, ClassificationBasis, ClassificationSupersedes,
+    CollectedDigest, CollectedSupport, CollectedUncounted, CollectionRequest, Collector,
+    CollectorRefusal, CompletionActor, CompletionDisposition, ConditionOutcome,
+    ConditionResultRecord, Conflicts, DeclaredCheck, EvaluationDraft, EvaluationService,
+    EvaluationSubjectDraft, EvaluationSupersedes, Evaluator, Finding, FindingSeverity, ImpactLevel,
     LocalModelActivationService, LocalModelEndpoint, MeasuredSpendService, MeasuredSpendV1,
     MissionCompletionV1, MissionDraft, MissionImpactClassificationV1, MissionImpactService,
     MissionMemberDraft, MissionService, MissionView, OUTCOME_RECEIPT_CHECKSUM_LABEL,
@@ -3483,9 +3483,11 @@ fn digest_bytes(hex: &str) -> [u8; 32] {
     bytes
 }
 
-/// A Receipt a completion can cite as support: `seeded_receipt`'s run and receipt rows, plus the
-/// `run.executed` Event that positions the run in the log -- the seeded rows alone have no Event,
-/// and a Receipt with no Event is `Unpositioned`, which is the wrong refusal to test against.
+/// A Receipt row with a run Event its OWNER REFUSES: the run and receipt rows plus a hand-written
+/// `run.executed` Event carrying only the run id, which is not an execution receipt. It positions
+/// the run in the log -- seeded rows alone are `Unpositioned`, the wrong refusal to test against --
+/// and `check_preflight`/`declared_checks` will not vouch for it, which is what sol1's P0 probe
+/// needs. For a Receipt the owner DOES vouch for, use `real_preflight_receipt`.
 /// `bound` says the fixture already bound repository revision 1 through `repository_revision()`,
 /// so only the run and receipt rows are inserted.
 fn receipt_for_support(fixture: &Admitted, bound: bool) -> (Uuid, String) {
@@ -3546,6 +3548,31 @@ fn receipt_for_support(fixture: &Admitted, bound: bool) -> (Uuid, String) {
         )
         .unwrap();
     (run_id, receipt_json)
+}
+
+/// A REAL Receipt: the preflight service's own run, receipt and `run.preflighted` Event, written
+/// by the path that writes them in production, so the Receipt owner's verifier accepts it.
+///
+/// The fixture's bound repository is a local path that does not exist, so the preflight refuses --
+/// which is a real outcome with a real receipt, and the only thing this needs is a Receipt the
+/// owner will vouch for. Returns the run and the EXACT stored `receipt_json` bytes, because that is
+/// what the completion's checksum covers.
+fn real_preflight_receipt(fixture: &Admitted) -> (Uuid, Vec<u8>) {
+    let receipt =
+        CheckPreflightService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+            .preflight(fixture.project.id)
+            .expect("the preflight service writes a run, a receipt and its Event");
+    let run_id = receipt.run_id;
+    let stored: Vec<u8> = fixture
+        .connection()
+        .query_row(
+            "SELECT CAST(receipt_json AS BLOB) FROM receipts
+             WHERE workspace_id = ?1 AND run_id = ?2",
+            params![fixture.store.workspace_id.to_string(), run_id.to_string()],
+            |row| row.get(0),
+        )
+        .expect("the receipt row the service wrote");
+    (run_id, stored)
 }
 
 /// A completion for this Mission at `boundary` whose one condition cites `support`, recorded.
@@ -3615,7 +3642,7 @@ fn every_support_kind_collects_through_its_owner_under_one_condition() {
     fixture.repository_revision();
     fixture.policy_revision();
     let artifact = fixture.record_mission_artifact(b"# The delivered document\n");
-    let (run_id, receipt_json) = receipt_for_support(&fixture, true);
+    let (run_id, receipt_json) = real_preflight_receipt(&fixture);
     let (proposal, evaluation) = proposal_and_evaluation(&fixture);
     let ruling = RulingService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
         .rule(
@@ -3634,7 +3661,7 @@ fn every_support_kind_collects_through_its_owner_under_one_condition() {
             SupportRef::Receipt {
                 run_id,
                 receipt_version: 1,
-                receipt_bytes_sha256: sha256_bytes(receipt_json.as_bytes()),
+                receipt_bytes_sha256: sha256_bytes(&receipt_json),
             },
             SupportRef::Evaluation(digest_bytes(&evaluation.digest().value)),
             SupportRef::Ruling(digest_bytes(&ruling.digest().value)),
@@ -3655,7 +3682,7 @@ fn every_support_kind_collects_through_its_owner_under_one_condition() {
                 workspace_id: fixture.store.workspace_id,
                 run_uuid: run_id,
                 receipt_version: 1,
-                outcome_checksum: sha256_hex(receipt_json.as_bytes()),
+                outcome_checksum: sha256_hex(&receipt_json),
             }),
             CollectedSupport::Evaluation(cited(SourceKind::Evaluation, &evaluation.digest().value)),
             CollectedSupport::Ruling(cited(SourceKind::Ruling, &ruling.digest().value)),
@@ -3671,7 +3698,8 @@ fn every_support_kind_collects_through_its_owner_under_one_condition() {
 #[test]
 fn a_lie_in_the_completions_support_is_refused_while_the_owned_record_is_correct() {
     let fixture = admitted("support-decoy-checksum", vec!["Gates pass".to_owned()]);
-    let (run_id, _) = receipt_for_support(&fixture, false);
+    fixture.repository_revision();
+    let (run_id, _) = real_preflight_receipt(&fixture);
     let digest = record_completion_with_support(
         &fixture,
         newest_event(&fixture.store),
@@ -3690,14 +3718,15 @@ fn a_lie_in_the_completions_support_is_refused_while_the_owned_record_is_correct
     );
 
     let fixture = admitted("support-decoy-version", vec!["Gates pass".to_owned()]);
-    let (run_id, receipt_json) = receipt_for_support(&fixture, false);
+    fixture.repository_revision();
+    let (run_id, receipt_json) = real_preflight_receipt(&fixture);
     let digest = record_completion_with_support(
         &fixture,
         newest_event(&fixture.store),
         vec![SupportRef::Receipt {
             run_id,
             receipt_version: 2,
-            receipt_bytes_sha256: sha256_bytes(receipt_json.as_bytes()),
+            receipt_bytes_sha256: sha256_bytes(&receipt_json),
         }],
     );
     assert_eq!(
