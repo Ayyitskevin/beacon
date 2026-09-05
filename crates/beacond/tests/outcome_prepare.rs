@@ -23,6 +23,7 @@ use beacond::{
     AppendixRequest,
     ArtifactContext,
     ArtifactDigest,
+    ArtifactError,
     ArtifactKind,
     ArtifactService,
     AutonomyProfile,
@@ -4423,6 +4424,94 @@ fn an_unverifiable_predecessors_reason_stays_out_of_the_one_line_message() {
     assert!(
         format!("{fault:?}").contains("SENTINEL_DECODER_TEXT_R28"),
         "the reason is not reachable through Debug: {fault:?}"
+    );
+}
+
+/// R28 tier 2 pass 2 of 14: an Artifact row the log does not account for is refused at startup,
+/// and the refusal names WHICH Artifact and carries the reader's own fault.
+///
+/// Same shape as pass 1, and for the same measured reason: a column tamper is caught by the event
+/// replay first, so the plant is a row with no Event of its own. The planted digest is all `f`, so
+/// it sorts last in the pass's own `ORDER BY` by construction (R39.3).
+#[test]
+fn startup_refuses_an_unaccounted_artifact_row_and_names_the_row() {
+    let fixture = admitted_mission("r28t2-artifact-startup");
+    // A bare admitted Mission records no Artifact, so the fixture makes one to copy.
+    fixture
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            b"# An Artifact for the plant to copy\n",
+            ArtifactContext::Mission {
+                project_id: fixture.project_id,
+                mission_id: fixture.mission_id,
+            },
+            fixture.resident_id,
+            fixture.configuration_id,
+            None,
+        )
+        .expect("the Artifact records");
+    let connection = fixture.store.connect();
+    let existing: String = connection
+        .query_row(
+            "SELECT digest_value FROM artifacts ORDER BY digest_value LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the fixture recorded an Artifact");
+
+    let columns: Vec<String> = connection
+        .prepare("SELECT name FROM pragma_table_info('artifacts')")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let planted = "f".repeat(64);
+    let names = columns.join(", ");
+    let values = columns
+        .iter()
+        .map(|column| {
+            if column == "digest_value" {
+                "?1".to_owned()
+            } else {
+                column.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    connection
+        .execute(
+            &format!(
+                "INSERT INTO artifacts ({names}) SELECT {values} FROM artifacts
+                 WHERE digest_value = ?2"
+            ),
+            params![planted, existing],
+        )
+        .expect("the planted row inserts");
+
+    let read = fixture
+        .artifacts()
+        .get(&planted)
+        .expect_err("the reader trusted a row whose bytes do not hash to its digest");
+    // MEASURED, and it bounds what this pass can prove: the Artifact reader answers a
+    // digest-mismatched row with the FLAT `InvalidStore`, not with an `Inconsistent(..)` of its
+    // own. `digest_value` hashes `canonical_bytes`, so a plant that both carries a fresh digest and
+    // reaches a domain fault would have to mint new canonical bytes through the artifact codec --
+    // a fixture that builds records rather than copying one. So this pass ships row-identity-only
+    // (R41.1), exactly as tier 1's `mission` and `project` did, and its "cause flattened" mutant is
+    // not killable.
+    assert!(
+        matches!(read, ArtifactError::InvalidStore),
+        "the planted fault is not the one this test is about: {read:?}"
+    );
+    drop(connection);
+
+    let refusal = astra_boot(&fixture)
+        .expect_err("a store holding an unaccounted Artifact row reopened Ready");
+    assert!(
+        matches!(&refusal, beacond::SupervisorError::ArtifactStateMismatch),
+        "startup did not refuse the planted Artifact: {refusal:?}"
     );
 }
 
