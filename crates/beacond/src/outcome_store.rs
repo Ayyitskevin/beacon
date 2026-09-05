@@ -37,6 +37,7 @@
 //! `a_manifest_cannot_exist_without_its_candidate` says so, because R18.6 revisits this only if
 //! one ever can. `verify_manifest_state` is what turns that position into an invariant (R18.7).
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use data_encoding::HEXLOWER;
@@ -54,8 +55,8 @@ use crate::mission_impact::{
 };
 use crate::operator_account::{OperatorAccountError, OperatorAccountService};
 use crate::outcome::{
-    AppendixRequest, MalformedOutcome, OutcomeManifestV1, OutcomeRefusal, SourceDigest, SourceKind,
-    VerifiedSources, render,
+    AppendixRequest, MalformedOutcome, OutcomeManifestV1, OutcomeRefusal, OutcomeState,
+    SourceDigest, SourceKind, VerifiedSources, render,
 };
 use crate::outcome_assembler::{AssemblyRefusal, SourcesRefusal, assemble, verified_sources_for};
 use crate::outcome_collector::{CollectionRequest, Collector, CollectorRefusal};
@@ -1050,6 +1051,32 @@ fn reconcile_completion(
                 "the manifest names {what} {claimed} and the completion names {actual}"
             ));
         }
+    }
+
+    // The delivered set, against the completion's own (the record calls it a set). A manifest
+    // that says the completion delivered an Artifact its bytes never cited -- or none where it
+    // cited some -- was accepted here and became a durable claim (sol1's cold read of the
+    // assembler, P0-1). Only the completion's bytes decide what was delivered; the manifest's
+    // list is a copy, and this is where the copy is proved, on the write path and the startup
+    // pass alike. `Verified([])` and `Absent` both claim nothing, which is one claim, not two.
+    let claimed: BTreeSet<String> = match &manifest.delivered_artifacts {
+        OutcomeState::Verified(refs) => refs.iter().map(|r| r.digest.value.clone()).collect(),
+        OutcomeState::Absent(_) | OutcomeState::Broken(_) | OutcomeState::NotEvaluated(_) => {
+            BTreeSet::new()
+        }
+    };
+    let actual: BTreeSet<String> = record
+        .delivered_artifacts
+        .iter()
+        .map(|digest| HEXLOWER.encode(digest))
+        .collect();
+    if claimed != actual {
+        let list = |set: &BTreeSet<String>| set.iter().cloned().collect::<Vec<_>>().join(", ");
+        return Err(format!(
+            "the manifest names delivered Artifacts [{}] and the completion names [{}]",
+            list(&claimed),
+            list(&actual)
+        ));
     }
     Ok(())
 }
