@@ -1743,6 +1743,31 @@ fn outcome_citation_bound_refuses_without_walking_past_it() {
 }
 
 #[test]
+fn outcome_collection_length_refuses_before_cloning_and_sorting_the_overlimit_array() {
+    let (mut near, sources) = bounded_manifest(1);
+    let repeated = match &near.delivered_artifacts {
+        OutcomeState::Verified(refs) => refs[0].clone(),
+        other => panic!("fixture has no verified Artifact: {other:?}"),
+    };
+    near.delivered_artifacts = OutcomeState::Verified(vec![repeated.clone(); 4_097]);
+    let mut far = near.clone();
+    far.delivered_artifacts = OutcomeState::Verified(vec![repeated; 50_000]);
+
+    let near_allocated = counting::measure(|| {
+        assert!(render(&near, &sources).is_err());
+    });
+    let far_allocated = counting::measure(|| {
+        assert!(render(&far, &sources).is_err());
+    });
+
+    assert!(
+        far_allocated <= near_allocated * 2,
+        "the 4,096-entry cap ran after cloning/sorting: {near_allocated} bytes at 4,097, \
+         {far_allocated} bytes at 50,000",
+    );
+}
+
+#[test]
 fn outcome_each_bound_names_itself_and_is_distinct_from_other_bounds_and_absence() {
     let names = [
         OutcomeBound::CitationCount.as_str(),
