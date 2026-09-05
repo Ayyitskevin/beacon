@@ -123,8 +123,6 @@ pub enum CompletionReadRefusal {
     BoundaryOutOfRange,
     /// Exactly one `mission.completed` Event must name this completion.
     EventCount(i64),
-    /// A delivered Artifact was cited and no Artifact entity exists to verify it against.
-    NoArtifactEntity,
     Store(String),
 }
 
@@ -175,8 +173,6 @@ impl std::fmt::Display for CompletionReadRefusal {
             ),
             Self::BoundaryOutOfRange => formatter.write_str("boundary event sequence out of range"),
             Self::EventCount(count) => write!(formatter, "{count} completion events, expected 1"),
-            Self::NoArtifactEntity => formatter
-                .write_str("delivered artifacts cannot be cited until the artifact entity exists"),
             Self::Store(reason) => write!(formatter, "store: {reason}"),
         }
     }
@@ -687,12 +683,11 @@ pub fn record_completion(
     connection: &mut Connection,
     record: &MissionCompletionV1,
 ) -> Result<String, CompletionReadRefusal> {
-    // No Artifact entity exists yet, so a delivered-Artifact digest is a reference nothing can
-    // verify -- exactly the dangling claim the record's vocabulary refuses to have a literal for.
-    // The refusal names what is missing rather than storing the digest and hoping.
-    if !record.delivered_artifacts.is_empty() {
-        return Err(CompletionReadRefusal::NoArtifactEntity);
-    }
+    // A delivered-Artifact digest is stored as cited, not verified here (R19.1, R32.1). The
+    // collector reads each one through the Artifact module's own verified reader at the
+    // completion's boundary and ABORTS on one that does not resolve or is scoped elsewhere
+    // (`outcome_collector.rs`, `artifact_at_or_before`). Re-checking it here would be a second
+    // copy of that rule, in a second place, to keep true forever.
     let bytes = record
         .canonical_bytes()
         .map_err(|_| CompletionReadRefusal::BytesDisagree)?;

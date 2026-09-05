@@ -1654,33 +1654,6 @@ fn an_accountable_resident_not_on_the_admission_roster_is_refused_by_the_store()
 }
 
 #[test]
-fn a_delivered_artifact_is_refused_while_no_artifact_entity_exists() {
-    // Bullet 9. The reference's SHAPE is settled (R16: the Artifact record's digest); its referent
-    // is not. Storing a digest nothing can verify would be exactly the dangling claim the record's
-    // vocabulary refuses to have a literal for, so the refusal names what is missing.
-    let store = TestStore::new("completion-artifact");
-    let accounts = enrolled_accounts(&store);
-    let mission = admit_with_conditions(&store, &accounts, vec!["Gates pass".to_owned()]);
-    let boundary = admitted_sequence(&store, mission.id);
-    let mut record = completion_for(
-        &store,
-        &mission,
-        boundary,
-        vec![beacond::ConditionOutcome::Met],
-    );
-    record.delivered_artifacts = vec![[0x22; 32]];
-
-    let mut connection = Connection::open(&store.path).unwrap();
-    connection
-        .pragma_update(None, "foreign_keys", "ON")
-        .unwrap();
-    assert_eq!(
-        beacond::record_completion(&mut connection, &record),
-        Err(beacond::CompletionReadRefusal::NoArtifactEntity)
-    );
-}
-
-#[test]
 fn a_row_that_disagrees_with_its_own_bytes_fails_the_reader_and_fails_startup() {
     // Bullet 4. The indexed columns are a projection of the bytes, and a projection that can drift
     // from its source is a second place to be wrong about what a completion says.
