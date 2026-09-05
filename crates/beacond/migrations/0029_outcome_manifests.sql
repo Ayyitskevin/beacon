@@ -39,7 +39,7 @@ CREATE TABLE outcome_manifests (
     workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
     digest_algorithm TEXT NOT NULL CHECK (digest_algorithm = 'sha256'),
     digest_canonicalizer TEXT NOT NULL
-        CHECK (digest_canonicalizer = 'beacon.outcome.manifest.v2'),
+        CHECK (digest_canonicalizer = 'beacon.outcome.manifest.v1'),
     manifest_digest TEXT NOT NULL PRIMARY KEY CHECK (
         length(manifest_digest) = 64 AND manifest_digest NOT GLOB '*[^0-9a-f]*'
     ),
