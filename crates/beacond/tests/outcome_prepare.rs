@@ -7057,3 +7057,99 @@ fn a_document_the_translator_cannot_read_is_a_named_refusal_not_an_empty_pdf() {
         "the renderer's refusal was flattened or renamed: {refusal:?}"
     );
 }
+
+/// The PDF is its version's, not the newest one's, and not version 1's.
+///
+/// Fable's mutant at `5f12f68`: pin `get_version_within`'s version argument to `1` and all five
+/// item-7 bars stay green — every one of them publishes once and asks for version 1, so the
+/// argument was never keyed. On a versioned API that is the lie "the PDF you asked for is the
+/// version you asked for", and export already has the bar this one mirrors
+/// (`a_superseded_version_exports_at_its_own_number_and_says_a_newer_exists`).
+///
+/// Three things, and the third is what makes the first two more than a coincidence: the two PDFs
+/// differ; each equals `render_pdf` of that version's OWN exported bytes; and each reports its own
+/// number beside the count, so a superseded version can be told from the current one (R24.2).
+#[test]
+fn the_pdf_of_a_superseded_version_is_rendered_from_that_versions_bytes() {
+    let fixture = admitted_mission("pdf-service-superseded");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, first_digest, first_evaluation) = fixture.publishable();
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &first_digest, &first_evaluation)
+        .expect("version 1 publishes");
+
+    // The correction: `Include` rather than `PolicyDefault`, so the request is in the manifest and
+    // the canonical bytes differ even though this Mission is ordinary.
+    let corrected = fixture
+        .outcomes
+        .prepare_for_mission(fixture.mission_id, AppendixRequest::Include)
+        .expect("the correction prepares");
+    let corrected_record = fixture
+        .artifacts()
+        .get(&corrected.candidate_artifact_digest)
+        .unwrap();
+    let corrected_evaluation =
+        fixture.evaluate(&corrected.candidate_artifact_digest, Verdict::Meets);
+    fixture
+        .outcomes
+        .publish(
+            fixture.mission_id,
+            corrected_record.digest(),
+            corrected_evaluation.digest(),
+        )
+        .expect("the correction publishes");
+
+    let one = fixture
+        .outcomes
+        .render_pdf_version(fixture.mission_id, 1)
+        .expect("a superseded version still renders");
+    let two = fixture
+        .outcomes
+        .render_pdf_version(fixture.mission_id, 2)
+        .expect("the current version renders");
+
+    assert_eq!(
+        (one.publication_version(), one.publication_version_count()),
+        (1, 2),
+        "version 1 did not report itself as one of two"
+    );
+    assert_eq!(
+        (two.publication_version(), two.publication_version_count()),
+        (2, 2),
+        "version 2 did not report itself as one of two"
+    );
+    assert_ne!(
+        one.candidate_digest(),
+        two.candidate_digest(),
+        "the two versions cite one candidate, so this proves nothing"
+    );
+    assert_ne!(
+        one.bytes(),
+        two.bytes(),
+        "two versions of one Mission rendered to the same PDF"
+    );
+
+    // Each is the render of ITS OWN exported bytes, computed here rather than taken on trust.
+    for version in [1, 2] {
+        let exported = fixture
+            .outcomes
+            .export_markdown_version(fixture.mission_id, version)
+            .expect("the version exports");
+        let served = if version == 1 { &one } else { &two };
+        assert_eq!(served.candidate_digest(), exported.digest());
+        assert_eq!(
+            served.bytes(),
+            beacond::render_pdf(
+                exported.bytes(),
+                "beacon.outcome.md.v1",
+                &exported.digest().value,
+                &beacond::BEACON_OUTCOME_1,
+            )
+            .expect("the exported bytes render")
+            .as_slice(),
+            "version {version}'s PDF is not the render of version {version}'s bytes"
+        );
+    }
+}
