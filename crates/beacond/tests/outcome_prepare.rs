@@ -6687,3 +6687,373 @@ fn the_history_and_the_export_read_one_missions_rows_and_not_another_missions() 
         "Mission a's count counted another Mission's publications"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// Slice 4b item 7 — the PDF reaches the service (R30.3)
+// ---------------------------------------------------------------------------------------------
+
+/// The derivative bar (R30.3): the export is the source, the PDF is a function of it, and the PDF
+/// is stored nowhere.
+///
+/// "Delete the derivative and regenerate" is the property, and it is asserted the only way it can
+/// be: the returned buffer is dropped, the export is read again and is unchanged, and a second
+/// render is byte-identical. There is nothing on disk to delete, which is the point -- the service
+/// stores no PDF, so a cache cannot go stale against a profile change.
+#[test]
+fn the_markdown_export_is_unchanged_and_the_pdf_regenerates_from_it() {
+    let fixture = admitted_mission("pdf-service-derivative");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, candidate_digest, evaluation_digest) = fixture.publishable();
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
+        .expect("the honest pairing publishes");
+
+    let before = fixture
+        .outcomes
+        .export_markdown_version(fixture.mission_id, 1)
+        .expect("the export reads");
+    let first = fixture
+        .outcomes
+        .render_pdf_version(fixture.mission_id, 1)
+        .expect("the document renders");
+    assert!(!first.bytes().is_empty(), "an empty PDF is not a render");
+    assert_eq!(first.publication_version(), 1);
+    assert_eq!(first.publication_version_count(), 1);
+    assert_eq!(first.profile(), "beacon-outcome-1");
+    assert_eq!(first.candidate_digest(), before.digest());
+
+    // Drop the derivative. Nothing was stored, so there is nothing to delete.
+    let first_bytes = first.into_bytes();
+
+    let after = fixture
+        .outcomes
+        .export_markdown_version(fixture.mission_id, 1)
+        .expect("the export still reads");
+    assert_eq!(
+        before.bytes(),
+        after.bytes(),
+        "rendering a PDF changed the canonical export"
+    );
+    let second = fixture
+        .outcomes
+        .render_pdf_version(fixture.mission_id, 1)
+        .expect("the document renders again");
+    assert_eq!(
+        first_bytes,
+        second.bytes(),
+        "the same document rendered to different bytes on a second call"
+    );
+
+    // And it is the render of THOSE bytes, computed here rather than taken on trust.
+    assert_eq!(
+        first_bytes,
+        beacond::render_pdf(
+            after.bytes(),
+            "beacon.outcome.md.v1",
+            &after.digest().value,
+            &beacond::BEACON_OUTCOME_1,
+        )
+        .expect("the exported bytes render"),
+        "the service's PDF is not the render of the exported bytes"
+    );
+}
+
+/// The bytes the PDF renders are the STORED ones, not a fresh assembly (R30.3, mutant 1).
+///
+/// Byte equality on an ordinary publication cannot show this: re-assembling the same manifest emits
+/// the same Markdown, so a service that quietly re-rendered would pass. It needs a stored candidate
+/// the current assembler would not produce, which is 4a's plant idiom
+/// (`exported_bytes_are_the_stored_candidate_bytes_byte_for_byte`) — the appendix rides along
+/// untouched so `candidate_proves_manifest` still holds, and everything else may differ.
+///
+/// The planted line is APPENDED and is ordinary v1 prose, deliberately. 4a's plant prepends an HTML
+/// comment, which the translator refuses on the unescaped `<` — that would also kill the mutant,
+/// but through a refusal, and a bar that proves its point by failing to render proves less than one
+/// that renders two different documents and says which it got.
+#[test]
+fn the_pdf_is_rendered_from_the_exported_bytes_not_a_fresh_render() {
+    let fixture = admitted_mission("pdf-service-planted");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (candidate, candidate_digest, evaluation_digest) = fixture.publishable();
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
+        .expect("the honest pairing publishes");
+
+    let rendered = fixture
+        .artifacts()
+        .get(&candidate.candidate_artifact_digest)
+        .unwrap()
+        .content()
+        .to_vec();
+    let mut planted_content = rendered.clone();
+    planted_content.extend_from_slice(b"\nA line the assembler would never emit.\n");
+    assert_ne!(planted_content, rendered);
+
+    let planted = fixture
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            &planted_content,
+            ArtifactContext::Mission {
+                project_id: fixture.project_id,
+                mission_id: fixture.mission_id,
+            },
+            fixture.resident_id,
+            fixture.configuration_id,
+            None,
+        )
+        .expect("the planted candidate records");
+    let planted_evaluation = fixture.evaluate(&planted.digest().value, Verdict::Meets);
+
+    with_trigger_down(
+        &fixture.store,
+        "outcome_manifests_no_update",
+        "outcome_manifests",
+        "Outcome manifests are immutable",
+        |connection| {
+            connection
+                .execute(
+                    "UPDATE outcome_manifests SET candidate_artifact_digest = ?1
+                     WHERE workspace_id = ?2",
+                    params![planted.digest().value, fixture.workspace_id.to_string()],
+                )
+                .unwrap();
+        },
+    );
+    with_trigger_down(
+        &fixture.store,
+        "outcome_publications_no_update",
+        "outcome_publications",
+        "Outcome publications are immutable",
+        |connection| {
+            connection
+                .execute(
+                    "UPDATE outcome_publications
+                     SET candidate_artifact_digest = ?1, evaluation_digest = ?2
+                     WHERE workspace_id = ?3",
+                    params![
+                        planted.digest().value,
+                        planted_evaluation.digest().value,
+                        fixture.workspace_id.to_string()
+                    ],
+                )
+                .unwrap();
+        },
+    );
+
+    // The control: the store really does hold bytes the assembler would not emit.
+    let exported = fixture
+        .outcomes
+        .export_markdown_version(fixture.mission_id, 1)
+        .expect("the planted publication reads back");
+    assert_eq!(exported.bytes(), planted_content.as_slice());
+    assert_ne!(
+        exported.bytes(),
+        rendered.as_slice(),
+        "the plant did not take, so this proves nothing"
+    );
+
+    let served = fixture
+        .outcomes
+        .render_pdf_version(fixture.mission_id, 1)
+        .expect("the planted document renders");
+
+    // What a service that re-rendered would have produced.
+    let from_a_fresh_assembly = beacond::render_pdf(
+        &rendered,
+        "beacon.outcome.md.v1",
+        &planted.digest().value,
+        &beacond::BEACON_OUTCOME_1,
+    )
+    .expect("the assembler's own bytes render too");
+
+    assert_ne!(
+        served.bytes(),
+        from_a_fresh_assembly.as_slice(),
+        "the service rendered the assembler's bytes, not the ones the store holds"
+    );
+    assert_eq!(
+        served.bytes(),
+        beacond::render_pdf(
+            exported.bytes(),
+            "beacon.outcome.md.v1",
+            &exported.digest().value,
+            &beacond::BEACON_OUTCOME_1,
+        )
+        .expect("the exported bytes render")
+        .as_slice(),
+        "the service's PDF is not the render of the exported bytes"
+    );
+}
+
+/// The access check is export's, so export's bars have to hold through this method too (row 3).
+///
+/// Re-run rather than assumed: `render_pdf_version` adds no authorization of its own, and the only
+/// way to say that truthfully is to ask it the same two questions 4a asks `export_markdown`.
+#[test]
+fn a_mission_in_another_workspace_renders_no_pdf_and_says_only_absent() {
+    let fixture = admitted_mission("pdf-service-cross-workspace");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, candidate_digest, evaluation_digest) = fixture.publishable();
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
+        .expect("the Mission publishes in its own Workspace");
+    assert!(
+        fixture
+            .outcomes
+            .render_pdf_version(fixture.mission_id, 1)
+            .is_ok()
+    );
+
+    let elsewhere = OutcomeService::new(Arc::clone(&fixture.accounts), Uuid::new_v4());
+    let refusal = elsewhere
+        .render_pdf_version(fixture.mission_id, 1)
+        .expect_err("another Workspace rendered this Mission's document");
+    assert!(matches!(refusal, PublishRefusal::Absent), "{refusal:?}");
+
+    // Indistinguishable from a Mission that simply has no publication, which is why the refusal
+    // confirms nothing about what the other Workspace holds (R29.6).
+    let unpublished = admitted_mission("pdf-service-cross-workspace-unpublished");
+    assert!(matches!(
+        unpublished
+            .outcomes
+            .render_pdf_version(unpublished.mission_id, 1)
+            .expect_err("an unpublished Mission rendered"),
+        PublishRefusal::Absent
+    ));
+}
+
+#[test]
+fn rendering_without_an_authenticated_session_is_refused_and_not_as_absent() {
+    let fixture = admitted_mission("pdf-service-locked");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, candidate_digest, evaluation_digest) = fixture.publishable();
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
+        .expect("the pairing publishes while unlocked");
+    assert!(
+        fixture
+            .outcomes
+            .render_pdf_version(fixture.mission_id, 1)
+            .is_ok()
+    );
+
+    fixture.accounts.lock().unwrap();
+
+    // The ACCOUNT's refusal, carried typed rather than flattened into `Absent` -- a locked store
+    // must not look like a Mission that has nothing.
+    assert!(
+        matches!(
+            fixture
+                .outcomes
+                .render_pdf_version(fixture.mission_id, 1)
+                .expect_err("a locked store rendered"),
+            PublishRefusal::Account(OperatorAccountError::NotAuthenticated)
+        ),
+        "a locked store's refusal was not the account's"
+    );
+}
+
+/// A stored document the translator cannot read is a refusal BY NAME, never an empty PDF (R30.3).
+#[test]
+fn a_document_the_translator_cannot_read_is_a_named_refusal_not_an_empty_pdf() {
+    let fixture = admitted_mission("pdf-service-untranslatable");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (candidate, candidate_digest, evaluation_digest) = fixture.publishable();
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
+        .expect("the honest pairing publishes");
+
+    // 4a's plant, with ITS bytes: an HTML comment the renderer would never emit. `escape_v1`
+    // escapes `<`, so an unescaped one is a construct outside the v1 shape.
+    let rendered = fixture
+        .artifacts()
+        .get(&candidate.candidate_artifact_digest)
+        .unwrap()
+        .content()
+        .to_vec();
+    let mut planted_content = b"<!-- planted: not what the assembler renders -->\n".to_vec();
+    planted_content.extend_from_slice(&rendered);
+    let planted = fixture
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            &planted_content,
+            ArtifactContext::Mission {
+                project_id: fixture.project_id,
+                mission_id: fixture.mission_id,
+            },
+            fixture.resident_id,
+            fixture.configuration_id,
+            None,
+        )
+        .expect("the planted candidate records");
+    let planted_evaluation = fixture.evaluate(&planted.digest().value, Verdict::Meets);
+    with_trigger_down(
+        &fixture.store,
+        "outcome_manifests_no_update",
+        "outcome_manifests",
+        "Outcome manifests are immutable",
+        |connection| {
+            connection
+                .execute(
+                    "UPDATE outcome_manifests SET candidate_artifact_digest = ?1
+                     WHERE workspace_id = ?2",
+                    params![planted.digest().value, fixture.workspace_id.to_string()],
+                )
+                .unwrap();
+        },
+    );
+    with_trigger_down(
+        &fixture.store,
+        "outcome_publications_no_update",
+        "outcome_publications",
+        "Outcome publications are immutable",
+        |connection| {
+            connection
+                .execute(
+                    "UPDATE outcome_publications
+                     SET candidate_artifact_digest = ?1, evaluation_digest = ?2
+                     WHERE workspace_id = ?3",
+                    params![
+                        planted.digest().value,
+                        planted_evaluation.digest().value,
+                        fixture.workspace_id.to_string()
+                    ],
+                )
+                .unwrap();
+        },
+    );
+
+    // The export still succeeds: the bytes are the store's, and export never reads them.
+    assert!(
+        fixture
+            .outcomes
+            .export_markdown_version(fixture.mission_id, 1)
+            .is_ok()
+    );
+
+    let refusal = fixture
+        .outcomes
+        .render_pdf_version(fixture.mission_id, 1)
+        .expect_err("an untranslatable document produced a PDF");
+    assert!(
+        matches!(
+            refusal,
+            PublishRefusal::Pdf(beacond::PdfRefusal::Translate(
+                beacond::TypstRefusal::UnescapedConstruct { character: '<', .. }
+            ))
+        ),
+        "the renderer's refusal was flattened or renamed: {refusal:?}"
+    );
+}
