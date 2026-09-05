@@ -707,6 +707,113 @@ impl InconsistentProposal {
     }
 }
 
+/// Which fault the Proposal startup pass hit, and WHICH ROW hit it (R27.1's shape, R28.1).
+pub(crate) enum ProposalStateFault {
+    /// The enumeration itself failed: no row to name, because none was reached.
+    Store(rusqlite::Error),
+    /// One Proposal did not re-prove. `cause` is the owning reader's OWN error, carried whole.
+    Row {
+        workspace_id: Uuid,
+        digest_value: String,
+        cause: ProposalError,
+    },
+    /// Counts across the store: no row to name (R39.2).
+    Totals(ProposalError),
+    /// A row whose Workspace column is not a UUID. Unreachable while the foreign-key check and the
+    /// Workspace pass run first.
+    Identity {
+        workspace_id: String,
+        digest_value: String,
+    },
+}
+
+impl ProposalError {
+    /// The variant's NAME, for R28.4's one-line startup message.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Account(_) => "Account",
+            Self::Oversize => "Oversize",
+            Self::Malformed(_) => "Malformed",
+            Self::NotCanonical => "NotCanonical",
+            Self::Inconsistent(_) => "Inconsistent",
+            Self::NotFound => "NotFound",
+            Self::DigestCollision => "DigestCollision",
+            Self::InvalidStore => "InvalidStore",
+            Self::Store(_) => "Store",
+            Self::Json(_) => "Json",
+        }
+    }
+}
+
+impl fmt::Display for ProposalStateFault {
+    /// R28.4: the KEY and the fault's NAME, never the carried error's own text.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(_) => formatter.write_str("the Proposals could not be read"),
+            Self::Row {
+                workspace_id,
+                digest_value,
+                cause,
+            } => write!(
+                formatter,
+                "Proposal {digest_value} in Workspace {workspace_id} does not re-prove: {}",
+                cause.name()
+            ),
+            Self::Totals(cause) => write!(
+                formatter,
+                "the Proposals do not agree with the log as a whole: {}",
+                cause.name()
+            ),
+            Self::Identity {
+                workspace_id,
+                digest_value,
+            } => write!(
+                formatter,
+                "a Proposal row's Workspace is not readable: {workspace_id}, Proposal \
+                 {digest_value}"
+            ),
+        }
+    }
+}
+
+/// Hand-written and NOT delegating to `Display`: R28.4 keeps the carried text reachable here.
+impl fmt::Debug for ProposalStateFault {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => formatter.debug_tuple("Store").field(error).finish(),
+            Self::Totals(cause) => formatter.debug_tuple("Totals").field(cause).finish(),
+            Self::Row {
+                workspace_id,
+                digest_value,
+                cause,
+            } => formatter
+                .debug_struct("Row")
+                .field("workspace_id", workspace_id)
+                .field("digest_value", digest_value)
+                .field("cause", cause)
+                .finish(),
+            Self::Identity {
+                workspace_id,
+                digest_value,
+            } => formatter
+                .debug_struct("Identity")
+                .field("workspace_id", workspace_id)
+                .field("digest_value", digest_value)
+                .finish(),
+        }
+    }
+}
+
+impl std::error::Error for ProposalStateFault {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::Totals(cause) | Self::Row { cause, .. } => Some(cause),
+            Self::Identity { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum ProposalError {
     Account(OperatorAccountError),
@@ -2323,23 +2430,53 @@ fn columns_match(stored: &StoredProposal, payload: &ProposalV1) -> bool {
 ///
 /// Current readiness is derived afterwards and never fails startup: a historical Proposal does not
 /// become corrupt merely because a referenced current revision moved.
-pub(crate) fn verify_proposal_state(connection: &Connection) -> Result<(), ProposalError> {
-    let mut statement = connection.prepare(
-        "SELECT workspace_id, digest_value FROM proposals ORDER BY workspace_id, digest_value",
-    )?;
+pub(crate) fn verify_proposal_state(connection: &Connection) -> Result<(), ProposalStateFault> {
+    let mut statement = connection
+        .prepare(
+            "SELECT workspace_id, digest_value FROM proposals ORDER BY workspace_id, digest_value",
+        )
+        .map_err(ProposalStateFault::Store)?;
     let rows = statement
         .query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+        })
+        .map_err(ProposalStateFault::Store)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(ProposalStateFault::Store)?;
     drop(statement);
 
-    if !rows.is_empty() && !owner_account_exists(connection)? {
-        return Err(ProposalError::InvalidStore);
+    if !rows.is_empty() && !owner_account_exists(connection).map_err(ProposalStateFault::Store)? {
+        return Err(ProposalStateFault::Totals(ProposalError::InvalidStore));
     }
 
     for (workspace_id, digest_value) in &rows {
-        let workspace_id = parse_uuid(workspace_id)?;
+        let identity = || ProposalStateFault::Identity {
+            workspace_id: workspace_id.clone(),
+            digest_value: digest_value.clone(),
+        };
+        let parsed = Uuid::parse_str(workspace_id).map_err(|_| identity())?;
+        verify_one_proposal(connection, parsed, digest_value).map_err(|cause| {
+            ProposalStateFault::Row {
+                workspace_id: parsed,
+                digest_value: digest_value.clone(),
+                cause,
+            }
+        })?;
+    }
+    verify_proposal_totals(connection, rows.len()).map_err(|cause| match cause {
+        ProposalError::Store(error) => ProposalStateFault::Store(error),
+        other => ProposalStateFault::Totals(other),
+    })?;
+    Ok(())
+}
+
+/// One stored Proposal, re-proved. Unchanged from what the loop held inline.
+fn verify_one_proposal(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+) -> Result<(), ProposalError> {
+    {
         let stored = load_stored(connection, workspace_id, digest_value)?
             .ok_or(ProposalError::InvalidStore)?;
         let proposal = verified_proposal(connection, stored)?;
@@ -2348,20 +2485,24 @@ pub(crate) fn verify_proposal_state(connection: &Connection) -> Result<(), Propo
             "SELECT count(*) FROM events
              WHERE workspace_id = ?1 AND kind = 'proposal.submitted'
                AND json_extract(payload_json, '$.proposal.digest.value') = ?2",
-            params![workspace_id.to_string(), digest_value.as_str()],
+            params![workspace_id.to_string(), digest_value],
             |row| row.get(0),
         )?;
         if event_count != 1 {
             return Err(ProposalError::InvalidStore);
         }
     }
+    Ok(())
+}
 
+/// The counts across the store: no row to name.
+fn verify_proposal_totals(connection: &Connection, proposal_count: usize) -> Result<(), ProposalError> {
     let total_events: i64 = connection.query_row(
         "SELECT count(*) FROM events WHERE kind = 'proposal.submitted'",
         [],
         |row| row.get(0),
     )?;
-    if usize::try_from(total_events) != Ok(rows.len()) {
+    if usize::try_from(total_events) != Ok(proposal_count) {
         return Err(ProposalError::InvalidStore);
     }
     Ok(())
@@ -3566,5 +3707,67 @@ mod tests {
             token_ceiling: 0,
         };
         assert_eq!(decode(&encode(&zeroed).unwrap()).unwrap(), zeroed);
+    }
+}
+
+#[cfg(test)]
+mod name_witness {
+    use super::*;
+
+    /// Pinned independently of `name()` (the fold at 30d2a20).
+    fn expected_name(error: &ProposalError) -> &'static str {
+        match error {
+            ProposalError::Account(_) => "Account",
+            ProposalError::Oversize => "Oversize",
+            ProposalError::Malformed(_) => "Malformed",
+            ProposalError::NotCanonical => "NotCanonical",
+            ProposalError::Inconsistent(_) => "Inconsistent",
+            ProposalError::NotFound => "NotFound",
+            ProposalError::DigestCollision => "DigestCollision",
+            ProposalError::InvalidStore => "InvalidStore",
+            ProposalError::Store(_) => "Store",
+            ProposalError::Json(_) => "Json",
+        }
+    }
+
+    #[test]
+    fn every_proposal_error_arm_has_its_own_pinned_name() {
+        let every_arm = [
+            ProposalError::Account(crate::operator_account::OperatorAccountError::PasswordTooShort),
+            ProposalError::Oversize,
+            ProposalError::Malformed(MalformedProposal::Magic),
+            ProposalError::NotCanonical,
+            ProposalError::Inconsistent(InconsistentProposal::WorkspaceScope),
+            ProposalError::NotFound,
+            ProposalError::DigestCollision,
+            ProposalError::InvalidStore,
+            ProposalError::Store(rusqlite::Error::QueryReturnedNoRows),
+            ProposalError::Json(serde_json::from_str::<u8>("\"x\"").unwrap_err()),
+        ];
+        assert_eq!(
+            every_arm.len(),
+            10,
+            "an arm was added to `ProposalError` without a fixture here"
+        );
+        for arm in &every_arm {
+            assert_eq!(
+                arm.name(),
+                expected_name(arm),
+                "the startup name does not match the pinned table: {arm:?}"
+            );
+        }
+        let names: std::collections::BTreeSet<&str> =
+            every_arm.iter().map(ProposalError::name).collect();
+        assert_eq!(
+            names.len(),
+            10,
+            "two arms share a startup name, so a swap between them is invisible: {names:?}"
+        );
+        for name in names {
+            assert!(
+                !name.contains(' ') && !name.contains('{'),
+                "a name is a name, not a rendering: {name}"
+            );
+        }
     }
 }
