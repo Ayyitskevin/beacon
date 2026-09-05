@@ -25,7 +25,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use uuid::Uuid;
 
 use crate::artifact::{
-    ArtifactDigest, ArtifactError, VerifiedArtifactRecord, supersession_tail,
+    ArtifactContext, ArtifactDigest, ArtifactError, VerifiedArtifactRecord, supersession_tail,
     verified_artifact_within,
 };
 use crate::evaluation::{
@@ -213,6 +213,17 @@ pub enum PublishRefusal {
     },
     /// The relation already holds this candidate or this Evaluation.
     AlreadyPublished,
+    /// A record the relation cites is about a different Mission than the relation row names.
+    ///
+    /// The relation's `mission_id` is an identity column with a foreign key to `missions` -- which
+    /// proves the Mission EXISTS, and proves nothing about whether the cited records are its. Every
+    /// cited record carries its own Mission inside its own bytes, and this is where the row's claim
+    /// is held to them (sol1's cold read, P0).
+    MissionBindingBroken {
+        what: &'static str,
+        named: Uuid,
+        relation: Uuid,
+    },
     /// No publication exists for that Mission, or not at that version.
     Absent,
     /// A cited record did not verify at read time.
@@ -249,6 +260,15 @@ impl fmt::Display for PublishRefusal {
             Self::AlreadyPublished => {
                 formatter.write_str("that candidate or Evaluation is already published")
             }
+            Self::MissionBindingBroken {
+                what,
+                named,
+                relation,
+            } => write!(
+                formatter,
+                "the {what} this publication cites is about Mission {named} and the publication is \
+                 filed under Mission {relation}"
+            ),
             Self::Absent => formatter.write_str("this Mission has no published Outcome"),
             Self::Unverified(detail) => write!(formatter, "{detail}"),
             Self::Store(error) => write!(formatter, "{error}"),
@@ -519,6 +539,30 @@ fn read_publication_within(
             PublicationSeamRefusal::SubjectIsNotTheCandidate,
         ));
     }
+    // Every cited record's own Mission, against the Mission this row is filed under. The row's
+    // foreign key proves the Mission exists; nothing until here proved the records are ITS.
+    if subject.mission_id != row.mission_id {
+        return Err(PublishRefusal::MissionBindingBroken {
+            what: "Evaluation's subject",
+            named: subject.mission_id,
+            relation: row.mission_id,
+        });
+    }
+    if let ArtifactContext::Mission { mission_id, .. } = candidate.payload().context {
+        if mission_id != row.mission_id {
+            return Err(PublishRefusal::MissionBindingBroken {
+                what: "candidate Artifact",
+                named: mission_id,
+                relation: row.mission_id,
+            });
+        }
+    } else {
+        return Err(PublishRefusal::MissionBindingBroken {
+            what: "candidate Artifact",
+            named: Uuid::nil(),
+            relation: row.mission_id,
+        });
+    }
 
     // The manifest, through its verified reader: bytes re-hashed, decoded, re-encoded.
     let manifest_digest: Option<String> = connection
@@ -531,6 +575,32 @@ fn read_publication_within(
         .optional()?;
     let manifest_digest = manifest_digest.ok_or(PublishRefusal::NoManifestForCandidate)?;
     let manifest = verified_manifest_within(connection, workspace_id, &manifest_digest)?;
+    if manifest.manifest().mission_id != row.mission_id {
+        return Err(PublishRefusal::MissionBindingBroken {
+            what: "manifest",
+            named: manifest.manifest().mission_id,
+            relation: row.mission_id,
+        });
+    }
+    // And the completion the manifest is frozen on, through its owning reader: the deepest record
+    // in the chain, and the one that says what Mission actually completed.
+    let completion = crate::mission_completion_store::verified_completion_within(
+        connection,
+        workspace_id,
+        &manifest.manifest().completion.digest.value,
+    )
+    .map_err(|refusal| {
+        PublishRefusal::Unverified(format!(
+            "the completion this publication's manifest is frozen on did not verify: {refusal}"
+        ))
+    })?;
+    if completion.mission_id != row.mission_id {
+        return Err(PublishRefusal::MissionBindingBroken {
+            what: "completion",
+            named: completion.mission_id,
+            relation: row.mission_id,
+        });
+    }
 
     // Read-time state, derived now and labelled as such. The Artifact chain comes back cited-first,
     // so the cited digest is in the chain rather than replaced by it.
