@@ -379,7 +379,20 @@ pub enum SupervisorError {
     CandidateEventMismatch(i64),
     CandidateStateMismatch,
     DispatchEventMismatch(i64),
-    DispatchStateMismatch,
+    /// The startup step that FINISHES an interrupted dispatch could not complete its write.
+    ///
+    /// Deliberately not a `...StateMismatch` (R28.1). Its nineteen neighbours in `inspect_store`
+    /// are verification passes: they compare a record against its own bytes and refuse when the two
+    /// disagree, and "state mismatch" is the verdict of that comparison.
+    /// `dispatch::finish_prepared_dispatches` compares nothing -- it writes a terminal Receipt for
+    /// an attempt that died before recording one. When it fails, nothing disagreed; a write did not
+    /// complete, and the Run it was recovering still has no terminal Receipt.
+    ///
+    /// It does not name the dispatch. The writer knows the run id at every one of its failure
+    /// points, but `DispatchError` has no variant that carries one, and giving it one is the
+    /// carried-cause change R27.2 holds for Kevin's timing -- not something to do in passing under
+    /// a rename.
+    DispatchRecoveryFailed,
     EvaluationStateMismatch,
     MissionCompletionEventMismatch(i64),
     MissionCompletionStateMismatch,
@@ -621,9 +634,10 @@ impl fmt::Display for SupervisorError {
                 formatter,
                 "Event sequence {sequence} does not match its stored dispatch Receipt"
             ),
-            Self::DispatchStateMismatch => write!(
+            Self::DispatchRecoveryFailed => write!(
                 formatter,
-                "an interrupted dispatch could not be finished from its preparation record"
+                "the recovery write for an interrupted dispatch did not complete, so its Run \
+                 still has no terminal Receipt"
             ),
             Self::PauseEventMismatch(sequence) => write!(
                 formatter,
@@ -1259,11 +1273,15 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     // declared effects and re-verifies them against that Proposal's own bytes.
     candidate::verify_candidate_state(connection)
         .map_err(|_| SupervisorError::CandidateStateMismatch)?;
-    // Before the Run-state check, because it is what turns an interrupted dispatch into a Run
-    // that HAS a terminal Receipt: an attempt that prepared a commit and never recorded what
-    // became of it is finished here, from its durable preparation and the repository's own ref.
+    // THIS STEP WRITES. It is the one call in this sequence that is not a verification pass: the
+    // other nineteen re-prove stored records and refuse, while this one turns an interrupted
+    // attempt into a Run that HAS a terminal Receipt, from its durable preparation and the
+    // repository's own ref. Its refusal is named for that (R28.1) -- a failed write, never a
+    // mismatch, because nothing here was compared.
+    //
+    // Before the Run-state check, because that check reads the Runs this step finishes.
     dispatch::finish_prepared_dispatches(connection)
-        .map_err(|_| SupervisorError::DispatchStateMismatch)?;
+        .map_err(|_| SupervisorError::DispatchRecoveryFailed)?;
     evaluation::verify_evaluation_state(connection)
         .map_err(|_| SupervisorError::EvaluationStateMismatch)?;
     // The Artifact state stands alone: it binds no other module's record, and nothing else's
