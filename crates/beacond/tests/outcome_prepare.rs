@@ -4337,9 +4337,34 @@ END;",
     assert!(
         matches!(
             &refusal,
-            beacond::SupervisorError::MissionCompletionStateMismatch
+            beacond::SupervisorError::MissionCompletionStateMismatch {
+                workspace_id,
+                digest_value,
+                cause: CompletionReadRefusal::ColumnDisagrees("completed_at_ms"),
+            } if *workspace_id == fixture.workspace_id && digest_value == &target
         ),
-        "startup did not refuse the tampered completion: {refusal:?}"
+        "refused for the wrong reason, with the cause flattened, or naming the wrong row: \
+         {refusal:?}"
+    );
+
+    // R28.4: the key and the fault's NAME, and not the carried refusal's own text.
+    let line = refusal.to_string();
+    assert!(
+        line.contains(&target) && line.contains(&fixture.workspace_id.to_string()),
+        "the refusal does not name the row it refused: {line}"
+    );
+    assert!(
+        line.contains("ColumnDisagrees"),
+        "the refusal does not name the fault: {line}"
+    );
+    let carried = CompletionReadRefusal::ColumnDisagrees("completed_at_ms").to_string();
+    assert!(
+        !line.contains(&carried),
+        "the carried refusal's own text reached the one-line message: {line}"
+    );
+    assert!(
+        format!("{refusal:?}").contains("completed_at_ms"),
+        "the carried fault is not reachable through Debug: {refusal:?}"
     );
 }
 
