@@ -449,6 +449,34 @@ pub struct CollectedSpend {
     /// The amount, as a state. `Verified` only when the record actually counted something in
     /// exactly one unit; never zero standing in for absence.
     pub amount: OutcomeState<SpendAmount>,
+    /// Whether the count is whole, and if not, where it is not -- as a state, so that "complete",
+    /// "incomplete and it says where" and "there is no count to be complete" never collapse into
+    /// one another (sol1's cold read, #14). A `partially_measured` record's named gaps travel
+    /// with its amount; a reader that drops them has turned "usable and incomplete" into a
+    /// figure that looks whole.
+    pub completeness: SpendCompleteness,
+}
+
+/// How much of the window a counted amount covers, in the record's own words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpendCompleteness {
+    /// `measured`: every priced unit inside the window was counted. Nothing is missing, and the
+    /// record says so -- a positive claim, not the absence of gaps.
+    Complete,
+    /// `partially_measured`: counted, with at least one named gap, carried whole. The grammar
+    /// refuses a partial record with no gap, so this list is never empty.
+    Partial(Vec<CollectedUncounted>),
+    /// There is no count to be complete or incomplete: `unmeasured`, `broken`, or no record at
+    /// all. Distinct from `Complete`, which is a count with nothing missing.
+    NoCount,
+}
+
+/// One thing a partial measurement could not count, exactly as the record says it: the kind as
+/// the record's own literal (never re-spelled), and the human detail that says where.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectedUncounted {
+    pub kind: String,
+    pub detail: String,
 }
 
 /// A counted amount in one unit, in stored integer minor units.
@@ -816,6 +844,7 @@ impl<'a> Collector<'a> {
                     measurement: "not_measured".to_owned(),
                     coverage: None,
                     amount: OutcomeState::NotEvaluated(reason.clone()),
+                    completeness: SpendCompleteness::NoCount,
                 });
             }
             SpendReference::Recorded {
@@ -904,6 +933,23 @@ impl<'a> Collector<'a> {
             payload.coverage_from_event_seq,
             payload.coverage_to_event_seq,
         ));
+        // The gaps come first and whole: the amount below folds the two counted arms together for
+        // its number, and this is what keeps them apart (sol1's cold read, #14).
+        let completeness = match &payload.measurement {
+            SpendMeasurement::Measured(_) => SpendCompleteness::Complete,
+            SpendMeasurement::PartiallyMeasured(_, uncounted) => SpendCompleteness::Partial(
+                uncounted
+                    .iter()
+                    .map(|entry| CollectedUncounted {
+                        kind: entry.kind.as_str().to_owned(),
+                        detail: entry.detail.clone(),
+                    })
+                    .collect(),
+            ),
+            SpendMeasurement::Unmeasured(_) | SpendMeasurement::Broken(_) => {
+                SpendCompleteness::NoCount
+            }
+        };
         let amount = match &payload.measurement {
             SpendMeasurement::Unmeasured(reason) => OutcomeState::NotEvaluated(reason.clone()),
             SpendMeasurement::Broken(reason) => OutcomeState::Broken(reason.clone()),
@@ -938,6 +984,7 @@ impl<'a> Collector<'a> {
             measurement: payload.measurement.literal().to_owned(),
             coverage,
             amount,
+            completeness,
         })
     }
 
