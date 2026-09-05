@@ -27,15 +27,15 @@ use beacond::{
     MissionImpactService, MissionMemberDraft, MissionService, NarrativeItem,
     OperatorAccountService, OperatorSessionPhase, OutcomeCandidate, OutcomeManifestV1,
     OutcomeService, OutcomeState, PolicyRevisionRef, PrepareRefusal, ProjectCharterDraft,
-    ProjectDraft, ProjectPolicyDraft, ProjectPolicyService, ProjectService, ProviderFeature,
-    PublicationSeamRefusal, PublishRefusal, ResidentConfigurationService, ResidentLifecycleService,
-    RubricDeclaration, SecretString, SourceDigest, SourceKind, SourceRef, SourcesRefusal,
-    SpendReference, StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig,
-    SuccessCondition, Supervisor, TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
-    TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft, TeamService,
-    TrackRecordEvidenceKind, TrackRecordRequirement, UnfinishedKind, Verdict, VerifiedSources,
-    VerifiedText, declared_conditions_digest, publication_candidacy, record_completion, render,
-    verified_manifest_within,
+    ProjectDraft, ProjectPolicyDraft, ProjectPolicyService, ProjectService, Provenance,
+    ProviderFeature, PublicationSeamRefusal, PublishRefusal, ResidentConfigurationService,
+    ResidentLifecycleService, RubricDeclaration, SecretString, SourceDigest, SourceKind, SourceRef,
+    SourcesRefusal, SpendReference, StarterOrganizationService, StarterResidentDraft, StarterRole,
+    StartupConfig, SuccessCondition, Supervisor, TeamDraft, TeamLeadAmbiguityRule,
+    TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
+    TeamService, TrackRecordEvidenceKind, TrackRecordRequirement, UnfinishedKind, Verdict,
+    VerifiedSources, VerifiedText, declared_conditions_digest, publication_candidacy,
+    record_completion, render, verified_manifest_within,
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -445,6 +445,44 @@ impl Fixture {
             .expect("the Evaluation records")
     }
 
+    /// A completion that is NOT a success: abandoned, with its one declared condition not met.
+    ///
+    /// A Mission can complete without succeeding, and an Outcome Document reports that honestly --
+    /// which is exactly why publishing one must not read as a success verdict.
+    fn complete_unsuccessfully(&self, accountable: (Uuid, Uuid)) -> (String, MissionCompletionV1) {
+        let boundary = self.latest_event_seq();
+        let record = MissionCompletionV1 {
+            workspace_id: self.workspace_id,
+            project_id: self.project_id,
+            mission_id: self.mission_id,
+            completion_id: Uuid::new_v4(),
+            actor: CompletionActor::Operator,
+            accountable_resident_id: accountable.0,
+            accountable_resident_configuration_id: accountable.1,
+            boundary_event_seq: boundary,
+            disposition: CompletionDisposition::Abandoned,
+            declared_conditions_sha256: declared_conditions_digest(&[CONDITION_TEXT.to_owned()]),
+            condition_results: vec![ConditionResultRecord {
+                ordinal: 0,
+                outcome: ConditionOutcome::NotMet,
+                support: vec![],
+                note: None,
+            }],
+            delivered_artifacts: vec![],
+            unfinished_work: vec![],
+            uncertainty: vec![],
+            spend: SpendReference::NotMeasured(
+                "No spend record exists for this Mission.".to_owned(),
+            ),
+            supersedes: CompletionSupersedes::None,
+            summary: "The Mission was stopped before its condition was met.".to_owned(),
+            completed_at_ms: 1_788_400_000_000,
+        };
+        let mut connection = self.store.connect();
+        let digest = record_completion(&mut connection, &record).expect("the completion records");
+        (digest, record)
+    }
+
     /// A SECOND Configuration for the candidate's author, succeeding the one the completion names.
     ///
     /// Two Configurations of one Resident are two evaluators for configuration purposes and one
@@ -549,6 +587,15 @@ impl Fixture {
         })
         .expect("the store restarts");
     }
+}
+
+/// One hex record digest as the raw 32 bytes `ArtifactService::record` takes for `supersedes`.
+fn digest_bytes(digest: &str) -> [u8; 32] {
+    let mut bytes = [0_u8; 32];
+    data_encoding::HEXLOWER
+        .decode_mut(digest.as_bytes(), &mut bytes)
+        .expect("a record digest is 32 hex-encoded bytes");
+    bytes
 }
 
 fn source(
@@ -3661,4 +3708,362 @@ fn a_corrected_outcome_reports_which_version_it_is_and_how_many_there_are() {
     assert!(!superseded.is_current_version());
     // And it is still the same publication, not a re-derived one.
     assert_eq!(superseded.publication_id(), first.publication_id());
+}
+
+// ---------------------------------------------------------------------------------------------
+// get: retrieval that re-proves, and labels what it did not (slice 3-B, item 4)
+// ---------------------------------------------------------------------------------------------
+
+/// `get` re-verifies all four: the manifest's bytes, the candidate's bytes, the Evaluation, and the
+/// relation row itself.
+///
+/// Each is proved by tampering with it and reading back: a stored record that no longer matches its
+/// own bytes is refused, not returned with a warning. The immutability trigger is dropped and
+/// restored around each edit, because the store must hold a row nothing should have written for the
+/// read path's checks to be reachable at all.
+#[test]
+fn published_outcome_get_verifies_manifest_artifact_evaluation_and_publication_relation() {
+    let fixture = admitted_mission("get-reverifies");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (candidate, candidate_digest, evaluation_digest) = fixture.publishable();
+    let published = fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
+        .expect("the pairing publishes");
+    assert!(
+        fixture.outcomes.get(fixture.mission_id).is_ok(),
+        "the control must read back"
+    );
+
+    // 1. A manifest projection column that disagrees with the stored bytes.
+    with_trigger_down(
+        &fixture.store,
+        "outcome_manifests_no_update",
+        "outcome_manifests",
+        "Outcome manifests are immutable",
+        |connection| {
+            connection
+                .execute(
+                    "UPDATE outcome_manifests SET boundary_event_seq = boundary_event_seq + 1
+                     WHERE workspace_id = ?1",
+                    params![fixture.workspace_id.to_string()],
+                )
+                .unwrap();
+        },
+    );
+    let refusal = fixture
+        .outcomes
+        .get(fixture.mission_id)
+        .expect_err("a manifest column that disagrees with its bytes was served");
+    assert!(
+        matches!(refusal, PublishRefusal::Manifest(_)),
+        "{refusal:?}"
+    );
+    with_trigger_down(
+        &fixture.store,
+        "outcome_manifests_no_update",
+        "outcome_manifests",
+        "Outcome manifests are immutable",
+        |connection| {
+            connection
+                .execute(
+                    "UPDATE outcome_manifests SET boundary_event_seq = boundary_event_seq - 1
+                     WHERE workspace_id = ?1",
+                    params![fixture.workspace_id.to_string()],
+                )
+                .unwrap();
+        },
+    );
+    assert!(
+        fixture.outcomes.get(fixture.mission_id).is_ok(),
+        "the restore must bring the control back"
+    );
+    assert_eq!(
+        published.manifest().digest().value,
+        fixture
+            .outcomes
+            .get(fixture.mission_id)
+            .unwrap()
+            .manifest()
+            .digest()
+            .value
+    );
+
+    // 2. The candidate Artifact's bytes.
+    with_trigger_down(
+        &fixture.store,
+        "artifacts_no_update",
+        "artifacts",
+        "Artifacts are immutable",
+        |connection| {
+            connection
+                .execute(
+                    "UPDATE artifacts SET content_inline = ?1
+                     WHERE workspace_id = ?2 AND digest_value = ?3",
+                    params![
+                        b"# Not the document that was evaluated.\n".to_vec(),
+                        fixture.workspace_id.to_string(),
+                        candidate.candidate_artifact_digest
+                    ],
+                )
+                .unwrap();
+        },
+    );
+    let refusal = fixture
+        .outcomes
+        .get(fixture.mission_id)
+        .expect_err("a candidate whose stored bytes changed was served");
+    assert!(
+        matches!(
+            refusal,
+            PublishRefusal::Unverified(_) | PublishRefusal::Manifest(_)
+        ),
+        "{refusal:?}"
+    );
+
+    // 3. The relation row: a publication naming a candidate the Evaluation is not about. Read from
+    //    the Evaluation's own bytes on every read, never trusted from the row.
+    let other = admitted_mission("get-reverifies-relation");
+    other.classify(ImpactLevel::Ordinary);
+    other.complete((other.resident_id, other.configuration_id));
+    let (_, other_candidate, other_evaluation) = other.publishable();
+    other
+        .outcomes
+        .publish(other.mission_id, &other_candidate, &other_evaluation)
+        .expect("the second Mission publishes");
+    let unrelated = other
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            b"# An Artifact no Evaluation is about.\n",
+            ArtifactContext::Mission {
+                project_id: other.project_id,
+                mission_id: other.mission_id,
+            },
+            other.resident_id,
+            other.configuration_id,
+            None,
+        )
+        .expect("the unrelated Artifact records");
+    with_trigger_down(
+        &other.store,
+        "outcome_publications_no_update",
+        "outcome_publications",
+        "Outcome publications are immutable",
+        |connection| {
+            connection
+                .execute(
+                    "UPDATE outcome_publications SET candidate_artifact_digest = ?1
+                     WHERE workspace_id = ?2",
+                    params![unrelated.digest().value, other.workspace_id.to_string()],
+                )
+                .unwrap();
+        },
+    );
+    let refusal = other
+        .outcomes
+        .get(other.mission_id)
+        .expect_err("a relation row naming bytes the Evaluation is not about was served");
+    assert!(
+        matches!(
+            refusal,
+            PublishRefusal::Seam(PublicationSeamRefusal::SubjectIsNotTheCandidate)
+                | PublishRefusal::NoManifestForCandidate
+        ),
+        "{refusal:?}"
+    );
+}
+
+/// R12.10: both links, and the cited one is never replaced by the current one.
+///
+/// After the published candidate is superseded, `get` still reports the digest the relation cites --
+/// the bytes that were actually evaluated -- and reports the successor BESIDE it as read-time
+/// state. A reader that swapped one for the other would be saying an Evaluation approved a document
+/// it never saw.
+#[test]
+fn published_outcome_get_reports_the_cited_digest_and_the_current_tail_separately() {
+    let fixture = admitted_mission("get-both-links");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (candidate, candidate_digest, evaluation_digest) = fixture.publishable();
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
+        .expect("the pairing publishes");
+
+    // Nothing has superseded it yet: the chain is the cited digest alone.
+    let before = fixture.outcomes.get(fixture.mission_id).unwrap();
+    assert_eq!(
+        before.supersession_at_read_time().candidate_chain(),
+        std::slice::from_ref(&candidate_digest)
+    );
+    assert_eq!(
+        before.supersession_at_read_time().candidate_tail().value,
+        candidate_digest.value
+    );
+
+    let successor = fixture
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            b"# Outcome (revised)\n",
+            ArtifactContext::Mission {
+                project_id: fixture.project_id,
+                mission_id: fixture.mission_id,
+            },
+            fixture.resident_id,
+            fixture.configuration_id,
+            Some(digest_bytes(&candidate.candidate_artifact_digest)),
+        )
+        .expect("the successor records");
+
+    let after = fixture.outcomes.get(fixture.mission_id).unwrap();
+    assert_eq!(
+        after.cited_candidate_artifact_digest().value,
+        candidate_digest.value,
+        "the tail was served in place of the digest the Evaluation is about"
+    );
+    assert_eq!(
+        after.supersession_at_read_time().candidate_tail().value,
+        successor.digest().value,
+        "the current tail was not reported"
+    );
+    assert_eq!(
+        after.supersession_at_read_time().candidate_chain().len(),
+        2,
+        "the chain must carry the cited digest first and the successor after it"
+    );
+    assert_eq!(
+        after.supersession_at_read_time().candidate_chain()[0].value,
+        candidate_digest.value
+    );
+}
+
+/// Boundary facts stay boundary facts. `get` never relabels them as re-verified now.
+#[test]
+fn published_outcome_get_does_not_present_boundary_citations_as_read_time_reverification() {
+    let fixture = admitted_mission("get-boundary-labels");
+    fixture.classify(ImpactLevel::Ordinary);
+    let (_, completion) = fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, candidate_digest, evaluation_digest) = fixture.publishable();
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
+        .expect("the pairing publishes");
+
+    let published = fixture.outcomes.get(fixture.mission_id).unwrap();
+
+    // What the manifest cites was proved at the completion's boundary, and the label says so with
+    // the exact event -- not "verified", not "current".
+    assert_eq!(
+        published.citation_provenance(),
+        Provenance::VerifiedAtBoundary {
+            boundary_event_seq: completion.boundary_event_seq
+        }
+    );
+    assert_eq!(
+        published.citation_provenance().to_string(),
+        format!(
+            "verified at boundary event {}",
+            completion.boundary_event_seq
+        )
+    );
+    // And the links derived on this read are labelled read-time, never as boundary facts.
+    assert_eq!(
+        published.supersession_at_read_time().provenance(),
+        Provenance::DerivedAtReadTime
+    );
+    assert_ne!(
+        published.citation_provenance(),
+        published.supersession_at_read_time().provenance(),
+        "one label for two different questions"
+    );
+}
+
+/// A published Outcome survives a restart and reads back without Activity or Trace.
+#[test]
+fn publication_survives_restart_without_activity_or_trace() {
+    let fixture = admitted_mission("publication-restart");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, candidate_digest, evaluation_digest) = fixture.publishable();
+    let before = fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
+        .expect("the pairing publishes");
+    let document = String::from_utf8(before.candidate().content().to_vec()).unwrap();
+
+    fixture.restart();
+    let accounts = Arc::new(OperatorAccountService::open(&fixture.store.path).unwrap());
+    accounts
+        .authenticate_password(
+            SecretString::new("a long local passphrase".to_owned()),
+            AccessOrigin::SameMachine,
+        )
+        .expect("the reopened store unlocks");
+    let outcomes = OutcomeService::new(accounts, fixture.workspace_id);
+
+    let after = outcomes
+        .get(fixture.mission_id)
+        .expect("the published Outcome reads after restart");
+    assert_eq!(after.publication_id(), before.publication_id());
+    assert_eq!(after.publication_version(), 1);
+    assert_eq!(
+        after.cited_candidate_artifact_digest().value,
+        candidate_digest.value
+    );
+    assert_eq!(
+        after.cited_evaluation_digest().value,
+        evaluation_digest.value
+    );
+    assert_eq!(
+        String::from_utf8(after.candidate().content().to_vec()).unwrap(),
+        document,
+        "the exact published Markdown did not survive the restart"
+    );
+}
+
+/// Publication is not success, not completion, and not permission.
+///
+/// The Mission here was ABANDONED with its one declared condition NOT met, and its Outcome Document
+/// publishes anyway -- because the document reports what happened, and what happened was failure. A
+/// surface that read `PublishedOutcome` existence as a success verdict would be reporting the
+/// opposite of the record.
+#[test]
+fn published_outcome_existence_is_never_permission_completion_or_success_authority() {
+    let fixture = admitted_mission("publication-no-authority");
+    fixture.classify(ImpactLevel::Ordinary);
+    let (_, completion) =
+        fixture.complete_unsuccessfully((fixture.resident_id, fixture.configuration_id));
+    assert_eq!(completion.disposition, CompletionDisposition::Abandoned);
+    assert_eq!(
+        completion.condition_results[0].outcome,
+        ConditionOutcome::NotMet
+    );
+
+    let (_, candidate_digest, evaluation_digest) = fixture.publishable();
+    let published = fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
+        .expect("an unsuccessful Mission still publishes its Outcome");
+
+    // The published document reports the failure rather than concealing it.
+    let document = String::from_utf8(published.candidate().content().to_vec()).unwrap();
+    assert!(
+        document.contains("not_met") || document.contains("not met"),
+        "the Outcome of a failed Mission does not say so: {document}"
+    );
+    // And the completion still says abandoned: publishing changed no Work state.
+    let reread: Vec<u8> = fixture
+        .store
+        .connect()
+        .query_row(
+            "SELECT canonical_bytes FROM mission_completions WHERE mission_id = ?1",
+            params![fixture.mission_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let reread = MissionCompletionV1::from_canonical_bytes(&reread).unwrap();
+    assert_eq!(reread.disposition, CompletionDisposition::Abandoned);
 }
