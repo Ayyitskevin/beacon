@@ -619,6 +619,26 @@ pub struct CollectedUncounted {
     pub detail: String,
 }
 
+/// The Event kinds a Run's Receipt writes -- the only kinds that can carry spend (R33.2, R34).
+///
+/// CLOSED, and cited from the producer rather than guessed. `SpendOrigin::DaemonLedger` totals
+/// "Beacon's own Invocation records" (`spend.rs`), and an Invocation happens inside a Run. These
+/// are every kind written beside an `INSERT INTO receipts`:
+///
+/// * `run.preflighted` -- `check_preflight.rs`
+/// * `run.executed` -- `declared_checks.rs`
+/// * `proposal.dispatched` -- `dispatch.rs`
+///
+/// `check_preflight::verify_run_state` enumerates the same three as the Run set, so this list is
+/// not a second opinion about what a Run is; a fourth Run kind would have to be added in both, and
+/// the mutant that widens this to every kind is what says so.
+///
+/// Everything else carries no spend and must not make a window partial: the spend's own
+/// `spend.recorded`, the Mission's `mission.admitted` and `mission.completed`, and every
+/// Project/Team/Artifact/Evaluation record.
+const SPEND_BEARING_EVENT_KINDS: &[&str] =
+    &["run.preflighted", "run.executed", "proposal.dispatched"];
+
 /// A counted amount in one unit, in stored integer minor units.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpendAmount {
@@ -774,6 +794,55 @@ impl<'a> Collector<'a> {
                 reason: error.to_string(),
             })
             .map(|found| found.and_then(|sequence| u64::try_from(sequence).ok()))
+    }
+
+    /// The first spend-bearing Event in `(coverage_to, boundary]`, if there is one (R33.2, R34).
+    ///
+    /// The interval is half-open at the bottom on purpose: `coverage_to` is covered BY the window,
+    /// so only what came after it can be uncovered. It is closed at the top because the boundary is
+    /// the cut the completion declared, and an Event at the cut is inside it.
+    ///
+    /// Workspace-scoped, not Mission-scoped, because the window is: `coverage_from_event_seq` and
+    /// `coverage_to_event_seq` are positions in this Workspace's own Event sequence, and the spend
+    /// owner validates `coverage_to` against `max(sequence)` for the Workspace
+    /// (`MalformedSpend::CoverageBeyondStore`). Narrowing the question here would ask it against a
+    /// different ruler than the one the record answered.
+    fn first_spend_bearing_event_in(
+        &self,
+        coverage_to_event_seq: u64,
+        boundary_event_seq: u64,
+    ) -> Result<Option<(u64, String)>, CollectorRefusal> {
+        let placeholders = SPEND_BEARING_EVENT_KINDS
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT sequence, kind FROM events
+             WHERE workspace_id = ?1 AND sequence > ?2 AND sequence <= ?3
+               AND kind IN ({placeholders})
+             ORDER BY sequence LIMIT 1"
+        );
+        let mut parameters: Vec<Box<dyn rusqlite::ToSql>> = vec![
+            Box::new(self.workspace_id.to_string()),
+            Box::new(i64::try_from(coverage_to_event_seq).unwrap_or(i64::MAX)),
+            Box::new(i64::try_from(boundary_event_seq).unwrap_or(i64::MAX)),
+        ];
+        for kind in SPEND_BEARING_EVENT_KINDS {
+            parameters.push(Box::new(*kind));
+        }
+        self.connection
+            .query_row(
+                &sql,
+                rusqlite::params_from_iter(parameters.iter().map(AsRef::as_ref)),
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|error| CollectorRefusal::Unverified {
+                kind: "spend",
+                reason: error.to_string(),
+            })
+            .map(|found| found.map(|(sequence, kind)| (u64::try_from(sequence).unwrap_or(0), kind)))
     }
 
     /// The sequence of the Event that recorded this object, from the one locator table.
@@ -1084,28 +1153,36 @@ impl<'a> Collector<'a> {
         ));
         // The gaps come first and whole: the amount below folds the two counted arms together for
         // its number, and this is what keeps them apart (sol1's cold read, #14).
-        // R21.3 / R32.2: a window that ends before the completion's boundary is partial AT THE CUT,
-        // even though the owner measured its own window completely. The owner is right about what
-        // it measured; only this collector knows what the completion needed covered.
+        // R21.3 / R33.2 / R34: a window is complete at the cut when nothing that could have cost
+        // anything happened after it. Arithmetic on the sequence numbers was tried twice and was
+        // wrong twice -- `coverage_to < boundary` makes every document partial, because a
+        // measurement cannot cover its own recording; `coverage_to >= S - 1` calls a spend measured
+        // before three Runs complete. The honest predicate is not about distance, it is about what
+        // is IN the gap.
         //
         // It moves both fields together on purpose. `completeness` carries the gaps and
         // `measurement` carries the token the assembler renders, and they are read by different
         // callers -- a downgrade that moved only one would leave the document saying `measured`
-        // over a partial figure, which is the defect this closes (R32.2) wearing a different face.
-        // Only a fully `Measured` record downgrades: `PartiallyMeasured` already is one, and the
-        // uncounted states never claimed a count.
-        let short_of_boundary = matches!(payload.measurement, SpendMeasurement::Measured(_))
-            && payload.coverage_to_event_seq < boundary_event_seq;
+        // over a partial figure, which is the defect this closes wearing a different face. Only a
+        // fully `Measured` record downgrades: `PartiallyMeasured` already is one, and the uncounted
+        // states never claimed a count.
+        let uncovered = if matches!(payload.measurement, SpendMeasurement::Measured(_)) {
+            self.first_spend_bearing_event_in(payload.coverage_to_event_seq, boundary_event_seq)?
+        } else {
+            None
+        };
+        let short_of_boundary = uncovered.is_some();
         let completeness = match &payload.measurement {
-            SpendMeasurement::Measured(_) if short_of_boundary => {
-                // `(coverage_to, boundary)` -- what was covered and what needed covering. A partial
-                // figure that cannot say what it missed is the "usable and incomplete" number this
-                // module refuses elsewhere. `coverage_to == boundary` stays `Complete` and is
-                // reachable: a measurement with nothing recorded between its end and the cut.
+            SpendMeasurement::Measured(_) if let Some((sequence, kind)) = uncovered.clone() => {
+                // The FIRST uncovered spend-bearing Event, named. A partial figure that cannot say
+                // what it missed is the "usable and incomplete" number this module refuses
+                // elsewhere, and "the window was short" does not tell an operator whether anything
+                // happened in the gap. This does.
                 SpendCompleteness::Partial(vec![CollectedUncounted {
-                    kind: "coverage_ends_before_boundary".to_owned(),
+                    kind: "spend_bearing_event_after_coverage".to_owned(),
                     detail: format!(
-                        "measured to event {}, the completion's boundary is event {}",
+                        "measured to event {}, but {kind} at event {sequence} is inside the \
+                         completion's boundary of event {}",
                         payload.coverage_to_event_seq, boundary_event_seq
                     ),
                 }])
