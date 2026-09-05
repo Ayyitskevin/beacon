@@ -2783,3 +2783,64 @@ fn collector_refuses_a_spend_record_for_a_different_mission_than_the_completion(
     );
 }
 
+
+#[test]
+fn a_forged_early_event_cannot_pull_a_post_boundary_classification_into_the_outcome() {
+    let fixture = admitted("classification-forged-boundary", vec!["Gates pass".to_owned()]);
+    let policy_revision = fixture.policy_revision();
+    let classification = MissionImpactClassificationV1 {
+        workspace_id: fixture.store.workspace_id,
+        mission_id: fixture.mission.id,
+        classification_id: Uuid::new_v4(),
+        version: 1,
+        impact: ImpactLevel::High,
+        basis: ClassificationBasis::OperatorDeclared,
+        policy: PolicyRevisionRef {
+            project_id: fixture.project.id,
+            policy_revision,
+            charter_revision: fixture.project.charter.revision,
+        },
+        rule_id: None,
+        reason: "This classification is recorded after the completion boundary.".to_owned(),
+        classified_by: ClassificationActor::Operator,
+        classified_at_ms: 1_788_400_000_000,
+        supersedes: ClassificationSupersedes::None,
+    };
+    let classification_digest = classification.digest().unwrap().value;
+    fixture
+        .connection()
+        .execute(
+            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+             VALUES (?1, 'mission.impact_classified', ?2, 0)",
+            params![
+                fixture.store.workspace_id.to_string(),
+                json!({"digest": {"value": classification_digest}}).to_string(),
+            ],
+        )
+        .unwrap();
+
+    let boundary = newest_event(&fixture.store);
+    let completion = fixture.completion(
+        boundary,
+        vec![ConditionOutcome::Met],
+        SpendReference::NotMeasured("no ledger was read".to_owned()),
+    );
+    let completion_digest = fixture.record(&completion);
+    MissionImpactService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+        .classify(&classification.canonical_bytes().unwrap())
+        .unwrap();
+
+    let connection = fixture.connection();
+    let result = Collector::new(&connection, fixture.store.workspace_id).collect(
+        &CollectionRequest {
+            completion_digest: Some(completion_digest),
+            classification_digest: Some(classification_digest),
+            ..CollectionRequest::default()
+        },
+    );
+    assert!(
+        matches!(result, Err(CollectorRefusal::AfterBoundary { kind: "classification", .. })),
+        "a forged early event made a post-boundary classification visible: {result:?}",
+    );
+}
+
