@@ -4,9 +4,17 @@
 //! function of exactly those bytes and a pinned profile, and of nothing else — no clock, no
 //! locale, no host path, no system font, no randomness.
 
-use beacond::{TypstRefusal, to_typst};
+use beacond::{BEACON_OUTCOME_1, PdfProfile, PdfRefusal, TypstRefusal, render_pdf, to_typst};
 
 const V1: &str = "beacon.outcome.md.v1";
+const DIGEST: &str = "e96fca3429bf3670b04e2e47ca0f5f025bec2247eda874876c304dc21ca8f831";
+/// The environment variable that turns [`helper_child_render`] from a no-op into the child half of
+/// the two-process bar.
+const CHILD_OUT: &str = "BEACON_PDF_TWO_PROCESS_OUT";
+
+fn render(markdown: &str, digest: &str, profile: &PdfProfile) -> Vec<u8> {
+    render_pdf(markdown.as_bytes(), V1, digest, profile).expect("the golden document renders")
+}
 
 fn fixture() -> String {
     std::fs::read_to_string(
@@ -126,5 +134,156 @@ fn a_table_row_of_the_wrong_width_is_refused_by_name() {
             expected: 2,
             observed: 1
         }
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Item 2 — render_pdf
+// ---------------------------------------------------------------------------------------------
+
+/// The child half of [`two_renders_of_one_document_are_byte_identical`].
+///
+/// It is a `#[test]` because that is the only entry point a test binary has. Without the
+/// environment variable it does nothing, because the parent is what asserts; with it, it renders
+/// and writes, and the parent compares the two files it left behind.
+#[test]
+fn helper_child_render() {
+    let Ok(path) = std::env::var(CHILD_OUT) else {
+        return;
+    };
+    std::fs::write(path, render(&fixture(), DIGEST, &BEACON_OUTCOME_1)).unwrap();
+}
+
+/// Two renders in two SEPARATE PROCESSES.
+///
+/// Two calls in one process would miss anything seeded once per process -- a hash seed, a
+/// per-process counter, an address that reaches the bytes. The child is this same test binary
+/// (`current_exe`) run twice with `--exact helper_child_render` and an output path in the
+/// environment, so the two renders share no memory at all.
+#[test]
+fn two_renders_of_one_document_are_byte_identical() {
+    let directory = std::env::temp_dir().join(format!("beacon-pdf-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut written = Vec::new();
+    for run in ["a", "b"] {
+        let path = directory.join(format!("{run}.pdf"));
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "helper_child_render", "--nocapture"])
+            .env(CHILD_OUT, &path)
+            .status()
+            .expect("the child test binary runs");
+        assert!(status.success(), "the child render failed");
+        written.push(std::fs::read(&path).expect("the child wrote its PDF"));
+    }
+    assert!(
+        !written[0].is_empty(),
+        "an empty render would compare equal to another empty render"
+    );
+    assert_eq!(
+        written[0], written[1],
+        "two processes rendered the same document to different bytes"
+    );
+    std::fs::remove_dir_all(&directory).ok();
+}
+
+#[test]
+fn one_changed_markdown_byte_changes_the_pdf() {
+    let markdown = fixture();
+    let changed = markdown.replacen("Outcome", "Outcomf", 1);
+    assert_ne!(
+        markdown, changed,
+        "the fixture did not change, so this proves nothing"
+    );
+    assert_ne!(
+        render(&markdown, DIGEST, &BEACON_OUTCOME_1),
+        render(&changed, DIGEST, &BEACON_OUTCOME_1),
+        "the renderer does not read its input"
+    );
+}
+
+#[test]
+fn a_changed_profile_changes_the_pdf() {
+    let markdown = fixture();
+    let larger = PdfProfile {
+        body_pt: BEACON_OUTCOME_1.body_pt + 1,
+        ..BEACON_OUTCOME_1
+    };
+    assert_ne!(
+        render(&markdown, DIGEST, &BEACON_OUTCOME_1),
+        render(&markdown, DIGEST, &larger),
+        "the profile does not reach the bytes, so pinning it proves nothing"
+    );
+}
+
+#[test]
+fn the_pdf_identifier_is_derived_from_the_candidate_digest() {
+    let markdown = fixture();
+    let mine = render(&markdown, DIGEST, &BEACON_OUTCOME_1);
+    let other = render(&markdown, &DIGEST.replace('e', "f"), &BEACON_OUTCOME_1);
+    assert_ne!(
+        mine, other,
+        "two candidates share a PDF identifier, so deriving it is theatre"
+    );
+    assert_eq!(
+        mine,
+        render(&markdown, DIGEST, &BEACON_OUTCOME_1),
+        "the same candidate rendered two different identifiers"
+    );
+    // The identifier is HASHED into the PDF, not written: the digest is an identity, and a
+    // derivative should not restate one.
+    assert!(
+        !String::from_utf8_lossy(&mine).contains(DIGEST_HEAD),
+        "the candidate digest was written into the PDF rather than hashed into its identifier"
+    );
+}
+
+/// A prefix long enough to be unmistakable and short enough to survive any line wrapping.
+const DIGEST_HEAD: &str = "e96fca3429bf3670";
+
+#[test]
+fn a_document_that_is_not_utf8_is_refused_by_name() {
+    assert_eq!(
+        render_pdf(&[0xff, 0xfe, 0x00], V1, DIGEST, &BEACON_OUTCOME_1).unwrap_err(),
+        PdfRefusal::NotUtf8
+    );
+}
+
+#[test]
+fn a_document_outside_the_shape_is_refused_through_the_translator() {
+    assert!(matches!(
+        render_pdf(b"#### too deep\n", V1, DIGEST, &BEACON_OUTCOME_1).unwrap_err(),
+        PdfRefusal::Translate(TypstRefusal::HeadingTooDeep(_))
+    ));
+}
+
+/// No date survives as plain bytes.
+///
+/// Named for exactly what it proves, because the first draft of it claimed more. When the clock is
+/// deliberately let in, typst writes the date somewhere this scan cannot see -- a compressed
+/// stream -- and this test stays green while `two_renders_of_one_document_are_byte_identical`
+/// goes red. So the two-process bar is the clock bar; this one catches the plain-text case and
+/// documents where the date is not.
+#[test]
+fn the_pdf_carries_no_plaintext_date() {
+    let pdf = render(&fixture(), DIGEST, &BEACON_OUTCOME_1);
+    let text = String::from_utf8_lossy(&pdf);
+    for needle in ["CreationDate", "ModDate", "D:20"] {
+        assert!(!text.contains(needle), "the PDF carries a date: {needle}");
+    }
+}
+
+/// R30.2: the profile belongs to the renderer, so it names itself in the PDF rather than in the
+/// document's front matter. Front matter would change every byte of every stored document.
+#[test]
+fn the_profile_names_itself_in_the_pdf_creator() {
+    let pdf = render(&fixture(), DIGEST, &BEACON_OUTCOME_1);
+    assert!(
+        String::from_utf8_lossy(&pdf).contains(BEACON_OUTCOME_1.name),
+        "the profile does not name itself in the rendered bytes"
+    );
+    // And the document it rendered from does not name a profile, because that is the renderer's.
+    assert!(
+        !fixture().contains("pdf_profile"),
+        "the Markdown document declares a PDF profile, which R30.2 says it must not"
     );
 }
