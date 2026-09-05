@@ -109,6 +109,7 @@ const TAG_SOURCE_SPEND: u8 = 0x08;
 
 const TAG_CONDITION_MET: u8 = 0x01;
 const TAG_CONDITION_NOT_MET: u8 = 0x02;
+const TAG_CONDITION_INCONCLUSIVE: u8 = 0x03;
 
 const TAG_APPENDIX_POLICY_DEFAULT: u8 = 0x01;
 const TAG_APPENDIX_INCLUDE: u8 = 0x02;
@@ -326,20 +327,47 @@ pub struct ReceiptRef {
     pub outcome_checksum: String,
 }
 
-/// The completion-owned result for one declared success condition.
+/// The completion-owned result for one declared success condition, as the manifest carries it.
 ///
-/// Two arms and no third.
+/// **This is `MissionCompletionV1`'s vocabulary (R13.3, R18.3), widened in the v2 grammar to hold
+/// every arm the owner has.** The owner's four arms map onto the manifest's honesty states without
+/// collapse:
 ///
-/// **Seam (R13.3): this vocabulary is `MissionCompletionV1`'s, not Outcome's.** Slice 1 keeps the
-/// closed set here because the manifest has to encode something and the owner does not exist on
-/// `main` yet. When `MissionCompletionV1` lands, `outcome` imports its vocabulary rather than
-/// keeping a second copy, and the resulting tag-table change is the slice-2 migration's business --
-/// a canonicalizer version, not a refactor. Two modules holding one vocabulary is how the two
-/// spellings of a condition result start.
+/// | owner (`ConditionOutcome`) | manifest |
+/// |---|---|
+/// | `Met` | `Verified(Met)` |
+/// | `NotMet` | `Verified(NotMet)` |
+/// | `AssessmentInconclusive` | `Verified(Inconclusive)` -- evaluated, no verdict |
+/// | `NotAssessed` | `NotEvaluated("not_assessed")` -- nobody looked; the same state, the owner's spelling |
+///
+/// The v1 grammar had two arms and a comment promising this widening. Mapping `inconclusive` onto
+/// `NotEvaluated` with a reason string instead would have been the collapse the four-state
+/// invariant forbids: a reason is prose beside a state, not a state. [`From<ConditionOutcome>`]
+/// below is the one place the mapping lives, and it is exhaustive over the owner's enum so a fifth
+/// owner arm fails to compile here rather than mapping to something by default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConditionResult {
     Met,
     NotMet,
+    /// Assessed, and the assessment reached no verdict. Not `NotMet` (that is a verdict), and not
+    /// `NotEvaluated` (somebody looked).
+    Inconclusive,
+}
+
+impl From<crate::mission_completion::ConditionOutcome> for OutcomeState<ConditionResult> {
+    fn from(outcome: crate::mission_completion::ConditionOutcome) -> Self {
+        use crate::mission_completion::ConditionOutcome;
+        match outcome {
+            ConditionOutcome::Met => OutcomeState::Verified(ConditionResult::Met),
+            ConditionOutcome::NotMet => OutcomeState::Verified(ConditionResult::NotMet),
+            ConditionOutcome::AssessmentInconclusive => {
+                OutcomeState::Verified(ConditionResult::Inconclusive)
+            }
+            // The owner's own token as the reason, so the document says what the completion said
+            // and not a paraphrase of it.
+            ConditionOutcome::NotAssessed => OutcomeState::NotEvaluated("not_assessed".to_owned()),
+        }
+    }
 }
 
 impl ConditionResult {
@@ -347,6 +375,7 @@ impl ConditionResult {
         match self {
             Self::Met => TAG_CONDITION_MET,
             Self::NotMet => TAG_CONDITION_NOT_MET,
+            Self::Inconclusive => TAG_CONDITION_INCONCLUSIVE,
         }
     }
 
@@ -354,6 +383,7 @@ impl ConditionResult {
         match tag {
             TAG_CONDITION_MET => Ok(Self::Met),
             TAG_CONDITION_NOT_MET => Ok(Self::NotMet),
+            TAG_CONDITION_INCONCLUSIVE => Ok(Self::Inconclusive),
             _ => Err(MalformedOutcome::UnknownTag),
         }
     }
@@ -362,6 +392,8 @@ impl ConditionResult {
         match self {
             Self::Met => "met",
             Self::NotMet => "not_met",
+            // The owner's spelling, verbatim: the document prints the completion's word.
+            Self::Inconclusive => "assessment_inconclusive",
         }
     }
 }

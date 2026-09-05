@@ -1217,6 +1217,58 @@ fn outcome_sort_uses_canonical_lowercase_code_point_order_not_locale_or_database
     );
 }
 
+/// R18.3: the owner's four arms reach the manifest without collapse. Exhaustive over the owner's
+/// enum ON PURPOSE -- a fifth `ConditionOutcome` arm makes this test stop compiling, which is how
+/// a closed vocabulary is extended by a named change rather than mapped to something by default.
+#[test]
+fn owner_condition_outcomes_map_without_collapsing_inconclusive_into_not_evaluated() {
+    use beacond::ConditionOutcome;
+    for outcome in [
+        ConditionOutcome::Met,
+        ConditionOutcome::NotMet,
+        ConditionOutcome::NotAssessed,
+        ConditionOutcome::AssessmentInconclusive,
+    ] {
+        let mapped: OutcomeState<ConditionResult> = outcome.into();
+        match outcome {
+            ConditionOutcome::Met => {
+                assert_eq!(mapped, OutcomeState::Verified(ConditionResult::Met));
+            }
+            ConditionOutcome::NotMet => {
+                assert_eq!(mapped, OutcomeState::Verified(ConditionResult::NotMet));
+            }
+            // Evaluated, no verdict: a STATE of its own, never a reason string beside a different
+            // state. This is the collapse the invariant forbids, and the assertion that catches it.
+            ConditionOutcome::AssessmentInconclusive => {
+                assert_eq!(
+                    mapped,
+                    OutcomeState::Verified(ConditionResult::Inconclusive),
+                    "assessment_inconclusive collapsed onto another state: {mapped:?}"
+                );
+            }
+            // Nobody looked: the same state as the manifest's `not_evaluated`, in the owner's
+            // spelling.
+            ConditionOutcome::NotAssessed => {
+                assert_eq!(
+                    mapped,
+                    OutcomeState::NotEvaluated("not_assessed".to_owned())
+                );
+            }
+        }
+    }
+
+    // And the new arm is its own literal in the document, round-trips through the bytes, and is
+    // distinct from both neighbours on the page.
+    let mut manifest = vector_manifest();
+    manifest.success_conditions[0].outcome = OutcomeState::Verified(ConditionResult::Inconclusive);
+    let decoded = OutcomeManifestV1::from_canonical_bytes(&manifest.canonical_bytes().unwrap())
+        .expect("decodes");
+    assert_eq!(decoded, manifest);
+    let document = render(&manifest, &vector_sources()).expect("renders");
+    assert!(document.contains("`assessment_inconclusive`"), "{document}");
+    assert!(document.contains("`not_evaluated`"), "{document}");
+}
+
 #[test]
 fn outcome_manifest_canonical_bytes_follow_adr_0034_0037_strict_round_trip_rules() {
     let manifest = vector_manifest();
