@@ -1112,6 +1112,108 @@ fn a_store_holding_spend_or_classification_events_restarts() {
     .expect("a store holding spend and classification Events must restart");
 }
 
+/// The SCHEMA half of sol1's #2 (R20.1): a classification naming a Project that does not own its
+/// Mission cannot be STORED, whatever wrote it.
+///
+/// The Command refuses it and so does the reader -- and both are code, which a restore, an older
+/// binary or a hand-run `INSERT` walks straight past. This row satisfies every other foreign key
+/// the table declares: the Mission exists, the other Project exists, and its Policy revision 1
+/// exists, so nothing but a key binding the Mission to its Project can refuse it. The insert goes
+/// through a raw connection with foreign keys ON, which is what a restore looks like.
+#[test]
+fn the_schema_refuses_a_classification_whose_project_does_not_own_its_mission() {
+    let stored = stored("classification-cross-project-schema");
+    stored.policy_revision();
+    let other_project =
+        ProjectService::new(Arc::clone(&stored.accounts), stored.store.workspace_id)
+            .create(ProjectDraft {
+                name: "Unrelated Project".to_owned(),
+                charter: ProjectCharterDraft {
+                    purpose: "Prove the schema's own scoping.".to_owned(),
+                    desired_outcomes: vec!["Stay unrelated".to_owned()],
+                    constraints: vec!["Do not borrow another Mission".to_owned()],
+                    prohibitions: vec!["No cross-Project binding".to_owned()],
+                    autonomy_profile: AutonomyProfile::Supervised,
+                },
+            })
+            .unwrap();
+    let connection = stored.connection();
+    connection
+        .execute(
+            r#"INSERT INTO project_policy_revisions (
+                 workspace_id, project_id, revision, charter_revision,
+                 required_capabilities_json, availability_rule, track_record_requirements_json,
+                 conflict_rule, ambiguity_rule, authored_by, authored_at_ms
+             ) VALUES (?1, ?2, 1, ?3, '["work.coordinate_mission"]',
+                       'current_team_eligibility', '[{"evidenceKind":"completed_mission"}]',
+                       'require_no_declared_conflict', 'require_operator_decision', 'operator', 0)"#,
+            params![
+                stored.store.workspace_id.to_string(),
+                other_project.id.to_string(),
+                other_project.charter.revision,
+            ],
+        )
+        .expect("the other Project's Policy revision is real");
+
+    let id = Uuid::new_v4();
+    let mut classification = stored.classification_record(id, 1);
+    classification.policy.project_id = other_project.id;
+    classification.policy.charter_revision = other_project.charter.revision;
+    let bytes = classification.canonical_bytes().unwrap();
+    let digest = classification.digest().unwrap().value;
+    let error = connection
+        .execute(
+            "INSERT INTO mission_impact_classifications (
+                 workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+                 canonical_bytes, classification_id, mission_id, project_id, version, impact,
+                 basis, policy_revision, charter_revision, classified_at_ms
+             ) VALUES (?1, 'sha256', 'beacon.mission-impact.v1', ?2, ?3, ?4, ?5, ?6, 1, 'high',
+                       'operator_declared', 1, ?7, ?8)",
+            params![
+                stored.store.workspace_id.to_string(),
+                digest,
+                bytes,
+                id.to_string(),
+                stored.mission_id.to_string(),
+                other_project.id.to_string(),
+                other_project.charter.revision,
+                i64::try_from(classification.classified_at_ms).unwrap(),
+            ],
+        )
+        .expect_err(
+            "a Mission of one Project classified under another Project's row must not store",
+        );
+    assert!(
+        error.to_string().contains("FOREIGN KEY constraint failed"),
+        "the row was refused, but not by a key binding the Mission to its Project: {error}"
+    );
+
+    // The control: the SAME row under the Project that does own the Mission stores.
+    let honest = stored.classification_record(Uuid::new_v4(), 1);
+    let honest_bytes = honest.canonical_bytes().unwrap();
+    let honest_digest = honest.digest().unwrap().value;
+    connection
+        .execute(
+            "INSERT INTO mission_impact_classifications (
+                 workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+                 canonical_bytes, classification_id, mission_id, project_id, version, impact,
+                 basis, policy_revision, charter_revision, classified_at_ms
+             ) VALUES (?1, 'sha256', 'beacon.mission-impact.v1', ?2, ?3, ?4, ?5, ?6, 1, 'high',
+                       'operator_declared', 1, ?7, ?8)",
+            params![
+                stored.store.workspace_id.to_string(),
+                honest_digest,
+                honest_bytes,
+                honest.classification_id.to_string(),
+                stored.mission_id.to_string(),
+                stored.project_id.to_string(),
+                stored.charter_revision,
+                i64::try_from(honest.classified_at_ms).unwrap(),
+            ],
+        )
+        .expect("the Mission's own Project stores");
+}
+
 /// The read-side half of #2, which the probe could not reach: `classify` refuses a cross-Project
 /// policy at the Command, so the reader's identical check had no test that failed when it was
 /// deleted (my own mutant table found it). This row is written PAST the Command -- the shape a
