@@ -71,6 +71,14 @@ pub enum CompletionReadRefusal {
     BytesDisagree,
     /// An indexed column says something the bytes do not.
     ColumnDisagrees(&'static str),
+    /// A stored condition row says something its completion's canonical bytes do not.
+    ///
+    /// Named by the ordinal and the column, because the parent row's `ColumnDisagrees` names its
+    /// column and a child row needs one more coordinate to be findable.
+    ConditionProjectionDisagrees {
+        ordinal: u32,
+        column: &'static str,
+    },
     /// The condition ordinals are not exactly the Mission's declared set.
     ConditionsNotExactlyOnce {
         declared: usize,
@@ -96,6 +104,11 @@ impl std::fmt::Display for CompletionReadRefusal {
             Self::ColumnDisagrees(column) => {
                 write!(formatter, "column {column} disagrees with the bytes")
             }
+            Self::ConditionProjectionDisagrees { ordinal, column } => write!(
+                formatter,
+                "the stored condition row for ordinal {ordinal} disagrees with the record's bytes \
+                 about {column}"
+            ),
             Self::ConditionsNotExactlyOnce { declared, stored } => write!(
                 formatter,
                 "{stored} condition results for {declared} declared conditions"
@@ -278,24 +291,78 @@ pub fn verified_completion_within(
         return Err(CompletionReadRefusal::ColumnDisagrees("completed_at_ms"));
     }
 
-    // 4. Exactly once, against the Mission's own declaration. The store's primary key already
-    //    forbids a duplicate ordinal and its foreign key forbids one past the end; what is left for
-    //    the reader is the count, which is the shape neither of those can see.
+    // 4. Exactly once, against the Mission's own declaration -- and then every row read, not
+    //    counted. The store's primary key forbids a duplicate ordinal and its foreign key forbids
+    //    one past the end; the count catches a missing or extra row. None of the three can see a
+    //    row whose VALUE was changed, and `count(*)` was all this reader looked at: sol1 changed
+    //    ordinal 0 from `met` to `not_met` and the reader returned `Met`, because the canonical
+    //    bytes still said so and nothing compared the two. Every projection in the child table is
+    //    now compared with the record, the same rule the parent row's columns already hold.
     let declared = declared_conditions(connection, workspace_id, record.mission_id)?;
-    let stored_count: i64 = connection
-        .query_row(
-            "SELECT count(*) FROM mission_completion_conditions
-             WHERE workspace_id = ?1 AND completion_digest = ?2",
-            params![workspace_id.to_string(), digest_value],
-            |row| row.get(0),
+    // Scoped by the parent digest ALONE, deliberately. Filtering by Workspace as well would hide a
+    // foreign-Workspace child row instead of naming it: it would simply not come back, and the
+    // count below would report a missing row rather than the row that is actually wrong.
+    let mut statement = connection
+        .prepare(
+            "SELECT workspace_id, condition_ordinal, outcome FROM mission_completion_conditions
+             WHERE completion_digest = ?1
+             ORDER BY condition_ordinal",
         )
         .map_err(store)?;
-    let stored_count = usize::try_from(stored_count).unwrap_or(usize::MAX);
+    let stored_conditions: Vec<(String, i64, String)> = statement
+        .query_map(params![digest_value], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(store)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(store)?;
+    drop(statement);
+    let stored_count = stored_conditions.len();
     if stored_count != declared.len() || record.condition_results.len() != declared.len() {
         return Err(CompletionReadRefusal::ConditionsNotExactlyOnce {
             declared: declared.len(),
             stored: stored_count,
         });
+    }
+    // The record's results are dense from zero and ascending -- its own decoder refuses anything
+    // else -- and the rows come back in ordinal order, so the two line up positionally. Each pair
+    // is compared field by field, and a disagreement names the row and the column: "a condition row
+    // disagrees" and "which one, about what" are different amounts of help.
+    for ((stored_workspace, stored_ordinal, stored_outcome), result) in stored_conditions
+        .iter()
+        .zip(record.condition_results.iter())
+    {
+        if stored_workspace != &record.workspace_id.to_string() {
+            return Err(CompletionReadRefusal::ConditionProjectionDisagrees {
+                ordinal: result.ordinal,
+                column: "workspace_id",
+            });
+        }
+        // MEASURED UNREACHABLE TODAY, and kept deliberately. Deleting this comparison leaves the
+        // whole `--test mission` suite green, because three schema facts already force the ordinal
+        // set: the child primary key forbids a duplicate ordinal, its foreign key into
+        // `mission_success_conditions` forbids one past the declared end, and the count above
+        // proves there are exactly as many rows as declared conditions. Between them the stored
+        // ordinals can only be `0..declared`, in the order this query returns them, so the
+        // positional pairing cannot be misaligned while the counts agree.
+        //
+        // It stays because it is the one of the three that does not depend on the schema keeping
+        // those constraints, and because a reader that pairs two lists positionally should say out
+        // loud what it assumes about the pairing. Any change to the child key or that foreign key
+        // makes this reachable, and then it needs a test. It is reported as unwitnessed rather than
+        // counted as covered.
+        if u32::try_from(*stored_ordinal) != Ok(result.ordinal) {
+            return Err(CompletionReadRefusal::ConditionProjectionDisagrees {
+                ordinal: result.ordinal,
+                column: "condition_ordinal",
+            });
+        }
+        if stored_outcome != outcome_token(result.outcome) {
+            return Err(CompletionReadRefusal::ConditionProjectionDisagrees {
+                ordinal: result.ordinal,
+                column: "outcome",
+            });
+        }
     }
 
     // 5. ...and about the SAME conditions. A complete ordinal set over rewritten text is exactly the
