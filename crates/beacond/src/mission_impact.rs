@@ -1029,10 +1029,45 @@ impl From<ClassificationStoreError> for ClassificationRecordError {
     }
 }
 
+/// The account fault's NAME, for this caller's outward line (R42).
+///
+/// `OperatorAccountError`'s own `Display` is not closed -- its `Store` arm carries a driver error
+/// whose text names columns and paths -- and its `Debug` is worse. A caller that must say *which*
+/// account fault it was therefore projects the name itself, and a caller-owned exhaustive match is
+/// what makes a new account variant a compile error here rather than a silent new disclosure.
+///
+/// Deliberately duplicated in `outcome_publication.rs` rather than shared: each caller owns the
+/// projection it emits, and one shared helper would let a change made for one caller's audience
+/// travel to the other's without anyone reading the second line (R42 selector ownership).
+/// `AuthenticationThrottled` keeps its `retry_after_ms` in the typed value and in `Debug`; this
+/// projection is the name alone, and the wire's retry handling is unchanged.
+fn account_tag(error: &OperatorAccountError) -> &'static str {
+    match error {
+        OperatorAccountError::PasswordTooShort => "PasswordTooShort",
+        OperatorAccountError::PasswordTooLong => "PasswordTooLong",
+        OperatorAccountError::PasswordConfirmationMismatch => "PasswordConfirmationMismatch",
+        OperatorAccountError::RecoveryNotConfirmed => "RecoveryNotConfirmed",
+        OperatorAccountError::SetupNotStarted => "SetupNotStarted",
+        OperatorAccountError::AccountAlreadyExists => "AccountAlreadyExists",
+        OperatorAccountError::AccountMissing => "AccountMissing",
+        OperatorAccountError::AuthenticationFailed => "AuthenticationFailed",
+        OperatorAccountError::AuthenticationThrottled { .. } => "AuthenticationThrottled",
+        OperatorAccountError::CredentialDisabled => "CredentialDisabled",
+        OperatorAccountError::RemotePasswordNotAllowed => "RemotePasswordNotAllowed",
+        OperatorAccountError::NotAuthenticated => "NotAuthenticated",
+        OperatorAccountError::InvalidSessionTimeout => "InvalidSessionTimeout",
+        OperatorAccountError::CredentialProcessing => "CredentialProcessing",
+        OperatorAccountError::InvalidStore => "InvalidStore",
+        OperatorAccountError::ClockBeforeUnixEpoch => "ClockBeforeUnixEpoch",
+        OperatorAccountError::Store(_) => "Store",
+        OperatorAccountError::StateUnavailable => "StateUnavailable",
+    }
+}
+
 impl fmt::Display for ClassificationRecordError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Account(error) => write!(formatter, "account: {error:?}"),
+            Self::Account(error) => write!(formatter, "account: {}", account_tag(error)),
             Self::Malformed(reason) => write!(formatter, "malformed: {reason}"),
             Self::NotCanonical => formatter.write_str("not_canonical"),
             Self::CrossWorkspace => formatter.write_str("cross_workspace"),
@@ -1047,7 +1082,7 @@ impl fmt::Display for ClassificationRecordError {
             Self::Predecessor { digest, fault } => {
                 write!(formatter, "predecessor {digest}: {fault}")
             }
-            Self::Store(reason) => write!(formatter, "store: {reason}"),
+            Self::Store(_) => formatter.write_str("store"),
         }
     }
 }
@@ -1552,6 +1587,362 @@ mod display_tests {
                 .to_string()
                 .contains(STORE_TEXT),
             "source() did not carry the driver's words"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // R42 slice 1, commit 1: the recorder's outward projection is closed.
+    // ---------------------------------------------------------------------------------------
+
+    /// Two fixed synthetic markers. Every diagnostic payload a case carries holds one, so "did
+    /// this line disclose the payload" is a substring search rather than an eyeball.
+    const NEEDLE_A: &str = "R42S1_PRIVATE_A";
+    const NEEDLE_B: &str = "R42S1_PRIVATE_B";
+
+    fn payload_a() -> String {
+        format!("{NEEDLE_A}|column=private_column|path=/home/example-user/private.txt\nsecond-line")
+    }
+
+    fn payload_b() -> String {
+        format!(
+            "{NEEDLE_B}|column=other_column|path=/home/example-user/other-note.txt\nsecond-line"
+        )
+    }
+
+    /// A real driver error carrying a marker. `InvalidParameterName` is a rusqlite constructor,
+    /// so this is the driver's own `Display`/`Debug`, not a string dressed up as one.
+    fn driver_error(needle: &str) -> rusqlite::Error {
+        rusqlite::Error::InvalidParameterName(format!("{needle}|:private_binding"))
+    }
+
+    /// One declarative row table, expanded into BOTH the exhaustive expected match and the
+    /// constructed fixtures.
+    ///
+    /// The match is wildcard-free, so a new production variant fails to compile here until its row
+    /// exists -- and a row cannot be added without supplying its constructor, its independently
+    /// written expected literal, and the markers its payload carries. Nothing in a table is read
+    /// from production: `account_tag`, `MalformedClassification::as_str` and the child `Display`s
+    /// are never called to build an expectation.
+    macro_rules! closed_table {
+        (
+            $expected_fn:ident / $rows_fn:ident : $ty:ty,
+            $( $case:literal | $pattern:pat => $line:expr , $build:expr , $markers:expr ; )+
+        ) => {
+            fn $expected_fn(value: &$ty) -> (&'static str, String) {
+                match value {
+                    $( $pattern => ($case, String::from($line)), )+
+                }
+            }
+
+            fn $rows_fn() -> Vec<(&'static str, $ty, &'static [&'static str])> {
+                vec![$(($case, $build, $markers)),+]
+            }
+        };
+    }
+
+    closed_table! {
+        expected_account / account_rows: OperatorAccountError,
+        "PASSWORD_TOO_SHORT" | OperatorAccountError::PasswordTooShort
+            => "PasswordTooShort", OperatorAccountError::PasswordTooShort, &[];
+        "PASSWORD_TOO_LONG" | OperatorAccountError::PasswordTooLong
+            => "PasswordTooLong", OperatorAccountError::PasswordTooLong, &[];
+        "PASSWORD_CONFIRMATION_MISMATCH" | OperatorAccountError::PasswordConfirmationMismatch
+            => "PasswordConfirmationMismatch",
+            OperatorAccountError::PasswordConfirmationMismatch, &[];
+        "RECOVERY_NOT_CONFIRMED" | OperatorAccountError::RecoveryNotConfirmed
+            => "RecoveryNotConfirmed", OperatorAccountError::RecoveryNotConfirmed, &[];
+        "SETUP_NOT_STARTED" | OperatorAccountError::SetupNotStarted
+            => "SetupNotStarted", OperatorAccountError::SetupNotStarted, &[];
+        "ACCOUNT_ALREADY_EXISTS" | OperatorAccountError::AccountAlreadyExists
+            => "AccountAlreadyExists", OperatorAccountError::AccountAlreadyExists, &[];
+        "ACCOUNT_MISSING" | OperatorAccountError::AccountMissing
+            => "AccountMissing", OperatorAccountError::AccountMissing, &[];
+        "AUTHENTICATION_FAILED" | OperatorAccountError::AuthenticationFailed
+            => "AuthenticationFailed", OperatorAccountError::AuthenticationFailed, &[];
+        "AUTHENTICATION_THROTTLED" | OperatorAccountError::AuthenticationThrottled { .. }
+            => "AuthenticationThrottled",
+            OperatorAccountError::AuthenticationThrottled { retry_after_ms: 1001 }, &[];
+        "CREDENTIAL_DISABLED" | OperatorAccountError::CredentialDisabled
+            => "CredentialDisabled", OperatorAccountError::CredentialDisabled, &[];
+        "REMOTE_PASSWORD_NOT_ALLOWED" | OperatorAccountError::RemotePasswordNotAllowed
+            => "RemotePasswordNotAllowed", OperatorAccountError::RemotePasswordNotAllowed, &[];
+        "NOT_AUTHENTICATED" | OperatorAccountError::NotAuthenticated
+            => "NotAuthenticated", OperatorAccountError::NotAuthenticated, &[];
+        "INVALID_SESSION_TIMEOUT" | OperatorAccountError::InvalidSessionTimeout
+            => "InvalidSessionTimeout", OperatorAccountError::InvalidSessionTimeout, &[];
+        "CREDENTIAL_PROCESSING" | OperatorAccountError::CredentialProcessing
+            => "CredentialProcessing", OperatorAccountError::CredentialProcessing, &[];
+        "INVALID_STORE" | OperatorAccountError::InvalidStore
+            => "InvalidStore", OperatorAccountError::InvalidStore, &[];
+        "CLOCK_BEFORE_UNIX_EPOCH" | OperatorAccountError::ClockBeforeUnixEpoch
+            => "ClockBeforeUnixEpoch", OperatorAccountError::ClockBeforeUnixEpoch, &[];
+        "STORE" | OperatorAccountError::Store(_)
+            => "Store", OperatorAccountError::Store(driver_error(NEEDLE_A)), &[NEEDLE_A];
+        "STATE_UNAVAILABLE" | OperatorAccountError::StateUnavailable
+            => "StateUnavailable", OperatorAccountError::StateUnavailable, &[];
+    }
+
+    closed_table! {
+        expected_malformed / malformed_rows: MalformedClassification,
+        "MAGIC" | MalformedClassification::Magic => "magic", MalformedClassification::Magic, &[];
+        "TRUNCATED" | MalformedClassification::Truncated
+            => "truncated", MalformedClassification::Truncated, &[];
+        "TRAILING_BYTES" | MalformedClassification::TrailingBytes
+            => "trailing_bytes", MalformedClassification::TrailingBytes, &[];
+        "UNKNOWN_TAG" | MalformedClassification::UnknownTag
+            => "unknown_tag", MalformedClassification::UnknownTag, &[];
+        "INVALID_UTF8" | MalformedClassification::InvalidUtf8
+            => "invalid_utf8", MalformedClassification::InvalidUtf8, &[];
+        "RECORD_TOO_LARGE" | MalformedClassification::RecordTooLarge
+            => "record_too_large", MalformedClassification::RecordTooLarge, &[];
+        "OVER_LIMIT_LENGTH" | MalformedClassification::OverLimitLength
+            => "over_limit_length", MalformedClassification::OverLimitLength, &[];
+        "RULE_ID_BASIS_MISMATCH" | MalformedClassification::RuleIdBasisMismatch
+            => "rule_id_basis_mismatch", MalformedClassification::RuleIdBasisMismatch, &[];
+        "RULE_ID" | MalformedClassification::RuleId
+            => "rule_id", MalformedClassification::RuleId, &[];
+        "EMPTY_TEXT" | MalformedClassification::EmptyText
+            => "empty_text", MalformedClassification::EmptyText, &[];
+        "UNTRIMMED_TEXT" | MalformedClassification::UntrimmedText
+            => "untrimmed_text", MalformedClassification::UntrimmedText, &[];
+        "TEXT_TOO_LONG" | MalformedClassification::TextTooLong
+            => "text_too_long", MalformedClassification::TextTooLong, &[];
+        "CONTROL_CHARACTER" | MalformedClassification::ControlCharacter
+            => "control_character", MalformedClassification::ControlCharacter, &[];
+        "REVISION" | MalformedClassification::Revision
+            => "revision", MalformedClassification::Revision, &[];
+        "SUPERSEDES_DIGEST" | MalformedClassification::SupersedesDigest
+            => "supersedes_digest", MalformedClassification::SupersedesDigest, &[];
+    }
+
+    closed_table! {
+        expected_predecessor / predecessor_rows: PredecessorFault,
+        "NOT_STORED" | PredecessorFault::NotStored
+            => "not_stored", PredecessorFault::NotStored, &[];
+        "UNVERIFIABLE" | PredecessorFault::Unverifiable(_)
+            => "unverifiable", PredecessorFault::Unverifiable(payload_a()), &[NEEDLE_A];
+        "IN_ANOTHER_WORKSPACE" | PredecessorFault::InAnotherWorkspace
+            => "in_another_workspace", PredecessorFault::InAnotherWorkspace, &[];
+        "FOR_ANOTHER_MISSION" | PredecessorFault::ForAnotherMission
+            => "for_another_mission", PredecessorFault::ForAnotherMission, &[];
+    }
+
+    /// The two predecessor digests, chosen in fixture metadata before any error is built. The
+    /// digest is approved outward context (R42's allowed-context list), so it is asserted
+    /// PRESENT -- an approved field is not a needle.
+    fn digest_a() -> String {
+        "a".repeat(64)
+    }
+
+    fn digest_b() -> String {
+        "b".repeat(64)
+    }
+
+    closed_table! {
+        expected_recorder / recorder_rows: ClassificationRecordError,
+        "R42S1.RECORD.ACCOUNT" | ClassificationRecordError::Account(error)
+            => format!("account: {}", expected_account(error).1),
+            ClassificationRecordError::Account(OperatorAccountError::Store(driver_error(NEEDLE_A))),
+            &[NEEDLE_A];
+        "R42S1.RECORD.MALFORMED" | ClassificationRecordError::Malformed(reason)
+            => format!("malformed: {}", expected_malformed(reason).1),
+            ClassificationRecordError::Malformed(MalformedClassification::Magic), &[];
+        "R42S1.RECORD.NOT_CANONICAL" | ClassificationRecordError::NotCanonical
+            => "not_canonical", ClassificationRecordError::NotCanonical, &[];
+        "R42S1.RECORD.CROSS_WORKSPACE" | ClassificationRecordError::CrossWorkspace
+            => "cross_workspace", ClassificationRecordError::CrossWorkspace, &[];
+        "R42S1.RECORD.IDENTITY_TAKEN" | ClassificationRecordError::IdentityTaken
+            => "identity_taken", ClassificationRecordError::IdentityTaken, &[];
+        "R42S1.RECORD.POLICY_REVISION_NOT_FOUND" | ClassificationRecordError::PolicyRevisionNotFound
+            => "policy_revision_not_found", ClassificationRecordError::PolicyRevisionNotFound, &[];
+        "R42S1.RECORD.POLICY_PROJECT_IS_NOT_THE_MISSIONS"
+            | ClassificationRecordError::PolicyProjectIsNotTheMissions
+            => "policy_project_is_not_the_missions",
+            ClassificationRecordError::PolicyProjectIsNotTheMissions, &[];
+        "R42S1.RECORD.POLICY_REVISION_HAS_ANOTHER_CHARTER"
+            | ClassificationRecordError::PolicyRevisionHasAnotherCharter
+            => "policy_revision_has_another_charter",
+            ClassificationRecordError::PolicyRevisionHasAnotherCharter, &[];
+        "R42S1.RECORD.PREDECESSOR" | ClassificationRecordError::Predecessor { digest, fault }
+            => format!("predecessor {digest}: {}", expected_predecessor(fault).1),
+            ClassificationRecordError::Predecessor {
+                digest: digest_a(),
+                fault: PredecessorFault::Unverifiable(payload_a()),
+            },
+            &[NEEDLE_A];
+        "R42S1.RECORD.STORE" | ClassificationRecordError::Store(_)
+            => "store", ClassificationRecordError::Store(payload_a()), &[NEEDLE_A];
+    }
+
+    /// One semantic case: an id nothing else shares, the value, and the markers its payload was
+    /// DECLARED to carry -- never the markers its Debug happens to contain.
+    struct Case {
+        id: String,
+        value: ClassificationRecordError,
+        markers: &'static [&'static str],
+    }
+
+    /// The three needle-bearing cases lead, so a mutant's FIRST failing label is predictable.
+    const LEAD_CASES: [&str; 3] = [
+        "R42S1.RECORD.STORE",
+        "R42S1.RECORD.ACCOUNT.STORE",
+        "R42S1.RECORD.PREDECESSOR.UNVERIFIABLE",
+    ];
+
+    /// The 44 cases: the seven leaf roots, plus every child variant of the three nested roots.
+    ///
+    /// The root rows drive which stems exist (and are themselves checked for pattern alignment);
+    /// the nested stems expand over their own tables, so a new child variant is a new case without
+    /// anyone remembering to add one.
+    fn recorder_cases() -> Vec<Case> {
+        let mut cases = Vec::new();
+        for (stem, value, markers) in recorder_rows() {
+            match stem {
+                "R42S1.RECORD.ACCOUNT" => {
+                    for (child, error, child_markers) in account_rows() {
+                        cases.push(Case {
+                            id: format!("{stem}.{child}"),
+                            value: ClassificationRecordError::Account(error),
+                            markers: child_markers,
+                        });
+                    }
+                }
+                "R42S1.RECORD.MALFORMED" => {
+                    for (child, reason, child_markers) in malformed_rows() {
+                        cases.push(Case {
+                            id: format!("{stem}.{child}"),
+                            value: ClassificationRecordError::Malformed(reason),
+                            markers: child_markers,
+                        });
+                    }
+                }
+                "R42S1.RECORD.PREDECESSOR" => {
+                    for (child, fault, child_markers) in predecessor_rows() {
+                        let carries_marker = !child_markers.is_empty();
+                        cases.push(Case {
+                            id: format!("{stem}.{child}"),
+                            value: ClassificationRecordError::Predecessor {
+                                digest: if carries_marker {
+                                    digest_a()
+                                } else {
+                                    digest_b()
+                                },
+                                fault,
+                            },
+                            markers: child_markers,
+                        });
+                    }
+                }
+                leaf => cases.push(Case {
+                    id: leaf.to_owned(),
+                    value,
+                    markers,
+                }),
+            }
+        }
+        cases.sort_by_key(|case| {
+            LEAD_CASES
+                .iter()
+                .position(|lead| *lead == case.id)
+                .unwrap_or(usize::MAX)
+        });
+        cases
+    }
+
+    /// R42 slice 1: every `ClassificationRecordError` line is the closed projection, and every
+    /// diagnostic payload it was built from is still in `Debug`.
+    ///
+    /// The two census sites are `Account` (which printed the account error's whole `Debug`) and
+    /// `Store` (which printed the store's text). The other eight arms are pinned here as
+    /// regressions: closing two lines must not quietly reword the eight that were already safe.
+    #[test]
+    fn r42_recorder_projection_is_closed() {
+        let cases = recorder_cases();
+
+        // Cardinality is reviewed, not read from production: 18 account + 15 malformed
+        // + 4 predecessor + 6 unit roots + Store.
+        assert_eq!(account_rows().len(), 18, "R42S1.RECORD.CARDINALITY.ACCOUNT");
+        assert_eq!(
+            malformed_rows().len(),
+            15,
+            "R42S1.RECORD.CARDINALITY.MALFORMED"
+        );
+        assert_eq!(
+            predecessor_rows().len(),
+            4,
+            "R42S1.RECORD.CARDINALITY.PREDECESSOR"
+        );
+        assert_eq!(recorder_rows().len(), 10, "R42S1.RECORD.CARDINALITY.ROOT");
+        assert_eq!(cases.len(), 44, "R42S1.RECORD.CARDINALITY.CASES");
+        let ids: std::collections::BTreeSet<&str> =
+            cases.iter().map(|case| case.id.as_str()).collect();
+        assert_eq!(ids.len(), cases.len(), "R42S1.RECORD.CASE_IDS_UNIQUE");
+        for lead in LEAD_CASES {
+            assert!(ids.contains(lead), "R42S1.RECORD.LEAD_CASE_PRESENT: {lead}");
+        }
+
+        // The driver fixture must really carry its marker, or every NO_NEEDLE below is vacuous.
+        assert!(
+            format!("{:?}", driver_error(NEEDLE_A)).contains(NEEDLE_A),
+            "R42S1.FIXTURE.DRIVER_NEEDLE"
+        );
+
+        for case in &cases {
+            let Case { id, value, markers } = case;
+            let (stem, expected) = expected_recorder(value);
+            assert!(
+                id == stem || id.starts_with(&format!("{stem}.")),
+                "R42S1.RECORD.PATTERN_ALIGNS: {id} was built as {stem}"
+            );
+
+            let line = value.to_string();
+            for marker in *markers {
+                assert!(!line.contains(marker), "{id}.NO_NEEDLE: {line}");
+            }
+            assert!(
+                !line.contains('\n') && !line.contains('\r'),
+                "{id}.ONE_LINE: {line:?}"
+            );
+
+            let debug = format!("{value:?}");
+            for marker in *markers {
+                assert!(debug.contains(marker), "{id}.DEBUG_RETAINS: {debug}");
+            }
+
+            assert_eq!(line, expected, "{id}.PROJECTION");
+        }
+
+        // Approved context: the predecessor digest is the submitted supersedes reference, and it
+        // is deliberately IN the line. A permitted field is asserted present, never absent.
+        let predecessor = ClassificationRecordError::Predecessor {
+            digest: digest_b(),
+            fault: PredecessorFault::Unverifiable(payload_b()),
+        };
+        let line = predecessor.to_string();
+        assert_eq!(
+            line,
+            format!("predecessor {}: unverifiable", digest_b()),
+            "R42S1.RECORD.PREDECESSOR.CONTEXT"
+        );
+        assert!(
+            !line.contains(NEEDLE_B),
+            "R42S1.RECORD.PREDECESSOR.NO_NEEDLE"
+        );
+        assert!(
+            format!("{predecessor:?}").contains(NEEDLE_B),
+            "R42S1.RECORD.PREDECESSOR.DEBUG_RETAINS"
+        );
+
+        // A second payload proves the projection is independent of the text it was handed.
+        let second = ClassificationRecordError::Store(payload_b());
+        assert_eq!(
+            second.to_string(),
+            "store",
+            "R42S1.RECORD.STORE.SECOND_SEED"
+        );
+        assert!(
+            format!("{second:?}").contains(NEEDLE_B),
+            "R42S1.RECORD.STORE.SECOND_SEED_DEBUG_RETAINS"
         );
     }
 }
