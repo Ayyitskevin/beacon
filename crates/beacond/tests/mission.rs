@@ -1225,6 +1225,46 @@ fn a_completion_naming_every_declared_condition_exactly_once_is_accepted() {
 }
 
 #[test]
+fn verified_completion_refuses_a_condition_outcome_projection_that_disagrees_with_its_bytes() {
+    let store = TestStore::new("completion-outcome-projection-tamper");
+    let accounts = enrolled_accounts(&store);
+    let mission = admit_with_conditions(&store, &accounts, vec!["Gates pass".to_owned()]);
+    let boundary = admitted_sequence(&store, mission.id);
+    let record = completion_for(
+        &store,
+        &mission,
+        boundary,
+        vec![beacond::ConditionOutcome::Met],
+    );
+    let mut connection = Connection::open(&store.path).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .unwrap();
+    let digest = beacond::record_completion(&mut connection, &record).unwrap();
+
+    connection
+        .execute_batch("DROP TRIGGER mission_completion_conditions_no_update")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE mission_completion_conditions SET outcome = 'not_met'
+             WHERE workspace_id = ?1 AND completion_digest = ?2 AND condition_ordinal = 0",
+            rusqlite::params![store.workspace_id.to_string(), digest],
+        )
+        .unwrap();
+
+    let reread = beacond::verified_completion_within(
+        &connection,
+        store.workspace_id,
+        &record.digest().unwrap().value,
+    );
+    assert!(
+        reread.is_err(),
+        "verified reader returned a completion whose condition outcome projection contradicts its canonical bytes: {reread:?}"
+    );
+}
+
+#[test]
 fn a_gap_a_duplicate_and_an_ordinal_past_the_end_are_three_distinguishable_refusals() {
     // Bullet 2 and bullet 3. A duplicate and an ordinal past the end are refused by the STORE -- the
     // primary key and the foreign key to `mission_success_conditions` -- and a gap by the reader's
