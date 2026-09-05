@@ -868,7 +868,7 @@ fn missing_duplicate_orphaned_or_differently_encoded_event_evidence_refuses_star
     assert!(
         matches!(
             fixture.restart(),
-            Err(SupervisorError::ArtifactStateMismatch)
+            Err(SupervisorError::ArtifactStateMismatch { .. })
                 | Err(SupervisorError::ArtifactEventMismatch(_))
         ),
         "a missing Event did not refuse startup"
@@ -890,7 +890,7 @@ fn missing_duplicate_orphaned_or_differently_encoded_event_evidence_refuses_star
     assert!(
         matches!(
             fixture.restart(),
-            Err(SupervisorError::ArtifactStateMismatch)
+            Err(SupervisorError::ArtifactStateMismatch { .. })
                 | Err(SupervisorError::ArtifactEventMismatch(_))
         ),
         "a duplicate Event did not refuse startup"
@@ -912,7 +912,7 @@ fn missing_duplicate_orphaned_or_differently_encoded_event_evidence_refuses_star
     assert!(
         matches!(
             fixture.restart(),
-            Err(SupervisorError::ArtifactStateMismatch)
+            Err(SupervisorError::ArtifactStateMismatch { .. })
                 | Err(SupervisorError::ArtifactEventMismatch(_))
                 | Err(SupervisorError::InvalidEventKind(_))
         ),
@@ -942,7 +942,7 @@ fn missing_duplicate_orphaned_or_differently_encoded_event_evidence_refuses_star
     assert!(
         matches!(
             fixture.restart(),
-            Err(SupervisorError::ArtifactStateMismatch)
+            Err(SupervisorError::ArtifactStateMismatch { .. })
                 | Err(SupervisorError::ArtifactEventMismatch(_))
         ),
         "an orphan Event did not refuse startup"
@@ -972,7 +972,7 @@ fn the_creation_cursor_is_rederived_against_the_event_at_every_read() {
     );
     assert!(matches!(
         fixture.restart(),
-        Err(SupervisorError::ArtifactStateMismatch)
+        Err(SupervisorError::ArtifactStateMismatch { .. })
     ));
 }
 
@@ -1373,7 +1373,7 @@ END;",
     assert!(
         matches!(
             fixture.restart(),
-            Err(SupervisorError::ArtifactStateMismatch)
+            Err(SupervisorError::ArtifactStateMismatch { .. })
         ),
         "a relation the bytes contradict did not refuse startup"
     );

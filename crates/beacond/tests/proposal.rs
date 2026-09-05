@@ -2409,7 +2409,10 @@ fn startup_refuses_an_unaccounted_proposal_row_and_names_the_row() {
         .get(&planted)
         .expect_err("the reader trusted a row whose bytes do not hash to its digest");
     assert!(
-        matches!(read, ProposalError::InvalidStore | ProposalError::Inconsistent(_)),
+        matches!(
+            read,
+            ProposalError::InvalidStore | ProposalError::Inconsistent(_)
+        ),
         "the planted fault is not the one this test is about: {read:?}"
     );
 

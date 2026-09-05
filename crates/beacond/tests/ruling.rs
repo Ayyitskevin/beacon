@@ -2280,7 +2280,7 @@ fn startup_refuses_a_ruling_whose_owner_account_is_gone() {
     assert!(
         matches!(
             error,
-            SupervisorError::RulingStateMismatch | SupervisorError::ProposalStateMismatch
+            SupervisorError::RulingStateMismatch | SupervisorError::ProposalStateMismatch { .. }
         ),
         "{error:?} / {error}"
     );
