@@ -243,6 +243,24 @@ impl From<PublishedOutcome> for ExportedOutcome {
     }
 }
 
+/// A stored publication version as the type the whole module speaks, or a refusal.
+///
+/// SQLite holds it as `i64` and migration 0031 checks only `>= 1`, so `4294967296` is a
+/// schema-valid row. Converting that with `unwrap_or(u32::MAX)` reported it as version 4294967295
+/// -- a number no row has, marked current, and one that `export_markdown_version` could never use
+/// to reach the row it came from (sol1's P1-1). A conversion that cannot represent its input must
+/// refuse it, not pick the nearest number it can spell.
+///
+/// The startup pass already refused this; the live readers did not, and a reader is exactly where
+/// post-open relation damage shows up. One function now, so the two cannot drift again.
+fn representable_version(stored: i64) -> Result<u32, PublishRefusal> {
+    u32::try_from(stored).map_err(|_| {
+        PublishRefusal::Unverified(format!(
+            "the stored publication version {stored} is outside the representable domain"
+        ))
+    })
+}
+
 /// One row of a Mission's publication history, carrying what the RELATION itself holds.
 ///
 /// Nothing here needs a manifest decoded or a document verified: drawing a list of versions must
@@ -527,9 +545,9 @@ pub(crate) fn publish_within(
         )
         .optional()?
         .flatten();
-    let next = u32::try_from(highest.unwrap_or(0))
-        .unwrap_or(u32::MAX)
-        .saturating_add(1);
+    // The same rule on the write path: a stored maximum this type cannot hold must refuse, not
+    // saturate into a version the relation does not have.
+    let next = representable_version(highest.unwrap_or(0))?.saturating_add(1);
     if let Some(highest) = highest {
         let contiguous = count_versions(transaction, workspace_id, mission_id)?;
         if i64::from(contiguous) != highest {
@@ -590,7 +608,7 @@ fn count_versions(
         params![workspace_id.to_string(), mission_id.to_string()],
         |row| row.get(0),
     )?;
-    Ok(u32::try_from(count).unwrap_or(u32::MAX))
+    representable_version(count)
 }
 
 /// The appendix carries the manifest's exact bytes as recomputable hex.
@@ -830,7 +848,7 @@ pub(crate) fn publication_history_within(
                 publication_id: Uuid::parse_str(&publication_id).map_err(|_| {
                     PublishRefusal::Unverified("a publication id is not a UUID".to_owned())
                 })?,
-                publication_version: u32::try_from(version).unwrap_or(u32::MAX),
+                publication_version: representable_version(version)?,
                 candidate_artifact_digest: candidate,
                 evaluation_digest: evaluation,
                 is_current: Some(version) == highest,
@@ -881,7 +899,7 @@ fn load_row(
             PublishRefusal::Unverified("the publication id is not a UUID".to_owned())
         })?,
         mission_id,
-        publication_version: u32::try_from(publication_version).unwrap_or(u32::MAX),
+        publication_version: representable_version(publication_version)?,
         candidate_artifact_digest,
         evaluation_digest,
     })
