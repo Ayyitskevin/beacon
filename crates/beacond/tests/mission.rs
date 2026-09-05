@@ -978,6 +978,29 @@ fn the_condition_migration_adds_triggers_and_rewrites_none() {
     }
 }
 
+/// The rollback undoes migration 0029 too: a store at an earlier version carries none of its
+/// insert guards, and startup compares a store's schema with its declared version BEFORE it
+/// migrates -- a rolled-back store that still carried them was refused as a schema mismatch.
+fn drop_0029_insert_guards(connection: &Connection) {
+    let mut statement = connection
+        .prepare(
+            r"SELECT name FROM sqlite_schema
+              WHERE type = 'trigger' AND name LIKE '%\_no\_conflicting\_insert' ESCAPE '\'",
+        )
+        .unwrap();
+    let guards: Vec<String> = statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    drop(statement);
+    for guard in guards {
+        connection
+            .execute_batch(&format!("DROP TRIGGER {guard};"))
+            .unwrap();
+    }
+}
+
 /// Migration 0028 REBUILT `evaluations` and its three related tables to generalize the subject, so
 /// a rollback to 23 has to put 0023's shapes back -- otherwise the store keeps a v28 `evaluations`
 /// whose triggers reference `artifacts`, which the rollback above has just dropped.
@@ -1108,6 +1131,7 @@ fn a_store_at_the_previous_schema_version_migrates_and_keeps_its_condition_rows(
              UPDATE schema_meta SET version = 23 WHERE singleton = 1;",
         )
         .unwrap();
+    drop_0029_insert_guards(&connection);
     restore_pre_0028_evaluations(&connection);
     restore_pre_0025_events(&connection);
     drop(connection);

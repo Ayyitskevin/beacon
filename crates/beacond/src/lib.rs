@@ -624,6 +624,40 @@ impl From<serde_json::Error> for SupervisorError {
     }
 }
 
+/// The one way a store connection is opened, so the connection state every store relies on is set
+/// in one place rather than remembered at each site.
+///
+/// `recursive_triggers` is here for sol1's #13 (R20.4): SQLite's REPLACE conflict resolution deletes
+/// the row it displaces WITHOUT firing that row's delete trigger unless this pragma is on, so every
+/// `BEFORE DELETE ... RAISE(ABORT)` that makes a store immutable was one `INSERT OR REPLACE` away
+/// from doing nothing. Migration 0029 adds the schema half (a `BEFORE INSERT` refusal per
+/// immutable table, generated from the schema) for connections that did not come through here.
+/// The tail every `<T>_no_conflicting_insert` guard's message ends with (migration 0029), so a
+/// writer that classifies "this identity is already taken" can recognise the guard's refusal
+/// beside the UNIQUE / PRIMARY KEY codes it used to see. The guard fires BEFORE the constraint
+/// check, so on a guarded table a plain duplicate insert never reaches the constraint at all:
+/// its error is `SQLITE_CONSTRAINT_TRIGGER` carrying this sentence. Keyed on text the schema
+/// supplies and this crate generates, never on text a caller could.
+pub(crate) const IDENTITY_ALREADY_STORED: &str = "a row with this identity is already stored";
+
+/// Is this the `_no_conflicting_insert` guard refusing a duplicate identity?
+pub(crate) fn is_identity_already_stored(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(failure, Some(message))
+            if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER
+                && message.ends_with(IDENTITY_ALREADY_STORED)
+    )
+}
+
+pub(crate) fn open_store_connection(path: &Path) -> rusqlite::Result<Connection> {
+    let connection = Connection::open(path)?;
+    connection.pragma_update(None, "foreign_keys", "ON")?;
+    connection.pragma_update(None, "recursive_triggers", "ON")?;
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    Ok(connection)
+}
+
 /// Owns store startup, first-Workspace creation, and the diagnostic report behind one interface.
 pub struct Supervisor;
 
@@ -634,9 +668,7 @@ impl Supervisor {
         prepare_parent(&config.store_path)?;
         prepare_store_file(&config.store_path)?;
 
-        let mut connection = Connection::open(&config.store_path)?;
-        connection.pragma_update(None, "foreign_keys", "ON")?;
-        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        let mut connection = open_store_connection(&config.store_path)?;
 
         // The immediate transaction prevents two starting supervisors from both creating the
         // first Workspace. Source:
@@ -4141,6 +4173,313 @@ mod tests {
             Supervisor::bootstrap(config(&store.path, "Personal")),
             Err(SupervisorError::UnsupportedSchemaVersion(v)) if v == between
         ));
+    }
+
+    /// The `<T>_no_conflicting_insert` guard for every paired-trigger table, generated from the
+    /// schema rather than hand-written thirty times (sol1's pre-read, R20.4). A table declares its
+    /// immutability with the `<T>_no_update` / `<T>_no_delete` pair; its guard's WHEN names every
+    /// PRIMARY KEY and UNIQUE key the table has, which is exactly the set of conflicts REPLACE
+    /// would resolve by deleting. A partial unique index conflicts only between rows its predicate
+    /// admits, so that branch carries the predicate for both rows. The message is the table's
+    /// own, copied from its delete trigger. Sorted by table so the output is stable.
+    ///
+    /// A rowid-alias PRIMARY KEY (`sequence INTEGER PRIMARY KEY AUTOINCREMENT`) is a key like any
+    /// other: `NEW.sequence` is `-1` in a BEFORE INSERT trigger when the insert did not name one
+    /// (measured, SQLite 3.45.1), so the branch never matches an honest insert and does match an
+    /// explicit REPLACE at a stored sequence.
+    fn generated_no_conflicting_insert_triggers(connection: &rusqlite::Connection) -> String {
+        let mut out = String::new();
+        for (table, delete_trigger_sql) in paired_trigger_tables(connection) {
+            let message = raise_message(&delete_trigger_sql);
+            let tail = crate::IDENTITY_ALREADY_STORED;
+            let keys = unique_keys(connection, &table);
+            assert!(
+                !keys.is_empty(),
+                "{table} has no PRIMARY KEY or UNIQUE key, so REPLACE cannot conflict on it and \
+                 a guard would be vacuous"
+            );
+            let predicates = keys
+                .iter()
+                .map(|(key, partial)| {
+                    let mut terms = key
+                        .iter()
+                        .map(|column| format!("existing.{column} = NEW.{column}"))
+                        .collect::<Vec<_>>();
+                    if let Some(predicate) = partial {
+                        for row in ["existing", "NEW"] {
+                            terms.push(format!(
+                                "({})",
+                                qualified(predicate, row, connection, &table)
+                            ));
+                        }
+                    }
+                    format!("({})", terms.join(" AND "))
+                })
+                .collect::<Vec<_>>()
+                .join("\n       OR ");
+            out.push_str(&format!(
+                "CREATE TRIGGER {table}_no_conflicting_insert\n\
+                 BEFORE INSERT ON {table}\n\
+                 WHEN EXISTS (\n    \
+                     SELECT 1 FROM {table} AS existing\n    \
+                     WHERE {predicates}\n\
+                 )\n\
+                 BEGIN\n    \
+                     SELECT RAISE(ABORT, '{message}; {tail}');\n\
+                 END;\n\n"
+            ));
+        }
+        out
+    }
+
+    /// `(table, sql of its delete trigger)` for every table with the `_no_update` / `_no_delete`
+    /// pair, by table name.
+    fn paired_trigger_tables(connection: &rusqlite::Connection) -> Vec<(String, String)> {
+        let mut statement = connection
+            .prepare(
+                "SELECT tbl_name, sql FROM sqlite_schema
+                 WHERE type = 'trigger' AND name = tbl_name || '_no_delete'
+                   AND EXISTS (
+                       SELECT 1 FROM sqlite_schema AS paired
+                       WHERE paired.type = 'trigger'
+                         AND paired.name = sqlite_schema.tbl_name || '_no_update'
+                   )
+                 ORDER BY tbl_name",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn raise_message(trigger_sql: &str) -> String {
+        let opener = "RAISE(ABORT, '";
+        let start = trigger_sql
+            .find(opener)
+            .expect("the delete trigger raises by name")
+            + opener.len();
+        let end = trigger_sql[start..].find('\'').unwrap() + start;
+        trigger_sql[start..end].to_owned()
+    }
+
+    fn column_names(connection: &rusqlite::Connection, table: &str) -> Vec<String> {
+        let mut info = connection
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        info.query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    /// Every PRIMARY KEY and UNIQUE key of `table`, each as its ordered column list plus the
+    /// predicate of a partial index, deduplicated. Read from `table_info` (a rowid-alias PRIMARY
+    /// KEY has no index to list), `index_list`, and the index's own text for its predicate.
+    #[allow(clippy::type_complexity)]
+    fn unique_keys(
+        connection: &rusqlite::Connection,
+        table: &str,
+    ) -> Vec<(Vec<String>, Option<String>)> {
+        let mut keys: Vec<(Vec<String>, Option<String>)> = Vec::new();
+        let mut info = connection
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        let mut primary: Vec<(i64, String)> = info
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(5)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        primary.retain(|(position, _)| *position > 0);
+        primary.sort();
+        if !primary.is_empty() {
+            keys.push((
+                primary.into_iter().map(|(_, column)| column).collect(),
+                None,
+            ));
+        }
+        let mut list = connection
+            .prepare(&format!("PRAGMA index_list({table})"))
+            .unwrap();
+        let indexes: Vec<(String, i64, i64)> = list
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        for (name, unique, partial) in indexes {
+            if unique == 0 {
+                continue;
+            }
+            let mut columns = connection
+                .prepare(&format!("PRAGMA index_info({name})"))
+                .unwrap();
+            let key: Vec<String> = columns
+                .query_map([], |row| row.get::<_, String>(2))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            let predicate = (partial != 0).then(|| {
+                let sql: String = connection
+                    .query_row(
+                        "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = ?1",
+                        [&name],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                // The index text keeps its author's line breaks, so the keyword is found as a
+                // token rather than as " WHERE " with spaces on both sides.
+                let at = sql
+                    .rfind("WHERE")
+                    .filter(|at| sql[..*at].ends_with(char::is_whitespace))
+                    .expect("a partial index has a WHERE");
+                sql[at + "WHERE".len()..]
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            });
+            let entry = (key, predicate);
+            if !keys.contains(&entry) {
+                keys.push(entry);
+            }
+        }
+        keys
+    }
+
+    /// The partial index's predicate with every column of `table` qualified as `row.column`. The
+    /// shapes on `main` are `column IS NULL` and `column IS NOT NULL`; anything the allowlist below
+    /// does not cover stops the generator rather than emitting a guard that might be wrong.
+    fn qualified(
+        predicate: &str,
+        row: &str,
+        connection: &rusqlite::Connection,
+        table: &str,
+    ) -> String {
+        let columns = column_names(connection, table);
+        let mut out = String::new();
+        for token in predicate.split_whitespace() {
+            let bare = token.trim_matches(|c| c == '(' || c == ')');
+            let allowed = ["IS", "NOT", "NULL", "AND", "OR", "=", "<>"];
+            assert!(
+                columns.iter().any(|column| column == bare)
+                    || allowed.contains(&bare)
+                    || (bare.starts_with('\'') && bare.ends_with('\'')),
+                "{table}: partial-index predicate token {token:?} is outside what the generator \
+                 qualifies; extend `qualified` deliberately"
+            );
+            let rendered = if columns.iter().any(|column| column == bare) {
+                token.replace(bare, &format!("{row}.{bare}"))
+            } else {
+                token.to_owned()
+            };
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(&rendered);
+        }
+        out
+    }
+
+    /// Migration 0029 is exactly the generated guard set: every table that declares immutability
+    /// with the `_no_update` / `_no_delete` pair gets `<T>_no_conflicting_insert`, and its WHEN
+    /// names every PRIMARY KEY and UNIQUE key. Generated from the 0028 schema and compared
+    /// byte-for-byte, so a key added to a table without regenerating the file fails here -- and so
+    /// does a paired table that lacks its guard after the ladder runs, or a guard on a table that
+    /// never declared itself immutable.
+    #[test]
+    fn migration_0029_is_the_generated_insert_guard_for_every_paired_trigger_table() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        crate::apply_migrations_through(&connection, 28).unwrap();
+        let generated = generated_no_conflicting_insert_triggers(&connection);
+        assert!(
+            crate::MIGRATION_V29.contains(generated.trim_end()),
+            "0029 is not the generated text; regenerate it with\n  cargo test -p beacond --lib -- \
+             print_the_no_conflicting_insert_triggers --ignored --nocapture\n{generated}"
+        );
+
+        connection.execute_batch(crate::MIGRATION_V29).unwrap();
+        let paired: Vec<String> = paired_trigger_tables(&connection)
+            .into_iter()
+            .map(|(table, _)| table)
+            .collect();
+        let mut statement = connection
+            .prepare(
+                "SELECT tbl_name FROM sqlite_schema
+                 WHERE type = 'trigger' AND name = tbl_name || '_no_conflicting_insert'
+                 ORDER BY tbl_name",
+            )
+            .unwrap();
+        let guarded: Vec<String> = statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            guarded, paired,
+            "guards and paired-trigger tables are not the same set"
+        );
+        assert_eq!(paired.len(), 30, "sol1's inventory at 0028 counts thirty");
+    }
+
+    /// A generator, not a check: prints 0029's trigger block for a store at 0028.
+    #[test]
+    #[ignore = "prints the generated block; run with --ignored --nocapture to regenerate 0029"]
+    fn print_the_no_conflicting_insert_triggers() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        crate::apply_migrations_through(&connection, 28).unwrap();
+        println!(
+            "-- GENERATED BLOCK BEGIN\n{}-- GENERATED BLOCK END",
+            generated_no_conflicting_insert_triggers(&connection)
+        );
+    }
+
+    /// R20.4's connection half (sol1's #13): every store connection opens with `recursive_triggers`
+    /// on, so SQLite's REPLACE fires the delete trigger it otherwise skips. Proven on a table that
+    /// has ONLY the old-shape trigger pair -- no `BEFORE INSERT` refusal to hide behind -- so what
+    /// refuses here is the pragma and nothing else; migration 0029's triggers have their own test.
+    #[test]
+    fn every_store_connection_opens_with_recursive_triggers_so_replace_meets_the_delete_trigger() {
+        let path = std::env::temp_dir().join(format!(
+            "beacon-recursive-triggers-{}.sqlite3",
+            uuid::Uuid::new_v4()
+        ));
+        let connection = crate::open_store_connection(&path).unwrap();
+        for pragma in ["foreign_keys", "recursive_triggers"] {
+            let on: i64 = connection
+                .query_row(&format!("PRAGMA {pragma}"), [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(on, 1, "{pragma} is not on");
+        }
+        connection
+            .execute_batch(
+                "CREATE TABLE guarded (digest TEXT NOT NULL PRIMARY KEY, value TEXT NOT NULL) STRICT;
+                 CREATE TRIGGER guarded_no_delete BEFORE DELETE ON guarded
+                 BEGIN SELECT RAISE(ABORT, 'guarded rows are immutable'); END;
+                 INSERT INTO guarded VALUES ('d1', 'first');",
+            )
+            .unwrap();
+        let replaced =
+            connection.execute("INSERT OR REPLACE INTO guarded VALUES ('d1', 'second')", []);
+        assert!(
+            replaced
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("immutable")),
+            "REPLACE walked past the delete trigger: {replaced:?}"
+        );
+        let value: String = connection
+            .query_row("SELECT value FROM guarded", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, "first");
+        drop(connection);
+        let _ = std::fs::remove_file(&path);
     }
 
     /// The #60 P2: every replayable Event kind still inserts, after the NEWEST migration.
