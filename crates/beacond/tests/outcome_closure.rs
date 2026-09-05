@@ -544,6 +544,38 @@ fn evaluate_artifact(fixture: &Fixture, artifact_digest: &str) -> Evaluation {
         .expect("C11.03.EVALUATION_RECORDED")
 }
 
+fn supersede_artifact_evaluation(
+    fixture: &Fixture,
+    artifact_digest: &str,
+    predecessor: &Evaluation,
+) -> Evaluation {
+    EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .record(EvaluationDraft {
+            subject: EvaluationSubjectDraft::Artifact(artifact_digest.to_owned()),
+            evaluator: Evaluator {
+                resident_id: fixture.other_resident_id,
+                configuration_id: fixture.other_configuration_id,
+            },
+            rubric: RubricDeclaration {
+                id: "outcome-document-v1".to_owned(),
+                version: 1,
+                canonicalizer: "beacon.rubric.v1".to_owned(),
+                sha256: data_encoding::HEXLOWER.encode(&[0x20_u8; 32]),
+            },
+            cited_runs: Vec::new(),
+            verdict: Verdict::Meets,
+            findings: vec![Finding {
+                severity: FindingSeverity::Note,
+                summary: "The later read confirms the originally cited candidate bytes.".to_owned(),
+            }],
+            conflicts: Conflicts::None,
+            rationale: "This is a successor record, not a rewrite of the cited Evaluation."
+                .to_owned(),
+            supersedes: EvaluationSupersedes::Evaluation(predecessor.digest().value.clone()),
+        })
+        .expect("C11.10.EVALUATION_SUCCESSOR_RECORDED")
+}
+
 fn classify_mission(
     fixture: &Fixture,
     mission_id: Uuid,
@@ -840,6 +872,100 @@ fn table_count(store: &TestStore, table: &str, workspace_id: Uuid) -> u64 {
         )
         .map(|count| u64::try_from(count).expect("C11.TABLE_COUNT_DOMAIN"))
         .expect("C11.TABLE_COUNT_READ")
+}
+
+/// Test-only PLANT boundary used only for R29.3's distinguishing stored-byte witness. The trigger
+/// is restored immediately; the closure never calls this for its primary owner-written path.
+fn with_update_trigger_down(
+    store: &TestStore,
+    name: &str,
+    _table: &str,
+    _message: &str,
+    plant: impl FnOnce(&Connection),
+) {
+    let connection = store.connect();
+    let original_sql: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+            [name],
+            |row| row.get(0),
+        )
+        .expect("C11.12.PLANT_TRIGGER_READ");
+    connection
+        .execute_batch(&format!("DROP TRIGGER {name};"))
+        .expect("C11.12.PLANT_TRIGGER_DROP");
+    plant(&connection);
+    connection
+        .execute_batch(&original_sql)
+        .expect("C11.12.PLANT_TRIGGER_RESTORE");
+}
+
+/// Read the appendix as an outside verifier would: locate the one proof block, concatenate its
+/// lines and decode them. This intentionally does not call the production renderer or codec.
+fn manifest_proof_from_markdown(markdown: &str) -> Vec<u8> {
+    assert_eq!(
+        markdown.matches("Manifest proof").count(),
+        1,
+        "C11.09.APPENDIX_MANIFEST_PROOF"
+    );
+    let proof = markdown
+        .split_once("Manifest proof")
+        .expect("C11.09.APPENDIX_MANIFEST_PROOF")
+        .1;
+    let fenced = proof
+        .split_once("```\n")
+        .expect("C11.09.APPENDIX_MANIFEST_PROOF")
+        .1;
+    let hex = fenced
+        .split_once("\n```")
+        .expect("C11.09.APPENDIX_MANIFEST_PROOF")
+        .0
+        .lines()
+        .collect::<String>();
+    assert_eq!(
+        data_encoding::HEXLOWER.encode(
+            &data_encoding::HEXLOWER
+                .decode(hex.as_bytes())
+                .expect("C11.09.APPENDIX_MANIFEST_PROOF")
+        ),
+        hex,
+        "C11.09.APPENDIX_MANIFEST_PROOF"
+    );
+    data_encoding::HEXLOWER
+        .decode(hex.as_bytes())
+        .expect("C11.09.APPENDIX_MANIFEST_PROOF")
+}
+
+/// Return only the appendix's cited-object data rows, preserving all eight displayed cells.
+fn appendix_object_rows(markdown: &str) -> Vec<Vec<String>> {
+    let section = markdown
+        .split_once(" Cited objects\n")
+        .expect("C11.09.APPENDIX_OBJECT_ROWS_EXACT")
+        .1
+        .split_once("\n### ")
+        .expect("C11.09.APPENDIX_OBJECT_ROWS_EXACT")
+        .0;
+    assert!(
+        section.contains(
+            "| kind | identity | schema | digest algorithm | digest | canonicalizer | pinned revision | verification result |"
+        ),
+        "C11.09.APPENDIX_OBJECT_ROWS_EXACT"
+    );
+    section
+        .lines()
+        .filter(|line| line.starts_with("| `"))
+        .map(|line| {
+            let cells = line
+                .split('|')
+                .skip(1)
+                .map(str::trim)
+                .filter(|cell| !cell.is_empty())
+                .map(|cell| cell.to_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(cells.len(), 8, "C11.09.APPENDIX_OBJECT_ROWS_EXACT");
+            cells
+        })
+        .collect()
 }
 
 /// Deliberate non-assertions: this closure does not duplicate the codec, migration, trigger,
@@ -1601,13 +1727,810 @@ fn criterion_11_outcome_closure_on_one_store() {
         "C11.08.PUBLISH_IS_NOT_SUCCESS"
     );
 
-    let _ = (
-        saved_store_path,
-        primary_candidate,
-        primary_stored,
-        primary_candidate_record,
-        qualifying_evaluation,
-        publication_v1,
+    // Step 9: get must reproduce the exact bindings, while explicitly keeping boundary-time
+    // citations distinct from the two chains derived on this read.
+    let read_v1 = fixture
+        .outcomes
+        .get(fixture.mission_id)
+        .expect("C11.09.GET_V1");
+    assert_eq!(
+        read_v1.publication_id(),
+        publication_v1.publication_id(),
+        "C11.09.GET_REPROVES_PUBLISHED_BINDINGS"
     );
-    panic!("C11.09.NOT_YET");
+    assert_eq!(
+        read_v1.manifest().canonical_bytes(),
+        primary_stored.canonical_bytes(),
+        "C11.09.GET_REPROVES_PUBLISHED_BINDINGS"
+    );
+    assert_eq!(
+        read_v1
+            .candidate()
+            .payload()
+            .canonical_bytes()
+            .expect("C11.09.CANDIDATE_RECORD_BYTES"),
+        primary_candidate_record
+            .payload()
+            .canonical_bytes()
+            .expect("C11.09.CANDIDATE_RECORD_BYTES"),
+        "C11.09.GET_REPROVES_PUBLISHED_BINDINGS"
+    );
+    assert_eq!(
+        read_v1.candidate().content(),
+        primary_candidate_record.content(),
+        "C11.09.GET_REPROVES_PUBLISHED_BINDINGS"
+    );
+    assert_eq!(
+        read_v1.cited_evaluation_digest(),
+        qualifying_evaluation.digest(),
+        "C11.09.GET_REPROVES_PUBLISHED_BINDINGS"
+    );
+    assert_eq!(
+        read_v1.citation_provenance(),
+        Provenance::VerifiedAtBoundary {
+            boundary_event_seq: boundary_primary,
+        },
+        "C11.09.BOUNDARY_IS_NOT_NOW"
+    );
+    assert_eq!(
+        read_v1.supersession_at_read_time().provenance(),
+        Provenance::DerivedAtReadTime,
+        "C11.09.BOUNDARY_IS_NOT_NOW"
+    );
+
+    let proof_bytes = manifest_proof_from_markdown(primary_markdown);
+    assert_eq!(
+        proof_bytes,
+        primary_stored.canonical_bytes(),
+        "C11.09.APPENDIX_MANIFEST_PROOF"
+    );
+    assert_eq!(
+        data_encoding::HEXLOWER.encode(&sha256_bytes(&proof_bytes)),
+        primary_stored.digest().value,
+        "C11.09.APPENDIX_MANIFEST_PROOF"
+    );
+    for exact_line in [
+        format!(
+            "manifest_digest_algorithm: {}",
+            primary_stored.digest().algorithm
+        ),
+        format!("manifest_digest: {}", primary_stored.digest().value),
+        format!("boundary_event_seq: {boundary_primary}"),
+        format!("| byte length | `{}` |", proof_bytes.len()),
+        format!("| boundary event sequence | `{boundary_primary}` |"),
+    ] {
+        assert!(
+            primary_markdown.contains(&exact_line),
+            "C11.09.APPENDIX_MANIFEST_PROOF: {exact_line}"
+        );
+    }
+
+    let appendix_rows = appendix_object_rows(primary_markdown);
+    let expected_appendix_digests = [
+        primary_completion_digest.as_str(),
+        high.digest().value.as_str(),
+        delivered.digest().value.as_str(),
+        supporting.digest().value.as_str(),
+        support_evaluation.digest().value.as_str(),
+        ruling.digest().value.as_str(),
+        primary_spend_record.digest().value.as_str(),
+    ];
+    assert_eq!(
+        appendix_rows.len(),
+        expected_appendix_digests.len(),
+        "C11.09.APPENDIX_OBJECT_ROWS_EXACT"
+    );
+    for digest in expected_appendix_digests {
+        assert_eq!(
+            appendix_rows
+                .iter()
+                .filter(|cells| cells[4].trim_matches('`') == digest)
+                .count(),
+            1,
+            "C11.09.APPENDIX_OBJECT_ROWS_EXACT: {digest}"
+        );
+    }
+    for row in &appendix_rows {
+        assert_eq!(
+            row[3].trim_matches('`'),
+            "sha256",
+            "C11.09.APPENDIX_OBJECT_ROWS_EXACT"
+        );
+        assert!(
+            row[7].contains(&format!("verified at boundary event {boundary_primary}")),
+            "C11.09.APPENDIX_OBJECT_ROWS_EXACT"
+        );
+        assert!(
+            !row.iter().any(|cell| {
+                cell.contains(&decoy.digest().value)
+                    || cell.contains(&decoy_evaluation.digest().value)
+                    || cell.contains(&qualifying_evaluation.digest().value)
+            }),
+            "C11.09.APPENDIX_OBJECT_ROWS_EXACT"
+        );
+    }
+    assert!(
+        primary_markdown.contains("candidate media type | `text/markdown; charset=utf-8`")
+            && primary_markdown.contains(&format!(
+                "Policy classification digest | `sha256:{}`",
+                high.digest().value
+            ))
+            && primary_markdown.contains("appendix request | `policy_default`")
+            && primary_markdown.contains("appendix mode | `included`")
+            && primary_markdown.contains(&format!("event `{boundary_primary}`")),
+        "C11.09.APPENDIX_POLICY_AND_PROFILE"
+    );
+
+    // Step 10: changing only the presentation request produces new canonical bytes and appends a
+    // second qualified relation. Every identity and byte sequence for version 1 is retained.
+    let candidate_v2 = fixture
+        .outcomes
+        .prepare_for_mission(fixture.mission_id, AppendixRequest::Include)
+        .expect("C11.10.NEW_CANDIDATE");
+    assert_ne!(candidate_v2, primary_candidate, "C11.10.NEW_CANDIDATE");
+    let stored_v2 = fixture
+        .outcomes
+        .manifest(&candidate_v2.manifest_digest)
+        .expect("C11.10.NEW_MANIFEST_READ");
+    let candidate_record_v2 = fixture
+        .outcomes
+        .candidate(&candidate_v2.manifest_digest)
+        .expect("C11.10.NEW_CANDIDATE_READ");
+    assert_ne!(
+        stored_v2.canonical_bytes(),
+        primary_stored.canonical_bytes(),
+        "C11.10.NEW_CANDIDATE"
+    );
+    assert_ne!(
+        candidate_record_v2.content(),
+        primary_candidate_record.content(),
+        "C11.10.NEW_CANDIDATE"
+    );
+    let qualifying_evaluation_v2 =
+        evaluate_artifact(&fixture, &candidate_v2.candidate_artifact_digest);
+    let publication_v2 = fixture
+        .outcomes
+        .publish(
+            fixture.mission_id,
+            candidate_record_v2.digest(),
+            qualifying_evaluation_v2.digest(),
+        )
+        .expect("C11.10.CORRECTION_PUBLISHED");
+    assert_ne!(
+        publication_v2.publication_id(),
+        publication_v1.publication_id(),
+        "C11.10.CORRECTION_PUBLISHED"
+    );
+    assert_eq!(
+        publication_v2.publication_version(),
+        2,
+        "C11.10.CURRENT_TWO_OF_TWO"
+    );
+    assert_eq!(
+        publication_v2.publication_version_count(),
+        2,
+        "C11.10.CURRENT_TWO_OF_TWO"
+    );
+    assert!(
+        publication_v2.is_current_version(),
+        "C11.10.CURRENT_TWO_OF_TWO"
+    );
+    let history = fixture
+        .outcomes
+        .publication_history(fixture.mission_id)
+        .expect("C11.10.HISTORY_READ");
+    assert_eq!(
+        history
+            .iter()
+            .map(|entry| entry.publication_version)
+            .collect::<Vec<_>>(),
+        vec![2, 1],
+        "C11.10.CURRENT_TWO_OF_TWO"
+    );
+    assert_eq!(
+        history.iter().filter(|entry| entry.is_current).count(),
+        1,
+        "C11.10.CURRENT_TWO_OF_TWO"
+    );
+    let old_v1 = fixture
+        .outcomes
+        .get_version(fixture.mission_id, 1)
+        .expect("C11.10.OLD_VERSION_READ");
+    assert_eq!(old_v1.publication_version(), 1, "C11.10.OLD_ID_UNCHANGED");
+    assert_eq!(
+        old_v1.publication_version_count(),
+        2,
+        "C11.10.OLD_ID_UNCHANGED"
+    );
+    assert!(!old_v1.is_current_version(), "C11.10.OLD_ID_UNCHANGED");
+    assert_eq!(
+        old_v1.publication_id(),
+        publication_v1.publication_id(),
+        "C11.10.OLD_ID_UNCHANGED"
+    );
+    assert_eq!(
+        old_v1.manifest().canonical_bytes(),
+        primary_stored.canonical_bytes(),
+        "C11.10.OLD_MANIFEST_UNCHANGED"
+    );
+    assert_eq!(
+        old_v1.candidate().content(),
+        primary_candidate_record.content(),
+        "C11.10.OLD_BYTES_UNCHANGED"
+    );
+    assert_eq!(
+        old_v1.cited_evaluation_digest(),
+        qualifying_evaluation.digest(),
+        "C11.10.OLD_ID_UNCHANGED"
+    );
+    let evaluation_successor = supersede_artifact_evaluation(
+        &fixture,
+        &primary_candidate.candidate_artifact_digest,
+        &qualifying_evaluation,
+    );
+    let old_with_tail = fixture
+        .outcomes
+        .get_version(fixture.mission_id, 1)
+        .expect("C11.10.OLD_WITH_TAIL_READ");
+    assert_eq!(
+        old_with_tail.cited_evaluation_digest(),
+        qualifying_evaluation.digest(),
+        "C11.10.CITED_IS_NOT_TAIL"
+    );
+    assert_eq!(
+        old_with_tail.supersession_at_read_time().evaluation_tail(),
+        Some(evaluation_successor.digest()),
+        "C11.10.CITED_IS_NOT_TAIL"
+    );
+
+    // Step 11: plant only a bare foreign Workspace, ordered strictly after A, then release every
+    // active store handle and bootstrap the exact same file. Services are rebound from saved IDs,
+    // never from whatever Workspace startup happens to return.
+    let workspace_a_created_at: i64 = fixture
+        .store
+        .connect()
+        .query_row(
+            "SELECT created_at_ms FROM workspaces WHERE id = ?1",
+            [fixture.workspace_id.to_string()],
+            |row| row.get(0),
+        )
+        .expect("C11.11.WORKSPACE_FIXTURE_ORDER");
+    let workspace_b_created_at = workspace_a_created_at
+        .checked_add(1)
+        .expect("C11.11.WORKSPACE_TIME_OVERFLOW");
+    let workspace_b = Uuid::new_v4();
+    fixture
+        .store
+        .connect()
+        .execute(
+            "INSERT INTO workspaces (id, name, created_at_ms) VALUES (?1, ?2, ?3)",
+            params![
+                workspace_b.to_string(),
+                "C11 foreign scope",
+                workspace_b_created_at,
+            ],
+        )
+        .expect("C11.11.WORKSPACE_FIXTURE_ORDER");
+    assert_ne!(
+        workspace_b, fixture.workspace_id,
+        "C11.11.WORKSPACE_FIXTURE_ORDER"
+    );
+    assert!(
+        workspace_b_created_at > workspace_a_created_at,
+        "C11.11.WORKSPACE_FIXTURE_ORDER"
+    );
+
+    let saved_store = fixture.store.clone();
+    let saved_workspace_a = fixture.workspace_id;
+    let saved_mission = fixture.mission_id;
+    let saved_project = fixture.project_id;
+    let saved_author = fixture.resident_id;
+    let saved_author_configuration = fixture.configuration_id;
+    let saved_evaluator = fixture.other_resident_id;
+    let saved_evaluator_configuration = fixture.other_configuration_id;
+    let saved_publication_v1_id = publication_v1.publication_id();
+    let saved_publication_v2_id = publication_v2.publication_id();
+    let saved_v1_manifest = primary_stored.canonical_bytes().to_vec();
+    let saved_v2_manifest = stored_v2.canonical_bytes().to_vec();
+    let saved_v1_candidate_record = primary_candidate_record
+        .payload()
+        .canonical_bytes()
+        .expect("C11.11.SAVE_V1_RECORD");
+    let saved_v2_candidate_record = candidate_record_v2
+        .payload()
+        .canonical_bytes()
+        .expect("C11.11.SAVE_V2_RECORD");
+    let saved_v1_content = primary_candidate_record.content().to_vec();
+    let saved_v2_content = candidate_record_v2.content().to_vec();
+    let saved_v1_candidate_digest = primary_candidate_record.digest().clone();
+    let saved_v2_candidate_digest = candidate_record_v2.digest().clone();
+    let saved_v1_evaluation_digest = qualifying_evaluation.digest().clone();
+    let saved_v2_evaluation_digest = qualifying_evaluation_v2.digest().clone();
+    drop(read_v1);
+    drop(mission_service);
+    drop(fixture);
+
+    let reopen_report = Supervisor::bootstrap(StartupConfig {
+        store_path: saved_store_path.clone(),
+        initial_workspace_name: "must not replace the saved store".to_owned(),
+    })
+    .expect("C11.11.REOPEN_READY");
+    assert_eq!(
+        reopen_report.workspace.id, saved_workspace_a,
+        "C11.11.REOPEN_WORKSPACE_SELECTION"
+    );
+    let reopened_accounts =
+        Arc::new(OperatorAccountService::open(&saved_store_path).expect("C11.11.REOPEN_ACCOUNT"));
+    assert_eq!(
+        reopened_accounts
+            .authenticate_password(
+                SecretString::new("a long local passphrase".to_owned()),
+                AccessOrigin::SameMachine,
+            )
+            .expect("C11.11.REOPEN_UNLOCK")
+            .phase,
+        OperatorSessionPhase::Unlocked,
+        "C11.11.REOPEN_READY"
+    );
+    let reopened_a = OutcomeService::new(Arc::clone(&reopened_accounts), saved_workspace_a);
+    let reopened_b = OutcomeService::new(Arc::clone(&reopened_accounts), workspace_b);
+    let reopened_v1 = reopened_a
+        .get_version(saved_mission, 1)
+        .expect("C11.11.REOPEN_V1");
+    let reopened_v2 = reopened_a
+        .get_version(saved_mission, 2)
+        .expect("C11.11.REOPEN_V2");
+    assert_eq!(
+        reopened_v1.publication_id(),
+        saved_publication_v1_id,
+        "C11.11.REOPEN_PRESERVES_BOTH_VERSIONS"
+    );
+    assert_eq!(
+        reopened_v2.publication_id(),
+        saved_publication_v2_id,
+        "C11.11.REOPEN_PRESERVES_BOTH_VERSIONS"
+    );
+    assert_eq!(
+        reopened_v1.manifest().canonical_bytes(),
+        saved_v1_manifest,
+        "C11.11.REOPEN_PRESERVES_BOTH_VERSIONS"
+    );
+    assert_eq!(
+        reopened_v2.manifest().canonical_bytes(),
+        saved_v2_manifest,
+        "C11.11.REOPEN_PRESERVES_BOTH_VERSIONS"
+    );
+    assert_eq!(
+        reopened_v1
+            .candidate()
+            .payload()
+            .canonical_bytes()
+            .expect("C11.11.REOPEN_V1_RECORD"),
+        saved_v1_candidate_record,
+        "C11.11.REOPEN_PRESERVES_BOTH_VERSIONS"
+    );
+    assert_eq!(
+        reopened_v2
+            .candidate()
+            .payload()
+            .canonical_bytes()
+            .expect("C11.11.REOPEN_V2_RECORD"),
+        saved_v2_candidate_record,
+        "C11.11.REOPEN_PRESERVES_BOTH_VERSIONS"
+    );
+    assert_eq!(
+        reopened_v1.candidate().content(),
+        saved_v1_content,
+        "C11.11.REOPEN_PRESERVES_BOTH_VERSIONS"
+    );
+    assert_eq!(
+        reopened_v2.candidate().content(),
+        saved_v2_content,
+        "C11.11.REOPEN_PRESERVES_BOTH_VERSIONS"
+    );
+    assert_eq!(
+        reopened_v1.cited_candidate_artifact_digest(),
+        &saved_v1_candidate_digest,
+        "C11.11.REOPEN_PRESERVES_BOTH_VERSIONS"
+    );
+    assert_eq!(
+        reopened_v2.cited_candidate_artifact_digest(),
+        &saved_v2_candidate_digest,
+        "C11.11.REOPEN_PRESERVES_BOTH_VERSIONS"
+    );
+    assert_eq!(
+        reopened_v1.cited_evaluation_digest(),
+        &saved_v1_evaluation_digest,
+        "C11.11.REOPEN_PRESERVES_BOTH_VERSIONS"
+    );
+    assert_eq!(
+        reopened_v2.cited_evaluation_digest(),
+        &saved_v2_evaluation_digest,
+        "C11.11.REOPEN_PRESERVES_BOTH_VERSIONS"
+    );
+    assert_eq!(
+        reopened_a
+            .get(saved_mission)
+            .expect("C11.11.REOPEN_CURRENT")
+            .publication_id(),
+        saved_publication_v2_id,
+        "C11.11.REOPEN_PRESERVES_BOTH_VERSIONS"
+    );
+    let nonexistent_mission = Uuid::new_v4();
+    for result in [
+        reopened_b.get(saved_mission),
+        reopened_b.get_version(saved_mission, 1),
+        reopened_b.get_version(saved_mission, 2),
+        reopened_b.get(nonexistent_mission),
+        reopened_b.get_version(nonexistent_mission, 1),
+    ] {
+        assert!(
+            matches!(result, Err(PublishRefusal::Absent)),
+            "C11.11.CROSS_WORKSPACE_READ_IS_ABSENT"
+        );
+    }
+
+    // Step 12: copy exact versioned bytes first, then establish the stronger R29.3 witness by
+    // replacing version 2's candidate relation with a valid owner-readable Artifact whose stored
+    // Markdown cannot be the current renderer's output.
+    let export_snapshot = (
+        event_count(&saved_store, saved_workspace_a),
+        publication_count(&saved_store, saved_workspace_a, saved_mission),
+    );
+    let ordinary_current_export = reopened_a
+        .export_markdown(saved_mission)
+        .expect("C11.12.EXPORT_CURRENT_BYTES");
+    let ordinary_v1_export = reopened_a
+        .export_markdown_version(saved_mission, 1)
+        .expect("C11.12.EXPORT_NUMBERED_BYTES");
+    assert_eq!(
+        ordinary_current_export.bytes(),
+        saved_v2_content,
+        "C11.12.EXPORT_CURRENT_BYTES"
+    );
+    assert_eq!(
+        ordinary_v1_export.bytes(),
+        saved_v1_content,
+        "C11.12.EXPORT_NUMBERED_BYTES"
+    );
+    assert_eq!(
+        ordinary_current_export.digest(),
+        &saved_v2_candidate_digest,
+        "C11.12.EXPORT_CITED_DIGEST_AND_VERSION"
+    );
+    assert_eq!(
+        ordinary_v1_export.digest(),
+        &saved_v1_candidate_digest,
+        "C11.12.EXPORT_CITED_DIGEST_AND_VERSION"
+    );
+    assert_eq!(
+        (
+            ordinary_current_export.publication_version(),
+            ordinary_current_export.publication_version_count()
+        ),
+        (2, 2),
+        "C11.12.EXPORT_CITED_DIGEST_AND_VERSION"
+    );
+    assert_eq!(
+        (
+            ordinary_v1_export.publication_version(),
+            ordinary_v1_export.publication_version_count()
+        ),
+        (1, 2),
+        "C11.12.EXPORT_CITED_DIGEST_AND_VERSION"
+    );
+    assert_eq!(
+        ordinary_current_export.media_type(),
+        "text/markdown; charset=utf-8",
+        "C11.12.EXPORT_CITED_DIGEST_AND_VERSION"
+    );
+    assert_eq!(
+        ordinary_v1_export.media_type(),
+        "text/markdown; charset=utf-8",
+        "C11.12.EXPORT_CITED_DIGEST_AND_VERSION"
+    );
+    assert_eq!(
+        manifest_proof_from_markdown(
+            std::str::from_utf8(ordinary_current_export.bytes()).expect("C11.12.EXPORT_UTF8")
+        ),
+        saved_v2_manifest,
+        "C11.12.EXPORTED_PROOF_MATCHES"
+    );
+    assert_eq!(
+        manifest_proof_from_markdown(
+            std::str::from_utf8(ordinary_v1_export.bytes()).expect("C11.12.EXPORT_UTF8")
+        ),
+        saved_v1_manifest,
+        "C11.12.EXPORTED_PROOF_MATCHES"
+    );
+
+    for result in [
+        reopened_b.export_markdown(saved_mission),
+        reopened_b.export_markdown_version(saved_mission, 1),
+        reopened_b.export_markdown_version(saved_mission, 2),
+        reopened_b.export_markdown(nonexistent_mission),
+    ] {
+        assert!(
+            matches!(result, Err(PublishRefusal::Absent)),
+            "C11.12.CROSS_WORKSPACE_EXPORT_IS_ABSENT"
+        );
+    }
+    reopened_accounts.lock().expect("C11.12.LOCK_ACCOUNT");
+    for result in [
+        reopened_a.export_markdown(saved_mission),
+        reopened_a.export_markdown_version(saved_mission, 1),
+    ] {
+        assert!(
+            matches!(
+                result,
+                Err(PublishRefusal::Account(
+                    OperatorAccountError::NotAuthenticated
+                ))
+            ),
+            "C11.12.LOCKED_EXPORT_IS_ACCOUNT_REFUSAL"
+        );
+    }
+    reopened_accounts
+        .authenticate_password(
+            SecretString::new("a long local passphrase".to_owned()),
+            AccessOrigin::SameMachine,
+        )
+        .expect("C11.12.REUNLOCK");
+
+    let mut distinguishable_bytes =
+        b"<!-- C11 stored-byte witness; the renderer did not emit this line -->\n".to_vec();
+    distinguishable_bytes.extend_from_slice(&saved_v2_content);
+    let distinguishable_candidate =
+        ArtifactService::new(Arc::clone(&reopened_accounts), saved_workspace_a)
+            .record(
+                ArtifactKind::OutcomeDocument,
+                &distinguishable_bytes,
+                ArtifactContext::Mission {
+                    project_id: saved_project,
+                    mission_id: saved_mission,
+                },
+                saved_author,
+                saved_author_configuration,
+                None,
+            )
+            .expect("C11.12.DISTINGUISHABLE_CANDIDATE_RECORD");
+    let distinguishable_evaluation =
+        EvaluationService::new(Arc::clone(&reopened_accounts), saved_workspace_a)
+            .record(EvaluationDraft {
+                subject: EvaluationSubjectDraft::Artifact(
+                    distinguishable_candidate.digest().value.clone(),
+                ),
+                evaluator: Evaluator {
+                    resident_id: saved_evaluator,
+                    configuration_id: saved_evaluator_configuration,
+                },
+                rubric: RubricDeclaration {
+                    id: "outcome-document-v1".to_owned(),
+                    version: 1,
+                    canonicalizer: "beacon.rubric.v1".to_owned(),
+                    sha256: data_encoding::HEXLOWER.encode(&[0x20_u8; 32]),
+                },
+                cited_runs: Vec::new(),
+                verdict: Verdict::Meets,
+                findings: Vec::new(),
+                conflicts: Conflicts::None,
+                rationale: "The stored-byte export witness retains the exact manifest proof."
+                    .to_owned(),
+                supersedes: EvaluationSupersedes::None,
+            })
+            .expect("C11.12.DISTINGUISHABLE_EVALUATION_RECORD");
+    with_update_trigger_down(
+        &saved_store,
+        "outcome_manifests_no_update",
+        "outcome_manifests",
+        "Outcome manifests are immutable",
+        |connection| {
+            assert_eq!(
+                connection
+                    .execute(
+                        "UPDATE outcome_manifests SET candidate_artifact_digest = ?1
+                         WHERE workspace_id = ?2 AND manifest_digest = ?3",
+                        params![
+                            distinguishable_candidate.digest().value,
+                            saved_workspace_a.to_string(),
+                            candidate_v2.manifest_digest,
+                        ],
+                    )
+                    .expect("C11.12.DISTINGUISHABLE_MANIFEST_PLANT"),
+                1,
+                "C11.12.DISTINGUISHABLE_MANIFEST_PLANT"
+            );
+        },
+    );
+    with_update_trigger_down(
+        &saved_store,
+        "outcome_publications_no_update",
+        "outcome_publications",
+        "Outcome publications are immutable",
+        |connection| {
+            assert_eq!(
+                connection
+                    .execute(
+                        "UPDATE outcome_publications
+                         SET candidate_artifact_digest = ?1, evaluation_digest = ?2
+                         WHERE workspace_id = ?3 AND mission_id = ?4 AND publication_version = 2",
+                        params![
+                            distinguishable_candidate.digest().value,
+                            distinguishable_evaluation.digest().value,
+                            saved_workspace_a.to_string(),
+                            saved_mission.to_string(),
+                        ],
+                    )
+                    .expect("C11.12.DISTINGUISHABLE_PUBLICATION_PLANT"),
+                1,
+                "C11.12.DISTINGUISHABLE_PUBLICATION_PLANT"
+            );
+        },
+    );
+    let planted_read = reopened_a
+        .get_version(saved_mission, 2)
+        .expect("C11.12.DISTINGUISHABLE_OWNER_READ");
+    assert_eq!(
+        planted_read.candidate().content(),
+        distinguishable_bytes,
+        "C11.12.EXPORT_USES_DISTINGUISHABLE_STORED_BYTES"
+    );
+    assert_ne!(
+        planted_read.candidate().content(),
+        saved_v2_content,
+        "C11.12.EXPORT_USES_DISTINGUISHABLE_STORED_BYTES"
+    );
+    let distinguishable_export = reopened_a
+        .export_markdown(saved_mission)
+        .expect("C11.12.DISTINGUISHABLE_EXPORT");
+    assert_eq!(
+        distinguishable_export.bytes(),
+        distinguishable_bytes,
+        "C11.12.EXPORT_USES_DISTINGUISHABLE_STORED_BYTES"
+    );
+    assert_eq!(
+        distinguishable_export.digest(),
+        distinguishable_candidate.digest(),
+        "C11.12.EXPORT_USES_DISTINGUISHABLE_STORED_BYTES"
+    );
+    assert_eq!(
+        manifest_proof_from_markdown(
+            std::str::from_utf8(distinguishable_export.bytes())
+                .expect("C11.12.DISTINGUISHABLE_UTF8")
+        ),
+        saved_v2_manifest,
+        "C11.12.EXPORTED_PROOF_MATCHES"
+    );
+
+    let post_plant_export_snapshot = (
+        event_count(&saved_store, saved_workspace_a),
+        publication_count(&saved_store, saved_workspace_a, saved_mission),
+    );
+    let mut caller_owned = distinguishable_export.clone().into_bytes();
+    caller_owned[0] ^= 1;
+    drop(caller_owned);
+    assert_eq!(
+        reopened_a
+            .export_markdown(saved_mission)
+            .expect("C11.12.REEXPORT")
+            .bytes(),
+        distinguishable_bytes,
+        "C11.12.EXPORT_CURRENT_BYTES"
+    );
+    assert_eq!(
+        (
+            event_count(&saved_store, saved_workspace_a),
+            publication_count(&saved_store, saved_workspace_a, saved_mission),
+        ),
+        post_plant_export_snapshot,
+        "C11.12.EXPORT_WRITES_NOTHING"
+    );
+    assert!(post_plant_export_snapshot.0 >= export_snapshot.0);
+    assert_eq!(post_plant_export_snapshot.1, export_snapshot.1);
+    let export_history = reopened_a
+        .publication_history(saved_mission)
+        .expect("C11.12.HISTORY_READ");
+    assert_eq!(
+        export_history
+            .iter()
+            .map(|entry| entry.publication_version)
+            .collect::<Vec<_>>(),
+        vec![2, 1],
+        "C11.12.HISTORY_EXACT"
+    );
+    assert_eq!(
+        export_history
+            .iter()
+            .filter(|entry| entry.is_current)
+            .count(),
+        1,
+        "C11.12.HISTORY_EXACT"
+    );
+    assert_eq!(
+        export_history[0].candidate_artifact_digest,
+        distinguishable_candidate.digest().value,
+        "C11.12.HISTORY_EXACT"
+    );
+    assert_eq!(
+        export_history[0].evaluation_digest,
+        distinguishable_evaluation.digest().value,
+        "C11.12.HISTORY_EXACT"
+    );
+
+    let transport_root =
+        std::env::temp_dir().join(format!("beacond-c11-transport-{}", Uuid::new_v4()));
+    fs::create_dir(&transport_root).expect("C11.12.TRANSPORT_DIR");
+    fs::set_permissions(&transport_root, fs::Permissions::from_mode(0o700))
+        .expect("C11.12.TRANSPORT_DIR_MODE");
+    let socket = transport_root.join("beacond.sock");
+    let token = transport_root.join("beacond.token");
+    let lock = transport_root.join("beacond.lock");
+    initialize_local_auth_token(&token).expect("C11.12.TRANSPORT_TOKEN");
+    let server = LocalSupervisorServer::bind(LocalServerConfig {
+        store_path: saved_store_path.clone(),
+        initial_workspace_name: "must not replace the saved store".to_owned(),
+        socket_path: socket.clone(),
+        auth_token_path: token.clone(),
+        lock_path: lock,
+        local_model_endpoint: LocalModelEndpoint::ollama_default(),
+    })
+    .expect("C11.12.TRANSPORT_SERVER");
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let server_thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&socket, &token).expect("C11.12.TRANSPORT_CLIENT");
+    assert!(
+        matches!(
+            client.outcome_document(saved_mission, None),
+            Err(LocalTransportError::Remote {
+                code: LocalErrorCode::NotAuthenticated,
+                ..
+            })
+        ),
+        "C11.12.TRANSPORT_BYTES_AND_SCOPE"
+    );
+    client
+        .authenticate_password(
+            SecretString::new("a long local passphrase".to_owned()),
+            AccessOrigin::SameMachine,
+        )
+        .expect("C11.12.TRANSPORT_AUTH");
+    let transported_current = client
+        .outcome_document(saved_mission, None)
+        .expect("C11.12.TRANSPORT_CURRENT");
+    let transported_v1 = client
+        .outcome_document(saved_mission, Some(1))
+        .expect("C11.12.TRANSPORT_V1");
+    assert_eq!(
+        transported_current, distinguishable_export,
+        "C11.12.TRANSPORT_BYTES_AND_SCOPE"
+    );
+    assert_eq!(
+        transported_v1, ordinary_v1_export,
+        "C11.12.TRANSPORT_BYTES_AND_SCOPE"
+    );
+    assert_eq!(
+        client
+            .mission_publications(saved_mission)
+            .expect("C11.12.TRANSPORT_HISTORY"),
+        export_history,
+        "C11.12.TRANSPORT_BYTES_AND_SCOPE"
+    );
+    running.store(false, Ordering::Release);
+    server_thread
+        .join()
+        .expect("C11.12.TRANSPORT_THREAD")
+        .expect("C11.12.TRANSPORT_SERVER");
+    fs::remove_dir_all(&transport_root).expect("C11.12.TRANSPORT_CLEANUP");
+
+    let _ = (
+        saved_store,
+        reopened_accounts,
+        reopened_a,
+        reopened_b,
+        reopened_v1,
+        reopened_v2,
+        distinguishable_export,
+    );
+    panic!("C11.13.NOT_YET");
 }
