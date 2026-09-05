@@ -663,6 +663,31 @@ fn a_decoy_projection_column_cannot_change_what_the_reader_returns() {
             "digest_canonicalizer",
             Value::from("beacon.outcome.manifest.v2".to_owned()),
         ),
+        // The candidate projection: astra's A2. Until it was checked, changing this column pointed
+        // every read at an unrelated document. The lie is a REAL Artifact of this Mission by this
+        // Resident, so nothing but the manifest-proof binding can tell it from the candidate.
+        (
+            "candidate_artifact_digest",
+            Value::from(
+                fixture
+                    .artifacts()
+                    .record(
+                        ArtifactKind::OutcomeDocument,
+                        b"# A decoy document for this Mission\n",
+                        ArtifactContext::Mission {
+                            project_id: fixture.project_id,
+                            mission_id: fixture.mission_id,
+                        },
+                        fixture.resident_id,
+                        fixture.configuration_id,
+                        None,
+                    )
+                    .unwrap()
+                    .digest()
+                    .value
+                    .clone(),
+            ),
+        ),
         // The reader compared this one and nothing witnessed it: dropping it from `StoredRow`, the
         // SELECT and the comparison left all 21 tests green and clippy at exit 0 (gpt2's P2,
         // reproduced here before this row existed). A check with no witness is a check that can be
@@ -1340,12 +1365,24 @@ fn an_outcome_manifest_no_artifact_event_reaches_refuses_startup() {
         insert_manifest_behind_the_ledger(&fixture, &orphan_manifest, &unrelated.digest().value);
     assert_ne!(orphan, real.manifest_digest);
 
-    // It reads clean: that is exactly the gap. Re-proving on every read cannot tell a row the
-    // ledger accounts for from one inserted behind it.
-    fixture
+    // When R18.7 was folded this row read clean, and that was the gap the startup pass closed:
+    // re-proving bytes on every read cannot tell a row the ledger accounts for from one inserted
+    // behind it. astra's A2 then closed it a second time and earlier -- the reader now proves the
+    // candidate binding, so the row is refused on read as well. Both are asserted, because the
+    // startup pass must not quietly become dead code behind the reader.
+    let refusal = fixture
         .outcomes
         .manifest(&orphan)
-        .expect("the orphan row reads clean through the verified reader");
+        .expect_err("the reader accepted a manifest whose candidate is not its document");
+    assert!(
+        matches!(
+            refusal,
+            PrepareRefusal::Manifest(ManifestStoreRefusal::ColumnDisagrees {
+                column: "candidate_artifact_digest"
+            })
+        ),
+        "{refusal:?}"
+    );
 
     // And every foreign key is satisfied, so whatever refuses this row below, it is not the
     // schema. Measured before the fix: `foreign_key_violations: 0, status: Ready`.
@@ -1586,8 +1623,23 @@ fn astra_same_mission_decoy_document_must_not_account_for_a_manifest() {
     );
     let unrelated = astra_record_document(&fixture, unrelated_bytes);
     let digest = insert_manifest_behind_the_ledger(&fixture, &manifest, &unrelated);
-    let read = fixture.outcomes.candidate(&digest).unwrap();
-    assert_eq!(read.content(), unrelated_bytes);
+    // astra wrote this as `candidate(&digest).unwrap()` and asserted the decoy's bytes came back,
+    // which is what the store did at b8d7455. The A2 fix makes that unreachable: the reader now
+    // proves the candidate binding too, so the decoy is refused before startup is ever reached.
+    // The finding's own assertion -- that startup must not accept it -- is unchanged below.
+    let read = fixture
+        .outcomes
+        .candidate(&digest)
+        .expect_err("the reader served a decoy document as this manifest's candidate");
+    assert!(
+        matches!(
+            read,
+            PrepareRefusal::Manifest(ManifestStoreRefusal::ColumnDisagrees {
+                column: "candidate_artifact_digest"
+            })
+        ),
+        "{read:?}"
+    );
     let boot = astra_boot(&fixture);
     eprintln!("ASTRA_DECOY candidate_is_unrelated=true startup={boot:?}");
     assert!(
