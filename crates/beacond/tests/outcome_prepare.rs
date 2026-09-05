@@ -37,6 +37,7 @@ use beacond::{
     Collector,
     CompletionActor,
     CompletionDisposition,
+    CompletionReadRefusal,
     CompletionSupersedes,
     ConditionOutcome,
     ConditionResult,
@@ -131,6 +132,7 @@ use beacond::{
     publication_candidacy,
     record_completion,
     render,
+    verified_completion_within,
     verified_manifest_within,
 };
 use rusqlite::types::Value;
@@ -4244,6 +4246,100 @@ fn startup_refuses_a_project_whose_charter_history_disagrees_and_names_the_row()
     assert!(
         format!("{refusal:?}").contains("InvalidStore"),
         "the carried fault is not reachable through Debug: {refusal:?}"
+    );
+}
+
+/// R28.1 pass 5 of 5: a completion whose projection disagrees with its own bytes is refused at
+/// startup, and the refusal names WHICH completion and carries the reader's own fault.
+///
+/// R39.3's two-row shape, deliberate: a superseding completion is recorded, the pass's own
+/// `ORDER BY digest_value` is read back, and the tamper lands on whichever sorts LAST.
+#[test]
+fn startup_refuses_a_completion_whose_column_disagrees_and_names_the_row() {
+    let fixture = admitted_mission("r28-completion-startup");
+    fixture.classify(ImpactLevel::Ordinary);
+    let (first_digest, first) = fixture.complete((fixture.resident_id, fixture.configuration_id));
+
+    // A SECOND completion needs a second Mission: `mission_completions` is UNIQUE on
+    // (workspace_id, mission_id), so a superseding completion cannot sit beside its predecessor
+    // (measured -- the first version of this bar got that constraint back). Two Missions, one
+    // completion each.
+    let other = sol1_admit_other_mission(&fixture, "A second Mission to complete");
+    let second = MissionCompletionV1 {
+        mission_id: other,
+        // `completion_id` is an R15 reference identity carried INSIDE the bytes, so it has to be
+        // its own -- copying the predecessor's collides on (workspace_id, completion_id).
+        completion_id: Uuid::new_v4(),
+        // The second Mission's admission moved the log, so the predecessor's boundary is no longer
+        // a cut this completion can claim (`BoundaryOutOfRange`, measured).
+        boundary_event_seq: fixture.latest_event_seq(),
+        summary: "The second Mission's own completion.".to_owned(),
+        ..first.clone()
+    };
+    let mut connection = fixture.store.connect();
+    let second_digest =
+        record_completion(&mut connection, &second).expect("the second completion records");
+    assert_ne!(second_digest, first_digest);
+    drop(connection);
+
+    let connection = fixture.store.connect();
+    let ordered: Vec<String> = connection
+        .prepare("SELECT digest_value FROM mission_completions ORDER BY digest_value")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        ordered.len(),
+        2,
+        "the fixture must hold two completions: {ordered:?}"
+    );
+    let target = ordered.last().unwrap().clone();
+
+    connection
+        .execute_batch("DROP TRIGGER mission_completions_no_update;")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE mission_completions SET completed_at_ms = completed_at_ms + 1
+             WHERE digest_value = ?1",
+            params![target],
+        )
+        .unwrap();
+    // Byte-exact, as migration 0026 wrote it (R39.3).
+    connection
+        .execute_batch(
+            "CREATE TRIGGER mission_completions_no_update
+BEFORE UPDATE ON mission_completions
+BEGIN
+    SELECT RAISE(ABORT, 'Mission completions are immutable');
+END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    // The belt refuses it ON READ, so the planted fault is real and has a name of its own.
+    let read_connection = fixture.store.connect();
+    let read = beacond::verified_completion_within(&read_connection, fixture.workspace_id, &target)
+        .expect_err("the reader trusted a projection its bytes do not support");
+    assert!(
+        matches!(
+            read,
+            CompletionReadRefusal::ColumnDisagrees("completed_at_ms")
+        ),
+        "the planted fault is not the one this test is about: {read:?}"
+    );
+    drop(read_connection);
+
+    let refusal = astra_boot(&fixture)
+        .expect_err("a store holding a completion that disagrees with its bytes reopened Ready");
+    assert!(
+        matches!(
+            &refusal,
+            beacond::SupervisorError::MissionCompletionStateMismatch
+        ),
+        "startup did not refuse the tampered completion: {refusal:?}"
     );
 }
 
