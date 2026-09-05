@@ -171,6 +171,41 @@ fn admitted_mission(label: &str) -> Fixture {
         OperatorSessionPhase::Unlocked
     );
 
+    let admitted = admit_mission_in(&accounts, workspace_id);
+    Fixture {
+        outcomes: OutcomeService::new(Arc::clone(&accounts), workspace_id),
+        store,
+        accounts,
+        workspace_id,
+        project_id: admitted.project_id,
+        mission_id: admitted.mission_id,
+        resident_id: admitted.resident_id,
+        configuration_id: admitted.configuration_id,
+        other_resident_id: admitted.other_resident_id,
+        other_configuration_id: admitted.other_configuration_id,
+        policy_revision: admitted.policy_revision,
+        charter_revision: admitted.charter_revision,
+    }
+}
+
+/// One Workspace's Project, Policy, Residents, Team and admitted Mission.
+///
+/// Split out of `admitted_mission` so a test can build a SECOND Workspace in the SAME store: the
+/// block needs nothing but an authenticated account service and a Workspace id, and the startup
+/// pass is about what happens across Workspaces.
+struct AdmittedMission {
+    project_id: Uuid,
+    mission_id: Uuid,
+    resident_id: Uuid,
+    configuration_id: Uuid,
+    other_resident_id: Uuid,
+    other_configuration_id: Uuid,
+    policy_revision: u32,
+    charter_revision: u32,
+}
+
+fn admit_mission_in(accounts: &Arc<OperatorAccountService>, workspace_id: Uuid) -> AdmittedMission {
+    let accounts = Arc::clone(accounts);
     let project = ProjectService::new(Arc::clone(&accounts), workspace_id)
         .create(ProjectDraft {
             name: "Beacon Alpha".to_owned(),
@@ -289,11 +324,7 @@ fn admitted_mission(label: &str) -> Fixture {
         })
         .unwrap();
 
-    Fixture {
-        outcomes: OutcomeService::new(Arc::clone(&accounts), workspace_id),
-        store,
-        accounts,
-        workspace_id,
+    AdmittedMission {
         project_id: project.id,
         mission_id: mission.id,
         resident_id: configurations[0].resident_id,
@@ -4699,4 +4730,145 @@ fn a_store_that_never_held_a_classification_reopens_ready() {
     })
     .expect("a store with a Mission but no classification reopens");
     assert_eq!(report.diagnostics.status, DiagnosticStatus::Ready);
+}
+
+/// The pass walks EVERY Workspace, and this is the test that can tell.
+///
+/// Fable's mutant restricted the enumeration to one Workspace
+/// (`WHERE workspace_id = (SELECT MAX(workspace_id) FROM mission_impact_classifications)`) and the
+/// whole suite stayed green: every other test in this file uses a single-Workspace store, so "for
+/// every Workspace" was a claim nothing could see.
+///
+/// WHICH Workspace holds the forgery is chosen, not drawn. `workspace_id` is stored as TEXT, so
+/// `MAX` is lexicographic over the hyphenated UUID string, and the second Workspace is given the
+/// id `ffffffff-ffff-ffff-ffff-ffffffffffff` -- the largest such string there is, since every
+/// character is the maximum hex digit. So the bootstrapped Workspace, whatever random id it drew,
+/// always sorts below it, and the forged row goes THERE: in the Workspace `MAX` skips. The test
+/// asserts that ordering rather than trusting it.
+#[test]
+fn a_forged_link_in_a_second_workspace_that_max_would_skip_fails_startup() {
+    let fixture = admitted_mission("classification-pass-two-workspaces");
+
+    // The second Workspace, with the largest possible id, and its own Project/Policy/Mission so its
+    // classifications verify on their own merits.
+    let highest = Uuid::from_u128(u128::MAX);
+    assert_eq!(highest.to_string(), "ffffffff-ffff-ffff-ffff-ffffffffffff");
+    assert!(
+        fixture.workspace_id.to_string() < highest.to_string(),
+        "the bootstrapped Workspace must sort below the planted one, or this test proves nothing"
+    );
+    fixture
+        .store
+        .connect()
+        .execute(
+            "INSERT INTO workspaces (id, name, created_at_ms) VALUES (?1, 'Second', 7)",
+            params![highest.to_string()],
+        )
+        .expect("the second Workspace row inserts");
+    let second = admit_mission_in(&fixture.accounts, highest);
+
+    // An honest chain in the HIGHER Workspace -- the one the mutant keeps. Under the mutant these
+    // are the only rows walked, and they all verify, so it reports a healthy store.
+    let second_first = classify_in(
+        &fixture.accounts,
+        highest,
+        &second,
+        1,
+        ClassificationSupersedes::None,
+    );
+    classify_in(
+        &fixture.accounts,
+        highest,
+        &second,
+        2,
+        ClassificationSupersedes::Record(second_first),
+    );
+
+    // An honest chain in the LOWER Workspace, with a forged v1 underneath it: v1 cites a
+    // predecessor nothing stored, and v2 supersedes v1, so nothing reads v1 again.
+    let forged = MissionImpactClassificationV1 {
+        workspace_id: fixture.workspace_id,
+        mission_id: fixture.mission_id,
+        classification_id: Uuid::new_v4(),
+        version: 1,
+        impact: ImpactLevel::Ordinary,
+        basis: ClassificationBasis::OperatorDeclared,
+        policy: PolicyRevisionRef {
+            project_id: fixture.project_id,
+            policy_revision: fixture.policy_revision,
+            charter_revision: fixture.charter_revision,
+        },
+        rule_id: None,
+        reason: "The Mission writes to the Operator's own repository.".to_owned(),
+        classified_by: ClassificationActor::Operator,
+        classified_at_ms: 1_788_400_000_000,
+        supersedes: ClassificationSupersedes::Record("ab".repeat(32)),
+    };
+    let planted = fixture.plant_classification(&forged);
+    fixture.classify_superseding(2, ClassificationSupersedes::Record(planted.clone()));
+
+    // The forgery is in the Workspace `MAX(workspace_id)` does NOT name -- asserted against the
+    // store, so the test fails loudly if the ids ever stop ordering this way.
+    let skipped: String = fixture
+        .store
+        .connect()
+        .query_row(
+            "SELECT MAX(workspace_id) FROM mission_impact_classifications",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        skipped,
+        highest.to_string(),
+        "the mutant's MAX must name the OTHER Workspace"
+    );
+    assert_ne!(skipped, fixture.workspace_id.to_string());
+
+    let refusal = Supervisor::bootstrap(StartupConfig {
+        store_path: fixture.store.path.clone(),
+        initial_workspace_name: "Personal".to_owned(),
+    })
+    .expect_err("a forged link in a second Workspace reopened Ready");
+    assert!(
+        matches!(
+            refusal,
+            SupervisorError::MissionImpactClassificationStateMismatch
+        ),
+        "refused for the wrong reason: {refusal:?}"
+    );
+}
+
+/// One classification recorded through the Command in an arbitrary Workspace.
+fn classify_in(
+    accounts: &Arc<OperatorAccountService>,
+    workspace_id: Uuid,
+    admitted: &AdmittedMission,
+    version: u32,
+    supersedes: ClassificationSupersedes,
+) -> String {
+    let record = MissionImpactClassificationV1 {
+        workspace_id,
+        mission_id: admitted.mission_id,
+        classification_id: Uuid::new_v4(),
+        version,
+        impact: ImpactLevel::Ordinary,
+        basis: ClassificationBasis::OperatorDeclared,
+        policy: PolicyRevisionRef {
+            project_id: admitted.project_id,
+            policy_revision: admitted.policy_revision,
+            charter_revision: admitted.charter_revision,
+        },
+        rule_id: None,
+        reason: "The Mission writes to the Operator's own repository.".to_owned(),
+        classified_by: ClassificationActor::Operator,
+        classified_at_ms: 1_788_400_000_000,
+        supersedes,
+    };
+    MissionImpactService::new(Arc::clone(accounts), workspace_id)
+        .classify(&record.canonical_bytes().unwrap())
+        .expect("the classification records")
+        .digest()
+        .value
+        .clone()
 }
