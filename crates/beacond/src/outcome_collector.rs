@@ -99,6 +99,17 @@ pub enum CollectorRefusal {
         declared_mission: Uuid,
         expected_mission: Uuid,
     },
+    /// A cited spend record's declared coverage window starts AFTER the Mission it measures was
+    /// admitted, so "actual spend" would be a figure for part of the Mission presented as the
+    /// whole (sol1's cold read, #11). The spend owner says a window that does not span the
+    /// Mission is the citing collector's refusal, and this is it -- keyed on the Mission's own
+    /// admission Event, its record of beginning, never on the record's word for where the
+    /// Mission began.
+    SpendCoverageStartsAfterMission {
+        id: String,
+        coverage_from_event_seq: u64,
+        mission_admitted_at_seq: u64,
+    },
     /// A delivered Artifact's own bytes name another Workspace (R19.2: the collector's own arm,
     /// like the other sources', never `Unverified` with a reason).
     ///
@@ -175,6 +186,15 @@ impl fmt::Display for CollectorRefusal {
                 formatter,
                 "the {kind} {id} is about Mission {declared_mission}; this Outcome is about \
                  Mission {expected_mission}"
+            ),
+            Self::SpendCoverageStartsAfterMission {
+                id,
+                coverage_from_event_seq,
+                mission_admitted_at_seq,
+            } => write!(
+                formatter,
+                "the spend {id}'s coverage starts at event {coverage_from_event_seq}, after the \
+                 Mission was admitted at event {mission_admitted_at_seq}"
             ),
             Self::ArtifactInAnotherWorkspace { id } => write!(
                 formatter,
@@ -568,6 +588,25 @@ impl<'a> Collector<'a> {
         Ok(())
     }
 
+    /// The Event at which the Mission was admitted: its own record of beginning in the log, keyed
+    /// on the Mission's id inside the Event's payload. `None` is a Mission the log does not
+    /// account for, which is `Unpositioned` and never assumed to have begun anywhere.
+    fn mission_admitted_at(&self, mission_id: Uuid) -> Result<Option<u64>, CollectorRefusal> {
+        self.connection
+            .query_row(
+                "SELECT min(sequence) FROM events
+                 WHERE workspace_id = ?1 AND kind = 'mission.admitted'
+                   AND json_extract(payload_json, '$.mission.id') = ?2",
+                rusqlite::params![self.workspace_id.to_string(), mission_id.to_string()],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .map_err(|error| CollectorRefusal::Unverified {
+                kind: "mission",
+                reason: error.to_string(),
+            })
+            .map(|found| found.and_then(|sequence| u64::try_from(sequence).ok()))
+    }
+
     /// The sequence of the Event that recorded this object, from the one locator table.
     fn event_sequence_of(
         &self,
@@ -836,6 +875,29 @@ impl<'a> Collector<'a> {
                 id: digest_value,
                 declared_mission: payload.mission_id,
                 expected_mission: completion.mission_id,
+            });
+        }
+        // The declared window must span the Mission: the spend owner says a window that does not
+        // is the citing collector's refusal (sol1's cold read, #11), and it is keyed on the
+        // Mission's own admission Event -- its record of beginning -- never on the record's word
+        // for it. Every measurement state declares a window, so every state is checked. The
+        // window's END is not checked here: the record's Event precedes the completion's, so
+        // `coverage_to` can never reach the boundary, and what the window failed to reach is the
+        // spend owner's word (`partially_measured`), not this collector's.
+        // A Mission with no admission Event is `Unpositioned` here for the record; through
+        // `collect()` the completion's owning reader fails first on the same missing Event, with a
+        // store error rather than a name, so no test reaches this arm today (declared).
+        let Some(admitted) = self.mission_admitted_at(completion.mission_id)? else {
+            return Err(CollectorRefusal::Unpositioned {
+                kind: "mission",
+                id: completion.mission_id.to_string(),
+            });
+        };
+        if payload.coverage_from_event_seq > admitted {
+            return Err(CollectorRefusal::SpendCoverageStartsAfterMission {
+                id: digest_value,
+                coverage_from_event_seq: payload.coverage_from_event_seq,
+                mission_admitted_at_seq: admitted,
             });
         }
         let coverage = Some((
