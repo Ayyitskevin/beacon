@@ -31,6 +31,7 @@ mod operator_account;
 mod outcome;
 mod outcome_assembler;
 mod outcome_collector;
+mod outcome_publication;
 mod outcome_store;
 mod platform_session;
 mod project;
@@ -149,6 +150,9 @@ pub use outcome_collector::{
     CollectedNarrative, CollectedSources, CollectedSpend, CollectedSupport, CollectedUncounted,
     CollectionRequest, Collector, CollectorRefusal, OUTCOME_RECEIPT_CHECKSUM_LABEL, SpendAmount,
     SpendCompleteness, positionable_sources,
+};
+pub use outcome_publication::{
+    Provenance, PublishRefusal, PublishedOutcome, SupersessionAtReadTime,
 };
 pub use outcome_store::{
     MAX_STORED_MANIFEST_BYTES, ManifestStoreRefusal, OutcomeCandidate, OutcomeService,

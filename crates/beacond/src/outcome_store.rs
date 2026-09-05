@@ -45,8 +45,10 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use uuid::Uuid;
 
 use crate::artifact::{
-    ArtifactContext, ArtifactError, ArtifactKind, VerifiedArtifactRecord, record_artifact_within,
+    ArtifactContext, ArtifactDigest, ArtifactError, ArtifactKind, VerifiedArtifactRecord,
+    record_artifact_within,
 };
+use crate::evaluation::EvaluationDigest;
 use crate::mission_completion::{COMPLETION_CANONICALIZER, MissionCompletionV1, SupportRef};
 use crate::mission_completion_store::{CompletionReadRefusal, verified_completion_within};
 use crate::mission_impact::{
@@ -60,6 +62,9 @@ use crate::outcome::{
 };
 use crate::outcome_assembler::{AssemblyRefusal, SourcesRefusal, assemble, verified_sources_for};
 use crate::outcome_collector::{CollectionRequest, Collector, CollectorRefusal};
+use crate::outcome_publication::{
+    PublishRefusal, PublishedOutcome, get_version_within, get_within, publish_within,
+};
 use crate::proposal::sha256;
 
 const DIGEST_ALGORITHM: &str = "sha256";
@@ -777,6 +782,69 @@ impl OutcomeService {
             )?;
             transaction.commit()?;
             Ok(candidate)
+        })
+    }
+
+    /// Publish one prepared candidate, qualified by one independent Evaluation.
+    ///
+    /// One transaction: the seam proves the pairing from both records' canonical bytes, the
+    /// manifest and completion are re-read through their owning verified readers, appendix policy
+    /// is re-checked against the candidate's own bytes, and the relation row is appended. The
+    /// append IS the publication event.
+    ///
+    /// **This completes nothing and grants nothing.** No Mission, completion, or authority record
+    /// is written or consulted for permission, and `PublishedOutcome` carries no predicate a
+    /// caller could branch on to derive success, completion, or permission (ADR 0040).
+    ///
+    /// The digests are taken as full ENVELOPES rather than hex strings so the seam's
+    /// `CitedEnvelopeDisagrees` check has something to catch: a caller that names the right 64
+    /// characters under an algorithm or canonicalizer no owning module produced is making the
+    /// assumption these records exist to remove.
+    pub fn publish(
+        &self,
+        mission_id: Uuid,
+        candidate_artifact_digest: &ArtifactDigest,
+        evaluation_digest: &EvaluationDigest,
+    ) -> Result<PublishedOutcome, PublishRefusal> {
+        self.accounts.with_authenticated_store(|connection, _now| {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let published = publish_within(
+                &transaction,
+                self.workspace_id,
+                mission_id,
+                candidate_artifact_digest,
+                evaluation_digest,
+            )?;
+            transaction.commit()?;
+            Ok(published)
+        })
+    }
+
+    /// The Mission's current published Outcome -- its highest version -- re-proved on every read.
+    ///
+    /// Retrieval inherits the Mission's Workspace access and is never public (R12.12): the read
+    /// goes through the authenticated store like every other, and a Workspace scopes it.
+    pub fn get(&self, mission_id: Uuid) -> Result<PublishedOutcome, PublishRefusal> {
+        self.accounts.with_authenticated_store(|connection, _now| {
+            get_within(connection, self.workspace_id, mission_id)
+        })
+    }
+
+    /// One exact version of a Mission's publication history. A corrected Outcome does not erase the
+    /// version it superseded, so every version stays readable at its own number (R12.11).
+    pub fn get_version(
+        &self,
+        mission_id: Uuid,
+        publication_version: u32,
+    ) -> Result<PublishedOutcome, PublishRefusal> {
+        self.accounts.with_authenticated_store(|connection, _now| {
+            get_version_within(
+                connection,
+                self.workspace_id,
+                mission_id,
+                publication_version,
+            )
         })
     }
 

@@ -15,21 +15,25 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use beacond::{
-    AccessOrigin, AppendixMode, AppendixRequest, ArtifactContext, ArtifactKind, ArtifactService,
-    AutonomyProfile, BeaconCapability, COMPLETION_CANONICALIZER, ClassificationActor,
-    ClassificationBasis, ClassificationSupersedes, CollectionRequest, Collector, CompletionActor,
-    CompletionDisposition, CompletionSupersedes, ConditionOutcome, ConditionResult,
-    ConditionResultRecord, ImpactLevel, LocalModelActivationService, LocalModelEndpoint,
-    MISSION_IMPACT_CANONICALIZER, ManifestStoreRefusal, MissionCompletionV1, MissionDraft,
-    MissionImpactClassificationV1, MissionImpactService, MissionMemberDraft, MissionService,
-    NarrativeItem, OperatorAccountService, OperatorSessionPhase, OutcomeManifestV1, OutcomeService,
-    OutcomeState, PolicyRevisionRef, PrepareRefusal, ProjectCharterDraft, ProjectDraft,
-    ProjectPolicyDraft, ProjectPolicyService, ProjectService, ProviderFeature,
-    ResidentConfigurationService, ResidentLifecycleService, SecretString, SourceDigest, SourceKind,
-    SourceRef, SourcesRefusal, SpendReference, StarterOrganizationService, StarterResidentDraft,
-    StarterRole, StartupConfig, SuccessCondition, Supervisor, TeamDraft, TeamLeadAmbiguityRule,
-    TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
-    TeamService, TrackRecordEvidenceKind, TrackRecordRequirement, UnfinishedKind, VerifiedSources,
+    AccessOrigin, AppendixMode, AppendixRequest, ArtifactContext, ArtifactDigest, ArtifactKind,
+    ArtifactService, AutonomyProfile, BeaconCapability, COMPLETION_CANONICALIZER,
+    ClassificationActor, ClassificationBasis, ClassificationSupersedes, CollectionRequest,
+    Collector, CompletionActor, CompletionDisposition, CompletionSupersedes, ConditionOutcome,
+    ConditionResult, ConditionResultRecord, Conflicts, Evaluation, EvaluationDigest,
+    EvaluationDraft, EvaluationError, EvaluationService, EvaluationSubjectDraft,
+    EvaluationSupersedes, Evaluator, Finding, FindingSeverity, ImpactLevel, InconsistentEvaluation,
+    LocalModelActivationService, LocalModelEndpoint, MISSION_IMPACT_CANONICALIZER,
+    ManifestStoreRefusal, MissionCompletionV1, MissionDraft, MissionImpactClassificationV1,
+    MissionImpactService, MissionMemberDraft, MissionService, NarrativeItem,
+    OperatorAccountService, OperatorSessionPhase, OutcomeCandidate, OutcomeManifestV1,
+    OutcomeService, OutcomeState, PolicyRevisionRef, PrepareRefusal, ProjectCharterDraft,
+    ProjectDraft, ProjectPolicyDraft, ProjectPolicyService, ProjectService, ProviderFeature,
+    PublicationSeamRefusal, PublishRefusal, ResidentConfigurationService, ResidentLifecycleService,
+    RubricDeclaration, SecretString, SourceDigest, SourceKind, SourceRef, SourcesRefusal,
+    SpendReference, StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig,
+    SuccessCondition, Supervisor, TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
+    TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft, TeamService,
+    TrackRecordEvidenceKind, TrackRecordRequirement, UnfinishedKind, Verdict, VerifiedSources,
     VerifiedText, declared_conditions_digest, record_completion, render, verified_manifest_within,
 };
 use rusqlite::types::Value;
@@ -392,6 +396,145 @@ impl Fixture {
             classification.version,
             recorded.digest().value.clone(),
         )
+    }
+
+    fn evaluations(&self) -> EvaluationService {
+        EvaluationService::new(Arc::clone(&self.accounts), self.workspace_id)
+    }
+
+    /// One Evaluation of the given candidate, by the OTHER Resident -- the independent evaluator
+    /// `publish` requires. `verdict` is a parameter because "not `meets`" is several answers.
+    fn evaluate(&self, candidate_digest: &str, verdict: Verdict) -> Evaluation {
+        self.evaluate_as(
+            candidate_digest,
+            verdict,
+            (self.other_resident_id, self.other_configuration_id),
+        )
+    }
+
+    fn evaluate_as(
+        &self,
+        candidate_digest: &str,
+        verdict: Verdict,
+        evaluator: (Uuid, Uuid),
+    ) -> Evaluation {
+        self.evaluations()
+            .record(EvaluationDraft {
+                subject: EvaluationSubjectDraft::Artifact(candidate_digest.to_owned()),
+                evaluator: Evaluator {
+                    resident_id: evaluator.0,
+                    configuration_id: evaluator.1,
+                },
+                rubric: RubricDeclaration {
+                    id: "outcome-document-v1".to_owned(),
+                    version: 1,
+                    canonicalizer: "beacon.rubric.v1".to_owned(),
+                    sha256: data_encoding::HEXLOWER.encode(&[0x20_u8; 32]),
+                },
+                cited_runs: Vec::new(),
+                verdict,
+                findings: vec![Finding {
+                    severity: FindingSeverity::Note,
+                    summary: "Read the exact candidate bytes.".to_owned(),
+                }],
+                conflicts: Conflicts::None,
+                rationale: "An independent Resident read the exact candidate bytes.".to_owned(),
+                supersedes: EvaluationSupersedes::None,
+            })
+            .expect("the Evaluation records")
+    }
+
+    /// A SECOND Configuration for the candidate's author, succeeding the one the completion names.
+    ///
+    /// Two Configurations of one Resident are two evaluators for configuration purposes and one
+    /// author for non-authorship purposes; this is how a test reaches the second half of that.
+    fn second_configuration_for_author(&self) -> Uuid {
+        let configurations =
+            ResidentConfigurationService::new(Arc::clone(&self.accounts), self.workspace_id);
+        let current = configurations
+            .list()
+            .expect("configurations list")
+            .into_iter()
+            .find(|configuration| configuration.id == self.configuration_id)
+            .expect("the author's configuration is listed");
+        let activation_id = current
+            .binding
+            .as_ref()
+            .expect("a configured Resident carries its binding")
+            .activation_id;
+        configurations
+            .configure(
+                self.resident_id,
+                Some(current.id),
+                activation_id,
+                vec![
+                    BeaconCapability::WorkCreateMission,
+                    BeaconCapability::WorkCoordinateMission,
+                ],
+            )
+            .expect("the author is reconfigured")
+            .id
+    }
+
+    /// The draft `evaluate_as` records, exposed so a test can assert the RECORD path's refusal.
+    fn artifact_evaluation_draft(
+        &self,
+        candidate_digest: &str,
+        verdict: Verdict,
+        evaluator: (Uuid, Uuid),
+    ) -> EvaluationDraft {
+        EvaluationDraft {
+            subject: EvaluationSubjectDraft::Artifact(candidate_digest.to_owned()),
+            evaluator: Evaluator {
+                resident_id: evaluator.0,
+                configuration_id: evaluator.1,
+            },
+            rubric: RubricDeclaration {
+                id: "outcome-document-v1".to_owned(),
+                version: 1,
+                canonicalizer: "beacon.rubric.v1".to_owned(),
+                sha256: data_encoding::HEXLOWER.encode(&[0x20_u8; 32]),
+            },
+            cited_runs: Vec::new(),
+            verdict,
+            findings: vec![Finding {
+                severity: FindingSeverity::Note,
+                summary: "Read the exact candidate bytes.".to_owned(),
+            }],
+            conflicts: Conflicts::None,
+            rationale: "An independent Resident read the exact candidate bytes.".to_owned(),
+            supersedes: EvaluationSupersedes::None,
+        }
+    }
+
+    /// A prepared candidate plus its qualifying Evaluation, when the caller already prepared.
+    fn publishable_from(
+        &self,
+        candidate: OutcomeCandidate,
+    ) -> (OutcomeCandidate, ArtifactDigest, EvaluationDigest) {
+        let record = self
+            .artifacts()
+            .get(&candidate.candidate_artifact_digest)
+            .expect("the candidate reads");
+        let evaluation = self.evaluate(&candidate.candidate_artifact_digest, Verdict::Meets);
+        let digest = evaluation.digest().clone();
+        (candidate, record.digest().clone(), digest)
+    }
+
+    /// A completed, classified Mission with a prepared candidate and a `meets` Evaluation of it:
+    /// everything `publish` needs, and nothing it is being tested on.
+    fn publishable(&self) -> (OutcomeCandidate, ArtifactDigest, EvaluationDigest) {
+        let candidate = self
+            .outcomes
+            .prepare_for_mission(self.mission_id, AppendixRequest::PolicyDefault)
+            .expect("the Mission prepares");
+        let record = self
+            .artifacts()
+            .get(&candidate.candidate_artifact_digest)
+            .expect("the candidate reads");
+        let evaluation = self.evaluate(&candidate.candidate_artifact_digest, Verdict::Meets);
+        let evaluation_digest = evaluation.digest().clone();
+        (candidate, record.digest().clone(), evaluation_digest)
     }
 
     fn artifacts(&self) -> ArtifactService {
@@ -2742,5 +2885,370 @@ fn kimi_a_manifest_id_collision_is_a_loud_refusal_not_a_merge() {
     assert!(
         error.to_string().contains("UNIQUE"),
         "the collision was refused for a reason other than uniqueness: {error}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// publish: the publication relation (slice 3-B, items 2 and 3)
+// ---------------------------------------------------------------------------------------------
+
+/// The Evaluation must be about the EXACT candidate bytes being published.
+///
+/// The mirror-image mutant gpt2's gate names is "accept Evaluation by ID while its subject digest
+/// differs", so the positive control matters as much as the refusal: a real Evaluation of a real
+/// sibling Artifact, by the right evaluator, with a `meets` verdict, refused only because its
+/// subject is different bytes.
+#[test]
+fn publish_requires_evaluation_of_exact_candidate_artifact_digest() {
+    let fixture = admitted_mission("publish-exact-subject");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, candidate_digest, evaluation_digest) = fixture.publishable();
+    assert!(
+        fixture
+            .outcomes
+            .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
+            .is_ok(),
+        "the control pairing must publish"
+    );
+
+    // A second Mission-scoped Artifact, evaluated properly -- and it is not the candidate.
+    let sibling = fixture
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            b"# Different bytes entirely.\n",
+            ArtifactContext::Mission {
+                project_id: fixture.project_id,
+                mission_id: fixture.mission_id,
+            },
+            fixture.resident_id,
+            fixture.configuration_id,
+            None,
+        )
+        .expect("the sibling records");
+    let sibling_evaluation = fixture.evaluate(&sibling.digest().value, Verdict::Meets);
+
+    let refusal = fixture
+        .outcomes
+        .publish(
+            fixture.mission_id,
+            &candidate_digest,
+            sibling_evaluation.digest(),
+        )
+        .expect_err("an Evaluation of different bytes published the candidate");
+    assert!(
+        matches!(
+            refusal,
+            PublishRefusal::Seam(PublicationSeamRefusal::SubjectIsNotTheCandidate)
+        ),
+        "{refusal:?}"
+    );
+}
+
+/// Non-authorship, keyed on the Resident and never on the (Resident, Configuration) pair.
+///
+/// MEASURED, and it changes what this test can claim: the Evaluation module refuses a
+/// self-evaluation at BOTH ends -- `record` refuses the draft, and `verified_evaluation_within`
+/// re-derives the same fact from the canonical bytes and refuses the stored row. So a
+/// self-evaluation cannot be recorded, and a planted one cannot be read back, which means
+/// `publish` can never be handed one and the seam's `EvaluatorAuthoredTheCandidate` arm is
+/// unreachable-by-construction from this layer.
+///
+/// That is defence in depth working, not a gap: the seam re-proves non-authorship from both
+/// records so `publish` verifies rather than trusts the Evaluation store's guard, and it stays
+/// correct if that guard is ever relaxed. What this test can honestly pin is the wall that DOES
+/// fire, and the part of it a check keyed on the pair would let through: the same Resident under a
+/// different Configuration is still the author.
+#[test]
+fn publish_refuses_evaluator_equal_to_accountable_author() {
+    let fixture = admitted_mission("publish-non-authorship");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let candidate = fixture
+        .outcomes
+        .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+        .expect("the Mission prepares");
+
+    // The author, under the exact Configuration the completion names.
+    let refusal = fixture
+        .evaluations()
+        .record(fixture.artifact_evaluation_draft(
+            &candidate.candidate_artifact_digest,
+            Verdict::Meets,
+            (fixture.resident_id, fixture.configuration_id),
+        ))
+        .expect_err("the candidate's own author evaluated it");
+    assert!(
+        matches!(
+            refusal,
+            EvaluationError::Inconsistent(InconsistentEvaluation::EvaluatorAuthoredTheArtifact)
+        ),
+        "{refusal:?}"
+    );
+
+    // The same Resident under a DIFFERENT Configuration: two evaluators for configuration
+    // purposes, ONE author for non-authorship purposes. A check keyed on the pair passes this.
+    let second_configuration = fixture.second_configuration_for_author();
+    let refusal = fixture
+        .evaluations()
+        .record(fixture.artifact_evaluation_draft(
+            &candidate.candidate_artifact_digest,
+            Verdict::Meets,
+            (fixture.resident_id, second_configuration),
+        ))
+        .expect_err("the author under a second Configuration evaluated their own candidate");
+    assert!(
+        matches!(
+            refusal,
+            EvaluationError::Inconsistent(InconsistentEvaluation::EvaluatorAuthoredTheArtifact)
+        ),
+        "keyed on the (Resident, Configuration) pair rather than the Resident: {refusal:?}"
+    );
+
+    // And the independent evaluator publishes, so the refusals above are about authorship and not
+    // about the pairing being unpublishable.
+    let (_, candidate_digest, evaluation_digest) = fixture.publishable_from(candidate);
+    assert!(
+        fixture
+            .outcomes
+            .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
+            .is_ok()
+    );
+}
+
+/// Every verdict that is not `meets` refuses -- including the ones a summariser would round up.
+///
+/// `uncertain` and `revision_requested` are first-class outcomes, not soft yeses, and there is no
+/// "absent", "broken" or "not_evaluated" verdict to launder into one: the grammar has four arms and
+/// the verified reader is what makes a missing Evaluation a refusal rather than a zero.
+#[test]
+fn publish_refuses_absent_broken_not_evaluated_or_non_meets_evaluation() {
+    for verdict in [
+        Verdict::RevisionRequested,
+        Verdict::DoesNotMeet,
+        Verdict::Uncertain,
+    ] {
+        let fixture = admitted_mission("publish-non-meets");
+        fixture.classify(ImpactLevel::Ordinary);
+        fixture.complete((fixture.resident_id, fixture.configuration_id));
+        let candidate = fixture
+            .outcomes
+            .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+            .expect("the Mission prepares");
+        let candidate_digest = fixture
+            .artifacts()
+            .get(&candidate.candidate_artifact_digest)
+            .unwrap()
+            .digest()
+            .clone();
+        let evaluation = fixture.evaluate(&candidate.candidate_artifact_digest, verdict);
+        let refusal = fixture
+            .outcomes
+            .publish(fixture.mission_id, &candidate_digest, evaluation.digest())
+            .expect_err("a non-meets verdict published");
+        assert!(
+            matches!(
+                refusal,
+                PublishRefusal::Seam(PublicationSeamRefusal::VerdictIsNotMeets)
+            ),
+            "{verdict:?}: {refusal:?}"
+        );
+    }
+
+    // An Evaluation nobody recorded is a refusal, never an absence read as approval.
+    let fixture = admitted_mission("publish-absent-evaluation");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let candidate = fixture
+        .outcomes
+        .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+        .expect("the Mission prepares");
+    let candidate_digest = fixture
+        .artifacts()
+        .get(&candidate.candidate_artifact_digest)
+        .unwrap()
+        .digest()
+        .clone();
+    let refusal = fixture
+        .outcomes
+        .publish(
+            fixture.mission_id,
+            &candidate_digest,
+            &EvaluationDigest {
+                algorithm: "sha256".to_owned(),
+                canonicalizer: "beacon.evaluation.v1".to_owned(),
+                value: "e".repeat(64),
+            },
+        )
+        .expect_err("an Evaluation nobody recorded published the candidate");
+    assert!(
+        matches!(
+            refusal,
+            PublishRefusal::Seam(PublicationSeamRefusal::EvaluationAbsent)
+        ),
+        "{refusal:?}"
+    );
+}
+
+/// The relation can only cite records both stores already refused to fabricate.
+///
+/// The cycle the external relation exists to break: an Evaluation stored INSIDE the candidate would
+/// change the candidate's bytes and so change the digest the Evaluation is about. Here the two
+/// records stay separate, and the proof is that the candidate's stored bytes do not contain the
+/// Evaluation's digest while the relation cites both.
+#[test]
+fn publication_relation_breaks_self_evaluation_digest_cycle() {
+    let fixture = admitted_mission("publication-no-cycle");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (candidate, candidate_digest, evaluation_digest) = fixture.publishable();
+    let published = fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
+        .expect("the pairing publishes");
+
+    let bytes = fixture
+        .artifacts()
+        .get(&candidate.candidate_artifact_digest)
+        .unwrap();
+    let document = String::from_utf8(bytes.content().to_vec()).unwrap();
+    assert!(
+        !document.contains(&evaluation_digest.value),
+        "the candidate's own bytes name the Evaluation that qualified them, which would change the \
+         digest that Evaluation is about"
+    );
+    // And the relation holds both, outside either record.
+    assert_eq!(
+        published.cited_evaluation_digest().value,
+        evaluation_digest.value
+    );
+    assert_eq!(
+        published.cited_candidate_artifact_digest().value,
+        candidate_digest.value
+    );
+}
+
+/// `publish` completes nothing and grants nothing.
+///
+/// Asserted on the store, not on the type: the completion record's bytes and the Mission row are
+/// unchanged, no Event was appended beyond the ones publication's own reads did not make, and
+/// `PublishedOutcome` exposes no predicate a caller could branch on for success or permission.
+#[test]
+fn publish_does_not_change_mission_completion_or_create_authority() {
+    let fixture = admitted_mission("publish-grants-nothing");
+    fixture.classify(ImpactLevel::Ordinary);
+    let (completion_digest, completion) =
+        fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, candidate_digest, evaluation_digest) = fixture.publishable();
+
+    let before_completion: Vec<u8> = fixture
+        .store
+        .connect()
+        .query_row(
+            "SELECT canonical_bytes FROM mission_completions WHERE digest_value = ?1",
+            params![completion_digest],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let before_events = fixture.latest_event_seq();
+
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
+        .expect("the pairing publishes");
+
+    let after_completion: Vec<u8> = fixture
+        .store
+        .connect()
+        .query_row(
+            "SELECT canonical_bytes FROM mission_completions WHERE digest_value = ?1",
+            params![completion_digest],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        before_completion, after_completion,
+        "publication rewrote the completion it cites"
+    );
+    assert_eq!(
+        fixture.latest_event_seq(),
+        before_events,
+        "publication appended an Event: the relation append IS the publication event, so there is \
+         no second record of it"
+    );
+    // And the bytes still decode to the same record: unchanged, not merely the same length.
+    let reread = MissionCompletionV1::from_canonical_bytes(&after_completion)
+        .expect("the completion still decodes");
+    assert_eq!(
+        reread.condition_results.len(),
+        completion.condition_results.len()
+    );
+    assert_eq!(reread.disposition, completion.disposition);
+    assert_eq!(reread.mission_id, completion.mission_id);
+}
+
+/// A candidate no manifest names is Markdown, not an Outcome.
+///
+/// The check `publish` adds beyond the seam: the seam proves a pairing of two records, and this
+/// proves the document being published is one this module rendered from a frozen manifest. Without
+/// it, any Mission-scoped Artifact with a `meets` Evaluation could be published as the Mission's
+/// Outcome Document -- prose with no manifest to verify it against.
+#[test]
+fn publish_refuses_a_candidate_no_manifest_names() {
+    let fixture = admitted_mission("publish-no-manifest");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+
+    // A well-formed, Mission-scoped, independently evaluated Artifact that `prepare` never made.
+    let impostor = fixture
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            b"# Outcome\n\nEverything went well.\n",
+            ArtifactContext::Mission {
+                project_id: fixture.project_id,
+                mission_id: fixture.mission_id,
+            },
+            fixture.resident_id,
+            fixture.configuration_id,
+            None,
+        )
+        .expect("the impostor records");
+    let evaluation = fixture.evaluate(&impostor.digest().value, Verdict::Meets);
+
+    let refusal = fixture
+        .outcomes
+        .publish(fixture.mission_id, impostor.digest(), evaluation.digest())
+        .expect_err("prose with no manifest published as an Outcome Document");
+    assert!(
+        matches!(refusal, PublishRefusal::NoManifestForCandidate),
+        "{refusal:?}"
+    );
+}
+
+/// Mission mismatch is a field comparison inside the subject arm's copied envelope, never a join.
+///
+/// The Evaluation's Artifact subject carries the Mission the Artifact declared, copied into the
+/// Evaluation's own canonical bytes at record time. Publishing under a different Mission is refused
+/// by comparing that copied field -- no query reaches the `missions` table to decide it.
+#[test]
+fn publish_refuses_mission_mismatch_from_the_envelope_not_a_join() {
+    let fixture = admitted_mission("publish-mission-mismatch");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, candidate_digest, evaluation_digest) = fixture.publishable();
+
+    let other_mission = Uuid::new_v4();
+    let refusal = fixture
+        .outcomes
+        .publish(other_mission, &candidate_digest, &evaluation_digest)
+        .expect_err("a candidate published under another Mission");
+    assert!(
+        matches!(
+            refusal,
+            PublishRefusal::Seam(PublicationSeamRefusal::MissionDiffers)
+        ),
+        "{refusal:?}"
     );
 }
