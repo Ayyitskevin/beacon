@@ -30,8 +30,7 @@ use beacond::{
     StarterRole, StartupConfig, SuccessCondition, Supervisor, TeamDraft, TeamLeadAmbiguityRule,
     TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
     TeamService, TrackRecordEvidenceKind, TrackRecordRequirement, UnfinishedKind, VerifiedSources,
-    VerifiedText, assemble, declared_conditions_digest, record_completion, render,
-    verified_manifest_within, verified_sources_for,
+    VerifiedText, declared_conditions_digest, record_completion, render, verified_manifest_within,
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -786,6 +785,8 @@ fn verified_sources_text_is_read_through_owners_not_narrative_projections() {
             summary: summary.to_owned(),
         }],
     );
+    // The honest read through the public collector: the collected narrative carries a kind and an
+    // ordinal and NO text -- which is the point: the text below cannot have come from it.
     let connection = fixture.store.connect();
     let collected = Collector::new(&connection, fixture.workspace_id)
         .collect(&CollectionRequest {
@@ -794,33 +795,38 @@ fn verified_sources_text_is_read_through_owners_not_narrative_projections() {
             ..CollectionRequest::default()
         })
         .expect("collects");
-    // The collected narrative carries a kind and an ordinal and NO text -- which is the point: the
-    // text below cannot have come from it.
     assert_eq!(
         collected.completion.as_ref().unwrap().unfinished_work[0].kind,
         "deferred_scope"
     );
+    drop(connection);
 
-    let manifest = assemble(
-        &collected,
-        fixture.workspace_id,
-        AppendixRequest::PolicyDefault,
+    // The seam from collected values to a document is `prepare_for_mission` and nothing else: the
+    // assembler and its text producer are crate-private and a `CollectedSources` is the collector's
+    // to build (sol1's P0-1). What the producer read is observed where it lands -- the candidate
+    // Artifact's bytes.
+    let candidate = fixture
+        .outcomes
+        .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+        .expect("a completed, classified Mission prepares");
+    let document = String::from_utf8(
+        fixture
+            .outcomes
+            .candidate(&candidate.manifest_digest)
+            .expect("the candidate reads")
+            .content()
+            .to_vec(),
     )
-    .expect("assembles");
-    let sources =
-        verified_sources_for(&connection, fixture.workspace_id, &manifest).expect("produces");
-    assert_eq!(sources.mission_title, "Ship one reviewed Beacon feature.");
-    assert_eq!(sources.condition_statements[0].id, "0");
-    assert_eq!(sources.condition_statements[0].text, CONDITION_TEXT);
-    assert_eq!(sources.unfinished_work[0].id, "0");
-    assert_eq!(
-        sources.unfinished_work[0].text, summary,
-        "the narrative text did not come from the completion's own record"
+    .unwrap();
+    assert!(
+        document.contains("Ship one reviewed Beacon feature."),
+        "{document}"
     );
-    assert!(sources.verified_source_bytes > 0);
-    let document = beacond::render(&manifest, &sources).expect("renders");
-    assert!(document.contains(summary), "{document}");
     assert!(document.contains(CONDITION_TEXT), "{document}");
+    assert!(
+        document.contains(summary),
+        "the narrative text did not come from the completion's own record:\n{document}"
+    );
 
     // The decoy: lie in the Mission row's own title column. The owner's reader proves the row
     // against its admission Event, so the lie is refused by name, never printed -- a producer that
@@ -839,7 +845,9 @@ fn verified_sources_text_is_read_through_owners_not_narrative_projections() {
                 .unwrap();
         },
     );
-    let refusal = verified_sources_for(&connection, fixture.workspace_id, &manifest)
+    let refusal = fixture
+        .outcomes
+        .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
         .expect_err("a tampered Mission title was served as the document's title");
     // Two owners prove the same row against the same Event: the completion reader (its Mission's
     // Project must own it, #71) and the Mission reader the producer calls. Whichever reads first
@@ -847,62 +855,19 @@ fn verified_sources_text_is_read_through_owners_not_narrative_projections() {
     assert!(
         matches!(
             refusal,
-            SourcesRefusal::MissionUnverified
-                | SourcesRefusal::Completion(
+            PrepareRefusal::Sources(SourcesRefusal::MissionUnverified)
+                | PrepareRefusal::Sources(SourcesRefusal::Completion(
+                    beacond::CompletionReadRefusal::MissionProjectDisagrees(_)
+                ))
+                | PrepareRefusal::Completion(
                     beacond::CompletionReadRefusal::MissionProjectDisagrees(_)
                 )
         ),
         "refused for the wrong reason: {refusal}"
     );
-}
-
-#[test]
-fn sol1_hand_built_collected_sources_cannot_invent_a_delivered_artifact() {
-    let fixture = admitted_mission("invented-delivery");
-    let classification = fixture.classify(ImpactLevel::Ordinary);
-    let (completion_digest, _) = fixture.complete((fixture.resident_id, fixture.configuration_id));
-    let undelivered = fixture
-        .artifacts()
-        .record(
-            ArtifactKind::OutcomeDocument,
-            b"# This Artifact was never delivered by the completion.\n",
-            ArtifactContext::Mission {
-                project_id: fixture.project_id,
-                mission_id: fixture.mission_id,
-            },
-            fixture.resident_id,
-            fixture.configuration_id,
-            None,
-        )
-        .expect("the decoy Artifact records");
-    let connection = fixture.store.connect();
-    let mut collected = Collector::new(&connection, fixture.workspace_id)
-        .collect(&CollectionRequest {
-            completion_digest: Some(completion_digest),
-            classification_digest: Some(classification.2),
-            ..CollectionRequest::default()
-        })
-        .expect("the honest set collects");
-    assert!(matches!(
-        collected.completion.as_ref().unwrap().delivered_artifacts,
-        OutcomeState::Absent(_)
-    ));
-    collected.completion.as_mut().unwrap().delivered_artifacts =
-        OutcomeState::Verified(vec![undelivered.digest().value.clone()]);
-    let manifest = assemble(
-        &collected,
-        fixture.workspace_id,
-        AppendixRequest::PolicyDefault,
-    )
-    .expect("the inconsistent set passed the assembler");
-    let sources = verified_sources_for(&connection, fixture.workspace_id, &manifest)
-        .expect("the producer accepted the invented delivery");
-    drop(connection);
-
-    let result = fixture.outcomes.prepare(&manifest, &sources);
     assert!(
-        result.is_err(),
-        "prepare stored a manifest that says an Artifact was delivered although the verified completion says none: {result:?}"
+        !refusal.to_string().contains("A title nobody admitted"),
+        "the lie was printed: {refusal}"
     );
 }
 

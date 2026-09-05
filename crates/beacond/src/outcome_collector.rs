@@ -334,6 +334,35 @@ impl CollectionRequest {
 // ---------------------------------------------------------------------------------------------
 
 /// What the collector resolved, all of it verified and all of it at or before the boundary.
+///
+/// Sealed: only the collector builds one. The assembler that turns a collected set into a manifest
+/// is not a second verifier -- it copies what the collector proved and refuses to guess -- so the
+/// only way to keep a forged set out of it is to make a forged set unwritable (sol1's cold read of
+/// the assembler, P0-1). Outside this crate a hand-built set does not compile, and neither does a
+/// call to the assembler: the seam from collected values to a manifest is
+/// `OutcomeService::prepare_for_mission`, which collects and assembles inside one transaction. The
+/// fields stay readable, because reading what the collector resolved is not a way to forge it.
+///
+/// A hand-built set is a type error:
+///
+/// ```compile_fail
+/// let forged = beacond::CollectedSources {
+///     proposals: Vec::new(),
+///     rulings: Vec::new(),
+///     evaluations: Vec::new(),
+///     receipts: Vec::new(),
+///     completion: None,
+///     classification: None,
+///     spend: None,
+///     boundary_event_seq: None,
+/// };
+/// ```
+///
+/// and so is reaching the assembler from outside the crate:
+///
+/// ```compile_fail
+/// use beacond::assemble;
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollectedSources {
     pub proposals: Vec<CollectedDigest>,
@@ -348,7 +377,14 @@ pub struct CollectedSources {
     pub spend: Option<CollectedSpend>,
     /// The cut everything above was frozen at, when a completion supplied one.
     pub boundary_event_seq: Option<u64>,
+    /// The collector's mark. Crate-private on purpose: it is the one field an outside caller cannot
+    /// write, which makes this a struct an outside caller cannot build.
+    pub(crate) proof: CollectorProof,
 }
+
+/// The collector's mark on a [`CollectedSources`]; see the seal note there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CollectorProof;
 
 /// One source, named by the identity its owning module actually has.
 ///
@@ -587,6 +623,7 @@ impl<'a> Collector<'a> {
             classification,
             spend,
             boundary_event_seq: boundary,
+            proof: CollectorProof,
         })
     }
 
