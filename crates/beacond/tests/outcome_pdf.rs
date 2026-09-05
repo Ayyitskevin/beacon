@@ -287,3 +287,98 @@ fn the_profile_names_itself_in_the_pdf_creator() {
         "the Markdown document declares a PDF profile, which R30.2 says it must not"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// Item 3 — isolation
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn an_empty_embedded_font_set_refuses_by_name() {
+    // Never a fallback. A renderer that finds a face on the host renders differently on two
+    // machines, and the operator has no way to know which face they are looking at.
+    let fontless = PdfProfile {
+        faces: &[],
+        ..BEACON_OUTCOME_1
+    };
+    assert_eq!(
+        render_pdf(fixture().as_bytes(), V1, DIGEST, &fontless).unwrap_err(),
+        PdfRefusal::EmbeddedFontSetEmpty
+    );
+}
+
+/// The child of [`the_same_document_renders_identically_under_two_locales_and_timezones`].
+#[test]
+fn helper_child_render_env() {
+    let Ok(path) = std::env::var(CHILD_OUT) else {
+        return;
+    };
+    std::fs::write(path, render(&fixture(), DIGEST, &BEACON_OUTCOME_1)).unwrap();
+}
+
+/// Two processes under hostile environments. Separate processes because a locale is read once per
+/// process, so setting the variables inside one would prove nothing about a renderer that had
+/// already read them.
+#[test]
+fn the_same_document_renders_identically_under_two_locales_and_timezones() {
+    let directory = std::env::temp_dir().join(format!("beacon-pdf-env-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let environments = [("Pacific/Kiritimati", "de_DE.UTF-8"), ("Etc/GMT+12", "C")];
+    let mut written = Vec::new();
+    for (index, (timezone, locale)) in environments.iter().enumerate() {
+        let path = directory.join(format!("{index}.pdf"));
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "helper_child_render_env", "--nocapture"])
+            .env(CHILD_OUT, &path)
+            .env("TZ", timezone)
+            .env("LANG", locale)
+            .env("LC_ALL", locale)
+            .status()
+            .expect("the child test binary runs");
+        assert!(
+            status.success(),
+            "the child render failed under {timezone}/{locale}"
+        );
+        written.push(std::fs::read(&path).unwrap());
+    }
+    assert!(!written[0].is_empty(), "an empty render proves nothing");
+    assert_eq!(
+        written[0], written[1],
+        "the same document rendered differently under two locales and timezones"
+    );
+    std::fs::remove_dir_all(&directory).ok();
+}
+
+/// Nothing about this host reaches the bytes.
+#[test]
+fn the_pdf_names_nothing_about_the_host() {
+    let pdf = render(&fixture(), DIGEST, &BEACON_OUTCOME_1);
+    let text = String::from_utf8_lossy(&pdf);
+    let mut needles: Vec<String> = vec![
+        "/home".to_owned(),
+        "LC_".to_owned(),
+        "/usr/share/fonts".to_owned(),
+        "TZ=".to_owned(),
+    ];
+    if let Ok(home) = std::env::var("HOME") {
+        needles.push(home);
+    }
+    if let Ok(user) = std::env::var("USER") {
+        needles.push(user);
+    }
+    if let Ok(host) = std::fs::read_to_string("/etc/hostname") {
+        let host = host.trim().to_owned();
+        if !host.is_empty() {
+            needles.push(host);
+        }
+    }
+    assert!(
+        needles.len() > 4,
+        "the scan found nothing host-specific to look for, so it proves nothing"
+    );
+    for needle in &needles {
+        assert!(
+            !text.contains(needle.as_str()),
+            "the PDF names something about this host: {needle}"
+        );
+    }
+}
