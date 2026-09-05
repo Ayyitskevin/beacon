@@ -70,9 +70,6 @@ pub enum PublicationSeamRefusal {
     /// The verdict is not `meets`. `uncertain` and `revision_requested` are first-class outcomes,
     /// and neither is a soft yes.
     VerdictIsNotMeets,
-    /// The evaluator is the candidate's accountable Resident. Keyed on the Resident, never on the
-    /// (Resident, Configuration) pair.
-    EvaluatorAuthoredTheCandidate,
     /// The Evaluation's derived Mission is not the Outcome's Mission.
     MissionDiffers,
     /// A supplied digest envelope is not the one the owning module verified: same value, different
@@ -94,9 +91,6 @@ impl fmt::Display for PublicationSeamRefusal {
                 "the Evaluation is about different bytes than the candidate"
             }
             Self::VerdictIsNotMeets => "the Evaluation's verdict is not `meets`",
-            Self::EvaluatorAuthoredTheCandidate => {
-                "the evaluator is the candidate's accountable Resident"
-            }
             Self::MissionDiffers => "the Evaluation's Mission is not this Outcome's Mission",
             Self::CitedEnvelopeDisagrees => {
                 "the supplied digest envelope is not the one the owning module verified"
@@ -158,11 +152,22 @@ pub fn publication_candidacy(
     if evaluation.payload().verdict != Verdict::Meets {
         return Err(PublicationSeamRefusal::VerdictIsNotMeets);
     }
-    // 4. Non-authorship, re-proved here from both records rather than trusted from the store's
-    //    triggers: `publish` verifies rather than trusts, which is what §8 says this arm buys it.
-    if evaluation.payload().evaluator.resident_id == candidate.payload().accountable_resident_id {
-        return Err(PublicationSeamRefusal::EvaluatorAuthoredTheCandidate);
-    }
+    // 4. NON-AUTHORSHIP IS NOT RE-PROVED HERE, and the absence is the design (R24.1, R9).
+    //
+    //    This arm existed so `publish` would verify rather than trust. It could never fire. The
+    //    Evaluation module refuses a self-evaluation at BOTH ends -- `record` refuses the draft
+    //    (`evaluation.rs`, the draft check), a SQL trigger refuses the insert
+    //    (`evaluations_evaluator_is_not_the_artifact_author`, migration 0028), and
+    //    `verified_evaluation` re-derives the fact from the canonical bytes and refuses the read.
+    //    This function calls that reader FIRST, so a self-evaluation is refused as `Unverified`
+    //    before reaching here: the check was witnessed directly, found unreachable, and removed
+    //    rather than left as a comment that reads like a guarantee.
+    //
+    //    The wall is the Evaluation module's own, and it is witnessed:
+    //    `publish_refuses_evaluator_equal_to_accountable_author` proves `record` refuses the author
+    //    (including under a SECOND Configuration, so the key is the Resident and not the pair), and
+    //    `the_seam_refuses_a_candidacy_whose_evaluator_authored_the_candidate` plants the row all
+    //    three walls exist to prevent and proves this function still refuses it.
     // 5. One Mission: the Evaluation's derived Mission is the Artifact's declared scope (the
     //    reader proved that), and the Outcome must be about the same one.
     if subject.mission_id != outcome_mission_id {
