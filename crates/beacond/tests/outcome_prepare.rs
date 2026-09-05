@@ -600,6 +600,76 @@ fn stored_manifests_are_immutable_under_update_and_delete() {
         .expect("the manifest still reads");
 }
 
+/// Migration 0031: the publication relation exists, is STRICT, is append-only, and carries nothing
+/// renderable.
+///
+/// Asserted against a live migrated store rather than against the migration text: a table nobody
+/// created and a trigger nobody registered are indistinguishable from a comment. That the triggers
+/// FIRE, and that versions stay contiguous, are proved through the real publish path below.
+#[test]
+fn migration_0031_makes_the_publication_relation_append_only_and_scoped() {
+    let fixture = admitted_mission("publication-relation-shape");
+    let connection = fixture.store.connect();
+
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT version FROM schema_meta WHERE singleton = 1",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        31
+    );
+
+    let ddl: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'outcome_publications'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the relation exists");
+    for column in [
+        "workspace_id",
+        "mission_id",
+        "publication_id",
+        "candidate_artifact_digest",
+        "evaluation_digest",
+        "publication_version",
+    ] {
+        assert!(ddl.contains(column), "{column} is missing from {ddl}");
+    }
+    assert!(ddl.contains("STRICT"), "{ddl}");
+    // Nothing renderable (R4.3): the row is a relation between identities, and a surface that wants
+    // a title, a verdict or a time reads it through the owning record.
+    for forbidden in ["title", "verdict", "summary", "rationale", "published_at"] {
+        assert!(
+            !ddl.contains(forbidden),
+            "the relation carries a renderable column `{forbidden}`: {ddl}"
+        );
+    }
+    assert!(ddl.contains("publication_version >= 1"), "{ddl}");
+
+    let triggers: Vec<String> = connection
+        .prepare(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'trigger' AND tbl_name = 'outcome_publications'",
+        )
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(
+        triggers.contains(&"outcome_publications_no_update".to_owned()),
+        "{triggers:?}"
+    );
+    assert!(
+        triggers.contains(&"outcome_publications_no_delete".to_owned()),
+        "{triggers:?}"
+    );
+}
+
 #[test]
 fn migration_0030_rebuilds_outcome_manifests_from_0029s_ddl_with_exactly_one_line_changed() {
     // R22's promise, made executable: 0030 is 0029's table definition with the canonicalizer CHECK
