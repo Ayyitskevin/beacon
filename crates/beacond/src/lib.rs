@@ -202,9 +202,9 @@ pub use sample_project::{
 };
 pub use spend::{
     CANONICALIZER as SPEND_CANONICALIZER, MalformedSpend, MeasuredSpend, MeasuredSpendService,
-    MeasuredSpendV1, SpendDigest, SpendLine, SpendMeasurement, SpendOrigin, SpendRecordError,
-    SpendStoreError, SpendSupersedes, SpendTotals, UncountedEntry, UncountedKind, compare_units,
-    verified_spend_for_citation, verified_spend_within,
+    MeasuredSpendV1, PredecessorFault, SpendDigest, SpendLine, SpendMeasurement, SpendOrigin,
+    SpendRecordError, SpendStoreError, SpendSupersedes, SpendTotals, UncountedEntry, UncountedKind,
+    compare_units, verified_spend_for_citation, verified_spend_within,
 };
 pub use starter_organization::{
     ResidentAgentSummary, StarterOrganizationDecision, StarterOrganizationError,
