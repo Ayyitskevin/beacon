@@ -135,6 +135,11 @@ pub enum ManifestStoreRefusal {
     ManifestTooLarge { configured: u64, observed: u64 },
     /// The bytes cannot be a v1 manifest at all.
     Malformed(MalformedOutcome),
+    /// A stored manifest says something about its completion that the completion does not say.
+    ///
+    /// The same disagreement `prepare` refuses, found on the read path instead of the write path
+    /// (astra's A3). It spans two records, so it is neither owner's refusal and lives here.
+    Irreconcilable { detail: String },
     /// The Mission citation claims a digest instead of declaring itself identity-only (R18.4).
     ///
     /// Nothing on `main` can verify a Mission declaration digest, so a citation that carries one
@@ -178,6 +183,12 @@ impl std::fmt::Display for ManifestStoreRefusal {
             ),
             Self::Malformed(reason) => {
                 write!(formatter, "not a v1 outcome manifest: {}", reason.as_str())
+            }
+            Self::Irreconcilable { detail } => {
+                write!(
+                    formatter,
+                    "the manifest and its completion disagree: {detail}"
+                )
             }
             Self::MissionCitationNotIdentityOnly => write!(
                 formatter,
@@ -774,7 +785,27 @@ fn read_completion(
     }
     let record =
         verified_completion_within(connection, workspace_id, &manifest.completion.digest.value)?;
+    reconcile_completion(manifest, &record)
+        .map_err(|detail| PrepareRefusal::Irreconcilable { detail })?;
+    Ok(record)
+}
 
+/// What the manifest says about its completion, against what the completion says.
+///
+/// Split out for astra's A3: the startup pass verified the completion record ALONE and skipped
+/// this, so a manifest whose copies of the boundary, the accountable Resident, the Mission or the
+/// recorded time disagreed with the completion -- refused by `prepare` -- survived a restart once
+/// it was in the store. `prepare` and `verify_manifest_state` now call the same function, because
+/// a rule enforced on the write path and not on the read path is a rule a planted row does not
+/// have to follow.
+///
+/// It spans two records and so belongs to neither owner: the completion's reader proves the
+/// completion and the manifest's codec proves the manifest, and nobody else checks that the second
+/// is talking about the first.
+fn reconcile_completion(
+    manifest: &OutcomeManifestV1,
+    record: &MissionCompletionV1,
+) -> Result<(), String> {
     let mismatches: [(&str, String, String); 6] = [
         (
             "completion reference identity",
@@ -809,14 +840,12 @@ fn read_completion(
     ];
     for (what, claimed, actual) in mismatches {
         if claimed != actual {
-            return Err(PrepareRefusal::Irreconcilable {
-                detail: format!(
-                    "the manifest names {what} {claimed} and the completion names {actual}"
-                ),
-            });
+            return Err(format!(
+                "the manifest names {what} {claimed} and the completion names {actual}"
+            ));
         }
     }
-    Ok(record)
+    Ok(())
 }
 
 /// Prove the manifest's copy of the high-impact bit against the Policy classification it cites.
@@ -932,10 +961,15 @@ pub(crate) fn verify_manifest_state(connection: &Connection) -> Result<(), Manif
         // key to `mission_completions` is single-column -- that key has no Workspace to be
         // composite over -- so this is where a manifest naming another Workspace's completion is
         // caught.
-        verified_completion_within(connection, workspace_id, &manifest.completion.digest.value)
-            .map_err(|_| ManifestStoreRefusal::CandidateNotAccounted {
-                reason: "the completion this manifest names does not verify in its Workspace",
-            })?;
+        let completion =
+            verified_completion_within(connection, workspace_id, &manifest.completion.digest.value)
+                .map_err(|_| ManifestStoreRefusal::CandidateNotAccounted {
+                    reason: "the completion this manifest names does not verify in its Workspace",
+                })?;
+        // The SAME reconciliation `prepare` requires. Verifying the completion alone proves the
+        // completion; it proves nothing about whether this manifest is describing it.
+        reconcile_completion(manifest, &completion)
+            .map_err(|detail| ManifestStoreRefusal::Irreconcilable { detail })?;
 
         let candidate_digest = stored.candidate_artifact_digest();
         let candidate =
