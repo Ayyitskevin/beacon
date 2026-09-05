@@ -1547,3 +1547,293 @@ fn sha2_256(bytes: &[u8]) -> [u8; 32] {
     hasher.update(bytes);
     hasher.finalize().into()
 }
+// Astra O-3a cold-read probes; append to tests/outcome_prepare.rs at 1c328cc.
+
+fn astra_record_document(fixture: &Fixture, content: &[u8]) -> String {
+    fixture
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            content,
+            ArtifactContext::Mission {
+                project_id: fixture.project_id,
+                mission_id: fixture.mission_id,
+            },
+            fixture.resident_id,
+            fixture.configuration_id,
+            None,
+        )
+        .unwrap()
+        .digest()
+        .value
+        .clone()
+}
+
+fn astra_boot(fixture: &Fixture) -> Result<beacond::StartupReport, beacond::SupervisorError> {
+    Supervisor::bootstrap(StartupConfig {
+        store_path: fixture.store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+}
+
+#[test]
+fn astra_same_mission_decoy_document_must_not_account_for_a_manifest() {
+    let (fixture, manifest, sources) = ordinary("astra-document-decoy");
+    let unrelated_bytes = b"# A different document with the same author and Mission\n";
+    assert_ne!(
+        render(&manifest, &sources).unwrap().as_bytes(),
+        unrelated_bytes
+    );
+    let unrelated = astra_record_document(&fixture, unrelated_bytes);
+    let digest = insert_manifest_behind_the_ledger(&fixture, &manifest, &unrelated);
+    let read = fixture.outcomes.candidate(&digest).unwrap();
+    assert_eq!(read.content(), unrelated_bytes);
+    let boot = astra_boot(&fixture);
+    eprintln!("ASTRA_DECOY candidate_is_unrelated=true startup={boot:?}");
+    assert!(
+        boot.is_err(),
+        "startup must reject a candidate whose bytes are not this manifest's rendered document"
+    );
+}
+
+#[test]
+fn astra_candidate_projection_must_be_verified_on_read_and_retry() {
+    let (fixture, manifest, sources) = ordinary("astra-candidate-projection");
+    let prepared = fixture.outcomes.prepare(&manifest, &sources).unwrap();
+    let unrelated = astra_record_document(&fixture, b"# Unrelated replacement document\n");
+    with_trigger_down(
+        &fixture.store,
+        "outcome_manifests_no_update",
+        "outcome_manifests",
+        "Outcome manifests are immutable",
+        |connection| {
+            connection.execute("UPDATE outcome_manifests SET candidate_artifact_digest = ?1 WHERE manifest_digest = ?2",
+                params![unrelated, prepared.manifest_digest]).unwrap();
+        },
+    );
+    let read = fixture.outcomes.manifest(&prepared.manifest_digest);
+    let candidate = fixture.outcomes.candidate(&prepared.manifest_digest);
+    let retry = fixture.outcomes.prepare(&manifest, &sources);
+    eprintln!(
+        "ASTRA_PROJECTION manifest_ok={} candidate_ok={} retry={retry:?}",
+        read.is_ok(),
+        candidate.is_ok()
+    );
+    assert!(
+        read.is_err() && candidate.is_err() && retry.is_err(),
+        "all three paths must refuse an unbound candidate projection"
+    );
+}
+
+#[test]
+fn astra_startup_must_reconcile_completion_copies() {
+    let (fixture, mut manifest, sources) = ordinary("astra-startup-completion");
+    manifest.boundary_event_seq += 1;
+    // Correct prepare rejects this cross-record lie; the renderer and manifest codec can encode it.
+    assert!(matches!(
+        fixture.outcomes.prepare(&manifest, &sources),
+        Err(PrepareRefusal::Irreconcilable { .. })
+    ));
+    let bytes = render(&manifest, &sources).unwrap();
+    let candidate = astra_record_document(&fixture, bytes.as_bytes());
+    insert_manifest_behind_the_ledger(&fixture, &manifest, &candidate);
+    let boot = astra_boot(&fixture);
+    eprintln!(
+        "ASTRA_COMPLETION wrong_boundary={} startup={boot:?}",
+        manifest.boundary_event_seq
+    );
+    assert!(
+        boot.is_err(),
+        "startup must recheck the same completion/manifest agreement that prepare requires"
+    );
+}
+
+#[test]
+fn astra_prepare_must_bind_policy_to_the_completed_mission() {
+    let fixture = admitted_mission("astra-other-policy");
+    fixture.classify(ImpactLevel::High);
+    let team_id: String = fixture
+        .store
+        .connect()
+        .query_row(
+            "SELECT team_id FROM missions WHERE id = ?1",
+            params![fixture.mission_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let other = MissionService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .admit(MissionDraft {
+            project_id: fixture.project_id,
+            expected_charter_revision: fixture.charter_revision,
+            team_id: Uuid::parse_str(&team_id).unwrap(),
+            desired_outcome: "An unrelated ordinary Mission".to_owned(),
+            success_conditions: vec![CONDITION_TEXT.to_owned()],
+            constraints: vec!["Keep changes reversible".to_owned()],
+            prohibitions: vec!["Do not deploy".to_owned()],
+            members: vec![
+                MissionMemberDraft {
+                    resident_id: fixture.resident_id,
+                    expected_configuration_id: fixture.configuration_id,
+                },
+                MissionMemberDraft {
+                    resident_id: fixture.other_resident_id,
+                    expected_configuration_id: fixture.other_configuration_id,
+                },
+            ],
+        })
+        .unwrap();
+    let ordinary_classification = MissionImpactClassificationV1 {
+        workspace_id: fixture.workspace_id,
+        mission_id: other.id,
+        classification_id: Uuid::new_v4(),
+        version: 1,
+        impact: ImpactLevel::Ordinary,
+        basis: ClassificationBasis::OperatorDeclared,
+        policy: PolicyRevisionRef {
+            project_id: fixture.project_id,
+            policy_revision: fixture.policy_revision,
+            charter_revision: fixture.charter_revision,
+        },
+        rule_id: None,
+        reason: "This other Mission is ordinary".to_owned(),
+        classified_by: ClassificationActor::Operator,
+        classified_at_ms: 1_788_400_000_000,
+        supersedes: ClassificationSupersedes::None,
+    };
+    let record = MissionImpactService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .classify(&ordinary_classification.canonical_bytes().unwrap())
+        .unwrap();
+    let classification = (
+        ordinary_classification.classification_id,
+        1,
+        record.digest().value.clone(),
+    );
+    let (completion_digest, completion) =
+        fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let mut accepted = Vec::new();
+    for request in [AppendixRequest::PolicyDefault, AppendixRequest::Include] {
+        let (manifest, sources) = manifest_for(
+            &fixture,
+            &completion_digest,
+            &completion,
+            &classification,
+            false,
+            request,
+        );
+        let result = fixture.outcomes.prepare(&manifest, &sources);
+        if let Ok(ref candidate) = result {
+            let content = fixture
+                .outcomes
+                .candidate(&candidate.manifest_digest)
+                .unwrap();
+            let markdown = std::str::from_utf8(content.content()).unwrap();
+            eprintln!(
+                "ASTRA_POLICY request={request:?} accepted=true omitted={}",
+                markdown.contains("appendix_mode: policy_state_not_high_impact")
+            );
+        }
+        if result.is_ok() {
+            accepted.push(request);
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "a different Mission's valid classification was accepted under: {accepted:?}"
+    );
+}
+
+#[test]
+fn astra_completion_citation_envelope_and_version_must_match_its_owner() {
+    let (fixture, base, sources) = ordinary("astra-completion-envelope");
+    let mut wrong_canonicalizer = base.clone();
+    wrong_canonicalizer.completion.digest.canonicalizer =
+        "beacon.mission_completion.v999".to_owned();
+    let mut wrong_version = base;
+    wrong_version.completion.schema_version = 999;
+    let mut accepted = Vec::new();
+    for (name, manifest) in [
+        ("canonicalizer", wrong_canonicalizer),
+        ("schema_version", wrong_version),
+    ] {
+        let result = fixture.outcomes.prepare(&manifest, &sources);
+        eprintln!("ASTRA_CITATION {name} result={result:?}");
+        if result.is_ok() {
+            accepted.push(name);
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "accepted false completion citation fields: {accepted:?}"
+    );
+}
+
+#[test]
+fn astra_control_both_insert_faults_roll_back_every_row_and_event() {
+    for table in ["artifacts", "outcome_manifests"] {
+        let (fixture, manifest, sources) = ordinary(&format!("astra-fault-{table}"));
+        let counts = || {
+            fixture.store.connect().query_row(
+            "SELECT (SELECT count(*) FROM outcome_manifests), (SELECT count(*) FROM artifacts), (SELECT count(*) FROM events)",
+            [], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))).unwrap()
+        };
+        let before = counts();
+        fixture.store.connect().execute_batch(&format!(
+            "CREATE TRIGGER astra_insert_fault BEFORE INSERT ON {table} BEGIN SELECT RAISE(ABORT, 'astra injected insert fault'); END;"
+        )).unwrap();
+        let result = fixture.outcomes.prepare(&manifest, &sources).unwrap_err();
+        assert!(format!("{result:?}").contains("astra injected insert fault"));
+        assert_eq!(
+            counts(),
+            before,
+            "partial prepare persisted after a fault at {table}"
+        );
+        fixture
+            .store
+            .connect()
+            .execute_batch("DROP TRIGGER astra_insert_fault")
+            .unwrap();
+        fixture.outcomes.prepare(&manifest, &sources).unwrap();
+        assert_eq!(counts(), (before.0 + 1, before.1 + 1, before.2 + 1));
+        eprintln!(
+            "ASTRA_ROLLBACK table={table} before={before:?} fault_unchanged=true retry={:?}",
+            counts()
+        );
+    }
+}
+
+#[test]
+fn astra_control_a_candidate_event_in_another_workspace_refuses_startup() {
+    let (fixture, manifest, sources) = ordinary("astra-foreign-event");
+    let prepared = fixture.outcomes.prepare(&manifest, &sources).unwrap();
+    let elsewhere = Uuid::new_v4();
+    let connection = fixture.store.connect();
+    connection
+        .execute(
+            "INSERT INTO workspaces (id, name, created_at_ms) VALUES (?1, 'Elsewhere', 1)",
+            params![elsewhere.to_string()],
+        )
+        .unwrap();
+    connection.execute("INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms) VALUES (?1, 'workspace.created', ?2, 1)",
+        params![elsewhere.to_string(), serde_json::json!({"workspace_id": elsewhere, "name": "Elsewhere"}).to_string()]).unwrap();
+    astra_boot(&fixture).expect("the two-Workspace control is a legitimate store");
+    assert_eq!(connection.execute("UPDATE events SET workspace_id = ?1 WHERE kind = 'artifact.recorded' AND json_extract(payload_json, '$.artifact.digest.value') = ?2",
+        params![elsewhere.to_string(), prepared.candidate_artifact_digest]).unwrap(), 1);
+    let error = astra_boot(&fixture).expect_err("a foreign Event cannot account for the candidate");
+    eprintln!("ASTRA_FOREIGN_EVENT refusal={error:?}");
+    assert!(matches!(
+        error,
+        beacond::SupervisorError::ArtifactEventMismatch(_)
+    ));
+}
+
+#[test]
+fn astra_control_reference_identity_is_exactly_the_first_sixteen_digest_bytes() {
+    let digest = "0123456789abcdeffedcba987654321000112233445566778899aabbccddeeff";
+    let id = beacond::manifest_reference_id(digest).unwrap();
+    assert_eq!(id.to_string(), "01234567-89ab-cdef-fedc-ba9876543210");
+    assert_eq!(beacond::manifest_reference_id(digest).unwrap(), id);
+    assert_ne!(
+        beacond::manifest_reference_id(&format!("11{}", &digest[2..])).unwrap(),
+        id
+    );
+}
