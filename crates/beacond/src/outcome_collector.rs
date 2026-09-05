@@ -292,7 +292,46 @@ const EVENT_LOCATORS: &[(&str, &str, &str)] = &[
 /// place (`version` moves 1 → 2 → 3). So it is positioned at the **latest** event naming its run,
 /// which is the conservative direction — a Receipt whose newest state arrived after the boundary is
 /// refused rather than quietly cited at its older one.
-const RECEIPT_RUN_EVENT_KINDS: &[&str] = &["run.preflighted", "run.executed"];
+/// The run Events that place a Receipt in the log, each beside the verifier its OWNING module
+/// runs at startup for that kind.
+///
+/// One table, not two call sites: a Receipt has no digest and no `verified_receipt_within`, so
+/// "read it through its owner" means replaying its Events through the owner's own verifier --
+/// the one `Supervisor::bootstrap` runs. Reading the `receipts` row and checksumming it is a
+/// SECOND reader, and a second reader is a decoy: it accepted a Receipt whose Event the owner
+/// refuses (sol1's cold read, P0). Adding a run kind is a row here, and the verifier comes with
+/// it.
+type RunEventVerifier = fn(&Connection, Uuid, u64, &str) -> Result<(), String>;
+
+fn verify_preflight_run_event(
+    connection: &Connection,
+    workspace_id: Uuid,
+    occurred_at_ms: u64,
+    payload_json: &str,
+) -> Result<(), String> {
+    crate::check_preflight::verify_run_event(connection, workspace_id, occurred_at_ms, payload_json)
+        .map_err(|error| format!("{error:?}"))
+}
+
+fn verify_executed_run_event(
+    connection: &Connection,
+    workspace_id: Uuid,
+    occurred_at_ms: u64,
+    payload_json: &str,
+) -> Result<(), String> {
+    crate::declared_checks::verify_execution_event(
+        connection,
+        workspace_id,
+        occurred_at_ms,
+        payload_json,
+    )
+    .map_err(|error| format!("{error:?}"))
+}
+
+const RECEIPT_RUN_EVENTS: &[(&str, RunEventVerifier)] = &[
+    ("run.preflighted", verify_preflight_run_event),
+    ("run.executed", verify_executed_run_event),
+];
 
 /// The most support references the collector will read for one condition -- the grammar's own
 /// bound, applied HERE before anything is allocated or read (the #6 lesson). The completion's
@@ -1465,8 +1504,13 @@ impl<'a> Collector<'a> {
             kind: "receipt",
             reason: "receipt version is not a u32".to_owned(),
         })?;
+        // The owner's verdict first, and unconditionally: every run Event naming this run is
+        // replayed through its owning module's verifier -- the one startup runs -- so the row
+        // read above is never the thing that authenticated this Receipt (sol1's cold read, P0).
+        // The verified position it returns is then what the boundary is measured against.
+        let position = self.verified_receipt_position(run_uuid)?;
         if let Some(cut) = boundary {
-            self.receipt_at_or_before(run_uuid, cut)?;
+            self.receipt_at_or_before(run_uuid, position, cut)?;
         }
 
         Ok(ReceiptRef {
@@ -1477,34 +1521,66 @@ impl<'a> Collector<'a> {
         })
     }
 
-    /// A Receipt's position: the latest run Event naming its run. See `RECEIPT_RUN_EVENT_KINDS`.
+    /// Every run Event naming this run, replayed through its OWNING module's verifier, and the
+    /// latest sequence among them.
+    ///
+    /// `None` is "the log accounts for this run nowhere" -- not a pass: the caller decides what
+    /// absence means, and with a boundary it is `Unpositioned`. An Event the owner refuses is
+    /// `Unverified` carrying the owner's own word, exactly as every other source's refusal is.
+    fn verified_receipt_position(&self, run_uuid: Uuid) -> Result<Option<i64>, CollectorRefusal> {
+        let id = run_uuid.to_string();
+        let mut latest: Option<i64> = None;
+        for (kind, verify) in RECEIPT_RUN_EVENTS {
+            let unverified = |reason: String| CollectorRefusal::Unverified {
+                kind: "receipt",
+                reason,
+            };
+            let mut statement = self
+                .connection
+                .prepare(
+                    "SELECT sequence, occurred_at_ms, payload_json FROM events
+                     WHERE workspace_id = ?1 AND kind = ?2
+                       AND json_extract(payload_json, '$.runId') = ?3
+                     ORDER BY sequence",
+                )
+                .map_err(|error| unverified(error.to_string()))?;
+            let events: Vec<(i64, i64, String)> = statement
+                .query_map(params![self.workspace_id.to_string(), kind, id], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .and_then(Iterator::collect)
+                .map_err(|error| unverified(error.to_string()))?;
+            for (sequence, occurred_at_ms, payload_json) in events {
+                let occurred_at_ms = u64::try_from(occurred_at_ms).map_err(|_| {
+                    unverified(format!("{kind} at sequence {sequence} has no timestamp"))
+                })?;
+                // EVERY Event of this run, not only the latest: an Event the owner refuses is a
+                // store this collector will not read a Receipt out of, wherever it sits.
+                verify(
+                    self.connection,
+                    self.workspace_id,
+                    occurred_at_ms,
+                    &payload_json,
+                )
+                .map_err(|reason| {
+                    unverified(format!(
+                        "{kind} at sequence {sequence} refused by its owning reader: {reason}"
+                    ))
+                })?;
+                latest = Some(latest.map_or(sequence, |current: i64| current.max(sequence)));
+            }
+        }
+        Ok(latest)
+    }
+
+    /// A Receipt's position against the completion's cut, from the sequence its owner verified.
     fn receipt_at_or_before(
         &self,
         run_uuid: Uuid,
+        position: Option<i64>,
         boundary_event_seq: u64,
     ) -> Result<(), CollectorRefusal> {
-        let id = run_uuid.to_string();
-        let mut latest: Option<i64> = None;
-        for kind in RECEIPT_RUN_EVENT_KINDS {
-            let found: Option<i64> = self
-                .connection
-                .query_row(
-                    "SELECT MAX(sequence) FROM events
-                     WHERE workspace_id = ?1 AND kind = ?2
-                       AND json_extract(payload_json, '$.runId') = ?3",
-                    params![self.workspace_id.to_string(), kind, id],
-                    |row| row.get::<_, Option<i64>>(0),
-                )
-                .map_err(|error| CollectorRefusal::Unverified {
-                    kind: "receipt",
-                    reason: error.to_string(),
-                })?;
-            latest = match (latest, found) {
-                (Some(a), Some(b)) => Some(a.max(b)),
-                (only, None) | (None, only) => only,
-            };
-        }
-        let Some(sequence) = latest else {
+        let Some(sequence) = position else {
             return Err(CollectorRefusal::Unpositioned {
                 kind: "receipt",
                 id: run_uuid.hyphenated().to_string(),
