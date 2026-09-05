@@ -125,6 +125,131 @@ struct MissionAdmittedPayload {
     mission: StoredMissionAdmission,
 }
 
+/// Which fault the Mission startup pass hit, and WHICH ROW hit it (R27.1's shape, R28.1).
+pub(crate) enum MissionStateFault {
+    /// The enumeration itself failed: no row to name, because none was reached.
+    Store(rusqlite::Error),
+    /// One Mission did not re-prove. `cause` is the owning reader's OWN error, carried whole.
+    ///
+    /// MEASURED LIMIT, recorded because it bounds what this arm proves: every column of `missions`
+    /// is compared against the admission event's payload by `verify_mission_event`, which runs
+    /// earlier, so a tampered column reopens as `MissionEventMismatch` and never reaches here. The
+    /// faults this pass can uniquely reach -- a wrong admitted-event count, an orphaned condition
+    /// row, a condition projection that disagrees with the Mission's own bytes -- are ALL
+    /// `MissionError::InvalidStore`. The row identity is therefore the whole of what widening buys
+    /// for this pass today, and a "cause flattened" mutant cannot be killed here.
+    Row {
+        workspace_id: Uuid,
+        mission_id: Uuid,
+        cause: MissionError,
+    },
+    /// A check that is about the STORE rather than one Mission: an orphaned condition row, or an
+    /// admitted-event count that does not match the number of Missions. There is no row to name,
+    /// and naming one with a nil UUID would be the invented identity this lane refuses everywhere
+    /// else.
+    Totals(MissionError),
+    /// A row whose identity columns are not UUIDs. Unreachable while the foreign-key check and the
+    /// Workspace pass run first.
+    Identity {
+        workspace_id: String,
+        mission_id: String,
+    },
+}
+
+impl MissionError {
+    /// The variant's NAME, for R28.4's one-line startup message. `Store`, `Json` and
+    /// `ResidentIneligible` all carry values that do not belong in a refusal line.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Account(_) => "Account",
+            Self::ProjectNotFound => "ProjectNotFound",
+            Self::TeamNotFound => "TeamNotFound",
+            Self::MissionNotFound => "MissionNotFound",
+            Self::StaleCharterRevision { .. } => "StaleCharterRevision",
+            Self::InvalidDesiredOutcome => "InvalidDesiredOutcome",
+            Self::InvalidSuccessConditions => "InvalidSuccessConditions",
+            Self::InvalidConstraint => "InvalidConstraint",
+            Self::InvalidProhibition => "InvalidProhibition",
+            Self::DuplicateMissionEntry => "DuplicateMissionEntry",
+            Self::InvalidMembers => "InvalidMembers",
+            Self::StaleTeamEligibility => "StaleTeamEligibility",
+            Self::ResidentIneligible(_) => "ResidentIneligible",
+            Self::InvalidStore => "InvalidStore",
+            Self::Store(_) => "Store",
+            Self::Json(_) => "Json",
+        }
+    }
+}
+
+impl fmt::Display for MissionStateFault {
+    /// R28.4: the KEY and the fault's NAME, never the carried error's own text.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(_) => formatter.write_str("the Missions could not be read"),
+            Self::Totals(cause) => write!(
+                formatter,
+                "the Missions do not agree with the store as a whole: {}",
+                cause.name()
+            ),
+            Self::Row {
+                workspace_id,
+                mission_id,
+                cause,
+            } => write!(
+                formatter,
+                "Mission {mission_id} in Workspace {workspace_id} does not re-prove: {}",
+                cause.name()
+            ),
+            Self::Identity {
+                workspace_id,
+                mission_id,
+            } => write!(
+                formatter,
+                "a Mission row's identity is not readable: Workspace {workspace_id}, Mission \
+                 {mission_id}"
+            ),
+        }
+    }
+}
+
+/// Hand-written and NOT delegating to `Display`: R28.4 keeps the carried text reachable here.
+impl fmt::Debug for MissionStateFault {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => formatter.debug_tuple("Store").field(error).finish(),
+            Self::Totals(cause) => formatter.debug_tuple("Totals").field(cause).finish(),
+            Self::Row {
+                workspace_id,
+                mission_id,
+                cause,
+            } => formatter
+                .debug_struct("Row")
+                .field("workspace_id", workspace_id)
+                .field("mission_id", mission_id)
+                .field("cause", cause)
+                .finish(),
+            Self::Identity {
+                workspace_id,
+                mission_id,
+            } => formatter
+                .debug_struct("Identity")
+                .field("workspace_id", workspace_id)
+                .field("mission_id", mission_id)
+                .finish(),
+        }
+    }
+}
+
+impl std::error::Error for MissionStateFault {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::Totals(cause) | Self::Row { cause, .. } => Some(cause),
+            Self::Identity { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum MissionError {
     Account(OperatorAccountError),
@@ -864,17 +989,47 @@ fn verify_mission_success_conditions(
     Ok(())
 }
 
-pub(crate) fn verify_mission_state(connection: &Connection) -> Result<(), MissionError> {
-    let mut statement =
-        connection.prepare("SELECT workspace_id, id FROM missions ORDER BY workspace_id, id")?;
+pub(crate) fn verify_mission_state(connection: &Connection) -> Result<(), MissionStateFault> {
+    let mut statement = connection
+        .prepare("SELECT workspace_id, id FROM missions ORDER BY workspace_id, id")
+        .map_err(MissionStateFault::Store)?;
     let ids = statement
         .query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+        })
+        .map_err(MissionStateFault::Store)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(MissionStateFault::Store)?;
     for (workspace_id, mission_id) in &ids {
-        let workspace_id = parse_uuid(workspace_id.clone())?;
-        let mission_id = parse_uuid(mission_id.clone())?;
+        let identity = || MissionStateFault::Identity {
+            workspace_id: workspace_id.clone(),
+            mission_id: mission_id.clone(),
+        };
+        let parsed_workspace = Uuid::parse_str(workspace_id).map_err(|_| identity())?;
+        let parsed_mission = Uuid::parse_str(mission_id).map_err(|_| identity())?;
+        verify_one_mission(connection, parsed_workspace, parsed_mission).map_err(|cause| {
+            MissionStateFault::Row {
+                workspace_id: parsed_workspace,
+                mission_id: parsed_mission,
+                cause,
+            }
+        })?;
+    }
+    // Whole-store checks: no row to name, so they are reported as the store fault they are.
+    verify_mission_totals(connection, ids.len()).map_err(|cause| match cause {
+        MissionError::Store(error) => MissionStateFault::Store(error),
+        other => MissionStateFault::Totals(other),
+    })?;
+    Ok(())
+}
+
+/// One stored Mission, re-proved. Unchanged from what the loop held inline.
+fn verify_one_mission(
+    connection: &Connection,
+    workspace_id: Uuid,
+    mission_id: Uuid,
+) -> Result<(), MissionError> {
+    {
         let mission = load_stored_mission(connection, workspace_id, mission_id)?
             .ok_or(MissionError::InvalidStore)?;
         let event_count = connection.query_row(
@@ -894,6 +1049,12 @@ pub(crate) fn verify_mission_state(connection: &Connection) -> Result<(), Missio
             &mission.success_conditions,
         )?;
     }
+    Ok(())
+}
+
+/// The two checks that are about the STORE rather than about one Mission, so they have no row to
+/// name and stay whole-store faults.
+fn verify_mission_totals(connection: &Connection, mission_count: usize) -> Result<(), MissionError> {
     // A condition row for a Mission that does not exist cannot be stored -- the composite foreign
     // key forbids it -- so walking the Missions reaches every row there is.
     let orphan_conditions: i64 = connection.query_row(
@@ -914,7 +1075,7 @@ pub(crate) fn verify_mission_state(connection: &Connection) -> Result<(), Missio
         [],
         |row| row.get::<_, i64>(0),
     )?;
-    if usize::try_from(event_count) != Ok(ids.len()) {
+    if usize::try_from(event_count) != Ok(mission_count) {
         return Err(MissionError::InvalidStore);
     }
     Ok(())

@@ -1088,16 +1088,15 @@ pub(crate) fn verify_publication_state(
         };
         let parsed_workspace = Uuid::parse_str(workspace_id).map_err(|_| identity())?;
         let parsed_mission = Uuid::parse_str(mission_id).map_err(|_| identity())?;
-        let version = u32::try_from(*publication_version).map_err(|_| {
-            PublicationStateFault::Row {
+        let version =
+            u32::try_from(*publication_version).map_err(|_| PublicationStateFault::Row {
                 workspace_id: parsed_workspace,
                 mission_id: parsed_mission,
                 version: *publication_version,
                 cause: PublishRefusal::Unverified(
                     "a publication version is out of range".to_owned(),
                 ),
-            }
-        })?;
+            })?;
         get_version_within(connection, parsed_workspace, parsed_mission, version).map_err(
             |cause| PublicationStateFault::Row {
                 workspace_id: parsed_workspace,
