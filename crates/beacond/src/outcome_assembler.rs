@@ -123,10 +123,10 @@ pub(crate) fn assemble(
     // would be a lie.
     let mut success_conditions = Vec::with_capacity(completion.condition_results.len());
     for condition in &completion.condition_results {
-        if condition.support_count > 0 {
+        if condition.support_count() > 0 {
             return Err(AssemblyRefusal::SupportNotCollected {
                 ordinal: condition.ordinal,
-                count: condition.support_count,
+                count: condition.support_count(),
             });
         }
         success_conditions.push(SuccessCondition {
@@ -644,22 +644,22 @@ mod tests {
                     CollectedCondition {
                         ordinal: 0,
                         outcome: ConditionOutcome::Met,
-                        support_count: 0,
+                        support: Vec::new(),
                     },
                     CollectedCondition {
                         ordinal: 1,
                         outcome: ConditionOutcome::NotMet,
-                        support_count: 0,
+                        support: Vec::new(),
                     },
                     CollectedCondition {
                         ordinal: 2,
                         outcome: ConditionOutcome::AssessmentInconclusive,
-                        support_count: 0,
+                        support: Vec::new(),
                     },
                     CollectedCondition {
                         ordinal: 3,
                         outcome: ConditionOutcome::NotAssessed,
-                        support_count: 0,
+                        support: Vec::new(),
                     },
                 ],
                 delivered_artifacts: OutcomeState::Absent(
