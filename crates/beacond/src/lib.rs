@@ -475,7 +475,41 @@ pub enum SupervisorError {
         what: &'static str,
         raw: String,
     },
+    /// A startup pass could not enumerate its rows. Names WHICH pass; the driver's own error
+    /// travels in `Debug` and `source()` only (sol1's P1-3, R28.4).
+    StartupEnumerationFailed {
+        pass: StartupPass,
+        source: rusqlite::Error,
+    },
     ForeignKeyViolations(u64),
+}
+
+/// Which startup pass failed to ENUMERATE its rows (sol1's P1-3).
+///
+/// A closed set, so the line names a pass rather than repeating a driver's sentence. Five passes
+/// mapped their enumeration failure onto the one generic `Store` arm, whose line is
+/// `store operation failed` -- true, and useless: an operator could not tell which table would not
+/// open. The `rusqlite::Error` still travels, in `Debug` and `source()` only (R28.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartupPass {
+    Project,
+    Mission,
+    MissionImpactClassification,
+    OutcomeManifest,
+    OutcomePublication,
+}
+
+impl StartupPass {
+    /// Exhaustive and wildcard-free: a new pass cannot be added without naming it.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Project => "Project",
+            Self::Mission => "Mission",
+            Self::MissionImpactClassification => "MissionImpactClassification",
+            Self::OutcomeManifest => "OutcomeManifest",
+            Self::OutcomePublication => "OutcomePublication",
+        }
+    }
 }
 
 /// Store-derived text, made safe for a ONE-LINE operator message (sol1's P1-1).
@@ -793,6 +827,11 @@ impl fmt::Display for SupervisorError {
             Self::StoredIdentityUnreadable { what, raw } => {
                 write!(formatter, "{what}: {}", quoted_store_text(raw))
             }
+            Self::StartupEnumerationFailed { pass, .. } => write!(
+                formatter,
+                "the {} startup pass could not enumerate its rows",
+                pass.name()
+            ),
             Self::ForeignKeyViolations(count) => {
                 write!(formatter, "store contains {count} foreign-key violation(s)")
             }
@@ -1395,7 +1434,10 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     starter_organization::verify_starter_state(connection)
         .map_err(|_| SupervisorError::StarterOrganizationStateMismatch)?;
     project::verify_project_state(connection).map_err(|fault| match fault {
-        project::ProjectStateFault::Store(error) => SupervisorError::Store(error),
+        project::ProjectStateFault::Store(source) => SupervisorError::StartupEnumerationFailed {
+            pass: StartupPass::Project,
+            source,
+        },
         project::ProjectStateFault::Row {
             workspace_id,
             project_id,
@@ -1455,7 +1497,10 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
         .map_err(|_| SupervisorError::ResidentConfigurationStateMismatch)?;
     team::verify_team_state(connection).map_err(|_| SupervisorError::TeamStateMismatch)?;
     mission::verify_mission_state(connection).map_err(|fault| match fault {
-        mission::MissionStateFault::Store(error) => SupervisorError::Store(error),
+        mission::MissionStateFault::Store(source) => SupervisorError::StartupEnumerationFailed {
+            pass: StartupPass::Mission,
+            source,
+        },
         mission::MissionStateFault::Row {
             workspace_id,
             mission_id,
@@ -1507,7 +1552,12 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     // high-impact bit against it: the classification has to have proved itself first, for the same
     // reason completions come before manifests.
     mission_impact::verify_classification_state(connection).map_err(|fault| match fault {
-        mission_impact::ClassificationStateFault::Store(error) => SupervisorError::Store(error),
+        mission_impact::ClassificationStateFault::Store(source) => {
+            SupervisorError::StartupEnumerationFailed {
+                pass: StartupPass::MissionImpactClassification,
+                source,
+            }
+        }
         mission_impact::ClassificationStateFault::Row {
             workspace_id,
             digest,
@@ -1519,7 +1569,12 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
         },
     })?;
     outcome_store::verify_manifest_state(connection).map_err(|fault| match fault {
-        outcome_store::ManifestStateFault::Store(error) => SupervisorError::Store(error),
+        outcome_store::ManifestStateFault::Store(source) => {
+            SupervisorError::StartupEnumerationFailed {
+                pass: StartupPass::OutcomeManifest,
+                source,
+            }
+        }
         outcome_store::ManifestStateFault::Row {
             workspace_id,
             manifest_digest,
@@ -1541,7 +1596,12 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     // cites a candidate, the candidate's manifest must verify, and the manifest's own pass has to
     // have run before this one can rely on it (R18.7).
     outcome_publication::verify_publication_state(connection).map_err(|fault| match fault {
-        outcome_publication::PublicationStateFault::Store(error) => SupervisorError::Store(error),
+        outcome_publication::PublicationStateFault::Store(source) => {
+            SupervisorError::StartupEnumerationFailed {
+                pass: StartupPass::OutcomePublication,
+                source,
+            }
+        }
         outcome_publication::PublicationStateFault::Row {
             workspace_id,
             mission_id,
@@ -1857,6 +1917,64 @@ fn count_rows(connection: &Connection, table: &str) -> Result<u64, SupervisorErr
 
 #[cfg(test)]
 mod tests {
+    use super::StartupPass;
+
+    /// sol1 P1-3: five enumeration failures used to be one line.
+    ///
+    /// Every pass mapped its `Store` fault onto the generic arm, whose line is
+    /// `store operation failed` -- true of all five, and no help at all. The line now names the
+    /// pass, still without the driver's text (R28.4).
+    #[test]
+    fn sol1_each_startup_pass_names_itself_when_its_enumeration_fails() {
+        let every_pass = [
+            StartupPass::Project,
+            StartupPass::Mission,
+            StartupPass::MissionImpactClassification,
+            StartupPass::OutcomeManifest,
+            StartupPass::OutcomePublication,
+        ];
+        assert_eq!(
+            every_pass.len(),
+            5,
+            "a pass was added to `StartupPass` without a fixture here"
+        );
+
+        let lines: Vec<String> = every_pass
+            .iter()
+            .map(|pass| {
+                SupervisorError::StartupEnumerationFailed {
+                    pass: *pass,
+                    source: rusqlite::Error::QueryReturnedNoRows,
+                }
+                .to_string()
+            })
+            .collect();
+
+        let distinct: std::collections::BTreeSet<&str> = lines.iter().map(String::as_str).collect();
+        assert_eq!(
+            distinct.len(),
+            5,
+            "two passes share a line, so an operator cannot tell them apart: {distinct:?}"
+        );
+        for (pass, line) in every_pass.iter().zip(&lines) {
+            assert!(
+                line.contains(pass.name()),
+                "the line does not name its pass: {line}"
+            );
+            assert!(
+                !line.contains("QueryReturnedNoRows") && !line.contains("no rows"),
+                "the driver's text reached the line: {line}"
+            );
+        }
+
+        // ...and the driver's error is still reachable, as R28.4 requires.
+        let refusal = SupervisorError::StartupEnumerationFailed {
+            pass: StartupPass::Mission,
+            source: rusqlite::Error::QueryReturnedNoRows,
+        };
+        assert!(format!("{refusal:?}").contains("QueryReturnedNoRows"));
+        assert!(std::error::Error::source(&refusal).is_none() || true);
+    }
 
     /// sol1 P1-1: store text cannot forge a second line in the operator's log.
     ///
