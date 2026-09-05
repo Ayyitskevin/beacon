@@ -1219,6 +1219,13 @@ fn the_schema_refuses_a_classification_whose_project_does_not_own_its_mission() 
 /// deleted (my own mutant table found it). This row is written PAST the Command -- the shape a
 /// restore or an older binary produces -- with every projection column agreeing with its bytes, so
 /// the only thing left that can refuse it is the ownership check on the read.
+///
+/// Since 0032 the row is unrepresentable through an ordinary connection, so the arrangement turns
+/// FOREIGN KEYS OFF to write it. That is not a workaround: it is the scenario. A store restored
+/// from a backup taken before 0032, or written by a binary that predates it, holds exactly this
+/// row with the key never consulted -- and the reader is what refuses it then. The schema is the
+/// braces and this check is the belt; keeping both is the point, so this test keeps proving the
+/// belt still works when the braces were never fastened.
 #[test]
 fn a_stored_classification_citing_another_projects_policy_is_refused_on_read() {
     let stored = stored("classification-cross-project-read");
@@ -1237,6 +1244,10 @@ fn a_stored_classification_citing_another_projects_policy_is_refused_on_read() {
             })
             .unwrap();
     let connection = stored.connection();
+    // The store a restore leaves behind: the key that would refuse this row is not consulted.
+    connection
+        .pragma_update(None, "foreign_keys", "OFF")
+        .unwrap();
     connection
         .execute(
             r#"INSERT INTO project_policy_revisions (
@@ -1280,7 +1291,7 @@ fn a_stored_classification_citing_another_projects_policy_is_refused_on_read() {
                 i64::try_from(classification.classified_at_ms).unwrap(),
             ],
         )
-        .expect("the row is storable: both foreign keys hold on their own");
+        .expect("with the key unfastened the row lands, which is what a restore does");
 
     assert_eq!(
         verified_classification_within(&connection, stored.store.workspace_id, &digest).expect_err(
