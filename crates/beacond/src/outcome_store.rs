@@ -63,7 +63,8 @@ use crate::outcome::{
 use crate::outcome_assembler::{AssemblyRefusal, SourcesRefusal, assemble, verified_sources_for};
 use crate::outcome_collector::{CollectionRequest, Collector, CollectorRefusal};
 use crate::outcome_publication::{
-    PublishRefusal, PublishedOutcome, get_version_within, get_within, publish_within,
+    ExportedOutcome, PublicationSummary, PublishRefusal, PublishedOutcome, get_version_within,
+    get_within, publication_history_within, publish_within,
 };
 use crate::proposal::sha256;
 
@@ -828,6 +829,69 @@ impl OutcomeService {
     pub fn get(&self, mission_id: Uuid) -> Result<PublishedOutcome, PublishRefusal> {
         self.accounts.with_authenticated_store(|connection, _now| {
             get_within(connection, self.workspace_id, mission_id)
+        })
+    }
+
+    /// The Mission's current published Outcome as its exact stored Markdown bytes.
+    ///
+    /// **A copy, never a re-render.** The bytes come from the stored candidate Artifact that the
+    /// relation cites and that the qualifying Evaluation was about. Re-running the renderer would
+    /// make the export a second path to the document, and the two would agree only until someone
+    /// changed the renderer -- at which point the export would no longer be the thing that was
+    /// published and evaluated.
+    ///
+    /// **Access is `get`'s, unchanged**: the same `with_authenticated_store` session gate, the same
+    /// `self.workspace_id`, the same `get_within`. There is no separate export permission, and the
+    /// reason is not that one was skipped: this codebase has one Operator, the schema admits no
+    /// second role, and no action records an actor, so "an explicit authenticated Operator action"
+    /// reduces here to exactly the check retrieval performs.
+    ///
+    /// **What is NOT recorded, named rather than left to be discovered (R29.4):** exporting emits
+    /// no Event, so the store does not know that bytes left it or who took them. "Who exported
+    /// this" belongs to the Operator and audit model that does not exist yet (Kevin's access item
+    /// 12); when it does, this method is one of its subjects.
+    pub fn export_markdown(&self, mission_id: Uuid) -> Result<ExportedOutcome, PublishRefusal> {
+        self.accounts.with_authenticated_store(|connection, _now| {
+            Ok(ExportedOutcome::from(get_within(
+                connection,
+                self.workspace_id,
+                mission_id,
+            )?))
+        })
+    }
+
+    /// One exact version's stored Markdown bytes. See `export_markdown` for the access note and
+    /// for why this is a copy rather than a render.
+    ///
+    /// The versioned pair is not ceremony: a corrected Outcome keeps its superseded versions
+    /// readable (R12.11), and an export that could only reach the newest one would make the version
+    /// an auditor holds unexportable.
+    pub fn export_markdown_version(
+        &self,
+        mission_id: Uuid,
+        publication_version: u32,
+    ) -> Result<ExportedOutcome, PublishRefusal> {
+        self.accounts.with_authenticated_store(|connection, _now| {
+            Ok(ExportedOutcome::from(get_version_within(
+                connection,
+                self.workspace_id,
+                mission_id,
+                publication_version,
+            )?))
+        })
+    }
+
+    /// Every version of this Mission's publication history, newest first.
+    ///
+    /// Reads the relation's own rows; it does not verify each document, because a list of versions
+    /// must not cost one full verification per row (R29.5). A caller that wants a version's bytes
+    /// asks for that version.
+    pub fn publication_history(
+        &self,
+        mission_id: Uuid,
+    ) -> Result<Vec<PublicationSummary>, PublishRefusal> {
+        self.accounts.with_authenticated_store(|connection, _now| {
+            publication_history_within(connection, self.workspace_id, mission_id)
         })
     }
 
