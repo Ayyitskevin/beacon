@@ -4465,8 +4465,7 @@ fn startup_refuses_an_unaccounted_evaluation_row_and_names_the_row() {
     let fixture = admitted_mission("r28t2-evaluation-startup");
     fixture.classify(ImpactLevel::Ordinary);
     fixture.complete((fixture.resident_id, fixture.configuration_id));
-    let (_, candidate, _) = fixture.publishable();
-    let source: String = candidate.value.clone();
+    fixture.publishable();
 
     let connection = fixture.store.connect();
     let existing: String = connection
@@ -4476,7 +4475,6 @@ fn startup_refuses_an_unaccounted_evaluation_row_and_names_the_row() {
             |row| row.get(0),
         )
         .expect("the fixture recorded an Evaluation");
-    let _ = source;
 
     // A copy of an honest row under a digest its bytes do not hash to, and with no Event naming it.
     // Column list read from the schema, so this plant does not go stale when a column is added.

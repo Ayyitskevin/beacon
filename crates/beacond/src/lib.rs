@@ -407,7 +407,7 @@ pub enum SupervisorError {
         cause: proposal::ProposalError,
     },
     /// The Proposals do not agree with the log as a whole. No row to name.
-    ProposalTotalsMismatch(proposal::ProposalError),
+    ProposalTotalsMismatch(TotalsMismatch),
     RulingEventMismatch(i64),
     EvaluationEventMismatch(i64),
     RulingStateMismatch,
@@ -437,7 +437,8 @@ pub enum SupervisorError {
         cause: evaluation::EvaluationError,
     },
     /// The Evaluation supersession chains do not agree with the store. No row to name.
-    EvaluationTotalsMismatch(evaluation::EvaluationError),
+    /// The Evaluation supersession chains do not re-prove. Structural, so no counts.
+    EvaluationChainsMismatch(evaluation::EvaluationError),
     MissionCompletionEventMismatch(i64),
     /// A stored Mission completion does not re-prove against its own bytes or the records it cites.
     ///
@@ -459,7 +460,9 @@ pub enum SupervisorError {
         cause: artifact::ArtifactError,
     },
     /// The Artifact supersession relation does not agree with the store. No row to name.
-    ArtifactTotalsMismatch(artifact::ArtifactError),
+    ArtifactTotalsMismatch(TotalsMismatch),
+    /// The Artifact supersession relation does not re-prove. Structural, so no counts.
+    ArtifactRelationMismatch(artifact::ArtifactError),
     /// A stored Mission impact classification does not re-prove against its own bytes or the
     /// predecessor it names -- WITH the row and the owning reader's own fault (R27.1).
     ///
@@ -551,6 +554,9 @@ pub enum StartupPass {
     OutcomeManifest,
     OutcomePublication,
     MissionCompletion,
+    Proposal,
+    Evaluation,
+    Artifact,
 }
 
 impl StartupPass {
@@ -563,6 +569,9 @@ impl StartupPass {
             Self::OutcomeManifest => "OutcomeManifest",
             Self::OutcomePublication => "OutcomePublication",
             Self::MissionCompletion => "MissionCompletion",
+            Self::Proposal => "Proposal",
+            Self::Evaluation => "Evaluation",
+            Self::Artifact => "Artifact",
         }
     }
 }
@@ -762,11 +771,12 @@ impl fmt::Display for SupervisorError {
                  the records it cites: {}",
                 cause.name()
             ),
-            Self::ProposalTotalsMismatch(cause) => write!(
-                formatter,
-                "the Proposals do not agree with the log as a whole: {}",
-                cause.name()
-            ),
+            Self::ProposalTotalsMismatch(totals) => {
+                write!(
+                    formatter,
+                    "the Proposals do not agree with the log as a whole -- {totals}"
+                )
+            }
             Self::RulingEventMismatch(sequence) => write!(
                 formatter,
                 "Event sequence {sequence} does not match its stored Ruling bytes"
@@ -807,9 +817,9 @@ impl fmt::Display for SupervisorError {
                  its own bytes or the records it cites: {}",
                 cause.name()
             ),
-            Self::EvaluationTotalsMismatch(cause) => write!(
+            Self::EvaluationChainsMismatch(cause) => write!(
                 formatter,
-                "the Evaluation supersession chains do not agree with the store: {}",
+                "the Evaluation supersession chains do not re-prove: {}",
                 cause.name()
             ),
             Self::ArtifactEventMismatch(sequence) => write!(
@@ -827,9 +837,15 @@ impl fmt::Display for SupervisorError {
                  its own bytes: {}",
                 cause.name()
             ),
-            Self::ArtifactTotalsMismatch(cause) => write!(
+            Self::ArtifactTotalsMismatch(totals) => {
+                write!(
+                    formatter,
+                    "the Artifacts do not agree with the log as a whole -- {totals}"
+                )
+            }
+            Self::ArtifactRelationMismatch(cause) => write!(
                 formatter,
-                "the Artifact supersession relation does not agree with the store: {}",
+                "the Artifact supersession relation does not re-prove: {}",
                 cause.name()
             ),
             Self::MissionImpactClassificationStateMismatch {
@@ -1725,7 +1741,10 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     sample_project::verify_sample_project_state(connection)
         .map_err(|_| SupervisorError::SampleProjectStateMismatch)?;
     proposal::verify_proposal_state(connection).map_err(|fault| match fault {
-        proposal::ProposalStateFault::Store(error) => SupervisorError::Store(error),
+        proposal::ProposalStateFault::Store(source) => SupervisorError::StartupEnumerationFailed {
+            pass: StartupPass::Proposal,
+            source,
+        },
         proposal::ProposalStateFault::Row {
             workspace_id,
             digest_value,
@@ -1741,9 +1760,10 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
         proposal::ProposalStateFault::Identity {
             workspace_id,
             digest_value,
-        } => SupervisorError::IntegrityCheckFailed(format!(
-            "a Proposal row's Workspace is not readable: {workspace_id}, Proposal {digest_value}"
-        )),
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "a Proposal row's Workspace is not readable",
+            raw: format!("{workspace_id}, Proposal {digest_value}"),
+        },
     })?;
     // After Proposal state, because every Ruling binds one and re-verifies what it copied against
     // that Proposal's own bytes.
@@ -1762,7 +1782,12 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     dispatch::finish_prepared_dispatches(connection)
         .map_err(|_| SupervisorError::DispatchRecoveryFailed)?;
     evaluation::verify_evaluation_state(connection).map_err(|fault| match fault {
-        evaluation::EvaluationStateFault::Store(error) => SupervisorError::Store(error),
+        evaluation::EvaluationStateFault::Store(source) => {
+            SupervisorError::StartupEnumerationFailed {
+                pass: StartupPass::Evaluation,
+                source,
+            }
+        }
         evaluation::EvaluationStateFault::Row {
             workspace_id,
             digest_value,
@@ -1772,21 +1797,24 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
             digest_value,
             cause,
         },
-        evaluation::EvaluationStateFault::Totals(cause) => {
-            SupervisorError::EvaluationTotalsMismatch(cause)
+        evaluation::EvaluationStateFault::Chains(cause) => {
+            SupervisorError::EvaluationChainsMismatch(cause)
         }
         evaluation::EvaluationStateFault::Identity {
             workspace_id,
             digest_value,
-        } => SupervisorError::IntegrityCheckFailed(format!(
-            "an Evaluation row's Workspace is not readable: {workspace_id}, Evaluation \
-             {digest_value}"
-        )),
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "an Evaluation row's Workspace is not readable",
+            raw: format!("{workspace_id}, Evaluation {digest_value}"),
+        },
     })?;
     // The Artifact state stands alone: it binds no other module's record, and nothing else's
     // verification reads it.
     artifact::verify_artifact_state(connection).map_err(|fault| match fault {
-        artifact::ArtifactStateFault::Store(error) => SupervisorError::Store(error),
+        artifact::ArtifactStateFault::Store(source) => SupervisorError::StartupEnumerationFailed {
+            pass: StartupPass::Artifact,
+            source,
+        },
         artifact::ArtifactStateFault::Row {
             workspace_id,
             digest_value,
@@ -1799,12 +1827,16 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
         artifact::ArtifactStateFault::Totals(cause) => {
             SupervisorError::ArtifactTotalsMismatch(cause)
         }
+        artifact::ArtifactStateFault::Relation(cause) => {
+            SupervisorError::ArtifactRelationMismatch(cause)
+        }
         artifact::ArtifactStateFault::Identity {
             workspace_id,
             digest_value,
-        } => SupervisorError::IntegrityCheckFailed(format!(
-            "an Artifact row's Workspace is not readable: {workspace_id}, Artifact {digest_value}"
-        )),
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "an Artifact row's Workspace is not readable",
+            raw: format!("{workspace_id}, Artifact {digest_value}"),
+        },
     })?;
     // A Run whose lease expired without a terminal Receipt becomes unconfirmed
     // here. Lease expiry is what proves that state; the Run is never removed.
