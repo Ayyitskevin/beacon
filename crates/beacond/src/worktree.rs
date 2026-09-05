@@ -1156,8 +1156,12 @@ fn run_git_bounded_raw(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::CommandExt;
     use std::path::{Path, PathBuf};
+    use std::process::Stdio;
+    use std::thread;
     use std::time::Duration;
 
     use uuid::Uuid;
@@ -1409,6 +1413,74 @@ mod tests {
         let holds = status_holds(&hanging, &directory.path, Duration::from_millis(50), &[]);
 
         assert_eq!(holds, vec![KeepReason::GateTimedOut]);
+    }
+
+    /// The kernel refuses to exec a file that any process holds open for writing. Beacon is
+    /// multi-threaded, so when one thread forks while a sibling holds a freshly written program
+    /// open, the child inherits that write descriptor and every exec of the program fails with
+    /// `ETXTBSY` until the child reaches its own exec and `CLOEXEC` closes it
+    /// (rust-lang/rust#114554). That window turned the 50 ms timeout test below into
+    /// `CheckFailed` on the main gate at 77f430c, under a load average of 17.
+    ///
+    /// The window is held open on purpose here rather than raced for, because racing for it
+    /// reproduced in only 1 to 6 runs of 10 and a bar that usually passes is not a bar. A child
+    /// announces itself down a pipe from between its own fork and exec, so by the time the status
+    /// is asked for, exactly one descriptor — the child's inherited one — holds the program open.
+    #[test]
+    fn a_check_a_forked_child_holds_open_is_never_a_failure() {
+        let directory = TempDir::new("gate-text-file-busy");
+        let fresh = program(&directory.path, "exit 0\n");
+
+        let mut ends = [0_i32; 2];
+        assert_eq!(
+            unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) },
+            0,
+            "the announcement pipe did not open"
+        );
+        // SAFETY: `pipe2` filled both ends, and each is owned by exactly one of these.
+        let (reader, writer_end) =
+            unsafe { (OwnedFd::from_raw_fd(ends[0]), OwnedFd::from_raw_fd(ends[1])) };
+        let announce = writer_end.as_raw_fd();
+
+        // Open for writing and keep it open across the fork below, so the child inherits it.
+        let held = fs::OpenOptions::new().write(true).open(&fresh).unwrap();
+
+        let mut command = Command::new("/bin/true");
+        command.stdin(Stdio::null());
+        command.stdout(Stdio::null());
+        command.stderr(Stdio::null());
+        // SAFETY: `write` and `nanosleep` are async-signal-safe, allocate nothing, and run between
+        // fork and exec on descriptors this command retains. Setting `pre_exec` at all also forces
+        // the real fork/exec path rather than `posix_spawn`, which is the path that shares the
+        // descriptor table. `spawn` does not return until the child execs, so the announcement has
+        // to come from the child itself.
+        unsafe {
+            command.pre_exec(move || {
+                libc::write(announce, [1_u8].as_ptr().cast(), 1);
+                let pause = libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 300_000_000,
+                };
+                libc::nanosleep(&pause, std::ptr::null_mut());
+                Ok(())
+            });
+        }
+        let forked = thread::spawn(move || command.spawn().unwrap().wait().unwrap());
+
+        let mut announcement = [0_u8; 1];
+        std::io::Read::read_exact(&mut fs::File::from(reader), &mut announcement).unwrap();
+        // From here the child is the only holder: it has forked, it has not yet exec'd, and this
+        // side lets go.
+        drop(held);
+
+        let holds = status_holds(&fresh, &directory.path, Duration::from_secs(5), &[]);
+        forked.join().unwrap();
+
+        assert_eq!(
+            holds,
+            Vec::new(),
+            "a program a sibling's child held open was recorded as an answer about the worktree"
+        );
     }
 
     #[test]
