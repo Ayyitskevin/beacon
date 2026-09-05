@@ -10,8 +10,11 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
 use beacond::{
@@ -22,22 +25,24 @@ use beacond::{
     CompletionSupersedes, ConditionOutcome, ConditionResult, ConditionResultRecord, Conflicts,
     DeclaredCheck, DiagnosticStatus, Evaluation, EvaluationDigest, EvaluationDraft,
     EvaluationError, EvaluationService, EvaluationSubjectDraft, EvaluationSupersedes, Evaluator,
-    Finding, FindingSeverity, ImpactLevel, InconsistentEvaluation, LocalModelActivationService,
-    LocalModelEndpoint, MISSION_IMPACT_CANONICALIZER, ManifestStoreRefusal, MissionCompletionV1,
-    MissionDraft, MissionImpactClassificationV1, MissionImpactService, MissionMemberDraft,
-    MissionService, NarrativeItem, OperatorAccountError, OperatorAccountService,
-    OperatorSessionPhase, OutcomeCandidate, OutcomeManifestV1, OutcomeService, OutcomeState,
-    PolicyRevisionRef, PredecessorFault, PrepareRefusal, ProjectCharterDraft, ProjectDraft,
-    ProjectPolicyDraft, ProjectPolicyService, ProjectRepositoryService, ProjectService, Provenance,
-    ProviderFeature, PublicationSeamRefusal, PublishRefusal, RepositoryDraft, RepositorySourceKind,
-    ResidentConfigurationService, ResidentLifecycleService, RubricDeclaration, SecretString,
-    SourceDigest, SourceKind, SourceRef, SourcesRefusal, SpendReference,
-    StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig, SuccessCondition,
-    Supervisor, SupervisorError, SupportRef, TeamDraft, TeamLeadAmbiguityRule,
-    TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
-    TeamService, TrackRecordEvidenceKind, TrackRecordRequirement, UnfinishedKind, Verdict,
-    VerifiedSources, VerifiedText, declared_conditions_digest, publication_candidacy,
-    record_completion, render, verified_manifest_within,
+    Finding, FindingSeverity, ImpactLevel, InconsistentEvaluation, LocalErrorCode,
+    LocalModelActivationService, LocalModelEndpoint, LocalServerConfig, LocalSupervisorClient,
+    LocalSupervisorServer, LocalTransportError, MISSION_IMPACT_CANONICALIZER, ManifestStoreRefusal,
+    MissionCompletionV1, MissionDraft, MissionImpactClassificationV1, MissionImpactService,
+    MissionMemberDraft, MissionService, NarrativeItem, OperatorAccountError,
+    OperatorAccountService, OperatorSessionPhase, OutcomeCandidate, OutcomeManifestV1,
+    OutcomeService, OutcomeState, PolicyRevisionRef, PredecessorFault, PrepareRefusal,
+    ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService,
+    ProjectRepositoryService, ProjectService, Provenance, ProviderFeature, PublicationSeamRefusal,
+    PublishRefusal, RepositoryDraft, RepositorySourceKind, ResidentConfigurationService,
+    ResidentLifecycleService, RubricDeclaration, SecretString, SourceDigest, SourceKind, SourceRef,
+    SourcesRefusal, SpendReference, StarterOrganizationService, StarterResidentDraft, StarterRole,
+    StartupConfig, SuccessCondition, Supervisor, SupervisorError, SupportRef, TeamDraft,
+    TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy,
+    TeamMemberDraft, TeamService, TrackRecordEvidenceKind, TrackRecordRequirement, UnfinishedKind,
+    Verdict, VerifiedSources, VerifiedText, declared_conditions_digest,
+    initialize_local_auth_token, publication_candidacy, record_completion, render,
+    verified_manifest_within,
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -3627,7 +3632,6 @@ fn publication_version_gap_is_refused() {
         .outcomes
         .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
         .expect("version 1 publishes");
-
     let planted = fixture
         .artifacts()
         .record(
@@ -6260,6 +6264,305 @@ fn the_history_lists_a_version_whose_document_no_longer_verifies() {
         history[0].candidate_artifact_digest,
         unrelated.digest().value
     );
+}
+
+#[test]
+fn sol1_history_refuses_a_publication_version_outside_the_exportable_domain() {
+    let fixture = admitted_mission("history-version-out-of-range");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (_, candidate_digest, evaluation_digest) = fixture.publishable();
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
+        .expect("version 1 publishes");
+
+    with_trigger_down(
+        &fixture.store,
+        "outcome_publications_no_update",
+        "outcome_publications",
+        "Outcome publications are immutable",
+        |connection| {
+            let changed = connection
+                .execute(
+                    "UPDATE outcome_publications SET publication_version = 4294967296
+                     WHERE workspace_id = ?1 AND mission_id = ?2",
+                    params![
+                        fixture.workspace_id.to_string(),
+                        fixture.mission_id.to_string()
+                    ],
+                )
+                .unwrap();
+            assert_eq!(changed, 1, "the out-of-domain plant did not take");
+        },
+    );
+
+    let result = fixture.outcomes.publication_history(fixture.mission_id);
+    assert!(
+        matches!(result, Err(PublishRefusal::Unverified(_))),
+        "an out-of-domain relation version was relabelled as an exportable version: {result:?}"
+    );
+}
+
+#[test]
+fn sol1_transport_preserves_nul_and_lone_cr_and_guards_the_session_and_input_type() {
+    let fixture = admitted_mission("transport-byte-identity");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (candidate, candidate_digest, evaluation_digest) = fixture.publishable();
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
+        .expect("version 1 publishes");
+    let other_mission = sol1_admit_other_mission(&fixture, "Another Mission");
+    let original = fixture
+        .artifacts()
+        .get(&candidate.candidate_artifact_digest)
+        .unwrap();
+    let mut planted_bytes = vec![0, b'\r'];
+    planted_bytes.extend_from_slice(original.content());
+    let planted = fixture
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            &planted_bytes,
+            ArtifactContext::Mission {
+                project_id: fixture.project_id,
+                mission_id: fixture.mission_id,
+            },
+            fixture.resident_id,
+            fixture.configuration_id,
+            None,
+        )
+        .expect("the byte probe records");
+    let planted_evaluation = fixture.evaluate(&planted.digest().value, Verdict::Meets);
+    with_trigger_down(
+        &fixture.store,
+        "outcome_manifests_no_update",
+        "outcome_manifests",
+        "Outcome manifests are immutable",
+        |connection| {
+            assert_eq!(
+                connection
+                    .execute(
+                        "UPDATE outcome_manifests SET candidate_artifact_digest = ?1
+                         WHERE workspace_id = ?2 AND mission_id = ?3",
+                        params![
+                            planted.digest().value,
+                            fixture.workspace_id.to_string(),
+                            fixture.mission_id.to_string()
+                        ],
+                    )
+                    .unwrap(),
+                1
+            );
+        },
+    );
+    with_trigger_down(
+        &fixture.store,
+        "outcome_publications_no_update",
+        "outcome_publications",
+        "Outcome publications are immutable",
+        |connection| {
+            assert_eq!(
+                connection
+                    .execute(
+                        "UPDATE outcome_publications
+                         SET candidate_artifact_digest = ?1, evaluation_digest = ?2
+                         WHERE workspace_id = ?3 AND mission_id = ?4",
+                        params![
+                            planted.digest().value,
+                            planted_evaluation.digest().value,
+                            fixture.workspace_id.to_string(),
+                            fixture.mission_id.to_string()
+                        ],
+                    )
+                    .unwrap(),
+                1
+            );
+        },
+    );
+
+    let root = std::env::temp_dir().join(format!("beacond-sol1-s4a-{}", Uuid::new_v4()));
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = root.join("beacond.sock");
+    let token = root.join("beacond.token");
+    let lock = root.join("beacond.lock");
+    initialize_local_auth_token(&token).unwrap();
+    let server = LocalSupervisorServer::bind(LocalServerConfig {
+        store_path: fixture.store.path.clone(),
+        initial_workspace_name: "Personal".to_owned(),
+        socket_path: socket.clone(),
+        auth_token_path: token.clone(),
+        lock_path: lock,
+        local_model_endpoint: LocalModelEndpoint::ollama_default(),
+    })
+    .unwrap();
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let server_thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&socket, &token).unwrap();
+
+    assert!(matches!(
+        client.outcome_document(fixture.mission_id, None),
+        Err(LocalTransportError::Remote {
+            code: LocalErrorCode::NotAuthenticated,
+            ..
+        })
+    ));
+    client
+        .authenticate_password(
+            SecretString::new("a long local passphrase".to_owned()),
+            AccessOrigin::SameMachine,
+        )
+        .unwrap();
+    let current = client
+        .outcome_document(fixture.mission_id, None)
+        .expect("current export crosses the real socket");
+    let version = client
+        .outcome_document(fixture.mission_id, Some(1))
+        .expect("versioned export crosses the real socket");
+    assert_eq!(current.bytes(), planted_bytes.as_slice());
+    assert_eq!(version.bytes(), planted_bytes.as_slice());
+    assert_eq!(current.digest(), planted.digest());
+    let history = client.mission_publications(fixture.mission_id).unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].candidate_artifact_digest, planted.digest().value);
+    for (mission_id, version) in [
+        (fixture.mission_id, 0),
+        (fixture.mission_id, 2),
+        (other_mission, 1),
+    ] {
+        assert!(matches!(
+            client.outcome_document(mission_id, Some(version)),
+            Err(LocalTransportError::Remote {
+                code: LocalErrorCode::MissionNotFound,
+                ..
+            })
+        ));
+    }
+
+    let encoded_token = fs::read_to_string(&token).unwrap();
+    let malformed = format!(
+        "{{\"protocol\":1,\"token\":\"{encoded_token}\",\"command\":{{\"name\":\"outcome_document\",\"mission_id\":\"{}\",\"publication_version\":-1}}}}",
+        fixture.mission_id
+    );
+    let mut raw = UnixStream::connect(&socket).unwrap();
+    raw.write_all(malformed.as_bytes()).unwrap();
+    raw.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut response = String::new();
+    raw.read_to_string(&mut response).unwrap();
+    assert!(
+        response.contains("\"code\":\"protocol_error\""),
+        "{response}"
+    );
+    assert_eq!(
+        client.status().unwrap().phase,
+        OperatorSessionPhase::Unlocked
+    );
+
+    client.lock().unwrap();
+    assert!(matches!(
+        client.mission_publications(fixture.mission_id),
+        Err(LocalTransportError::Remote {
+            code: LocalErrorCode::NotAuthenticated,
+            ..
+        })
+    ));
+    running.store(false, Ordering::Release);
+    server_thread.join().unwrap().unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sol1_invalid_utf8_outcome_artifact_is_refused_before_export() {
+    let fixture = admitted_mission("export-invalid-utf8");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    let (candidate, candidate_digest, evaluation_digest) = fixture.publishable();
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
+        .unwrap();
+    let original = fixture
+        .artifacts()
+        .get(&candidate.candidate_artifact_digest)
+        .unwrap();
+    let mut invalid = vec![0xff];
+    invalid.extend_from_slice(original.content());
+    let planted = fixture
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            &invalid,
+            ArtifactContext::Mission {
+                project_id: fixture.project_id,
+                mission_id: fixture.mission_id,
+            },
+            fixture.resident_id,
+            fixture.configuration_id,
+            None,
+        )
+        .expect("the Artifact store accepts opaque bytes");
+    let planted_evaluation = fixture.evaluate(&planted.digest().value, Verdict::Meets);
+    with_trigger_down(
+        &fixture.store,
+        "outcome_manifests_no_update",
+        "outcome_manifests",
+        "Outcome manifests are immutable",
+        |connection| {
+            assert_eq!(
+                connection
+                    .execute(
+                        "UPDATE outcome_manifests SET candidate_artifact_digest = ?1
+                         WHERE workspace_id = ?2 AND mission_id = ?3",
+                        params![
+                            planted.digest().value,
+                            fixture.workspace_id.to_string(),
+                            fixture.mission_id.to_string()
+                        ],
+                    )
+                    .unwrap(),
+                1
+            );
+        },
+    );
+    with_trigger_down(
+        &fixture.store,
+        "outcome_publications_no_update",
+        "outcome_publications",
+        "Outcome publications are immutable",
+        |connection| {
+            assert_eq!(
+                connection
+                    .execute(
+                        "UPDATE outcome_publications
+                         SET candidate_artifact_digest = ?1, evaluation_digest = ?2
+                         WHERE workspace_id = ?3 AND mission_id = ?4",
+                        params![
+                            planted.digest().value,
+                            planted_evaluation.digest().value,
+                            fixture.workspace_id.to_string(),
+                            fixture.mission_id.to_string()
+                        ],
+                    )
+                    .unwrap(),
+                1
+            );
+        },
+    );
+
+    let refusal = fixture
+        .outcomes
+        .export_markdown(fixture.mission_id)
+        .expect_err("invalid UTF-8 crossed the Markdown export boundary");
+    assert!(matches!(
+        refusal,
+        PublishRefusal::Manifest(ManifestStoreRefusal::ColumnDisagrees {
+            column: "candidate_artifact_digest"
+        })
+    ));
 }
 
 /// The history and the export are readers over ONE Mission's rows, and this is the test that can
