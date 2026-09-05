@@ -1278,6 +1278,37 @@ fn completion_refuses_a_project_that_does_not_own_its_mission() {
     );
 }
 
+#[test]
+fn completion_supersession_cannot_name_a_record_from_another_workspace() {
+    let other = admitted("completion-super-other", vec!["Gates pass".to_owned()]);
+    let other_completion = other.completion(
+        newest_event(&other.store),
+        vec![ConditionOutcome::Met],
+        SpendReference::NotMeasured("no ledger".to_owned()),
+    );
+    let foreign_predecessor = sha256_bytes(
+        &other_completion
+            .canonical_bytes()
+            .expect("canonical completion"),
+    );
+    other.record(&other_completion);
+
+    let local = admitted("completion-super-local", vec!["Gates pass".to_owned()]);
+    let mut successor = local.completion(
+        newest_event(&local.store),
+        vec![ConditionOutcome::Met],
+        SpendReference::NotMeasured("no ledger".to_owned()),
+    );
+    successor.supersedes = beacond::CompletionSupersedes::Record(foreign_predecessor);
+    let mut connection = local.connection();
+    let result = record_completion(&mut connection, &successor);
+
+    assert!(
+        result.is_err(),
+        "a completion accepted another Workspace's predecessor: {result:?}"
+    );
+}
+
 /// §7 slice 2. A digest that exists is not a digest that is yours.
 ///
 /// The point of the test is the *second* Workspace being real: a random UUID would prove only that
