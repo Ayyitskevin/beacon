@@ -1005,7 +1005,7 @@ fn a_row_that_disagrees_with_its_own_bytes_fails_startup() {
     assert!(
         matches!(
             outcome,
-            Err(SupervisorError::CandidateStateMismatch
+            Err(SupervisorError::CandidateStateMismatch { .. }
                 | SupervisorError::CandidateEventMismatch(_))
         ),
         "a row disagreeing with its bytes started: {outcome:?}"
@@ -1054,7 +1054,7 @@ fn a_candidate_whose_entries_no_longer_match_its_proposal_fails_startup() {
 
     let outcome = fixture.restart();
     assert!(
-        matches!(outcome, Err(SupervisorError::CandidateStateMismatch)),
+        matches!(outcome, Err(SupervisorError::CandidateStateMismatch { .. })),
         "entries that no longer match their Proposal started: {outcome:?}"
     );
 }
@@ -1073,7 +1073,7 @@ fn a_candidate_without_its_event_fails_startup() {
     assert!(
         matches!(
             fixture.restart(),
-            Err(SupervisorError::CandidateStateMismatch)
+            Err(SupervisorError::CandidateStateMismatch { .. })
         ),
         "a Candidate with no evidence started"
     );
@@ -1110,7 +1110,7 @@ fn an_event_naming_no_candidate_fails_startup() {
     assert!(
         matches!(
             fixture.restart(),
-            Err(SupervisorError::CandidateStateMismatch)
+            Err(SupervisorError::CandidateStateMismatch { .. })
         ),
         "a duplicated Event started"
     );
@@ -1298,7 +1298,7 @@ fn a_row_whose_bytes_were_swapped_for_another_valid_candidate_fails_startup() {
     assert!(
         matches!(
             outcome,
-            Err(SupervisorError::CandidateStateMismatch
+            Err(SupervisorError::CandidateStateMismatch { .. }
                 | SupervisorError::CandidateEventMismatch(_))
         ),
         "bytes swapped for another valid Candidate started: {outcome:?}"
@@ -1414,5 +1414,91 @@ fn a_candidate_read_for_use_verifies_its_event_rather_than_counting_it() {
     assert!(
         matches!(outcome, Err(CandidateError::InvalidStore)),
         "an Event whose time disagrees with its record was accepted: {outcome:?}"
+    );
+}
+
+/// R28 tier 2 pass 5 of 14: a Candidate row the log does not account for is refused at startup,
+/// and the refusal names WHICH Candidate and carries the reader's own fault.
+///
+/// Pass 1's plant shape; the planted digest is all `f`, so it sorts last by construction (R39.3).
+#[test]
+fn startup_refuses_an_unaccounted_candidate_row_and_names_the_row() {
+    let fixture = admitted_mission("r28t2-candidate-startup");
+    let proposal_digest = fixture.submit("A Proposal for the planted Candidate to copy.");
+    fixture
+        .candidates
+        .record(&proposal_digest, &default_images())
+        .expect("the fixture records a Candidate");
+    // `candidates` is UNIQUE on (workspace_id, proposal_digest) -- one Candidate per Proposal --
+    // so the planted copy needs a Proposal of its own to name (measured: the first draft got that
+    // constraint back).
+    let second_proposal = fixture.submit("A second Proposal, so the planted row has one to name.");
+
+    let connection = fixture.store.connect();
+    let existing: String = connection
+        .query_row(
+            "SELECT digest_value FROM candidates ORDER BY digest_value LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the fixture recorded a Candidate");
+    let columns: Vec<String> = connection
+        .prepare("SELECT name FROM pragma_table_info('candidates')")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let planted = "f".repeat(64);
+    let names = columns.join(", ");
+    let values = columns
+        .iter()
+        .map(|column| match column.as_str() {
+            "digest_value" => "?1".to_owned(),
+            "proposal_digest" => "?3".to_owned(),
+            _ => column.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    connection
+        .execute(
+            &format!(
+                "INSERT INTO candidates ({names}) SELECT {values} FROM candidates
+                 WHERE digest_value = ?2"
+            ),
+            rusqlite::params![planted, existing, second_proposal],
+        )
+        .expect("the planted row inserts");
+    drop(connection);
+
+    let refusal = fixture
+        .restart()
+        .expect_err("a store holding an unaccounted Candidate row reopened Ready");
+    assert!(
+        matches!(
+            &refusal,
+            SupervisorError::CandidateStateMismatch {
+                workspace_id,
+                digest_value,
+                ..
+            } if *workspace_id == fixture.workspace_id && digest_value == &planted
+        ),
+        "refused for the wrong reason, or naming the wrong row: {refusal:?}"
+    );
+
+    // R28.4: the key and the fault's NAME (kimi's P3-2 form).
+    let line = refusal.to_string();
+    assert!(
+        line.contains(&planted) && line.contains(&fixture.workspace_id.to_string()),
+        "the refusal does not name the row it refused: {line}"
+    );
+    let named = line.rsplit(": ").next().unwrap().to_owned();
+    assert!(
+        !named.contains(' ') && !named.contains('{'),
+        "the tail of the line is a rendering, not a name: {line}"
+    );
+    assert!(
+        format!("{refusal:?}").contains(&named),
+        "the named fault is not reachable through Debug: {refusal:?}"
     );
 }
