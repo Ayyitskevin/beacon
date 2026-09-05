@@ -143,9 +143,7 @@ pub use outcome::{
     SourceMismatch, SourceRef, SpendMeasurementKind, SpendRef, SuccessCondition, VerifiedArtifact,
     VerifiedSources, VerifiedText, compare_canonical_keys, render,
 };
-pub use outcome_assembler::{
-    ARTIFACT_TITLE_ABSENT, AssemblyRefusal, SourcesRefusal, assemble, verified_sources_for,
-};
+pub use outcome_assembler::{ARTIFACT_TITLE_ABSENT, AssemblyRefusal, SourcesRefusal};
 pub use outcome_collector::{
     CollectedClassification, CollectedCompletion, CollectedCondition, CollectedDigest,
     CollectedNarrative, CollectedSources, CollectedSpend, CollectedUncounted, CollectionRequest,
