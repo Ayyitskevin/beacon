@@ -125,6 +125,103 @@ pub struct SampleProjectInstallResult {
     pub installation: SampleProjectInstallation,
 }
 
+/// Which fault the sample-Project startup pass hit, and WHICH ROW hit it (R28.1).
+///
+/// This pass's row IS a Workspace -- `sample_project_installations` is keyed by it alone -- so the
+/// key has no second field. Inventing one to match the other passes would be shape for its own
+/// sake.
+pub(crate) enum SampleProjectStateFault {
+    /// The enumeration itself failed: no row to name, because none was reached.
+    Store(rusqlite::Error),
+    /// One installation did not re-prove. `cause` is the owning reader's OWN error.
+    Row {
+        workspace_id: Uuid,
+        cause: SampleProjectError,
+    },
+    /// A COUNT across the store that does not match the log.
+    Totals(crate::TotalsMismatch),
+    /// A row whose Workspace column is not a UUID. Unreachable while the foreign-key check and the
+    /// Workspace pass run first.
+    Identity { workspace_id: String },
+}
+
+impl SampleProjectError {
+    /// The variant's NAME, for R28.4's one-line startup message.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Account(_) => "Account",
+            Self::NotInstalled => "NotInstalled",
+            Self::UnsafeDestination => "UnsafeDestination",
+            Self::BundleMismatch => "BundleMismatch",
+            Self::MaterializationFailed => "MaterializationFailed",
+            Self::TamperedInstallation => "TamperedInstallation",
+            Self::InvalidStore => "InvalidStore",
+            Self::Store(_) => "Store",
+            Self::Io(_) => "Io",
+            Self::Json(_) => "Json",
+        }
+    }
+}
+
+impl fmt::Display for SampleProjectStateFault {
+    /// R28.4: the KEY and the fault's NAME, never the carried error's own text.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(_) => {
+                formatter.write_str("the sample Project installations could not be read")
+            }
+            Self::Row {
+                workspace_id,
+                cause,
+            } => write!(
+                formatter,
+                "the sample Project installation in Workspace {workspace_id} does not re-prove: {}",
+                cause.name()
+            ),
+            Self::Totals(totals) => write!(
+                formatter,
+                "the sample Project installations do not agree with the log -- {totals}"
+            ),
+            Self::Identity { workspace_id } => write!(
+                formatter,
+                "a sample Project row's Workspace is not readable: {workspace_id}"
+            ),
+        }
+    }
+}
+
+/// Hand-written and NOT delegating to `Display`: R28.4 keeps the carried text reachable here.
+impl fmt::Debug for SampleProjectStateFault {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => formatter.debug_tuple("Store").field(error).finish(),
+            Self::Totals(totals) => formatter.debug_tuple("Totals").field(totals).finish(),
+            Self::Row {
+                workspace_id,
+                cause,
+            } => formatter
+                .debug_struct("Row")
+                .field("workspace_id", workspace_id)
+                .field("cause", cause)
+                .finish(),
+            Self::Identity { workspace_id } => formatter
+                .debug_struct("Identity")
+                .field("workspace_id", workspace_id)
+                .finish(),
+        }
+    }
+}
+
+impl std::error::Error for SampleProjectStateFault {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::Row { cause, .. } => Some(cause),
+            Self::Totals(_) | Self::Identity { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum SampleProjectError {
     Account(OperatorAccountError),
@@ -1394,15 +1491,37 @@ pub(crate) fn verify_sample_project_event(
 
 pub(crate) fn verify_sample_project_state(
     connection: &Connection,
-) -> Result<(), SampleProjectError> {
+) -> Result<(), SampleProjectStateFault> {
     let mut statement = connection
-        .prepare("SELECT workspace_id FROM sample_project_installations ORDER BY workspace_id")?;
+        .prepare("SELECT workspace_id FROM sample_project_installations ORDER BY workspace_id")
+        .map_err(SampleProjectStateFault::Store)?;
     let workspaces = statement
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(SampleProjectStateFault::Store)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(SampleProjectStateFault::Store)?;
     for workspace_id in &workspaces {
-        let workspace_id =
-            Uuid::parse_str(workspace_id).map_err(|_| SampleProjectError::InvalidStore)?;
+        let parsed =
+            Uuid::parse_str(workspace_id).map_err(|_| SampleProjectStateFault::Identity {
+                workspace_id: workspace_id.clone(),
+            })?;
+        verify_one_installation(connection, parsed).map_err(|cause| {
+            SampleProjectStateFault::Row {
+                workspace_id: parsed,
+                cause,
+            }
+        })?;
+    }
+    verify_sample_project_totals(connection, workspaces.len())?;
+    Ok(())
+}
+
+/// One stored installation, re-proved. Unchanged from what the loop held inline.
+fn verify_one_installation(
+    connection: &Connection,
+    workspace_id: Uuid,
+) -> Result<(), SampleProjectError> {
+    {
         let installation =
             load_installation(connection, workspace_id)?.ok_or(SampleProjectError::InvalidStore)?;
         validate_stored_installation(&installation)?;
@@ -1420,15 +1539,27 @@ pub(crate) fn verify_sample_project_state(
             return Err(SampleProjectError::InvalidStore);
         }
     }
-    let event_count: i64 = connection.query_row(
-        "SELECT count(*) FROM events WHERE kind = 'sample_project.installed'",
-        [],
-        |row| row.get(0),
-    )?;
-    if event_count
-        != i64::try_from(workspaces.len()).map_err(|_| SampleProjectError::InvalidStore)?
-    {
-        return Err(SampleProjectError::InvalidStore);
+    Ok(())
+}
+
+/// The count across the store: no row to name.
+fn verify_sample_project_totals(
+    connection: &Connection,
+    installation_count: usize,
+) -> Result<(), SampleProjectStateFault> {
+    let event_count: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind = 'sample_project.installed'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(SampleProjectStateFault::Store)?;
+    if event_count != i64::try_from(installation_count).unwrap_or(i64::MAX) {
+        return Err(SampleProjectStateFault::Totals(crate::TotalsMismatch {
+            table: "events (sample_project.installed)",
+            expected: installation_count as u64,
+            observed: event_count.unsigned_abs(),
+        }));
     }
     Ok(())
 }
@@ -3015,9 +3146,90 @@ mod tests {
             initial_workspace_name: "Ignored".to_owned(),
         })
         .unwrap_err();
-        assert!(matches!(
-            error,
-            crate::SupervisorError::SampleProjectStateMismatch
-        ));
+        // R28.1: the refusal names the Workspace it refused, and R28.4's line is the key plus
+        // the fault's NAME with the reader's own sentence absent.
+        assert!(
+            matches!(
+                &error,
+                crate::SupervisorError::SampleProjectStateMismatch { workspace_id, .. }
+                    if !workspace_id.is_nil()
+            ),
+            "the refusal does not name the Workspace it refused: {error:?}"
+        );
+        let line = error.to_string();
+        let named = line.rsplit(": ").next().unwrap().to_owned();
+        assert!(
+            !named.contains(' ') && !named.contains('{'),
+            "the tail of the line is a rendering, not a name: {line}"
+        );
+        assert!(
+            format!("{error:?}").contains(&named),
+            "the named fault is not reachable through Debug: {error:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod name_witness {
+    use super::*;
+
+    /// Pinned independently of `name()` (the fold at 30d2a20): an exhaustive `name()` catches an
+    /// added arm, only a second table catches a wrong or duplicated name.
+    fn expected_name(error: &SampleProjectError) -> &'static str {
+        match error {
+            SampleProjectError::Account(_) => "Account",
+            SampleProjectError::NotInstalled => "NotInstalled",
+            SampleProjectError::UnsafeDestination => "UnsafeDestination",
+            SampleProjectError::BundleMismatch => "BundleMismatch",
+            SampleProjectError::MaterializationFailed => "MaterializationFailed",
+            SampleProjectError::TamperedInstallation => "TamperedInstallation",
+            SampleProjectError::InvalidStore => "InvalidStore",
+            SampleProjectError::Store(_) => "Store",
+            SampleProjectError::Io(_) => "Io",
+            SampleProjectError::Json(_) => "Json",
+        }
+    }
+
+    #[test]
+    fn every_sample_project_error_arm_has_its_own_pinned_name() {
+        let every_arm = [
+            SampleProjectError::Account(
+                crate::operator_account::OperatorAccountError::PasswordTooShort,
+            ),
+            SampleProjectError::NotInstalled,
+            SampleProjectError::UnsafeDestination,
+            SampleProjectError::BundleMismatch,
+            SampleProjectError::MaterializationFailed,
+            SampleProjectError::TamperedInstallation,
+            SampleProjectError::InvalidStore,
+            SampleProjectError::Store(rusqlite::Error::QueryReturnedNoRows),
+            SampleProjectError::Io(std::io::Error::other("x")),
+            SampleProjectError::Json(serde_json::from_str::<u8>("\"x\"").unwrap_err()),
+        ];
+        assert_eq!(
+            every_arm.len(),
+            10,
+            "an arm was added to `SampleProjectError` without a fixture here"
+        );
+        for arm in &every_arm {
+            assert_eq!(
+                arm.name(),
+                expected_name(arm),
+                "the startup name does not match the pinned table: {arm:?}"
+            );
+        }
+        let names: std::collections::BTreeSet<&str> =
+            every_arm.iter().map(SampleProjectError::name).collect();
+        assert_eq!(
+            names.len(),
+            10,
+            "two arms share a startup name, so a swap between them is invisible: {names:?}"
+        );
+        for name in names {
+            assert!(
+                !name.contains(' ') && !name.contains('{'),
+                "a name is a name, not a rendering: {name}"
+            );
+        }
     }
 }
