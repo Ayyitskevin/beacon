@@ -8,7 +8,7 @@ use beacond::{
     AppendixRequest, AssemblyRefusal, CollectedClassification, CollectedCompletion,
     CollectedCondition, CollectedDigest, CollectedNarrative, CollectedSources, CollectedSpend,
     ConditionOutcome, ConditionResult, OutcomeState, ReceiptRef, SourceKind, SpendAmount,
-    VerifiedSources, VerifiedText, assemble, render,
+    SpendMeasurementKind, VerifiedSources, VerifiedText, assemble, render,
 };
 use uuid::Uuid;
 
@@ -230,10 +230,12 @@ fn assembler_refuses_to_guess_an_absent_field() {
 }
 
 #[test]
-fn a_partially_measured_spend_is_refused_rather_than_rendered_complete() {
-    // R21.3: a window that ends before the boundary is `partially_measured` -- a state of its own,
-    // never Verified-complete. The manifest grammar has no slot for it, so the honest output is a
-    // refusal that names the window, not the nearest representable `SpendRef`.
+fn a_partially_measured_spend_maps_to_its_own_state_with_its_coverage_intact() {
+    // R21.3 by way of R23.1: a window that ends before the boundary is `partially_measured`, a
+    // state of its own. Until the grammar carried the token the assembler refused this shape by
+    // name (`SpendPartialityNotRepresentable`, RED-then-removed); now the token rides in the
+    // `SpendRef` and the document prints it beside the amount, and the assembler maps -- never to
+    // `Measured`, never to a footnote.
     let mut partial = collected();
     partial.spend = Some(CollectedSpend {
         digest_value: Some(hex("66")),
@@ -248,14 +250,29 @@ fn a_partially_measured_spend_is_refused_rather_than_rendered_complete() {
             counted_units: 400,
         }),
     });
+    let manifest = assemble(&partial, workspace(), AppendixRequest::PolicyDefault).unwrap();
+    let spend = manifest
+        .spend_ref
+        .verified()
+        .expect("a partial measurement is a Verified state");
+    assert_eq!(spend.measurement, SpendMeasurementKind::PartiallyMeasured);
     assert_eq!(
-        assemble(&partial, workspace(), AppendixRequest::PolicyDefault).unwrap_err(),
-        AssemblyRefusal::SpendPartialityNotRepresentable {
-            coverage_to_event_seq: 30,
-            boundary_event_seq: 40,
-        }
+        (spend.coverage_from_event_seq, spend.coverage_to_event_seq),
+        (1, 30)
     );
-    // The complete measurement, same shape, assembles into a `SpendRef` carrying the coverage.
+    assert!(
+        spend.coverage_to_event_seq < manifest.boundary_event_seq,
+        "the window ends before the cut"
+    );
+    assert_eq!(spend.amount_minor, 12_345);
+    let document = render(&manifest, &sources_for(&manifest)).expect("renders");
+    assert!(
+        document.contains("| measurement | `partially_measured` |"),
+        "{document}"
+    );
+    assert!(document.contains("floor over that window"), "{document}");
+
+    // The complete measurement, same shape, is the other arm -- and only the token differs.
     let mut complete = partial.clone();
     complete.spend.as_mut().unwrap().measurement = "measured".to_owned();
     complete.spend.as_mut().unwrap().coverage = Some((1, 40));
@@ -264,12 +281,12 @@ fn a_partially_measured_spend_is_refused_rather_than_rendered_complete() {
         .spend_ref
         .verified()
         .expect("a complete measurement is Verified");
+    assert_eq!(spend.measurement, SpendMeasurementKind::Measured);
     assert_eq!(
         (spend.coverage_from_event_seq, spend.coverage_to_event_seq),
         (1, 40)
     );
     assert_eq!(spend.currency, "USD");
-    assert_eq!(spend.amount_minor, 12_345);
 }
 
 #[test]

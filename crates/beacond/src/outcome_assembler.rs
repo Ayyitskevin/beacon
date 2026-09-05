@@ -27,8 +27,8 @@ use crate::mission_completion_store::{
 use crate::mission_impact::CANONICALIZER as MISSION_IMPACT_CANONICALIZER;
 use crate::outcome::{
     AppendixRequest, CANONICALIZER, NarrativeRef, OutcomeManifestV1, OutcomeState, RENDERER_V1,
-    ReferenceIdentity, SourceDigest, SourceKind, SourceRef, SpendRef, SuccessCondition,
-    VerifiedArtifact, VerifiedSources, VerifiedText,
+    ReferenceIdentity, SourceDigest, SourceKind, SourceRef, SpendMeasurementKind, SpendRef,
+    SuccessCondition, VerifiedArtifact, VerifiedSources, VerifiedText,
 };
 use crate::outcome_collector::{CollectedDigest, CollectedNarrative, CollectedSources};
 use crate::spend::CANONICALIZER as SPEND_CANONICALIZER;
@@ -56,13 +56,6 @@ pub enum AssemblyRefusal {
     /// their count. The manifest cites objects, not counts, and a citation cannot be invented from
     /// a number -- so this refuses rather than emit `Absent` for support that exists.
     SupportNotCollected { ordinal: u32, count: usize },
-    /// The completion's spend was `partially_measured` (R21.3), and `SpendRef` has no way to say
-    /// so. Rendering it as a complete measurement is exactly the laundering R21.3 forbids, so the
-    /// assembler refuses and names the window rather than choosing the nearest representable state.
-    SpendPartialityNotRepresentable {
-        coverage_to_event_seq: u64,
-        boundary_event_seq: u64,
-    },
     /// A spend was collected as measured, yet lacks the identity or coverage a measured record
     /// always carries. The collected set disagrees with itself.
     SpendInconsistent { detail: &'static str },
@@ -85,14 +78,6 @@ impl std::fmt::Display for AssemblyRefusal {
                 formatter,
                 "condition {ordinal} has {count} supporting object(s) the collector did not carry; \
                  a citation cannot be assembled from a count"
-            ),
-            Self::SpendPartialityNotRepresentable {
-                coverage_to_event_seq,
-                boundary_event_seq,
-            } => write!(
-                formatter,
-                "the spend is partially measured (coverage ends at event {coverage_to_event_seq}, \
-                 the boundary is {boundary_event_seq}) and the manifest grammar cannot say so"
             ),
             Self::SpendInconsistent { detail } => {
                 write!(
@@ -201,7 +186,7 @@ pub fn assemble(
         OutcomeState::Verified(collected.receipts.clone())
     };
 
-    let spend_ref = spend_state(collected, workspace_id, boundary_event_seq)?;
+    let spend_ref = spend_state(collected, workspace_id)?;
 
     Ok(OutcomeManifestV1 {
         workspace_id,
@@ -323,7 +308,6 @@ fn cited_refs(
 fn spend_state(
     collected: &CollectedSources,
     workspace_id: Uuid,
-    boundary_event_seq: u64,
 ) -> Result<OutcomeState<SpendRef>, AssemblyRefusal> {
     let Some(spend) = &collected.spend else {
         // The collector returns `Some` whenever a completion was requested; `None` means the
@@ -348,13 +332,9 @@ fn spend_state(
                 _ => OutcomeState::Broken("the spend measurement is broken.".to_owned()),
             });
         }
-        "partially_measured" => {
-            return Err(AssemblyRefusal::SpendPartialityNotRepresentable {
-                coverage_to_event_seq: spend.coverage.map(|(_, to)| to).unwrap_or_default(),
-                boundary_event_seq,
-            });
-        }
-        "measured" => {}
+        // Complete and partial are two arms of one closed vocabulary (R23.1), never one arm with
+        // a footnote: the token rides in the manifest and the document prints it beside the amount.
+        "measured" | "partially_measured" => {}
         other => {
             return Err(AssemblyRefusal::SpendMeasurementUnknown {
                 measurement: other.to_owned(),
@@ -379,6 +359,11 @@ fn spend_state(
             return Ok(OutcomeState::NotEvaluated(reason.clone()));
         }
     };
+    let measurement = if spend.measurement == "partially_measured" {
+        SpendMeasurementKind::PartiallyMeasured
+    } else {
+        SpendMeasurementKind::Measured
+    };
     Ok(OutcomeState::Verified(SpendRef {
         workspace_id,
         spend_id,
@@ -393,6 +378,7 @@ fn spend_state(
         minor_units_exponent: amount.minor_units_exponent,
         coverage_from_event_seq: from,
         coverage_to_event_seq: to,
+        measurement,
     }))
 }
 
