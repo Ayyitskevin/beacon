@@ -128,7 +128,7 @@ pub(crate) enum ProjectStateFault {
     },
     /// Counts across the whole store: Projects against creation snapshots against events. No row
     /// to name, and naming one with a nil UUID would be an invented identity.
-    Totals(ProjectError),
+    Totals(crate::TotalsMismatch),
     /// A row whose identity columns are not UUIDs. Unreachable while the foreign-key check and the
     /// Workspace pass run first.
     Identity {
@@ -172,10 +172,9 @@ impl fmt::Display for ProjectStateFault {
                 "Project {project_id} in Workspace {workspace_id} does not re-prove: {}",
                 cause.name()
             ),
-            Self::Totals(cause) => write!(
+            Self::Totals(totals) => write!(
                 formatter,
-                "the Projects do not agree with the store as a whole: {}",
-                cause.name()
+                "the Projects do not agree with the store as a whole -- {totals}"
             ),
             Self::Identity {
                 workspace_id,
@@ -194,7 +193,7 @@ impl fmt::Debug for ProjectStateFault {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Store(error) => formatter.debug_tuple("Store").field(error).finish(),
-            Self::Totals(cause) => formatter.debug_tuple("Totals").field(cause).finish(),
+            Self::Totals(totals) => formatter.debug_tuple("Totals").field(totals).finish(),
             Self::Row {
                 workspace_id,
                 project_id,
@@ -221,7 +220,9 @@ impl std::error::Error for ProjectStateFault {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Store(error) => Some(error),
-            Self::Totals(cause) | Self::Row { cause, .. } => Some(cause),
+            Self::Row { cause, .. } => Some(cause),
+            // A `TotalsMismatch` is DATA, not a nested error: it has no source of its own.
+            Self::Totals(_) => None,
             Self::Identity { .. } => None,
         }
     }
@@ -941,10 +942,7 @@ pub(crate) fn verify_project_state(
             }
         })?;
     }
-    verify_project_totals(connection).map_err(|cause| match cause {
-        ProjectError::Store(error) => ProjectStateFault::Store(error),
-        other => ProjectStateFault::Totals(other),
-    })?;
+    verify_project_totals(connection)?;
     Ok(())
 }
 
@@ -1011,34 +1009,58 @@ fn verify_one_project(
 }
 
 /// The checks that are about the STORE rather than one Project.
-fn verify_project_totals(connection: &rusqlite::Connection) -> Result<(), ProjectError> {
-    let project_count: i64 =
-        connection.query_row("SELECT count(*) FROM projects", [], |row| row.get(0))?;
-    let snapshot_count: i64 = connection.query_row(
-        "SELECT count(*) FROM project_creation_snapshots",
-        [],
-        |row| row.get(0),
-    )?;
-    let project_event_count: i64 = connection.query_row(
-        "SELECT count(*) FROM events WHERE kind = 'project.created'",
-        [],
-        |row| row.get(0),
-    )?;
-    let expected_revision_event_count: i64 = connection.query_row(
-        "SELECT count(*) FROM project_charter_revisions WHERE revision > 1",
-        [],
-        |row| row.get(0),
-    )?;
-    let revision_event_count: i64 = connection.query_row(
-        "SELECT count(*) FROM events WHERE kind = 'project.charter_revised'",
-        [],
-        |row| row.get(0),
-    )?;
-    if project_count != snapshot_count || project_count != project_event_count {
-        return Err(ProjectError::InvalidStore);
+fn verify_project_totals(connection: &rusqlite::Connection) -> Result<(), ProjectStateFault> {
+    let project_count: i64 = connection
+        .query_row("SELECT count(*) FROM projects", [], |row| row.get(0))
+        .map_err(ProjectStateFault::Store)?;
+    let snapshot_count: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM project_creation_snapshots",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(ProjectStateFault::Store)?;
+    let project_event_count: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind = 'project.created'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(ProjectStateFault::Store)?;
+    let expected_revision_event_count: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM project_charter_revisions WHERE revision > 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(ProjectStateFault::Store)?;
+    let revision_event_count: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind = 'project.charter_revised'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(ProjectStateFault::Store)?;
+    if project_count != snapshot_count {
+        return Err(ProjectStateFault::Totals(crate::TotalsMismatch {
+            table: "project_creation_snapshots",
+            expected: project_count.unsigned_abs(),
+            observed: snapshot_count.unsigned_abs(),
+        }));
+    }
+    if project_count != project_event_count {
+        return Err(ProjectStateFault::Totals(crate::TotalsMismatch {
+            table: "events (project.created)",
+            expected: project_count.unsigned_abs(),
+            observed: project_event_count.unsigned_abs(),
+        }));
     }
     if expected_revision_event_count != revision_event_count {
-        return Err(ProjectError::InvalidStore);
+        return Err(ProjectStateFault::Totals(crate::TotalsMismatch {
+            table: "events (project.charter_revised)",
+            expected: expected_revision_event_count.unsigned_abs(),
+            observed: revision_event_count.unsigned_abs(),
+        }));
     }
     Ok(())
 }

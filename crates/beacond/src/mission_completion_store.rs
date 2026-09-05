@@ -78,7 +78,7 @@ pub(crate) enum CompletionStateFault {
     },
     /// One `mission.completed` Event per stored completion: a count across the store, with no row
     /// to name.
-    Totals(CompletionReadRefusal),
+    Totals(crate::TotalsMismatch),
     /// A row whose Workspace column is not a UUID. Unreachable while the foreign-key check and the
     /// Workspace pass run first.
     Identity {
@@ -127,10 +127,9 @@ impl fmt::Display for CompletionStateFault {
                 "completion {digest_value} in Workspace {workspace_id} does not re-prove: {}",
                 cause.name()
             ),
-            Self::Totals(cause) => write!(
+            Self::Totals(totals) => write!(
                 formatter,
-                "the Mission completions do not agree with the log as a whole: {}",
-                cause.name()
+                "the Mission completions do not agree with the log as a whole -- {totals}"
             ),
             Self::Identity {
                 workspace_id,
@@ -149,7 +148,7 @@ impl fmt::Debug for CompletionStateFault {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Store(error) => formatter.debug_tuple("Store").field(error).finish(),
-            Self::Totals(cause) => formatter.debug_tuple("Totals").field(cause).finish(),
+            Self::Totals(totals) => formatter.debug_tuple("Totals").field(totals).finish(),
             Self::Row {
                 workspace_id,
                 digest_value,
@@ -176,7 +175,9 @@ impl std::error::Error for CompletionStateFault {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Store(error) => Some(error),
-            Self::Totals(cause) | Self::Row { cause, .. } => Some(cause),
+            Self::Row { cause, .. } => Some(cause),
+            // A `TotalsMismatch` is DATA, not a nested error: it has no source of its own.
+            Self::Totals(_) => None,
             Self::Identity { .. } => None,
         }
     }
@@ -756,9 +757,11 @@ pub(crate) fn verify_completion_state(connection: &Connection) -> Result<(), Com
         )
         .map_err(CompletionStateFault::Store)?;
     if usize::try_from(events) != Ok(rows.len()) {
-        return Err(CompletionStateFault::Totals(
-            CompletionReadRefusal::EventCount(events),
-        ));
+        return Err(CompletionStateFault::Totals(crate::TotalsMismatch {
+            table: "events (mission.completed)",
+            expected: rows.len() as u64,
+            observed: events.unsigned_abs(),
+        }));
     }
     Ok(())
 }
