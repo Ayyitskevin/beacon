@@ -3857,6 +3857,82 @@ fn sol1_get_refuses_a_valid_evaluation_swapped_into_the_relation() {
     ));
 }
 
+/// R28.1 pass 2 of 5: a manifest whose projection disagrees with its own bytes is refused at
+/// startup, and the refusal names WHICH manifest and carries the reader's own fault.
+///
+/// R39.3's two-row shape, made deliberate rather than lucky: two honest manifests are prepared and
+/// the tamper lands on whichever sorts LAST in the pass's own `ORDER BY`, so a mutant naming
+/// `rows[0]` always names an honest row. Manifest order is by digest, which no fixture can choose,
+/// so the fixture reads the order back and picks — it does not hope.
+#[test]
+fn startup_refuses_a_manifest_whose_column_disagrees_and_names_the_row() {
+    let (fixture, manifest, sources) = ordinary("r28-manifest-startup");
+    fixture.outcomes.prepare(&manifest, &sources).unwrap();
+    let second = OutcomeManifestV1 {
+        appendix_request: AppendixRequest::Include,
+        ..manifest.clone()
+    };
+    fixture
+        .outcomes
+        .prepare(&second, &sources)
+        .expect("a second honest manifest, so rows[0] is not the tampered row");
+
+    let connection = fixture.store.connect();
+    let ordered: Vec<String> = connection
+        .prepare("SELECT manifest_digest FROM outcome_manifests ORDER BY workspace_id, manifest_digest")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(ordered.len(), 2, "the fixture must hold two manifests: {ordered:?}");
+    let target = ordered.last().unwrap().clone();
+
+    connection
+        .execute_batch("DROP TRIGGER outcome_manifests_no_update;")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE outcome_manifests SET renderer_version = ?1 WHERE manifest_digest = ?2",
+            params!["r28-not-what-the-bytes-say", target],
+        )
+        .unwrap();
+    // Byte-exact, as migration 0030 wrote it (R39.3): SQLite keeps the literal CREATE text, and
+    // startup compares the schema before it reaches any verification pass.
+    connection
+        .execute_batch(
+            "CREATE TRIGGER outcome_manifests_no_update
+BEFORE UPDATE ON outcome_manifests
+BEGIN
+    SELECT RAISE(ABORT, 'Outcome manifests are immutable');
+END;",
+        )
+        .unwrap();
+
+    // The belt refuses it ON READ, so the planted fault is real and has a name of its own.
+    let read = fixture
+        .outcomes
+        .manifest(&target)
+        .expect_err("the reader trusted a projection its bytes do not support");
+    assert!(
+        matches!(
+            read,
+            PrepareRefusal::Manifest(ManifestStoreRefusal::ColumnDisagrees {
+                column: "renderer_version"
+            })
+        ),
+        "the planted fault is not the one this test is about: {read:?}"
+    );
+    drop(connection);
+
+    let refusal = astra_boot(&fixture)
+        .expect_err("a store holding a manifest that disagrees with its bytes reopened Ready");
+    assert!(
+        matches!(&refusal, beacond::SupervisorError::OutcomeManifestStateMismatch),
+        "startup did not refuse the tampered manifest: {refusal:?}"
+    );
+}
+
 /// R28.4 at the innermost point (Fable's addendum 2, from opus2's R28.4-D lane): the driver's own
 /// text never reaches a printed line, through ANY mapping onto `SupervisorError::Store`.
 ///
