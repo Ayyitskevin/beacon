@@ -365,6 +365,7 @@ pub enum SupervisorError {
     MissionCompletionStateMismatch,
     ArtifactEventMismatch(i64),
     ArtifactStateMismatch,
+    OutcomeManifestStateMismatch,
     PauseEventMismatch(i64),
     SchemaMismatch,
     UnsupportedSchemaVersion(i64),
@@ -541,6 +542,14 @@ impl fmt::Display for SupervisorError {
                     formatter,
                     "Artifact state does not agree with its bytes, its content, its supersession \
                      chain, or its audit Event"
+                )
+            }
+            Self::OutcomeManifestStateMismatch => {
+                write!(
+                    formatter,
+                    "stored Outcome manifests do not agree with their bytes, the completion they \
+                     are frozen on, or the candidate Artifact whose audit Event is their position \
+                     in the log"
                 )
             }
             Self::RulingStateMismatch => {
@@ -1134,6 +1143,11 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     // rows and its boundary from the Mission's admission Event.
     mission_completion_store::verify_completion_state(connection)
         .map_err(|_| SupervisorError::MissionCompletionStateMismatch)?;
+    // Last, because it is the only pass that re-proves records belonging to two other modules: an
+    // Outcome manifest is accounted for by its candidate Artifact's Event and frozen on a
+    // completion, so both of those have to have proved themselves first (R18.7).
+    outcome_store::verify_manifest_state(connection)
+        .map_err(|_| SupervisorError::OutcomeManifestStateMismatch)?;
 
     Ok(StoreDiagnostics {
         status: DiagnosticStatus::Ready,

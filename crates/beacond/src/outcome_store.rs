@@ -22,6 +22,14 @@
 //! **Preparing an Outcome creates no authority.** It does not complete a Mission, publish an
 //! Outcome, qualify anything for publication, or make a success verdict. A candidate is a document
 //! that exists.
+//!
+//! **There is no `outcome.prepared` Event kind (R18.6).** A prepared manifest is positioned in the
+//! log by its candidate Artifact's `artifact.recorded` Event -- the Artifact the row's foreign key
+//! requires -- so the ledger accounts for every row without a new kind and without rebuilding the
+//! closed `events` table. A manifest cannot exist without a candidate by construction (they are
+//! written in one transaction, and the foreign key is `NOT NULL`);
+//! `a_manifest_cannot_exist_without_its_candidate` says so, because R18.6 revisits this only if
+//! one ever can. `verify_manifest_state` is what turns that position into an invariant (R18.7).
 
 use std::sync::Arc;
 
@@ -55,13 +63,17 @@ pub const MAX_STORED_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 
 /// The manifest's R15 reference identity, DERIVED from its content identity.
 ///
-/// `OutcomeManifestV1` carries no UUID inside its canonical bytes and its grammar is frozen
-/// (R12/R13), so a freshly minted UUID stored beside those bytes would be a second identity the
-/// bytes do not carry -- exactly the decoy R15 exists to refuse, since nothing in the record could
-/// contradict it. This one is the first sixteen bytes of the digest re-spelled, so a citation's
-/// UUID and digest cannot disagree: one is a function of the other. Whether the manifest should
-/// instead carry a UUID inside its canonical bytes -- a canonicalizer version and a new frozen
-/// vector -- is the Steward's call, not this slice's.
+/// **A recorded exception to R15, ruled in R18.2**, not an oversight. R15 puts a record's UUID
+/// inside its canonical bytes; a manifest is the one record that must not have one there. It is
+/// immutable and `prepare` is idempotent on its bytes, so an immutable manifest WANTS content
+/// identity and reference identity to be the same thing: two identical manifests are one manifest,
+/// and corrections are new publication versions rather than new manifests. A minted UUID inside
+/// the bytes would break that idempotency outright, and one stored beside the bytes would be a
+/// second identity the bytes cannot contradict -- the decoy R15 exists to refuse.
+///
+/// So this is the first sixteen bytes of the digest re-spelled as a UUID: a citation's UUID and
+/// digest cannot disagree, because one is a function of the other. R18.2 revisits this only if a
+/// manifest ever needs an identity its bytes cannot give.
 pub fn manifest_reference_id(manifest_digest: &str) -> Result<Uuid, ManifestStoreRefusal> {
     let decoded = HEXLOWER
         .decode(manifest_digest.as_bytes())
@@ -99,6 +111,13 @@ pub enum ManifestStoreRefusal {
     ManifestTooLarge { configured: u64, observed: u64 },
     /// The bytes cannot be a v1 manifest at all.
     Malformed(MalformedOutcome),
+    /// The row is self-consistent and the ledger does not account for it (R18.7).
+    ///
+    /// A manifest's candidate Artifact is its position in the log -- there is no
+    /// `outcome.prepared` Event (R18.6) -- so "this row was prepared" and "this row was inserted
+    /// behind the ledger" are the same sentence to a reader that only re-proves bytes. The startup
+    /// pass is what separates them, and `reason` names which link failed.
+    CandidateNotAccounted { reason: &'static str },
     /// The store itself failed. Never silently an absence.
     Store(String),
 }
@@ -130,6 +149,10 @@ impl std::fmt::Display for ManifestStoreRefusal {
             Self::Malformed(reason) => {
                 write!(formatter, "not a v1 outcome manifest: {}", reason.as_str())
             }
+            Self::CandidateNotAccounted { reason } => write!(
+                formatter,
+                "the ledger does not account for this outcome manifest: {reason}"
+            ),
             Self::Store(detail) => write!(formatter, "the store failed: {detail}"),
         }
     }
@@ -469,6 +492,13 @@ impl OutcomeService {
     /// its bit. The manifest carries the copy so drift is detectable (ADR 0037's argument) and
     /// `recheck_copied_bit` proves the copy against the record at prepare time (R13.7) -- so a
     /// caller cannot dodge a mandatory appendix by writing `false` into the manifest it supplies.
+    ///
+    /// **This is an authenticated service method in v1, not a Command (R18.1)** -- the same posture
+    /// as `record_completion`. There is no admission check, no transport and no Agent path to it,
+    /// and nothing outside tests may call it: the Command, its admission check and its transport
+    /// arrive with the presentation surface (gpt2 slice 4), under R12.12's rule that retrieval and
+    /// export are Operator actions inside the Mission's Workspace scope. An input surface built
+    /// before its consumers exist is how a grammar gets frozen around a guess.
     pub fn prepare(
         &self,
         manifest: &OutcomeManifestV1,
@@ -591,6 +621,17 @@ impl OutcomeService {
 
 /// The completion this manifest is frozen on, read through its owning verified reader, and then
 /// reconciled against what the manifest says about it.
+///
+/// **The Mission is proved by IDENTITY here, not by digest, and R18.4 says that is the design.**
+/// There is no `MissionDeclarationV1` in v1 and none is coming: gpt2's design cites the Mission by
+/// `mission_id` and anchors it on the completion, and slice 1's `mission: SourceRef` -- which
+/// requires a digest -- over-generalized that. So `manifest.mission.digest` is a field this
+/// function does not verify and cannot: nothing on `main` produces a Mission declaration digest to
+/// verify it against. It is a temporary pass-through, and it goes away with the one grammar
+/// revision of `OutcomeManifestV1` that R18.3-5 order (the condition vocabulary widened to the
+/// completion's, the Mission cited by identity, and Proposal/Ruling/Evaluation cited as
+/// `kind + workspace + digest`) -- a canonicalizer version and a regenerated frozen vector, built
+/// by a non-author seat, landing as slice 3b's item 0 before the assembler.
 ///
 /// The reconciliation spans two records, so it belongs to neither: the completion's reader proves
 /// the completion, and the manifest's codec proves the manifest, and nobody else checks that the
@@ -718,5 +759,117 @@ fn insert_manifest(
             ],
         )
         .map_err(store_error)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Startup: every stored manifest is accounted for by the ledger (R18.7)
+// ---------------------------------------------------------------------------------------------
+
+/// Re-proves every stored manifest against its own bytes AND against the log, at startup.
+///
+/// Re-proving on every read is not the invariant the other stores hold. A row inserted behind the
+/// ledger -- self-consistent bytes, a digest they hash to, projections that repeat them, every
+/// foreign key satisfied -- reads clean through [`verified_manifest_within`], and measurably did:
+/// `foreign_key_violations: 0`, `status: Ready`. This pass is what refuses it, by name.
+///
+/// **It enumerates `outcome_manifests` by the manifest's own key.** Enumerating the candidate
+/// Artifacts instead and asking each for its manifest would visit only rows the ledger already
+/// reaches, which is the one set that never contained the orphan -- a startup pass keyed on the
+/// wrong column is a pass that cannot fail (sol1's E-1 P0, not repeated here).
+///
+/// What "accounted for" means, given there is no `outcome.prepared` Event kind (R18.6): the
+/// manifest's candidate Artifact must exist in the manifest's Workspace, verify against its own
+/// bytes, sit at exactly one `artifact.recorded` Event, and actually BE this manifest's document --
+/// an Outcome Document scoped to the manifest's Mission and authored by the manifest's accountable
+/// Resident. Without those last three, a manifest could name any Artifact in the Workspace and
+/// borrow its Event as a position.
+pub(crate) fn verify_manifest_state(connection: &Connection) -> Result<(), ManifestStoreRefusal> {
+    let mut statement = connection
+        .prepare(
+            "SELECT workspace_id, manifest_digest FROM outcome_manifests
+             ORDER BY workspace_id, manifest_digest",
+        )
+        .map_err(store_error)?;
+    let rows: Vec<(String, String)> = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(store_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(store_error)?;
+    drop(statement);
+
+    for (workspace_id, manifest_digest) in &rows {
+        let workspace_id =
+            Uuid::parse_str(workspace_id).map_err(|_| ManifestStoreRefusal::BytesDisagree)?;
+        // The bytes first, through the same reader every caller uses: a row that cannot prove
+        // itself is refused before anything is asked of the log about it.
+        let stored = verified_manifest_within(connection, workspace_id, manifest_digest)?;
+        let manifest = stored.manifest();
+
+        // The completion the manifest is frozen on, through its owning reader. The row's foreign
+        // key to `mission_completions` is single-column -- that key has no Workspace to be
+        // composite over -- so this is where a manifest naming another Workspace's completion is
+        // caught.
+        verified_completion_within(connection, workspace_id, &manifest.completion.digest.value)
+            .map_err(|_| ManifestStoreRefusal::CandidateNotAccounted {
+                reason: "the completion this manifest names does not verify in its Workspace",
+            })?;
+
+        let candidate_digest = stored.candidate_artifact_digest();
+        let candidate =
+            crate::artifact::verified_artifact_within(connection, workspace_id, candidate_digest)
+                .map_err(|_| ManifestStoreRefusal::CandidateNotAccounted {
+                    reason: "the candidate Artifact does not verify against its own bytes",
+                })?
+                .ok_or(ManifestStoreRefusal::CandidateNotAccounted {
+                    reason: "no candidate Artifact in this Workspace carries that digest",
+                })?;
+
+        // Exactly one `artifact.recorded` Event names it, in this Workspace, and it is the cursor
+        // the Artifact itself carries. One is the count: none is an unaccounted row, and two would
+        // make "where this entered the ledger" a question with two answers.
+        let mut statement = connection
+            .prepare(
+                "SELECT count(*) FROM events
+                 WHERE workspace_id = ?1 AND kind = 'artifact.recorded'
+                   AND json_extract(payload_json, '$.artifact.digest.value') = ?2",
+            )
+            .map_err(store_error)?;
+        let events: i64 = statement
+            .query_row(params![workspace_id.to_string(), candidate_digest], |row| {
+                row.get(0)
+            })
+            .map_err(store_error)?;
+        drop(statement);
+        if events != 1 {
+            return Err(ManifestStoreRefusal::CandidateNotAccounted {
+                reason: "the candidate Artifact is not named by exactly one artifact.recorded event",
+            });
+        }
+
+        // ...and the Artifact is THIS manifest's document, not merely some Artifact the log
+        // happens to reach. Every field here lives inside the Artifact's canonical bytes, so none
+        // of it is a projection and none of it needs a re-render.
+        let payload = candidate.payload();
+        if payload.kind != ArtifactKind::OutcomeDocument {
+            return Err(ManifestStoreRefusal::CandidateNotAccounted {
+                reason: "the candidate Artifact is not an Outcome Document",
+            });
+        }
+        match payload.context {
+            ArtifactContext::Mission { mission_id, .. }
+                if mission_id == manifest.mission.object_id => {}
+            _ => {
+                return Err(ManifestStoreRefusal::CandidateNotAccounted {
+                    reason: "the candidate Artifact is not scoped to this manifest's Mission",
+                });
+            }
+        }
+        if payload.accountable_resident_id != manifest.accountable_resident_id {
+            return Err(ManifestStoreRefusal::CandidateNotAccounted {
+                reason: "the candidate Artifact's accountable Resident is not the manifest's",
+            });
+        }
+    }
     Ok(())
 }
