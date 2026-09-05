@@ -15,23 +15,23 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use beacond::{
-    AccessOrigin, AppendixMode, AppendixRequest, AutonomyProfile, BeaconCapability,
-    COMPLETION_CANONICALIZER, ClassificationActor, ClassificationBasis, ClassificationSupersedes,
-    CompletionActor, CompletionDisposition, CompletionSupersedes, ConditionOutcome,
-    ConditionResult, ConditionResultRecord, ImpactLevel, LocalModelActivationService,
-    LocalModelEndpoint, MISSION_IMPACT_CANONICALIZER, ManifestStoreRefusal, MissionCompletionV1,
-    MissionDraft, MissionImpactClassificationV1, MissionImpactService, MissionMemberDraft,
-    MissionService, OperatorAccountService, OperatorSessionPhase, OutcomeManifestV1,
-    OutcomeService, OutcomeState, PolicyRevisionRef, PrepareRefusal, ProjectCharterDraft,
-    ProjectDraft, ProjectPolicyDraft, ProjectPolicyService, ProjectService, ProviderFeature,
-    ResidentConfigurationService, ResidentLifecycleService, SecretString, SourceDigest, SourceKind,
-    SourceRef, SpendReference, StarterOrganizationService, StarterResidentDraft, StarterRole,
-    StartupConfig, SuccessCondition, Supervisor, TeamDraft, TeamLeadAmbiguityRule,
-    TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
-    TeamService, TrackRecordEvidenceKind, TrackRecordRequirement, VerifiedSources, VerifiedText,
-    declared_conditions_digest, record_completion, render, verified_manifest_within,
+    AccessOrigin, AppendixMode, AppendixRequest, ArtifactContext, ArtifactKind, ArtifactService,
+    AutonomyProfile, BeaconCapability, COMPLETION_CANONICALIZER, ClassificationActor,
+    ClassificationBasis, ClassificationSupersedes, CompletionActor, CompletionDisposition,
+    CompletionSupersedes, ConditionOutcome, ConditionResult, ConditionResultRecord, ImpactLevel,
+    LocalModelActivationService, LocalModelEndpoint, MISSION_IMPACT_CANONICALIZER,
+    ManifestStoreRefusal, MissionCompletionV1, MissionDraft, MissionImpactClassificationV1,
+    MissionImpactService, MissionMemberDraft, MissionService, OperatorAccountService,
+    OperatorSessionPhase, OutcomeManifestV1, OutcomeService, OutcomeState, PolicyRevisionRef,
+    PrepareRefusal, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService,
+    ProjectService, ProviderFeature, ResidentConfigurationService, ResidentLifecycleService,
+    SecretString, SourceDigest, SourceKind, SourceRef, SpendReference, StarterOrganizationService,
+    StarterResidentDraft, StarterRole, StartupConfig, SuccessCondition, Supervisor, TeamDraft,
+    TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy,
+    TeamMemberDraft, TeamService, TrackRecordEvidenceKind, TrackRecordRequirement, VerifiedSources,
+    VerifiedText, declared_conditions_digest, record_completion, render, verified_manifest_within,
 };
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
 const CONDITION_TEXT: &str = "Relevant gates pass";
@@ -375,6 +375,10 @@ impl Fixture {
             classification.version,
             recorded.digest().value.clone(),
         )
+    }
+
+    fn artifacts(&self) -> ArtifactService {
+        ArtifactService::new(Arc::clone(&self.accounts), self.workspace_id)
     }
 
     fn restart(&self) {
@@ -1235,6 +1239,192 @@ fn the_manifests_reference_identity_is_derived_from_its_content_identity() {
         .decode(candidate.manifest_digest.as_bytes())
         .unwrap();
     assert_eq!(candidate.manifest_id.as_bytes(), &digest_head[..16]);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The startup pass (R18.7)
+// ---------------------------------------------------------------------------------------------
+
+/// Inserts one manifest row directly, behind the ledger, naming `candidate` as its candidate.
+///
+/// Every column is self-consistent: the bytes hash to the digest, the projections repeat what the
+/// bytes say, and every foreign key is satisfied. No write path produces this row -- which is the
+/// point, because a store that only re-proves on READ answers for it as though `prepare` had made
+/// it.
+fn insert_manifest_behind_the_ledger(
+    fixture: &Fixture,
+    manifest: &OutcomeManifestV1,
+    candidate_artifact_digest: &str,
+) -> String {
+    let bytes = manifest.canonical_bytes().unwrap();
+    let digest = data_encoding::HEXLOWER.encode(&sha2_256(&bytes));
+    let manifest_id = beacond::manifest_reference_id(&digest).unwrap();
+    fixture
+        .store
+        .connect()
+        .execute(
+            "INSERT INTO outcome_manifests (
+                 workspace_id, digest_algorithm, digest_canonicalizer, manifest_digest,
+                 canonical_bytes, manifest_id, mission_id, completion_digest,
+                 canonicalizer_version, renderer_version, boundary_event_seq,
+                 candidate_artifact_digest
+             ) VALUES (?1, 'sha256', 'beacon.outcome.manifest.v1', ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                       ?9, ?10)",
+            params![
+                fixture.workspace_id.to_string(),
+                digest,
+                bytes,
+                manifest_id.to_string(),
+                manifest.mission.object_id.to_string(),
+                manifest.completion.digest.value.as_str(),
+                manifest.canonicalizer_version.as_str(),
+                manifest.renderer_version.as_str(),
+                i64::try_from(manifest.boundary_event_seq).unwrap(),
+                candidate_artifact_digest,
+            ],
+        )
+        .unwrap();
+    digest
+}
+
+#[test]
+fn an_outcome_manifest_no_artifact_event_reaches_refuses_startup() {
+    let (fixture, manifest, sources) = ordinary("orphan");
+    let real = fixture.outcomes.prepare(&manifest, &sources).unwrap();
+
+    // A REAL, ledger-accounted Artifact -- recorded through the service, so it has its own
+    // `artifact.recorded` Event and satisfies every foreign key -- but Workspace-scoped, and so
+    // not the Outcome Document of this manifest's Mission by this manifest's accountable Resident.
+    // The manifest row below claims it anyway.
+    let unrelated = fixture
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            b"# Not this Mission's outcome\n",
+            ArtifactContext::None,
+            fixture.resident_id,
+            fixture.configuration_id,
+            None,
+        )
+        .unwrap();
+    let orphan_manifest = OutcomeManifestV1 {
+        appendix_request: AppendixRequest::Include,
+        ..manifest.clone()
+    };
+    let orphan =
+        insert_manifest_behind_the_ledger(&fixture, &orphan_manifest, &unrelated.digest().value);
+    assert_ne!(orphan, real.manifest_digest);
+
+    // It reads clean: that is exactly the gap. Re-proving on every read cannot tell a row the
+    // ledger accounts for from one inserted behind it.
+    fixture
+        .outcomes
+        .manifest(&orphan)
+        .expect("the orphan row reads clean through the verified reader");
+
+    // And every foreign key is satisfied, so whatever refuses this row below, it is not the
+    // schema. Measured before the fix: `foreign_key_violations: 0, status: Ready`.
+    assert_eq!(
+        fixture
+            .store
+            .connect()
+            .query_row("PRAGMA foreign_key_check", [], |row| row
+                .get::<_, String>(0))
+            .optional()
+            .unwrap(),
+        None,
+        "the arrangement leans on a foreign key rather than on the startup pass"
+    );
+
+    let refusal = Supervisor::bootstrap(StartupConfig {
+        store_path: fixture.store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .expect_err("startup accepted a manifest the ledger does not account for");
+    assert!(
+        format!("{refusal:?}").contains("OutcomeManifestStateMismatch"),
+        "the orphan was not refused by name: {refusal:?}"
+    );
+}
+
+#[test]
+fn a_manifest_cannot_exist_without_its_candidate() {
+    // R18.6 rules that a prepared manifest is positioned by its candidate Artifact's
+    // `artifact.recorded` Event rather than by an `outcome.prepared` kind of its own, and revisits
+    // that only if a manifest can ever exist without a candidate. It cannot, and this is the test
+    // that says so: the column is NOT NULL, and the foreign key requires a real Artifact in the
+    // same Workspace.
+    let (fixture, manifest, sources) = ordinary("no-candidate");
+    fixture.outcomes.prepare(&manifest, &sources).unwrap();
+    let orphan_manifest = OutcomeManifestV1 {
+        appendix_request: AppendixRequest::Include,
+        ..manifest
+    };
+    let bytes = orphan_manifest.canonical_bytes().unwrap();
+    let digest = data_encoding::HEXLOWER.encode(&sha2_256(&bytes));
+    let manifest_id = beacond::manifest_reference_id(&digest).unwrap();
+
+    for (label, candidate) in [
+        ("absent", None),
+        ("naming no Artifact", Some("cc".repeat(32))),
+    ] {
+        let connection = fixture.store.connect();
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .unwrap();
+        let error = connection
+            .execute(
+                "INSERT INTO outcome_manifests (
+                     workspace_id, digest_algorithm, digest_canonicalizer, manifest_digest,
+                     canonical_bytes, manifest_id, mission_id, completion_digest,
+                     canonicalizer_version, renderer_version, boundary_event_seq,
+                     candidate_artifact_digest
+                 ) VALUES (?1, 'sha256', 'beacon.outcome.manifest.v1', ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                           ?9, ?10)",
+                params![
+                    fixture.workspace_id.to_string(),
+                    digest,
+                    bytes,
+                    manifest_id.to_string(),
+                    orphan_manifest.mission.object_id.to_string(),
+                    orphan_manifest.completion.digest.value.as_str(),
+                    orphan_manifest.canonicalizer_version.as_str(),
+                    orphan_manifest.renderer_version.as_str(),
+                    i64::try_from(orphan_manifest.boundary_event_seq).unwrap(),
+                    candidate,
+                ],
+            )
+            .expect_err("a manifest with a candidate {label} was stored");
+        let error = error.to_string();
+        assert!(
+            error.contains("NOT NULL") || error.contains("FOREIGN KEY"),
+            "a candidate {label} was refused for the wrong reason: {error}"
+        );
+    }
+}
+
+#[test]
+fn a_prepared_manifest_still_reopens_after_the_startup_pass() {
+    let (fixture, manifest, sources) = ordinary("startup-positive");
+    let candidate = fixture.outcomes.prepare(&manifest, &sources).unwrap();
+    // The positive control: the pass must not refuse the row `prepare` actually made, and the
+    // record must still read back as itself afterwards.
+    fixture.restart();
+    let accounts = Arc::new(OperatorAccountService::open(&fixture.store.path).unwrap());
+    assert_eq!(
+        accounts
+            .authenticate_password(
+                SecretString::new("a long local passphrase".to_owned()),
+                AccessOrigin::SameMachine,
+            )
+            .expect("the store unlocks")
+            .phase,
+        OperatorSessionPhase::Unlocked
+    );
+    let stored = OutcomeService::new(accounts, fixture.workspace_id)
+        .manifest(&candidate.manifest_digest)
+        .expect("the prepared manifest still reads after the startup pass");
+    assert_eq!(stored.manifest(), &manifest);
 }
 
 fn sha2_256(bytes: &[u8]) -> [u8; 32] {
