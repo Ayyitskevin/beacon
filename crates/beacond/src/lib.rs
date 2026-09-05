@@ -31,6 +31,7 @@ mod operator_account;
 mod outcome;
 mod outcome_assembler;
 mod outcome_collector;
+mod outcome_pdf;
 mod outcome_publication;
 mod outcome_store;
 mod outcome_typst;
@@ -152,6 +153,7 @@ pub use outcome_collector::{
     CollectionRequest, Collector, CollectorRefusal, OUTCOME_RECEIPT_CHECKSUM_LABEL, SpendAmount,
     SpendCompleteness, positionable_sources,
 };
+pub use outcome_pdf::{BEACON_OUTCOME_1, EmbeddedFace, PdfProfile, PdfRefusal, render_pdf};
 pub use outcome_publication::{
     Provenance, PublishRefusal, PublishedOutcome, SupersessionAtReadTime,
 };
