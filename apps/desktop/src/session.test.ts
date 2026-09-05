@@ -1421,3 +1421,69 @@ describe("desktop session transport", () => {
     expect(verbatimFailure({})).toBe("no reason was reported");
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// R42 slice 1, commit 4: the refusal copy an Operator reads is closed and truthful.
+//
+// Top-level rather than inside a describe block, so the anchored `-t` name a reviewer runs has no
+// prefix ambiguity. JavaScript has no Debug/source contract to retain anything in: the input value
+// stays with its caller, and what is asserted here is that the formatter ignores its arbitrary
+// text entirely.
+// ---------------------------------------------------------------------------------------------
+it("R42S1 desktop refusal copy is closed and truthful", () => {
+  const NEEDLE = "R42S1_PRIVATE_A";
+  const marker = `${NEEDLE}|column=private_column|path=/home/example-user/private.txt`;
+  const NEUTRAL = "Beacon could not complete that local request.";
+
+  // Whole strings, never "does it lack the word account": two wrong sentences can both lack it.
+  const check = (label: string, input: unknown, expected: string) => {
+    const actual = describeLocalAccountError(input);
+    expect(actual, `${label}.MESSAGE`).toBe(expected);
+    expect(actual.includes(NEEDLE), `${label}.NO_NEEDLE`).toBe(false);
+  };
+
+  // A non-object input first: the branch that used to name the account service for a value it
+  // had not even looked at.
+  for (const input of [marker, null, undefined, false, 17, [marker]]) {
+    check("R42S1.DESKTOP.NON_OBJECT", input, NEUTRAL);
+  }
+
+  // Then an unknown code -- including a code that IS the marker.
+  for (const input of [{ code: "future_error", message: marker }, {}, { code: marker }]) {
+    check("R42S1.DESKTOP.UNKNOWN_CODE", input, NEUTRAL);
+  }
+
+  // The new desktop-only code takes the same neutral default, so it needs no redundant case.
+  check(
+    "R42S1.DESKTOP.LOCAL_REQUEST",
+    { code: "local_request_failed", message: marker, retryAfterMs: 9_000 },
+    NEUTRAL,
+  );
+
+  // The authentic account failure keeps its meaning, which is the whole point of the split.
+  check(
+    "R42S1.DESKTOP.ACCOUNT_SERVICE",
+    { code: "account_service_unavailable", message: marker },
+    "The local account service is unavailable.",
+  );
+
+  // R29.6: absence and unverifiability stay DIFFERENT sentences. A blanket generic message would
+  // pass every assertion above and quietly delete this distinction.
+  check(
+    "R42S1.DESKTOP.OUTCOME_ABSENT",
+    { code: "outcome_absent", message: marker },
+    "This Mission has no published Outcome Document.",
+  );
+  check(
+    "R42S1.DESKTOP.OUTCOME_UNVERIFIED",
+    { code: "outcome_unverified", message: marker },
+    "Beacon could not verify this Mission's Outcome Document.",
+  );
+
+  // The one input whose approved context reaches the reader.
+  check(
+    "R42S1.DESKTOP.THROTTLE",
+    { code: "authentication_throttled", retryAfterMs: 1_001, message: marker },
+    "Wait 2 seconds before trying again.",
+  );
+});
