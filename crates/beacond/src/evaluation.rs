@@ -526,6 +526,8 @@ pub enum InconsistentEvaluation {
     SupersedesOtherSubject,
     NotTheCurrentTail,
     EvaluatedBeforeTail,
+    /// The subject entered the ledger at or after the Evaluation that judges it (astra's S4).
+    SubjectEnteredAfterTheEvaluation,
     SupersessionDisagreesWithBytes,
     FindingsDisagreeWithBytes,
     CitedRunsDisagreeWithBytes,
@@ -534,6 +536,9 @@ pub enum InconsistentEvaluation {
 impl fmt::Display for InconsistentEvaluation {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
+            Self::SubjectEnteredAfterTheEvaluation => {
+                "the subject entered the ledger at or after the Evaluation that judges it"
+            }
             Self::ProposalNotFound => "no stored Proposal has that digest in this Workspace",
             Self::DigestMismatch => "the stored digest is not the hash of the stored bytes",
             Self::BytesNotCanonical => "the stored bytes are not what re-encoding produces",
@@ -1415,6 +1420,23 @@ fn verified_evaluation(
         ));
     }
 
+    // The subject existed BEFORE the judgement of it. Nothing checked the order, so astra swapped
+    // the two Events' sequences, moved the Artifact's cursor to match its new position, and got an
+    // Evaluation of a subject that entered the ledger after it -- `Ready` at startup, `Ok` from the
+    // reader, `Ok` from candidacy.
+    //
+    // Both positions come from the Event that CARRIES each record's bytes, never one that merely
+    // names its digest: that is lane 2's #8 lesson, and a forged Event can name a digest it never
+    // held but cannot carry bytes a reader just proved. The Artifact's cursor is re-derived by its
+    // owning reader against its own Event; this Evaluation's is located here the same way.
+    if let Some(subject_seq) = facts.subject_creation_event_seq {
+        let evaluation_seq = evaluation_event_sequence(connection, workspace_id, &row)?;
+        if subject_seq >= evaluation_seq {
+            return Err(EvaluationError::Inconsistent(
+                InconsistentEvaluation::SubjectEnteredAfterTheEvaluation,
+            ));
+        }
+    }
     let force = match &facts.proposal_bindings {
         Some(bindings) => derive_force(connection, workspace_id, &row, bindings)?,
         None => EvaluationForce {
@@ -1885,11 +1907,51 @@ struct SubjectFacts {
     /// the record carries no Charter, Policy, Repository or base revision, so there is nothing that
     /// could have moved under it. `None` here is that fact, not a missing lookup.
     proposal_bindings: Option<crate::proposal::ProposalBindingFacts>,
+    /// Where the subject entered the ledger, for the arm that has a cursor.
+    ///
+    /// `Some` for an Artifact subject, whose owning reader re-derives this against the subject's
+    /// own `artifact.recorded` Event on every read. `None` for a Proposal, which carries no such
+    /// cursor -- so the ordering check below applies to the Artifact arm and says so, rather than
+    /// pretending to cover both.
+    subject_creation_event_seq: Option<u64>,
 }
 
 /// The same four facts, for a subject already recorded: the read path knows the arm from the bytes
 /// rather than from a caller. One function would need two shapes of input; two functions that share
 /// `SubjectFacts` keep the comparison identical on both sides.
+/// Where this Evaluation entered the ledger, from the Event that carries its exact bytes.
+///
+/// Exactly one such Event. None means the record is not accounted for by the log; two would make
+/// "when was this recorded" a question with two answers. Keying on the bytes rather than on the
+/// digest alone is the #8 rule: an Event that carries the bytes is the Event that recorded them.
+fn evaluation_event_sequence(
+    connection: &Connection,
+    workspace_id: Uuid,
+    row: &StoredRow,
+) -> Result<u64, EvaluationError> {
+    let mut statement = connection.prepare(
+        "SELECT sequence FROM events
+         WHERE workspace_id = ?1 AND kind = 'evaluation.recorded'
+           AND json_extract(payload_json, '$.evaluation.digest.value') = ?2
+           AND json_extract(payload_json, '$.evaluation.canonical_bytes_base64') = ?3",
+    )?;
+    let sequences: Vec<i64> = statement
+        .query_map(
+            params![
+                workspace_id.to_string(),
+                row.digest_value.as_str(),
+                BASE64.encode(&row.canonical_bytes)
+            ],
+            |row| row.get(0),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    let [sequence] = sequences.as_slice() else {
+        return Err(EvaluationError::InvalidStore);
+    };
+    u64::try_from(*sequence).map_err(|_| EvaluationError::InvalidStore)
+}
+
 fn subject_facts_for_read(
     connection: &Connection,
     workspace_id: Uuid,
@@ -1925,6 +1987,7 @@ fn subject_facts(
                 mission_id: facts.mission_id,
                 author_resident_id: facts.author_resident_id,
                 proposal_bindings: Some(facts),
+                subject_creation_event_seq: None,
             })
         }
         EvaluationSubjectDraft::Artifact(digest) => {
@@ -1958,6 +2021,7 @@ fn subject_facts(
                 mission_id,
                 author_resident_id: record.payload().accountable_resident_id,
                 proposal_bindings: None,
+                subject_creation_event_seq: Some(record.creation_event_seq()),
             })
         }
     }
