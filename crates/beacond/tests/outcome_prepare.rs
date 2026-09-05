@@ -6545,7 +6545,10 @@ fn a_mission_in_another_workspace_exports_as_absent_so_existence_is_not_confirme
     let refusal = elsewhere
         .export_markdown(fixture.mission_id)
         .expect_err("another Workspace exported this Mission's document");
-    assert!(matches!(refusal, PublishRefusal::Absent), "{refusal:?}");
+    assert!(
+        matches!(refusal, PublishRefusal::Absent),
+        "R42S1.OPACITY.EXPORT.FOREIGN_VARIANT: {refusal:?}"
+    );
 
     // The SAME answer a Mission with no publication gives, which is the point: the two are not
     // distinguishable, so the refusal confirms nothing.
@@ -6553,8 +6556,28 @@ fn a_mission_in_another_workspace_exports_as_absent_so_existence_is_not_confirme
     let never = fixture_outcomes(&unpublished)
         .export_markdown(unpublished.mission_id)
         .expect_err("an unpublished Mission exported");
-    assert!(matches!(never, PublishRefusal::Absent), "{never:?}");
-    assert_eq!(format!("{refusal}"), format!("{never}"));
+    assert!(
+        matches!(never, PublishRefusal::Absent),
+        "R42S1.OPACITY.EXPORT.UNPUBLISHED_VARIANT: {never:?}"
+    );
+
+    // R42: each line against the independently written expected text BEFORE they are compared to
+    // each other. Two equally wrong strings are equal too, and equality alone would pass.
+    assert_eq!(
+        refusal.to_string(),
+        "this Mission has no published Outcome",
+        "R42S1.OPACITY.EXPORT.FOREIGN_LINE"
+    );
+    assert_eq!(
+        never.to_string(),
+        "this Mission has no published Outcome",
+        "R42S1.OPACITY.EXPORT.UNPUBLISHED_LINE"
+    );
+    assert_eq!(
+        format!("{refusal}"),
+        format!("{never}"),
+        "R42S1.OPACITY.EXPORT.SAME_LINE"
+    );
 
     // And the history is empty rather than a refusal, for the same reason.
     assert!(
@@ -7543,18 +7566,40 @@ fn a_mission_in_another_workspace_renders_no_pdf_and_says_only_absent() {
     let refusal = elsewhere
         .render_pdf_version(fixture.mission_id, 1)
         .expect_err("another Workspace rendered this Mission's document");
-    assert!(matches!(refusal, PublishRefusal::Absent), "{refusal:?}");
+    assert!(
+        matches!(refusal, PublishRefusal::Absent),
+        "R42S1.OPACITY.PDF.FOREIGN_VARIANT: {refusal:?}"
+    );
 
     // Indistinguishable from a Mission that simply has no publication, which is why the refusal
     // confirms nothing about what the other Workspace holds (R29.6).
     let unpublished = admitted_mission("pdf-service-cross-workspace-unpublished");
-    assert!(matches!(
-        unpublished
-            .outcomes
-            .render_pdf_version(unpublished.mission_id, 1)
-            .expect_err("an unpublished Mission rendered"),
-        PublishRefusal::Absent
-    ));
+    let never = unpublished
+        .outcomes
+        .render_pdf_version(unpublished.mission_id, 1)
+        .expect_err("an unpublished Mission rendered");
+    assert!(
+        matches!(never, PublishRefusal::Absent),
+        "R42S1.OPACITY.PDF.UNPUBLISHED_VARIANT: {never:?}"
+    );
+
+    // R42: the refusal is kept rather than consumed inside `matches!`, so both lines can be held
+    // to the expected text before they are held to each other.
+    assert_eq!(
+        refusal.to_string(),
+        "this Mission has no published Outcome",
+        "R42S1.OPACITY.PDF.FOREIGN_LINE"
+    );
+    assert_eq!(
+        never.to_string(),
+        "this Mission has no published Outcome",
+        "R42S1.OPACITY.PDF.UNPUBLISHED_LINE"
+    );
+    assert_eq!(
+        format!("{refusal}"),
+        format!("{never}"),
+        "R42S1.OPACITY.PDF.SAME_LINE"
+    );
 }
 
 #[test]
