@@ -1833,6 +1833,8 @@ mod scope_tests {
             Ok(CollectedSupport::Evaluation(CollectedDigest {
                 kind: SourceKind::Evaluation,
                 workspace_id: Uuid::nil(),
+                digest_algorithm: String::new(),
+                digest_canonicalizer: String::new(),
                 digest_value: String::new(),
             }))
         };
@@ -1871,6 +1873,8 @@ mod scope_tests {
             Ok(CollectedSupport::Evaluation(CollectedDigest {
                 kind: SourceKind::Evaluation,
                 workspace_id: Uuid::nil(),
+                digest_algorithm: String::new(),
+                digest_canonicalizer: String::new(),
                 digest_value: String::new(),
             }))
         })
