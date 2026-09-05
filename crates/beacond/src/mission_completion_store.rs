@@ -486,7 +486,11 @@ fn verified_completion_on_path(
     // 6. The boundary: at or after the Mission's admission, and strictly before this completion's
     //    own Event. Two invariants, two scenarios -- a backdated boundary, and a record that claims
     //    a cut at or after the moment it was itself written.
-    let admitted: i64 = connection
+    // `min` over no rows is NULL, not an error, and a NULL read into an `i64` was the driver
+    // error R21.4 names. Read it as the absence it is, and refuse it by name: a Mission with no
+    // admission Event is a corrupt store, and "corrupt" is a fact this reader states, not a
+    // message it lets a caller parse out of `Store(..)`.
+    let admitted: Option<i64> = connection
         .query_row(
             "SELECT min(sequence) FROM events
              WHERE workspace_id = ?1 AND kind = 'mission.admitted'
@@ -495,6 +499,9 @@ fn verified_completion_on_path(
             |row| row.get(0),
         )
         .map_err(store)?;
+    let Some(admitted) = admitted else {
+        return Err(CompletionReadRefusal::MissionNotAdmitted);
+    };
     let completed: Option<i64> = connection
         .query_row(
             "SELECT sequence FROM events
