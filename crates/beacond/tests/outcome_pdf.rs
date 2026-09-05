@@ -154,18 +154,51 @@ fn helper_child_render() {
     std::fs::write(path, render(&fixture(), DIGEST, &BEACON_OUTCOME_1)).unwrap();
 }
 
-/// Two renders in two SEPARATE PROCESSES.
+/// Seconds since the epoch, for [`two_renders_of_one_document_are_byte_identical`]'s tick wait.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the host clock is after the Unix epoch")
+        .as_secs()
+}
+
+/// Two renders in two SEPARATE PROCESSES, **on two different wall-clock seconds**.
 ///
-/// Two calls in one process would miss anything seeded once per process -- a hash seed, a
-/// per-process counter, an address that reaches the bytes. The child is this same test binary
-/// (`current_exe`) run twice with `--exact helper_child_render` and an output path in the
+/// Separate processes because two calls in one would miss anything seeded once per process -- a
+/// hash seed, a per-process counter, an address that reaches the bytes. The child is this same
+/// test binary (`current_exe`) run with `--exact helper_child_render` and an output path in the
 /// environment, so the two renders share no memory at all.
+///
+/// # Why it waits for the second to tick
+///
+/// blue's probe (`D-blue-confirm-s4b.md`): with the clock deliberately let in
+/// (`timestamp: Some(now)` and `date: auto`), this bar was GREEN 5 runs out of 5. The two children
+/// run about 0.4 s apart, so they almost always fall inside the same wall-clock second and a
+/// second-resolution clock leak produces identical bytes. A bar that only fails when the scheduler
+/// happens to straddle a second is the false-green shape this suite exists to avoid, and the
+/// report named this bar as *the* clock bar, which made the claim worse than the gap.
+///
+/// So the parent waits for the second to change between the two children. The wait is bounded by
+/// construction -- the second always ticks, so it is under 1 s -- and it makes a second-resolution
+/// leak RED on every run rather than on a lucky one.
+///
+/// A faked clock would be the other way to force disagreement, and it is not available: `faketime`
+/// is a new tool, and injecting a time seam into `render_pdf` would add a knob to the product for
+/// a test's benefit -- the exact shape of guard this fleet has been bitten by, where the thing
+/// under test supplies the value that constrains it. Waiting costs one second and adds nothing to
+/// the product.
 #[test]
 fn two_renders_of_one_document_are_byte_identical() {
     let directory = std::env::temp_dir().join(format!("beacon-pdf-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&directory).unwrap();
     let mut written = Vec::new();
     for run in ["a", "b"] {
+        if run == "b" {
+            let second = now_secs();
+            while now_secs() == second {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
         let path = directory.join(format!("{run}.pdf"));
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "helper_child_render", "--nocapture"])
