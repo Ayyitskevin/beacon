@@ -2711,3 +2711,75 @@ fn collector_refuses_a_classification_for_a_different_mission_than_the_completio
     );
 }
 
+
+#[test]
+fn collector_refuses_a_spend_record_for_a_different_mission_than_the_completion() {
+    let fixture = admitted("spend-cross-mission", vec!["Gates pass".to_owned()]);
+    let other_mission = Uuid::new_v4();
+    let connection = fixture.connection();
+    connection
+        .execute(
+            "INSERT INTO missions SELECT ?1, workspace_id, project_id, charter_revision, team_id,
+                    desired_outcome, success_conditions_json, constraints_json, prohibitions_json,
+                    lifecycle, admitted_by, admitted_at_ms
+               FROM missions WHERE id = ?2",
+            params![other_mission.to_string(), fixture.mission.id.to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO mission_admission_members
+               SELECT workspace_id, ?1, team_id, position, resident_id, configuration_id
+               FROM mission_admission_members WHERE mission_id = ?2",
+            params![other_mission.to_string(), fixture.mission.id.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+
+    let spend = MeasuredSpendV1 {
+        workspace_id: fixture.store.workspace_id,
+        mission_id: other_mission,
+        spend_id: Uuid::new_v4(),
+        version: 1,
+        origin: SpendOrigin::DaemonLedger,
+        measured_at_ms: 1_788_400_000_000,
+        coverage_from_event_seq: 1,
+        coverage_to_event_seq: newest_event(&fixture.store),
+        measurement: SpendMeasurement::Measured(SpendTotals {
+            counted_units: 1,
+            lines: vec![SpendLine {
+                unit: "USD".to_owned(),
+                amount_minor: 100,
+                minor_units_exponent: 2,
+            }],
+        }),
+        supersedes: SpendSupersedes::None,
+    };
+    MeasuredSpendService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+        .record(&spend.canonical_bytes().unwrap())
+        .unwrap();
+
+    let boundary = newest_event(&fixture.store);
+    let completion = fixture.completion(
+        boundary,
+        vec![ConditionOutcome::Met],
+        SpendReference::Recorded {
+            spend_id: spend.spend_id,
+            spend_version: spend.version,
+            spend_sha256: sha256_bytes(&spend.canonical_bytes().unwrap()),
+        },
+    );
+    let completion_digest = fixture.record(&completion);
+    let connection = fixture.connection();
+    let result = Collector::new(&connection, fixture.store.workspace_id).collect(
+        &CollectionRequest {
+            completion_digest: Some(completion_digest),
+            ..CollectionRequest::default()
+        },
+    );
+    assert!(
+        result.is_err(),
+        "collector joined Mission A's completion to Mission B's spend: {result:?}",
+    );
+}
+
