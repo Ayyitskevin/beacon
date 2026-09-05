@@ -2005,10 +2005,6 @@ pub(crate) fn verify_ruling_event(
 // Error mapping
 // ---------------------------------------------------------------------------------------------
 
-fn parse_uuid(value: &str) -> Result<Uuid, RulingError> {
-    Uuid::parse_str(value).map_err(|_| RulingError::InvalidStore)
-}
-
 fn positive_u32(value: i64) -> Result<u32, RulingError> {
     let value = u32::try_from(value).map_err(|_| RulingError::InvalidStore)?;
     if value == 0 {

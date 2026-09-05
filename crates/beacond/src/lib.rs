@@ -392,7 +392,15 @@ pub enum SupervisorError {
     ProjectPolicyEventMismatch(i64),
     ProjectPolicyStateMismatch,
     ProjectRepositoryEventMismatch(i64),
-    ProjectRepositoryStateMismatch,
+    /// A Project's repository history does not re-prove against its own records.
+    ///
+    /// Names the row and carries the owning reader's own error (R28.1). No `Totals` twin: this
+    /// pass has no whole-store count.
+    ProjectRepositoryStateMismatch {
+        workspace_id: Uuid,
+        project_id: Uuid,
+        cause: project_repository::ProjectRepositoryError,
+    },
     SampleProjectEventMismatch(i64),
     SampleProjectStateMismatch,
     RunEventMismatch(i64),
@@ -578,6 +586,7 @@ pub enum StartupPass {
     Artifact,
     Ruling,
     Candidate,
+    ProjectRepository,
 }
 
 impl StartupPass {
@@ -595,6 +604,7 @@ impl StartupPass {
             Self::Artifact => "Artifact",
             Self::Candidate => "Candidate",
             Self::Ruling => "Ruling",
+            Self::ProjectRepository => "ProjectRepository",
         }
     }
 }
@@ -754,12 +764,17 @@ impl fmt::Display for SupervisorError {
                 formatter,
                 "Event sequence {sequence} does not match Project Repository state"
             ),
-            Self::ProjectRepositoryStateMismatch => {
-                write!(
-                    formatter,
-                    "Project Repository state has no exact audit Event"
-                )
-            }
+            // R28.4: the key and the fault's NAME.
+            Self::ProjectRepositoryStateMismatch {
+                workspace_id,
+                project_id,
+                cause,
+            } => write!(
+                formatter,
+                "the repository history of Project {project_id} in Workspace {workspace_id} does \
+                 not re-prove: {}",
+                cause.name()
+            ),
             Self::SampleProjectEventMismatch(sequence) => write!(
                 formatter,
                 "Event sequence {sequence} does not match Sample Project installation state"
@@ -1780,8 +1795,32 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     project::verify_project_state(connection).map_err(map_project_state_fault)?;
     project_policy::verify_project_policy_state(connection)
         .map_err(|_| SupervisorError::ProjectPolicyStateMismatch)?;
-    project_repository::verify_project_repository_state(connection)
-        .map_err(|_| SupervisorError::ProjectRepositoryStateMismatch)?;
+    project_repository::verify_project_repository_state(connection).map_err(
+        |fault| match fault {
+            project_repository::ProjectRepositoryStateFault::Store(source) => {
+                SupervisorError::StartupEnumerationFailed {
+                    pass: StartupPass::ProjectRepository,
+                    source,
+                }
+            }
+            project_repository::ProjectRepositoryStateFault::Row {
+                workspace_id,
+                project_id,
+                cause,
+            } => SupervisorError::ProjectRepositoryStateMismatch {
+                workspace_id,
+                project_id,
+                cause,
+            },
+            project_repository::ProjectRepositoryStateFault::Identity {
+                workspace_id,
+                project_id,
+            } => SupervisorError::StoredIdentityUnreadable {
+                what: "a Project repository row's identity is not readable",
+                raw: format!("Workspace {workspace_id}, Project {project_id}"),
+            },
+        },
+    )?;
     sample_project::verify_sample_project_state(connection)
         .map_err(|_| SupervisorError::SampleProjectStateMismatch)?;
     proposal::verify_proposal_state(connection).map_err(|fault| match fault {

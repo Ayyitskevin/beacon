@@ -470,7 +470,10 @@ fn restart_refuses_repository_state_without_its_exact_event() {
         initial_workspace_name: "Ignored".to_owned(),
     });
     assert!(
-        matches!(result, Err(SupervisorError::ProjectRepositoryStateMismatch)),
+        matches!(
+            result,
+            Err(SupervisorError::ProjectRepositoryStateMismatch { .. })
+        ),
         "unexpected bootstrap result: {result:?}"
     );
 }
@@ -575,5 +578,92 @@ fn only_the_latest_repository_revision_can_apply_to_the_current_charter() {
     assert_eq!(
         repositories.current(project.id).unwrap().unwrap().revision,
         2
+    );
+}
+
+/// R28 tier 2 pass 6 of 14: a Project whose repository binding the log does not account for is
+/// refused at startup, and the refusal names WHICH Project.
+///
+/// R39.3's two-row shape: TWO Projects are bound and the event is deleted for the one that sorts
+/// LAST in the pass's own `ORDER BY workspace_id, project_id`, read back rather than assumed --
+/// Project ids are UUIDs, which no fixture can choose.
+#[test]
+fn startup_refuses_an_unaccounted_repository_binding_and_names_the_row() {
+    let (store, _accounts, projects, repositories) = enrolled_services("r28t2-repository-startup");
+    let first = projects.create(project_draft()).unwrap();
+    let second = projects.create(project_draft()).unwrap();
+    repositories
+        .bind(first.id, 1, None, repository_draft())
+        .unwrap();
+    repositories
+        .bind(second.id, 1, None, repository_draft())
+        .unwrap();
+
+    let connection = Connection::open(&store.path).unwrap();
+    let ordered: Vec<String> = connection
+        .prepare(
+            "SELECT DISTINCT project_id FROM project_repository_revisions
+             ORDER BY workspace_id, project_id",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        ordered.len(),
+        2,
+        "the fixture must hold two Projects: {ordered:?}"
+    );
+    let target = Uuid::parse_str(ordered.last().unwrap()).unwrap();
+
+    connection
+        .execute(
+            // Matched on the payload TEXT rather than a json path: the first draft guessed
+            // `$.repository.project_id`, deleted nothing, and the store reopened Ready -- a plant
+            // that plants nothing looks exactly like a pass that works.
+            "DELETE FROM events WHERE kind = 'project.repository_bound'
+             AND payload_json LIKE '%' || ?1 || '%'",
+            rusqlite::params![target.to_string()],
+        )
+        .unwrap();
+    let removed: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind = 'project.repository_bound'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(removed, 1, "the plant removed the wrong number of Events");
+    drop(connection);
+
+    let refusal = Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .expect_err("a store whose repository binding has no Event reopened Ready");
+    assert!(
+        matches!(
+            &refusal,
+            SupervisorError::ProjectRepositoryStateMismatch { project_id, .. }
+                if *project_id == target
+        ),
+        "refused for the wrong reason, or naming the wrong row: {refusal:?}"
+    );
+
+    // R28.4: the key and the fault's NAME (kimi's P3-2 form).
+    let line = refusal.to_string();
+    assert!(
+        line.contains(&target.to_string()),
+        "the refusal does not name the Project it refused: {line}"
+    );
+    let named = line.rsplit(": ").next().unwrap().to_owned();
+    assert!(
+        !named.contains(' ') && !named.contains('{'),
+        "the tail of the line is a rendering, not a name: {line}"
+    );
+    assert!(
+        format!("{refusal:?}").contains(&named),
+        "the named fault is not reachable through Debug: {refusal:?}"
     );
 }
