@@ -22,23 +22,24 @@ use std::thread::{self, JoinHandle};
 
 use beacond::{
     ArtifactContext, ArtifactKind, ArtifactService, AutonomyProfile, BeaconCapability,
-    ClassificationActor, ClassificationBasis, ClassificationSupersedes, CollectedUncounted,
-    CollectionRequest, Collector, CollectorRefusal, CompletionActor, CompletionDisposition,
-    ConditionOutcome, ConditionResultRecord, Conflicts, DeclaredCheck, EvaluationDraft,
-    EvaluationService, EvaluationSubjectDraft, EvaluationSupersedes, Evaluator, Finding,
-    FindingSeverity, ImpactLevel, LocalModelActivationService, LocalModelEndpoint,
-    MeasuredSpendService, MeasuredSpendV1, MissionCompletionV1, MissionDraft,
-    MissionImpactClassificationV1, MissionImpactService, MissionMemberDraft, MissionService,
-    MissionView, OUTCOME_RECEIPT_CHECKSUM_LABEL, OperatorAccountService, OperatorSessionPhase,
-    OutcomeState, PolicyRevisionRef, ProjectCharterDraft, ProjectDraft, ProjectRepositoryService,
-    ProjectService, ProjectView, ProposalService, ProviderFeature, RepositoryDraft,
-    RepositorySourceKind, ResidentConfiguration, ResidentConfigurationService,
-    ResidentLifecycleService, RubricDeclaration, RulingDecision, RulingService, RulingSupersedes,
-    SecretString, SourceKind, SpendCompleteness, SpendLine, SpendMeasurement, SpendOrigin,
-    SpendReference, SpendSupersedes, SpendTotals, StarterOrganizationService, StarterResidentDraft,
-    StarterRole, StartupConfig, Supervisor, TeamDraft, TeamMemberDraft, TeamService, TeamView,
-    UncertaintyKind, UncountedEntry, UncountedKind, UnfinishedKind, Verdict,
-    declared_conditions_digest, positionable_sources, record_completion,
+    ClassificationActor, ClassificationBasis, ClassificationSupersedes, CollectedDigest,
+    CollectedSupport, CollectedUncounted, CollectionRequest, Collector, CollectorRefusal,
+    CompletionActor, CompletionDisposition, ConditionOutcome, ConditionResultRecord, Conflicts,
+    DeclaredCheck, EvaluationDraft, EvaluationService, EvaluationSubjectDraft,
+    EvaluationSupersedes, Evaluator, Finding, FindingSeverity, ImpactLevel,
+    LocalModelActivationService, LocalModelEndpoint, MeasuredSpendService, MeasuredSpendV1,
+    MissionCompletionV1, MissionDraft, MissionImpactClassificationV1, MissionImpactService,
+    MissionMemberDraft, MissionService, MissionView, OUTCOME_RECEIPT_CHECKSUM_LABEL,
+    OperatorAccountService, OperatorSessionPhase, OutcomeState, PolicyRevisionRef,
+    ProjectCharterDraft, ProjectDraft, ProjectRepositoryService, ProjectService, ProjectView,
+    ProposalService, ProviderFeature, RepositoryDraft, RepositorySourceKind, ResidentConfiguration,
+    ResidentConfigurationService, ResidentLifecycleService, RubricDeclaration, RulingDecision,
+    RulingService, RulingSupersedes, SecretString, SourceKind, SpendCompleteness, SpendLine,
+    SpendMeasurement, SpendOrigin, SpendReference, SpendSupersedes, SpendTotals,
+    StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig, Supervisor,
+    SupportRef, TeamDraft, TeamMemberDraft, TeamService, TeamView, UncertaintyKind, UncountedEntry,
+    UncountedKind, UnfinishedKind, Verdict, declared_conditions_digest, positionable_sources,
+    record_completion,
 };
 use data_encoding::HEXLOWER;
 use rusqlite::{Connection, params};
@@ -3405,4 +3406,72 @@ fn astra_s6_unverified_evaluation_event_cannot_move_a_late_citation_before_the_c
         after.is_err(),
         "an unverified locator decoy laundered a late Evaluation into the frozen collection"
     );
+}
+
+/// R23.2: a real Evaluation cited under a condition collects as the same `CollectedDigest` the
+/// top-level citations carry -- kind, Workspace, digest -- read through its owning reader at the
+/// completion's boundary and scoped to the Mission through its subject's own bytes. The count is
+/// the list's length, not a second field.
+#[test]
+fn a_real_evaluation_cited_under_a_condition_collects_with_its_envelope() {
+    let fixture = admitted("support-evaluation", vec!["Gates pass".to_owned()]);
+    fixture.repository_revision();
+    fixture.policy_revision();
+    let proposal = ProposalService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+        .submit(&fixture.proposal_record().bytes())
+        .expect("the Proposal records");
+    let evaluator = &fixture.mission.members[1];
+    let evaluation =
+        EvaluationService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+            .record(EvaluationDraft {
+                subject: EvaluationSubjectDraft::Proposal(proposal.digest().value.clone()),
+                evaluator: Evaluator {
+                    resident_id: evaluator.resident_id,
+                    configuration_id: evaluator.admission_configuration_id,
+                },
+                rubric: RubricDeclaration {
+                    id: "security-review-v1".to_owned(),
+                    version: 1,
+                    canonicalizer: "beacon.rubric.v1".to_owned(),
+                    sha256: sha256_hex(&[0x20_u8; 32]),
+                },
+                cited_runs: Vec::new(),
+                verdict: Verdict::Meets,
+                findings: vec![],
+                conflicts: Conflicts::None,
+                rationale: "The gate passed on the exact Proposal bytes.".to_owned(),
+                supersedes: EvaluationSupersedes::None,
+            })
+            .expect("the Evaluation records");
+    let mut cited = [0_u8; 32];
+    cited.copy_from_slice(
+        &HEXLOWER
+            .decode(evaluation.digest().value.as_bytes())
+            .unwrap(),
+    );
+
+    let mut completion = fixture.completion(
+        newest_event(&fixture.store),
+        vec![ConditionOutcome::Met],
+        SpendReference::NotMeasured("no ledger was read".to_owned()),
+    );
+    completion.condition_results[0].support = vec![SupportRef::Evaluation(cited)];
+    let digest = fixture.record(&completion);
+    let connection = fixture.connection();
+    let collected = Collector::new(&connection, fixture.store.workspace_id)
+        .collect(&CollectionRequest {
+            completion_digest: Some(digest),
+            ..CollectionRequest::default()
+        })
+        .expect("a verified Evaluation under a condition collects");
+    let condition = &collected.completion.unwrap().condition_results[0];
+    assert_eq!(
+        condition.support,
+        vec![CollectedSupport::Evaluation(CollectedDigest {
+            kind: SourceKind::Evaluation,
+            workspace_id: fixture.store.workspace_id,
+            digest_value: evaluation.digest().value.clone(),
+        })]
+    );
+    assert_eq!(condition.support_count(), condition.support.len());
 }
