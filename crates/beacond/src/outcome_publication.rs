@@ -213,6 +213,11 @@ pub enum PublishRefusal {
     },
     /// The relation already holds this candidate or this Evaluation.
     AlreadyPublished,
+    /// The Mission's publication history is not contiguous from 1.
+    HistoryNotContiguous {
+        expected: u32,
+        found: u32,
+    },
     /// The qualifying Evaluation's verdict is not `meets`, read back from its own bytes.
     QualifyingVerdictNotMeets,
     /// A record the relation cites is about a different Mission than the relation row names.
@@ -262,6 +267,11 @@ impl fmt::Display for PublishRefusal {
             Self::AlreadyPublished => {
                 formatter.write_str("that candidate or Evaluation is already published")
             }
+            Self::HistoryNotContiguous { expected, found } => write!(
+                formatter,
+                "this Mission's publication history is not contiguous from 1: version {expected} \
+                 is missing and {found} versions are stored"
+            ),
             Self::QualifyingVerdictNotMeets => formatter.write_str(
                 "the Evaluation this publication cites does not carry a `meets` verdict",
             ),
@@ -617,6 +627,24 @@ fn read_publication_within(
     // Read-time state, derived now and labelled as such. The Artifact chain comes back cited-first,
     // so the cited digest is in the chain rather than replaced by it.
     let publication_version_count = count_versions(connection, workspace_id, row.mission_id)?;
+    // The history the relation PROMISES: contiguous from 1. `publish` cannot create a gap, so a gap
+    // means something else wrote the row -- and a history that begins at version 2, read back as
+    // "version 2", is a claim about a version 1 nobody can produce (sol1's P1). Count against
+    // maximum: equal means contiguous, and anything else is a hole.
+    let highest: i64 = connection
+        .query_row(
+            "SELECT coalesce(max(publication_version), 0) FROM outcome_publications
+             WHERE workspace_id = ?1 AND mission_id = ?2",
+            params![workspace_id.to_string(), row.mission_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if i64::from(publication_version_count) != highest {
+        return Err(PublishRefusal::HistoryNotContiguous {
+            expected: publication_version_count.saturating_add(1),
+            found: publication_version_count,
+        });
+    }
 
     let supersession = SupersessionAtReadTime {
         candidate: supersession_tail(connection, workspace_id, &row.candidate_artifact_digest)?,
