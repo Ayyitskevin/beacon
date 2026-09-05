@@ -410,7 +410,18 @@ pub enum SupervisorError {
     ProposalTotalsMismatch(TotalsMismatch),
     RulingEventMismatch(i64),
     EvaluationEventMismatch(i64),
-    RulingStateMismatch,
+    /// A stored Ruling does not re-prove against its own bytes or the records it cites.
+    ///
+    /// Names the row and carries the owning reader's own error (R28.1).
+    RulingStateMismatch {
+        workspace_id: Uuid,
+        digest_value: String,
+        cause: ruling::RulingError,
+    },
+    /// The Rulings do not agree with the log as a whole. No row to name.
+    RulingTotalsMismatch(TotalsMismatch),
+    /// The Ruling chains do not re-prove. Structural, so no counts.
+    RulingChainsMismatch(ruling::RulingError),
     CandidateEventMismatch(i64),
     CandidateStateMismatch,
     DispatchEventMismatch(i64),
@@ -557,6 +568,7 @@ pub enum StartupPass {
     Proposal,
     Evaluation,
     Artifact,
+    Ruling,
 }
 
 impl StartupPass {
@@ -572,6 +584,7 @@ impl StartupPass {
             Self::Proposal => "Proposal",
             Self::Evaluation => "Evaluation",
             Self::Artifact => "Artifact",
+            Self::Ruling => "Ruling",
         }
     }
 }
@@ -882,11 +895,28 @@ impl fmt::Display for SupervisorError {
                  {workspace_id} does not re-prove against the records it cites: {}",
                 cause.name()
             ),
-            Self::RulingStateMismatch => {
+            // R28.4: the key and the fault's NAME.
+            Self::RulingStateMismatch {
+                workspace_id,
+                digest_value,
+                cause,
+            } => write!(
+                formatter,
+                "Ruling {digest_value} in Workspace {workspace_id} does not re-prove \
+                 against its own bytes or the records it cites: {}",
+                cause.name()
+            ),
+            Self::RulingTotalsMismatch(totals) => {
                 write!(
                     formatter,
-                    "Ruling state does not agree with its bytes, the Proposal it binds, its \
-                     supersession chain, or its audit Event"
+                    "the Rulings do not agree with the log as a whole -- {totals}"
+                )
+            }
+            Self::RulingChainsMismatch(cause) => {
+                write!(
+                    formatter,
+                    "the Ruling chains do not re-prove: {}",
+                    cause.name()
                 )
             }
             Self::CandidateEventMismatch(sequence) => write!(
@@ -1767,7 +1797,30 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     })?;
     // After Proposal state, because every Ruling binds one and re-verifies what it copied against
     // that Proposal's own bytes.
-    ruling::verify_ruling_state(connection).map_err(|_| SupervisorError::RulingStateMismatch)?;
+    ruling::verify_ruling_state(connection).map_err(|fault| match fault {
+        ruling::RulingStateFault::Store(source) => SupervisorError::StartupEnumerationFailed {
+            pass: StartupPass::Ruling,
+            source,
+        },
+        ruling::RulingStateFault::Row {
+            workspace_id,
+            digest_value,
+            cause,
+        } => SupervisorError::RulingStateMismatch {
+            workspace_id,
+            digest_value,
+            cause,
+        },
+        ruling::RulingStateFault::Totals(totals) => SupervisorError::RulingTotalsMismatch(totals),
+        ruling::RulingStateFault::Chains(cause) => SupervisorError::RulingChainsMismatch(cause),
+        ruling::RulingStateFault::Identity {
+            workspace_id,
+            digest_value,
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "a Ruling row's Workspace is not readable",
+            raw: format!("Workspace {workspace_id}, Ruling {digest_value}"),
+        },
+    })?;
     // After Proposal state for the same reason a Ruling is: a Candidate copies one Proposal's
     // declared effects and re-verifies them against that Proposal's own bytes.
     candidate::verify_candidate_state(connection)
