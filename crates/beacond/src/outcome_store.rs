@@ -1576,84 +1576,84 @@ fn verify_one_manifest(
     workspace_id: Uuid,
     manifest_digest: &str,
 ) -> Result<(), ManifestStoreRefusal> {
-        // The bytes first, through the same reader every caller uses: a row that cannot prove
-        // itself is refused before anything is asked of the log about it.
-        let stored = verified_manifest_within(connection, workspace_id, manifest_digest)?;
-        let manifest = stored.manifest();
+    // The bytes first, through the same reader every caller uses: a row that cannot prove
+    // itself is refused before anything is asked of the log about it.
+    let stored = verified_manifest_within(connection, workspace_id, manifest_digest)?;
+    let manifest = stored.manifest();
 
-        // The completion the manifest is frozen on, through its owning reader. The row's foreign
-        // key to `mission_completions` is single-column -- that key has no Workspace to be
-        // composite over -- so this is where a manifest naming another Workspace's completion is
-        // caught.
-        let completion =
-            verified_completion_within(connection, workspace_id, &manifest.completion.digest.value)
-                .map_err(|_| ManifestStoreRefusal::CandidateNotAccounted {
-                    reason: "the completion this manifest names does not verify in its Workspace",
-                })?;
-        // The SAME reconciliation `prepare` requires. Verifying the completion alone proves the
-        // completion; it proves nothing about whether this manifest is describing it.
-        reconcile_completion(manifest, &completion)
-            .map_err(|detail| ManifestStoreRefusal::Irreconcilable { detail })?;
+    // The completion the manifest is frozen on, through its owning reader. The row's foreign
+    // key to `mission_completions` is single-column -- that key has no Workspace to be
+    // composite over -- so this is where a manifest naming another Workspace's completion is
+    // caught.
+    let completion =
+        verified_completion_within(connection, workspace_id, &manifest.completion.digest.value)
+            .map_err(|_| ManifestStoreRefusal::CandidateNotAccounted {
+                reason: "the completion this manifest names does not verify in its Workspace",
+            })?;
+    // The SAME reconciliation `prepare` requires. Verifying the completion alone proves the
+    // completion; it proves nothing about whether this manifest is describing it.
+    reconcile_completion(manifest, &completion)
+        .map_err(|detail| ManifestStoreRefusal::Irreconcilable { detail })?;
 
-        let candidate_digest = stored.candidate_artifact_digest();
-        let candidate =
-            crate::artifact::verified_artifact_within(connection, workspace_id, candidate_digest)
-                .map_err(|_| ManifestStoreRefusal::CandidateNotAccounted {
-                    reason: "the candidate Artifact does not verify against its own bytes",
-                })?
-                .ok_or(ManifestStoreRefusal::CandidateNotAccounted {
-                    reason: "no candidate Artifact in this Workspace carries that digest",
-                })?;
+    let candidate_digest = stored.candidate_artifact_digest();
+    let candidate =
+        crate::artifact::verified_artifact_within(connection, workspace_id, candidate_digest)
+            .map_err(|_| ManifestStoreRefusal::CandidateNotAccounted {
+                reason: "the candidate Artifact does not verify against its own bytes",
+            })?
+            .ok_or(ManifestStoreRefusal::CandidateNotAccounted {
+                reason: "no candidate Artifact in this Workspace carries that digest",
+            })?;
 
-        // Exactly one `artifact.recorded` Event names it, in this Workspace, and it is the cursor
-        // (masked today: the artifact pass at lib.rs ~1130 refuses a second recording Event before
-        // this arm runs, so no test can reach it while that ordering holds -- kept for when it changes;
-        // kimi's read, D-kimi-read-o3a.md P2)
-        // the Artifact itself carries. One is the count: none is an unaccounted row, and two would
-        // make "where this entered the ledger" a question with two answers.
-        let mut statement = connection
-            .prepare(
-                "SELECT count(*) FROM events
+    // Exactly one `artifact.recorded` Event names it, in this Workspace, and it is the cursor
+    // (masked today: the artifact pass at lib.rs ~1130 refuses a second recording Event before
+    // this arm runs, so no test can reach it while that ordering holds -- kept for when it changes;
+    // kimi's read, D-kimi-read-o3a.md P2)
+    // the Artifact itself carries. One is the count: none is an unaccounted row, and two would
+    // make "where this entered the ledger" a question with two answers.
+    let mut statement = connection
+        .prepare(
+            "SELECT count(*) FROM events
                  WHERE workspace_id = ?1 AND kind = 'artifact.recorded'
                    AND json_extract(payload_json, '$.artifact.digest.value') = ?2",
-            )
-            .map_err(store_error)?;
-        let events: i64 = statement
-            .query_row(params![workspace_id.to_string(), candidate_digest], |row| {
-                row.get(0)
-            })
-            .map_err(store_error)?;
-        drop(statement);
-        if events != 1 {
-            return Err(ManifestStoreRefusal::CandidateNotAccounted {
-                reason: "the candidate Artifact is not named by exactly one artifact.recorded event",
-            });
-        }
+        )
+        .map_err(store_error)?;
+    let events: i64 = statement
+        .query_row(params![workspace_id.to_string(), candidate_digest], |row| {
+            row.get(0)
+        })
+        .map_err(store_error)?;
+    drop(statement);
+    if events != 1 {
+        return Err(ManifestStoreRefusal::CandidateNotAccounted {
+            reason: "the candidate Artifact is not named by exactly one artifact.recorded event",
+        });
+    }
 
-        // ...and the Artifact is THIS manifest's document, not merely some Artifact the log
-        // happens to reach. Every field here lives inside the Artifact's canonical bytes, so none
-        // of it is a projection and none of it needs a re-render.
-        let payload = candidate.payload();
-        if payload.kind != ArtifactKind::OutcomeDocument {
+    // ...and the Artifact is THIS manifest's document, not merely some Artifact the log
+    // happens to reach. Every field here lives inside the Artifact's canonical bytes, so none
+    // of it is a projection and none of it needs a re-render.
+    let payload = candidate.payload();
+    if payload.kind != ArtifactKind::OutcomeDocument {
+        return Err(ManifestStoreRefusal::CandidateNotAccounted {
+            reason: "the candidate Artifact is not an Outcome Document",
+        });
+    }
+    match payload.context {
+        ArtifactContext::Mission { mission_id, .. } if mission_id == manifest.mission_id => {}
+        _ => {
             return Err(ManifestStoreRefusal::CandidateNotAccounted {
-                reason: "the candidate Artifact is not an Outcome Document",
+                reason: "the candidate Artifact is not scoped to this manifest's Mission",
             });
         }
-        match payload.context {
-            ArtifactContext::Mission { mission_id, .. } if mission_id == manifest.mission_id => {}
-            _ => {
-                return Err(ManifestStoreRefusal::CandidateNotAccounted {
-                    reason: "the candidate Artifact is not scoped to this manifest's Mission",
-                });
-            }
-        }
-        if payload.accountable_resident_id != manifest.accountable_resident_id {
-            return Err(ManifestStoreRefusal::CandidateNotAccounted {
-                reason: "the candidate Artifact's accountable Resident is not the manifest's",
-            });
-        }
+    }
+    if payload.accountable_resident_id != manifest.accountable_resident_id {
+        return Err(ManifestStoreRefusal::CandidateNotAccounted {
+            reason: "the candidate Artifact's accountable Resident is not the manifest's",
+        });
+    }
 
-        // The CONTENT binding is not repeated here: `verified_manifest_within` above already made
-        // it, on this exact row, and one rule with two implementations is two rules.
+    // The CONTENT binding is not repeated here: `verified_manifest_within` above already made
+    // it, on this exact row, and one rule with two implementations is two rules.
     Ok(())
 }

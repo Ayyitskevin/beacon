@@ -369,7 +369,17 @@ pub enum SupervisorError {
     TeamEventMismatch(i64),
     TeamStateMismatch,
     MissionEventMismatch(i64),
-    MissionStateMismatch,
+    /// A stored Mission does not re-prove against its own record or its projections.
+    ///
+    /// Names the row and carries the owning reader's own error (R28.1).
+    MissionStateMismatch {
+        workspace_id: Uuid,
+        mission_id: Uuid,
+        cause: mission::MissionError,
+    },
+    /// The Missions do not agree with the store as a whole: an orphaned condition row, or an
+    /// admitted-event count that does not match the number of Missions. No row to name.
+    MissionTotalsMismatch(mission::MissionError),
     ProjectPolicyEventMismatch(i64),
     ProjectPolicyStateMismatch,
     ProjectRepositoryEventMismatch(i64),
@@ -534,12 +544,22 @@ impl fmt::Display for SupervisorError {
                     "Event sequence {sequence} does not match Mission admission state"
                 )
             }
-            Self::MissionStateMismatch => {
-                write!(
-                    formatter,
-                    "Mission state has no exact admission audit Event"
-                )
-            }
+            // R28.4: the key and the fault's NAME.
+            Self::MissionStateMismatch {
+                workspace_id,
+                mission_id,
+                cause,
+            } => write!(
+                formatter,
+                "Mission {mission_id} in Workspace {workspace_id} does not re-prove against its \
+                 own record or its projections: {}",
+                cause.name()
+            ),
+            Self::MissionTotalsMismatch(cause) => write!(
+                formatter,
+                "the Missions do not agree with the store as a whole: {}",
+                cause.name()
+            ),
             Self::ProjectPolicyEventMismatch(sequence) => write!(
                 formatter,
                 "Event sequence {sequence} does not match Project Policy state"
@@ -1339,7 +1359,26 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     resident_configuration::verify_configuration_state(connection)
         .map_err(|_| SupervisorError::ResidentConfigurationStateMismatch)?;
     team::verify_team_state(connection).map_err(|_| SupervisorError::TeamStateMismatch)?;
-    mission::verify_mission_state(connection).map_err(|_| SupervisorError::MissionStateMismatch)?;
+    mission::verify_mission_state(connection).map_err(|fault| match fault {
+        mission::MissionStateFault::Store(error) => SupervisorError::Store(error),
+        mission::MissionStateFault::Row {
+            workspace_id,
+            mission_id,
+            cause,
+        } => SupervisorError::MissionStateMismatch {
+            workspace_id,
+            mission_id,
+            cause,
+        },
+        mission::MissionStateFault::Totals(cause) => SupervisorError::MissionTotalsMismatch(cause),
+        mission::MissionStateFault::Identity {
+            workspace_id,
+            mission_id,
+        } => SupervisorError::IntegrityCheckFailed(format!(
+            "a Mission row's identity is not readable: Workspace {workspace_id}, Mission \
+             {mission_id}"
+        )),
+    })?;
     // After Mission state, because every completion re-derives its conditions from the Mission's own
     // rows and its boundary from the Mission's admission Event.
     mission_completion_store::verify_completion_state(connection)
@@ -1362,7 +1401,7 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
             cause,
         },
     })?;
-outcome_store::verify_manifest_state(connection).map_err(|fault| match fault {
+    outcome_store::verify_manifest_state(connection).map_err(|fault| match fault {
         outcome_store::ManifestStateFault::Store(error) => SupervisorError::Store(error),
         outcome_store::ManifestStateFault::Row {
             workspace_id,
@@ -1383,32 +1422,31 @@ outcome_store::verify_manifest_state(connection).map_err(|fault| match fault {
     // After the manifest pass, because a publication is proved THROUGH its manifest: the relation
     // cites a candidate, the candidate's manifest must verify, and the manifest's own pass has to
     // have run before this one can rely on it (R18.7).
-    outcome_publication::verify_publication_state(connection)
-        .map_err(|fault| match fault {
-            outcome_publication::PublicationStateFault::Store(error) => SupervisorError::Store(error),
-            outcome_publication::PublicationStateFault::Row {
-                workspace_id,
-                mission_id,
-                version,
-                cause,
-            } => SupervisorError::OutcomePublicationStateMismatch {
-                workspace_id,
-                mission_id,
-                version,
-                cause,
-            },
-            // Unreachable while the foreign-key check and the Workspace and Mission passes run
-            // first; reported as what it is rather than folded into a row refusal that would have
-            // to invent the identity it is missing.
-            outcome_publication::PublicationStateFault::Identity {
-                workspace_id,
-                mission_id,
-                version,
-            } => SupervisorError::IntegrityCheckFailed(format!(
-                "a publication row's identity is not readable: Workspace {workspace_id}, Mission \
+    outcome_publication::verify_publication_state(connection).map_err(|fault| match fault {
+        outcome_publication::PublicationStateFault::Store(error) => SupervisorError::Store(error),
+        outcome_publication::PublicationStateFault::Row {
+            workspace_id,
+            mission_id,
+            version,
+            cause,
+        } => SupervisorError::OutcomePublicationStateMismatch {
+            workspace_id,
+            mission_id,
+            version,
+            cause,
+        },
+        // Unreachable while the foreign-key check and the Workspace and Mission passes run
+        // first; reported as what it is rather than folded into a row refusal that would have
+        // to invent the identity it is missing.
+        outcome_publication::PublicationStateFault::Identity {
+            workspace_id,
+            mission_id,
+            version,
+        } => SupervisorError::IntegrityCheckFailed(format!(
+            "a publication row's identity is not readable: Workspace {workspace_id}, Mission \
                  {mission_id}, version {version}"
-            )),
-        })?;
+        )),
+    })?;
 
     Ok(StoreDiagnostics {
         status: DiagnosticStatus::Ready,

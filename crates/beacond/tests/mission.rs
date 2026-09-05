@@ -894,7 +894,7 @@ fn a_condition_row_whose_text_disagrees_with_the_mission_fails_startup() {
         initial_workspace_name: "Ignored".to_owned(),
     });
     assert!(
-        matches!(outcome, Err(beacond::SupervisorError::MissionStateMismatch)),
+        matches!(outcome, Err(beacond::SupervisorError::MissionStateMismatch { .. })),
         "startup accepted a condition row that disagrees with its Mission: {outcome:?}"
     );
 }
@@ -935,7 +935,7 @@ fn a_condition_row_the_mission_never_declared_fails_startup() {
             store_path: store.path.clone(),
             initial_workspace_name: "Ignored".to_owned(),
         }),
-        Err(beacond::SupervisorError::MissionStateMismatch)
+        Err(beacond::SupervisorError::MissionStateMismatch { .. })
     ));
 }
 
