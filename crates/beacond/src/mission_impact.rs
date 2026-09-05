@@ -1343,3 +1343,44 @@ pub(crate) fn verify_classification_state(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+
+    /// Text only a store error carries: a constraint name and the column it names. R28.4 is about
+    /// exactly this reaching a one-line refusal an operator sees.
+    const STORE_TEXT: &str =
+        "UNIQUE constraint failed: mission_impact_classifications.digest_value";
+
+    /// Today's behaviour, pinned before it changes (R28.4 changes it).
+    ///
+    /// `ClassificationStoreError::Store`'s Display is `store: {reason}`, and the reason is built
+    /// from `rusqlite::Error::to_string()` at five sites in this file. `ClassificationStateFault`'s
+    /// `Row` arm interpolates that cause, and `SupervisorError`'s widened variant interpolates it
+    /// again -- so the store's own text reaches the one line a startup refusal prints. R28.4 says
+    /// the key and the fault's NAME, and the text only through `Debug`/`source()`.
+    ///
+    /// It is deleted by the commit that closes this, and replaced by the bar for the new rule.
+    #[test]
+    fn a_classification_refusal_prints_the_store_text_in_its_one_line_message() {
+        let workspace_id = Uuid::new_v4();
+        let digest = "a".repeat(64);
+        let fault = ClassificationStateFault::Row {
+            workspace_id,
+            digest: digest.clone(),
+            cause: ClassificationStoreError::Store(STORE_TEXT.to_owned()),
+        };
+        let line = fault.to_string();
+        assert!(line.contains(&workspace_id.to_string()), "{line}");
+        assert!(line.contains(&digest), "{line}");
+        assert!(
+            line.contains(STORE_TEXT),
+            "the store text is not in the one-line message, so this pins nothing: {line}"
+        );
+
+        // And `Debug` is `Display`, so there is no channel that carries MORE than the one line --
+        // which is the other half of what R28.4 asks for.
+        assert_eq!(format!("{fault:?}"), line);
+    }
+}
