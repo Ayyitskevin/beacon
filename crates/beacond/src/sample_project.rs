@@ -2276,6 +2276,67 @@ mod tests {
         assert_at_fdcwd_renameat2_filter_live(path)
     }
 
+    /// TF-2's precondition, made re-runnable rather than left as a claim in a report.
+    ///
+    /// `sandbox/bounded.rs` spawns a Declared Check's own program, and the kernel refuses to exec
+    /// a file that any process holds open for writing. That `ETXTBSY` is a transient condition the
+    /// spawn site records as a permanent `NotStarted` outcome -- but it is unreachable in
+    /// production, and this is one of the three measured reasons why: nothing the materializer
+    /// writes is executable, so no file it produces can be the target of an exec at all. The other
+    /// two closers, and the conditions that would flip them, are in
+    /// `beacon-team/OTF2-opus2-build-report.md`.
+    ///
+    /// Regular files only. Directories carry the execute bit because traversal needs it, and a
+    /// symlink is not a file the materializer is allowed to create.
+    #[test]
+    fn the_production_materializer_writes_no_executable_file() {
+        let store = TestStore::new("materializer-modes");
+        let accounts = store.enrolled_accounts();
+        let service =
+            SampleProjectService::new(Arc::clone(&accounts), store.workspace_id, &store.path)
+                .unwrap();
+        let installed = service.install().unwrap();
+        let root = PathBuf::from(&installed.installation.repository_path);
+
+        let mut executable = Vec::new();
+        let mut files = 0_usize;
+        let mut directories = vec![root.clone()];
+        while let Some(directory) = directories.pop() {
+            for entry in fs::read_dir(&directory).unwrap() {
+                let path = entry.unwrap().path();
+                let metadata = fs::symlink_metadata(&path).unwrap();
+                if metadata.is_dir() {
+                    directories.push(path);
+                    continue;
+                }
+                if !metadata.is_file() {
+                    continue;
+                }
+                files += 1;
+                let mode = metadata.permissions().mode() & 0o7777;
+                if mode & 0o111 != 0 {
+                    executable.push(format!(
+                        "{} is mode {mode:o}",
+                        path.strip_prefix(&root).unwrap_or(&path).display()
+                    ));
+                }
+            }
+        }
+
+        assert!(files > 0, "the walk found no files, so it proved nothing");
+        assert!(
+            executable.is_empty(),
+            "the materializer wrote {} executable file(s) of {files}: {}.\n\
+             This is TF-2's precondition. An executable file written in Beacon's own address space \
+             can be held open for writing by a sibling fork and then exec'd, and the kernel answers \
+             ETXTBSY -- which sandbox/bounded.rs records as a permanent NotStarted outcome for a \
+             transient cause. See beacon-team/OTF2-opus2-build-report.md, \"the condition to \
+             watch\": if this is now intended, that report's port is the fix.",
+            executable.len(),
+            executable.join(", ")
+        );
+    }
+
     #[test]
     fn authenticated_operator_installs_an_inert_supervised_sample_project() {
         let store = TestStore::new("install");

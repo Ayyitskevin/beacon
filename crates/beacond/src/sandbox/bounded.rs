@@ -266,6 +266,14 @@ pub(super) fn run_bounded(
     };
 
     before_spawn();
+    // A spawn that fails with ETXTBSY is a transient kernel condition recorded here as a permanent
+    // `NotStarted`. Unreachable in production today -- nothing Beacon writes in its own address
+    // space is executable, pinned by `the_production_materializer_writes_no_executable_file`. See
+    // `beacon-team/OTF2-opus2-build-report.md`, "the condition to watch": if a dispatch copy ever
+    // writes an executable, port TF-1's fix -- retry on ETXTBSY only, inside the check's own
+    // budget, and a check still busy at the budget's end is
+    // `ExecutionOutcome::Bounded { ceiling: Ceiling::WallClock }`, the arm this function already
+    // reaches when the deadline passes -- not `NotStarted`, which claims nothing was attempted.
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
