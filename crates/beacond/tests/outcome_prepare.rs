@@ -3523,7 +3523,9 @@ fn sol1_get_refuses_a_relation_forged_under_another_mission() {
     ));
 
     let connection = fixture.store.connect();
-    connection.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .unwrap();
     connection
         .execute(
             "INSERT INTO outcome_publications (
@@ -3556,7 +3558,9 @@ fn sol1_startup_refuses_a_relation_forged_under_another_mission() {
     fixture.complete((fixture.resident_id, fixture.configuration_id));
     let (_, candidate, evaluation) = fixture.publishable();
     let connection = fixture.store.connect();
-    connection.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .unwrap();
     connection
         .execute(
             "INSERT INTO outcome_publications (
@@ -3662,13 +3666,15 @@ fn sol1_get_refuses_a_non_meets_evaluation_of_the_same_candidate_swapped_into_th
         (fixture.other_resident_id, fixture.other_configuration_id),
     );
     replacement.rationale = "A second reading says the exact candidate does not meet.".to_owned();
-    replacement.supersedes =
-        EvaluationSupersedes::Evaluation(first_evaluation.value.clone());
+    replacement.supersedes = EvaluationSupersedes::Evaluation(first_evaluation.value.clone());
     let replacement_evaluation = fixture
         .evaluations()
         .record(replacement)
         .expect("the replacement Evaluation records through its owner");
-    assert_ne!(replacement_evaluation.digest().value, first_evaluation.value);
+    assert_ne!(
+        replacement_evaluation.digest().value,
+        first_evaluation.value
+    );
     let connection = fixture.store.connect();
     connection
         .execute_batch("DROP TRIGGER outcome_publications_no_update;")
@@ -3707,7 +3713,9 @@ fn sol1_get_refuses_a_noncontiguous_relation_history() {
     fixture.complete((fixture.resident_id, fixture.configuration_id));
     let (_, candidate, evaluation) = fixture.publishable();
     let connection = fixture.store.connect();
-    connection.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .unwrap();
     connection
         .execute(
             "INSERT INTO outcome_publications (
@@ -3726,7 +3734,10 @@ fn sol1_get_refuses_a_noncontiguous_relation_history() {
 
     let read = fixture.outcomes.get(fixture.mission_id);
     eprintln!("SOL1_GAPPED_GET result={read:?}");
-    assert!(read.is_err(), "get accepted a noncontiguous publication history");
+    assert!(
+        read.is_err(),
+        "get accepted a noncontiguous publication history"
+    );
 }
 
 #[test]
@@ -3747,7 +3758,9 @@ fn sol1_same_candidate_is_not_a_correction() {
     let count: i64 = fixture
         .store
         .connect()
-        .query_row("SELECT count(*) FROM outcome_publications", [], |row| row.get(0))
+        .query_row("SELECT count(*) FROM outcome_publications", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(count, 1);
 }
@@ -3782,7 +3795,9 @@ fn sol1_concurrent_publish_cannot_create_two_version_one_rows() {
     let versions: Vec<i64> = fixture
         .store
         .connect()
-        .prepare("SELECT publication_version FROM outcome_publications ORDER BY publication_version")
+        .prepare(
+            "SELECT publication_version FROM outcome_publications ORDER BY publication_version",
+        )
         .unwrap()
         .query_map([], |row| row.get(0))
         .unwrap()
