@@ -2595,3 +2595,49 @@ fn an_empty_delivery_is_absent_and_never_an_empty_verified_list() {
         other => panic!("delivering nothing is not an absence: {other:?}"),
     }
 }
+
+/// R19.2's premise, measured: a row filed under THIS Workspace's predicate whose canonical bytes
+/// name ANOTHER Workspace never reaches the collector's own arm.
+///
+/// Measured three ways before deciding. With the row's digest moved to match the foreign bytes, the
+/// owner still refuses; with the owner's `columns_match` Workspace guard disabled it STILL refuses
+/// (the `artifact.recorded` Event pairing catches it); with the collector's check removed as well
+/// it still refuses. So the collector's arm is defence in depth behind three of the owner's guards,
+/// kept because it is one line, and proved as a pure function in the module's own tests
+/// (acceptance row 0) rather than through a row that would have to forge an Event to reach it.
+#[test]
+fn an_artifact_whose_bytes_name_another_workspace_is_refused_by_its_owning_reader() {
+    let fixture = admitted("artifact-foreign-bytes", vec!["Gates pass".to_owned()]);
+    let honest = fixture.record_mission_artifact(b"# Outcome\n\nFiled here, named elsewhere.\n");
+
+    // The same record with another Workspace in its bytes, spliced under this Workspace's row.
+    let mut foreign = honest.payload().clone();
+    foreign.workspace_id = Uuid::new_v4();
+    let foreign_bytes = foreign.canonical_bytes().expect("the grammar allows it");
+    let connection = fixture.connection();
+    connection
+        .execute_batch("DROP TRIGGER artifacts_no_update;")
+        .unwrap();
+    // The digest column moves WITH the bytes, so the only thing wrong with the row is whose it is:
+    // a splice that left the old digest would be refused for the digest first and prove nothing
+    // about the Workspace guard.
+    let foreign_digest = sha256_hex(&foreign_bytes);
+    connection
+        .execute(
+            "UPDATE artifacts SET canonical_bytes = ?1, digest_value = ?2 WHERE digest_value = ?3",
+            params![foreign_bytes, foreign_digest, honest.digest().value],
+        )
+        .expect("the store admits the splice: SQL cannot decode");
+
+    // The OWNER refuses -- InvalidStore -- and the collector reports exactly that as `Unverified`.
+    // The collector's own arm (`ArtifactInAnotherWorkspace`) is never reached on a real row.
+    assert_eq!(
+        Collector::new(&connection, fixture.store.workspace_id)
+            .artifact(&foreign_digest, fixture.mission.id)
+            .expect_err("a row whose bytes name another Workspace does not read"),
+        CollectorRefusal::Unverified {
+            kind: "artifact",
+            reason: beacond::ArtifactError::InvalidStore.to_string(),
+        }
+    );
+}
