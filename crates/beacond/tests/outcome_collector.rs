@@ -1245,6 +1245,39 @@ fn verified_completion_refuses_condition_rows_belonging_to_another_mission() {
     );
 }
 
+#[test]
+fn completion_refuses_a_project_that_does_not_own_its_mission() {
+    let fixture = admitted("completion-cross-project", vec!["Gates pass".to_owned()]);
+    let other_project =
+        ProjectService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+            .create(ProjectDraft {
+                name: "Unrelated Project".to_owned(),
+                charter: ProjectCharterDraft {
+                    purpose: "Stay unrelated to the Mission.".to_owned(),
+                    desired_outcomes: vec!["No cross-Project completion".to_owned()],
+                    constraints: vec!["Keep scope structural".to_owned()],
+                    prohibitions: vec!["Do not borrow a Mission".to_owned()],
+                    autonomy_profile: AutonomyProfile::Supervised,
+                },
+            })
+            .unwrap();
+    let boundary = newest_event(&fixture.store);
+    let mut completion = fixture.completion(
+        boundary,
+        vec![ConditionOutcome::Met],
+        SpendReference::NotMeasured("no ledger was read".to_owned()),
+    );
+    completion.project_id = other_project.id;
+    let mut connection = fixture.connection();
+    let result = record_completion(&mut connection, &completion);
+    assert!(
+        result.is_err(),
+        "Mission {} was completed under unrelated Project {}: {result:?}",
+        completion.mission_id,
+        other_project.id,
+    );
+}
+
 /// §7 slice 2. A digest that exists is not a digest that is yours.
 ///
 /// The point of the test is the *second* Workspace being real: a random UUID would prove only that
