@@ -97,6 +97,114 @@ struct TeamFormedPayload {
     team: StoredTeamFormation,
 }
 
+/// Which fault the Team startup pass hit, and WHICH ROW hit it (R27.1's shape, R28.1).
+pub(crate) enum TeamStateFault {
+    /// The enumeration itself failed: no row to name, because none was reached.
+    Store(rusqlite::Error),
+    /// One Team did not re-prove. `cause` is the owning reader's OWN error, carried whole.
+    Row {
+        workspace_id: Uuid,
+        team_id: Uuid,
+        cause: TeamError,
+    },
+    /// A COUNT across the store that does not match the log: numbers, never an invented row.
+    Totals(crate::TotalsMismatch),
+    /// A row whose Workspace column is not a UUID. Unreachable while the foreign-key check and
+    /// the Workspace pass run first.
+    Identity {
+        workspace_id: String,
+        team_id: String,
+    },
+}
+
+impl TeamError {
+    /// The variant's NAME, for R28.4's one-line startup message.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Account(_) => "Account",
+            Self::ProjectNotFound => "ProjectNotFound",
+            Self::TeamNotFound => "TeamNotFound",
+            Self::InvalidName => "InvalidName",
+            Self::InvalidMembers => "InvalidMembers",
+            Self::ResidentConfigurationUnavailable => "ResidentConfigurationUnavailable",
+            Self::StaleResidentConfiguration => "StaleResidentConfiguration",
+            Self::ResidentIneligible(_) => "ResidentIneligible",
+            Self::InvalidStore => "InvalidStore",
+            Self::Store(_) => "Store",
+            Self::Json(_) => "Json",
+        }
+    }
+}
+
+impl fmt::Display for TeamStateFault {
+    /// R28.4: the KEY and the fault's NAME, never the carried error's own text.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(_) => formatter.write_str("the Teams could not be read"),
+            Self::Row {
+                workspace_id,
+                team_id,
+                cause,
+            } => write!(
+                formatter,
+                "Team {team_id} in Workspace {workspace_id} does not re-prove: {}",
+                cause.name()
+            ),
+            Self::Totals(totals) => write!(
+                formatter,
+                "the Teams do not agree with the log as a whole -- {totals}"
+            ),
+            Self::Identity {
+                workspace_id,
+                team_id,
+            } => write!(
+                formatter,
+                "a Team row's Workspace is not readable: {workspace_id}, Team \
+                 {team_id}"
+            ),
+        }
+    }
+}
+
+/// Hand-written and NOT delegating to `Display`: R28.4 keeps the carried text reachable here.
+impl fmt::Debug for TeamStateFault {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => formatter.debug_tuple("Store").field(error).finish(),
+            Self::Totals(totals) => formatter.debug_tuple("Totals").field(totals).finish(),
+            Self::Row {
+                workspace_id,
+                team_id,
+                cause,
+            } => formatter
+                .debug_struct("Row")
+                .field("workspace_id", workspace_id)
+                .field("team_id", team_id)
+                .field("cause", cause)
+                .finish(),
+            Self::Identity {
+                workspace_id,
+                team_id,
+            } => formatter
+                .debug_struct("Identity")
+                .field("workspace_id", workspace_id)
+                .field("team_id", team_id)
+                .finish(),
+        }
+    }
+}
+
+impl std::error::Error for TeamStateFault {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::Row { cause, .. } => Some(cause),
+            // A `TotalsMismatch` is DATA, not a nested error.
+            Self::Totals(_) | Self::Identity { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum TeamError {
     Account(OperatorAccountError),
@@ -499,17 +607,43 @@ pub(crate) fn verify_team_event(
     Ok(())
 }
 
-pub(crate) fn verify_team_state(connection: &Connection) -> Result<(), TeamError> {
-    let mut statement =
-        connection.prepare("SELECT workspace_id, id FROM teams ORDER BY workspace_id, id")?;
+pub(crate) fn verify_team_state(connection: &Connection) -> Result<(), TeamStateFault> {
+    let mut statement = connection
+        .prepare("SELECT workspace_id, id FROM teams ORDER BY workspace_id, id")
+        .map_err(TeamStateFault::Store)?;
     let ids = statement
         .query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+        })
+        .map_err(TeamStateFault::Store)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(TeamStateFault::Store)?;
     for (workspace_id, team_id) in &ids {
-        let workspace_id = parse_uuid(workspace_id.clone())?;
-        let team_id = parse_uuid(team_id.clone())?;
+        let identity = || TeamStateFault::Identity {
+            workspace_id: workspace_id.clone(),
+            team_id: team_id.clone(),
+        };
+        let parsed_workspace = Uuid::parse_str(workspace_id).map_err(|_| identity())?;
+        let parsed_team = Uuid::parse_str(team_id).map_err(|_| identity())?;
+        verify_one_team(connection, parsed_workspace, parsed_team).map_err(|cause| {
+            TeamStateFault::Row {
+                workspace_id: parsed_workspace,
+                team_id: parsed_team,
+                cause,
+            }
+        })?;
+    }
+    verify_team_totals(connection, ids.len())?;
+    Ok(())
+}
+
+/// One stored Team, re-proved. Unchanged from what the loop held inline.
+fn verify_one_team(
+    connection: &Connection,
+    workspace_id: Uuid,
+    team_id: Uuid,
+) -> Result<(), TeamError> {
+    {
         let formation =
             load_stored_team(connection, workspace_id, team_id)?.ok_or(TeamError::InvalidStore)?;
         let event_count = connection.query_row(
@@ -523,13 +657,89 @@ pub(crate) fn verify_team_state(connection: &Connection) -> Result<(), TeamError
             return Err(TeamError::InvalidStore);
         }
     }
-    let event_count = connection.query_row(
-        "SELECT count(*) FROM events WHERE kind = 'team.formed'",
-        [],
-        |row| row.get::<_, i64>(0),
-    )?;
-    if usize::try_from(event_count) != Ok(ids.len()) {
-        return Err(TeamError::InvalidStore);
+    Ok(())
+}
+
+/// The count across the store: no row to name.
+fn verify_team_totals(connection: &Connection, team_count: usize) -> Result<(), TeamStateFault> {
+    let event_count = connection
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind = 'team.formed'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(TeamStateFault::Store)?;
+    if usize::try_from(event_count) != Ok(team_count) {
+        return Err(TeamStateFault::Totals(crate::TotalsMismatch {
+            table: "events (team.formed)",
+            expected: team_count as u64,
+            observed: event_count.unsigned_abs(),
+        }));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod name_witness {
+    use super::*;
+
+    /// Pinned independently of `name()` (the fold at 30d2a20): an exhaustive `name()` catches an
+    /// added arm, only a second table catches a wrong or duplicated name.
+    fn expected_name(error: &TeamError) -> &'static str {
+        match error {
+            TeamError::Account(_) => "Account",
+            TeamError::ProjectNotFound => "ProjectNotFound",
+            TeamError::TeamNotFound => "TeamNotFound",
+            TeamError::InvalidName => "InvalidName",
+            TeamError::InvalidMembers => "InvalidMembers",
+            TeamError::ResidentConfigurationUnavailable => "ResidentConfigurationUnavailable",
+            TeamError::StaleResidentConfiguration => "StaleResidentConfiguration",
+            TeamError::ResidentIneligible(_) => "ResidentIneligible",
+            TeamError::InvalidStore => "InvalidStore",
+            TeamError::Store(_) => "Store",
+            TeamError::Json(_) => "Json",
+        }
+    }
+
+    #[test]
+    fn every_team_error_arm_has_its_own_pinned_name() {
+        let every_arm = [
+            TeamError::Account(crate::operator_account::OperatorAccountError::PasswordTooShort),
+            TeamError::ProjectNotFound,
+            TeamError::TeamNotFound,
+            TeamError::InvalidName,
+            TeamError::InvalidMembers,
+            TeamError::ResidentConfigurationUnavailable,
+            TeamError::StaleResidentConfiguration,
+            TeamError::ResidentIneligible(Uuid::nil()),
+            TeamError::InvalidStore,
+            TeamError::Store(rusqlite::Error::QueryReturnedNoRows),
+            TeamError::Json(serde_json::from_str::<u8>("\"x\"").unwrap_err()),
+        ];
+        assert_eq!(
+            every_arm.len(),
+            11,
+            "an arm was added to `TeamError` without a fixture here"
+        );
+        for arm in &every_arm {
+            assert_eq!(
+                arm.name(),
+                expected_name(arm),
+                "the startup name does not match the pinned table: {arm:?}"
+            );
+        }
+        let names: std::collections::BTreeSet<&str> =
+            every_arm.iter().map(TeamError::name).collect();
+        assert_eq!(
+            names.len(),
+            11,
+            "two arms share a startup name, so a swap between them is invisible: {names:?}"
+        );
+        for name in names {
+            assert!(
+                !name.contains(' ') && !name.contains('{'),
+                "a name is a name, not a rendering: {name}"
+            );
+        }
+    }
 }
