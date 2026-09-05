@@ -663,6 +663,14 @@ fn a_decoy_projection_column_cannot_change_what_the_reader_returns() {
             "digest_canonicalizer",
             Value::from("beacon.outcome.manifest.v2".to_owned()),
         ),
+        // The reader compared this one and nothing witnessed it: dropping it from `StoredRow`, the
+        // SELECT and the comparison left all 21 tests green and clippy at exit 0 (gpt2's P2,
+        // reproduced here before this row existed). A check with no witness is a check that can be
+        // deleted by accident.
+        (
+            "boundary_event_seq",
+            Value::from(i64::try_from(manifest.boundary_event_seq).unwrap() + 1),
+        ),
     ] {
         let previous: Value = fixture
             .store
