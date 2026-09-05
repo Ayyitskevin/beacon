@@ -1810,6 +1810,184 @@ fn map_sample_project_state_fault(
     }
 }
 
+/// The production mapping for the Proposal startup pass, NAMED so a bar can drive it.
+fn map_proposal_state_fault(fault: proposal::ProposalStateFault) -> SupervisorError {
+    match fault {
+        proposal::ProposalStateFault::Store(source) => SupervisorError::StartupEnumerationFailed {
+            pass: StartupPass::Proposal,
+            source,
+        },
+        proposal::ProposalStateFault::Row {
+            workspace_id,
+            digest_value,
+            cause,
+        } => SupervisorError::ProposalStateMismatch {
+            workspace_id,
+            digest_value,
+            cause,
+        },
+        proposal::ProposalStateFault::Totals(cause) => {
+            SupervisorError::ProposalTotalsMismatch(cause)
+        }
+        proposal::ProposalStateFault::Identity {
+            workspace_id,
+            digest_value,
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "a Proposal row's Workspace is not readable",
+            raw: format!("{workspace_id}, Proposal {digest_value}"),
+        },
+    }
+}
+
+/// The production mapping for the Ruling startup pass, NAMED so a bar can drive it.
+fn map_ruling_state_fault(fault: ruling::RulingStateFault) -> SupervisorError {
+    match fault {
+        ruling::RulingStateFault::Store(source) => SupervisorError::StartupEnumerationFailed {
+            pass: StartupPass::Ruling,
+            source,
+        },
+        ruling::RulingStateFault::Row {
+            workspace_id,
+            digest_value,
+            cause,
+        } => SupervisorError::RulingStateMismatch {
+            workspace_id,
+            digest_value,
+            cause,
+        },
+        ruling::RulingStateFault::Totals(totals) => SupervisorError::RulingTotalsMismatch(totals),
+        ruling::RulingStateFault::Chains(cause) => SupervisorError::RulingChainsMismatch(cause),
+        ruling::RulingStateFault::Identity {
+            workspace_id,
+            digest_value,
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "a Ruling row's Workspace is not readable",
+            raw: format!("Workspace {workspace_id}, Ruling {digest_value}"),
+        },
+    }
+}
+
+/// The production mapping for the Candidate startup pass, NAMED so a bar can drive it.
+fn map_candidate_state_fault(fault: candidate::CandidateStateFault) -> SupervisorError {
+    match fault {
+        candidate::CandidateStateFault::Store(source) => {
+            SupervisorError::StartupEnumerationFailed {
+                pass: StartupPass::Candidate,
+                source,
+            }
+        }
+        candidate::CandidateStateFault::Row {
+            workspace_id,
+            digest_value,
+            cause,
+        } => SupervisorError::CandidateStateMismatch {
+            workspace_id,
+            digest_value,
+            cause,
+        },
+        candidate::CandidateStateFault::Identity {
+            workspace_id,
+            digest_value,
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "a Candidate row's Workspace is not readable",
+            raw: format!("Workspace {workspace_id}, Candidate {digest_value}"),
+        },
+    }
+}
+
+/// The production mapping for the Evaluation startup pass, NAMED so a bar can drive it.
+fn map_evaluation_state_fault(fault: evaluation::EvaluationStateFault) -> SupervisorError {
+    match fault {
+        evaluation::EvaluationStateFault::Store(source) => {
+            SupervisorError::StartupEnumerationFailed {
+                pass: StartupPass::Evaluation,
+                source,
+            }
+        }
+        evaluation::EvaluationStateFault::Row {
+            workspace_id,
+            digest_value,
+            cause,
+        } => SupervisorError::EvaluationStateMismatch {
+            workspace_id,
+            digest_value,
+            cause,
+        },
+        evaluation::EvaluationStateFault::Chains(cause) => {
+            SupervisorError::EvaluationChainsMismatch(cause)
+        }
+        evaluation::EvaluationStateFault::Identity {
+            workspace_id,
+            digest_value,
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "an Evaluation row's Workspace is not readable",
+            raw: format!("{workspace_id}, Evaluation {digest_value}"),
+        },
+    }
+}
+
+/// The production mapping for the Artifact startup pass, NAMED so a bar can drive it.
+fn map_artifact_state_fault(fault: artifact::ArtifactStateFault) -> SupervisorError {
+    match fault {
+        artifact::ArtifactStateFault::Store(source) => SupervisorError::StartupEnumerationFailed {
+            pass: StartupPass::Artifact,
+            source,
+        },
+        artifact::ArtifactStateFault::Row {
+            workspace_id,
+            digest_value,
+            cause,
+        } => SupervisorError::ArtifactStateMismatch {
+            workspace_id,
+            digest_value,
+            cause,
+        },
+        artifact::ArtifactStateFault::Totals(cause) => {
+            SupervisorError::ArtifactTotalsMismatch(cause)
+        }
+        artifact::ArtifactStateFault::Relation(cause) => {
+            SupervisorError::ArtifactRelationMismatch(cause)
+        }
+        artifact::ArtifactStateFault::Identity {
+            workspace_id,
+            digest_value,
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "an Artifact row's Workspace is not readable",
+            raw: format!("{workspace_id}, Artifact {digest_value}"),
+        },
+    }
+}
+
+/// The production mapping for the ProjectRepository startup pass, NAMED so a bar can drive it.
+fn map_project_repository_state_fault(
+    fault: project_repository::ProjectRepositoryStateFault,
+) -> SupervisorError {
+    match fault {
+        project_repository::ProjectRepositoryStateFault::Store(source) => {
+            SupervisorError::StartupEnumerationFailed {
+                pass: StartupPass::ProjectRepository,
+                source,
+            }
+        }
+        project_repository::ProjectRepositoryStateFault::Row {
+            workspace_id,
+            project_id,
+            cause,
+        } => SupervisorError::ProjectRepositoryStateMismatch {
+            workspace_id,
+            project_id,
+            cause,
+        },
+        project_repository::ProjectRepositoryStateFault::Identity {
+            workspace_id,
+            project_id,
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "a Project repository row's identity is not readable",
+            raw: format!("Workspace {workspace_id}, Project {project_id}"),
+        },
+    }
+}
+
 fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, SupervisorError> {
     let schema_version = connection.query_row(
         "SELECT version FROM schema_meta WHERE singleton = 1",
@@ -1844,111 +2022,17 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     project::verify_project_state(connection).map_err(map_project_state_fault)?;
     project_policy::verify_project_policy_state(connection)
         .map_err(|_| SupervisorError::ProjectPolicyStateMismatch)?;
-    project_repository::verify_project_repository_state(connection).map_err(
-        |fault| match fault {
-            project_repository::ProjectRepositoryStateFault::Store(source) => {
-                SupervisorError::StartupEnumerationFailed {
-                    pass: StartupPass::ProjectRepository,
-                    source,
-                }
-            }
-            project_repository::ProjectRepositoryStateFault::Row {
-                workspace_id,
-                project_id,
-                cause,
-            } => SupervisorError::ProjectRepositoryStateMismatch {
-                workspace_id,
-                project_id,
-                cause,
-            },
-            project_repository::ProjectRepositoryStateFault::Identity {
-                workspace_id,
-                project_id,
-            } => SupervisorError::StoredIdentityUnreadable {
-                what: "a Project repository row's identity is not readable",
-                raw: format!("Workspace {workspace_id}, Project {project_id}"),
-            },
-        },
-    )?;
+    project_repository::verify_project_repository_state(connection)
+        .map_err(map_project_repository_state_fault)?;
     sample_project::verify_sample_project_state(connection)
         .map_err(map_sample_project_state_fault)?;
-    proposal::verify_proposal_state(connection).map_err(|fault| match fault {
-        proposal::ProposalStateFault::Store(source) => SupervisorError::StartupEnumerationFailed {
-            pass: StartupPass::Proposal,
-            source,
-        },
-        proposal::ProposalStateFault::Row {
-            workspace_id,
-            digest_value,
-            cause,
-        } => SupervisorError::ProposalStateMismatch {
-            workspace_id,
-            digest_value,
-            cause,
-        },
-        proposal::ProposalStateFault::Totals(cause) => {
-            SupervisorError::ProposalTotalsMismatch(cause)
-        }
-        proposal::ProposalStateFault::Identity {
-            workspace_id,
-            digest_value,
-        } => SupervisorError::StoredIdentityUnreadable {
-            what: "a Proposal row's Workspace is not readable",
-            raw: format!("{workspace_id}, Proposal {digest_value}"),
-        },
-    })?;
+    proposal::verify_proposal_state(connection).map_err(map_proposal_state_fault)?;
     // After Proposal state, because every Ruling binds one and re-verifies what it copied against
     // that Proposal's own bytes.
-    ruling::verify_ruling_state(connection).map_err(|fault| match fault {
-        ruling::RulingStateFault::Store(source) => SupervisorError::StartupEnumerationFailed {
-            pass: StartupPass::Ruling,
-            source,
-        },
-        ruling::RulingStateFault::Row {
-            workspace_id,
-            digest_value,
-            cause,
-        } => SupervisorError::RulingStateMismatch {
-            workspace_id,
-            digest_value,
-            cause,
-        },
-        ruling::RulingStateFault::Totals(totals) => SupervisorError::RulingTotalsMismatch(totals),
-        ruling::RulingStateFault::Chains(cause) => SupervisorError::RulingChainsMismatch(cause),
-        ruling::RulingStateFault::Identity {
-            workspace_id,
-            digest_value,
-        } => SupervisorError::StoredIdentityUnreadable {
-            what: "a Ruling row's Workspace is not readable",
-            raw: format!("Workspace {workspace_id}, Ruling {digest_value}"),
-        },
-    })?;
+    ruling::verify_ruling_state(connection).map_err(map_ruling_state_fault)?;
     // After Proposal state for the same reason a Ruling is: a Candidate copies one Proposal's
     // declared effects and re-verifies them against that Proposal's own bytes.
-    candidate::verify_candidate_state(connection).map_err(|fault| match fault {
-        candidate::CandidateStateFault::Store(source) => {
-            SupervisorError::StartupEnumerationFailed {
-                pass: StartupPass::Candidate,
-                source,
-            }
-        }
-        candidate::CandidateStateFault::Row {
-            workspace_id,
-            digest_value,
-            cause,
-        } => SupervisorError::CandidateStateMismatch {
-            workspace_id,
-            digest_value,
-            cause,
-        },
-        candidate::CandidateStateFault::Identity {
-            workspace_id,
-            digest_value,
-        } => SupervisorError::StoredIdentityUnreadable {
-            what: "a Candidate row's Workspace is not readable",
-            raw: format!("Workspace {workspace_id}, Candidate {digest_value}"),
-        },
-    })?;
+    candidate::verify_candidate_state(connection).map_err(map_candidate_state_fault)?;
     // THIS STEP WRITES. It is the one call in this sequence that is not a verification pass: the
     // other nineteen re-prove stored records and refuse, while this one turns an interrupted
     // attempt into a Run that HAS a terminal Receipt, from its durable preparation and the
@@ -1958,63 +2042,10 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     // Before the Run-state check, because that check reads the Runs this step finishes.
     dispatch::finish_prepared_dispatches(connection)
         .map_err(|_| SupervisorError::DispatchRecoveryFailed)?;
-    evaluation::verify_evaluation_state(connection).map_err(|fault| match fault {
-        evaluation::EvaluationStateFault::Store(source) => {
-            SupervisorError::StartupEnumerationFailed {
-                pass: StartupPass::Evaluation,
-                source,
-            }
-        }
-        evaluation::EvaluationStateFault::Row {
-            workspace_id,
-            digest_value,
-            cause,
-        } => SupervisorError::EvaluationStateMismatch {
-            workspace_id,
-            digest_value,
-            cause,
-        },
-        evaluation::EvaluationStateFault::Chains(cause) => {
-            SupervisorError::EvaluationChainsMismatch(cause)
-        }
-        evaluation::EvaluationStateFault::Identity {
-            workspace_id,
-            digest_value,
-        } => SupervisorError::StoredIdentityUnreadable {
-            what: "an Evaluation row's Workspace is not readable",
-            raw: format!("{workspace_id}, Evaluation {digest_value}"),
-        },
-    })?;
+    evaluation::verify_evaluation_state(connection).map_err(map_evaluation_state_fault)?;
     // The Artifact state stands alone: it binds no other module's record, and nothing else's
     // verification reads it.
-    artifact::verify_artifact_state(connection).map_err(|fault| match fault {
-        artifact::ArtifactStateFault::Store(source) => SupervisorError::StartupEnumerationFailed {
-            pass: StartupPass::Artifact,
-            source,
-        },
-        artifact::ArtifactStateFault::Row {
-            workspace_id,
-            digest_value,
-            cause,
-        } => SupervisorError::ArtifactStateMismatch {
-            workspace_id,
-            digest_value,
-            cause,
-        },
-        artifact::ArtifactStateFault::Totals(cause) => {
-            SupervisorError::ArtifactTotalsMismatch(cause)
-        }
-        artifact::ArtifactStateFault::Relation(cause) => {
-            SupervisorError::ArtifactRelationMismatch(cause)
-        }
-        artifact::ArtifactStateFault::Identity {
-            workspace_id,
-            digest_value,
-        } => SupervisorError::StoredIdentityUnreadable {
-            what: "an Artifact row's Workspace is not readable",
-            raw: format!("{workspace_id}, Artifact {digest_value}"),
-        },
-    })?;
+    artifact::verify_artifact_state(connection).map_err(map_artifact_state_fault)?;
     // A Run whose lease expired without a terminal Receipt becomes unconfirmed
     // here. Lease expiry is what proves that state; the Run is never removed.
     check_preflight::verify_run_state(connection).map_err(|_| SupervisorError::RunStateMismatch)?;
@@ -2393,8 +2424,61 @@ mod tests {
                         .expect_err("no `outcome_publications` table"),
                 ),
             ),
+            (
+                "Proposal",
+                super::map_proposal_state_fault(
+                    crate::proposal::verify_proposal_state(&connection)
+                        .expect_err("no `proposals` table"),
+                ),
+            ),
+            (
+                "Ruling",
+                super::map_ruling_state_fault(
+                    crate::ruling::verify_ruling_state(&connection)
+                        .expect_err("no `rulings` table"),
+                ),
+            ),
+            (
+                "Candidate",
+                super::map_candidate_state_fault(
+                    crate::candidate::verify_candidate_state(&connection)
+                        .expect_err("no `candidates` table"),
+                ),
+            ),
+            (
+                "Evaluation",
+                super::map_evaluation_state_fault(
+                    crate::evaluation::verify_evaluation_state(&connection)
+                        .expect_err("no `evaluations` table"),
+                ),
+            ),
+            (
+                "Artifact",
+                super::map_artifact_state_fault(
+                    crate::artifact::verify_artifact_state(&connection)
+                        .expect_err("no `artifacts` table"),
+                ),
+            ),
+            (
+                "ProjectRepository",
+                super::map_project_repository_state_fault(
+                    crate::project_repository::verify_project_repository_state(&connection)
+                        .expect_err("no `project_repository_revisions` table"),
+                ),
+            ),
+            (
+                "SampleProject",
+                super::map_sample_project_state_fault(
+                    crate::sample_project::verify_sample_project_state(&connection)
+                        .expect_err("no `sample_project_installations` table"),
+                ),
+            ),
         ];
-        assert_eq!(refusals.len(), 6, "a pass was added without a fixture here");
+        assert_eq!(
+            refusals.len(),
+            13,
+            "a pass was added without a fixture here"
+        );
 
         let mut lines = std::collections::BTreeSet::new();
         for (pass, refusal) in &refusals {
@@ -2416,7 +2500,7 @@ mod tests {
         }
         assert_eq!(
             lines.len(),
-            6,
+            13,
             "two passes render the same line, so an operator cannot tell them apart: {lines:?}"
         );
     }
