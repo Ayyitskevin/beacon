@@ -1054,7 +1054,10 @@ fn verify_one_mission(
 
 /// The two checks that are about the STORE rather than about one Mission, so they have no row to
 /// name and stay whole-store faults.
-fn verify_mission_totals(connection: &Connection, mission_count: usize) -> Result<(), MissionError> {
+fn verify_mission_totals(
+    connection: &Connection,
+    mission_count: usize,
+) -> Result<(), MissionError> {
     // A condition row for a Mission that does not exist cannot be stored -- the composite foreign
     // key forbids it -- so walking the Missions reaches every row there is.
     let orphan_conditions: i64 = connection.query_row(
