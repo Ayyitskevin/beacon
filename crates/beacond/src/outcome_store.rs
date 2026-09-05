@@ -45,8 +45,8 @@ use crate::mission_completion_store::{CompletionReadRefusal, verified_completion
 use crate::mission_impact::{ClassificationStoreError, verified_classification_for_citation};
 use crate::operator_account::{OperatorAccountError, OperatorAccountService};
 use crate::outcome::{
-    CANONICALIZER, MalformedOutcome, OutcomeManifestV1, OutcomeRefusal, SourceDigest, SourceKind,
-    VerifiedSources, render,
+    MalformedOutcome, OutcomeManifestV1, OutcomeRefusal, SourceDigest, SourceKind, VerifiedSources,
+    render,
 };
 use crate::proposal::sha256;
 
@@ -330,6 +330,8 @@ pub struct OutcomeCandidate {
 struct StoredRow {
     workspace_id: String,
     canonical_bytes: Vec<u8>,
+    digest_algorithm: String,
+    digest_canonicalizer: String,
     manifest_id: String,
     mission_id: String,
     completion_digest: String,
@@ -356,22 +358,24 @@ pub fn verified_manifest_within(
 ) -> Result<StoredOutcomeManifest, ManifestStoreRefusal> {
     let row: Option<StoredRow> = connection
         .query_row(
-            "SELECT workspace_id, canonical_bytes, manifest_id, mission_id, completion_digest,
-                    canonicalizer_version, renderer_version, boundary_event_seq,
-                    candidate_artifact_digest
+            "SELECT workspace_id, canonical_bytes, digest_algorithm, digest_canonicalizer,
+                    manifest_id, mission_id, completion_digest, canonicalizer_version,
+                    renderer_version, boundary_event_seq, candidate_artifact_digest
              FROM outcome_manifests WHERE manifest_digest = ?1",
             params![manifest_digest],
             |row| {
                 Ok(StoredRow {
                     workspace_id: row.get(0)?,
                     canonical_bytes: row.get(1)?,
-                    manifest_id: row.get(2)?,
-                    mission_id: row.get(3)?,
-                    completion_digest: row.get(4)?,
-                    canonicalizer_version: row.get(5)?,
-                    renderer_version: row.get(6)?,
-                    boundary_event_seq: row.get(7)?,
-                    candidate_artifact_digest: row.get(8)?,
+                    digest_algorithm: row.get(2)?,
+                    digest_canonicalizer: row.get(3)?,
+                    manifest_id: row.get(4)?,
+                    mission_id: row.get(5)?,
+                    completion_digest: row.get(6)?,
+                    canonicalizer_version: row.get(7)?,
+                    renderer_version: row.get(8)?,
+                    boundary_event_seq: row.get(9)?,
+                    candidate_artifact_digest: row.get(10)?,
                 })
             },
         )
@@ -398,6 +402,20 @@ pub fn verified_manifest_within(
     // Every projection repeats what the bytes say. A decoy row -- one whose columns lie while its
     // bytes stay correct -- is refused here rather than answered from.
     for (column, observed, from_bytes) in [
+        // The digest ENVELOPE, not the value alone (R15): 0029 persists the algorithm and the
+        // canonicalizer beside the bytes, so both are projections and both are checked. A reader
+        // that returned a freshly built envelope instead could hand back `sha256` over bytes filed
+        // under `sha512` and never notice -- measured, it did.
+        (
+            "digest_algorithm",
+            stored.digest_algorithm.clone(),
+            DIGEST_ALGORITHM.to_owned(),
+        ),
+        (
+            "digest_canonicalizer",
+            stored.digest_canonicalizer.clone(),
+            manifest.canonicalizer_version.clone(),
+        ),
         (
             "workspace_id",
             stored.workspace_id.clone(),
@@ -441,9 +459,11 @@ pub fn verified_manifest_within(
 
     Ok(StoredOutcomeManifest {
         manifest_id,
+        // The envelope returned is the STORED one, now proved equal to what the bytes and this
+        // reader's own hash function say. Building a fresh one here is what let a lie through.
         digest: SourceDigest {
-            algorithm: DIGEST_ALGORITHM.to_owned(),
-            canonicalizer: CANONICALIZER.to_owned(),
+            algorithm: stored.digest_algorithm,
+            canonicalizer: stored.digest_canonicalizer,
             value: recomputed,
         },
         canonical_bytes: stored.canonical_bytes,
