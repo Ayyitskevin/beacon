@@ -3565,3 +3565,501 @@ fn the_evaluation_chain_link_reports_the_tail_not_the_next_evaluation() {
         None
     );
 }
+// Astra seam audit at 572a92ff. Temporary-store corruption only; production code is unchanged.
+fn astra_allow_update(conn: &Connection, trigger: &str) -> String {
+    let sql: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+            [trigger],
+            |r| r.get(0),
+        )
+        .unwrap();
+    conn.execute_batch(&format!("DROP TRIGGER {trigger};"))
+        .unwrap();
+    sql
+}
+
+fn astra_restart(f: &Fixture) -> Result<beacond::StartupReport, beacond::SupervisorError> {
+    Supervisor::bootstrap(StartupConfig {
+        store_path: f.store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+}
+
+fn astra_other_mission(f: &Fixture) -> Uuid {
+    let missions = MissionService::new(Arc::clone(&f.accounts), f.workspace_id);
+    let current = missions.get(f.mission_id).unwrap();
+    missions
+        .admit(MissionDraft {
+            project_id: current.project_id,
+            expected_charter_revision: current.charter_revision,
+            team_id: current.team_id,
+            desired_outcome: "A distinct Mission for a seam scope control.".to_owned(),
+            success_conditions: vec!["A different result".to_owned()],
+            constraints: vec![],
+            prohibitions: vec![],
+            members: current
+                .members
+                .iter()
+                .map(|m| MissionMemberDraft {
+                    resident_id: m.resident_id,
+                    expected_configuration_id: m.admission_configuration_id,
+                })
+                .collect(),
+        })
+        .unwrap()
+        .id
+}
+
+fn astra_successor(f: &Fixture, previous: &str, content: &[u8]) -> beacond::VerifiedArtifactRecord {
+    let digest: [u8; 32] = HEXLOWER
+        .decode(previous.as_bytes())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    f.artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            content,
+            ArtifactContext::Mission {
+                project_id: f.project_id,
+                mission_id: f.mission_id,
+            },
+            f.resident_id,
+            f.configuration_id,
+            Some(digest),
+        )
+        .unwrap()
+}
+
+fn astra_pair(
+    f: &Fixture,
+) -> (
+    beacond::VerifiedArtifactRecord,
+    EvaluationService,
+    beacond::Evaluation,
+) {
+    let a = f.record_artifact(b"# Outcome\n\nOriginal cited bytes.\n");
+    let es = EvaluationService::new(Arc::clone(&f.accounts), f.workspace_id);
+    let e = es
+        .record(f.artifact_evaluation_draft(&a.digest().value))
+        .unwrap();
+    (a, es, e)
+}
+
+fn astra_seam(
+    f: &Fixture,
+    e: &beacond::Evaluation,
+    a: &beacond::VerifiedArtifactRecord,
+) -> Result<beacond::PublicationCandidacy, PublicationSeamRefusal> {
+    publication_candidacy(
+        &f.store.connect(),
+        f.workspace_id,
+        e.digest(),
+        a.digest(),
+        f.mission_id,
+    )
+}
+
+#[test]
+fn astra_control_valid_chain_restart_and_exact_collector_citation() {
+    let f = admitted_mission("astra-valid-chain");
+    let (a, es, e) = astra_pair(&f);
+    let b = astra_successor(&f, &a.digest().value, b"# Second\n");
+    let c = astra_successor(&f, &b.digest().value, b"# Third\n");
+    assert_eq!(
+        es.get(&e.digest().value)
+            .unwrap()
+            .force()
+            .subject_superseded_by(),
+        Some(c.digest())
+    );
+    assert!(astra_restart(&f).is_ok());
+    assert!(astra_seam(&f, &e, &a).is_ok());
+    let conn = f.store.connect();
+    let cited = beacond::Collector::new(&conn, f.workspace_id)
+        .artifact(&a.digest().value, f.mission_id)
+        .unwrap();
+    assert_eq!(cited.digest_value, a.digest().value);
+}
+
+#[test]
+fn astra_s1_subject_tail_cannot_jump_to_another_missions_unrelated_artifact() {
+    let f = admitted_mission("astra-foreign-mission-tail");
+    let other_mission = astra_other_mission(&f);
+    let (a, es, e) = astra_pair(&f);
+    let b = f
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            b"# Other Mission\n",
+            ArtifactContext::Mission {
+                project_id: f.project_id,
+                mission_id: other_mission,
+            },
+            f.resident_id,
+            f.configuration_id,
+            None,
+        )
+        .unwrap();
+    assert!(astra_restart(&f).is_ok());
+    assert!(astra_seam(&f, &e, &a).is_ok());
+    let conn = f.store.connect();
+    conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+    conn.execute(
+        "INSERT INTO artifact_supersessions (workspace_id, artifact_digest, supersedes_digest)
+         VALUES (?1, ?2, ?3)",
+        rusqlite::params![
+            f.workspace_id.to_string(),
+            b.digest().value,
+            a.digest().value
+        ],
+    )
+    .unwrap();
+    let read = es.get(&e.digest().value);
+    let seam = astra_seam(&f, &e, &a);
+    eprintln!(
+        "S1 foreign_mission={} tail={:?} seam={:?}",
+        other_mission,
+        read.as_ref().map(|x| x.force().subject_superseded_by()),
+        seam
+    );
+    // The known Artifact startup ladder refuses this row. The new question is the READ consumer.
+    assert!(astra_restart(&f).is_err());
+    assert!(
+        read.is_err() && seam.is_err(),
+        "an unrelated other-Mission Artifact became a verified subject tail"
+    );
+}
+
+#[test]
+fn astra_control_foreign_workspace_tail_is_refused() {
+    let f = admitted_mission("astra-foreign-ws-tail");
+    let other = admitted_mission("astra-foreign-ws-target");
+    let (a, es, e) = astra_pair(&f);
+    let b = other.record_artifact(b"# Elsewhere\n");
+    // Disable FKs only on this temporary-store test connection: emulate a bad restore.
+    let conn = f.store.connect();
+    conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+    conn.execute(
+        "INSERT INTO artifact_supersessions (workspace_id, artifact_digest, supersedes_digest)
+         VALUES (?1, ?2, ?3)",
+        rusqlite::params![
+            f.workspace_id.to_string(),
+            b.digest().value,
+            a.digest().value
+        ],
+    )
+    .unwrap();
+    assert!(es.get(&e.digest().value).is_err());
+    assert!(astra_seam(&f, &e, &a).is_err());
+    assert!(astra_restart(&f).is_err());
+}
+
+#[test]
+fn astra_s2_subject_tail_must_verify_the_middle_artifacts_content() {
+    let f = admitted_mission("astra-middle-artifact");
+    let (a, es, e) = astra_pair(&f);
+    let b = astra_successor(&f, &a.digest().value, b"# Second\n");
+    let c = astra_successor(&f, &b.digest().value, b"# Third\n");
+    assert!(astra_restart(&f).is_ok());
+    assert_eq!(
+        es.get(&e.digest().value)
+            .unwrap()
+            .force()
+            .subject_superseded_by(),
+        Some(c.digest())
+    );
+    let conn = f.store.connect();
+    let trigger = astra_allow_update(&conn, "artifacts_no_update");
+    conn.execute(
+        "UPDATE artifacts SET content_inline = x'00' WHERE digest_value = ?1",
+        [&b.digest().value],
+    )
+    .unwrap();
+    conn.execute_batch(&trigger).unwrap();
+    assert!(f.artifacts().get(&b.digest().value).is_err());
+    let read = es.get(&e.digest().value);
+    let seam = astra_seam(&f, &e, &a);
+    eprintln!(
+        "S2 corrupt_middle={} tail={:?} seam={:?}",
+        b.digest().value,
+        read.as_ref().map(|x| x.force().subject_superseded_by()),
+        seam
+    );
+    assert!(astra_restart(&f).is_err());
+    assert!(
+        read.is_err() && seam.is_err(),
+        "a corrupt middle Artifact was skipped by the supposedly verified tail walk"
+    );
+}
+
+#[test]
+fn astra_s3_evaluation_tail_must_verify_the_middle_evaluation() {
+    let f = admitted_mission("astra-middle-evaluation");
+    let (a, es, first) = astra_pair(&f);
+    let mut second_draft = f.artifact_evaluation_draft(&a.digest().value);
+    second_draft.supersedes = EvaluationSupersedes::Evaluation(first.digest().value.clone());
+    second_draft.rationale = "Second reading".to_owned();
+    let second = es.record(second_draft).unwrap();
+    let mut third_draft = f.artifact_evaluation_draft(&a.digest().value);
+    third_draft.supersedes = EvaluationSupersedes::Evaluation(second.digest().value.clone());
+    third_draft.rationale = "Third reading".to_owned();
+    let third = es.record(third_draft).unwrap();
+    assert!(astra_restart(&f).is_ok());
+    assert_eq!(
+        es.get(&first.digest().value)
+            .unwrap()
+            .force()
+            .superseded_by(),
+        Some(third.digest())
+    );
+    let conn = f.store.connect();
+    let trigger = astra_allow_update(&conn, "evaluations_no_update");
+    conn.execute(
+        "UPDATE evaluations SET rationale = 'decoy' WHERE digest_value = ?1",
+        [&second.digest().value],
+    )
+    .unwrap();
+    conn.execute_batch(&trigger).unwrap();
+    assert!(es.get(&second.digest().value).is_err());
+    let read = es.get(&first.digest().value);
+    let seam = astra_seam(&f, &first, &a);
+    eprintln!(
+        "S3 corrupt_middle={} tail={:?} seam={:?}",
+        second.digest().value,
+        read.as_ref().map(|x| x.force().superseded_by()),
+        seam
+    );
+    assert!(astra_restart(&f).is_err());
+    assert!(
+        read.is_err() && seam.is_err(),
+        "a corrupt middle Evaluation was skipped by the supposedly verified tail walk"
+    );
+}
+
+#[test]
+fn astra_control_mission_comes_from_arm03_and_not_its_projection() {
+    let f = admitted_mission("astra-mission-arm");
+    let other = astra_other_mission(&f);
+    let (a, es, e) = astra_pair(&f);
+    assert!(astra_seam(&f, &e, &a).is_ok());
+    assert_eq!(
+        publication_candidacy(
+            &f.store.connect(),
+            f.workspace_id,
+            e.digest(),
+            a.digest(),
+            other
+        ),
+        Err(PublicationSeamRefusal::MissionDiffers)
+    );
+    let conn = f.store.connect();
+    let trigger = astra_allow_update(&conn, "evaluations_no_update");
+    conn.execute(
+        "UPDATE evaluations SET mission_id = ?1 WHERE digest_value = ?2",
+        rusqlite::params![other.to_string(), e.digest().value],
+    )
+    .unwrap();
+    conn.execute_batch(&trigger).unwrap();
+    assert!(es.get(&e.digest().value).is_err());
+    assert!(publication_candidacy(&conn, f.workspace_id, e.digest(), a.digest(), other).is_err());
+    assert!(astra_restart(&f).is_err());
+}
+
+#[test]
+fn astra_control_forged_subject_event_is_refused_after_restart() {
+    let f = admitted_mission("astra-artifact-event");
+    let (a, es, e) = astra_pair(&f);
+    assert!(astra_restart(&f).is_ok());
+    assert!(astra_seam(&f, &e, &a).is_ok());
+    let conn = f.store.connect();
+    conn.execute(
+        "UPDATE events SET payload_json = json_set(payload_json, '$.artifact.digest.canonicalizer', 'wrong.v1')
+         WHERE kind = 'artifact.recorded' AND json_extract(payload_json, '$.artifact.digest.value') = ?1",
+        [&a.digest().value],
+    ).unwrap();
+    assert!(es.get(&e.digest().value).is_err());
+    assert!(astra_seam(&f, &e, &a).is_err());
+    assert!(
+        beacond::Collector::new(&conn, f.workspace_id)
+            .artifact(&a.digest().value, f.mission_id)
+            .is_err()
+    );
+    assert!(astra_restart(&f).is_err());
+}
+
+#[test]
+fn astra_s4_reordered_subject_creation_cannot_follow_its_evaluation() {
+    let f = admitted_mission("astra-reordered-artifact-event");
+    let (a, es, e) = astra_pair(&f);
+    assert!(astra_restart(&f).is_ok());
+    let conn = f.store.connect();
+    let eval_seq: i64 = conn
+        .query_row(
+            "SELECT sequence FROM events WHERE kind = 'evaluation.recorded'
+         AND json_extract(payload_json, '$.evaluation.digest.value') = ?1",
+            [&e.digest().value],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(a.creation_event_seq() < eval_seq as u64);
+    let scratch: i64 = conn
+        .query_row("SELECT MAX(sequence)+1 FROM events", [], |r| r.get(0))
+        .unwrap();
+    let moved = eval_seq;
+    conn.execute(
+        "UPDATE events SET sequence = ?1 WHERE sequence = ?2",
+        rusqlite::params![scratch, eval_seq],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE events SET sequence = ?1 WHERE sequence = ?2",
+        rusqlite::params![moved, i64::try_from(a.creation_event_seq()).unwrap()],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE events SET sequence = ?1 WHERE sequence = ?2",
+        rusqlite::params![i64::try_from(a.creation_event_seq()).unwrap(), scratch],
+    )
+    .unwrap();
+    // A mismatching cursor on its own is refused: positive detector control.
+    assert!(es.get(&e.digest().value).is_err());
+    let trigger = astra_allow_update(&conn, "artifacts_no_update");
+    conn.execute(
+        "UPDATE artifacts SET creation_event_seq = ?1 WHERE digest_value = ?2",
+        rusqlite::params![moved, a.digest().value],
+    )
+    .unwrap();
+    conn.execute_batch(&trigger).unwrap();
+    let restart = astra_restart(&f);
+    let read = es.get(&e.digest().value);
+    let seam = astra_seam(&f, &e, &a);
+    eprintln!(
+        "S4 artifact_seq={moved} evaluation_seq={} restart={restart:?} read_ok={} seam={seam:?}",
+        a.creation_event_seq(),
+        read.is_ok()
+    );
+    assert!(
+        restart.is_err() && read.is_err() && seam.is_err(),
+        "an Evaluation was accepted even though its subject entered the ledger after it"
+    );
+}
+
+#[test]
+fn astra_control_collected_identity_is_not_a_meets_verdict() {
+    let f = admitted_mission("astra-collected-not-meets");
+    let (a, es, meets) = astra_pair(&f);
+    let mut draft = f.artifact_evaluation_draft(&a.digest().value);
+    draft.verdict = Verdict::Uncertain; // There is NO not_evaluated Evaluation verdict in v1.
+    draft.rationale = "No definite assessment can be made.".to_owned();
+    draft.supersedes = EvaluationSupersedes::Evaluation(meets.digest().value.clone());
+    let uncertain = es.record(draft).unwrap();
+    let conn = f.store.connect();
+    let collected = beacond::Collector::new(&conn, f.workspace_id)
+        .artifact(&a.digest().value, f.mission_id)
+        .unwrap();
+    assert_eq!(collected.digest_value, a.digest().value);
+    assert_eq!(
+        es.get(&uncertain.digest().value).unwrap().payload().verdict,
+        Verdict::Uncertain
+    );
+    assert_eq!(
+        astra_seam(&f, &uncertain, &a),
+        Err(PublicationSeamRefusal::VerdictIsNotMeets)
+    );
+    // Historical Meets remains usable under K-2 §8; the later Evaluation is shown beside it.
+    assert_eq!(
+        es.get(&meets.digest().value)
+            .unwrap()
+            .force()
+            .superseded_by(),
+        Some(uncertain.digest())
+    );
+    assert!(astra_seam(&f, &meets, &a).is_ok());
+}
+
+#[test]
+fn astra_s1_canonical_cross_mission_successor_is_not_a_verified_subject_tail() {
+    let f = admitted_mission("astra-canonical-cross-mission");
+    let other = astra_other_mission(&f);
+    let (a, es, e) = astra_pair(&f);
+    let b = f
+        .artifacts()
+        .record(
+            ArtifactKind::OutcomeDocument,
+            b"# Other Mission\n",
+            ArtifactContext::Mission {
+                project_id: f.project_id,
+                mission_id: other,
+            },
+            f.resident_id,
+            f.configuration_id,
+            None,
+        )
+        .unwrap();
+    assert!(astra_restart(&f).is_ok());
+    // Build a byte-consistent restore image: B truthfully declares predecessor A but has another Mission.
+    // The writer refuses WrongContext; this probe is exclusively about consumers reading persisted data.
+    let conn = f.store.connect();
+    conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+    let mut bytes: Vec<u8> = conn
+        .query_row(
+            "SELECT canonical_bytes FROM artifacts WHERE digest_value = ?1",
+            [&b.digest().value],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let predecessor_tag = bytes.len() - 9;
+    assert_eq!(bytes[predecessor_tag], 0x00);
+    bytes[predecessor_tag] = 0x01;
+    let predecessor: [u8; 32] = HEXLOWER
+        .decode(a.digest().value.as_bytes())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    bytes.splice(predecessor_tag + 1..predecessor_tag + 1, predecessor);
+    let parsed = beacond::Artifact::from_canonical_bytes(&bytes).unwrap();
+    assert_eq!(parsed.payload().supersedes, Some(predecessor));
+    assert_eq!(
+        parsed.payload().context,
+        ArtifactContext::Mission {
+            project_id: f.project_id,
+            mission_id: other
+        }
+    );
+    let replacement = parsed.digest().value.clone();
+    let trigger = astra_allow_update(&conn, "artifacts_no_update");
+    conn.execute(
+        "UPDATE artifacts SET digest_value=?1, canonical_bytes=?2, has_predecessor=1, supersedes_digest=?3
+         WHERE digest_value=?4",
+        rusqlite::params![replacement, bytes, a.digest().value, b.digest().value],
+    ).unwrap();
+    conn.execute_batch(&trigger).unwrap();
+    conn.execute(
+        "UPDATE events SET payload_json=json_set(payload_json, '$.artifact.digest.value', ?1,
+             '$.artifact.canonicalBytesBase64', ?2)
+         WHERE kind='artifact.recorded' AND json_extract(payload_json, '$.artifact.digest.value')=?3",
+        rusqlite::params![replacement, BASE64.encode(&bytes), b.digest().value],
+    ).unwrap();
+    conn.execute(
+        "INSERT INTO artifact_supersessions (workspace_id, artifact_digest, supersedes_digest)
+         VALUES (?1, ?2, ?3)",
+        rusqlite::params![f.workspace_id.to_string(), replacement, a.digest().value],
+    )
+    .unwrap();
+    // The canonical bytes, projections, Event and predecessor relation all agree.
+    assert!(f.artifacts().get(&replacement).is_ok());
+    let restart = astra_restart(&f);
+    let read = es.get(&e.digest().value);
+    let seam = astra_seam(&f, &e, &a);
+    eprintln!(
+        "S1b cross_mission={other} tail={:?} restart_ok={} seam={seam:?}",
+        read.as_ref().map(|x| x.force().subject_superseded_by()),
+        restart.is_ok()
+    );
+    assert!(
+        read.is_err() && seam.is_err(),
+        "the Evaluation reader blessed a cross-Mission subject chain after a byte-consistent restore"
+    );
+}
