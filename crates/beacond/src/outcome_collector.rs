@@ -6,11 +6,13 @@
 //! claim.** Every source is re-read through its owning module's verified reader, which proves the
 //! Workspace, the exact identity, the stored bytes and the digest before returning a typed value.
 //!
-//! Three of the four readers the skeleton typed as missing now exist and are wired here: measured
-//! spend and the Mission impact classification (`0025`) and `MissionCompletionV1` (`0026`). The
-//! **Artifact entity store** is still a typed refusal, never a stub that returns a value: a stub is
-//! indistinguishable from a verified read at the call site, and the whole point of this module is
-//! that a caller cannot tell "verified" from "assumed" by looking at the type.
+//! All four readers the skeleton once typed as missing now exist and are wired here: measured spend
+//! and the Mission impact classification (`0025`), `MissionCompletionV1` (`0026`), and the Artifact
+//! store (`0027`, #63). A delivered Artifact is read through `artifact::verified_artifact_within` --
+//! the reader `ArtifactService::get` wraps -- and the collector adds only the two facts that reader
+//! cannot know: that the record is this Workspace's and scoped to this Mission. No seam remains,
+//! and the enum that named them went with the last one: a variant no code can produce is a lie
+//! about the store.
 //!
 //! Two properties are this module's own, and neither belongs to any single owning reader:
 //!
@@ -361,8 +363,11 @@ pub struct CollectedCompletion {
     /// exactly the Mission's declared set, exactly once each.
     pub condition_results: Vec<CollectedCondition>,
     /// The Artifact **record** digests (R16) this Mission delivered, as a state: `Absent` when the
-    /// completion delivered none. A non-empty set cannot reach here at all — the completion's own
-    /// reader refuses a delivered Artifact while no Artifact entity exists to verify it against.
+    /// completion delivered none, `Verified` with the exact cited digests otherwise -- each read
+    /// through `artifact::verified_artifact_within` and required to be this Workspace's and scoped
+    /// to this Mission. A digest nothing stored, or one scoped elsewhere, aborts the collection
+    /// rather than shortening this list: a manifest rendering some of a delivery is a document
+    /// nobody could tell was incomplete.
     pub delivered_artifacts: OutcomeState<Vec<String>>,
     pub unfinished_work: Vec<CollectedNarrative>,
     pub uncertainty: Vec<CollectedNarrative>,
