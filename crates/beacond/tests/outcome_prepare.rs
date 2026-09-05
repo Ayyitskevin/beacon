@@ -7932,10 +7932,13 @@ fn a_classification_id_column_that_is_not_a_uuid_is_refused_with_what_was_found(
 /// * `outcome_publication.rs`, the candidate with no Mission context: the Evaluation owner refuses
 ///   an unscoped Artifact first, with `Inconsistent(ArtifactHasNoMissionScope)`, so no publication
 ///   can cite one through any owner path.
-/// * `mission_impact.rs`, the unparseable Workspace column at startup: an earlier pass parses
-///   Workspace ids and refuses with `InvalidWorkspaceId("...")` (`lib.rs:996`) before the
-///   classification pass runs. A first draft of this bar asserted the raw text and passed for that
-///   reason; restoring the nil-carrying arm left it GREEN, which is how the vacuity was found.
+/// * `mission_impact.rs`, the unparseable Workspace column at startup: a classification row whose
+///   `workspace_id` is not a UUID needs a `workspaces` row with that same key (0032's composite
+///   foreign key), and BOTH ways of planting one are refused by an earlier layer -- measured
+///   below, not argued. A first draft of this bar asserted the raw text instead and passed for the
+///   wrong reason; restoring the nil-carrying arm left it GREEN, which is how the vacuity was
+///   found. The assertions here are on the refusals of the layers that run first, so they cannot
+///   go green on my own pass's output.
 #[test]
 fn the_unreachable_r39_sites_are_recorded_rather_than_barred() {
     let fixture = admitted_mission("r39-defensive-sites");
@@ -7991,5 +7994,60 @@ fn the_unreachable_r39_sites_are_recorded_rather_than_barred() {
         format!("{refusal:?}").contains("ArtifactHasNoMissionScope"),
         "the Evaluation owner no longer refuses first, so the publication arm may now be \
          reachable and deserves its own bar: {refusal:?}"
+    );
+
+    // Site 2: the classification startup pass's unparseable Workspace key. The plant needs a
+    // `workspaces` row carrying the same non-UUID key, and where that row sorts decides which
+    // earlier layer answers -- neither of them the classification pass.
+    fn boot_with_a_corrupt_workspace_key(name: &str, age_offset_ms: i64) -> SupervisorError {
+        let fixture = admitted_mission(name);
+        fixture.classify(ImpactLevel::Ordinary);
+        with_trigger_down(
+            &fixture.store,
+            "mission_impact_classifications_no_update",
+            "mission_impact_classifications",
+            "Mission impact classifications are immutable",
+            |connection| {
+                connection
+                    .pragma_update(None, "foreign_keys", "OFF")
+                    .unwrap();
+                connection
+                    .execute(
+                        "INSERT INTO workspaces (id, name, created_at_ms)
+                         SELECT 'not-a-uuid-WSNEEDLE', name, created_at_ms + ?2 FROM workspaces
+                         WHERE id = ?1",
+                        params![fixture.workspace_id.to_string(), age_offset_ms],
+                    )
+                    .unwrap();
+                connection
+                    .execute(
+                        "UPDATE mission_impact_classifications
+                         SET workspace_id = 'not-a-uuid-WSNEEDLE' WHERE workspace_id = ?1",
+                        params![fixture.workspace_id.to_string()],
+                    )
+                    .unwrap();
+            },
+        );
+        astra_boot(&fixture).expect_err("a store holding a non-UUID Workspace key opened Ready")
+    }
+
+    // Planted older, it is the row `Supervisor::bootstrap` opens (`ORDER BY created_at_ms, id
+    // LIMIT 1`), so `parse_workspace_id` refuses with what was found -- lib.rs:996, R39.2's shape
+    // already applied there.
+    let opened_first = boot_with_a_corrupt_workspace_key("r39-workspace-key-older", -1000);
+    assert!(
+        matches!(
+            &opened_first,
+            SupervisorError::InvalidWorkspaceId(value) if value == "not-a-uuid-WSNEEDLE"
+        ),
+        "the Workspace open no longer refuses first: {opened_first:?}"
+    );
+
+    // Planted newer, the open reads the good row and the composite foreign key is what the
+    // classification row now breaks -- `PRAGMA foreign_key_check`, still before any pass.
+    let checked_first = boot_with_a_corrupt_workspace_key("r39-workspace-key-newer", 1000);
+    assert!(
+        matches!(checked_first, SupervisorError::ForeignKeyViolations(_)),
+        "the foreign-key check no longer refuses first: {checked_first:?}"
     );
 }
