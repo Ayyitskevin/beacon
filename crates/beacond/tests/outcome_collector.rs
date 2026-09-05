@@ -36,8 +36,8 @@ use beacond::{
     RulingService, RulingSupersedes, SecretString, SourceKind, SpendLine, SpendMeasurement,
     SpendOrigin, SpendReference, SpendSupersedes, SpendTotals, StarterOrganizationService,
     StarterResidentDraft, StarterRole, StartupConfig, Supervisor, TeamDraft, TeamMemberDraft,
-    TeamService, TeamView, UncertaintyKind, UnfinishedKind, Verdict, declared_conditions_digest,
-    positionable_sources, record_completion,
+    TeamService, TeamView, UncertaintyKind, UncountedEntry, UncountedKind, UnfinishedKind, Verdict,
+    declared_conditions_digest, positionable_sources, record_completion,
 };
 use data_encoding::HEXLOWER;
 use rusqlite::{Connection, params};
@@ -3258,5 +3258,51 @@ fn a_spend_window_that_starts_at_admission_spans_the_mission() {
         matches!(spend.amount, OutcomeState::Verified(_)),
         "{:?}",
         spend.amount
+    );
+}
+
+#[test]
+fn collector_preserves_where_a_partial_spend_measurement_is_incomplete() {
+    let fixture = admitted("partial-spend-gap", vec!["Gates pass".to_owned()]);
+    let spend = fixture.measure_spend(SpendMeasurement::PartiallyMeasured(
+        SpendTotals {
+            counted_units: 11,
+            lines: vec![SpendLine {
+                unit: "USD".to_owned(),
+                amount_minor: 4_200,
+                minor_units_exponent: 2,
+            }],
+        },
+        vec![UncountedEntry {
+            kind: UncountedKind::ProviderDidNotPrice,
+            detail: "provider omitted one invocation".to_owned(),
+        }],
+    ));
+    let boundary = newest_event(&fixture.store);
+    let completion = fixture.completion(
+        boundary,
+        vec![ConditionOutcome::Met],
+        SpendReference::Recorded {
+            spend_id: spend.spend_id,
+            spend_version: spend.version,
+            spend_sha256: sha256_bytes(&spend.canonical_bytes().unwrap()),
+        },
+    );
+    let digest = fixture.record(&completion);
+    let connection = fixture.connection();
+    let collected = Collector::new(&connection, fixture.store.workspace_id)
+        .collect(&CollectionRequest {
+            completion_digest: Some(digest),
+            ..CollectionRequest::default()
+        })
+        .expect("the partial measurement is a valid verified spend");
+    let spend = collected.spend.expect("the completion cited spend");
+
+    assert_eq!(spend.measurement, "partially_measured");
+    let exposed = format!("{spend:?}");
+    assert!(
+        exposed.contains("provider_did_not_price")
+            && exposed.contains("provider omitted one invocation"),
+        "the collected partial measurement lost the named gap: {exposed}"
     );
 }
