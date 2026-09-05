@@ -4067,6 +4067,75 @@ END;",
     );
 }
 
+/// R28.1 pass 4 of 5: a Project whose charter history disagrees with its current revision is
+/// refused at startup, and the refusal names WHICH Project.
+///
+/// R39.3's two-row shape, deliberate: a second Project is created and the tamper lands on
+/// whichever sorts LAST in the pass's own `ORDER BY`.
+#[test]
+fn startup_refuses_a_project_whose_charter_history_disagrees_and_names_the_row() {
+    let fixture = admitted_mission("r28-project-startup");
+    let second = ProjectService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .create(ProjectDraft {
+            name: "Beacon Beta".to_owned(),
+            charter: ProjectCharterDraft {
+                purpose: "A second Project, so rows[0] is not the tampered row.".to_owned(),
+                desired_outcomes: vec!["Exist".to_owned()],
+                constraints: vec!["Keep authority explicit".to_owned()],
+                prohibitions: vec!["Do not deploy".to_owned()],
+                autonomy_profile: AutonomyProfile::Supervised,
+            },
+        })
+        .expect("the second Project is created");
+    assert_ne!(second.id, fixture.project_id);
+
+    let connection = fixture.store.connect();
+    let ordered: Vec<String> = connection
+        .prepare("SELECT id FROM projects ORDER BY workspace_id, id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        ordered.len(),
+        2,
+        "the fixture must hold two Projects: {ordered:?}"
+    );
+    let target = Uuid::parse_str(ordered.last().unwrap()).unwrap();
+
+    // `project_charter_revisions` carries no immutability trigger, so this needs no drop-and-restore
+    // -- and that absence is itself worth knowing: the history a Project's terminal revision is
+    // checked against is not protected the way the records it summarises are.
+    // ADDED, not removed: the Project row references its own charter revision, so deleting the
+    // history trips a foreign key before the pass ever sees it (measured -- the first version of
+    // this bar got `FOREIGN KEY constraint failed`). A revision the Project does not point at
+    // makes the terminal revision disagree with the current one, which is this pass's own check.
+    let added = connection
+        .execute(
+            "INSERT INTO project_charter_revisions (
+                 workspace_id, project_id, revision, purpose, desired_outcomes_json,
+                 constraints_json, prohibitions_json, autonomy_profile, budget_boundary,
+                 external_effects, author_kind, authored_at_ms
+             )
+             SELECT workspace_id, project_id, revision + 1, purpose, desired_outcomes_json,
+                    constraints_json, prohibitions_json, autonomy_profile, budget_boundary,
+                    external_effects, author_kind, authored_at_ms + 1
+             FROM project_charter_revisions WHERE project_id = ?1",
+            params![target.to_string()],
+        )
+        .unwrap();
+    assert!(added > 0, "the plant added nothing, so it plants nothing");
+    drop(connection);
+
+    let refusal = astra_boot(&fixture)
+        .expect_err("a store whose charter history disagrees reopened Ready");
+    assert!(
+        matches!(&refusal, beacond::SupervisorError::ProjectStateMismatch),
+        "startup did not refuse the tampered charter history: {refusal:?}"
+    );
+}
+
 /// R28.4 at the innermost point (Fable's addendum 2, from opus2's R28.4-D lane): the driver's own
 /// text never reaches a printed line, through ANY mapping onto `SupervisorError::Store`.
 ///
