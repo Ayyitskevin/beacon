@@ -465,6 +465,30 @@ impl From<LocalTransportError> for CommandError {
                 "Review the Mission outcome, success conditions, Team, and exact member evidence.",
                 None,
             ),
+            // A locked session is not an unavailable service, and saying so was the difference
+            // between an operator re-authenticating and an operator filing a bug. Split out of the
+            // group below for the reason the Policy and Mission arms record: each refusal must
+            // carry its own code, or the matching `case` in session.ts is unreachable.
+            LocalTransportError::Remote {
+                code: LocalErrorCode::NotAuthenticated,
+                ..
+            } => ("not_authenticated", "Unlock Beacon to continue.", None),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::OutcomeAbsent,
+                ..
+            } => (
+                "outcome_absent",
+                "This Mission has no published Outcome Document.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::OutcomeUnavailable,
+                ..
+            } => (
+                "outcome_unverified",
+                "Beacon could not verify this Mission's Outcome Document.",
+                None,
+            ),
             LocalTransportError::Remote {
                 code: LocalErrorCode::MissionNotFound,
                 ..
@@ -510,7 +534,6 @@ impl From<LocalTransportError> for CommandError {
                     | LocalErrorCode::AccountAlreadyExists
                     | LocalErrorCode::AccountMissing
                     | LocalErrorCode::RemotePasswordNotAllowed
-                    | LocalErrorCode::NotAuthenticated
                     | LocalErrorCode::AccountServiceUnavailable
                     | LocalErrorCode::UnauthorizedClient
                     | LocalErrorCode::ProtocolError,
@@ -1741,13 +1764,13 @@ mod tests {
         admit_mission_value, authentication_capabilities_value, begin_password_setup_value,
         bind_project_repository_value, complete_operator_setup_value, create_project_value,
         current_project_repository_value, install_sample_project_value, migrate_legacy_app_data,
-        mission_value, platform_session_monitor_status_value, preflight_project_checks_value,
-        prepare_runtime_directory, project_charter_history_value, project_policy_history_value,
-        project_policy_value, project_repository_history_value, project_value, projects_value,
-        publish_project_policy_value, reactivate_resident_value, residents_value,
-        retire_resident_value, revise_project_charter_value, sample_project_status_value,
-        session_policy_value, session_status_value, set_session_timeout_value,
-        starter_organization_value, suspend_resident_value,
+        mission_value, outcome_document_value, platform_session_monitor_status_value,
+        preflight_project_checks_value, prepare_runtime_directory, project_charter_history_value,
+        project_policy_history_value, project_policy_value, project_repository_history_value,
+        project_value, projects_value, publish_project_policy_value, reactivate_resident_value,
+        residents_value, retire_resident_value, revise_project_charter_value,
+        sample_project_status_value, session_policy_value, session_status_value,
+        set_session_timeout_value, starter_organization_value, suspend_resident_value,
     };
 
     #[test]
@@ -2054,6 +2077,35 @@ mod tests {
                 "allow-deactivate-local-model",
             ]
         );
+    }
+
+    #[test]
+    fn blue_locked_outcome_export_reaches_renderer_as_not_authenticated() {
+        let state = TestState::new();
+        let refusal = outcome_document_value(&state.state, Uuid::new_v4(), None).unwrap_err();
+        assert_eq!(refusal.code, "not_authenticated");
+    }
+
+    /// The other half of blue's P1: an unlocked store with no publication must say so, and must not
+    /// say the account service is unavailable either.
+    #[test]
+    fn an_absent_outcome_reaches_the_renderer_as_outcome_absent() {
+        let state = TestState::new();
+        state
+            .state
+            .supervisor
+            .begin_password_setup(
+                SecretString::new("a long local passphrase".to_owned()),
+                SecretString::new("a long local passphrase".to_owned()),
+            )
+            .unwrap();
+        state
+            .state
+            .supervisor
+            .complete_operator_setup(true)
+            .unwrap();
+        let refusal = outcome_document_value(&state.state, Uuid::new_v4(), None).unwrap_err();
+        assert_eq!(refusal.code, "outcome_absent");
     }
 
     struct TestState {

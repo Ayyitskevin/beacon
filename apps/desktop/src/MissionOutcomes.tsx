@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import {
   type ExportedOutcome,
   type PublicationSummary,
+  describeLocalAccountError,
   loadMissionPublications,
   loadOutcomeDocument,
 } from "./session";
@@ -65,7 +66,7 @@ export function MissionOutcomes({ missionId }: { missionId: string }): React.JSX
         setSelected(loaded.length > 0 ? loaded[0].publicationVersion : null);
       })
       .catch((cause: unknown) => {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
+        if (!cancelled) setError(describeLocalAccountError(cause));
       });
     return () => {
       cancelled = true;
@@ -84,7 +85,7 @@ export function MissionOutcomes({ missionId }: { missionId: string }): React.JSX
         if (!cancelled) setDocument(loaded);
       })
       .catch((cause: unknown) => {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
+        if (!cancelled) setError(describeLocalAccountError(cause));
       });
     return () => {
       cancelled = true;

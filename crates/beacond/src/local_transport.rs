@@ -104,6 +104,8 @@ pub enum LocalErrorCode {
     StaleMissionTeam,
     MissionMemberIneligible,
     MissionUnavailable,
+    OutcomeAbsent,
+    OutcomeUnavailable,
     LocalModelUnavailable,
     LocalModelNotFound,
     LocalModelChanged,
@@ -2110,20 +2112,35 @@ fn wire_error_from_sample_project(error: SampleProjectError) -> WireError {
     }
 }
 
-/// An Outcome refusal on the wire.
+/// An Outcome refusal on the wire, EXHAUSTIVELY -- no wildcard, so a new refusal is a compile error
+/// here rather than a silent fall into "unavailable" (blue's P1, and the rule the Policy and Mission
+/// arms already carry: each refusal must arrive with its own code).
 ///
-/// `Absent` is `MissionNotFound` deliberately: it is the answer for a Mission with no publication
-/// AND for a Mission in another Workspace (R29.6), and the wire must not separate the two -- a
-/// distinct code would confirm to a caller who may not read the Workspace that the record exists.
-/// Everything else that is not an account refusal is an unavailable store, because every remaining
-/// arm means a stored record did not prove.
+/// `OutcomeAbsent` covers a Mission with no publication AND a Mission in another Workspace, with one
+/// code for both (R29.6): a distinct code would confirm to a caller who may not read the Workspace
+/// that the record exists.
 fn wire_error_from_outcome(error: PublishRefusal) -> WireError {
     let code = match error {
         // An account refusal is the account module's to report, exactly as every other wire
-        // mapping does: a locked store must reach the caller as `NotAuthenticated`.
+        // mapping does.
         PublishRefusal::Account(error) => return wire_error_from_account(error),
-        PublishRefusal::Absent => LocalErrorCode::MissionNotFound,
-        _ => LocalErrorCode::ProtocolError,
+        PublishRefusal::Absent => LocalErrorCode::OutcomeAbsent,
+        // Everything below means a stored record did not prove, or a pairing was refused. They are
+        // one code on the wire because they are one thing to an operator -- this document cannot be
+        // served -- and the detail belongs in the log, not in a renderer string.
+        PublishRefusal::Seam(_)
+        | PublishRefusal::NoManifestForCandidate
+        | PublishRefusal::Manifest(_)
+        | PublishRefusal::ManifestMissionDiffers { .. }
+        | PublishRefusal::Completion(_)
+        | PublishRefusal::AppendixRequired
+        | PublishRefusal::VersionGap { .. }
+        | PublishRefusal::AlreadyPublished
+        | PublishRefusal::MissionBindingBroken { .. }
+        | PublishRefusal::QualifyingVerdictNotMeets
+        | PublishRefusal::HistoryNotContiguous { .. }
+        | PublishRefusal::Unverified(_)
+        | PublishRefusal::Store(_) => LocalErrorCode::OutcomeUnavailable,
     };
     WireError {
         code,

@@ -1203,6 +1203,12 @@ export function describeLocalAccountError(error: unknown): string {
       return "Review the Mission outcome, success conditions, Team, and exact member evidence.";
     case "mission_not_found":
       return "That Mission is no longer available in this Workspace.";
+    case "not_authenticated":
+      return "Unlock Beacon to continue.";
+    case "outcome_absent":
+      return "This Mission has no published Outcome Document.";
+    case "outcome_unverified":
+      return "Beacon could not verify this Mission's Outcome Document.";
     case "stale_mission_team":
       return "The Team or a Resident configuration changed. Reload before admitting the Mission.";
     case "mission_member_ineligible":
