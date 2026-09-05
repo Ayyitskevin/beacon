@@ -144,6 +144,106 @@ impl InvalidRepositoryDraft {
     }
 }
 
+/// Which fault the ProjectRepository startup pass hit, and WHICH ROW hit it (R27.1's shape, R28.1).
+pub(crate) enum ProjectRepositoryStateFault {
+    /// The enumeration itself failed: no row to name, because none was reached.
+    Store(rusqlite::Error),
+    /// One ProjectRepository did not re-prove. `cause` is the owning reader's OWN error, carried whole.
+    Row {
+        workspace_id: Uuid,
+        project_id: Uuid,
+        cause: ProjectRepositoryError,
+    },
+    // NO `Totals` ARM. This pass walks the Projects that have repository revisions and checks
+    // each one's own history and Events; there is no whole-store count left over.
+    /// A row whose Workspace column is not a UUID. Unreachable while the foreign-key check and
+    /// the Workspace pass run first.
+    Identity {
+        workspace_id: String,
+        project_id: String,
+    },
+}
+
+impl ProjectRepositoryError {
+    /// The variant's NAME, for R28.4's one-line startup message.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Account(_) => "Account",
+            Self::ProjectNotFound => "ProjectNotFound",
+            Self::StaleCharterRevision { .. } => "StaleCharterRevision",
+            Self::StaleRepositoryRevision => "StaleRepositoryRevision",
+            Self::InvalidDraft(_) => "InvalidDraft",
+            Self::UnchangedRepository => "UnchangedRepository",
+            Self::InvalidStore => "InvalidStore",
+            Self::Store(_) => "Store",
+            Self::Json(_) => "Json",
+        }
+    }
+}
+
+impl fmt::Display for ProjectRepositoryStateFault {
+    /// R28.4: the KEY and the fault's NAME, never the carried error's own text.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(_) => formatter.write_str("the ProjectRepositorys could not be read"),
+            Self::Row {
+                workspace_id,
+                project_id,
+                cause,
+            } => write!(
+                formatter,
+                "ProjectRepository {project_id} in Workspace {workspace_id} does not re-prove: {}",
+                cause.name()
+            ),
+            Self::Identity {
+                workspace_id,
+                project_id,
+            } => write!(
+                formatter,
+                "a ProjectRepository row's Workspace is not readable: {workspace_id}, ProjectRepository \
+                 {project_id}"
+            ),
+        }
+    }
+}
+
+/// Hand-written and NOT delegating to `Display`: R28.4 keeps the carried text reachable here.
+impl fmt::Debug for ProjectRepositoryStateFault {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => formatter.debug_tuple("Store").field(error).finish(),
+            Self::Row {
+                workspace_id,
+                project_id,
+                cause,
+            } => formatter
+                .debug_struct("Row")
+                .field("workspace_id", workspace_id)
+                .field("project_id", project_id)
+                .field("cause", cause)
+                .finish(),
+            Self::Identity {
+                workspace_id,
+                project_id,
+            } => formatter
+                .debug_struct("Identity")
+                .field("workspace_id", workspace_id)
+                .field("project_id", project_id)
+                .finish(),
+        }
+    }
+}
+
+impl std::error::Error for ProjectRepositoryStateFault {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::Row { cause, .. } => Some(cause),
+            Self::Identity { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum ProjectRepositoryError {
     Account(OperatorAccountError),
@@ -735,19 +835,45 @@ fn monotonic_time(
 
 pub(crate) fn verify_project_repository_state(
     connection: &Connection,
-) -> Result<(), ProjectRepositoryError> {
-    let mut statement = connection.prepare(
-        "SELECT DISTINCT workspace_id, project_id FROM project_repository_revisions
-         ORDER BY workspace_id, project_id",
-    )?;
+) -> Result<(), ProjectRepositoryStateFault> {
+    let mut statement = connection
+        .prepare(
+            "SELECT DISTINCT workspace_id, project_id FROM project_repository_revisions
+             ORDER BY workspace_id, project_id",
+        )
+        .map_err(ProjectRepositoryStateFault::Store)?;
     let projects = statement
         .query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+        })
+        .map_err(ProjectRepositoryStateFault::Store)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(ProjectRepositoryStateFault::Store)?;
     for (workspace_id, project_id) in projects {
-        let workspace_id = parse_uuid(workspace_id)?;
-        let project_id = parse_uuid(project_id)?;
+        let identity = || ProjectRepositoryStateFault::Identity {
+            workspace_id: workspace_id.clone(),
+            project_id: project_id.clone(),
+        };
+        let parsed_workspace = Uuid::parse_str(&workspace_id).map_err(|_| identity())?;
+        let parsed_project = Uuid::parse_str(&project_id).map_err(|_| identity())?;
+        verify_one_project_repository(connection, parsed_workspace, parsed_project).map_err(
+            |cause| ProjectRepositoryStateFault::Row {
+                workspace_id: parsed_workspace,
+                project_id: parsed_project,
+                cause,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// One Project's repository history, re-proved. Unchanged from what the loop held inline.
+fn verify_one_project_repository(
+    connection: &Connection,
+    workspace_id: Uuid,
+    project_id: Uuid,
+) -> Result<(), ProjectRepositoryError> {
+    {
         let repositories = load_repository_history(connection, workspace_id, project_id)?;
         if repositories.iter().enumerate().any(|(index, repository)| {
             usize::try_from(repository.revision) != Ok(index + 1)
@@ -808,10 +934,6 @@ fn map_project_error(error: ProjectError) -> ProjectRepositoryError {
     }
 }
 
-fn parse_uuid(value: String) -> Result<Uuid, ProjectRepositoryError> {
-    Uuid::parse_str(&value).map_err(|_| ProjectRepositoryError::InvalidStore)
-}
-
 fn positive_u32(value: i64) -> Result<u32, ProjectRepositoryError> {
     let value = u32::try_from(value).map_err(|_| ProjectRepositoryError::InvalidStore)?;
     if value == 0 {
@@ -822,4 +944,70 @@ fn positive_u32(value: i64) -> Result<u32, ProjectRepositoryError> {
 
 fn nonnegative_u64(value: i64) -> Result<u64, ProjectRepositoryError> {
     u64::try_from(value).map_err(|_| ProjectRepositoryError::InvalidStore)
+}
+
+#[cfg(test)]
+mod name_witness {
+    use super::*;
+
+    /// Pinned independently of `name()` (the fold at 30d2a20): an exhaustive `name()` catches an
+    /// added arm, only a second table catches a wrong or duplicated name.
+    fn expected_name(error: &ProjectRepositoryError) -> &'static str {
+        match error {
+            ProjectRepositoryError::Account(_) => "Account",
+            ProjectRepositoryError::ProjectNotFound => "ProjectNotFound",
+            ProjectRepositoryError::StaleCharterRevision { .. } => "StaleCharterRevision",
+            ProjectRepositoryError::StaleRepositoryRevision => "StaleRepositoryRevision",
+            ProjectRepositoryError::InvalidDraft(_) => "InvalidDraft",
+            ProjectRepositoryError::UnchangedRepository => "UnchangedRepository",
+            ProjectRepositoryError::InvalidStore => "InvalidStore",
+            ProjectRepositoryError::Store(_) => "Store",
+            ProjectRepositoryError::Json(_) => "Json",
+        }
+    }
+
+    #[test]
+    fn every_project_repository_error_arm_has_its_own_pinned_name() {
+        let every_arm = [
+            ProjectRepositoryError::Account(
+                crate::operator_account::OperatorAccountError::PasswordTooShort,
+            ),
+            ProjectRepositoryError::ProjectNotFound,
+            ProjectRepositoryError::StaleCharterRevision {
+                expected: 1,
+                current: 2,
+            },
+            ProjectRepositoryError::StaleRepositoryRevision,
+            ProjectRepositoryError::InvalidDraft(InvalidRepositoryDraft::Source),
+            ProjectRepositoryError::UnchangedRepository,
+            ProjectRepositoryError::InvalidStore,
+            ProjectRepositoryError::Store(rusqlite::Error::QueryReturnedNoRows),
+            ProjectRepositoryError::Json(serde_json::from_str::<u8>("\"x\"").unwrap_err()),
+        ];
+        assert_eq!(
+            every_arm.len(),
+            9,
+            "an arm was added to `ProjectRepositoryError` without a fixture here"
+        );
+        for arm in &every_arm {
+            assert_eq!(
+                arm.name(),
+                expected_name(arm),
+                "the startup name does not match the pinned table: {arm:?}"
+            );
+        }
+        let names: std::collections::BTreeSet<&str> =
+            every_arm.iter().map(ProjectRepositoryError::name).collect();
+        assert_eq!(
+            names.len(),
+            9,
+            "two arms share a startup name, so a swap between them is invisible: {names:?}"
+        );
+        for name in names {
+            assert!(
+                !name.contains(' ') && !name.contains('{'),
+                "a name is a name, not a rendering: {name}"
+            );
+        }
+    }
 }
