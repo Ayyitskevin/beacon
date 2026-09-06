@@ -4924,6 +4924,165 @@ fn the_persisted_receipt_of_an_unobserved_landing_makes_no_residue_claim() {
     assert_eq!(tokens, expected, "{payload}");
 }
 
+/// R46.8, the observed-evidence contract as a table. One probe per cell, each a real dispatch
+/// through the public services followed by a restart, because the failure this lane kept finding
+/// was a Receipt the store would not read back.
+///
+/// | declared | observed  | this file's probe                                          |
+/// |----------|-----------|------------------------------------------------------------|
+/// | present  | `Bytes` ≠ | `a_mismatch_cell_declared_present_bytes_differ_reopens`     |
+/// | present  | `Absent`  | `astra_a_truthful_absent_pre_image_mismatch_remains_readable_after_restart` |
+/// | absent   | `Bytes`   | `astra_a_create_conflict_remains_readable_after_restart`    |
+/// | absent   | `Absent`  | `a_holding_cell_declared_absent_and_absent_applies_and_reopens` |
+/// | present  | `Bytes` = | `a_holding_cell_declared_present_bytes_equal_applies_and_reopens` |
+#[test]
+fn a_mismatch_cell_declared_present_bytes_differ_reopens() {
+    let fixture = admitted_mission("cell-present-differs");
+    let repository = CopyRepository::create(&fixture.copies_root, "cell-present-differs");
+    let (proposal_digest, _) = fixture.candidate_for_with_pre_image(
+        &repository,
+        "Modify the library root from bytes it no longer holds.",
+        b"what the file held some time ago\n",
+    );
+    let ruling = fixture
+        .rulings
+        .rule_on_candidate(
+            &fixture.candidates.present(&proposal_digest).unwrap(),
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap();
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling.digest().value, &content_for(NEW_BYTES))
+        .unwrap();
+
+    assert_eq!(receipt.outcome, DispatchOutcome::PreImageMismatch);
+    assert_eq!(receipt.version, 4);
+    let record = receipt
+        .per_mutation
+        .iter()
+        .find(|record| record.path == TARGET)
+        .expect("the refused mutation is recorded");
+    let Some(ObservedPreImage::Bytes { digest }) = record.observed_pre_image.as_ref() else {
+        panic!("R46.CELL.PRESENT_DIFFERS_CARRIES_BYTES: {record:?}");
+    };
+    assert_ne!(Some(digest.as_str()), record.pre_image.as_deref());
+    fixture.restart().expect("R46.CELL.PRESENT_DIFFERS_REOPENS");
+}
+
+/// The `(absent, Absent)` cell: a create whose path really is not there HOLDS, and applies.
+#[test]
+fn a_holding_cell_declared_absent_and_absent_applies_and_reopens() {
+    let fixture = admitted_mission("cell-absent-absent");
+    let repository = CopyRepository::create(&fixture.copies_root, "cell-absent-absent");
+    let created = "src/created.rs";
+    let mut record = fixture.proposal("Create a file the base revision does not hold.");
+    record.mutations = vec![(MUTATION_CREATE, created.to_owned())];
+    record.repository_revision = fixture.rebind_repository(&repository);
+    record.base_revision = repository.revision.clone();
+    record.context_digest = sha256(BASE_LIB_BYTES);
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    fixture
+        .candidates
+        .record(
+            &proposal.digest().value,
+            &[CandidateImages {
+                pre_image_sha256: None,
+                post_image_sha256: Some(sha256(NEW_BYTES)),
+            }],
+        )
+        .unwrap();
+    let ruling = fixture
+        .rulings
+        .rule_on_candidate(
+            &fixture
+                .candidates
+                .present(&proposal.digest().value)
+                .unwrap(),
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap();
+    let receipt = fixture
+        .dispatches
+        .dispatch(
+            &ruling.digest().value,
+            &[SuppliedContent {
+                path: created.to_owned(),
+                bytes: Some(NEW_BYTES.to_vec()),
+            }],
+        )
+        .unwrap();
+
+    assert_eq!(
+        receipt.outcome,
+        DispatchOutcome::Applied,
+        "R46.CELL.ABSENT_AND_ABSENT_HOLDS"
+    );
+    // A cell that HOLDS records the observation too -- the evidence is not only kept for refusals.
+    assert!(
+        receipt
+            .per_mutation
+            .iter()
+            .all(|record| matches!(record.observed_pre_image, Some(ObservedPreImage::Absent))),
+        "R46.CELL.ABSENT_AND_ABSENT_CARRIES_ABSENT: {:?}",
+        receipt.per_mutation
+    );
+    fixture
+        .restart()
+        .expect("R46.CELL.ABSENT_AND_ABSENT_REOPENS");
+}
+
+/// The `(present, Bytes =)` cell: a modify whose declared pre-image is what the tree holds applies.
+#[test]
+fn a_holding_cell_declared_present_bytes_equal_applies_and_reopens() {
+    let fixture = admitted_mission("cell-present-equal");
+    let repository = CopyRepository::create(&fixture.copies_root, "cell-present-equal");
+    let (proposal_digest, _) = fixture.candidate_for_with_pre_image(
+        &repository,
+        "Modify the library root from the bytes it actually holds.",
+        BASE_LIB_BYTES,
+    );
+    let ruling = fixture
+        .rulings
+        .rule_on_candidate(
+            &fixture.candidates.present(&proposal_digest).unwrap(),
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap();
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling.digest().value, &content_for(NEW_BYTES))
+        .unwrap();
+
+    assert_eq!(
+        receipt.outcome,
+        DispatchOutcome::Applied,
+        "R46.CELL.PRESENT_AND_EQUAL_HOLDS"
+    );
+    let record = receipt
+        .per_mutation
+        .iter()
+        .find(|record| record.path == TARGET)
+        .expect("the applied mutation is recorded");
+    let Some(ObservedPreImage::Bytes { digest }) = record.observed_pre_image.as_ref() else {
+        panic!("R46.CELL.PRESENT_AND_EQUAL_CARRIES_BYTES: {record:?}");
+    };
+    assert_eq!(
+        Some(digest.as_str()),
+        record.pre_image.as_deref(),
+        "the cell that holds is the one whose observation EQUALS the declaration"
+    );
+    fixture
+        .restart()
+        .expect("R46.CELL.PRESENT_AND_EQUAL_REOPENS");
+}
+
 /// A second post-image, so two Rulings on one base prepare two different commits.
 const OTHER_BYTES: &[u8] = b"fn main() { /* the other dispatch */ }\n";
 
@@ -5155,4 +5314,74 @@ fn a_decoy_swapped_in_for_the_duration_of_one_invocation_receives_nothing() {
         "the decoy received a write from a command that should have entered by descriptor"
     );
     assert_ne!(receipt.outcome, DispatchOutcome::Applied);
+}
+
+#[test]
+fn astra_a_create_conflict_remains_readable_after_restart() {
+    // Ordinary public commands: a create declaration conflicts with an existing base file.
+    // No store writes, repository damage, failpoints, or production-code changes.
+    let fixture = admitted_mission("create-conflict");
+    let repository = CopyRepository::create(&fixture.copies_root, "create-conflict");
+    let mut record = fixture.proposal("Create a file whose path is already present.");
+    record.mutations = vec![(MUTATION_CREATE, TARGET.to_owned())];
+    record.repository_revision = fixture.rebind_repository(&repository);
+    record.base_revision = repository.revision.clone();
+    record.context_digest = sha256(BASE_LIB_BYTES);
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    fixture
+        .candidates
+        .record(
+            &proposal.digest().value,
+            &[CandidateImages {
+                pre_image_sha256: None,
+                post_image_sha256: Some(sha256(NEW_BYTES)),
+            }],
+        )
+        .unwrap();
+    let ruling = fixture
+        .rulings
+        .rule_on_candidate(
+            &fixture
+                .candidates
+                .present(&proposal.digest().value)
+                .unwrap(),
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap();
+    let head_before = CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]);
+    let receipt = fixture
+        .dispatches
+        .dispatch(
+            &ruling.digest().value,
+            &[SuppliedContent {
+                path: TARGET.to_owned(),
+                bytes: Some(NEW_BYTES.to_vec()),
+            }],
+        )
+        .unwrap();
+    assert_eq!(
+        receipt.outcome,
+        DispatchOutcome::PreImageMismatch,
+        "R46.MISMATCH.CREATE_CONFLICT_IS_NAMED"
+    );
+    assert_eq!(
+        receipt.version, 4,
+        "R46.MISMATCH.CREATE_CONFLICT_IS_VERSION_4"
+    );
+    assert_eq!(receipt.prepared_commit, None);
+    assert_eq!(receipt.resulting_revision, None);
+    assert_eq!(receipt.repository_effect(), RepositoryEffect::ByteIdentical);
+    assert_eq!(
+        CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]),
+        head_before
+    );
+    eprintln!(
+        "CREATE_CONFLICT_OBSERVATION={:?}",
+        receipt.per_mutation[0].observed_pre_image
+    );
+    fixture
+        .restart()
+        .expect("R46.MISMATCH.OBSERVED_PRESENT_REOPENS");
 }
