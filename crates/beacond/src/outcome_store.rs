@@ -154,6 +154,64 @@ pub enum ManifestStoreRefusal {
     Store(String),
 }
 
+/// The approved `ColumnDisagrees.column` labels, and nothing else (R42).
+///
+/// Every production constructor supplies one of these ten literals -- measured, not assumed: the
+/// nine-entry comparison array and the candidate-digest check are the only two expressions that
+/// assign this field, and neither passes stored text through it. But `column` is a public
+/// `&'static str` on a public enum, and a static lifetime says where a string lives, not who wrote
+/// it. This guard is preventive at the public-constructor boundary: known labels keep their exact
+/// current line, an unapproved one is declined by name rather than echoed, and the original stays
+/// in `Debug` either way.
+fn approved_column(column: &str) -> Option<&'static str> {
+    match column {
+        "digest_algorithm" => Some("digest_algorithm"),
+        "digest_canonicalizer" => Some("digest_canonicalizer"),
+        "workspace_id" => Some("workspace_id"),
+        "manifest_id" => Some("manifest_id"),
+        "mission_id" => Some("mission_id"),
+        "completion_digest" => Some("completion_digest"),
+        "canonicalizer_version" => Some("canonicalizer_version"),
+        "renderer_version" => Some("renderer_version"),
+        "boundary_event_seq" => Some("boundary_event_seq"),
+        "candidate_artifact_digest" => Some("candidate_artifact_digest"),
+        _ => None,
+    }
+}
+
+/// The approved `CandidateNotAccounted.reason` sentences. Same reasoning as `approved_column`:
+/// nine production constructors supply these seven literals, and the field is public and static.
+///
+/// A string vocabulary gains no compile-time exhaustiveness from being a `match`. A newly added
+/// producer literal takes the fallback until someone reviews it -- the safe direction, and the
+/// reason the constructor census must be re-counted rather than trusted after a rebase.
+fn approved_reason(reason: &str) -> Option<&'static str> {
+    match reason {
+        "the candidate Artifact does not verify against its own bytes" => {
+            Some("the candidate Artifact does not verify against its own bytes")
+        }
+        "no candidate Artifact in this Workspace carries that digest" => {
+            Some("no candidate Artifact in this Workspace carries that digest")
+        }
+        "the completion this manifest names does not verify in its Workspace" => {
+            Some("the completion this manifest names does not verify in its Workspace")
+        }
+        "the candidate Artifact is not named by exactly one artifact.recorded event" => {
+            Some("the candidate Artifact is not named by exactly one artifact.recorded event")
+        }
+        "the candidate Artifact is not an Outcome Document" => {
+            Some("the candidate Artifact is not an Outcome Document")
+        }
+        "the candidate Artifact is not scoped to this manifest's Mission" => {
+            Some("the candidate Artifact is not scoped to this manifest's Mission")
+        }
+        "the candidate Artifact's accountable Resident is not the manifest's" => {
+            Some("the candidate Artifact's accountable Resident is not the manifest's")
+        }
+        _ => None,
+    }
+}
+
 impl std::fmt::Display for ManifestStoreRefusal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -166,10 +224,16 @@ impl std::fmt::Display for ManifestStoreRefusal {
                 formatter,
                 "the stored manifest bytes and their digest disagree"
             ),
-            Self::ColumnDisagrees { column } => write!(
-                formatter,
-                "the stored column {column} disagrees with the manifest's own bytes"
-            ),
+            Self::ColumnDisagrees { column } => match approved_column(column) {
+                Some(approved) => write!(
+                    formatter,
+                    "the stored column {approved} disagrees with the manifest's own bytes"
+                ),
+                // Declining to name an unapproved value, not inventing a column called "unknown".
+                None => formatter.write_str(
+                    "a stored column disagrees with the manifest's own bytes: ColumnDisagrees",
+                ),
+            },
             Self::ManifestTooLarge {
                 configured,
                 observed,
@@ -181,17 +245,25 @@ impl std::fmt::Display for ManifestStoreRefusal {
             Self::Malformed(reason) => {
                 write!(formatter, "not a v1 outcome manifest: {}", reason.as_str())
             }
-            Self::Irreconcilable { detail } => {
-                write!(
-                    formatter,
-                    "the manifest and its completion disagree: {detail}"
-                )
+            // `detail` is record-derived: `reconcile_completion` builds it from the claimed and
+            // actual identities and times, or from delivered Artifact digests. Whole sentences
+            // about records the caller may not own.
+            Self::Irreconcilable { .. } => {
+                formatter.write_str("the manifest and its completion disagree: Irreconcilable")
             }
-            Self::CandidateNotAccounted { reason } => write!(
-                formatter,
-                "the ledger does not account for this outcome manifest: {reason}"
-            ),
-            Self::Store(detail) => write!(formatter, "the store failed: {detail}"),
+            Self::CandidateNotAccounted { reason } => match approved_reason(reason) {
+                Some(approved) => write!(
+                    formatter,
+                    "the ledger does not account for this outcome manifest: {approved}"
+                ),
+                None => formatter.write_str(
+                    "the ledger does not account for this outcome manifest: CandidateNotAccounted",
+                ),
+            },
+            // The driver's own words arrive here through `store_error`. It also carries a fixed
+            // negative-clock sentence, so the line says a MANIFEST OPERATION failed rather than
+            // pretending every String on this arm is a database diagnosis.
+            Self::Store(_) => formatter.write_str("manifest operation failed: Store"),
         }
     }
 }
@@ -1724,6 +1796,398 @@ mod name_witness {
             assert!(
                 !name.contains(' ') && !name.contains('{'),
                 "a name is a name, not a rendering: {name}"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // R42 slice 3, commit 2: the manifest reader's caller text is closed.
+    // ---------------------------------------------------------------------------------------
+
+    const NEEDLE_A: &str = "R42S3_PRIVATE_A";
+    const NEEDLE_B: &str = "R42S3_PRIVATE_B";
+    /// Two compile-time statics, because the two guarded fields are `&'static str`.
+    const STATIC_NEEDLE_A: &str = "R42S3_PRIVATE_A /home/example/private.db column=private_column";
+    const STATIC_NEEDLE_B: &str = "R42S3_PRIVATE_B /home/example/other.db column=other_column";
+
+    const FIRST_CONFIGURED: u64 = 1024;
+    const FIRST_OBSERVED: u64 = 2048;
+    const SECOND_CONFIGURED: u64 = 3072;
+    const SECOND_OBSERVED: u64 = 4096;
+
+    fn payload_a() -> String {
+        format!("{NEEDLE_A} /home/example/private.db column=private_column\r\nsecond-line")
+    }
+
+    fn payload_b() -> String {
+        format!("{NEEDLE_B} /home/example/other.db column=other_column\r\nsecond-line")
+    }
+
+    /// The ten approved column labels, written here from the reviewed list -- never read back
+    /// from the production allowlist this witness constrains.
+    const APPROVED_COLUMNS: [&str; 10] = [
+        "digest_algorithm",
+        "digest_canonicalizer",
+        "workspace_id",
+        "manifest_id",
+        "mission_id",
+        "completion_digest",
+        "canonicalizer_version",
+        "renderer_version",
+        "boundary_event_seq",
+        "candidate_artifact_digest",
+    ];
+
+    /// The seven approved reason sentences, likewise.
+    const APPROVED_REASONS: [&str; 7] = [
+        "the candidate Artifact does not verify against its own bytes",
+        "no candidate Artifact in this Workspace carries that digest",
+        "the completion this manifest names does not verify in its Workspace",
+        "the candidate Artifact is not named by exactly one artifact.recorded event",
+        "the candidate Artifact is not an Outcome Document",
+        "the candidate Artifact is not scoped to this manifest's Mission",
+        "the candidate Artifact's accountable Resident is not the manifest's",
+    ];
+
+    /// This witness's own view of the column vocabulary: an approved label, or the fixed decline.
+    fn expected_column_line(column: &str) -> String {
+        if APPROVED_COLUMNS.contains(&column) {
+            format!("the stored column {column} disagrees with the manifest's own bytes")
+        } else {
+            "a stored column disagrees with the manifest's own bytes: ColumnDisagrees".to_owned()
+        }
+    }
+
+    fn expected_reason_line(reason: &str) -> String {
+        if APPROVED_REASONS.contains(&reason) {
+            format!("the ledger does not account for this outcome manifest: {reason}")
+        } else {
+            "the ledger does not account for this outcome manifest: CandidateNotAccounted"
+                .to_owned()
+        }
+    }
+
+    macro_rules! closed_table {
+        (
+            $expected_fn:ident / $rows_fn:ident : $ty:ty,
+            $( $case:literal | $pattern:pat => $line:expr , $build:expr , $markers:expr ; )+
+        ) => {
+            fn $expected_fn(value: &$ty) -> (&'static str, String) {
+                match value {
+                    $( $pattern => ($case, String::from($line)), )+
+                }
+            }
+
+            #[allow(dead_code)]
+            fn $rows_fn() -> Vec<(&'static str, $ty, &'static [&'static str])> {
+                vec![$(($case, $build, $markers)),+]
+            }
+        };
+    }
+
+    closed_table! {
+        expected_malformed / malformed_rows: MalformedOutcome,
+        "Magic" | MalformedOutcome::Magic => "magic", MalformedOutcome::Magic, &[];
+        "Truncated" | MalformedOutcome::Truncated => "truncated", MalformedOutcome::Truncated, &[];
+        "TrailingBytes" | MalformedOutcome::TrailingBytes => "trailing_bytes", MalformedOutcome::TrailingBytes, &[];
+        "UnknownTag" | MalformedOutcome::UnknownTag => "unknown_tag", MalformedOutcome::UnknownTag, &[];
+        "OverLimitLength" | MalformedOutcome::OverLimitLength => "over_limit_length", MalformedOutcome::OverLimitLength, &[];
+        "InvalidUtf8" | MalformedOutcome::InvalidUtf8 => "invalid_utf8", MalformedOutcome::InvalidUtf8, &[];
+        "DigestValue" | MalformedOutcome::DigestValue => "digest_value", MalformedOutcome::DigestValue, &[];
+        "DigestEnvelope" | MalformedOutcome::DigestEnvelope => "digest_envelope", MalformedOutcome::DigestEnvelope, &[];
+        "PinnedRevision" | MalformedOutcome::PinnedRevision => "pinned_revision", MalformedOutcome::PinnedRevision, &[];
+        "EmptyText" | MalformedOutcome::EmptyText => "empty_text", MalformedOutcome::EmptyText, &[];
+        "UntrimmedText" | MalformedOutcome::UntrimmedText => "untrimmed_text", MalformedOutcome::UntrimmedText, &[];
+        "TextTooLong" | MalformedOutcome::TextTooLong => "text_too_long", MalformedOutcome::TextTooLong, &[];
+        "ControlCharacter" | MalformedOutcome::ControlCharacter => "control_character", MalformedOutcome::ControlCharacter, &[];
+        "LineBreakInLabel" | MalformedOutcome::LineBreakInLabel => "line_break_in_label", MalformedOutcome::LineBreakInLabel, &[];
+        "Token" | MalformedOutcome::Token => "token", MalformedOutcome::Token, &[];
+        "UnknownVersion" | MalformedOutcome::UnknownVersion => "unknown_version", MalformedOutcome::UnknownVersion, &[];
+        "ReferenceIdentityRequired" | MalformedOutcome::ReferenceIdentityRequired => "reference_identity_required", MalformedOutcome::ReferenceIdentityRequired, &[];
+        "ReferenceIdentityNotCarried" | MalformedOutcome::ReferenceIdentityNotCarried => "reference_identity_not_carried", MalformedOutcome::ReferenceIdentityNotCarried, &[];
+        "RetiredVersion" | MalformedOutcome::RetiredVersion => "retired_version", MalformedOutcome::RetiredVersion, &[];
+        "NonCanonicalOrder" | MalformedOutcome::NonCanonicalOrder => "non_canonical_order", MalformedOutcome::NonCanonicalOrder, &[];
+        "NoSuccessConditions" | MalformedOutcome::NoSuccessConditions => "no_success_conditions", MalformedOutcome::NoSuccessConditions, &[];
+        "MinorUnitsExponent" | MalformedOutcome::MinorUnitsExponent => "minor_units_exponent", MalformedOutcome::MinorUnitsExponent, &[];
+        "SpendCoverage" | MalformedOutcome::SpendCoverage => "spend_coverage", MalformedOutcome::SpendCoverage, &[];
+        "SourceKind" | MalformedOutcome::SourceKind => "source_kind", MalformedOutcome::SourceKind, &[];
+        "CrossWorkspace" | MalformedOutcome::CrossWorkspace => "cross_workspace", MalformedOutcome::CrossWorkspace, &[];
+    }
+
+    closed_table! {
+        expected_manifest / manifest_rows: ManifestStoreRefusal,
+        "Absent" | ManifestStoreRefusal::Absent
+            => "no outcome manifest at that digest", ManifestStoreRefusal::Absent, &[];
+        "CrossWorkspace" | ManifestStoreRefusal::CrossWorkspace
+            => "that outcome manifest belongs to another Workspace",
+            ManifestStoreRefusal::CrossWorkspace, &[];
+        "BytesDisagree" | ManifestStoreRefusal::BytesDisagree
+            => "the stored manifest bytes and their digest disagree",
+            ManifestStoreRefusal::BytesDisagree, &[];
+        "ColumnDisagrees" | ManifestStoreRefusal::ColumnDisagrees { column }
+            => expected_column_line(column),
+            ManifestStoreRefusal::ColumnDisagrees { column: STATIC_NEEDLE_A }, &[NEEDLE_A];
+        "ManifestTooLarge" | ManifestStoreRefusal::ManifestTooLarge { configured, observed }
+            => format!(
+                "bound stored_manifest_bytes exhausted: configured {configured}, observed \
+                 {observed}"
+            ),
+            ManifestStoreRefusal::ManifestTooLarge {
+                configured: FIRST_CONFIGURED,
+                observed: FIRST_OBSERVED,
+            },
+            &[];
+        "Malformed" | ManifestStoreRefusal::Malformed(reason)
+            => format!("not a v1 outcome manifest: {}", expected_malformed(reason).1),
+            ManifestStoreRefusal::Malformed(MalformedOutcome::Magic), &[];
+        "Irreconcilable" | ManifestStoreRefusal::Irreconcilable { .. }
+            => "the manifest and its completion disagree: Irreconcilable",
+            ManifestStoreRefusal::Irreconcilable { detail: payload_a() }, &[NEEDLE_A];
+        "CandidateNotAccounted" | ManifestStoreRefusal::CandidateNotAccounted { reason }
+            => expected_reason_line(reason),
+            ManifestStoreRefusal::CandidateNotAccounted { reason: STATIC_NEEDLE_A }, &[NEEDLE_A];
+        "Store" | ManifestStoreRefusal::Store(_)
+            => "manifest operation failed: Store",
+            ManifestStoreRefusal::Store(payload_a()), &[NEEDLE_A];
+    }
+
+    struct Case {
+        id: String,
+        value: ManifestStoreRefusal,
+        markers: &'static [&'static str],
+    }
+
+    /// The spec's lead order, so a mutant's FIRST failing label is predictable.
+    const MANIFEST_LEADS: [&str; 4] = [
+        "R42S3.MANIFEST.Store",
+        "R42S3.MANIFEST.Irreconcilable",
+        "R42S3.MANIFEST.ColumnDisagrees.Unknown",
+        "R42S3.MANIFEST.CandidateNotAccounted.Unknown",
+    ];
+
+    /// The 50 base rows: six leaf roots + 25 malformed tokens + 10 known columns + 1 unknown +
+    /// 7 known reasons + 1 unknown.
+    fn manifest_cases() -> Vec<Case> {
+        let mut cases = Vec::new();
+        for (stem, value, markers) in manifest_rows() {
+            match stem {
+                "Malformed" => {
+                    for (child, reason, _) in malformed_rows() {
+                        cases.push(Case {
+                            id: format!("R42S3.MANIFEST.Malformed.{child}"),
+                            value: ManifestStoreRefusal::Malformed(reason),
+                            markers: &[],
+                        });
+                    }
+                }
+                "ColumnDisagrees" => {
+                    for column in APPROVED_COLUMNS {
+                        cases.push(Case {
+                            id: format!("R42S3.MANIFEST.ColumnDisagrees.{column}"),
+                            value: ManifestStoreRefusal::ColumnDisagrees { column },
+                            markers: &[],
+                        });
+                    }
+                    cases.push(Case {
+                        id: "R42S3.MANIFEST.ColumnDisagrees.Unknown".to_owned(),
+                        value,
+                        markers,
+                    });
+                }
+                "CandidateNotAccounted" => {
+                    for (ordinal, reason) in APPROVED_REASONS.iter().enumerate() {
+                        cases.push(Case {
+                            id: format!("R42S3.MANIFEST.CandidateNotAccounted.Known{ordinal}"),
+                            value: ManifestStoreRefusal::CandidateNotAccounted { reason },
+                            markers: &[],
+                        });
+                    }
+                    cases.push(Case {
+                        id: "R42S3.MANIFEST.CandidateNotAccounted.Unknown".to_owned(),
+                        value,
+                        markers,
+                    });
+                }
+                leaf => cases.push(Case {
+                    id: format!("R42S3.MANIFEST.{leaf}"),
+                    value,
+                    markers,
+                }),
+            }
+        }
+        cases.sort_by_key(|case| {
+            MANIFEST_LEADS
+                .iter()
+                .position(|lead| *lead == case.id)
+                .unwrap_or(usize::MAX)
+        });
+        cases
+    }
+
+    /// R42 slice 3: every `ManifestStoreRefusal` line is the closed caller projection, and every
+    /// value it was built from is still in `Debug`.
+    ///
+    /// Four sites: two String arms that carried record-derived sentences and driver text, and two
+    /// public `&'static str` fields whose known labels stay useful while an unapproved one is
+    /// declined by name. The other five arms -- including the byte bounds and the malformed token
+    /// vocabulary -- are unchanged and pinned as regressions.
+    #[test]
+    fn r42_manifest_projection_is_closed() {
+        let cases = manifest_cases();
+        assert_eq!(manifest_rows().len(), 9, "R42S3.MANIFEST.CARDINALITY.ROOT");
+        assert_eq!(
+            malformed_rows().len(),
+            25,
+            "R42S3.MANIFEST.CARDINALITY.MALFORMED"
+        );
+        assert_eq!(
+            APPROVED_COLUMNS.len(),
+            10,
+            "R42S3.MANIFEST.CARDINALITY.COLUMNS"
+        );
+        assert_eq!(
+            APPROVED_REASONS.len(),
+            7,
+            "R42S3.MANIFEST.CARDINALITY.REASONS"
+        );
+        assert_eq!(cases.len(), 50, "R42S3.MANIFEST.CARDINALITY.CASES");
+        let ids: std::collections::BTreeSet<&str> =
+            cases.iter().map(|case| case.id.as_str()).collect();
+        assert_eq!(ids.len(), cases.len(), "R42S3.MANIFEST.CASE_IDS_UNIQUE");
+        for lead in MANIFEST_LEADS {
+            assert!(ids.contains(lead), "R42S3.MANIFEST.LEAD_PRESENT: {lead}");
+        }
+
+        for case in &cases {
+            let Case { id, value, markers } = case;
+            // 1. Fixture premise.
+            let (stem, expected) = expected_manifest(value);
+            assert!(
+                id.starts_with(&format!("R42S3.MANIFEST.{stem}")),
+                "R42S3.FIXTURE.{id}.PATTERN: built as {stem}"
+            );
+            let debug = format!("{value:?}");
+            for marker in *markers {
+                assert!(debug.contains(marker), "R42S3.FIXTURE.{id}.NEEDLE");
+            }
+
+            // 2. Nothing hidden reaches the line; the line is one line; Debug still has it.
+            let line = value.to_string();
+            for marker in *markers {
+                assert!(!line.contains(marker), "{id}.NO_NEEDLE: {line}");
+            }
+            assert!(
+                !line.contains('\n') && !line.contains('\r'),
+                "{id}.ONE_LINE: {line:?}"
+            );
+            for marker in *markers {
+                assert!(debug.contains(marker), "{id}.DEBUG_RETAINS");
+            }
+
+            // 3. The whole line against the independent literal.
+            assert_eq!(line, expected, "{id}.PROJECTION");
+
+            // The parent arm forwards this line whole, so closing the child closes it.
+            assert_eq!(
+                PrepareRefusal::Manifest(match value {
+                    ManifestStoreRefusal::Absent => ManifestStoreRefusal::Absent,
+                    ManifestStoreRefusal::CrossWorkspace => ManifestStoreRefusal::CrossWorkspace,
+                    ManifestStoreRefusal::BytesDisagree => ManifestStoreRefusal::BytesDisagree,
+                    ManifestStoreRefusal::ColumnDisagrees { column } => {
+                        ManifestStoreRefusal::ColumnDisagrees { column }
+                    }
+                    ManifestStoreRefusal::ManifestTooLarge {
+                        configured,
+                        observed,
+                    } => ManifestStoreRefusal::ManifestTooLarge {
+                        configured: *configured,
+                        observed: *observed,
+                    },
+                    ManifestStoreRefusal::Malformed(reason) => {
+                        ManifestStoreRefusal::Malformed(*reason)
+                    }
+                    ManifestStoreRefusal::Irreconcilable { detail } => {
+                        ManifestStoreRefusal::Irreconcilable {
+                            detail: detail.clone(),
+                        }
+                    }
+                    ManifestStoreRefusal::CandidateNotAccounted { reason } => {
+                        ManifestStoreRefusal::CandidateNotAccounted { reason }
+                    }
+                    ManifestStoreRefusal::Store(detail) => {
+                        ManifestStoreRefusal::Store(detail.clone())
+                    }
+                })
+                .to_string(),
+                expected,
+                "{id}.PARENT_PROJECTION"
+            );
+        }
+
+        // The B seed: different hidden input, same independently fixed output.
+        for (id, first, second, marker) in [
+            (
+                "R42S3.MANIFEST.Store",
+                ManifestStoreRefusal::Store(payload_a()),
+                ManifestStoreRefusal::Store(payload_b()),
+                NEEDLE_B,
+            ),
+            (
+                "R42S3.MANIFEST.Irreconcilable",
+                ManifestStoreRefusal::Irreconcilable {
+                    detail: payload_a(),
+                },
+                ManifestStoreRefusal::Irreconcilable {
+                    detail: payload_b(),
+                },
+                NEEDLE_B,
+            ),
+            (
+                "R42S3.MANIFEST.ColumnDisagrees.Unknown",
+                ManifestStoreRefusal::ColumnDisagrees {
+                    column: STATIC_NEEDLE_A,
+                },
+                ManifestStoreRefusal::ColumnDisagrees {
+                    column: STATIC_NEEDLE_B,
+                },
+                NEEDLE_B,
+            ),
+            (
+                "R42S3.MANIFEST.CandidateNotAccounted.Unknown",
+                ManifestStoreRefusal::CandidateNotAccounted {
+                    reason: STATIC_NEEDLE_A,
+                },
+                ManifestStoreRefusal::CandidateNotAccounted {
+                    reason: STATIC_NEEDLE_B,
+                },
+                NEEDLE_B,
+            ),
+        ] {
+            assert!(!second.to_string().contains(marker), "{id}.NO_NEEDLE");
+            assert_eq!(
+                first.to_string(),
+                second.to_string(),
+                "{id}.HIDDEN_CHANGE_SAME_LINE"
+            );
+            assert!(format!("{second:?}").contains(marker), "{id}.DEBUG_RETAINS");
+        }
+
+        // 4. Approved context: both byte-bound pairs, each pair distinct.
+        for (configured, observed) in [
+            (FIRST_CONFIGURED, FIRST_OBSERVED),
+            (SECOND_CONFIGURED, SECOND_OBSERVED),
+        ] {
+            assert_eq!(
+                ManifestStoreRefusal::ManifestTooLarge {
+                    configured,
+                    observed,
+                }
+                .to_string(),
+                format!(
+                    "bound stored_manifest_bytes exhausted: configured {configured}, observed \
+                     {observed}"
+                ),
+                "R42S3.MANIFEST.ManifestTooLarge.CONTEXT"
             );
         }
     }
