@@ -344,7 +344,7 @@ fn restart_refuses_policy_state_without_its_exact_event() {
             .query_row(
                 &format!(
                     "SELECT DISTINCT project_id FROM project_policy_revisions
-                 ORDER BY workspace_id, project_id {order} LIMIT 1"
+                 ORDER BY workspace_id {order}, project_id {order} LIMIT 1"
                 ),
                 [],
                 |row| row.get(0),
