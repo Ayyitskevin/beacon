@@ -1642,7 +1642,7 @@ fn startup_requires_exactly_one_execution_event_for_every_terminal_execution() {
                 },
             )
             .unwrap();
-        checks.execute(project.id, bounds()).unwrap();
+        let receipt = checks.execute(project.id, bounds()).unwrap();
 
         let connection = Connection::open(&store.path).unwrap();
         if tamper == "duplicate-event" {
@@ -1666,10 +1666,10 @@ fn startup_requires_exactly_one_execution_event_for_every_terminal_execution() {
             initial_workspace_name: "Ignored".to_owned(),
         })
         .unwrap_err();
-        assert!(
-            matches!(error, SupervisorError::RunStateMismatch),
-            "{tamper} failed through the wrong guard: {error:?}"
-        );
+        let SupervisorError::RunStateMismatch { run_id, .. } = &error else {
+            panic!("{tamper} failed through the wrong guard: {error:?}");
+        };
+        assert_eq!(run_id, &receipt.run_id.to_string());
     }
 }
 
@@ -1719,7 +1719,18 @@ fn startup_rejects_execution_relabelled_as_preflight_without_a_preflight_event()
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap_err();
-    assert!(matches!(error, SupervisorError::RunStateMismatch));
+    let SupervisorError::RunStateMismatch { run_id, .. } = &error else {
+        panic!("expected a named Run-state refusal, got {error:?}");
+    };
+    assert_eq!(run_id, &receipt.run_id.to_string());
+    // The LINE, not just the variant: R28.4's operator message carries the row and the owning
+    // reader's fault NAME, so a Display that drops either is caught here rather than by reading.
+    // This bar and not the state-column one below, because this tamper is what reaches the pass.
+    let line = error.to_string();
+    assert!(
+        line.contains(&receipt.run_id.to_string()) && line.contains("InvalidStore"),
+        "the operator's line names neither the Run nor the fault it hit: {line}"
+    );
 }
 
 #[test]
@@ -1747,6 +1758,15 @@ fn startup_refuses_execution_only_state_on_a_preflight_run() {
     checks.execute(project.id, bounds()).unwrap();
 
     let connection = Connection::open(&store.path).unwrap();
+    // Read the row's own id before tampering, so the assertion below compares the refusal against
+    // the store rather than against a name the test made up.
+    let tampered_run_id: String = connection
+        .query_row(
+            "SELECT id FROM runs WHERE kind = 'check_preflight'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     replace_run_update_trigger(&connection, |connection| {
         connection.execute(
             "UPDATE runs SET state = 'incomplete' WHERE kind = 'check_preflight'",
@@ -1760,7 +1780,21 @@ fn startup_refuses_execution_only_state_on_a_preflight_run() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap_err();
-    assert!(matches!(error, SupervisorError::RunStateMismatch));
+    // THE LOG WALK REACHES THIS FIRST, and that is the honest state, not a weaker refusal:
+    // `verify_persisted_events` is `inspect_store`'s first line, so every `run.preflighted` event
+    // is replayed against its Run before any state pass runs. This tamper moves only the `state`
+    // column, which preserves the cardinalities `verify_run_state` compares, so the replay is the
+    // guard that can see it. What R28 buys here is that the replay now NAMES the Run: before, its
+    // refusal and the state pass's shared one nameless variant.
+    let SupervisorError::RunEventStateMismatch { run_id, .. } = &error else {
+        panic!("expected a named Run-event state refusal, got {error:?}");
+    };
+    assert_eq!(run_id.to_string(), tampered_run_id);
+    let line = error.to_string();
+    assert!(
+        line.contains(&tampered_run_id) && line.contains("Receipt"),
+        "the operator's line does not name the Run whose Receipt disagrees: {line}"
+    );
 }
 
 #[test]

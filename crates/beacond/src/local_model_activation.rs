@@ -122,12 +122,6 @@ pub(crate) enum LocalModelActivationStateFault {
     /// A row that could not be READ at all, so it cannot be named -- the identity columns are
     /// part of what failed. Distinct from `Row` (pass 11's shape).
     Unreadable(LocalModelActivationError),
-    /// A row whose Workspace column is not a UUID. Unreachable while the foreign-key check and
-    /// the Workspace pass run first.
-    Identity {
-        workspace_id: String,
-        activation_id: String,
-    },
 }
 
 impl LocalModelActivationError {
@@ -168,14 +162,6 @@ impl fmt::Display for LocalModelActivationStateFault {
                 "a local model activation row could not be read: {}",
                 cause.name()
             ),
-            Self::Identity {
-                workspace_id,
-                activation_id,
-            } => write!(
-                formatter,
-                "a LocalModelActivation row's Workspace is not readable: {workspace_id}, LocalModelActivation \
-                 {activation_id}"
-            ),
         }
     }
 }
@@ -196,14 +182,6 @@ impl fmt::Debug for LocalModelActivationStateFault {
                 .field("cause", cause)
                 .finish(),
             Self::Unreadable(cause) => formatter.debug_tuple("Unreadable").field(cause).finish(),
-            Self::Identity {
-                workspace_id,
-                activation_id,
-            } => formatter
-                .debug_struct("Identity")
-                .field("workspace_id", workspace_id)
-                .field("activation_id", activation_id)
-                .finish(),
         }
     }
 }
@@ -213,7 +191,6 @@ impl std::error::Error for LocalModelActivationStateFault {
         match self {
             Self::Store(error) => Some(error),
             Self::Unreadable(cause) | Self::Row { cause, .. } => Some(cause),
-            Self::Identity { .. } => None,
         }
     }
 }
