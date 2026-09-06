@@ -784,6 +784,23 @@ fn resolve_within(root: &Path, declared: &str) -> Containment {
 /// Returns nothing. It used to return the number of leases it expired, which no caller read, and
 /// that dead `u64` was the pass's only fallible conversion -- forcing a fault arm that would have
 /// had to be named for a count rather than for anything a reader could act on.
+/// The ORDER BY `verify_run_state` enumerates under. ONE definition, interpolated into the pass's
+/// own query and into `enumerate_runs` below, so a mutant on the ordering moves both (R44.6).
+const ENUMERATION_ORDER: &str = "ORDER BY runs.workspace_id, runs.id";
+
+/// The `(workspace_id, id)` keys `verify_run_state` enumerates, in its order.
+pub fn enumerate_runs(connection: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT runs.workspace_id, runs.id FROM runs {ENUMERATION_ORDER}"
+    ))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 pub(crate) fn verify_run_state(connection: &Connection) -> Result<(), RunStateFault> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -829,7 +846,7 @@ pub(crate) fn verify_run_state(connection: &Connection) -> Result<(), RunStateFa
     // cardinality so compound relabelling cannot move a Run between separate
     // validators and disappear from both.
     let mut statement = connection
-        .prepare(
+        .prepare(&format!(
             // `runs.id` is selected so a refusal can NAME the Run (R28.1). Before this the loop had
             // no identity at all -- the pass could say a Run disagreed with the log and never which.
             "SELECT runs.id, runs.workspace_id, runs.kind, runs.state,
@@ -851,8 +868,8 @@ pub(crate) fn verify_run_state(connection: &Connection) -> Result<(), RunStateFa
          FROM runs
          -- Ordered like every other pass, so a bar can plant a failing row that is NOT the row
          -- this pass reads first. Without it the enumeration order is whatever SQLite returns.
-         ORDER BY runs.workspace_id, runs.id",
-        )
+         {ENUMERATION_ORDER}"
+        ))
         .map_err(RunStateFault::Store)?;
     let rows = statement
         .query_map([], |row| {

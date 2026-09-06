@@ -321,7 +321,7 @@ fn concurrent_publications_from_the_same_revision_commit_exactly_once() {
 fn restart_refuses_policy_state_without_its_exact_event() {
     // R44: BOTH ENDS. Tampering only the last-sorting Project made "names the failing row"
     // and "names the last row" one assertion, and a Row arm naming `rows.last()` survived.
-    for (end, order) in [("last", "DESC"), ("first", "ASC")] {
+    for end in ["last", "first"] {
         let (store, accounts, projects, policies) =
             enrolled_services(&format!("missing-event-{end}"));
         // R39.3 (kimi's HOLD): TWO Projects carry policies, and the tamper hits whichever sorts LAST
@@ -340,16 +340,17 @@ fn restart_refuses_policy_state_without_its_exact_event() {
         drop(accounts);
         let connection = Connection::open(&store.path).unwrap();
         // The pass's own order, read back from the store rather than assumed from the ids.
-        let tampered: String = connection
-            .query_row(
-                &format!(
-                    "SELECT DISTINCT project_id FROM project_policy_revisions
-                 ORDER BY workspace_id {order}, project_id {order} LIMIT 1"
-                ),
-                [],
-                |row| row.get(0),
-            )
-            .expect("both Projects have policy revisions");
+        // R44.6: CALL the pass's own enumeration rather than copying its query.
+        let enumerated =
+            beacond::enumerate_policy_projects(&connection).expect("the pass's enumeration reads");
+        let tampered: String = if end == "last" {
+            enumerated.last()
+        } else {
+            enumerated.first()
+        }
+        .expect("both Projects have policy revisions")
+        .1
+        .clone();
         let removed = connection
             .execute(
                 "DELETE FROM events

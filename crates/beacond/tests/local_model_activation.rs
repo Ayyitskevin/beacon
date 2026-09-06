@@ -436,7 +436,7 @@ fn activation_refuses_a_review_when_provider_features_change() {
 fn restart_refuses_an_activation_decision_without_its_exact_event() {
     // R44: BOTH ENDS. Tampering only the last-sorting decision made "names the failing
     // row" and "names the last row" the same assertion; `rows.last()` survived it.
-    for (end, order) in [("last", "DESC"), ("first", "ASC")] {
+    for end in ["last", "first"] {
         let store = TestStore::new(&format!("missing-event-{end}"));
         let accounts = enrolled_accounts(&store);
         let mut responses = two_model_inspection_responses();
@@ -469,17 +469,17 @@ fn restart_refuses_an_activation_decision_without_its_exact_event() {
         // mutant naming `rows[0]` was indistinguishable from naming the failing row.
         let connection = Connection::open(&store.path).unwrap();
         // R44: BOTH ENDS -- the target is read back from the pass's own ORDER BY, one end per run.
-        let target: String = connection
-            .query_row(
-                &format!(
-                    "SELECT id FROM local_model_activation_decisions
-                 ORDER BY workspace_id {order}, provider {order}, endpoint {order},
-                          model_name {order}, sequence {order} LIMIT 1"
-                ),
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+        // R44.6: CALL the pass's own enumeration rather than copying its query.
+        let enumerated = beacond::enumerate_activation_decisions(&connection)
+            .expect("the pass's enumeration reads");
+        let target: String = if end == "last" {
+            enumerated.last()
+        } else {
+            enumerated.first()
+        }
+        .expect("the fixture activated twice")
+        .1
+        .clone();
         if end == "last" {
             assert_eq!(
                 target,
