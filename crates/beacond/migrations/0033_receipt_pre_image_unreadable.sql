@@ -84,7 +84,17 @@ CREATE TABLE receipts (
 ) STRICT;
 
 INSERT INTO receipts SELECT * FROM receipts_v32;
-DROP TABLE receipts_v32;
+
+-- THE CHILD IS REBUILT BEFORE THE OLD PARENT IS DROPPED, which is the order SQLite documents for
+-- a parent rebuild and the order this migration did NOT have (astra's HOLD R46-MIGRATION).
+-- A modern `ALTER TABLE ... RENAME` rewrote the child's foreign key to follow the parent, so its
+-- rows still referenced `receipts_v32` -- and dropping that table with rows pointing at it is
+-- `FOREIGN KEY constraint failed` (1811). Every fixture on this lane had an EMPTY child, so the
+-- suite never touched it: measured, reproduced with one planted citation row, and RED before this
+-- reordering.
+--
+-- New parent, copy, new child referencing the NEW parent, copy the child's rows, then drop the old
+-- child and only then the old parent.
 
 -- The child, from its own live definition, pointing at the rebuilt parent.
 CREATE TABLE evaluation_cited_runs (
@@ -100,6 +110,7 @@ CREATE TABLE evaluation_cited_runs (
 
 INSERT INTO evaluation_cited_runs SELECT * FROM evaluation_cited_runs_v32;
 DROP TABLE evaluation_cited_runs_v32;
+DROP TABLE receipts_v32;
 
 CREATE TRIGGER evaluation_cited_runs_no_update
 BEFORE UPDATE ON evaluation_cited_runs
@@ -127,5 +138,21 @@ BEGIN
 END;
 
 
+
+-- The rebuild is only correct if nothing is left pointing at a table that moved. A migration that
+-- rewrote a foreign key and did not check is how this one shipped its defect.
+--
+-- AS A REFUSAL, NOT A REPORT. A bare `PRAGMA foreign_key_check` returns rows and a script discards
+-- them, so it would state the rule without enforcing it -- the same decorative shape this lane has
+-- been finding all week. `pragma_foreign_key_check` as a table-valued function can be asserted on,
+-- and RAISE(ABORT) rolls the migration back.
+-- `RAISE()` is trigger-only, so the refusal is a CHECK the count has to satisfy: a non-zero count
+-- fails the INSERT and rolls the migration back.
+CREATE TEMP TABLE migration_0033_foreign_key_guard (
+    dangling INTEGER NOT NULL CHECK (dangling = 0)
+);
+INSERT INTO migration_0033_foreign_key_guard
+    SELECT count(*) FROM pragma_foreign_key_check;
+DROP TABLE migration_0033_foreign_key_guard;
 
 UPDATE schema_meta SET version = 33 WHERE singleton = 1 AND version = 32;
