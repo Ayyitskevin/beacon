@@ -2431,20 +2431,25 @@ fn columns_match(stored: &StoredProposal, payload: &ProposalV1) -> bool {
 ///
 /// Current readiness is derived afterwards and never fails startup: a historical Proposal does not
 /// become corrupt merely because a referenced current revision moved.
-pub(crate) fn verify_proposal_state(connection: &Connection) -> Result<(), ProposalStateFault> {
-    let mut statement = connection
-        .prepare(
-            "SELECT workspace_id, digest_value FROM proposals ORDER BY workspace_id, digest_value",
-        )
-        .map_err(ProposalStateFault::Store)?;
+/// The rows `verify_proposal_state` enumerates, in the order it enumerates them.
+///
+/// EXTRACTED SO A BAR CAN CALL IT (R44.6): a placement assertion that COPIES this query agrees
+/// with itself, so flipping the pass's own `ORDER BY` leaves it decorative. One function, called
+/// by both, moves the pass and the bar's view of it together.
+pub fn enumerate_proposals(connection: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut statement = connection.prepare(
+        "SELECT workspace_id, digest_value FROM proposals ORDER BY workspace_id, digest_value",
+    )?;
     let rows = statement
         .query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(ProposalStateFault::Store)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(ProposalStateFault::Store)?;
-    drop(statement);
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub(crate) fn verify_proposal_state(connection: &Connection) -> Result<(), ProposalStateFault> {
+    let rows = enumerate_proposals(connection).map_err(ProposalStateFault::Store)?;
 
     if !rows.is_empty() && !owner_account_exists(connection).map_err(ProposalStateFault::Store)? {
         return Err(ProposalStateFault::Totals(crate::TotalsMismatch {

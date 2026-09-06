@@ -93,7 +93,7 @@ pub use artifact::{
 };
 pub use candidate::{
     Candidate, CandidateDigest, CandidateEntry, CandidateError, CandidateImages, CandidateService,
-    CandidateV1, InconsistentCandidate, MalformedCandidate,
+    CandidateV1, InconsistentCandidate, MalformedCandidate, enumerate_candidates,
 };
 #[cfg(debug_assertions)]
 #[doc(hidden)]
@@ -108,6 +108,7 @@ pub use evaluation::{
     EvaluationForce, EvaluationService, EvaluationSubject, EvaluationSubjectDraft,
     EvaluationSupersedes, EvaluationV1, Evaluator, Finding, FindingSeverity,
     InconsistentEvaluation, MalformedEvaluation, RubricDeclaration, Verdict,
+    enumerate_evaluation_keys,
 };
 pub use local_model_activation::{
     LocalModelActivation, LocalModelActivationError, LocalModelActivationReview,
@@ -158,7 +159,7 @@ pub use outcome_collector::{
 pub use outcome_pdf::{BEACON_OUTCOME_1, EmbeddedFace, PdfProfile, PdfRefusal, render_pdf};
 pub use outcome_publication::{
     ExportedOutcome, Provenance, PublicationSummary, PublishRefusal, PublishedOutcome,
-    SupersessionAtReadTime,
+    SupersessionAtReadTime, enumerate_publications,
 };
 pub use outcome_store::{
     MAX_STORED_MANIFEST_BYTES, ManifestStoreRefusal, OutcomeCandidate, OutcomeService,
@@ -188,7 +189,7 @@ pub use proposal::{
     OwnerBootstrap, Proposal, ProposalActor, ProposalBindings, ProposalBounds, ProposalDigest,
     ProposalError, ProposalIntent, ProposalReadiness, ProposalRequester, ProposalRequirements,
     ProposalScope, ProposalService, ProposalV1, ReadableContext, RollbackStrategy,
-    UnmetPrecondition,
+    UnmetPrecondition, enumerate_proposals,
 };
 pub use publication_seam::{PublicationCandidacy, PublicationSeamRefusal, publication_candidacy};
 pub use resident_configuration::{
@@ -208,6 +209,7 @@ pub use resource_discovery::{
 pub use ruling::{
     InconsistentRuling, MalformedRuling, Ruling, RulingDecider, RulingDecision, RulingDigest,
     RulingError, RulingForce, RulingGrammar, RulingService, RulingSupersedes, RulingV1,
+    enumerate_rulings,
 };
 #[cfg(debug_assertions)]
 #[doc(hidden)]

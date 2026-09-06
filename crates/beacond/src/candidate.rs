@@ -1332,13 +1332,18 @@ fn agrees_with_proposal(facts: &ProposalIntentFacts, payload: &CandidateV1) -> b
 /// What it deliberately does not do is re-derive anything about the world: a Candidate records what
 /// a change would do to a tree at one revision, and that record does not become invalid because the
 /// tree moved. Dispatch re-establishes every live fact itself, at dispatch time.
-pub(crate) fn verify_candidate_state(connection: &Connection) -> Result<(), CandidateStateFault> {
-    let mut statement = connection
-        .prepare(
-            "SELECT workspace_id, digest_value, proposal_digest FROM candidates
+/// The rows `verify_candidate_state` enumerates, in the order it enumerates them.
+///
+/// EXTRACTED SO A BAR CAN CALL IT (R44.6): a placement assertion that COPIES this query agrees
+/// with itself, so flipping the pass's own `ORDER BY` leaves it decorative. One function, called
+/// by both, moves the pass and the bar's view of it together.
+pub fn enumerate_candidates(
+    connection: &Connection,
+) -> rusqlite::Result<Vec<(String, String, String)>> {
+    let mut statement = connection.prepare(
+        "SELECT workspace_id, digest_value, proposal_digest FROM candidates
          ORDER BY workspace_id, digest_value",
-        )
-        .map_err(CandidateStateFault::Store)?;
+    )?;
     let rows = statement
         .query_map([], |row| {
             Ok((
@@ -1346,11 +1351,13 @@ pub(crate) fn verify_candidate_state(connection: &Connection) -> Result<(), Cand
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
             ))
-        })
-        .map_err(CandidateStateFault::Store)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(CandidateStateFault::Store)?;
-    drop(statement);
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub(crate) fn verify_candidate_state(connection: &Connection) -> Result<(), CandidateStateFault> {
+    let rows = enumerate_candidates(connection).map_err(CandidateStateFault::Store)?;
 
     for (workspace_id, digest_value, proposal_digest) in &rows {
         let identity = || CandidateStateFault::Identity {
