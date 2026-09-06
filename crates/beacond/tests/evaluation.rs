@@ -751,7 +751,7 @@ fn a_recorded_evaluation_is_immutable_and_survives_startup_verification() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .expect("startup verifies the Evaluation");
-    assert_eq!(report.diagnostics.schema_version, 32);
+    assert_eq!(report.diagnostics.schema_version, 33);
     assert_eq!(
         evaluations.get(&evaluation.digest().value).unwrap(),
         evaluation
@@ -2978,9 +2978,40 @@ fn migration_0028_preserves_preexisting_proposal_evaluation_bytes_and_chain() {
              DROP TABLE evaluation_supersessions;
              DROP TABLE evaluation_cited_runs;
              DROP TABLE evaluation_findings;
-             DROP TABLE evaluations;",
+             DROP TABLE evaluations;
+             -- R46's 0033 rebuilds `receipts` to widen its outcome CHECK, and rewrites
+             -- `evaluation_cited_runs` with it (the FK follows a rename). This fixture rolls the
+             -- store back to 27, so it has to roll those back too -- before R46 they were
+             -- untouched since 0022 and this snapshot did not need to name them.
+             DROP TRIGGER receipts_no_update;
+             DROP TRIGGER receipts_no_delete;
+             ALTER TABLE receipts RENAME TO receipts_r46;",
         )
         .unwrap();
+    // `receipts` at its 0022 shape, sliced out of 0022's own text for the same reason the
+    // evaluation slice below gives: a rollback that retyped the DDL would be testing the test.
+    // Its two triggers come with it -- 0022's block ends at the next table.
+    let migration_0022 = include_str!("../migrations/0022_candidates.sql");
+    // The CREATE and the two triggers, but NOT 0022's own carry-over INSERT from `receipts_v21`:
+    // that table belongs to 0022's rebuild, not to this one.
+    let receipt_table = &migration_0022[migration_0022.find("CREATE TABLE receipts (").unwrap()
+        ..migration_0022
+            .find("CREATE TABLE dispatch_preparations (")
+            .unwrap()];
+    let receipt_create =
+        &receipt_table[..receipt_table.find(") STRICT;").unwrap() + ") STRICT;".len()];
+    let receipt_triggers = &receipt_table[receipt_table
+        .find("CREATE TRIGGER receipts_no_update")
+        .unwrap()..];
+    connection.execute_batch(receipt_create).unwrap();
+    connection.execute_batch(receipt_triggers).unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO receipts SELECT * FROM receipts_r46;
+             DROP TABLE receipts_r46;",
+        )
+        .unwrap();
+
     let migration_0023 = include_str!("../migrations/0023_evaluations.sql");
     let evaluation_objects =
         &migration_0023[migration_0023.find("CREATE TABLE evaluations (").unwrap()
@@ -3027,7 +3058,7 @@ fn migration_0028_preserves_preexisting_proposal_evaluation_bytes_and_chain() {
              SELECT workspace_id, subject_digest, evaluation_digest,
                     supersedes_evaluation_digest
              FROM supersessions_snapshot;
-             UPDATE schema_meta SET version = 27 WHERE singleton = 1 AND version = 32;
+             UPDATE schema_meta SET version = 27 WHERE singleton = 1 AND version = 33;
              COMMIT;",
         )
         .unwrap();
