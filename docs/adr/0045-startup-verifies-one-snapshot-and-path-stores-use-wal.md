@@ -49,23 +49,38 @@ its own decision.
 The following is proposed operating text, not evidence that Beacon has executed or passed a
 backup drill.
 
-- Identify and quiesce every process and connection that can write the store, or use a
-  SQLite-aware snapshot operation and verify that it completed.
-- For the offline-copy route, verify checkpoint completion first. Keep every writer quiescent
-  through checkpoint, connection close, and the complete copy. A successful checkpoint does not
-  reserve a later copy window.
+- Identify and quiesce every process and connection that can access the store, including
+  read-only connections, or use a SQLite-aware snapshot operation and verify that it completed.
+  Readers pin the WAL even when they never write.
+- Treat the SQLite backup API as complete only after the backup step reports `SQLITE_DONE` and
+  `backup_finish` succeeds. An API call or command exit without that completion state is not a
+  completed backup.
+- For the offline-copy route, verify checkpoint completion first. A checkpoint can return busy or
+  leave work pending; record its returned completion status, not only the command's exit. Keep
+  every connection quiescent through checkpoint, connection close, and the complete copy. A
+  successful checkpoint does not reserve a later copy window.
+- A long-lived reader, including startup's own verification snapshot, can delay checkpoint
+  progress. While readers are open, monitor WAL size and filesystem free space.
 - Never call a copy of the main database file alone a completed snapshot of a live WAL store.
   Never treat sequential copies of changing files as one atomic snapshot.
-- After a crash, preserve the database main file and its `-wal` and `-shm` family together. Do not
-  remove sidecars to clear a lock. Recover from a private staging copy and let SQLite perform its
-  own recovery.
+- While a store is open, `-wal` holds committed pages that have not been checkpointed and `-shm`
+  is SQLite's transient coordination index, not a second copy of those pages. Protect both as
+  store data while the store is open; never delete either sidecar manually, including to clear a
+  lock.
+- After a crash, preserve the database main file and its `-wal` and `-shm` family together. Let
+  SQLite recover the family in one private writable staging location before making a new snapshot
+  or relying on the recovered store.
 - Never open a live or mutable store with `immutable=1`. That flag is not a substitute for
   quiescence, locking, or recovery.
+- Restore every backup, crash-recovery family, and read-only archive into one private writable
+  staging location first, then verify it there. Beacon does not bootstrap an archive in place as
+  a read-only store.
 - Verify a restored snapshot before relying on it. Check a known latest immutable record or
   recorded cut in addition to SQLite integrity checks; `integrity_check` alone can report an
   internally consistent but stale main-file copy.
-- Restore an archive from read-only media into private writable staging and verify it there.
-  Beacon does not bootstrap an archive in place as a read-only store.
+- Include WAL size and filesystem free space in disk-pressure diagnostics. The current runtime
+  setting `synchronous=FULL` is measured, not pinned by the product; changing durability requires
+  a separate decision.
 - Keep managed stores on same-host local storage with SQLite-compatible locking and shared
   memory. Do not use WAL as a network-filesystem interoperability mechanism.
 
