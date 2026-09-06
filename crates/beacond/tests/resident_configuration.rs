@@ -642,7 +642,7 @@ fn startup_refuses_missing_or_tampered_configuration_events() {
                 store_path: store.path.clone(),
                 initial_workspace_name: "Ignored".to_owned(),
             }),
-            Err(beacond::SupervisorError::ResidentConfigurationStateMismatch)
+            Err(beacond::SupervisorError::ResidentConfigurationStateMismatch { .. })
                 | Err(beacond::SupervisorError::ResidentConfigurationEventMismatch(_))
                 | Err(beacond::SupervisorError::Json(_))
         ));
@@ -686,6 +686,6 @@ fn startup_refuses_capabilities_added_outside_the_operator_decision() {
             initial_workspace_name: "Ignored".to_owned(),
         }),
         Err(beacond::SupervisorError::ResidentConfigurationEventMismatch(_))
-            | Err(beacond::SupervisorError::ResidentConfigurationStateMismatch)
+            | Err(beacond::SupervisorError::ResidentConfigurationStateMismatch { .. })
     ));
 }
