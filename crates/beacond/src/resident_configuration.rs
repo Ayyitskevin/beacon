@@ -167,6 +167,12 @@ pub(crate) enum ResidentConfigurationStateFault {
         workspace_id: String,
         decision_id: String,
     },
+    /// A decision whose stored ordering key is outside the positive domain the service writes.
+    Sequence {
+        workspace_id: String,
+        decision_id: String,
+        sequence: i64,
+    },
 }
 
 impl ResidentConfigurationError {
@@ -210,6 +216,8 @@ impl fmt::Display for ResidentConfigurationStateFault {
                 "a ResidentConfiguration row's Workspace is not readable: {workspace_id}, ResidentConfiguration \
                  {decision_id}"
             ),
+            Self::Sequence { .. } => formatter
+                .write_str("a Resident configuration decision's ordering key is not readable"),
         }
     }
 }
@@ -237,6 +245,16 @@ impl fmt::Debug for ResidentConfigurationStateFault {
                 .field("workspace_id", workspace_id)
                 .field("decision_id", decision_id)
                 .finish(),
+            Self::Sequence {
+                workspace_id,
+                decision_id,
+                sequence,
+            } => formatter
+                .debug_struct("Sequence")
+                .field("workspace_id", workspace_id)
+                .field("decision_id", decision_id)
+                .field("sequence", sequence)
+                .finish(),
         }
     }
 }
@@ -246,7 +264,7 @@ impl std::error::Error for ResidentConfigurationStateFault {
         match self {
             Self::Store(error) => Some(error),
             Self::Row { cause, .. } => Some(cause),
-            Self::Identity { .. } => None,
+            Self::Identity { .. } | Self::Sequence { .. } => None,
         }
     }
 }
@@ -867,6 +885,31 @@ pub(crate) fn verify_configuration_event(
 pub(crate) fn verify_configuration_state(
     connection: &Connection,
 ) -> Result<(), ResidentConfigurationStateFault> {
+    let invalid_sequence = connection
+        .query_row(
+            "SELECT workspace_id, id, sequence
+             FROM resident_configuration_decisions
+             WHERE sequence < 1
+             ORDER BY workspace_id, id, sequence
+             LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(ResidentConfigurationStateFault::Store)?;
+    if let Some((workspace_id, decision_id, sequence)) = invalid_sequence {
+        return Err(ResidentConfigurationStateFault::Sequence {
+            workspace_id,
+            decision_id,
+            sequence,
+        });
+    }
     let mut statement = connection
         .prepare(
             "SELECT id, workspace_id, resident_id, state, predecessor_id, decided_at_ms
