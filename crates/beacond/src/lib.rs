@@ -2353,6 +2353,13 @@ fn map_local_model_activation_state_fault(
         local_model_activation::LocalModelActivationStateFault::Unreadable(cause) => {
             SupervisorError::LocalModelActivationRowUnreadable(cause)
         }
+        local_model_activation::LocalModelActivationStateFault::Identity {
+            workspace_id,
+            activation_id,
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "a local-model activation row's identity is not readable",
+            raw: format!("Workspace {workspace_id}, activation {activation_id}"),
+        },
         local_model_activation::LocalModelActivationStateFault::Sequence {
             workspace_id,
             activation_id,
