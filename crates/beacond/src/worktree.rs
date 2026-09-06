@@ -852,6 +852,19 @@ pub enum PinnedReadFailure {
     PinBrokenAfterRead,
 }
 
+impl PinnedReadFailure {
+    /// The subcase's NAME, for the Receipt line that says WHICH read failed.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::FilterInventoryUnreadable => "filter_inventory_unreadable",
+            Self::ChildFailed => "child_failed",
+            Self::Signalled => "signalled",
+            Self::TimedOut => "timed_out",
+            Self::PinBrokenAfterRead => "pin_broken_after_read",
+        }
+    }
+}
+
 /// What a pinned byte read established. THREE answers, never two (R46/R46.1).
 ///
 /// `NotFound` is a fact about the tree -- Git ran, under the hardening, in the pinned repository,

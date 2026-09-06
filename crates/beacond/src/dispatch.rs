@@ -51,8 +51,8 @@ use crate::ruling::{
     RulingDecision, RulingDigest, ruling_event_sequence, ruling_row_scope, verified_ruling_within,
 };
 use crate::worktree::{
-    GitIdentity, PinnedRepository, READ_BUDGET, WRITE_BUDGET, read_pinned, read_pinned_bytes,
-    read_pinned_exit, write_pinned,
+    GitIdentity, PinnedRead, PinnedReadFailure, PinnedRepository, READ_BUDGET, WRITE_BUDGET,
+    read_pinned, read_pinned_bytes, read_pinned_exit, write_pinned,
 };
 use crate::{AutonomyProfile, CandidateDigest, RepositorySourceKind};
 
@@ -109,8 +109,16 @@ pub enum DispatchOutcome {
     /// The Installation is paused.
     InstallationPaused,
     /// A declared pre-image is not what the pinned base revision holds: the Candidate describes a
-    /// tree that is not there.
+    /// tree that is not there. COMPARED AND DIFFERED -- bytes were read, or the tree was read and
+    /// reported no such object. Never a read that failed (R46).
     PreImageMismatch,
+    /// A declared pre-image could not be READ, so no comparison happened. The Receipt names which
+    /// read failed; it makes no claim about what the base revision holds.
+    ///
+    /// R46. Before it, this refused as `PreImageMismatch` -- a Receipt asserting a comparison that
+    /// never took place, which is the absent/broken collapse the write side already refuses
+    /// (R28.1: "a failed write, never a mismatch, because nothing here was compared").
+    PreImageUnreadable,
     /// The attempt exceeded the wall-clock bound the Proposal itself declared.
     WallClockExceeded,
     /// This Ruling has already been dispatched. One decision authorizes one application: an attempt
@@ -159,6 +167,7 @@ impl DispatchOutcome {
             Self::AutonomyProfileRefuses => "autonomy_profile_refuses",
             Self::InstallationPaused => "installation_paused",
             Self::PreImageMismatch => "pre_image_mismatch",
+            Self::PreImageUnreadable => "pre_image_unreadable",
             Self::WallClockExceeded => "wall_clock_exceeded",
             Self::AlreadyDispatched => "already_dispatched",
             Self::Admissible => "admissible",
@@ -273,6 +282,13 @@ pub struct DispatchReceipt {
     /// Receipt that cannot say what it failed to check is not evidence (ADR 0027), and free-form
     /// strings cannot be checked by a reader or by reconciliation (gpt1).
     pub not_verified: Vec<NotVerified>,
+    /// WHICH pre-image read failed, present only with `PreImageUnreadable` (R46).
+    ///
+    /// The outcome says a comparison did not happen; this says why not, from the closed subcase
+    /// vocabulary rather than a message. Defaulted so Receipts recorded before R46 stay decodable:
+    /// none of them can carry the outcome this field belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_image_read_failure: Option<PinnedReadFailure>,
 }
 
 /// What a Receipt can say about the repository it names, afterwards.
@@ -863,8 +879,16 @@ impl DispatchService {
         // anyway, and refused as its own reason rather than as a content mismatch: the supplied
         // content is not what disagrees.
         let pinned_base = ruling.payload().bindings.pinned_base_revision.clone();
-        if !pre_images_hold(&repository, &pinned_base, &mut decided) {
-            return Ok(decided.refused(DispatchOutcome::PreImageMismatch));
+        match pre_images_hold(&repository, &pinned_base, &mut decided) {
+            PreImageVerdict::Hold => {}
+            PreImageVerdict::Mismatch => {
+                return Ok(decided.refused(DispatchOutcome::PreImageMismatch));
+            }
+            // R46: no comparison happened, so the refusal names the READ, not a disagreement.
+            PreImageVerdict::Unreadable(failure) => {
+                decided.pre_image_read_failure = Some(failure);
+                return Ok(decided.refused(DispatchOutcome::PreImageUnreadable));
+            }
         }
 
         // G11: the live repository, read through the pinned directory with a read-only Git shape.
@@ -1554,6 +1578,8 @@ struct Decided {
     /// What the branch held when this attempt observed it. `NothingPrepared` until a landing runs.
     landing_observation: LandingObservation,
     git_steps: Vec<GitStep>,
+    /// Which pre-image read failed, when the gate could not answer (R46).
+    pre_image_read_failure: Option<PinnedReadFailure>,
     source_identity: Option<SourceIdentity>,
     /// SHA-256 over the commit's own NUL-delimited name-status output: a measured diff digest,
     /// which a Candidate digest is not.
@@ -1633,6 +1659,7 @@ impl DispatchService {
             started_at_ms: opened.started_at_ms,
             ended_at_ms,
             not_verified: not_verified(outcome, decided),
+            pre_image_read_failure: decided.pre_image_read_failure,
         })
     }
 
@@ -1980,30 +2007,60 @@ fn swap_ref<'a>(
 /// A create must find nothing at its path; a modify or a delete must find a blob whose bytes hash
 /// to the declared pre-image. Read from the base TREE, not from the working tree: the tree is what
 /// the change will be applied to.
-fn pre_images_hold(repository: &PinnedRepository, base: &str, decided: &mut Decided) -> bool {
+/// The verdict of the pre-image gate. Three answers, because `Unreadable` is not a disagreement.
+enum PreImageVerdict {
+    Hold,
+    /// Every declared pre-image was READ (or the tree reported no such object) and at least one
+    /// disagreed with what the Candidate declares.
+    Mismatch,
+    /// At least one declared pre-image could not be read. Carries the FIRST such failure, which is
+    /// the one that stopped this gate from being able to answer.
+    Unreadable(PinnedReadFailure),
+}
+
+fn pre_images_hold(
+    repository: &PinnedRepository,
+    base: &str,
+    decided: &mut Decided,
+) -> PreImageVerdict {
     let records: Vec<(Option<String>, String)> = decided
         .per_mutation
         .iter()
         .map(|record| (record.pre_image.clone(), record.path.clone()))
         .collect();
     let mut held = true;
+    let mut unreadable: Option<PinnedReadFailure> = None;
     for (declared_pre_image, declared_path) in records {
         let path = format!("{base}:{declared_path}");
         let cat_file = ["cat-file", "blob", path.as_str()];
         let read = read_pinned_bytes(repository, &cat_file, READ_BUDGET);
         decided.record_step(GitStepName::CatFile, &cat_file, read.bytes().is_some());
-        let blob = read.bytes().map(<[u8]>::to_vec);
-        let record_holds = match (&declared_pre_image, blob) {
-            // Declared absent, and absent: `cat-file` fails for a path the tree does not hold.
-            (None, None) => true,
-            (None, Some(_)) | (Some(_), None) => false,
-            (Some(declared), Some(bytes)) => hex(&crate::proposal::sha256(&bytes)) == *declared,
+        let record_holds = match (&declared_pre_image, &read) {
+            // Declared absent, and absent: Git ran and reported no such object in the tree. This
+            // is the ONE no-bytes answer that is evidence (R46.1); the other is below.
+            (None, PinnedRead::NotFound) => true,
+            (None, PinnedRead::Bytes(_)) | (Some(_), PinnedRead::NotFound) => false,
+            (Some(declared), PinnedRead::Bytes(bytes)) => {
+                hex(&crate::proposal::sha256(bytes)) == *declared
+            }
+            // R46: the read FAILED. This gate cannot say whether the pre-image holds, so it does
+            // not say it does and it does not say it disagrees. The first such failure is kept
+            // because it is the one that stopped the gate answering; later reads still run, so
+            // the Receipt's step list stays the invocations this dispatch made.
+            (_, PinnedRead::Unreadable(failure)) => {
+                unreadable.get_or_insert(*failure);
+                false
+            }
         };
         // Every declared path is read, not just the ones up to the first disagreement, so the
         // Receipt's step list is the invocations this dispatch made rather than a prefix of them.
         held = held && record_holds;
     }
-    held
+    match (unreadable, held) {
+        (Some(failure), _) => PreImageVerdict::Unreadable(failure),
+        (None, true) => PreImageVerdict::Hold,
+        (None, false) => PreImageVerdict::Mismatch,
+    }
 }
 
 /// Did Beacon make this repository?
@@ -2339,6 +2396,8 @@ fn interrupted_receipt(
         per_mutation: Vec::new(),
         started_at_ms,
         ended_at_ms: started_at_ms,
+        // A reconstruction never ran the pre-image gate, so it carries no read failure.
+        pre_image_read_failure: None,
         not_verified,
     }
 }
@@ -2977,6 +3036,7 @@ mod tests {
             },
             started_at_ms: 1,
             ended_at_ms: 2,
+            pre_image_read_failure: None,
             not_verified: vec![
                 NotVerified::ExecutionPolicyConstraint,
                 NotVerified::SandboxConstraint,
