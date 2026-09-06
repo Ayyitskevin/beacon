@@ -2724,7 +2724,17 @@ fn verify_outcome_invariants(receipt: &DispatchReceipt) -> Result<(), DispatchEr
             // fabrication and refusing it would make every historical refusal unreadable after an
             // upgrade (the lockout R46.7 named, in the other direction).
             let observation = if receipt.version >= RECEIPT_VERSION {
-                receipt.per_mutation.iter().any(is_mismatch_cell)
+                // R46.9 (astra): `any(is_mismatch_cell)` alone let a Receipt carry an UNRECORDED
+                // row as long as some OTHER row mismatched -- the five-cell table held per row and
+                // said nothing about the Receipt as a whole. Every mutation of a version-4
+                // mismatch was read, so every one has an observation; a holding cell is a perfectly
+                // valid row (the gate reads every declared path, not a prefix), and at least one
+                // row has to occupy a mismatch cell or the outcome is not what happened.
+                receipt
+                    .per_mutation
+                    .iter()
+                    .all(|record| record.observed_pre_image.is_some())
+                    && receipt.per_mutation.iter().any(is_mismatch_cell)
             } else {
                 true
             };
@@ -3306,6 +3316,56 @@ mod tests {
         // build could have written.
         assert!(absent_members(&specimen(DispatchOutcome::Applied)).is_empty());
         verify_outcome_invariants(&specimen(DispatchOutcome::Applied)).unwrap();
+    }
+
+    /// R46.9 (astra's joint read): the evidence rule is about the RECEIPT, not one lucky row.
+    ///
+    /// The five-cell table holds per mutation; `any(is_mismatch_cell)` then accepted a Receipt
+    /// carrying an unrecorded row as long as some OTHER row mismatched. Every declared path of a
+    /// version-4 mismatch was read -- the gate reads all of them, not a prefix -- so every row has
+    /// an observation, and a HOLDING row is perfectly valid beside a mismatching one.
+    #[test]
+    fn every_mutation_of_a_version_four_mismatch_carries_its_observation() {
+        let row = |path: &str, observed: Option<ObservedPreImage>| MutationRecord {
+            kind: MutationKind::ModifyFile,
+            path: path.to_owned(),
+            pre_image: Some("7".repeat(64)),
+            post_image: Some("8".repeat(64)),
+            observed_pre_image: observed,
+            effect: MutationEffect::NotAttempted,
+        };
+        let receipt_with = |rows: Vec<MutationRecord>| {
+            let mut receipt = specimen(DispatchOutcome::PreImageMismatch);
+            receipt.per_mutation = rows;
+            receipt
+        };
+        let mismatching = Some(ObservedPreImage::Bytes {
+            digest: "9".repeat(64),
+        });
+        let holding = Some(ObservedPreImage::Bytes {
+            digest: "7".repeat(64),
+        });
+
+        // Both rows recorded, one of them a mismatch: coherent, and the second row HOLDING is not
+        // a defect -- it is what reading every declared path looks like.
+        verify_outcome_invariants(&receipt_with(vec![
+            row("src/lib.rs", mismatching.clone()),
+            row("src/other.rs", holding),
+        ]))
+        .expect("a recorded holding row beside a recorded mismatch is coherent");
+
+        // One row UNRECORDED: the Receipt says a comparison happened for a path it kept no
+        // evidence about, and the other row's mismatch does not cover for it.
+        assert!(
+            matches!(
+                verify_outcome_invariants(&receipt_with(vec![
+                    row("src/lib.rs", mismatching),
+                    row("src/other.rs", None),
+                ])),
+                Err(DispatchError::InvalidStore)
+            ),
+            "a version-4 mismatch carrying an unrecorded mutation was accepted"
+        );
     }
 
     /// R46.5: a `PreImageMismatch` Receipt owes its own record the digest it compared against.
