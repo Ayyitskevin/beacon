@@ -162,11 +162,255 @@ pub enum LocalTransportError {
     Outcome(PublishRefusal),
 }
 
+/// The account fault's NAME, for a caller of the local transport (R42).
+///
+/// A third caller-owned copy of this projection, beside `mission_impact.rs`'s and
+/// `outcome_publication.rs`'s. Deliberate: each caller owns the text it emits, and this one's
+/// audience -- an in-process transport caller who may not own the row at all -- is the narrowest
+/// of the three. `OperatorAccountError` has no `name()` of its own and this slice's fence forbids
+/// adding one to `operator_account.rs`, so the match lives here and is exhaustive: a new account
+/// fault is a compile error at this caller, not a new sentence nobody read.
+fn account_tag(error: &OperatorAccountError) -> &'static str {
+    match error {
+        OperatorAccountError::PasswordTooShort => "PasswordTooShort",
+        OperatorAccountError::PasswordTooLong => "PasswordTooLong",
+        OperatorAccountError::PasswordConfirmationMismatch => "PasswordConfirmationMismatch",
+        OperatorAccountError::RecoveryNotConfirmed => "RecoveryNotConfirmed",
+        OperatorAccountError::SetupNotStarted => "SetupNotStarted",
+        OperatorAccountError::AccountAlreadyExists => "AccountAlreadyExists",
+        OperatorAccountError::AccountMissing => "AccountMissing",
+        OperatorAccountError::AuthenticationFailed => "AuthenticationFailed",
+        OperatorAccountError::AuthenticationThrottled { .. } => "AuthenticationThrottled",
+        OperatorAccountError::CredentialDisabled => "CredentialDisabled",
+        OperatorAccountError::RemotePasswordNotAllowed => "RemotePasswordNotAllowed",
+        OperatorAccountError::NotAuthenticated => "NotAuthenticated",
+        OperatorAccountError::InvalidSessionTimeout => "InvalidSessionTimeout",
+        OperatorAccountError::CredentialProcessing => "CredentialProcessing",
+        OperatorAccountError::InvalidStore => "InvalidStore",
+        OperatorAccountError::ClockBeforeUnixEpoch => "ClockBeforeUnixEpoch",
+        OperatorAccountError::Store(_) => "Store",
+        OperatorAccountError::StateUnavailable => "StateUnavailable",
+    }
+}
+
+/// Which part of a repository draft was refused. A closed three-name vocabulary; the draft's own
+/// content -- source URL, revision, declared checks -- never reaches the caller line.
+fn invalid_draft_tag(reason: &crate::InvalidRepositoryDraft) -> &'static str {
+    match reason {
+        crate::InvalidRepositoryDraft::Source => "Source",
+        crate::InvalidRepositoryDraft::BaseRevision => "BaseRevision",
+        crate::InvalidRepositoryDraft::DeclaredChecks => "DeclaredChecks",
+    }
+}
+
+/// `RecentReceiptError` has no `name()` and its file is outside this slice's fence, so the three
+/// names are written here.
+fn recent_receipt_tag(error: &crate::RecentReceiptError) -> String {
+    match error {
+        crate::RecentReceiptError::Account(cause) => format!("Account.{}", account_tag(cause)),
+        crate::RecentReceiptError::InvalidStore => "InvalidStore".to_owned(),
+        crate::RecentReceiptError::Store(_) => "Store".to_owned(),
+    }
+}
+
+/// `ResourceDiscoveryError` likewise. `EndpointNotLoopback` carries the endpoint it refused; the
+/// name says which check failed without repeating the address.
+fn resource_discovery_tag(error: &ResourceDiscoveryError) -> String {
+    match error {
+        ResourceDiscoveryError::Account(cause) => format!("Account.{}", account_tag(cause)),
+        ResourceDiscoveryError::EndpointNotLoopback => "EndpointNotLoopback".to_owned(),
+    }
+}
+
+fn starter_organization_tag(error: &StarterOrganizationError) -> String {
+    match error {
+        StarterOrganizationError::Account(cause) => format!("Account.{}", account_tag(cause)),
+        named @ (StarterOrganizationError::UnsupportedProposalVersion
+        | StarterOrganizationError::EmptyRoster
+        | StarterOrganizationError::DuplicateRole
+        | StarterOrganizationError::InvalidDisplayName
+        | StarterOrganizationError::DecisionAlreadyRecorded
+        | StarterOrganizationError::InvalidStore
+        | StarterOrganizationError::Store(_)
+        | StarterOrganizationError::Json(_)) => named.name().to_owned(),
+    }
+}
+
+fn resident_lifecycle_tag(error: &ResidentLifecycleError) -> String {
+    match error {
+        ResidentLifecycleError::Account(cause) => format!("Account.{}", account_tag(cause)),
+        named @ (ResidentLifecycleError::NotFound
+        | ResidentLifecycleError::InvalidTransition
+        | ResidentLifecycleError::StaleDecision
+        | ResidentLifecycleError::InvalidStore
+        | ResidentLifecycleError::Store(_)
+        | ResidentLifecycleError::Json(_)) => named.name().to_owned(),
+    }
+}
+
+fn resident_configuration_tag(error: &ResidentConfigurationError) -> String {
+    match error {
+        ResidentConfigurationError::Account(cause) => format!("Account.{}", account_tag(cause)),
+        named @ (ResidentConfigurationError::ResidentNotFound
+        | ResidentConfigurationError::ResidentRetired
+        | ResidentConfigurationError::ModelActivationUnavailable
+        | ResidentConfigurationError::ModelMissingCompletion
+        | ResidentConfigurationError::InvalidCapabilities
+        | ResidentConfigurationError::StaleDecision
+        | ResidentConfigurationError::AlreadyCleared
+        | ResidentConfigurationError::InvalidStore
+        | ResidentConfigurationError::Store(_)
+        | ResidentConfigurationError::Json(_)) => named.name().to_owned(),
+    }
+}
+
+fn project_tag(error: &ProjectError) -> String {
+    match error {
+        ProjectError::Account(cause) => format!("Account.{}", account_tag(cause)),
+        ProjectError::StaleCharterRevision { expected, current } => {
+            format!("StaleCharterRevision(expected={expected},current={current})")
+        }
+        named @ (ProjectError::InvalidName
+        | ProjectError::InvalidPurpose
+        | ProjectError::InvalidDesiredOutcomes
+        | ProjectError::InvalidConstraint
+        | ProjectError::InvalidProhibition
+        | ProjectError::DuplicateCharterEntry
+        | ProjectError::UnchangedCharter
+        | ProjectError::NotFound
+        | ProjectError::InvalidStore
+        | ProjectError::Store(_)
+        | ProjectError::Json(_)) => named.name().to_owned(),
+    }
+}
+
+fn project_policy_tag(error: &ProjectPolicyError) -> String {
+    match error {
+        ProjectPolicyError::Account(cause) => format!("Account.{}", account_tag(cause)),
+        ProjectPolicyError::StaleCharterRevision { expected, current } => {
+            format!("StaleCharterRevision(expected={expected},current={current})")
+        }
+        named @ (ProjectPolicyError::ProjectNotFound
+        | ProjectPolicyError::StalePolicyRevision
+        | ProjectPolicyError::InvalidRequiredCapabilities
+        | ProjectPolicyError::InvalidTrackRecordRequirements
+        | ProjectPolicyError::UnchangedPolicy
+        | ProjectPolicyError::InvalidStore
+        | ProjectPolicyError::Store(_)
+        | ProjectPolicyError::Json(_)) => named.name().to_owned(),
+    }
+}
+
+fn project_repository_tag(error: &ProjectRepositoryError) -> String {
+    match error {
+        ProjectRepositoryError::Account(cause) => format!("Account.{}", account_tag(cause)),
+        ProjectRepositoryError::StaleCharterRevision { expected, current } => {
+            format!("StaleCharterRevision(expected={expected},current={current})")
+        }
+        ProjectRepositoryError::InvalidDraft(reason) => {
+            format!("InvalidDraft.{}", invalid_draft_tag(reason))
+        }
+        named @ (ProjectRepositoryError::ProjectNotFound
+        | ProjectRepositoryError::StaleRepositoryRevision
+        | ProjectRepositoryError::UnchangedRepository
+        | ProjectRepositoryError::InvalidStore
+        | ProjectRepositoryError::Store(_)
+        | ProjectRepositoryError::Json(_)) => named.name().to_owned(),
+    }
+}
+
+fn check_preflight_tag(error: &CheckPreflightError) -> String {
+    match error {
+        CheckPreflightError::Account(cause) => format!("Account.{}", account_tag(cause)),
+        named @ (CheckPreflightError::ProjectNotFound
+        | CheckPreflightError::RepositoryNotBound
+        | CheckPreflightError::InvalidStore
+        | CheckPreflightError::Store(_)
+        | CheckPreflightError::Json(_)) => named.name().to_owned(),
+    }
+}
+
+fn sample_project_tag(error: &SampleProjectError) -> String {
+    match error {
+        SampleProjectError::Account(cause) => format!("Account.{}", account_tag(cause)),
+        named @ (SampleProjectError::NotInstalled
+        | SampleProjectError::UnsafeDestination
+        | SampleProjectError::BundleMismatch
+        | SampleProjectError::MaterializationFailed
+        | SampleProjectError::TamperedInstallation
+        | SampleProjectError::InvalidStore
+        | SampleProjectError::Store(_)
+        | SampleProjectError::Io(_)
+        | SampleProjectError::Json(_)) => named.name().to_owned(),
+    }
+}
+
+fn team_tag(error: &TeamError) -> String {
+    match error {
+        TeamError::Account(cause) => format!("Account.{}", account_tag(cause)),
+        named @ (TeamError::ProjectNotFound
+        | TeamError::TeamNotFound
+        | TeamError::InvalidName
+        | TeamError::InvalidMembers
+        | TeamError::ResidentConfigurationUnavailable
+        | TeamError::StaleResidentConfiguration
+        | TeamError::ResidentIneligible(_)
+        | TeamError::InvalidStore
+        | TeamError::Store(_)
+        | TeamError::Json(_)) => named.name().to_owned(),
+    }
+}
+
+fn mission_tag(error: &MissionError) -> String {
+    match error {
+        MissionError::Account(cause) => format!("Account.{}", account_tag(cause)),
+        MissionError::StaleCharterRevision { expected, current } => {
+            format!("StaleCharterRevision(expected={expected},current={current})")
+        }
+        named @ (MissionError::ProjectNotFound
+        | MissionError::TeamNotFound
+        | MissionError::MissionNotFound
+        | MissionError::InvalidDesiredOutcome
+        | MissionError::InvalidSuccessConditions
+        | MissionError::InvalidConstraint
+        | MissionError::InvalidProhibition
+        | MissionError::DuplicateMissionEntry
+        | MissionError::InvalidMembers
+        | MissionError::StaleTeamEligibility
+        | MissionError::ResidentIneligible(_)
+        | MissionError::InvalidStore
+        | MissionError::Store(_)
+        | MissionError::Json(_)) => named.name().to_owned(),
+    }
+}
+
+fn local_model_activation_tag(error: &crate::LocalModelActivationError) -> String {
+    match error {
+        crate::LocalModelActivationError::Account(cause) => {
+            format!("Account.{}", account_tag(cause))
+        }
+        named @ (crate::LocalModelActivationError::ResourceUnavailable
+        | crate::LocalModelActivationError::InvalidProviderResponse
+        | crate::LocalModelActivationError::ModelNotFound
+        | crate::LocalModelActivationError::ModelDrift
+        | crate::LocalModelActivationError::InvalidApproval
+        | crate::LocalModelActivationError::AlreadyActive
+        | crate::LocalModelActivationError::StaleDecision
+        | crate::LocalModelActivationError::InvalidStore
+        | crate::LocalModelActivationError::Store(_)
+        | crate::LocalModelActivationError::Json(_)) => named.name().to_owned(),
+    }
+}
+
 impl fmt::Display for LocalTransportError {
+    /// R42: one closed line per arm. The child's own `Display` is the child's business -- it is
+    /// written for whoever owns that row -- and a transport caller may own none of it. Every arm
+    /// that used to interpolate `{error}` now interpolates a NAME through a private borrowed
+    /// selector, and every original value stays in the derived `Debug`.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Io(error) => write!(formatter, "local transport I/O failed: {error}"),
-            Self::Json(error) => write!(formatter, "local transport message was invalid: {error}"),
+            Self::Io(_) => write!(formatter, "local transport I/O failed: Io"),
+            Self::Json(_) => write!(formatter, "local transport message was invalid: Json"),
             Self::InvalidTokenFile => write!(formatter, "local transport token is invalid"),
             Self::InsecurePermissions => {
                 write!(
@@ -175,39 +419,109 @@ impl fmt::Display for LocalTransportError {
                 )
             }
             Self::Protocol => write!(formatter, "local transport protocol mismatch"),
+            // Reviewed: `LocalErrorCode` is 62 unit variants with no payload, so its `Debug` is a
+            // closed name vocabulary. Pinned by the code table in the wire witness -- a
+            // payload-bearing code would break that table before it could reach this line.
             Self::Remote { code, .. } => write!(formatter, "local supervisor refused: {code:?}"),
+            // OPEN UNTIL COMMIT 1. The caller-safe Supervisor tag is a lib.rs selector (it needs
+            // all 72 variants and the private children), and this lane builds local_transport.rs
+            // first to stay out of a write race on lib.rs. The witness row for this arm records
+            // the still-open line rather than pretending otherwise.
             Self::Supervisor(error) => write!(formatter, "supervisor startup failed: {error}"),
-            Self::Account(error) => write!(formatter, "account service failed: {error}"),
+            Self::Account(error) => {
+                write!(formatter, "account service failed: {}", account_tag(error))
+            }
             Self::StarterOrganization(error) => {
-                write!(formatter, "starter organization failed: {error}")
+                write!(
+                    formatter,
+                    "starter organization failed: {}",
+                    starter_organization_tag(error)
+                )
             }
             Self::ResidentLifecycle(error) => {
-                write!(formatter, "Resident lifecycle failed: {error}")
+                write!(
+                    formatter,
+                    "Resident lifecycle failed: {}",
+                    resident_lifecycle_tag(error)
+                )
             }
             Self::ResidentConfiguration(error) => {
-                write!(formatter, "Resident configuration failed: {error}")
+                write!(
+                    formatter,
+                    "Resident configuration failed: {}",
+                    resident_configuration_tag(error)
+                )
             }
-            Self::Project(error) => write!(formatter, "Project operation failed: {error}"),
-            Self::ProjectPolicy(error) => write!(formatter, "Project Policy failed: {error}"),
+            Self::Project(error) => {
+                write!(
+                    formatter,
+                    "Project operation failed: {}",
+                    project_tag(error)
+                )
+            }
+            Self::ProjectPolicy(error) => {
+                write!(
+                    formatter,
+                    "Project Policy failed: {}",
+                    project_policy_tag(error)
+                )
+            }
+            // Already closed by slice 1: the publisher's own line is the reviewed closed
+            // projection, so forwarding it is R37.4 delegation, not disclosure.
             Self::Outcome(error) => write!(formatter, "Outcome failed: {error}"),
             Self::ProjectRepository(error) => {
-                write!(formatter, "Project Repository failed: {error}")
+                write!(
+                    formatter,
+                    "Project Repository failed: {}",
+                    project_repository_tag(error)
+                )
             }
-            Self::CheckPreflight(error) => write!(formatter, "check preflight failed: {error}"),
-            Self::RecentReceipt(error) => write!(formatter, "recent Receipts failed: {error}"),
-            Self::SampleProject(error) => write!(formatter, "Sample Project failed: {error}"),
-            Self::Team(error) => write!(formatter, "Team operation failed: {error}"),
-            Self::Mission(error) => write!(formatter, "Mission operation failed: {error}"),
+            Self::CheckPreflight(error) => {
+                write!(
+                    formatter,
+                    "check preflight failed: {}",
+                    check_preflight_tag(error)
+                )
+            }
+            Self::RecentReceipt(error) => {
+                write!(
+                    formatter,
+                    "recent Receipts failed: {}",
+                    recent_receipt_tag(error)
+                )
+            }
+            Self::SampleProject(error) => {
+                write!(
+                    formatter,
+                    "Sample Project failed: {}",
+                    sample_project_tag(error)
+                )
+            }
+            Self::Team(error) => write!(formatter, "Team operation failed: {}", team_tag(error)),
+            Self::Mission(error) => {
+                write!(
+                    formatter,
+                    "Mission operation failed: {}",
+                    mission_tag(error)
+                )
+            }
             Self::ResourceDiscovery(error) => {
-                write!(formatter, "resource discovery failed: {error}")
+                write!(
+                    formatter,
+                    "resource discovery failed: {}",
+                    resource_discovery_tag(error)
+                )
             }
             Self::LocalModelActivation(error) => {
-                write!(formatter, "local model activation failed: {error}")
+                write!(
+                    formatter,
+                    "local model activation failed: {}",
+                    local_model_activation_tag(error)
+                )
             }
         }
     }
 }
-
 impl std::error::Error for LocalTransportError {}
 
 impl From<std::io::Error> for LocalTransportError {
@@ -2312,8 +2626,17 @@ mod tests {
         LocalErrorCode, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
         LocalTransportError, initialize_local_auth_token,
     };
+    use crate::outcome::MalformedOutcome;
+    use crate::outcome_pdf::PdfRefusal;
+    use crate::outcome_store::ManifestStoreRefusal;
+    use crate::outcome_typst::TypstRefusal;
+    use crate::publication_seam::PublicationSeamRefusal;
     use crate::{
-        LocalModelEndpoint, SampleProjectInstallOutcome, SampleProjectStatus, SecretString,
+        CheckPreflightError, LocalModelEndpoint, MissionError, OperatorAccountError, ProjectError,
+        ProjectPolicyError, ProjectRepositoryError, PublishRefusal, ResidentConfigurationError,
+        ResidentLifecycleError, ResourceDiscoveryError, SampleProjectError,
+        SampleProjectInstallOutcome, SampleProjectStatus, SecretString, StarterOrganizationError,
+        TeamError,
     };
 
     #[test]
@@ -2546,6 +2869,1447 @@ mod tests {
         assert_eq!(
             reaches_dispatch(&command_vocabulary(synthetic)).as_deref(),
             Some("ResumeWork,")
+        );
+    }
+
+    // -------------------------------------------------------------------------------------
+    // R42 slice 2, commit 2: the transport's caller-facing text is closed.
+    // -------------------------------------------------------------------------------------
+
+    /// Two fixed synthetic markers, each placed before any newline so that "is it in the line"
+    /// is a substring question and never an escaping question.
+    const NEEDLE_A: &str = "R42S2_PRIVATE_A";
+    const NEEDLE_B: &str = "R42S2_PRIVATE_B";
+
+    /// Approved numeric context, chosen here before any error is built and pairwise distinct so a
+    /// swapped pair cannot pass.
+    const FIRST_EXPECTED: u32 = 7;
+    const FIRST_CURRENT: u32 = 11;
+    const SECOND_EXPECTED: u32 = 13;
+    const SECOND_CURRENT: u32 = 17;
+    const THROTTLE_MS: u64 = 4242;
+
+    fn payload_a() -> String {
+        format!("{NEEDLE_A} /home/example/private.txt column=private_column\r\nsecond-line")
+    }
+
+    fn payload_b() -> String {
+        format!("{NEEDLE_B} /home/example/other.txt column=other_column\r\nsecond-line")
+    }
+
+    fn driver_error(needle: &str) -> rusqlite::Error {
+        rusqlite::Error::InvalidParameterName(format!("{needle} :private_binding"))
+    }
+
+    fn io_error(needle: &str) -> std::io::Error {
+        std::io::Error::other(format!("{needle} /home/example/private.txt"))
+    }
+
+    fn json_error(needle: &str) -> serde_json::Error {
+        serde::de::Error::custom(format!("{needle} /home/example/private.txt"))
+    }
+
+    /// One declarative row table per vocabulary, expanded into BOTH the exhaustive expected match
+    /// and the constructed fixtures. Wildcard-free: a new variant anywhere in this tree fails to
+    /// compile here until its row supplies a constructor, an independently written expected
+    /// literal, and its declared markers. No table reads a production `Display` or `name()`.
+    macro_rules! closed_table {
+        (
+            $expected_fn:ident / $rows_fn:ident : $ty:path,
+            $( $case:literal | $pattern:pat => $line:expr , $build:expr , $markers:expr ; )+
+        ) => {
+            fn $expected_fn(value: &$ty) -> (&'static str, String) {
+                match value {
+                    $( $pattern => ($case, String::from($line)), )+
+                }
+            }
+
+            #[allow(dead_code)]
+            fn $rows_fn() -> Vec<(&'static str, $ty, &'static [&'static str])> {
+                vec![$(($case, $build, $markers)),+]
+            }
+        };
+    }
+
+    // ---- generated child tables ----
+    closed_table! {
+        expected_account / account_rows: OperatorAccountError,
+        "PasswordTooShort" | OperatorAccountError::PasswordTooShort
+            => "PasswordTooShort",
+            OperatorAccountError::PasswordTooShort, &[];
+        "PasswordTooLong" | OperatorAccountError::PasswordTooLong
+            => "PasswordTooLong",
+            OperatorAccountError::PasswordTooLong, &[];
+        "PasswordConfirmationMismatch" | OperatorAccountError::PasswordConfirmationMismatch
+            => "PasswordConfirmationMismatch",
+            OperatorAccountError::PasswordConfirmationMismatch, &[];
+        "RecoveryNotConfirmed" | OperatorAccountError::RecoveryNotConfirmed
+            => "RecoveryNotConfirmed",
+            OperatorAccountError::RecoveryNotConfirmed, &[];
+        "SetupNotStarted" | OperatorAccountError::SetupNotStarted
+            => "SetupNotStarted",
+            OperatorAccountError::SetupNotStarted, &[];
+        "AccountAlreadyExists" | OperatorAccountError::AccountAlreadyExists
+            => "AccountAlreadyExists",
+            OperatorAccountError::AccountAlreadyExists, &[];
+        "AccountMissing" | OperatorAccountError::AccountMissing
+            => "AccountMissing",
+            OperatorAccountError::AccountMissing, &[];
+        "AuthenticationFailed" | OperatorAccountError::AuthenticationFailed
+            => "AuthenticationFailed",
+            OperatorAccountError::AuthenticationFailed, &[];
+        "AuthenticationThrottled" | OperatorAccountError::AuthenticationThrottled { .. }
+            => "AuthenticationThrottled",
+            OperatorAccountError::AuthenticationThrottled { retry_after_ms: THROTTLE_MS }, &[];
+        "CredentialDisabled" | OperatorAccountError::CredentialDisabled
+            => "CredentialDisabled",
+            OperatorAccountError::CredentialDisabled, &[];
+        "RemotePasswordNotAllowed" | OperatorAccountError::RemotePasswordNotAllowed
+            => "RemotePasswordNotAllowed",
+            OperatorAccountError::RemotePasswordNotAllowed, &[];
+        "NotAuthenticated" | OperatorAccountError::NotAuthenticated
+            => "NotAuthenticated",
+            OperatorAccountError::NotAuthenticated, &[];
+        "InvalidSessionTimeout" | OperatorAccountError::InvalidSessionTimeout
+            => "InvalidSessionTimeout",
+            OperatorAccountError::InvalidSessionTimeout, &[];
+        "CredentialProcessing" | OperatorAccountError::CredentialProcessing
+            => "CredentialProcessing",
+            OperatorAccountError::CredentialProcessing, &[];
+        "InvalidStore" | OperatorAccountError::InvalidStore
+            => "InvalidStore",
+            OperatorAccountError::InvalidStore, &[];
+        "ClockBeforeUnixEpoch" | OperatorAccountError::ClockBeforeUnixEpoch
+            => "ClockBeforeUnixEpoch",
+            OperatorAccountError::ClockBeforeUnixEpoch, &[];
+        "Store" | OperatorAccountError::Store(_)
+            => "Store",
+            OperatorAccountError::Store(driver_error(NEEDLE_A)), &[NEEDLE_A];
+        "StateUnavailable" | OperatorAccountError::StateUnavailable
+            => "StateUnavailable",
+            OperatorAccountError::StateUnavailable, &[];
+    }
+
+    closed_table! {
+        expected_draft / draft_rows: crate::InvalidRepositoryDraft,
+        "Source" | crate::InvalidRepositoryDraft::Source
+            => "Source", crate::InvalidRepositoryDraft::Source, &[];
+        "BaseRevision" | crate::InvalidRepositoryDraft::BaseRevision
+            => "BaseRevision", crate::InvalidRepositoryDraft::BaseRevision, &[];
+        "DeclaredChecks" | crate::InvalidRepositoryDraft::DeclaredChecks
+            => "DeclaredChecks", crate::InvalidRepositoryDraft::DeclaredChecks, &[];
+    }
+
+    closed_table! {
+        expected_starter / starter_rows: StarterOrganizationError,
+        "Account" | StarterOrganizationError::Account(cause)
+            => format!("Account.{}", expected_account(cause).1),
+            StarterOrganizationError::Account(OperatorAccountError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "UnsupportedProposalVersion" | StarterOrganizationError::UnsupportedProposalVersion
+            => "UnsupportedProposalVersion",
+            StarterOrganizationError::UnsupportedProposalVersion, &[];
+        "EmptyRoster" | StarterOrganizationError::EmptyRoster
+            => "EmptyRoster",
+            StarterOrganizationError::EmptyRoster, &[];
+        "DuplicateRole" | StarterOrganizationError::DuplicateRole
+            => "DuplicateRole",
+            StarterOrganizationError::DuplicateRole, &[];
+        "InvalidDisplayName" | StarterOrganizationError::InvalidDisplayName
+            => "InvalidDisplayName",
+            StarterOrganizationError::InvalidDisplayName, &[];
+        "DecisionAlreadyRecorded" | StarterOrganizationError::DecisionAlreadyRecorded
+            => "DecisionAlreadyRecorded",
+            StarterOrganizationError::DecisionAlreadyRecorded, &[];
+        "InvalidStore" | StarterOrganizationError::InvalidStore
+            => "InvalidStore",
+            StarterOrganizationError::InvalidStore, &[];
+        "Store" | StarterOrganizationError::Store(_)
+            => "Store",
+            StarterOrganizationError::Store(driver_error(NEEDLE_A)), &[NEEDLE_A];
+        "Json" | StarterOrganizationError::Json(_)
+            => "Json",
+            StarterOrganizationError::Json(json_error(NEEDLE_A)), &[NEEDLE_A];
+    }
+
+    closed_table! {
+        expected_lifecycle / lifecycle_rows: ResidentLifecycleError,
+        "Account" | ResidentLifecycleError::Account(cause)
+            => format!("Account.{}", expected_account(cause).1),
+            ResidentLifecycleError::Account(OperatorAccountError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "NotFound" | ResidentLifecycleError::NotFound
+            => "NotFound",
+            ResidentLifecycleError::NotFound, &[];
+        "InvalidTransition" | ResidentLifecycleError::InvalidTransition
+            => "InvalidTransition",
+            ResidentLifecycleError::InvalidTransition, &[];
+        "StaleDecision" | ResidentLifecycleError::StaleDecision
+            => "StaleDecision",
+            ResidentLifecycleError::StaleDecision, &[];
+        "InvalidStore" | ResidentLifecycleError::InvalidStore
+            => "InvalidStore",
+            ResidentLifecycleError::InvalidStore, &[];
+        "Store" | ResidentLifecycleError::Store(_)
+            => "Store",
+            ResidentLifecycleError::Store(driver_error(NEEDLE_A)), &[NEEDLE_A];
+        "Json" | ResidentLifecycleError::Json(_)
+            => "Json",
+            ResidentLifecycleError::Json(json_error(NEEDLE_A)), &[NEEDLE_A];
+    }
+
+    closed_table! {
+        expected_configuration / configuration_rows: ResidentConfigurationError,
+        "Account" | ResidentConfigurationError::Account(cause)
+            => format!("Account.{}", expected_account(cause).1),
+            ResidentConfigurationError::Account(OperatorAccountError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "ResidentNotFound" | ResidentConfigurationError::ResidentNotFound
+            => "ResidentNotFound",
+            ResidentConfigurationError::ResidentNotFound, &[];
+        "ResidentRetired" | ResidentConfigurationError::ResidentRetired
+            => "ResidentRetired",
+            ResidentConfigurationError::ResidentRetired, &[];
+        "ModelActivationUnavailable" | ResidentConfigurationError::ModelActivationUnavailable
+            => "ModelActivationUnavailable",
+            ResidentConfigurationError::ModelActivationUnavailable, &[];
+        "ModelMissingCompletion" | ResidentConfigurationError::ModelMissingCompletion
+            => "ModelMissingCompletion",
+            ResidentConfigurationError::ModelMissingCompletion, &[];
+        "InvalidCapabilities" | ResidentConfigurationError::InvalidCapabilities
+            => "InvalidCapabilities",
+            ResidentConfigurationError::InvalidCapabilities, &[];
+        "StaleDecision" | ResidentConfigurationError::StaleDecision
+            => "StaleDecision",
+            ResidentConfigurationError::StaleDecision, &[];
+        "AlreadyCleared" | ResidentConfigurationError::AlreadyCleared
+            => "AlreadyCleared",
+            ResidentConfigurationError::AlreadyCleared, &[];
+        "InvalidStore" | ResidentConfigurationError::InvalidStore
+            => "InvalidStore",
+            ResidentConfigurationError::InvalidStore, &[];
+        "Store" | ResidentConfigurationError::Store(_)
+            => "Store",
+            ResidentConfigurationError::Store(driver_error(NEEDLE_A)), &[NEEDLE_A];
+        "Json" | ResidentConfigurationError::Json(_)
+            => "Json",
+            ResidentConfigurationError::Json(json_error(NEEDLE_A)), &[NEEDLE_A];
+    }
+
+    closed_table! {
+        expected_project / project_rows: ProjectError,
+        "Account" | ProjectError::Account(cause)
+            => format!("Account.{}", expected_account(cause).1),
+            ProjectError::Account(OperatorAccountError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "InvalidName" | ProjectError::InvalidName
+            => "InvalidName",
+            ProjectError::InvalidName, &[];
+        "InvalidPurpose" | ProjectError::InvalidPurpose
+            => "InvalidPurpose",
+            ProjectError::InvalidPurpose, &[];
+        "InvalidDesiredOutcomes" | ProjectError::InvalidDesiredOutcomes
+            => "InvalidDesiredOutcomes",
+            ProjectError::InvalidDesiredOutcomes, &[];
+        "InvalidConstraint" | ProjectError::InvalidConstraint
+            => "InvalidConstraint",
+            ProjectError::InvalidConstraint, &[];
+        "InvalidProhibition" | ProjectError::InvalidProhibition
+            => "InvalidProhibition",
+            ProjectError::InvalidProhibition, &[];
+        "DuplicateCharterEntry" | ProjectError::DuplicateCharterEntry
+            => "DuplicateCharterEntry",
+            ProjectError::DuplicateCharterEntry, &[];
+        "StaleCharterRevision" | ProjectError::StaleCharterRevision { expected, current }
+            => format!("StaleCharterRevision(expected={expected},current={current})"),
+            ProjectError::StaleCharterRevision { expected: FIRST_EXPECTED, current: FIRST_CURRENT }, &[];
+        "UnchangedCharter" | ProjectError::UnchangedCharter
+            => "UnchangedCharter",
+            ProjectError::UnchangedCharter, &[];
+        "NotFound" | ProjectError::NotFound
+            => "NotFound",
+            ProjectError::NotFound, &[];
+        "InvalidStore" | ProjectError::InvalidStore
+            => "InvalidStore",
+            ProjectError::InvalidStore, &[];
+        "Store" | ProjectError::Store(_)
+            => "Store",
+            ProjectError::Store(driver_error(NEEDLE_A)), &[NEEDLE_A];
+        "Json" | ProjectError::Json(_)
+            => "Json",
+            ProjectError::Json(json_error(NEEDLE_A)), &[NEEDLE_A];
+    }
+
+    closed_table! {
+        expected_policy / policy_rows: ProjectPolicyError,
+        "Account" | ProjectPolicyError::Account(cause)
+            => format!("Account.{}", expected_account(cause).1),
+            ProjectPolicyError::Account(OperatorAccountError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "ProjectNotFound" | ProjectPolicyError::ProjectNotFound
+            => "ProjectNotFound",
+            ProjectPolicyError::ProjectNotFound, &[];
+        "StaleCharterRevision" | ProjectPolicyError::StaleCharterRevision { expected, current }
+            => format!("StaleCharterRevision(expected={expected},current={current})"),
+            ProjectPolicyError::StaleCharterRevision { expected: FIRST_EXPECTED, current: FIRST_CURRENT }, &[];
+        "StalePolicyRevision" | ProjectPolicyError::StalePolicyRevision
+            => "StalePolicyRevision",
+            ProjectPolicyError::StalePolicyRevision, &[];
+        "InvalidRequiredCapabilities" | ProjectPolicyError::InvalidRequiredCapabilities
+            => "InvalidRequiredCapabilities",
+            ProjectPolicyError::InvalidRequiredCapabilities, &[];
+        "InvalidTrackRecordRequirements" | ProjectPolicyError::InvalidTrackRecordRequirements
+            => "InvalidTrackRecordRequirements",
+            ProjectPolicyError::InvalidTrackRecordRequirements, &[];
+        "UnchangedPolicy" | ProjectPolicyError::UnchangedPolicy
+            => "UnchangedPolicy",
+            ProjectPolicyError::UnchangedPolicy, &[];
+        "InvalidStore" | ProjectPolicyError::InvalidStore
+            => "InvalidStore",
+            ProjectPolicyError::InvalidStore, &[];
+        "Store" | ProjectPolicyError::Store(_)
+            => "Store",
+            ProjectPolicyError::Store(driver_error(NEEDLE_A)), &[NEEDLE_A];
+        "Json" | ProjectPolicyError::Json(_)
+            => "Json",
+            ProjectPolicyError::Json(json_error(NEEDLE_A)), &[NEEDLE_A];
+    }
+
+    closed_table! {
+        expected_repository / repository_rows: ProjectRepositoryError,
+        "Account" | ProjectRepositoryError::Account(cause)
+            => format!("Account.{}", expected_account(cause).1),
+            ProjectRepositoryError::Account(OperatorAccountError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "ProjectNotFound" | ProjectRepositoryError::ProjectNotFound
+            => "ProjectNotFound",
+            ProjectRepositoryError::ProjectNotFound, &[];
+        "StaleCharterRevision" | ProjectRepositoryError::StaleCharterRevision { expected, current }
+            => format!("StaleCharterRevision(expected={expected},current={current})"),
+            ProjectRepositoryError::StaleCharterRevision { expected: FIRST_EXPECTED, current: FIRST_CURRENT }, &[];
+        "StaleRepositoryRevision" | ProjectRepositoryError::StaleRepositoryRevision
+            => "StaleRepositoryRevision",
+            ProjectRepositoryError::StaleRepositoryRevision, &[];
+        "InvalidDraft" | ProjectRepositoryError::InvalidDraft(reason)
+            => format!("InvalidDraft.{}", expected_draft(reason).1),
+            ProjectRepositoryError::InvalidDraft(crate::InvalidRepositoryDraft::Source), &[];
+        "UnchangedRepository" | ProjectRepositoryError::UnchangedRepository
+            => "UnchangedRepository",
+            ProjectRepositoryError::UnchangedRepository, &[];
+        "InvalidStore" | ProjectRepositoryError::InvalidStore
+            => "InvalidStore",
+            ProjectRepositoryError::InvalidStore, &[];
+        "Store" | ProjectRepositoryError::Store(_)
+            => "Store",
+            ProjectRepositoryError::Store(driver_error(NEEDLE_A)), &[NEEDLE_A];
+        "Json" | ProjectRepositoryError::Json(_)
+            => "Json",
+            ProjectRepositoryError::Json(json_error(NEEDLE_A)), &[NEEDLE_A];
+    }
+
+    closed_table! {
+        expected_preflight / preflight_rows: CheckPreflightError,
+        "Account" | CheckPreflightError::Account(cause)
+            => format!("Account.{}", expected_account(cause).1),
+            CheckPreflightError::Account(OperatorAccountError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "ProjectNotFound" | CheckPreflightError::ProjectNotFound
+            => "ProjectNotFound",
+            CheckPreflightError::ProjectNotFound, &[];
+        "RepositoryNotBound" | CheckPreflightError::RepositoryNotBound
+            => "RepositoryNotBound",
+            CheckPreflightError::RepositoryNotBound, &[];
+        "InvalidStore" | CheckPreflightError::InvalidStore
+            => "InvalidStore",
+            CheckPreflightError::InvalidStore, &[];
+        "Store" | CheckPreflightError::Store(_)
+            => "Store",
+            CheckPreflightError::Store(driver_error(NEEDLE_A)), &[NEEDLE_A];
+        "Json" | CheckPreflightError::Json(_)
+            => "Json",
+            CheckPreflightError::Json(json_error(NEEDLE_A)), &[NEEDLE_A];
+    }
+
+    closed_table! {
+        expected_receipt / receipt_rows: crate::RecentReceiptError,
+        "Account" | crate::RecentReceiptError::Account(cause)
+            => format!("Account.{}", expected_account(cause).1),
+            crate::RecentReceiptError::Account(OperatorAccountError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "InvalidStore" | crate::RecentReceiptError::InvalidStore
+            => "InvalidStore",
+            crate::RecentReceiptError::InvalidStore, &[];
+        "Store" | crate::RecentReceiptError::Store(_)
+            => "Store",
+            crate::RecentReceiptError::Store(driver_error(NEEDLE_A)), &[NEEDLE_A];
+    }
+
+    closed_table! {
+        expected_sample / sample_rows: SampleProjectError,
+        "Account" | SampleProjectError::Account(cause)
+            => format!("Account.{}", expected_account(cause).1),
+            SampleProjectError::Account(OperatorAccountError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "NotInstalled" | SampleProjectError::NotInstalled
+            => "NotInstalled",
+            SampleProjectError::NotInstalled, &[];
+        "UnsafeDestination" | SampleProjectError::UnsafeDestination
+            => "UnsafeDestination",
+            SampleProjectError::UnsafeDestination, &[];
+        "BundleMismatch" | SampleProjectError::BundleMismatch
+            => "BundleMismatch",
+            SampleProjectError::BundleMismatch, &[];
+        "MaterializationFailed" | SampleProjectError::MaterializationFailed
+            => "MaterializationFailed",
+            SampleProjectError::MaterializationFailed, &[];
+        "TamperedInstallation" | SampleProjectError::TamperedInstallation
+            => "TamperedInstallation",
+            SampleProjectError::TamperedInstallation, &[];
+        "InvalidStore" | SampleProjectError::InvalidStore
+            => "InvalidStore",
+            SampleProjectError::InvalidStore, &[];
+        "Store" | SampleProjectError::Store(_)
+            => "Store",
+            SampleProjectError::Store(driver_error(NEEDLE_A)), &[NEEDLE_A];
+        "Io" | SampleProjectError::Io(_)
+            => "Io",
+            SampleProjectError::Io(io_error(NEEDLE_A)), &[NEEDLE_A];
+        "Json" | SampleProjectError::Json(_)
+            => "Json",
+            SampleProjectError::Json(json_error(NEEDLE_A)), &[NEEDLE_A];
+    }
+
+    closed_table! {
+        expected_team / team_rows: TeamError,
+        "Account" | TeamError::Account(cause)
+            => format!("Account.{}", expected_account(cause).1),
+            TeamError::Account(OperatorAccountError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "ProjectNotFound" | TeamError::ProjectNotFound
+            => "ProjectNotFound",
+            TeamError::ProjectNotFound, &[];
+        "TeamNotFound" | TeamError::TeamNotFound
+            => "TeamNotFound",
+            TeamError::TeamNotFound, &[];
+        "InvalidName" | TeamError::InvalidName
+            => "InvalidName",
+            TeamError::InvalidName, &[];
+        "InvalidMembers" | TeamError::InvalidMembers
+            => "InvalidMembers",
+            TeamError::InvalidMembers, &[];
+        "ResidentConfigurationUnavailable" | TeamError::ResidentConfigurationUnavailable
+            => "ResidentConfigurationUnavailable",
+            TeamError::ResidentConfigurationUnavailable, &[];
+        "StaleResidentConfiguration" | TeamError::StaleResidentConfiguration
+            => "StaleResidentConfiguration",
+            TeamError::StaleResidentConfiguration, &[];
+        "ResidentIneligible" | TeamError::ResidentIneligible(_)
+            => "ResidentIneligible",
+            TeamError::ResidentIneligible(Default::default()), &[];
+        "InvalidStore" | TeamError::InvalidStore
+            => "InvalidStore",
+            TeamError::InvalidStore, &[];
+        "Store" | TeamError::Store(_)
+            => "Store",
+            TeamError::Store(driver_error(NEEDLE_A)), &[NEEDLE_A];
+        "Json" | TeamError::Json(_)
+            => "Json",
+            TeamError::Json(json_error(NEEDLE_A)), &[NEEDLE_A];
+    }
+
+    closed_table! {
+        expected_mission / mission_rows: MissionError,
+        "Account" | MissionError::Account(cause)
+            => format!("Account.{}", expected_account(cause).1),
+            MissionError::Account(OperatorAccountError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "ProjectNotFound" | MissionError::ProjectNotFound
+            => "ProjectNotFound",
+            MissionError::ProjectNotFound, &[];
+        "TeamNotFound" | MissionError::TeamNotFound
+            => "TeamNotFound",
+            MissionError::TeamNotFound, &[];
+        "MissionNotFound" | MissionError::MissionNotFound
+            => "MissionNotFound",
+            MissionError::MissionNotFound, &[];
+        "StaleCharterRevision" | MissionError::StaleCharterRevision { expected, current }
+            => format!("StaleCharterRevision(expected={expected},current={current})"),
+            MissionError::StaleCharterRevision { expected: FIRST_EXPECTED, current: FIRST_CURRENT }, &[];
+        "InvalidDesiredOutcome" | MissionError::InvalidDesiredOutcome
+            => "InvalidDesiredOutcome",
+            MissionError::InvalidDesiredOutcome, &[];
+        "InvalidSuccessConditions" | MissionError::InvalidSuccessConditions
+            => "InvalidSuccessConditions",
+            MissionError::InvalidSuccessConditions, &[];
+        "InvalidConstraint" | MissionError::InvalidConstraint
+            => "InvalidConstraint",
+            MissionError::InvalidConstraint, &[];
+        "InvalidProhibition" | MissionError::InvalidProhibition
+            => "InvalidProhibition",
+            MissionError::InvalidProhibition, &[];
+        "DuplicateMissionEntry" | MissionError::DuplicateMissionEntry
+            => "DuplicateMissionEntry",
+            MissionError::DuplicateMissionEntry, &[];
+        "InvalidMembers" | MissionError::InvalidMembers
+            => "InvalidMembers",
+            MissionError::InvalidMembers, &[];
+        "StaleTeamEligibility" | MissionError::StaleTeamEligibility
+            => "StaleTeamEligibility",
+            MissionError::StaleTeamEligibility, &[];
+        "ResidentIneligible" | MissionError::ResidentIneligible(_)
+            => "ResidentIneligible",
+            MissionError::ResidentIneligible(Default::default()), &[];
+        "InvalidStore" | MissionError::InvalidStore
+            => "InvalidStore",
+            MissionError::InvalidStore, &[];
+        "Store" | MissionError::Store(_)
+            => "Store",
+            MissionError::Store(driver_error(NEEDLE_A)), &[NEEDLE_A];
+        "Json" | MissionError::Json(_)
+            => "Json",
+            MissionError::Json(json_error(NEEDLE_A)), &[NEEDLE_A];
+    }
+
+    closed_table! {
+        expected_discovery / discovery_rows: ResourceDiscoveryError,
+        "Account" | ResourceDiscoveryError::Account(cause)
+            => format!("Account.{}", expected_account(cause).1),
+            ResourceDiscoveryError::Account(OperatorAccountError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "EndpointNotLoopback" | ResourceDiscoveryError::EndpointNotLoopback
+            => "EndpointNotLoopback",
+            ResourceDiscoveryError::EndpointNotLoopback, &[];
+    }
+
+    closed_table! {
+        expected_activation / activation_rows: crate::LocalModelActivationError,
+        "Account" | crate::LocalModelActivationError::Account(cause)
+            => format!("Account.{}", expected_account(cause).1),
+            crate::LocalModelActivationError::Account(OperatorAccountError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "ResourceUnavailable" | crate::LocalModelActivationError::ResourceUnavailable
+            => "ResourceUnavailable",
+            crate::LocalModelActivationError::ResourceUnavailable, &[];
+        "InvalidProviderResponse" | crate::LocalModelActivationError::InvalidProviderResponse
+            => "InvalidProviderResponse",
+            crate::LocalModelActivationError::InvalidProviderResponse, &[];
+        "ModelNotFound" | crate::LocalModelActivationError::ModelNotFound
+            => "ModelNotFound",
+            crate::LocalModelActivationError::ModelNotFound, &[];
+        "ModelDrift" | crate::LocalModelActivationError::ModelDrift
+            => "ModelDrift",
+            crate::LocalModelActivationError::ModelDrift, &[];
+        "InvalidApproval" | crate::LocalModelActivationError::InvalidApproval
+            => "InvalidApproval",
+            crate::LocalModelActivationError::InvalidApproval, &[];
+        "AlreadyActive" | crate::LocalModelActivationError::AlreadyActive
+            => "AlreadyActive",
+            crate::LocalModelActivationError::AlreadyActive, &[];
+        "StaleDecision" | crate::LocalModelActivationError::StaleDecision
+            => "StaleDecision",
+            crate::LocalModelActivationError::StaleDecision, &[];
+        "InvalidStore" | crate::LocalModelActivationError::InvalidStore
+            => "InvalidStore",
+            crate::LocalModelActivationError::InvalidStore, &[];
+        "Store" | crate::LocalModelActivationError::Store(_)
+            => "Store",
+            crate::LocalModelActivationError::Store(driver_error(NEEDLE_A)), &[NEEDLE_A];
+        "Json" | crate::LocalModelActivationError::Json(_)
+            => "Json",
+            crate::LocalModelActivationError::Json(json_error(NEEDLE_A)), &[NEEDLE_A];
+    }
+
+    closed_table! {
+        expected_code / code_rows: LocalErrorCode,
+        "PasswordTooShort" | LocalErrorCode::PasswordTooShort => "PasswordTooShort", LocalErrorCode::PasswordTooShort, &[];
+        "PasswordTooLong" | LocalErrorCode::PasswordTooLong => "PasswordTooLong", LocalErrorCode::PasswordTooLong, &[];
+        "PasswordConfirmationMismatch" | LocalErrorCode::PasswordConfirmationMismatch => "PasswordConfirmationMismatch", LocalErrorCode::PasswordConfirmationMismatch, &[];
+        "RecoveryNotConfirmed" | LocalErrorCode::RecoveryNotConfirmed => "RecoveryNotConfirmed", LocalErrorCode::RecoveryNotConfirmed, &[];
+        "SetupNotStarted" | LocalErrorCode::SetupNotStarted => "SetupNotStarted", LocalErrorCode::SetupNotStarted, &[];
+        "AccountAlreadyExists" | LocalErrorCode::AccountAlreadyExists => "AccountAlreadyExists", LocalErrorCode::AccountAlreadyExists, &[];
+        "AccountMissing" | LocalErrorCode::AccountMissing => "AccountMissing", LocalErrorCode::AccountMissing, &[];
+        "AuthenticationFailed" | LocalErrorCode::AuthenticationFailed => "AuthenticationFailed", LocalErrorCode::AuthenticationFailed, &[];
+        "AuthenticationThrottled" | LocalErrorCode::AuthenticationThrottled => "AuthenticationThrottled", LocalErrorCode::AuthenticationThrottled, &[];
+        "CredentialDisabled" | LocalErrorCode::CredentialDisabled => "CredentialDisabled", LocalErrorCode::CredentialDisabled, &[];
+        "RemotePasswordNotAllowed" | LocalErrorCode::RemotePasswordNotAllowed => "RemotePasswordNotAllowed", LocalErrorCode::RemotePasswordNotAllowed, &[];
+        "NotAuthenticated" | LocalErrorCode::NotAuthenticated => "NotAuthenticated", LocalErrorCode::NotAuthenticated, &[];
+        "InvalidSessionTimeout" | LocalErrorCode::InvalidSessionTimeout => "InvalidSessionTimeout", LocalErrorCode::InvalidSessionTimeout, &[];
+        "UnsupportedStarterProposal" | LocalErrorCode::UnsupportedStarterProposal => "UnsupportedStarterProposal", LocalErrorCode::UnsupportedStarterProposal, &[];
+        "InvalidStarterRoster" | LocalErrorCode::InvalidStarterRoster => "InvalidStarterRoster", LocalErrorCode::InvalidStarterRoster, &[];
+        "StarterDecisionRecorded" | LocalErrorCode::StarterDecisionRecorded => "StarterDecisionRecorded", LocalErrorCode::StarterDecisionRecorded, &[];
+        "StarterOrganizationUnavailable" | LocalErrorCode::StarterOrganizationUnavailable => "StarterOrganizationUnavailable", LocalErrorCode::StarterOrganizationUnavailable, &[];
+        "ResidentNotFound" | LocalErrorCode::ResidentNotFound => "ResidentNotFound", LocalErrorCode::ResidentNotFound, &[];
+        "InvalidResidentTransition" | LocalErrorCode::InvalidResidentTransition => "InvalidResidentTransition", LocalErrorCode::InvalidResidentTransition, &[];
+        "StaleResidentDecision" | LocalErrorCode::StaleResidentDecision => "StaleResidentDecision", LocalErrorCode::StaleResidentDecision, &[];
+        "ResidentLifecycleUnavailable" | LocalErrorCode::ResidentLifecycleUnavailable => "ResidentLifecycleUnavailable", LocalErrorCode::ResidentLifecycleUnavailable, &[];
+        "InvalidResidentConfiguration" | LocalErrorCode::InvalidResidentConfiguration => "InvalidResidentConfiguration", LocalErrorCode::InvalidResidentConfiguration, &[];
+        "StaleResidentConfiguration" | LocalErrorCode::StaleResidentConfiguration => "StaleResidentConfiguration", LocalErrorCode::StaleResidentConfiguration, &[];
+        "ResidentConfigurationUnavailable" | LocalErrorCode::ResidentConfigurationUnavailable => "ResidentConfigurationUnavailable", LocalErrorCode::ResidentConfigurationUnavailable, &[];
+        "InvalidProject" | LocalErrorCode::InvalidProject => "InvalidProject", LocalErrorCode::InvalidProject, &[];
+        "ProjectNotFound" | LocalErrorCode::ProjectNotFound => "ProjectNotFound", LocalErrorCode::ProjectNotFound, &[];
+        "StaleCharterRevision" | LocalErrorCode::StaleCharterRevision => "StaleCharterRevision", LocalErrorCode::StaleCharterRevision, &[];
+        "UnchangedCharter" | LocalErrorCode::UnchangedCharter => "UnchangedCharter", LocalErrorCode::UnchangedCharter, &[];
+        "ProjectUnavailable" | LocalErrorCode::ProjectUnavailable => "ProjectUnavailable", LocalErrorCode::ProjectUnavailable, &[];
+        "InvalidProjectPolicy" | LocalErrorCode::InvalidProjectPolicy => "InvalidProjectPolicy", LocalErrorCode::InvalidProjectPolicy, &[];
+        "StaleProjectPolicy" | LocalErrorCode::StaleProjectPolicy => "StaleProjectPolicy", LocalErrorCode::StaleProjectPolicy, &[];
+        "UnchangedProjectPolicy" | LocalErrorCode::UnchangedProjectPolicy => "UnchangedProjectPolicy", LocalErrorCode::UnchangedProjectPolicy, &[];
+        "ProjectPolicyUnavailable" | LocalErrorCode::ProjectPolicyUnavailable => "ProjectPolicyUnavailable", LocalErrorCode::ProjectPolicyUnavailable, &[];
+        "InvalidProjectRepository" | LocalErrorCode::InvalidProjectRepository => "InvalidProjectRepository", LocalErrorCode::InvalidProjectRepository, &[];
+        "StaleProjectRepository" | LocalErrorCode::StaleProjectRepository => "StaleProjectRepository", LocalErrorCode::StaleProjectRepository, &[];
+        "UnchangedProjectRepository" | LocalErrorCode::UnchangedProjectRepository => "UnchangedProjectRepository", LocalErrorCode::UnchangedProjectRepository, &[];
+        "ProjectRepositoryUnavailable" | LocalErrorCode::ProjectRepositoryUnavailable => "ProjectRepositoryUnavailable", LocalErrorCode::ProjectRepositoryUnavailable, &[];
+        "RepositoryNotBound" | LocalErrorCode::RepositoryNotBound => "RepositoryNotBound", LocalErrorCode::RepositoryNotBound, &[];
+        "PreflightUnavailable" | LocalErrorCode::PreflightUnavailable => "PreflightUnavailable", LocalErrorCode::PreflightUnavailable, &[];
+        "SampleProjectUnavailable" | LocalErrorCode::SampleProjectUnavailable => "SampleProjectUnavailable", LocalErrorCode::SampleProjectUnavailable, &[];
+        "InvalidTeam" | LocalErrorCode::InvalidTeam => "InvalidTeam", LocalErrorCode::InvalidTeam, &[];
+        "TeamNotFound" | LocalErrorCode::TeamNotFound => "TeamNotFound", LocalErrorCode::TeamNotFound, &[];
+        "StaleTeamMemberConfiguration" | LocalErrorCode::StaleTeamMemberConfiguration => "StaleTeamMemberConfiguration", LocalErrorCode::StaleTeamMemberConfiguration, &[];
+        "TeamMemberIneligible" | LocalErrorCode::TeamMemberIneligible => "TeamMemberIneligible", LocalErrorCode::TeamMemberIneligible, &[];
+        "TeamUnavailable" | LocalErrorCode::TeamUnavailable => "TeamUnavailable", LocalErrorCode::TeamUnavailable, &[];
+        "InvalidMission" | LocalErrorCode::InvalidMission => "InvalidMission", LocalErrorCode::InvalidMission, &[];
+        "MissionNotFound" | LocalErrorCode::MissionNotFound => "MissionNotFound", LocalErrorCode::MissionNotFound, &[];
+        "StaleMissionTeam" | LocalErrorCode::StaleMissionTeam => "StaleMissionTeam", LocalErrorCode::StaleMissionTeam, &[];
+        "MissionMemberIneligible" | LocalErrorCode::MissionMemberIneligible => "MissionMemberIneligible", LocalErrorCode::MissionMemberIneligible, &[];
+        "MissionUnavailable" | LocalErrorCode::MissionUnavailable => "MissionUnavailable", LocalErrorCode::MissionUnavailable, &[];
+        "OutcomeAbsent" | LocalErrorCode::OutcomeAbsent => "OutcomeAbsent", LocalErrorCode::OutcomeAbsent, &[];
+        "OutcomeUnavailable" | LocalErrorCode::OutcomeUnavailable => "OutcomeUnavailable", LocalErrorCode::OutcomeUnavailable, &[];
+        "LocalModelUnavailable" | LocalErrorCode::LocalModelUnavailable => "LocalModelUnavailable", LocalErrorCode::LocalModelUnavailable, &[];
+        "LocalModelNotFound" | LocalErrorCode::LocalModelNotFound => "LocalModelNotFound", LocalErrorCode::LocalModelNotFound, &[];
+        "LocalModelChanged" | LocalErrorCode::LocalModelChanged => "LocalModelChanged", LocalErrorCode::LocalModelChanged, &[];
+        "InvalidLocalModelApproval" | LocalErrorCode::InvalidLocalModelApproval => "InvalidLocalModelApproval", LocalErrorCode::InvalidLocalModelApproval, &[];
+        "LocalModelAlreadyActive" | LocalErrorCode::LocalModelAlreadyActive => "LocalModelAlreadyActive", LocalErrorCode::LocalModelAlreadyActive, &[];
+        "StaleLocalModelDecision" | LocalErrorCode::StaleLocalModelDecision => "StaleLocalModelDecision", LocalErrorCode::StaleLocalModelDecision, &[];
+        "LocalModelActivationUnavailable" | LocalErrorCode::LocalModelActivationUnavailable => "LocalModelActivationUnavailable", LocalErrorCode::LocalModelActivationUnavailable, &[];
+        "AccountServiceUnavailable" | LocalErrorCode::AccountServiceUnavailable => "AccountServiceUnavailable", LocalErrorCode::AccountServiceUnavailable, &[];
+        "UnauthorizedClient" | LocalErrorCode::UnauthorizedClient => "UnauthorizedClient", LocalErrorCode::UnauthorizedClient, &[];
+        "ProtocolError" | LocalErrorCode::ProtocolError => "ProtocolError", LocalErrorCode::ProtocolError, &[];
+    }
+
+    closed_table! {
+        expected_transport / transport_rows: LocalTransportError,
+        "R42S2.TRANSPORT.Io" | LocalTransportError::Io(_)
+            => "local transport I/O failed: Io",
+            LocalTransportError::Io(io_error(NEEDLE_A)), &[NEEDLE_A];
+        "R42S2.TRANSPORT.Json" | LocalTransportError::Json(_)
+            => "local transport message was invalid: Json",
+            LocalTransportError::Json(json_error(NEEDLE_A)), &[NEEDLE_A];
+        "R42S2.TRANSPORT.InvalidTokenFile" | LocalTransportError::InvalidTokenFile
+            => "local transport token is invalid",
+            LocalTransportError::InvalidTokenFile, &[];
+        "R42S2.TRANSPORT.InsecurePermissions" | LocalTransportError::InsecurePermissions
+            => "local transport path permissions are not private",
+            LocalTransportError::InsecurePermissions, &[];
+        "R42S2.TRANSPORT.Protocol" | LocalTransportError::Protocol
+            => "local transport protocol mismatch",
+            LocalTransportError::Protocol, &[];
+        "R42S2.TRANSPORT.Remote" | LocalTransportError::Remote { code, .. }
+            => format!("local supervisor refused: {}", expected_code(code).1),
+            LocalTransportError::Remote { code: LocalErrorCode::ProtocolError, retry_after_ms: None }, &[];
+        // OPEN UNTIL COMMIT 1 -- see the Display arm. Its expected line is the CURRENT
+        // forwarding text, deliberately, so this row must be rewritten when the arm closes.
+        "R42S2.TRANSPORT.Supervisor" | LocalTransportError::Supervisor(error)
+            => format!("supervisor startup failed: {error}"),
+            LocalTransportError::Supervisor(crate::SupervisorError::SchemaMismatch), &[];
+        "R42S2.TRANSPORT.Account" | LocalTransportError::Account(error)
+            => format!("account service failed: {}", expected_account(error).1),
+            LocalTransportError::Account(OperatorAccountError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "R42S2.TRANSPORT.StarterOrganization" | LocalTransportError::StarterOrganization(error)
+            => format!("starter organization failed: {}", expected_starter(error).1),
+            LocalTransportError::StarterOrganization(StarterOrganizationError::EmptyRoster), &[];
+        "R42S2.TRANSPORT.ResidentLifecycle" | LocalTransportError::ResidentLifecycle(error)
+            => format!("Resident lifecycle failed: {}", expected_lifecycle(error).1),
+            LocalTransportError::ResidentLifecycle(ResidentLifecycleError::NotFound), &[];
+        "R42S2.TRANSPORT.ResidentConfiguration" | LocalTransportError::ResidentConfiguration(error)
+            => format!("Resident configuration failed: {}", expected_configuration(error).1),
+            LocalTransportError::ResidentConfiguration(ResidentConfigurationError::ResidentNotFound), &[];
+        "R42S2.TRANSPORT.Project" | LocalTransportError::Project(error)
+            => format!("Project operation failed: {}", expected_project(error).1),
+            LocalTransportError::Project(ProjectError::NotFound), &[];
+        "R42S2.TRANSPORT.ProjectPolicy" | LocalTransportError::ProjectPolicy(error)
+            => format!("Project Policy failed: {}", expected_policy(error).1),
+            LocalTransportError::ProjectPolicy(ProjectPolicyError::ProjectNotFound), &[];
+        "R42S2.TRANSPORT.ProjectRepository" | LocalTransportError::ProjectRepository(error)
+            => format!("Project Repository failed: {}", expected_repository(error).1),
+            LocalTransportError::ProjectRepository(ProjectRepositoryError::ProjectNotFound), &[];
+        "R42S2.TRANSPORT.CheckPreflight" | LocalTransportError::CheckPreflight(error)
+            => format!("check preflight failed: {}", expected_preflight(error).1),
+            LocalTransportError::CheckPreflight(CheckPreflightError::ProjectNotFound), &[];
+        "R42S2.TRANSPORT.RecentReceipt" | LocalTransportError::RecentReceipt(error)
+            => format!("recent Receipts failed: {}", expected_receipt(error).1),
+            LocalTransportError::RecentReceipt(crate::RecentReceiptError::InvalidStore), &[];
+        "R42S2.TRANSPORT.SampleProject" | LocalTransportError::SampleProject(error)
+            => format!("Sample Project failed: {}", expected_sample(error).1),
+            LocalTransportError::SampleProject(SampleProjectError::NotInstalled), &[];
+        "R42S2.TRANSPORT.Team" | LocalTransportError::Team(error)
+            => format!("Team operation failed: {}", expected_team(error).1),
+            LocalTransportError::Team(TeamError::TeamNotFound), &[];
+        "R42S2.TRANSPORT.Mission" | LocalTransportError::Mission(error)
+            => format!("Mission operation failed: {}", expected_mission(error).1),
+            LocalTransportError::Mission(MissionError::MissionNotFound), &[];
+        "R42S2.TRANSPORT.ResourceDiscovery" | LocalTransportError::ResourceDiscovery(error)
+            => format!("resource discovery failed: {}", expected_discovery(error).1),
+            LocalTransportError::ResourceDiscovery(ResourceDiscoveryError::EndpointNotLoopback), &[];
+        "R42S2.TRANSPORT.LocalModelActivation" | LocalTransportError::LocalModelActivation(error)
+            => format!("local model activation failed: {}", expected_activation(error).1),
+            LocalTransportError::LocalModelActivation(crate::LocalModelActivationError::ModelNotFound), &[];
+        "R42S2.TRANSPORT.Outcome" | LocalTransportError::Outcome(error)
+            => format!("Outcome failed: {}", expected_publish(error).1),
+            LocalTransportError::Outcome(PublishRefusal::Absent), &[];
+    }
+
+    // ---- the Outcome sub-tree: slice 1's closed publisher/PDF chain, forwarded whole ----------
+    //
+    // Independent literals again, not calls into `outcome_publication`'s private witness: this
+    // caller has to be able to fail on its own when that chain changes.
+    const ROW_WIDTH_EXPECTED: usize = 3;
+    const ROW_WIDTH_OBSERVED: usize = 5;
+    const CEILING_CONFIGURED: u64 = 1024;
+    const CEILING_OBSERVED: u64 = 1025;
+    const GAP_EXPECTED: u32 = 2;
+    const GAP_FOUND: u32 = 4;
+    const HISTORY_EXPECTED: u32 = 7;
+    const HISTORY_FOUND: u32 = 3;
+    const STATIC_NEEDLE_A: &str = "R42S2_PRIVATE_A column=private_column";
+
+    fn first_uuid() -> Uuid {
+        Uuid::parse_str("11111111-1111-4111-8111-111111111111").expect("a fixture UUID parses")
+    }
+
+    fn second_uuid() -> Uuid {
+        Uuid::parse_str("22222222-2222-4222-8222-222222222222").expect("a fixture UUID parses")
+    }
+
+    closed_table! {
+        expected_seam / seam_rows: PublicationSeamRefusal,
+        "EvaluationAbsent" | PublicationSeamRefusal::EvaluationAbsent
+            => "no Evaluation in this Workspace has that digest",
+            PublicationSeamRefusal::EvaluationAbsent, &[];
+        "CandidateAbsent" | PublicationSeamRefusal::CandidateAbsent
+            => "no Artifact in this Workspace has that digest",
+            PublicationSeamRefusal::CandidateAbsent, &[];
+        "SubjectIsNotAnArtifact" | PublicationSeamRefusal::SubjectIsNotAnArtifact
+            => "the Evaluation's subject is not an Artifact",
+            PublicationSeamRefusal::SubjectIsNotAnArtifact, &[];
+        "SubjectIsNotTheCandidate" | PublicationSeamRefusal::SubjectIsNotTheCandidate
+            => "the Evaluation is about different bytes than the candidate",
+            PublicationSeamRefusal::SubjectIsNotTheCandidate, &[];
+        "VerdictIsNotMeets" | PublicationSeamRefusal::VerdictIsNotMeets
+            => "the Evaluation's verdict is not `meets`",
+            PublicationSeamRefusal::VerdictIsNotMeets, &[];
+        "MissionDiffers" | PublicationSeamRefusal::MissionDiffers
+            => "the Evaluation's Mission is not this Outcome's Mission",
+            PublicationSeamRefusal::MissionDiffers, &[];
+        "CitedEnvelopeDisagrees" | PublicationSeamRefusal::CitedEnvelopeDisagrees
+            => "the supplied digest envelope is not the one the owning module verified",
+            PublicationSeamRefusal::CitedEnvelopeDisagrees, &[];
+        "Unverified" | PublicationSeamRefusal::Unverified
+            => "a cited record did not verify",
+            PublicationSeamRefusal::Unverified, &[];
+    }
+
+    closed_table! {
+        expected_malformed_outcome / malformed_outcome_rows: MalformedOutcome,
+        "Magic" | MalformedOutcome::Magic
+            => "magic",
+            MalformedOutcome::Magic, &[];
+        "Truncated" | MalformedOutcome::Truncated
+            => "truncated",
+            MalformedOutcome::Truncated, &[];
+        "TrailingBytes" | MalformedOutcome::TrailingBytes
+            => "trailing_bytes",
+            MalformedOutcome::TrailingBytes, &[];
+        "UnknownTag" | MalformedOutcome::UnknownTag
+            => "unknown_tag",
+            MalformedOutcome::UnknownTag, &[];
+        "OverLimitLength" | MalformedOutcome::OverLimitLength
+            => "over_limit_length",
+            MalformedOutcome::OverLimitLength, &[];
+        "InvalidUtf8" | MalformedOutcome::InvalidUtf8
+            => "invalid_utf8",
+            MalformedOutcome::InvalidUtf8, &[];
+        "DigestValue" | MalformedOutcome::DigestValue
+            => "digest_value",
+            MalformedOutcome::DigestValue, &[];
+        "DigestEnvelope" | MalformedOutcome::DigestEnvelope
+            => "digest_envelope",
+            MalformedOutcome::DigestEnvelope, &[];
+        "PinnedRevision" | MalformedOutcome::PinnedRevision
+            => "pinned_revision",
+            MalformedOutcome::PinnedRevision, &[];
+        "EmptyText" | MalformedOutcome::EmptyText
+            => "empty_text",
+            MalformedOutcome::EmptyText, &[];
+        "UntrimmedText" | MalformedOutcome::UntrimmedText
+            => "untrimmed_text",
+            MalformedOutcome::UntrimmedText, &[];
+        "TextTooLong" | MalformedOutcome::TextTooLong
+            => "text_too_long",
+            MalformedOutcome::TextTooLong, &[];
+        "ControlCharacter" | MalformedOutcome::ControlCharacter
+            => "control_character",
+            MalformedOutcome::ControlCharacter, &[];
+        "LineBreakInLabel" | MalformedOutcome::LineBreakInLabel
+            => "line_break_in_label",
+            MalformedOutcome::LineBreakInLabel, &[];
+        "Token" | MalformedOutcome::Token
+            => "token",
+            MalformedOutcome::Token, &[];
+        "UnknownVersion" | MalformedOutcome::UnknownVersion
+            => "unknown_version",
+            MalformedOutcome::UnknownVersion, &[];
+        "ReferenceIdentityRequired" | MalformedOutcome::ReferenceIdentityRequired
+            => "reference_identity_required",
+            MalformedOutcome::ReferenceIdentityRequired, &[];
+        "ReferenceIdentityNotCarried" | MalformedOutcome::ReferenceIdentityNotCarried
+            => "reference_identity_not_carried",
+            MalformedOutcome::ReferenceIdentityNotCarried, &[];
+        "RetiredVersion" | MalformedOutcome::RetiredVersion
+            => "retired_version",
+            MalformedOutcome::RetiredVersion, &[];
+        "NonCanonicalOrder" | MalformedOutcome::NonCanonicalOrder
+            => "non_canonical_order",
+            MalformedOutcome::NonCanonicalOrder, &[];
+        "NoSuccessConditions" | MalformedOutcome::NoSuccessConditions
+            => "no_success_conditions",
+            MalformedOutcome::NoSuccessConditions, &[];
+        "MinorUnitsExponent" | MalformedOutcome::MinorUnitsExponent
+            => "minor_units_exponent",
+            MalformedOutcome::MinorUnitsExponent, &[];
+        "SpendCoverage" | MalformedOutcome::SpendCoverage
+            => "spend_coverage",
+            MalformedOutcome::SpendCoverage, &[];
+        "SourceKind" | MalformedOutcome::SourceKind
+            => "source_kind",
+            MalformedOutcome::SourceKind, &[];
+        "CrossWorkspace" | MalformedOutcome::CrossWorkspace
+            => "cross_workspace",
+            MalformedOutcome::CrossWorkspace, &[];
+    }
+
+    closed_table! {
+        expected_typst / typst_rows: TypstRefusal,
+        "UnknownRendererVersion" | TypstRefusal::UnknownRendererVersion(_)
+            => "UnknownRendererVersion",
+            TypstRefusal::UnknownRendererVersion(payload_a()), &[NEEDLE_A];
+        "UnclosedFrontMatter" | TypstRefusal::UnclosedFrontMatter
+            => "UnclosedFrontMatter",
+            TypstRefusal::UnclosedFrontMatter, &[];
+        "FrontMatterNotKeyValue" | TypstRefusal::FrontMatterNotKeyValue(_)
+            => "FrontMatterNotKeyValue",
+            TypstRefusal::FrontMatterNotKeyValue(payload_a()), &[NEEDLE_A];
+        "UnclosedCodeFence" | TypstRefusal::UnclosedCodeFence
+            => "UnclosedCodeFence",
+            TypstRefusal::UnclosedCodeFence, &[];
+        "HeadingTooDeep" | TypstRefusal::HeadingTooDeep(_)
+            => "HeadingTooDeep",
+            TypstRefusal::HeadingTooDeep(payload_a()), &[NEEDLE_A];
+        "UnescapedConstruct" | TypstRefusal::UnescapedConstruct { .. }
+            => "UnescapedConstruct",
+            TypstRefusal::UnescapedConstruct { character: '#', line: payload_a() }, &[NEEDLE_A];
+        "TableRowWidth" | TypstRefusal::TableRowWidth { expected, observed }
+            => format!("TableRowWidth(expected={expected}, observed={observed})"),
+            TypstRefusal::TableRowWidth { expected: ROW_WIDTH_EXPECTED, observed: ROW_WIDTH_OBSERVED }, &[];
+    }
+
+    closed_table! {
+        expected_pdf / pdf_rows: PdfRefusal,
+        "NotUtf8" | PdfRefusal::NotUtf8
+            => "the exported document is not UTF-8",
+            PdfRefusal::NotUtf8, &[];
+        "Translate" | PdfRefusal::Translate(refusal)
+            => format!("Translate.{}", expected_typst(refusal).1),
+            PdfRefusal::Translate(TypstRefusal::UnknownRendererVersion(payload_a())), &[NEEDLE_A];
+        "EmbeddedFontSetEmpty" | PdfRefusal::EmbeddedFontSetEmpty
+            => "the render profile embeds no font, and this renderer never looks for one on the \
+                host",
+            PdfRefusal::EmbeddedFontSetEmpty, &[];
+        "Compile" | PdfRefusal::Compile(_)
+            => "Compile",
+            PdfRefusal::Compile(payload_a()), &[NEEDLE_A];
+        "Serialize" | PdfRefusal::Serialize(_)
+            => "Serialize",
+            PdfRefusal::Serialize(payload_b()), &[NEEDLE_B];
+    }
+
+    closed_table! {
+        expected_manifest / manifest_rows: ManifestStoreRefusal,
+        "Absent" | ManifestStoreRefusal::Absent
+            => "Absent",
+            ManifestStoreRefusal::Absent, &[];
+        "CrossWorkspace" | ManifestStoreRefusal::CrossWorkspace
+            => "CrossWorkspace",
+            ManifestStoreRefusal::CrossWorkspace, &[];
+        "BytesDisagree" | ManifestStoreRefusal::BytesDisagree
+            => "BytesDisagree",
+            ManifestStoreRefusal::BytesDisagree, &[];
+        "ColumnDisagrees" | ManifestStoreRefusal::ColumnDisagrees { .. }
+            => "ColumnDisagrees",
+            ManifestStoreRefusal::ColumnDisagrees { column: STATIC_NEEDLE_A }, &[NEEDLE_A];
+        "ManifestTooLarge" | ManifestStoreRefusal::ManifestTooLarge { configured, observed }
+            => format!("ManifestTooLarge(configured={configured}, observed={observed})"),
+            ManifestStoreRefusal::ManifestTooLarge { configured: CEILING_CONFIGURED, observed: CEILING_OBSERVED }, &[];
+        "Malformed" | ManifestStoreRefusal::Malformed(reason)
+            => format!("Malformed.{}", expected_malformed_outcome(reason).1),
+            ManifestStoreRefusal::Malformed(MalformedOutcome::Magic), &[];
+        "Irreconcilable" | ManifestStoreRefusal::Irreconcilable { .. }
+            => "Irreconcilable",
+            ManifestStoreRefusal::Irreconcilable { detail: payload_a() }, &[NEEDLE_A];
+        "CandidateNotAccounted" | ManifestStoreRefusal::CandidateNotAccounted { .. }
+            => "CandidateNotAccounted",
+            ManifestStoreRefusal::CandidateNotAccounted { reason: STATIC_NEEDLE_A }, &[NEEDLE_A];
+        "Store" | ManifestStoreRefusal::Store(_)
+            => "Store",
+            ManifestStoreRefusal::Store(payload_a()), &[NEEDLE_A];
+    }
+
+    closed_table! {
+        expected_publish / publish_rows: PublishRefusal,
+        "R42S2.OUTCOME.Seam" | PublishRefusal::Seam(refusal)
+            => expected_seam(refusal).1,
+            PublishRefusal::Seam(PublicationSeamRefusal::EvaluationAbsent), &[];
+        "R42S2.OUTCOME.NoManifestForCandidate" | PublishRefusal::NoManifestForCandidate
+            => "no prepared manifest names that candidate Artifact",
+            PublishRefusal::NoManifestForCandidate, &[];
+        "R42S2.OUTCOME.Manifest" | PublishRefusal::Manifest(refusal)
+            => format!("outcome manifest refused: {}", expected_manifest(refusal).1),
+            PublishRefusal::Manifest(ManifestStoreRefusal::Store(payload_a())), &[NEEDLE_A];
+        "R42S2.OUTCOME.ManifestMissionDiffers" | PublishRefusal::ManifestMissionDiffers { .. }
+            => "publication refused: ManifestMissionDiffers",
+            PublishRefusal::ManifestMissionDiffers { manifest: first_uuid(), requested: second_uuid() }, &[];
+        "R42S2.OUTCOME.Completion" | PublishRefusal::Completion(_)
+            => "publication refused: Completion",
+            PublishRefusal::Completion(payload_a()), &[NEEDLE_A];
+        "R42S2.OUTCOME.AppendixRequired" | PublishRefusal::AppendixRequired
+            => "Policy classified this Mission high-impact and the candidate carries no \
+                verification appendix",
+            PublishRefusal::AppendixRequired, &[];
+        "R42S2.OUTCOME.VersionGap" | PublishRefusal::VersionGap { expected, found }
+            => format!("the next publication version for this Mission is {expected} and {found} was about to be written"),
+            PublishRefusal::VersionGap { expected: GAP_EXPECTED, found: GAP_FOUND }, &[];
+        "R42S2.OUTCOME.AlreadyPublished" | PublishRefusal::AlreadyPublished
+            => "that candidate or Evaluation is already published",
+            PublishRefusal::AlreadyPublished, &[];
+        "R42S2.OUTCOME.HistoryNotContiguous" | PublishRefusal::HistoryNotContiguous { expected, found }
+            => format!("this Mission's publication history is not contiguous from 1: version {expected} is missing and {found} versions are stored"),
+            PublishRefusal::HistoryNotContiguous { expected: HISTORY_EXPECTED, found: HISTORY_FOUND }, &[];
+        "R42S2.OUTCOME.QualifyingVerdictNotMeets" | PublishRefusal::QualifyingVerdictNotMeets
+            => "the Evaluation this publication cites does not carry a `meets` verdict",
+            PublishRefusal::QualifyingVerdictNotMeets, &[];
+        "R42S2.OUTCOME.MissionBindingBroken" | PublishRefusal::MissionBindingBroken { .. }
+            => "publication refused: MissionBindingBroken",
+            PublishRefusal::MissionBindingBroken { what: STATIC_NEEDLE_A, named: first_uuid(), relation: second_uuid() }, &[NEEDLE_A];
+        "R42S2.OUTCOME.Pdf" | PublishRefusal::Pdf(refusal)
+            => format!("the document did not render: {}", expected_pdf(refusal).1),
+            PublishRefusal::Pdf(PdfRefusal::Compile(payload_a())), &[NEEDLE_A];
+        "R42S2.OUTCOME.Absent" | PublishRefusal::Absent
+            => "this Mission has no published Outcome",
+            PublishRefusal::Absent, &[];
+        "R42S2.OUTCOME.Account" | PublishRefusal::Account(error)
+            => format!("publication refused: Account.{}", expected_account(error).1),
+            PublishRefusal::Account(OperatorAccountError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "R42S2.OUTCOME.Unverified" | PublishRefusal::Unverified(_)
+            => "publication refused: Unverified",
+            PublishRefusal::Unverified(payload_a()), &[NEEDLE_A];
+        "R42S2.OUTCOME.Store" | PublishRefusal::Store(_)
+            => "publication refused: Store",
+            PublishRefusal::Store(driver_error(NEEDLE_A)), &[NEEDLE_A];
+        "R42S2.OUTCOME.CandidateIsNotMissionScoped" | PublishRefusal::CandidateIsNotMissionScoped { .. }
+            => "publication refused: CandidateIsNotMissionScoped",
+            PublishRefusal::CandidateIsNotMissionScoped { relation: second_uuid() }, &[];
+    }
+
+    struct Case {
+        id: String,
+        value: LocalTransportError,
+        markers: &'static [&'static str],
+    }
+
+    /// Expand one domain vocabulary into cases, recursing where the selector recurses.
+    ///
+    /// Three shapes because the special arms are not on every enum: a `match` on the row's case ID
+    /// still has to typecheck for the enum it is written against.
+    macro_rules! domain_cases {
+        ($name:ident, $wrap:path, $rows:ident, $stem:literal, $account:path) => {
+            fn $name(cases: &mut Vec<Case>) {
+                for (case, value, markers) in $rows() {
+                    if case == "Account" {
+                        for (child, account, child_markers) in account_rows() {
+                            cases.push(Case {
+                                id: format!("{}.Account.{}", $stem, child),
+                                value: $wrap($account(account)),
+                                markers: child_markers,
+                            });
+                        }
+                    } else {
+                        cases.push(Case {
+                            id: format!("{}.{}", $stem, case),
+                            value: $wrap(value),
+                            markers,
+                        });
+                    }
+                }
+            }
+        };
+        ($name:ident, $wrap:path, $rows:ident, $stem:literal, $account:path, $stale:expr) => {
+            fn $name(cases: &mut Vec<Case>) {
+                for (case, value, markers) in $rows() {
+                    match case {
+                        "Account" => {
+                            for (child, account, child_markers) in account_rows() {
+                                cases.push(Case {
+                                    id: format!("{}.Account.{}", $stem, child),
+                                    value: $wrap($account(account)),
+                                    markers: child_markers,
+                                });
+                            }
+                        }
+                        // Both approved numeric pairs, so a selector printing a constant -- or
+                        // swapping the two -- cannot pass.
+                        "StaleCharterRevision" => {
+                            cases.push(Case {
+                                id: format!("{}.StaleCharterRevision", $stem),
+                                value: $wrap(($stale)(FIRST_EXPECTED, FIRST_CURRENT)),
+                                markers: &[],
+                            });
+                            cases.push(Case {
+                                id: format!("{}.StaleCharterRevision.SECOND", $stem),
+                                value: $wrap(($stale)(SECOND_EXPECTED, SECOND_CURRENT)),
+                                markers: &[],
+                            });
+                        }
+                        other => cases.push(Case {
+                            id: format!("{}.{}", $stem, other),
+                            value: $wrap(value),
+                            markers,
+                        }),
+                    }
+                }
+            }
+        };
+        ($name:ident, $wrap:path, $rows:ident, $stem:literal, $account:path, $stale:expr, $draft:path) => {
+            fn $name(cases: &mut Vec<Case>) {
+                for (case, value, markers) in $rows() {
+                    match case {
+                        "Account" => {
+                            for (child, account, child_markers) in account_rows() {
+                                cases.push(Case {
+                                    id: format!("{}.Account.{}", $stem, child),
+                                    value: $wrap($account(account)),
+                                    markers: child_markers,
+                                });
+                            }
+                        }
+                        "InvalidDraft" => {
+                            for (child, reason, _) in draft_rows() {
+                                cases.push(Case {
+                                    id: format!("{}.InvalidDraft.{}", $stem, child),
+                                    value: $wrap($draft(reason)),
+                                    markers: &[],
+                                });
+                            }
+                        }
+                        "StaleCharterRevision" => {
+                            cases.push(Case {
+                                id: format!("{}.StaleCharterRevision", $stem),
+                                value: $wrap(($stale)(FIRST_EXPECTED, FIRST_CURRENT)),
+                                markers: &[],
+                            });
+                            cases.push(Case {
+                                id: format!("{}.StaleCharterRevision.SECOND", $stem),
+                                value: $wrap(($stale)(SECOND_EXPECTED, SECOND_CURRENT)),
+                                markers: &[],
+                            });
+                        }
+                        other => cases.push(Case {
+                            id: format!("{}.{}", $stem, other),
+                            value: $wrap(value),
+                            markers,
+                        }),
+                    }
+                }
+            }
+        };
+    }
+
+    domain_cases!(
+        starter_cases,
+        LocalTransportError::StarterOrganization,
+        starter_rows,
+        "R42S2.TRANSPORT.StarterOrganization",
+        StarterOrganizationError::Account
+    );
+    domain_cases!(
+        lifecycle_cases,
+        LocalTransportError::ResidentLifecycle,
+        lifecycle_rows,
+        "R42S2.TRANSPORT.ResidentLifecycle",
+        ResidentLifecycleError::Account
+    );
+    domain_cases!(
+        configuration_cases,
+        LocalTransportError::ResidentConfiguration,
+        configuration_rows,
+        "R42S2.TRANSPORT.ResidentConfiguration",
+        ResidentConfigurationError::Account
+    );
+    domain_cases!(
+        project_cases,
+        LocalTransportError::Project,
+        project_rows,
+        "R42S2.TRANSPORT.Project",
+        ProjectError::Account,
+        |expected, current| ProjectError::StaleCharterRevision { expected, current }
+    );
+    domain_cases!(
+        policy_cases,
+        LocalTransportError::ProjectPolicy,
+        policy_rows,
+        "R42S2.TRANSPORT.ProjectPolicy",
+        ProjectPolicyError::Account,
+        |expected, current| ProjectPolicyError::StaleCharterRevision { expected, current }
+    );
+    domain_cases!(
+        repository_cases,
+        LocalTransportError::ProjectRepository,
+        repository_rows,
+        "R42S2.TRANSPORT.ProjectRepository",
+        ProjectRepositoryError::Account,
+        |expected, current| ProjectRepositoryError::StaleCharterRevision { expected, current },
+        ProjectRepositoryError::InvalidDraft
+    );
+    domain_cases!(
+        preflight_cases,
+        LocalTransportError::CheckPreflight,
+        preflight_rows,
+        "R42S2.TRANSPORT.CheckPreflight",
+        CheckPreflightError::Account
+    );
+    domain_cases!(
+        receipt_cases,
+        LocalTransportError::RecentReceipt,
+        receipt_rows,
+        "R42S2.TRANSPORT.RecentReceipt",
+        crate::RecentReceiptError::Account
+    );
+    domain_cases!(
+        sample_cases,
+        LocalTransportError::SampleProject,
+        sample_rows,
+        "R42S2.TRANSPORT.SampleProject",
+        SampleProjectError::Account
+    );
+    domain_cases!(
+        team_cases,
+        LocalTransportError::Team,
+        team_rows,
+        "R42S2.TRANSPORT.Team",
+        TeamError::Account
+    );
+    domain_cases!(
+        mission_cases,
+        LocalTransportError::Mission,
+        mission_rows,
+        "R42S2.TRANSPORT.Mission",
+        MissionError::Account,
+        |expected, current| MissionError::StaleCharterRevision { expected, current }
+    );
+    domain_cases!(
+        discovery_cases,
+        LocalTransportError::ResourceDiscovery,
+        discovery_rows,
+        "R42S2.TRANSPORT.ResourceDiscovery",
+        ResourceDiscoveryError::Account
+    );
+    domain_cases!(
+        activation_cases,
+        LocalTransportError::LocalModelActivation,
+        activation_rows,
+        "R42S2.TRANSPORT.LocalModelActivation",
+        crate::LocalModelActivationError::Account
+    );
+
+    /// The declaration-order lead cases, so a mutant's FIRST failing label is predictable.
+    const TRANSPORT_LEADS: [&str; 5] = [
+        "R42S2.TRANSPORT.Io",
+        "R42S2.TRANSPORT.Json",
+        "R42S2.TRANSPORT.Account.Store",
+        "R42S2.TRANSPORT.Project.Account.Store",
+        "R42S2.TRANSPORT.ProjectRepository.InvalidDraft.Source",
+    ];
+
+    fn transport_cases() -> Vec<Case> {
+        let mut cases: Vec<Case> = Vec::new();
+        for (stem, value, markers) in transport_rows() {
+            match stem {
+                "R42S2.TRANSPORT.Remote" => {
+                    for (child, code, _) in code_rows() {
+                        cases.push(Case {
+                            id: format!("{stem}.{child}"),
+                            value: LocalTransportError::Remote {
+                                code,
+                                retry_after_ms: None,
+                            },
+                            markers: &[],
+                        });
+                    }
+                }
+                "R42S2.TRANSPORT.Account" => {
+                    for (child, account, child_markers) in account_rows() {
+                        cases.push(Case {
+                            id: format!("{stem}.{child}"),
+                            value: LocalTransportError::Account(account),
+                            markers: child_markers,
+                        });
+                    }
+                }
+                "R42S2.TRANSPORT.StarterOrganization" => starter_cases(&mut cases),
+                "R42S2.TRANSPORT.ResidentLifecycle" => lifecycle_cases(&mut cases),
+                "R42S2.TRANSPORT.ResidentConfiguration" => configuration_cases(&mut cases),
+                "R42S2.TRANSPORT.Project" => project_cases(&mut cases),
+                "R42S2.TRANSPORT.ProjectPolicy" => policy_cases(&mut cases),
+                "R42S2.TRANSPORT.ProjectRepository" => repository_cases(&mut cases),
+                "R42S2.TRANSPORT.CheckPreflight" => preflight_cases(&mut cases),
+                "R42S2.TRANSPORT.RecentReceipt" => receipt_cases(&mut cases),
+                "R42S2.TRANSPORT.SampleProject" => sample_cases(&mut cases),
+                "R42S2.TRANSPORT.Team" => team_cases(&mut cases),
+                "R42S2.TRANSPORT.Mission" => mission_cases(&mut cases),
+                "R42S2.TRANSPORT.ResourceDiscovery" => discovery_cases(&mut cases),
+                "R42S2.TRANSPORT.LocalModelActivation" => activation_cases(&mut cases),
+                "R42S2.TRANSPORT.Outcome" => {
+                    for (child, refusal, child_markers) in publish_rows() {
+                        match child {
+                            "R42S2.OUTCOME.Seam" => {
+                                for (leaf, seam, leaf_markers) in seam_rows() {
+                                    cases.push(Case {
+                                        id: format!("{stem}.Seam.{leaf}"),
+                                        value: LocalTransportError::Outcome(PublishRefusal::Seam(
+                                            seam,
+                                        )),
+                                        markers: leaf_markers,
+                                    });
+                                }
+                            }
+                            "R42S2.OUTCOME.Manifest" => {
+                                for (leaf, manifest, leaf_markers) in manifest_rows() {
+                                    if leaf == "Malformed" {
+                                        for (reason_case, reason, reason_markers) in
+                                            malformed_outcome_rows()
+                                        {
+                                            cases.push(Case {
+                                                id: format!(
+                                                    "{stem}.Manifest.Malformed.{reason_case}"
+                                                ),
+                                                value: LocalTransportError::Outcome(
+                                                    PublishRefusal::Manifest(
+                                                        ManifestStoreRefusal::Malformed(reason),
+                                                    ),
+                                                ),
+                                                markers: reason_markers,
+                                            });
+                                        }
+                                    } else {
+                                        cases.push(Case {
+                                            id: format!("{stem}.Manifest.{leaf}"),
+                                            value: LocalTransportError::Outcome(
+                                                PublishRefusal::Manifest(manifest),
+                                            ),
+                                            markers: leaf_markers,
+                                        });
+                                    }
+                                }
+                            }
+                            "R42S2.OUTCOME.Pdf" => {
+                                for (leaf, pdf, leaf_markers) in pdf_rows() {
+                                    if leaf == "Translate" {
+                                        for (typst_case, typst, typst_markers) in typst_rows() {
+                                            cases.push(Case {
+                                                id: format!("{stem}.Pdf.Translate.{typst_case}"),
+                                                value: LocalTransportError::Outcome(
+                                                    PublishRefusal::Pdf(PdfRefusal::Translate(
+                                                        typst,
+                                                    )),
+                                                ),
+                                                markers: typst_markers,
+                                            });
+                                        }
+                                    } else {
+                                        cases.push(Case {
+                                            id: format!("{stem}.Pdf.{leaf}"),
+                                            value: LocalTransportError::Outcome(
+                                                PublishRefusal::Pdf(pdf),
+                                            ),
+                                            markers: leaf_markers,
+                                        });
+                                    }
+                                }
+                            }
+                            "R42S2.OUTCOME.Account" => {
+                                for (leaf, account, leaf_markers) in account_rows() {
+                                    cases.push(Case {
+                                        id: format!("{stem}.Account.{leaf}"),
+                                        value: LocalTransportError::Outcome(
+                                            PublishRefusal::Account(account),
+                                        ),
+                                        markers: leaf_markers,
+                                    });
+                                }
+                            }
+                            leaf => cases.push(Case {
+                                id: format!("{stem}.{}", leaf.trim_start_matches("R42S2.OUTCOME.")),
+                                value: LocalTransportError::Outcome(refusal),
+                                markers: child_markers,
+                            }),
+                        }
+                    }
+                }
+                leaf => cases.push(Case {
+                    id: leaf.to_owned(),
+                    value,
+                    markers,
+                }),
+            }
+        }
+        cases.sort_by_key(|case| {
+            TRANSPORT_LEADS
+                .iter()
+                .position(|lead| *lead == case.id)
+                .unwrap_or(usize::MAX)
+        });
+        cases
+    }
+
+    /// R42 slice 2: every `LocalTransportError` line a caller reads is the closed projection, and
+    /// every value it was built from is still in `Debug`.
+    ///
+    /// Seventeen arms interpolated a child's own `Display` -- written for whoever owns that row,
+    /// which a transport caller may not be. Sixteen are closed here; `Supervisor` is closed in
+    /// commit 1 with its lib.rs selector and its row below still records the OPEN line.
+    #[test]
+    fn r42_transport_projection_is_closed() {
+        let cases = transport_cases();
+
+        // Fixture premises first: a broken fixture is not a mutant kill.
+        assert!(
+            format!("{:?}", driver_error(NEEDLE_A)).contains(NEEDLE_A),
+            "R42S2.FIXTURE.Driver.NEEDLE"
+        );
+        assert!(
+            format!("{:?}", io_error(NEEDLE_A)).contains(NEEDLE_A),
+            "R42S2.FIXTURE.Io.NEEDLE"
+        );
+        assert!(
+            format!("{:?}", json_error(NEEDLE_A)).contains(NEEDLE_A),
+            "R42S2.FIXTURE.Json.NEEDLE"
+        );
+        assert!(
+            payload_a().contains(NEEDLE_A),
+            "R42S2.FIXTURE.PayloadA.NEEDLE"
+        );
+        assert!(
+            payload_b().contains(NEEDLE_B),
+            "R42S2.FIXTURE.PayloadB.NEEDLE"
+        );
+
+        assert_eq!(
+            account_rows().len(),
+            18,
+            "R42S2.TRANSPORT.CARDINALITY.Account"
+        );
+        assert_eq!(
+            draft_rows().len(),
+            3,
+            "R42S2.TRANSPORT.CARDINALITY.InvalidDraft"
+        );
+        assert_eq!(
+            code_rows().len(),
+            62,
+            "R42S2.TRANSPORT.CARDINALITY.LocalErrorCode"
+        );
+        assert_eq!(
+            transport_rows().len(),
+            22,
+            "R42S2.TRANSPORT.CARDINALITY.ROOT"
+        );
+        // 22 roots expanded: 62 Remote codes, 18 account faults at each of 14 wrappers, the
+        // three draft reasons, both charter-revision pairs, and slice 1's 83-case Outcome tree.
+        assert_eq!(cases.len(), 514, "R42S2.TRANSPORT.CARDINALITY.CASES");
+        let ids: std::collections::BTreeSet<&str> =
+            cases.iter().map(|case| case.id.as_str()).collect();
+        assert_eq!(ids.len(), cases.len(), "R42S2.TRANSPORT.CASE_IDS_UNIQUE");
+        for lead in TRANSPORT_LEADS {
+            assert!(ids.contains(lead), "R42S2.TRANSPORT.LEAD_PRESENT: {lead}");
+        }
+
+        for case in &cases {
+            let Case { id, value, markers } = case;
+            let (stem, expected) = expected_transport(value);
+            assert!(
+                id == stem || id.starts_with(&format!("{stem}.")),
+                "R42S2.FIXTURE.{id}.PATTERN: built as {stem}"
+            );
+
+            let line = value.to_string();
+            for marker in *markers {
+                assert!(!line.contains(marker), "{id}.NO_NEEDLE: {line}");
+            }
+            assert!(
+                !line.contains('\n') && !line.contains('\r'),
+                "{id}.ONE_LINE: {line:?}"
+            );
+
+            let debug = format!("{value:?}");
+            for marker in *markers {
+                assert!(debug.contains(marker), "{id}.DEBUG_RETAINS: {debug}");
+            }
+
+            assert_eq!(line, expected, "{id}.PROJECTION");
+        }
+
+        // The same arms with the OTHER marker: identical outward text, its own marker in Debug.
+        for (id, first, second) in [
+            (
+                "R42S2.TRANSPORT.Io",
+                LocalTransportError::Io(io_error(NEEDLE_A)),
+                LocalTransportError::Io(io_error(NEEDLE_B)),
+            ),
+            (
+                "R42S2.TRANSPORT.Json",
+                LocalTransportError::Json(json_error(NEEDLE_A)),
+                LocalTransportError::Json(json_error(NEEDLE_B)),
+            ),
+            (
+                "R42S2.TRANSPORT.Account.Store",
+                LocalTransportError::Account(OperatorAccountError::Store(driver_error(NEEDLE_A))),
+                LocalTransportError::Account(OperatorAccountError::Store(driver_error(NEEDLE_B))),
+            ),
+            (
+                "R42S2.TRANSPORT.Project.Account.Store",
+                LocalTransportError::Project(ProjectError::Account(OperatorAccountError::Store(
+                    driver_error(NEEDLE_A),
+                ))),
+                LocalTransportError::Project(ProjectError::Account(OperatorAccountError::Store(
+                    driver_error(NEEDLE_B),
+                ))),
+            ),
+        ] {
+            assert_eq!(
+                first.to_string(),
+                second.to_string(),
+                "{id}.HIDDEN_CHANGE_SAME_LINE"
+            );
+            assert!(
+                !second.to_string().contains(NEEDLE_B),
+                "{id}.HIDDEN_CHANGE_NO_NEEDLE"
+            );
+            assert!(
+                format!("{second:?}").contains(NEEDLE_B),
+                "{id}.HIDDEN_CHANGE_DEBUG_RETAINS"
+            );
+        }
+
+        // A production conversion, not a hand-built fixture: closing the line must not have been
+        // bought by erasing the cause on the way in.
+        let original = io_error(NEEDLE_A);
+        assert!(
+            format!("{original:?}").contains(NEEDLE_A),
+            "R42S2.FIXTURE.FromIo.NEEDLE"
+        );
+        let converted = LocalTransportError::from(original);
+        assert!(
+            format!("{converted:?}").contains(NEEDLE_A),
+            "R42S2.TRANSPORT.FromIo.DEBUG_RETAINS"
+        );
+        assert_eq!(
+            converted.to_string(),
+            "local transport I/O failed: Io",
+            "R42S2.TRANSPORT.FromIo.PROJECTION"
         );
     }
 }
