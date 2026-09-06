@@ -1,6 +1,10 @@
 use std::collections::HashSet;
 use std::fmt;
+#[cfg(debug_assertions)]
+use std::path::Path;
 use std::sync::Arc;
+#[cfg(debug_assertions)]
+use std::sync::Mutex;
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -13,6 +17,32 @@ use crate::{
 };
 
 const MAX_TEAM_NAME_CHARS: usize = 120;
+
+/// A debug-only synchronization point after Team enumeration and before its verified reads and
+/// Totals query. The path lets a concurrent integration test act on only its own store.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub type TeamVerificationHook = Arc<dyn Fn(&Path) + Send + Sync>;
+
+#[cfg(debug_assertions)]
+static AFTER_TEAM_ENUMERATION: Mutex<Option<TeamVerificationHook>> = Mutex::new(None);
+
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn set_after_team_enumeration_hook(hook: Option<TeamVerificationHook>) {
+    *AFTER_TEAM_ENUMERATION.lock().unwrap() = hook;
+}
+
+#[cfg(debug_assertions)]
+fn after_team_enumeration(connection: &Connection) {
+    let Some(path) = connection.path() else {
+        return;
+    };
+    let hook = AFTER_TEAM_ENUMERATION.lock().unwrap().clone();
+    if let Some(hook) = hook {
+        hook(Path::new(path));
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -625,6 +655,8 @@ pub fn enumerate_teams(connection: &Connection) -> rusqlite::Result<Vec<(String,
 
 pub(crate) fn verify_team_state(connection: &Connection) -> Result<(), TeamStateFault> {
     let ids = enumerate_teams(connection).map_err(TeamStateFault::Store)?;
+    #[cfg(debug_assertions)]
+    after_team_enumeration(connection);
     for (workspace_id, team_id) in &ids {
         let identity = || TeamStateFault::Identity {
             workspace_id: workspace_id.clone(),

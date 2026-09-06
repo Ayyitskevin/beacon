@@ -7,7 +7,7 @@ use std::fs::OpenOptions;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -85,6 +85,9 @@ pub use sandbox::{
     SandboxCapability, SandboxUnavailableReason, detect as detect_sandbox, interrupt_channel,
     run_bounded_for_test,
 };
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub use team::{TeamVerificationHook, set_after_team_enumeration_hook};
 
 pub use artifact::{
     Artifact, ArtifactActor, ArtifactContext, ArtifactDigest, ArtifactError, ArtifactKind,
@@ -526,9 +529,10 @@ pub enum SupervisorError {
     DispatchEventMismatch(i64),
     /// The startup step that FINISHES an interrupted dispatch could not complete its write.
     ///
-    /// Deliberately not a `...StateMismatch` (R28.1). Its nineteen neighbours in `inspect_store`
-    /// are verification passes: they compare a record against its own bytes and refuse when the two
-    /// disagree, and "state mismatch" is the verdict of that comparison.
+    /// Deliberately not a `...StateMismatch` (R28.1). It runs in the committed reconciliation step
+    /// before `inspect_store`; that entire successor walk is verification-only. Those passes compare
+    /// a record against its own bytes and refuse when the two disagree, and "state mismatch" is the
+    /// verdict of that comparison.
     /// `dispatch::finish_prepared_dispatches` compares nothing -- it writes a terminal Receipt for
     /// an attempt that died before recording one. When it fails, nothing disagreed; a write did not
     /// complete, and the Run it was recovering still has no terminal Receipt.
@@ -1551,9 +1555,10 @@ impl From<serde_json::Error> for SupervisorError {
 /// duplicate insert on thirty tables, a cost the hole it closed did not justify.
 pub fn open_store_connection(path: &Path) -> rusqlite::Result<Connection> {
     let connection = Connection::open(path)?;
+    connection.busy_timeout(Duration::from_millis(STORE_BUSY_TIMEOUT_MS.into()))?;
+    ensure_write_ahead_log(&connection)?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
     connection.pragma_update(None, "recursive_triggers", "ON")?;
-    connection.busy_timeout(Duration::from_millis(STORE_BUSY_TIMEOUT_MS.into()))?;
     Ok(connection)
 }
 
@@ -1567,6 +1572,35 @@ pub fn open_store_connection(path: &Path) -> rusqlite::Result<Connection> {
 /// queue was refused. `expected_schema` took the computation out of the lock; this stays where it
 /// was, now named and with its reason written down.
 const STORE_BUSY_TIMEOUT_MS: u32 = 5_000;
+
+/// R45.5: a verifier holds one deferred read snapshot while public services may continue to write.
+/// WAL is therefore store state, not a test convenience: rollback-journal mode would make that
+/// reader block the writer whose commit proves the snapshot boundary. A fresh store can be opened
+/// concurrently, and SQLite does not run this journal transition through the busy handler, so
+/// retry only that transition's two lock errors within the same bounded wait every connection has.
+fn ensure_write_ahead_log(connection: &Connection) -> rusqlite::Result<()> {
+    let deadline = Instant::now() + Duration::from_millis(STORE_BUSY_TIMEOUT_MS.into());
+    loop {
+        match connection.query_row("PRAGMA journal_mode = WAL", [], |row| {
+            row.get::<_, String>(0)
+        }) {
+            Ok(mode) if mode.eq_ignore_ascii_case("wal") => return Ok(()),
+            Ok(_) => return Err(rusqlite::Error::InvalidQuery),
+            Err(error)
+                if error.sqlite_error_code().is_some_and(|code| {
+                    matches!(
+                        code,
+                        rusqlite::ffi::ErrorCode::DatabaseBusy
+                            | rusqlite::ffi::ErrorCode::DatabaseLocked
+                    )
+                }) && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
 
 /// Owns store startup, first-Workspace creation, and the diagnostic report behind one interface.
 pub struct Supervisor;
@@ -1664,7 +1698,24 @@ impl Supervisor {
 
         transaction.commit()?;
 
-        let diagnostics = inspect_store(&connection)?;
+        // Reconciliation owns all startup writes and commits them before verification takes its
+        // snapshot. Dispatch recovery must precede Run lease reconciliation just as it did in the
+        // old mixed walk: it may finish a dispatch Run that the Run-state pass then re-proves.
+        let reconciliation =
+            connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        dispatch::finish_prepared_dispatches(&reconciliation)
+            .map_err(|_| SupervisorError::DispatchRecoveryFailed)?;
+        check_preflight::reconcile_expired_run_leases(&reconciliation)
+            .map_err(map_run_state_fault)?;
+        reconciliation.commit()?;
+
+        // Every verification pass, including each pass's Totals query, sees one deferred read
+        // snapshot. `query_only` makes the separation executable: a write accidentally added to
+        // `inspect_store` refuses instead of quietly extending reconciliation again.
+        connection.pragma_update(None, "query_only", "ON")?;
+        let verification = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let diagnostics = inspect_store(&verification)?;
+        verification.commit()?;
         let workspace = WorkspaceSummary {
             id: workspace_id,
             name: stored_name,
@@ -2786,21 +2837,10 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     // After Proposal state for the same reason a Ruling is: a Candidate copies one Proposal's
     // declared effects and re-verifies them against that Proposal's own bytes.
     candidate::verify_candidate_state(connection).map_err(map_candidate_state_fault)?;
-    // THIS STEP WRITES. It is the one call in this sequence that is not a verification pass: the
-    // other nineteen re-prove stored records and refuse, while this one turns an interrupted
-    // attempt into a Run that HAS a terminal Receipt, from its durable preparation and the
-    // repository's own ref. Its refusal is named for that (R28.1) -- a failed write, never a
-    // mismatch, because nothing here was compared.
-    //
-    // Before the Run-state check, because that check reads the Runs this step finishes.
-    dispatch::finish_prepared_dispatches(connection)
-        .map_err(|_| SupervisorError::DispatchRecoveryFailed)?;
     evaluation::verify_evaluation_state(connection).map_err(map_evaluation_state_fault)?;
     // The Artifact state stands alone: it binds no other module's record, and nothing else's
     // verification reads it.
     artifact::verify_artifact_state(connection).map_err(map_artifact_state_fault)?;
-    // A Run whose lease expired without a terminal Receipt becomes unconfirmed
-    // here. Lease expiry is what proves that state; the Run is never removed.
     check_preflight::verify_run_state(connection).map_err(map_run_state_fault)?;
     local_model_activation::verify_activation_state(connection)
         .map_err(map_local_model_activation_state_fault)?;
