@@ -206,6 +206,18 @@ pub struct MutationRecord {
     pub pre_image: Option<String>,
     /// What it declares afterwards.
     pub post_image: Option<String>,
+    /// What the pinned base revision ACTUALLY held at this path, as lowercase hex, in the same
+    /// encoding as `pre_image`.
+    ///
+    /// R46.5 (grok's HOLD): a `PreImageMismatch` Receipt carried only the declared digests, so it
+    /// asserted a comparison and recorded nothing that was read -- the same shape of claim R46
+    /// exists to remove one level up. This is the evidence that a comparison happened at all.
+    ///
+    /// Absent when nothing was read: the tree held no such object, or the read failed
+    /// (`PreImageUnreadable`, which by construction never compared anything). Skipped when absent
+    /// so every Receipt that records no comparison is byte-for-byte what it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_pre_image: Option<String>,
     /// What this dispatch did with it. Recorded per mutation rather than once, so an attempt that
     /// wrote some and not others has a place to say so.
     pub effect: MutationEffect,
@@ -824,6 +836,8 @@ impl DispatchService {
                 path: entry.path.clone(),
                 pre_image: entry.pre_image_sha256.as_ref().map(hex),
                 post_image: entry.post_image_sha256.as_ref().map(hex),
+                // Filled by the pre-image gate, from what it read.
+                observed_pre_image: None,
                 effect: MutationEffect::NotAttempted,
             })
             .collect();
@@ -2054,6 +2068,7 @@ fn pre_images_hold(
         .collect();
     let mut held = true;
     let mut unreadable: Option<PinnedReadFailure> = None;
+    let mut observed: Vec<(String, String)> = Vec::new();
     for (declared_pre_image, declared_path) in records {
         let path = format!("{base}:{declared_path}");
         let cat_file = ["cat-file", "blob", path.as_str()];
@@ -2066,7 +2081,12 @@ fn pre_images_hold(
             (None, PinnedRead::NotFound) => true,
             (None, PinnedRead::Bytes(_)) | (Some(_), PinnedRead::NotFound) => false,
             (Some(declared), PinnedRead::Bytes(bytes)) => {
-                hex(&crate::proposal::sha256(bytes)) == *declared
+                // R46.5: what was READ, recorded whether or not it agreed. A Receipt that claims a
+                // comparison has to carry the thing it compared against.
+                let read_digest = hex(&crate::proposal::sha256(bytes));
+                let holds = read_digest == *declared;
+                observed.push((declared_path.clone(), read_digest));
+                holds
             }
             // R46: the read FAILED. This gate cannot say whether the pre-image holds, so it does
             // not say it does and it does not say it disagrees. The first such failure is kept
@@ -2080,6 +2100,15 @@ fn pre_images_hold(
         // Every declared path is read, not just the ones up to the first disagreement, so the
         // Receipt's step list is the invocations this dispatch made rather than a prefix of them.
         held = held && record_holds;
+    }
+    for (path, digest) in observed {
+        if let Some(record) = decided
+            .per_mutation
+            .iter_mut()
+            .find(|record| record.path == path)
+        {
+            record.observed_pre_image = Some(digest);
+        }
     }
     match (unreadable, held) {
         (Some(failure), _) => PreImageVerdict::Unreadable(failure),
@@ -2606,6 +2635,20 @@ fn verify_outcome_invariants(receipt: &DispatchReceipt) -> Result<(), DispatchEr
                 && !receipt.checkout_updated
                 && names(NotVerified::LandingResultUnknown)
         }
+        // R46.5: a mismatch Receipt must carry the digest it read, and that digest must DISAGREE
+        // with the declared one. A mismatch whose observed digest equals the declared one is
+        // incoherent -- it records the comparison holding and the outcome refusing -- and a
+        // mismatch carrying none asserts a comparison it kept no evidence of. Both refuse here as
+        // `InvalidStore`, the same way every other incoherent Receipt does.
+        DispatchOutcome::PreImageMismatch => {
+            receipt.resulting_revision.is_none()
+                && !receipt.checkout_updated
+                && names(NotVerified::ChangeNotApplied)
+                && receipt.per_mutation.iter().any(|record| {
+                    record.observed_pre_image.is_some()
+                        && record.observed_pre_image != record.pre_image
+                })
+        }
         // Every other arm refused. Objects it wrote may survive -- that is what the residue token
         // is for, and a diff digest measured over a commit that was never published is still a
         // measurement of that commit -- but nothing it prepared may be presented as a landing.
@@ -3054,6 +3097,9 @@ mod tests {
                     path: "src/lib.rs".to_owned(),
                     pre_image: Some("7".repeat(64)),
                     post_image: Some("8".repeat(64)),
+                    // An APPLIED specimen: its pre-image held, so the observed digest equals the
+                    // declared one and the field is skipped rather than repeating it.
+                    observed_pre_image: None,
                     effect: MutationEffect::Written,
                 }]
             } else {
@@ -3157,6 +3203,50 @@ mod tests {
         // build could have written.
         assert!(absent_members(&specimen(DispatchOutcome::Applied)).is_empty());
         verify_outcome_invariants(&specimen(DispatchOutcome::Applied)).unwrap();
+    }
+
+    /// R46.5: a `PreImageMismatch` Receipt owes its own record the digest it compared against.
+    ///
+    /// The Receipt owner refuses both incoherent shapes the same way every other incoherent
+    /// Receipt is refused -- `DispatchError::InvalidStore` out of `verify_outcome_invariants`,
+    /// which is what a reconciling reader calls before it believes a stored refusal.
+    #[test]
+    fn a_mismatch_receipt_owes_the_digest_it_read() {
+        let mismatch = |observed: Option<&str>| {
+            let mut receipt = specimen(DispatchOutcome::PreImageMismatch);
+            receipt.per_mutation = vec![MutationRecord {
+                kind: MutationKind::ModifyFile,
+                path: "src/lib.rs".to_owned(),
+                pre_image: Some("7".repeat(64)),
+                post_image: Some("8".repeat(64)),
+                observed_pre_image: observed.map(str::to_owned),
+                effect: MutationEffect::NotAttempted,
+            }];
+            receipt
+        };
+
+        // A digest that DISAGREES: the comparison happened and the outcome follows from it.
+        verify_outcome_invariants(&mismatch(Some(&"9".repeat(64))))
+            .expect("a mismatch carrying what it read is coherent");
+
+        // NONE: the Receipt asserts a comparison and keeps no evidence of one.
+        assert!(
+            matches!(
+                verify_outcome_invariants(&mismatch(None)),
+                Err(DispatchError::InvalidStore)
+            ),
+            "a mismatch that recorded nothing it read was accepted"
+        );
+
+        // EQUAL to the declared digest: the comparison held and the outcome refused. Both cannot
+        // be true, and this is the shape a plausible-looking forgery would take.
+        assert!(
+            matches!(
+                verify_outcome_invariants(&mismatch(Some(&"7".repeat(64)))),
+                Err(DispatchError::InvalidStore)
+            ),
+            "a mismatch whose observed digest equals the declared one was accepted"
+        );
     }
 
     #[test]
