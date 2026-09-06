@@ -414,7 +414,13 @@ fn sol1_startup_refuses_minimum_lifecycle_sequence() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .expect_err("startup accepted lifecycle sequence i64::MIN as Ready");
-    let SupervisorError::StoredIdentityUnreadable { what, raw } = &error else {
+    let SupervisorError::StoredIntegerKeyUnreadable {
+        what,
+        raw,
+        key_name,
+        key,
+    } = &error
+    else {
         panic!("the lifecycle ordering key was refused under the wrong name: {error:?}");
     };
     assert_eq!(
@@ -422,5 +428,174 @@ fn sol1_startup_refuses_minimum_lifecycle_sequence() {
         "a Resident lifecycle decision's ordering key is not readable"
     );
     assert!(raw.contains(&resident_id.to_string()));
-    assert!(raw.contains(&i64::MIN.to_string()));
+    assert_eq!(*key_name, "sequence");
+    assert_eq!(*key, i64::MIN);
+}
+
+#[test]
+fn astra_startup_refuses_zero_lifecycle_sequence() {
+    let store = TestStore::new("sol1-min-sequence");
+    let accounts = enrolled_accounts(&store);
+    let (_organization, resident_id) = admit_resident(&store, &accounts);
+    let service = ResidentLifecycleService::new(accounts, store.workspace_id);
+    service.activate(resident_id, None).unwrap();
+    drop(service);
+
+    let connection = Connection::open(&store.path).unwrap();
+    let trigger: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema
+             WHERE type = 'trigger' AND name = 'resident_lifecycle_decisions_no_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute_batch("DROP TRIGGER resident_lifecycle_decisions_no_update")
+        .unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE resident_lifecycle_decisions SET sequence = ?1 WHERE resident_id = ?2",
+                rusqlite::params![0_i64, resident_id.to_string()],
+            )
+            .unwrap(),
+        1,
+        "the 0_i64 sequence did not plant"
+    );
+    connection.execute_batch(&trigger).unwrap();
+    drop(connection);
+
+    let error = Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .expect_err("R45.LIFECYCLE.ZERO_REFUSED");
+    let SupervisorError::StoredIntegerKeyUnreadable {
+        what,
+        raw,
+        key_name,
+        key,
+    } = &error
+    else {
+        panic!("the lifecycle ordering key was refused under the wrong name: {error:?}");
+    };
+    assert_eq!(
+        *what,
+        "a Resident lifecycle decision's ordering key is not readable"
+    );
+    assert!(raw.contains(&resident_id.to_string()));
+    assert_eq!(*key_name, "sequence");
+    assert_eq!(*key, 0, "R45.LIFECYCLE.ZERO_KEY");
+    assert!(
+        error.to_string().contains("sequence 0"),
+        "R45.LIFECYCLE.ZERO_LINE_KEY"
+    );
+}
+
+#[test]
+fn astra_startup_accepts_maximum_lifecycle_sequence() {
+    let store = TestStore::new("sol1-min-sequence");
+    let accounts = enrolled_accounts(&store);
+    let (_organization, resident_id) = admit_resident(&store, &accounts);
+    let service = ResidentLifecycleService::new(accounts, store.workspace_id);
+    service.activate(resident_id, None).unwrap();
+    drop(service);
+
+    let connection = Connection::open(&store.path).unwrap();
+    let trigger: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema
+             WHERE type = 'trigger' AND name = 'resident_lifecycle_decisions_no_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute_batch("DROP TRIGGER resident_lifecycle_decisions_no_update")
+        .unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE resident_lifecycle_decisions SET sequence = ?1 WHERE resident_id = ?2",
+                rusqlite::params![i64::MAX, resident_id.to_string()],
+            )
+            .unwrap(),
+        1,
+        "the i64::MAX sequence did not plant"
+    );
+    connection.execute_batch(&trigger).unwrap();
+    drop(connection);
+
+    let result = Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    });
+    assert!(
+        result.is_ok(),
+        "R45.LIFECYCLE.MAX_POSITIVE_ORDER_KEY: {result:?}"
+    );
+}
+
+#[test]
+fn astra_minimum_lifecycle_sequence_outward_key_is_exact() {
+    let store = TestStore::new("sol1-min-sequence");
+    let accounts = enrolled_accounts(&store);
+    let (_organization, resident_id) = admit_resident(&store, &accounts);
+    let service = ResidentLifecycleService::new(accounts, store.workspace_id);
+    service.activate(resident_id, None).unwrap();
+    drop(service);
+
+    let connection = Connection::open(&store.path).unwrap();
+    let trigger: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema
+             WHERE type = 'trigger' AND name = 'resident_lifecycle_decisions_no_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute_batch("DROP TRIGGER resident_lifecycle_decisions_no_update")
+        .unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE resident_lifecycle_decisions SET sequence = ?1 WHERE resident_id = ?2",
+                rusqlite::params![i64::MIN, resident_id.to_string()],
+            )
+            .unwrap(),
+        1,
+        "the i64::MIN sequence did not plant"
+    );
+    connection.execute_batch(&trigger).unwrap();
+    drop(connection);
+
+    let error = Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .expect_err("startup accepted lifecycle sequence i64::MIN as Ready");
+    let SupervisorError::StoredIntegerKeyUnreadable {
+        what,
+        raw,
+        key_name,
+        key,
+    } = &error
+    else {
+        panic!("the lifecycle ordering key was refused under the wrong name: {error:?}");
+    };
+    assert_eq!(
+        *what,
+        "a Resident lifecycle decision's ordering key is not readable"
+    );
+    assert!(raw.contains(&resident_id.to_string()));
+    assert_eq!(*key_name, "sequence");
+    assert_eq!(*key, i64::MIN);
+    let line = error.to_string();
+    eprintln!("OUTWARD {line}");
+    assert!(
+        line.contains(&i64::MIN.to_string()),
+        "R45.LIFECYCLE.MIN_LINE_KEY_EXACT: {line}"
+    );
 }

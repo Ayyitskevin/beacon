@@ -829,7 +829,13 @@ fn sol1_startup_refuses_minimum_configuration_sequence() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .expect_err("startup accepted configuration sequence i64::MIN as Ready");
-    let beacond::SupervisorError::StoredIdentityUnreadable { what, raw } = &error else {
+    let beacond::SupervisorError::StoredIntegerKeyUnreadable {
+        what,
+        raw,
+        key_name,
+        key,
+    } = &error
+    else {
         panic!("the configuration ordering key was refused under the wrong name: {error:?}");
     };
     assert_eq!(
@@ -837,5 +843,213 @@ fn sol1_startup_refuses_minimum_configuration_sequence() {
         "a Resident configuration decision's ordering key is not readable"
     );
     assert!(raw.contains(&configured.id.to_string()));
-    assert!(raw.contains(&i64::MIN.to_string()));
+    assert_eq!(*key_name, "sequence");
+    assert_eq!(*key, i64::MIN);
+}
+
+#[test]
+fn astra_startup_refuses_zero_configuration_sequence() {
+    let store = TestStore::new("sol1-min-sequence");
+    let accounts = enrolled_accounts(&store);
+    let resident_id = admit_lead(&store, &accounts);
+    ResidentLifecycleService::new(Arc::clone(&accounts), store.workspace_id)
+        .activate(resident_id, None)
+        .unwrap();
+    let activation = activate_model(&store, &accounts, vec![ProviderFeature::Completion]);
+    let configurations =
+        ResidentConfigurationService::new(Arc::clone(&accounts), store.workspace_id);
+    let configured = configurations
+        .configure(
+            resident_id,
+            None,
+            activation.id,
+            vec![BeaconCapability::WorkCreateMission],
+        )
+        .unwrap();
+    drop(configurations);
+    drop(accounts);
+
+    let connection = Connection::open(&store.path).unwrap();
+    let trigger: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema
+             WHERE type = 'trigger' AND name = 'resident_configuration_decisions_no_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute_batch("DROP TRIGGER resident_configuration_decisions_no_update")
+        .unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE resident_configuration_decisions SET sequence = ?1 WHERE id = ?2",
+                rusqlite::params![0_i64, configured.id.to_string()],
+            )
+            .unwrap(),
+        1,
+        "the 0_i64 sequence did not plant"
+    );
+    connection.execute_batch(&trigger).unwrap();
+    drop(connection);
+
+    let error = Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .expect_err("R45.CONFIGURATION.ZERO_REFUSED");
+    let beacond::SupervisorError::StoredIntegerKeyUnreadable {
+        what,
+        raw,
+        key_name,
+        key,
+    } = &error
+    else {
+        panic!("the configuration ordering key was refused under the wrong name: {error:?}");
+    };
+    assert_eq!(
+        *what,
+        "a Resident configuration decision's ordering key is not readable"
+    );
+    assert!(raw.contains(&configured.id.to_string()));
+    assert_eq!(*key_name, "sequence");
+    assert_eq!(*key, 0, "R45.CONFIGURATION.ZERO_KEY");
+    assert!(
+        error.to_string().contains("sequence 0"),
+        "R45.CONFIGURATION.ZERO_LINE_KEY"
+    );
+}
+
+#[test]
+fn astra_startup_accepts_maximum_configuration_sequence() {
+    let store = TestStore::new("sol1-min-sequence");
+    let accounts = enrolled_accounts(&store);
+    let resident_id = admit_lead(&store, &accounts);
+    ResidentLifecycleService::new(Arc::clone(&accounts), store.workspace_id)
+        .activate(resident_id, None)
+        .unwrap();
+    let activation = activate_model(&store, &accounts, vec![ProviderFeature::Completion]);
+    let configurations =
+        ResidentConfigurationService::new(Arc::clone(&accounts), store.workspace_id);
+    let configured = configurations
+        .configure(
+            resident_id,
+            None,
+            activation.id,
+            vec![BeaconCapability::WorkCreateMission],
+        )
+        .unwrap();
+    drop(configurations);
+    drop(accounts);
+
+    let connection = Connection::open(&store.path).unwrap();
+    let trigger: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema
+             WHERE type = 'trigger' AND name = 'resident_configuration_decisions_no_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute_batch("DROP TRIGGER resident_configuration_decisions_no_update")
+        .unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE resident_configuration_decisions SET sequence = ?1 WHERE id = ?2",
+                rusqlite::params![i64::MAX, configured.id.to_string()],
+            )
+            .unwrap(),
+        1,
+        "the i64::MAX sequence did not plant"
+    );
+    connection.execute_batch(&trigger).unwrap();
+    drop(connection);
+
+    let result = Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    });
+    assert!(
+        result.is_ok(),
+        "R45.CONFIGURATION.MAX_POSITIVE_ORDER_KEY: {result:?}"
+    );
+}
+
+#[test]
+fn astra_minimum_configuration_sequence_outward_key_is_exact() {
+    let store = TestStore::new("sol1-min-sequence");
+    let accounts = enrolled_accounts(&store);
+    let resident_id = admit_lead(&store, &accounts);
+    ResidentLifecycleService::new(Arc::clone(&accounts), store.workspace_id)
+        .activate(resident_id, None)
+        .unwrap();
+    let activation = activate_model(&store, &accounts, vec![ProviderFeature::Completion]);
+    let configurations =
+        ResidentConfigurationService::new(Arc::clone(&accounts), store.workspace_id);
+    let configured = configurations
+        .configure(
+            resident_id,
+            None,
+            activation.id,
+            vec![BeaconCapability::WorkCreateMission],
+        )
+        .unwrap();
+    drop(configurations);
+    drop(accounts);
+
+    let connection = Connection::open(&store.path).unwrap();
+    let trigger: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema
+             WHERE type = 'trigger' AND name = 'resident_configuration_decisions_no_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute_batch("DROP TRIGGER resident_configuration_decisions_no_update")
+        .unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE resident_configuration_decisions SET sequence = ?1 WHERE id = ?2",
+                rusqlite::params![i64::MIN, configured.id.to_string()],
+            )
+            .unwrap(),
+        1,
+        "the i64::MIN sequence did not plant"
+    );
+    connection.execute_batch(&trigger).unwrap();
+    drop(connection);
+
+    let error = Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .expect_err("startup accepted configuration sequence i64::MIN as Ready");
+    let beacond::SupervisorError::StoredIntegerKeyUnreadable {
+        what,
+        raw,
+        key_name,
+        key,
+    } = &error
+    else {
+        panic!("the configuration ordering key was refused under the wrong name: {error:?}");
+    };
+    assert_eq!(
+        *what,
+        "a Resident configuration decision's ordering key is not readable"
+    );
+    assert!(raw.contains(&configured.id.to_string()));
+    assert_eq!(*key_name, "sequence");
+    assert_eq!(*key, i64::MIN);
+    let line = error.to_string();
+    eprintln!("OUTWARD {line}");
+    assert!(
+        line.contains(&i64::MIN.to_string()),
+        "R45.CONFIGURATION.MIN_LINE_KEY_EXACT: {line}"
+    );
 }
