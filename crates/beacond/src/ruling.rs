@@ -1808,13 +1808,18 @@ pub(crate) fn ruling_event_sequence(
 /// Force is derived along the way and never fails startup by itself: drift populates a list, it
 /// does not raise an error, so a historical Ruling does not become corrupt because the world moved.
 /// Everything that *does* refuse here is a store disagreeing with its own bytes.
-pub(crate) fn verify_ruling_state(connection: &Connection) -> Result<(), RulingStateFault> {
-    let mut statement = connection
-        .prepare(
-            "SELECT workspace_id, digest_value, proposal_digest FROM rulings
-             ORDER BY workspace_id, digest_value",
-        )
-        .map_err(RulingStateFault::Store)?;
+/// The rows `verify_ruling_state` enumerates, in the order it enumerates them.
+///
+/// EXTRACTED SO A BAR CAN CALL IT (R44.6): a placement assertion that COPIES this query agrees
+/// with itself, so flipping the pass's own `ORDER BY` leaves it decorative. One function, called
+/// by both, moves the pass and the bar's view of it together.
+pub fn enumerate_rulings(
+    connection: &Connection,
+) -> rusqlite::Result<Vec<(String, String, String)>> {
+    let mut statement = connection.prepare(
+        "SELECT workspace_id, digest_value, proposal_digest FROM rulings
+         ORDER BY workspace_id, digest_value",
+    )?;
     let rows = statement
         .query_map([], |row| {
             Ok((
@@ -1822,11 +1827,13 @@ pub(crate) fn verify_ruling_state(connection: &Connection) -> Result<(), RulingS
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
             ))
-        })
-        .map_err(RulingStateFault::Store)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(RulingStateFault::Store)?;
-    drop(statement);
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub(crate) fn verify_ruling_state(connection: &Connection) -> Result<(), RulingStateFault> {
+    let rows = enumerate_rulings(connection).map_err(RulingStateFault::Store)?;
 
     // A record naming `owner` as its decider basis is only truthful while that account exists.
     if !rows.is_empty() && !owner_account_exists(connection).map_err(RulingStateFault::Store)? {
