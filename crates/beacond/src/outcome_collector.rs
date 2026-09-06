@@ -77,10 +77,10 @@ pub enum CollectorRefusal {
         recorded_at_seq: i64,
         boundary_event_seq: u64,
     },
-    /// The object is stored and no Event places it in the log, so the boundary cannot be applied.
+    /// The object is stored and no owning Event verifies or places it in the log.
     ///
     /// A third state, not absence and not lateness: the store holds a record the event log does not
-    /// account for, and a freeze that cannot be evaluated must not be assumed to pass.
+    /// account for, so neither ownership nor a freeze may be assumed to pass.
     Unpositioned { kind: &'static str, id: String },
     /// A citation's reference identity and the record the store returned disagree (R15).
     CitedIdentityMismatch { kind: &'static str, id: String },
@@ -172,7 +172,7 @@ impl fmt::Display for CollectorRefusal {
             ),
             Self::Unpositioned { kind, id } => write!(
                 formatter,
-                "{kind} {id} is stored and no event places it relative to the boundary"
+                "{kind} {id} is stored and no owning event verifies or places it in the log"
             ),
             Self::CitedIdentityMismatch { kind, id } => write!(
                 formatter,
@@ -1569,9 +1569,8 @@ impl<'a> Collector<'a> {
     ///
     /// **The `outcome` column is not read.** It is a projection of a value inside `receipt_json`,
     /// and a joined column may identify a candidate but may never supply a renderable claim. The
-    /// checksum covers the stored bytes and nothing else, so a store whose column disagrees with its
-    /// bytes produces the same citation as one whose column agrees -- the projection cannot reach
-    /// the document.
+    /// checksum covers the stored bytes and nothing else. The Event-based owning verifier separately
+    /// checks the Receipt and its projections before the citation can be returned.
     ///
     /// The bytes are read as bytes -- `CAST(receipt_json AS BLOB)` -- rather than as a `String`,
     /// because "exact stored bytes" is the claim the checksum makes, and a round trip through Rust's
@@ -1609,7 +1608,12 @@ impl<'a> Collector<'a> {
         // replayed through its owning module's verifier -- the one startup runs -- so the row
         // read above is never the thing that authenticated this Receipt (sol1's cold read, P0).
         // The verified position it returns is then what the boundary is measured against.
-        let position = self.verified_receipt_position(run_uuid)?;
+        let position = self.verified_receipt_position(run_uuid)?.ok_or_else(|| {
+            CollectorRefusal::Unpositioned {
+                kind: "receipt",
+                id: run_uuid.hyphenated().to_string(),
+            }
+        })?;
         if let Some(cut) = boundary {
             self.receipt_at_or_before(run_uuid, position, cut)?;
         }
@@ -1625,9 +1629,9 @@ impl<'a> Collector<'a> {
     /// Every run Event naming this run, replayed through its OWNING module's verifier, and the
     /// latest sequence among them.
     ///
-    /// `None` is "the log accounts for this run nowhere" -- not a pass: the caller decides what
-    /// absence means, and with a boundary it is `Unpositioned`. An Event the owner refuses is
-    /// `Unverified` carrying the owner's own word, exactly as every other source's refusal is.
+    /// `None` is "the log accounts for this run nowhere" -- not a pass: the caller refuses it as
+    /// `Unpositioned` before constructing a citation. An Event the owner refuses is `Unverified`
+    /// carrying the owner's own word, exactly as every other source's refusal is.
     fn verified_receipt_position(&self, run_uuid: Uuid) -> Result<Option<i64>, CollectorRefusal> {
         let id = run_uuid.to_string();
         let mut latest: Option<i64> = None;
@@ -1678,15 +1682,9 @@ impl<'a> Collector<'a> {
     fn receipt_at_or_before(
         &self,
         run_uuid: Uuid,
-        position: Option<i64>,
+        sequence: i64,
         boundary_event_seq: u64,
     ) -> Result<(), CollectorRefusal> {
-        let Some(sequence) = position else {
-            return Err(CollectorRefusal::Unpositioned {
-                kind: "receipt",
-                id: run_uuid.hyphenated().to_string(),
-            });
-        };
         let cut = i64::try_from(boundary_event_seq).map_err(|_| CollectorRefusal::Unverified {
             kind: "receipt",
             reason: "the completion's boundary is not a sequence number".to_owned(),
