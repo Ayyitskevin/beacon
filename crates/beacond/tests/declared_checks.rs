@@ -2162,3 +2162,79 @@ fn replace_run_update_trigger(
     tamper(connection).unwrap();
     connection.execute_batch(&trigger_sql).unwrap();
 }
+
+/// R45.1: the public Run identity is a UUID, so startup must refuse a stored primary key that the
+/// owning reader cannot represent. The long case also proves the operator line is bounded.
+#[test]
+fn sol1_startup_refuses_untyped_run_identity_edges() {
+    for (label, run_id) in [
+        ("empty", String::new()),
+        ("one-megabyte", "r".repeat(1 << 20)),
+    ] {
+        let (repository, revision) = fixture_repository(label);
+        let source = repository.path.to_string_lossy().into_owned();
+        let (store, projects, repositories, _checks) = enrolled(label);
+        let project = projects.create(project_draft()).unwrap();
+        repositories
+            .bind(
+                project.id,
+                project.charter.revision,
+                None,
+                RepositoryDraft {
+                    source_kind: RepositorySourceKind::LocalPath,
+                    source,
+                    base_revision: revision,
+                    declared_checks: vec![check("ok", &["/bin/true"], ".")],
+                },
+            )
+            .unwrap();
+        let connection = Connection::open(&store.path).unwrap();
+        let workspace_id: String = connection
+            .query_row("SELECT id FROM workspaces", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            connection
+                .execute(
+                    "INSERT INTO runs (
+                        workspace_id, id, project_id, kind, repository_revision, charter_revision,
+                        state, lease_expires_at_ms, started_at_ms, ended_at_ms
+                     ) VALUES (?1, ?2, ?3, 'declared_checks', 1, 1, 'unconfirmed', 0, 0, 0)",
+                    rusqlite::params![workspace_id, run_id, project.id.to_string()],
+                )
+                .unwrap(),
+            1,
+            "{label}: the edge row did not plant"
+        );
+        drop(connection);
+
+        let error = Supervisor::bootstrap(StartupConfig {
+            store_path: store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        })
+        .expect_err("startup accepted an unrepresentable Run identity");
+        let SupervisorError::StoredIdentityUnreadable { what, raw } = &error else {
+            panic!("{label}: the Run identity was refused under the wrong name: {error:?}");
+        };
+        assert_eq!(*what, "a Run row's identity is not readable");
+        assert!(
+            raw.ends_with(&format!("Run {run_id}")),
+            "{label}: the typed reader fault lost the raw Run key"
+        );
+        let line = error.to_string();
+        assert!(
+            !line.contains('\r') && !line.contains('\n') && !line.contains('\u{1b}'),
+            "{label}: the one-line refusal obeyed stored control bytes: {line:?}"
+        );
+        assert!(
+            line.chars().count() <= 256,
+            "{label}: the one-line refusal was not bounded: {} characters",
+            line.chars().count()
+        );
+        if label == "one-megabyte" {
+            assert!(
+                line.contains("truncated from 1048628 characters"),
+                "the bounded refusal did not report truncation: {line}"
+            );
+        }
+    }
+}
