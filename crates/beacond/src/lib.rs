@@ -1578,6 +1578,7 @@ const STORE_BUSY_TIMEOUT_MS: u32 = 5_000;
 /// reader block the writer whose commit proves the snapshot boundary. A fresh store can be opened
 /// concurrently, and SQLite does not run this journal transition through the busy handler, so
 /// retry only that transition's two lock errors within the same bounded wait every connection has.
+/// The 5,000 ms bound is retry admission plus in-flight SQLite work and scheduler delay, not a strict open/bootstrap wall-clock deadline.
 /// SQLite's non-file `:memory:` fixture reports its permanent `memory` mode instead; it has no
 /// path-backed store or second connection across which this invariant could apply.
 fn ensure_write_ahead_log(connection: &Connection) -> rusqlite::Result<()> {
