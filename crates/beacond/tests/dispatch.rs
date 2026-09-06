@@ -2420,6 +2420,35 @@ fn a_landed_dispatch_replays_from_its_own_receipt_after_a_restart() {
 }
 
 #[test]
+fn a_receipt_cannot_evade_startup_replay_by_losing_its_event() {
+    // R48 bar (b): the Run verifier owns the cardinality as well as the Event replay. A Receipt
+    // whose terminal Event is gone must not become invisible merely because the Event walk has
+    // nothing left to decode.
+    let fixture = admitted_mission("receipt-without-event");
+    let (_repository, ruling_digest) = fixture.approved("receipt-without-event");
+    fixture
+        .dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+
+    let deleted = fixture
+        .store
+        .connect()
+        .execute("DELETE FROM events WHERE kind = 'proposal.dispatched'", [])
+        .unwrap();
+    assert_eq!(deleted, 1, "the bar did not remove the terminal Event");
+    assert_eq!(fixture.count("SELECT count(*) FROM receipts"), 1);
+
+    assert!(
+        matches!(
+            fixture.restart(),
+            Err(SupervisorError::RunStateMismatch { .. })
+        ),
+        "a terminal Receipt with no Event evaded startup replay"
+    );
+}
+
+#[test]
 fn a_dispatch_run_state_matches_its_receipt_outcome() {
     // `check_preflight::verify_run_state` owns cardinality for every Run kind, so a dispatch Run
     // whose state does not match its Receipt is caught there rather than by a second walk.
@@ -2603,7 +2632,7 @@ fn a_candidate_describing_a_tree_that_is_not_there_is_refused_before_any_object_
 /// observation, and every historical mismatch has none. Keying the rule on the Receipt's VERSION
 /// rather than on the field's presence is what keeps an upgraded store readable.
 #[test]
-fn a_version_three_mismatch_without_the_observed_field_still_reopens() {
+fn an_older_schema_34_reader_accepts_legacy_receipts_but_refuses_a_future_outcome() {
     let fixture = admitted_mission("legacy-mismatch");
     let repository = CopyRepository::create(&fixture.copies_root, "legacy-mismatch");
     let (proposal_digest, _) = fixture.candidate_for_with_pre_image(
@@ -2675,6 +2704,41 @@ END;",
     fixture
         .restart()
         .expect("a version-3 mismatch without the observed field is unrecorded, not incoherent");
+
+    // R48 bar (c): this process stands in for the older binary. Both stores have today's schema,
+    // but only the historical Receipt belongs to its typed vocabulary. A token written by a
+    // hypothetical future binary is SQL-valid after 0034 and still unreadable here.
+    let future = admitted_mission("future-outcome");
+    let (_repository, ruling_digest) = future.approved("future-outcome");
+    future
+        .dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+    assert_eq!(
+        future
+            .store
+            .connect()
+            .query_row("SELECT version FROM schema_meta", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        34
+    );
+    future.without_run_triggers(
+        "UPDATE receipts
+            SET outcome = 'future_outcome',
+                receipt_json = json_set(receipt_json, '$.outcome', 'future_outcome');
+         UPDATE events
+            SET payload_json = json_set(payload_json, '$.outcome', 'future_outcome')
+          WHERE kind = 'proposal.dispatched';",
+    );
+    assert!(
+        matches!(
+            future.restart(),
+            Err(SupervisorError::DispatchEventMismatch(_))
+        ),
+        "the older typed owner returned a value for a future outcome token"
+    );
 }
 
 #[test]
@@ -4011,9 +4075,10 @@ fn an_applied_receipt_that_does_not_match_its_durable_preparation_is_refused_at_
 
 #[test]
 fn an_applied_receipt_that_names_no_landing_is_refused_at_startup() {
-    // The other half: a record that contradicts itself rather than its preparation. Both copies are
-    // rewritten the same way, so byte equality still holds and only the arm's own invariant is left
-    // to catch it.
+    // R48 bar (d), and the other half of the preparation test: `applied` remains a SQL-valid,
+    // typed token, but this record contradicts itself. Both copies are rewritten the same way, so
+    // byte equality still holds and only the owner's outcome-specific invariant is left to catch
+    // it.
     let fixture = admitted_mission("incoherent-applied");
     let (_repository, ruling_digest) = fixture.approved("incoherent-applied");
     fixture
