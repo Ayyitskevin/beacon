@@ -5671,6 +5671,16 @@ fn a_superseded_classification_citing_a_predecessor_the_store_does_not_hold_fail
     drop(connection);
     forged.version = 1;
 
+    // R44 DECLARED SURVIVOR, measured rather than assumed. This bar names the row it refused (the
+    // held `planted` literal, below), but a mutant naming a FIXED END of the pass's own ORDER BY
+    // survives it: the planted classification's digest sorts FIRST among the three, so "names the
+    // failing row" and "names rows[0]" coincide here. Measured five runs out of five, so it is
+    // deterministic, not flaky -- and it cannot be fixed by placement the way the other eighteen
+    // bars were. `digest_value` is CONTENT ADDRESSED: the fixture cannot mint a classification
+    // whose hash lands at a chosen end, and there is no second Workspace to move the row with
+    // (the ORDER BY is `workspace_id, digest_value`). Closing it needs a fixture that can place a
+    // row by identity, not a tamper that can choose an end.
+
     // And startup refuses it BY NAME. Before this slice, this reopened Ready.
     let refusal = Supervisor::bootstrap(StartupConfig {
         store_path: fixture.store.path.clone(),
