@@ -2593,6 +2593,26 @@ fn startup_refuses_an_unaccounted_ruling_row_and_names_the_row() {
             rusqlite::params![planted, existing],
         )
         .expect("the planted row inserts");
+        // R44.4 (astra): the endpoint is CONSTRUCTED, not read back, so assert it -- one ordered
+        // read per iteration, the same query the pass runs. Fixed-width lowercase hex makes all
+        // `f`/all `0` the extremes today; a migration that changed the digest encoding or the
+        // column collation would silently stop bracketing and this bar would decay to one end
+        // without failing.
+        {
+            let order = if end == "last" { "DESC" } else { "ASC" };
+            let placed: String = connection
+                .query_row(
+                    &format!("SELECT digest_value FROM rulings ORDER BY workspace_id {order}, digest_value {order} LIMIT 1"),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the plant is in the table");
+            assert_eq!(
+                placed, planted,
+                "{end}: the planted row is not at the {end} end of this pass's own ORDER BY"
+            );
+        }
+
         drop(connection);
 
         let refusal = fixture
