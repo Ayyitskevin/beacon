@@ -835,7 +835,7 @@ pub(crate) fn read_pinned_exit(
 /// object that is absent, and `pre_images_hold` then reported both as `PreImageMismatch` -- a
 /// claim about a comparison that never happened. Each arm is a read that FAILED; none of them is
 /// evidence about the tree's contents.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PinnedReadFailure {
     /// The filter-driver inventory could not be read, so the hardening this read depends on could
@@ -850,6 +850,29 @@ pub enum PinnedReadFailure {
     /// The read returned, but the repository was no longer the one that was pinned, so its bytes
     /// describe something this attempt never measured.
     PinBrokenAfterRead,
+    /// git refused the read and did NOT say the path is absent from the tree. R46.3: `cat-file`
+    /// exits 128 for "path does not exist in this tree" AND for "this repository is broken", so
+    /// the exit code alone cannot separate them. Anything git says that is not the absence
+    /// message is this -- FAIL CLOSED -- and it carries what git said so the evidence survives.
+    ReadRefused { message: String },
+}
+
+/// What git says when the path is simply not in that tree: `path 'x' does not exist in 'REV'`.
+///
+/// Keyed on what was said ABOUT THE PATH, not on the exit code, and not on the whole sentence: the
+/// quoted path and revision are the caller's own strings and the wording around them is git's.
+const PATH_ABSENT_FROM_TREE: &str = "does not exist in";
+
+/// git's message, bounded and escaped for a Receipt. The cap is R28.4's: a diagnostic is evidence,
+/// not a channel for arbitrary bytes to reach a reader.
+fn quoted_git_message(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let trimmed = text.trim();
+    let mut message: String = trimmed.chars().take(120).collect();
+    if trimmed.chars().count() > 120 {
+        message.push('…');
+    }
+    message
 }
 
 impl PinnedReadFailure {
@@ -861,6 +884,7 @@ impl PinnedReadFailure {
             Self::Signalled => "signalled",
             Self::TimedOut => "timed_out",
             Self::PinBrokenAfterRead => "pin_broken_after_read",
+            Self::ReadRefused { .. } => "read_refused",
         }
     }
 }
@@ -922,13 +946,23 @@ fn classify_pinned_read(raw: BoundedRaw, still_pinned: bool) -> PinnedRead {
     match raw {
         // The pin is checked BEFORE the code is read: bytes from a repository that is no longer
         // the pinned one are not evidence about it, whatever the child's status said.
-        BoundedRaw::Finished { code, stdout } => {
+        BoundedRaw::Finished {
+            code,
+            stdout,
+            stderr,
+        } => {
             if !still_pinned {
                 return PinnedRead::Unreadable(PinnedReadFailure::PinBrokenAfterRead);
             }
             match code {
                 Some(0) => PinnedRead::Bytes(stdout),
-                Some(_) => PinnedRead::NotFound,
+                // R46.3: NotFound is what GIT SAID about the path, never what the exit code was.
+                Some(_) if String::from_utf8_lossy(&stderr).contains(PATH_ABSENT_FROM_TREE) => {
+                    PinnedRead::NotFound
+                }
+                Some(_) => PinnedRead::Unreadable(PinnedReadFailure::ReadRefused {
+                    message: quoted_git_message(&stderr),
+                }),
                 None => PinnedRead::Unreadable(PinnedReadFailure::Signalled),
             }
         }
@@ -1177,6 +1211,9 @@ enum BoundedRaw {
     Finished {
         code: Option<i32>,
         stdout: Vec<u8>,
+        /// What git SAID. Kept because an exit code cannot tell "this path is not in that tree"
+        /// from "this repository is broken" -- both are 128 (R46.3).
+        stderr: Vec<u8>,
     },
     TimedOut,
     Failed,
@@ -1188,7 +1225,7 @@ fn run_git_bounded_inner(
     budget: Duration,
 ) -> Bounded {
     match run_git_bounded_raw(command, stdin_bytes, budget) {
-        BoundedRaw::Finished { code, stdout } => match String::from_utf8(stdout) {
+        BoundedRaw::Finished { code, stdout, .. } => match String::from_utf8(stdout) {
             Ok(stdout) => Bounded::Finished {
                 success: code == Some(0),
                 stdout,
@@ -1210,7 +1247,7 @@ fn run_git_bounded_raw(
     if stdin_bytes.is_none() {
         command.stdin(Stdio::null());
     }
-    command.stdout(Stdio::piped()).stderr(Stdio::null());
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
     // One clock for the whole invocation: a start that cannot be reached inside the budget is a
     // check that did not finish, and counting it from after the spawn would let a retry below add
     // a second budget's worth of waiting to every call.
@@ -1269,9 +1306,19 @@ fn run_git_bounded_raw(
     if pipe.read_to_end(&mut stdout).is_err() {
         return BoundedRaw::Failed;
     }
+    // Read after the child exited, like stdout above: git's diagnostics are one line and cannot
+    // fill the pipe, and a child that somehow did would be killed by the budget rather than
+    // deadlock here.
+    let mut stderr = Vec::new();
+    if let Some(mut pipe) = child.stderr.take()
+        && pipe.read_to_end(&mut stderr).is_err()
+    {
+        return BoundedRaw::Failed;
+    }
     BoundedRaw::Finished {
         code: status.code(),
         stdout,
+        stderr,
     }
 }
 
@@ -1299,7 +1346,8 @@ mod r46_read_classification {
             classify_pinned_read(
                 BoundedRaw::Finished {
                     code: None,
-                    stdout: Vec::new()
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
                 },
                 true
             ),
@@ -1324,7 +1372,8 @@ mod r46_read_classification {
             classify_pinned_read(
                 BoundedRaw::Finished {
                     code: Some(0),
-                    stdout: b"bytes this attempt never measured".to_vec()
+                    stdout: b"bytes this attempt never measured".to_vec(),
+                    stderr: Vec::new(),
                 },
                 false
             ),
@@ -1334,12 +1383,93 @@ mod r46_read_classification {
             classify_pinned_read(
                 BoundedRaw::Finished {
                     code: Some(1),
-                    stdout: Vec::new()
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
                 },
                 false
             ),
             PinnedRead::Unreadable(PinnedReadFailure::PinBrokenAfterRead)
         );
+    }
+
+    /// R46.3: NotFound is what GIT SAID about the path, never what the exit code was.
+    ///
+    /// `cat-file` exits 128 for "path does not exist in this tree" and for "this repository is
+    /// broken". Classifying on the code made the second satisfy "declared absent, and absent" --
+    /// R46's own collapse, one level down, on the boundary this lane exists to close.
+    #[test]
+    fn a_broken_repository_is_unreadable_and_never_not_found() {
+        let broken = classify_pinned_read(
+            BoundedRaw::Finished {
+                code: Some(128),
+                stdout: Vec::new(),
+                stderr: b"fatal: not a git repository (or any of the parent directories): .git"
+                    .to_vec(),
+            },
+            true,
+        );
+        assert_eq!(
+            broken,
+            PinnedRead::Unreadable(PinnedReadFailure::ReadRefused {
+                message: "fatal: not a git repository (or any of the parent directories): .git"
+                    .to_owned(),
+            }),
+            "a broken repository was read as a path that is not there"
+        );
+        assert!(
+            !matches!(broken, PinnedRead::NotFound),
+            "the exit code decided this, not what git said"
+        );
+    }
+
+    /// FAIL CLOSED: an exit git explains in words this build does not recognise is unreadable.
+    #[test]
+    fn an_unrecognised_diagnostic_is_unreadable_rather_than_assumed_absent() {
+        assert_eq!(
+            classify_pinned_read(
+                BoundedRaw::Finished {
+                    code: Some(128),
+                    stdout: Vec::new(),
+                    stderr: b"fatal: something this build has never seen".to_vec(),
+                },
+                true,
+            ),
+            PinnedRead::Unreadable(PinnedReadFailure::ReadRefused {
+                message: "fatal: something this build has never seen".to_owned(),
+            })
+        );
+        // ...and a non-zero exit with NOTHING said is not evidence of absence either.
+        assert!(matches!(
+            classify_pinned_read(
+                BoundedRaw::Finished {
+                    code: Some(1),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                },
+                true,
+            ),
+            PinnedRead::Unreadable(PinnedReadFailure::ReadRefused { .. })
+        ));
+    }
+
+    /// git's message is bounded and trimmed before it can reach a Receipt (R28.4's cap).
+    #[test]
+    fn a_git_message_reaches_the_receipt_bounded() {
+        let long = vec![b'x'; 400];
+        let PinnedRead::Unreadable(PinnedReadFailure::ReadRefused { message }) =
+            classify_pinned_read(
+                BoundedRaw::Finished {
+                    code: Some(128),
+                    stdout: Vec::new(),
+                    stderr: long,
+                },
+                true,
+            )
+        else {
+            panic!("a refused read must carry what git said");
+        };
+        assert_eq!(message.chars().count(), 121, "120 characters and the mark");
+        assert!(message.ends_with('…'));
     }
 
     /// The two answers that are FACTS, and they are not the same fact.
@@ -1349,7 +1479,8 @@ mod r46_read_classification {
             classify_pinned_read(
                 BoundedRaw::Finished {
                     code: Some(128),
-                    stdout: Vec::new()
+                    stdout: Vec::new(),
+                    stderr: b"fatal: path 'gone.txt' does not exist in 'HEAD'".to_vec(),
                 },
                 true
             ),
@@ -1360,7 +1491,8 @@ mod r46_read_classification {
             classify_pinned_read(
                 BoundedRaw::Finished {
                     code: Some(0),
-                    stdout: b"the bytes".to_vec()
+                    stdout: b"the bytes".to_vec(),
+                    stderr: Vec::new(),
                 },
                 true
             ),
