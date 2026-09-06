@@ -783,18 +783,23 @@ pub(crate) fn read_pinned(
     // The filter inventory is read through the SAME pinned directory: reading it by pathname would
     // let a swap decide which drivers the hardening neutralizes, before the write enters the
     // original descriptor (gpt1).
-    let filter_drivers = pinned_filter_drivers(repository)?;
+    let filter_drivers = pinned_filter_drivers(repository).ok()?;
     let mut command = read_only_git_command(Path::new(GIT), &filter_drivers);
     repository.enter(&mut command);
     for argument in arguments {
         command.arg(argument);
     }
-    match run_git_bounded(command, budget) {
-        Bounded::Finished {
-            success: true,
-            stdout,
-        } if repository.still_pinned() => Some(stdout),
-        _ => None,
+    // R47: no exit arithmetic here either. These reads answer negatively in silence --
+    // `symbolic-ref --quiet` on a detached HEAD is the one that does -- and every other non-zero
+    // exit carries a diagnostic. The caller's `Option` still folds the negative answer and the
+    // failure together; that collapse is one layer UP and outside this lane (see the report).
+    match classify_pinned_read(
+        run_git_bounded_raw(command, None, budget),
+        repository.still_pinned(),
+        AbsenceWitness::Silence,
+    ) {
+        PinnedRead::Bytes(stdout) => String::from_utf8(stdout).ok(),
+        PinnedRead::NotFound | PinnedRead::Unreadable(_) => None,
     }
 }
 
@@ -812,15 +817,21 @@ pub(crate) fn read_pinned_exit(
     arguments: &[&str],
     budget: Duration,
 ) -> Option<i32> {
-    let filter_drivers = pinned_filter_drivers(repository)?;
+    let filter_drivers = pinned_filter_drivers(repository).ok()?;
     let mut command = read_only_git_command(Path::new(GIT), &filter_drivers);
     repository.enter(&mut command);
     for argument in arguments {
         command.arg(argument);
     }
-    match run_git_bounded_raw(command, None, budget) {
-        BoundedRaw::Finished { code, .. } if repository.still_pinned() => code,
-        _ => None,
+    let raw = run_git_bounded_raw(command, None, budget);
+    let code = raw.exit_code();
+    // R47: the classifier decides whether the code is an ANSWER; only then is it carried through.
+    // Before, any finished child in a pinned repository handed its code back, so a broken
+    // repository's 128 arrived beside the 0 and 1 that mean yes and no.
+    match classify_pinned_read(raw, repository.still_pinned(), AbsenceWitness::Silence) {
+        PinnedRead::Bytes(_) => Some(0),
+        PinnedRead::NotFound => code,
+        PinnedRead::Unreadable(_) => None,
     }
 }
 
@@ -890,9 +901,30 @@ fn shows_absence(witness: AbsenceWitness, stdout: &[u8], stderr: &[u8]) -> bool 
         return false;
     }
     match witness {
-        AbsenceWitness::Silence => String::from_utf8_lossy(stderr).trim().is_empty(),
+        AbsenceWitness::Silence => !said_anything_diagnostic(stderr),
         AbsenceWitness::Message(said) => String::from_utf8_lossy(stderr).contains(said),
     }
+}
+
+/// git's advisory channel, which is NOT a diagnostic about the read.
+///
+/// MEASURED, and it cost a shipped test to find: a pinned `merge-base --is-ancestor` writes seven
+/// `hint:` lines about `<GIT_DIR>/info/grafts` on this box -- on the SUCCESSFUL answer and on the
+/// negative one alike (`rev-parse` writes none, so it is the commit-graph walk that loads them).
+/// Under a literal "any stderr means the read failed" rule, `merge-base`'s "no" became "could not
+/// tell" -- exactly the collapse R14 built `a_read_whose_answer_is_its_exit_code_tells_no_apart_from_could_not_tell`
+/// to prevent, arriving from the other direction.
+///
+/// `hint:` is git's documented advice prefix and the thing `advice.*` switches off, so it is the
+/// one prefix that is safe to discount. Everything else on stderr counts, which keeps the rule
+/// FAIL CLOSED: a failure that is not prefixed at all is still read as a failure.
+const ADVICE_PREFIX: &str = "hint:";
+
+fn said_anything_diagnostic(stderr: &[u8]) -> bool {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .map(str::trim)
+        .any(|line| !line.is_empty() && !line.starts_with(ADVICE_PREFIX))
 }
 
 /// What git says when the path is simply not in that tree: `path 'x' does not exist in 'REV'`.
@@ -959,8 +991,12 @@ pub(crate) fn read_pinned_bytes(
     arguments: &[&str],
     budget: Duration,
 ) -> PinnedRead {
-    let Some(filter_drivers) = pinned_filter_drivers(repository) else {
-        return PinnedRead::Unreadable(PinnedReadFailure::FilterInventoryUnreadable);
+    let filter_drivers = match pinned_filter_drivers(repository) {
+        Ok(drivers) => drivers,
+        // R47: the inventory names its OWN failure, carrying git's message where there is one.
+        // Before, this read proceeded with an empty filter set and the refusal that eventually
+        // arrived described the byte read instead of the hardening that was never established.
+        Err(failure) => return PinnedRead::Unreadable(failure),
     };
     let mut command = read_only_git_command(Path::new(GIT), &filter_drivers);
     repository.enter(&mut command);
@@ -1037,7 +1073,7 @@ pub(crate) fn write_pinned(
     stdin_bytes: Option<&[u8]>,
     budget: Duration,
 ) -> Option<String> {
-    let filter_drivers = pinned_filter_drivers(repository)?;
+    let filter_drivers = pinned_filter_drivers(repository).ok()?;
     let mut command = hardened_git_command(Path::new(GIT), &filter_drivers);
     if let Some(index) = index_file {
         command.env("GIT_INDEX_FILE", index);
@@ -1072,7 +1108,7 @@ pub(crate) fn write_pinned(
 /// The same data-only `config --file` read `repository_filter_drivers` performs, entered by
 /// descriptor rather than by `-C <path>`: a rename between the pin and this read would otherwise
 /// let a different repository decide what the hardening suppresses.
-fn pinned_filter_drivers(repository: &PinnedRepository) -> Option<Vec<String>> {
+fn pinned_filter_drivers(repository: &PinnedRepository) -> Result<Vec<String>, PinnedReadFailure> {
     let mut command = closed_git_command(Path::new(GIT));
     repository.enter(&mut command);
     command
@@ -1085,21 +1121,39 @@ fn pinned_filter_drivers(repository: &PinnedRepository) -> Option<Vec<String>> {
         .arg("--name-only")
         .arg("--null")
         .arg("--list");
-    let Bounded::Finished { success, stdout } = run_git_bounded(command, READ_BUDGET) else {
-        return None;
-    };
-    if !success {
-        // No repository-local configuration is not a failure: it is an empty inventory.
-        return repository.still_pinned().then(Vec::new);
+    // R47: through the ONE classifier, with this site's witness. `config --list` over a
+    // configuration that names no entries exits 0 and says nothing (MEASURED on git 2.43.0 --
+    // tools/r47/logs/measure-config-site.log), so silence with a non-zero exit is the only shape
+    // that could ever be an empty inventory here, and every diagnostic is a failure.
+    //
+    // What this replaces: `if !success { return still_pinned().then(Vec::new) }` -- an unreadable,
+    // missing or malformed configuration became an EMPTY filter-driver inventory, and that
+    // inventory is what decides which drivers the hardening suppresses. The read then proceeded
+    // into the repository with the hardening switched off (opus, R46 report; R47).
+    match classify_pinned_read(
+        run_git_bounded_raw(command, None, READ_BUDGET),
+        repository.still_pinned(),
+        AbsenceWitness::Silence,
+    ) {
+        // The shared parser, not a second one: this inventory used to recognize only `.smudge` and
+        // `.clean`, so a driver declared with `filter.<name>.process` alone was never discovered
+        // and therefore never neutralized -- reopening the repository-supplied execution boundary
+        // the hardened command exists to close (gpt1). One parser, one definition of a driver.
+        PinnedRead::Bytes(stdout) => match String::from_utf8(stdout) {
+            Ok(stdout) => Ok(filter_drivers_from_config_output(&stdout)),
+            // Unchanged: an inventory that is not text is not an inventory.
+            Err(_) => Err(PinnedReadFailure::FilterInventoryUnreadable),
+        },
+        // Silence with a non-zero exit: git found nothing to list and said nothing about it.
+        PinnedRead::NotFound => Ok(Vec::new()),
+        // git said WHY, so the Receipt can too.
+        PinnedRead::Unreadable(PinnedReadFailure::ReadRefused { message }) => {
+            Err(PinnedReadFailure::FilterInventoryRefused { message })
+        }
+        // A pin broken under the read, a child that could not start, a signal, a timeout: the
+        // inventory was not established and there is no message to carry.
+        PinnedRead::Unreadable(_) => Err(PinnedReadFailure::FilterInventoryUnreadable),
     }
-    if !repository.still_pinned() {
-        return None;
-    }
-    // The shared parser, not a second one: this inventory used to recognize only `.smudge` and
-    // `.clean`, so a driver declared with `filter.<name>.process` alone was never discovered and
-    // therefore never neutralized -- reopening the repository-supplied execution boundary the
-    // hardened command exists to close (gpt1). One parser, one definition of what a driver is.
-    Some(filter_drivers_from_config_output(&stdout))
 }
 
 /// Who Beacon says wrote a commit, and when.
@@ -1261,6 +1315,18 @@ enum BoundedRaw {
     },
     TimedOut,
     Failed,
+}
+
+impl BoundedRaw {
+    /// The child's exit code, for the ONE site whose answer IS the code
+    /// (`merge-base --is-ancestor`). Reading it is not classifying on it: the classifier still
+    /// decides whether the code is an answer at all, and this only carries it through.
+    fn exit_code(&self) -> Option<i32> {
+        match self {
+            Self::Finished { code, .. } => *code,
+            Self::TimedOut | Self::Failed => None,
+        }
+    }
 }
 
 fn run_git_bounded_inner(
@@ -1650,6 +1716,49 @@ mod r46_read_classification {
         );
     }
 
+    /// R47, measured the hard way: git's advisory channel is not a diagnostic about the read.
+    ///
+    /// A pinned `merge-base --is-ancestor` writes seven `hint:` lines about `<GIT_DIR>/info/grafts`
+    /// on this box, on the successful answer and the negative one alike. Reading "any stderr" as a
+    /// failure turned its legitimate "no" into "could not tell" -- R14's collapse, from the other
+    /// side. Only `hint:` is discounted; anything else keeps the rule fail-closed.
+    #[test]
+    fn git_advice_is_not_a_diagnostic_but_everything_else_is() {
+        let hint = b"hint: Support for <GIT_DIR>/info/grafts is deprecated\nhint: \nhint: Turn this message off by running\n";
+        assert_eq!(
+            classify_pinned_read(
+                BoundedRaw::Finished {
+                    code: Some(1),
+                    stdout: Vec::new(),
+                    stderr: hint.to_vec(),
+                },
+                true,
+                AbsenceWitness::Silence,
+            ),
+            PinnedRead::NotFound,
+            "advice about a deprecated feature was read as a failure of the read"
+        );
+
+        let mut warned =
+            b"warning: unable to access '/proc/self/fd/100/config': Permission denied\n".to_vec();
+        warned.extend_from_slice(hint);
+        assert!(
+            matches!(
+                classify_pinned_read(
+                    BoundedRaw::Finished {
+                        code: Some(128),
+                        stdout: Vec::new(),
+                        stderr: warned,
+                    },
+                    true,
+                    AbsenceWitness::Silence,
+                ),
+                PinnedRead::Unreadable(PinnedReadFailure::ReadRefused { .. })
+            ),
+            "a diagnostic buried among advice was discounted with it"
+        );
+    }
+
     /// Output plus a non-zero exit is never an absence at EITHER site.
     #[test]
     fn output_defeats_both_witnesses() {
@@ -1688,9 +1797,9 @@ mod tests {
 
     use super::{
         Bounded, CLOSED_GIT_ENVIRONMENT_KEYS, CleanupOutcome, GIT, KeepReason, PINNED_GIT_DIR_FD,
-        PinnedRead, PinnedRepository, READ_BUDGET, Worktree, closed_git_command,
-        configure_closed_git_environment, read_only_git_command, read_pinned, read_pinned_bytes,
-        read_pinned_exit, run_git_bounded, status_holds,
+        PinnedRead, PinnedReadFailure, PinnedRepository, READ_BUDGET, Worktree, closed_git_command,
+        configure_closed_git_environment, pinned_filter_drivers, read_only_git_command,
+        read_pinned, read_pinned_bytes, read_pinned_exit, run_git_bounded, status_holds,
     };
     use std::process::Command;
 
@@ -2266,6 +2375,43 @@ mod tests {
             read_pinned_bytes(&pinned, &["cat-file", "blob", object.as_str()], READ_BUDGET),
             PinnedRead::Bytes(b"three\n".to_vec()),
             "the pre-image read through a pin placed on its own descriptor did not answer"
+        );
+    }
+
+    /// A repository with one commit whose `.git/config` this test can break.
+    fn pinned_one_commit(label: &str) -> (TempDir, PinnedRepository) {
+        let (root, _first, _second, _third) = three_commits(label);
+        let path = fs::canonicalize(&root.path).unwrap();
+        let pinned = PinnedRepository::open(&path).expect("a repository pins");
+        (root, pinned)
+    }
+
+    /// R47: an inventory git REFUSED is a failure, never "this repository configures no drivers".
+    ///
+    /// The inventory decides which filter drivers the hardening suppresses. Returning an empty set
+    /// for a configuration that could not be read does not lose a diagnostic -- it switches the
+    /// hardening off and then runs the child, which is the security half of this lane.
+    #[test]
+    fn an_inventory_git_refused_is_never_an_empty_filter_set() {
+        let (root, pinned) = pinned_one_commit("inventory-refused");
+        let configuration = root.path.join(".git").join("config");
+        let restore = fs::metadata(&configuration).unwrap().permissions();
+        fs::set_permissions(&configuration, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let answer = pinned_filter_drivers(&pinned);
+
+        fs::set_permissions(&configuration, restore).unwrap();
+        assert_ne!(
+            answer,
+            Ok(Vec::new()),
+            "git refused the inventory and the read proceeded with the hardening switched off"
+        );
+        let Err(PinnedReadFailure::FilterInventoryRefused { message }) = answer else {
+            panic!("the inventory failure does not name itself: {answer:?}");
+        };
+        assert!(
+            message.contains("Permission denied"),
+            "the refusal does not carry what git said: {message}"
         );
     }
 }
