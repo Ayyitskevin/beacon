@@ -103,8 +103,8 @@ pub use candidate::{
 pub use dispatch::DispatchFailpoints;
 pub use dispatch::{
     DispatchActor, DispatchError, DispatchOutcome, DispatchReceipt, DispatchService, GitStep,
-    GitStepName, GitStepResult, MutationEffect, MutationRecord, NotVerified, PauseService,
-    RepositoryEffect, SourceIdentity, SuppliedContent, UnresolvedRuns,
+    GitStepName, GitStepResult, MutationEffect, MutationRecord, NotVerified, ObservedPreImage,
+    PauseService, RepositoryEffect, SourceIdentity, SuppliedContent, UnresolvedRuns,
 };
 pub use evaluation::{
     ArtifactSubject, Conflicts, Evaluation, EvaluationDigest, EvaluationDraft, EvaluationError,
