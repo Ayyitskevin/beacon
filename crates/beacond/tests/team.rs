@@ -2,9 +2,11 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::PathBuf;
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 
+#[cfg(debug_assertions)]
+use beacond::set_after_team_enumeration_hook;
 use beacond::{
     AutonomyProfile, BeaconCapability, LocalModelActivationService, LocalModelEndpoint,
     OperatorAccountService, OperatorSessionPhase, ProjectCharterDraft, ProjectDraft,
@@ -759,4 +761,115 @@ fn startup_refuses_an_unaccounted_team_and_names_the_row() {
             "the named fault is not reachable through Debug: {refusal:?}"
         );
     }
+}
+
+/// R45.5: every startup pass's enumeration and Totals read belong to one snapshot. A public write
+/// committed between those two Team reads leaves an honest before-state and honest after-state;
+/// startup must not synthesize a mismatch from one half of each.
+#[cfg(debug_assertions)]
+#[test]
+fn sol1_team_enumeration_and_totals_share_one_transaction() {
+    struct ClearHook;
+    impl Drop for ClearHook {
+        fn drop(&mut self) {
+            set_after_team_enumeration_hook(None);
+        }
+    }
+
+    let store = TestStore::new("sol1-totals-snapshot");
+    let accounts = enrolled_accounts(&store);
+    let project_id = create_project(&accounts, store.workspace_id);
+    let resident_ids = admit_residents(&accounts, store.workspace_id);
+    let lifecycle = ResidentLifecycleService::new(Arc::clone(&accounts), store.workspace_id);
+    for resident_id in &resident_ids {
+        lifecycle.activate(*resident_id, None).unwrap();
+    }
+    let (_models, activation_id) = activate_model(&store, &accounts);
+    let configurations =
+        ResidentConfigurationService::new(Arc::clone(&accounts), store.workspace_id);
+    let members: Vec<_> = resident_ids
+        .iter()
+        .map(|resident_id| {
+            let configuration = configurations
+                .configure(
+                    *resident_id,
+                    None,
+                    activation_id,
+                    vec![BeaconCapability::WorkCreateMission],
+                )
+                .unwrap();
+            TeamMemberDraft {
+                resident_id: *resident_id,
+                expected_configuration_id: configuration.id,
+            }
+        })
+        .collect();
+    let teams = TeamService::new(Arc::clone(&accounts), store.workspace_id);
+    teams
+        .form(TeamDraft {
+            project_id,
+            name: "Alpha Team".to_owned(),
+            members: members.clone(),
+        })
+        .unwrap();
+
+    let state = Arc::new((Mutex::new((false, false)), Condvar::new()));
+    let target = store.path.clone();
+    let hook_state = Arc::clone(&state);
+    let _clear_hook = ClearHook;
+    set_after_team_enumeration_hook(Some(Arc::new(move |path| {
+        if path != target {
+            return;
+        }
+        let (lock, changed) = &*hook_state;
+        let mut state = lock.lock().unwrap();
+        state.0 = true;
+        changed.notify_all();
+        while !state.1 {
+            state = changed.wait(state).unwrap();
+        }
+    })));
+
+    let store_path = store.path.clone();
+    let bootstrap = thread::spawn(move || {
+        Supervisor::bootstrap(StartupConfig {
+            store_path,
+            initial_workspace_name: "Ignored".to_owned(),
+        })
+    });
+    let (lock, changed) = &*state;
+    let mut guard = lock.lock().unwrap();
+    while !guard.0 {
+        let (next, timeout) = changed
+            .wait_timeout(guard, std::time::Duration::from_secs(10))
+            .unwrap();
+        assert!(
+            !timeout.timed_out(),
+            "R45.5.TEAM_ENUMERATION_REACHED: startup never reached the Team barrier"
+        );
+        guard = next;
+    }
+    drop(guard);
+
+    let concurrent_write = teams.form(TeamDraft {
+        project_id,
+        name: "Beta Team".to_owned(),
+        members,
+    });
+    let mut guard = lock.lock().unwrap();
+    guard.1 = true;
+    changed.notify_all();
+    drop(guard);
+    concurrent_write.expect("R45.5.WAL_WRITER_COMMITS: the honest concurrent Team must commit");
+
+    bootstrap
+        .join()
+        .unwrap()
+        .expect("R45.5.ONE_READ_SNAPSHOT: startup mixed Team enumeration and Totals snapshots");
+    set_after_team_enumeration_hook(None);
+    assert_eq!(
+        teams.list(project_id).unwrap().len(),
+        2,
+        "R45.5.HONEST_AFTER_STATE: both committed Teams remain readable"
+    );
 }

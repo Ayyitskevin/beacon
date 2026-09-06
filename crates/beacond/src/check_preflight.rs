@@ -777,18 +777,11 @@ fn resolve_within(root: &Path, declared: &str) -> Containment {
     }
 }
 
-/// Startup reconciliation: a Run whose lease expired without a terminal Receipt
-/// is `unconfirmed`, never absent. Lease expiry is what proves that state.
-/// Reconcile every Run against its Receipts and Events.
-///
-/// Returns nothing. It used to return the number of leases it expired, which no caller read, and
-/// that dead `u64` was the pass's only fallible conversion -- forcing a fault arm that would have
-/// had to be named for a count rather than for anything a reader could act on.
 /// The ORDER BY `verify_run_state` enumerates under. ONE definition, interpolated into the pass's
 /// own query and into `enumerate_runs` below, so a mutant on the ordering moves both (R44.6).
 const ENUMERATION_ORDER: &str = "ORDER BY runs.workspace_id, runs.id";
 
-/// The `(workspace_id, id)` keys `verify_run_state` enumerates, in its order.
+/// The `(workspace_id, id)` keys Run startup processing enumerates, in its order.
 pub fn enumerate_runs(connection: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
     let mut statement = connection.prepare(&format!(
         "SELECT runs.workspace_id, runs.id FROM runs {ENUMERATION_ORDER}"
@@ -801,7 +794,10 @@ pub fn enumerate_runs(connection: &Connection) -> rusqlite::Result<Vec<(String, 
     Ok(rows)
 }
 
-pub(crate) fn verify_run_state(connection: &Connection) -> Result<(), RunStateFault> {
+/// Reconcile expired Run leases before the read-only startup verification snapshot begins. A Run
+/// whose lease expired without a terminal Receipt is `unconfirmed`, never absent; lease expiry is
+/// what proves that state.
+pub(crate) fn reconcile_expired_run_leases(connection: &Connection) -> Result<(), RunStateFault> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| RunStateFault::Clock)?
@@ -811,18 +807,7 @@ pub(crate) fn verify_run_state(connection: &Connection) -> Result<(), RunStateFa
     // Identity is part of deciding whether a stored Run is representable at all. Establish it
     // before lease reconciliation so a row that startup must refuse cannot be changed on the way
     // to that refusal (R45.RUN.IDENTITY_BEFORE_LEASE_STATE).
-    let identities = {
-        let mut statement = connection
-            .prepare("SELECT workspace_id, id FROM runs ORDER BY workspace_id, id")
-            .map_err(RunStateFault::Store)?;
-        statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(RunStateFault::Store)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(RunStateFault::Store)?
-    };
+    let identities = enumerate_runs(connection).map_err(RunStateFault::Store)?;
     for (workspace_id, run_id) in identities {
         let identity = || RunStateFault::Identity {
             workspace_id: workspace_id.clone(),
@@ -842,6 +827,14 @@ pub(crate) fn verify_run_state(connection: &Connection) -> Result<(), RunStateFa
         )
         .map_err(RunStateFault::Store)?;
 
+    Ok(())
+}
+
+/// Re-prove every Run against its Receipts and Events without changing the store. Returns nothing:
+/// it used to return the number of leases it expired, which no caller read, and that dead `u64`
+/// was the pass's only fallible conversion -- forcing a fault arm that would have had to be named
+/// for a count rather than for anything a reader could act on.
+pub(crate) fn verify_run_state(connection: &Connection) -> Result<(), RunStateFault> {
     // One reconciliation owns kind, state, Receipt, and terminal-event
     // cardinality so compound relabelling cannot move a Run between separate
     // validators and disappear from both.
