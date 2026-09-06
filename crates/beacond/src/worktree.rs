@@ -1174,7 +1174,7 @@ fn run_git_bounded_raw(
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::CommandExt;
     use std::path::{Path, PathBuf};
@@ -1185,8 +1185,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        Bounded, CLOSED_GIT_ENVIRONMENT_KEYS, CleanupOutcome, KeepReason, PinnedRepository,
-        READ_BUDGET, Worktree, closed_git_command, configure_closed_git_environment, read_pinned,
+        Bounded, CLOSED_GIT_ENVIRONMENT_KEYS, CleanupOutcome, GIT, KeepReason, PINNED_GIT_DIR_FD,
+        PinnedRepository, READ_BUDGET, Worktree, closed_git_command,
+        configure_closed_git_environment, read_only_git_command, read_pinned, read_pinned_bytes,
         read_pinned_exit, run_git_bounded, status_holds,
     };
     use std::process::Command;
@@ -1666,5 +1667,99 @@ mod tests {
         assert_eq!(moved.identity(), pinned.identity());
 
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Hold every descriptor through `last`, so the next open in this process gets `last + 1`.
+    ///
+    /// The state grok measured under a concurrent build: a descriptor table grown by 32 test
+    /// threads, live repositories and pipes until `openat` reaches the number the pin is placed
+    /// at. Forced here rather than waited for, because a regression test for a flake may not be
+    /// one itself.
+    fn hold_descriptors_through(last: RawFd) -> Vec<fs::File> {
+        let mut held = Vec::new();
+        loop {
+            let file = fs::File::open("/dev/null").expect("/dev/null opens");
+            let number = file.as_raw_fd();
+            if number > last {
+                break;
+            }
+            held.push(file);
+            if number == last {
+                break;
+            }
+        }
+        held
+    }
+
+    #[test]
+    fn a_git_directory_that_opens_on_the_placement_descriptor_still_reaches_the_child() {
+        // grok's R41 root cause (R49). `PINNED_GIT_DIR_FD` is a fixed destination because
+        // `GIT_DIR` is baked before the fork, and `PinnedRepository::open` takes `.git` with
+        // `O_CLOEXEC`. When the descriptor table has grown that far, `openat(.git)` returns that
+        // very number, and `dup2(n, n)` is a successful NO-OP by POSIX -- it does not clear
+        // close-on-exec. The exec then closes the pin, the child's `/proc/self/fd/100` is gone,
+        // and Git reports the Git directory it was pointed at as missing. Placement "succeeds"
+        // and returns the destination, so nothing upstream can see it; the loss arrives four
+        // gates later as a content disagreement about a repository that was never read.
+        let (root, _first, _second, head) = three_commits("pin-on-placement-descriptor");
+        let repository = fs::canonicalize(&root.path).unwrap();
+
+        // Two descriptors below the placement number are left free, which is what
+        // `PinnedRepository::open` consumes in order: the root, then `.git` through it. Its
+        // object-store check opens above them and closes again before the second. A sibling test
+        // thread can take either slot first -- that is a setup failure, never a pass, so it is
+        // retried and its exhaustion is a panic rather than a skip.
+        let mut placed = None;
+        for _ in 0..16 {
+            let held = hold_descriptors_through(PINNED_GIT_DIR_FD - 2);
+            let pinned = PinnedRepository::open(&repository).expect("a repository pins");
+            if pinned.git_directory.as_raw_fd() == PINNED_GIT_DIR_FD {
+                placed = Some((pinned, held));
+                break;
+            }
+        }
+        let Some((pinned, _held)) = placed else {
+            panic!("the Git directory never opened on descriptor {PINNED_GIT_DIR_FD}");
+        };
+        // The other half of the collision. Without close-on-exec on the source there is nothing
+        // for the no-op to fail to clear, and this test would pass against the defect.
+        let flags = unsafe { libc::fcntl(PINNED_GIT_DIR_FD, libc::F_GETFD) };
+        assert!(
+            flags >= 0 && flags & libc::FD_CLOEXEC != 0,
+            "the pinned Git directory is not close-on-exec, so this no longer reproduces R49"
+        );
+
+        // The mechanism, in Git's own words. The bounded runner sends stderr to `Stdio::null`, so
+        // the message is read here rather than out of a refusal: at the level of the Receipt this
+        // defect is indistinguishable from a Candidate that declared the wrong bytes.
+        let mut command = read_only_git_command(Path::new(GIT), &[]);
+        pinned.enter(&mut command);
+        let output = command
+            .arg("rev-parse")
+            .arg("--is-inside-work-tree")
+            .stdin(Stdio::null())
+            .output()
+            .expect("git starts");
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            !stderr.contains(&format!(
+                "not a git repository: '/proc/self/fd/{PINNED_GIT_DIR_FD}'"
+            )),
+            "the exec closed the pinned Git directory: {stderr}"
+        );
+        assert!(
+            output.status.success(),
+            "the child entered through the pin could not start: {stderr}"
+        );
+
+        // ...and the read the dispatch pre-image gate makes through that pin answers, rather than
+        // arriving as an absent blob the gate can only read as a disagreement.
+        let object = format!("{head}:a.txt");
+        assert_eq!(
+            read_pinned_bytes(&pinned, &["cat-file", "blob", object.as_str()], READ_BUDGET)
+                .as_deref(),
+            Some(b"three\n".as_slice()),
+            "the pre-image read through a pin placed on its own descriptor did not answer"
+        );
     }
 }
