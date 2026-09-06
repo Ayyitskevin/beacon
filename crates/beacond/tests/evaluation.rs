@@ -751,7 +751,7 @@ fn a_recorded_evaluation_is_immutable_and_survives_startup_verification() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .expect("startup verifies the Evaluation");
-    assert_eq!(report.diagnostics.schema_version, 33);
+    assert_eq!(report.diagnostics.schema_version, 34);
     assert_eq!(
         evaluations.get(&evaluation.digest().value).unwrap(),
         evaluation
@@ -1493,6 +1493,71 @@ fn astra_migration_0033_copies_populated_parent_and_child_with_constraints() {
         row_snapshot(&connection, "PRAGMA foreign_key_check").is_empty(),
         "R46.MIGRATION.FK_AFTER"
     );
+    let receipts_ddl_before: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'receipts'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let membership_start = receipts_ddl_before
+        .find(" CHECK (outcome IN (")
+        .expect("0033 still has the SQL membership vocabulary");
+    let receipt_json_start = receipts_ddl_before
+        .find("\n    receipt_json TEXT")
+        .expect("receipt_json follows the outcome membership CHECK");
+    let receipts_ddl_without_membership = format!(
+        "{},{}",
+        &receipts_ddl_before[..membership_start],
+        &receipts_ddl_before[receipt_json_start..]
+    );
+    let migration_0034 = include_str!("../migrations/0034_receipt_outcome_typed_owner.sql");
+    connection.execute_batch("BEGIN IMMEDIATE;").unwrap();
+    connection
+        .execute_batch(migration_0034)
+        .expect("R48.MIGRATION.0034_EXECUTES");
+    connection.execute_batch("COMMIT;").unwrap();
+    let receipts_ddl_after: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'receipts'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        receipts_ddl_after, receipts_ddl_without_membership,
+        "R48.MIGRATION.ONLY_OUTCOME_MEMBERSHIP_CHECK_MOVED"
+    );
+    assert_eq!(
+        row_snapshot(&connection, receipt_query),
+        parent_before,
+        "R48.MIGRATION.ALL_SIX_PARENT_COLUMNS_EXACT"
+    );
+    assert_eq!(
+        row_snapshot(&connection, child_query),
+        child_before,
+        "R48.MIGRATION.ALL_THREE_CHILD_COLUMNS_EXACT"
+    );
+    assert_eq!(
+        row_snapshot(&connection, objects_query),
+        objects_before,
+        "R48.MIGRATION.ALL_INDEX_TRIGGER_NAMES_AND_SQL_EXACT"
+    );
+    assert!(
+        row_snapshot(&connection, "PRAGMA foreign_key_check").is_empty(),
+        "R48.MIGRATION.FK_AFTER"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT version FROM schema_meta WHERE singleton = 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        34,
+        "R48.MIGRATION.VERSION_34"
+    );
     for (sql, required) in [
         (
             "UPDATE receipts SET recorded_at_ms=recorded_at_ms",
@@ -1526,6 +1591,28 @@ fn astra_migration_0033_copies_populated_parent_and_child_with_constraints() {
             &connection,
             "SELECT type,name FROM sqlite_master WHERE tbl_name IN ('receipts','evaluation_cited_runs') AND type IN ('index','trigger') ORDER BY type,name"
         )
+    );
+    println!(
+        "R48.MIGRATION parent_rows=2 columns=6 child_rows=2 columns=3 schema_objects={}",
+        objects_before.len()
+    );
+}
+
+#[test]
+fn r48_receipt_outcomes_are_not_a_sql_membership_vocabulary() {
+    let fixture = admitted_mission("receipt-outcome-owner");
+    let connection = fixture.store.connect();
+    let receipts_sql: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'receipts'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    assert!(
+        !receipts_sql.contains("CHECK (outcome IN ("),
+        "R48.OUTCOME_VOCABULARY_TYPED_NOT_SQL: {receipts_sql}"
     );
 }
 
@@ -3198,10 +3285,10 @@ fn migration_0028_preserves_preexisting_proposal_evaluation_bytes_and_chain() {
              DROP TABLE evaluation_cited_runs;
              DROP TABLE evaluation_findings;
              DROP TABLE evaluations;
-             -- R46's 0033 rebuilds `receipts` to widen its outcome CHECK, and rewrites
-             -- `evaluation_cited_runs` with it (the FK follows a rename). This fixture rolls the
-             -- store back to 27, so it has to roll those back too -- before R46 they were
-             -- untouched since 0022 and this snapshot did not need to name them.
+             -- R46's 0033 adds the last SQL outcome and R48's 0034 removes that membership CHECK;
+             -- both rebuild `receipts` and rewrite `evaluation_cited_runs` with it (the FK follows
+             -- a rename). This fixture rolls the store back to 27, so it has to roll both back too
+             -- -- before R46 they were untouched since 0022 and this snapshot did not name them.
              DROP TRIGGER receipts_no_update;
              DROP TRIGGER receipts_no_delete;
              ALTER TABLE receipts RENAME TO receipts_r46;",
@@ -3277,7 +3364,7 @@ fn migration_0028_preserves_preexisting_proposal_evaluation_bytes_and_chain() {
              SELECT workspace_id, subject_digest, evaluation_digest,
                     supersedes_evaluation_digest
              FROM supersessions_snapshot;
-             UPDATE schema_meta SET version = 27 WHERE singleton = 1 AND version = 33;
+             UPDATE schema_meta SET version = 27 WHERE singleton = 1 AND version = 34;
              COMMIT;",
         )
         .unwrap();

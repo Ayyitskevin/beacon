@@ -1751,10 +1751,11 @@ fn the_charter_check_reads_the_policys_charter_column_not_its_revision_number() 
 /// 0032 for real rather than a test re-running its SQL by hand.
 /// R46: `receipts` back to its 0022 shape.
 ///
-/// 0033 rebuilds it to widen the outcome CHECK, and rewrites `evaluation_cited_runs` with it (a
-/// foreign key follows a rename). Any fixture that rolls a store below 33 has to unwind that too --
-/// before R46 `receipts` had been untouched since 0022, so no rollback named it. The CREATE and its
-/// two triggers only: 0022's own carry-over INSERT from `receipts_v21` belongs to that rebuild.
+/// 0033 added the final SQL outcome variant and 0034 removed that membership CHECK; both rebuild
+/// `receipts` and rewrite `evaluation_cited_runs` with it (a foreign key follows a rename). Any
+/// fixture that rolls a store below 33 has to unwind both -- before R46 `receipts` had been untouched
+/// since 0022, so no rollback named it. The CREATE and its two triggers only: 0022's own carry-over
+/// INSERT from `receipts_v21` belongs to that rebuild.
 fn restore_pre_0033_receipts(connection: &Connection) {
     let source = include_str!("../migrations/0022_candidates.sql");
     let block = &source[source
@@ -1898,7 +1899,7 @@ fn a_store_with_classifications_crosses_0032_and_keeps_them() {
     })
     .expect("a store written before 0032 migrates forward");
     assert_eq!(report.diagnostics.status, DiagnosticStatus::Ready);
-    assert_eq!(report.diagnostics.schema_version, 33);
+    assert_eq!(report.diagnostics.schema_version, 34);
 
     let connection = stored.connection();
     let carried: Vec<u8> = connection
