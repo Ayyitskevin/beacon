@@ -628,123 +628,135 @@ fn concurrent_accepted_formations_are_distinct_immutable_teams() {
 /// refusal names WHICH Team.
 #[test]
 fn startup_refuses_an_unaccounted_team_and_names_the_row() {
-    let store = TestStore::new("r28t2-team-startup");
-    let accounts = enrolled_accounts(&store);
-    let project_id = create_project(&accounts, store.workspace_id);
-    let resident_ids = admit_residents(&accounts, store.workspace_id);
-    let lifecycle = ResidentLifecycleService::new(Arc::clone(&accounts), store.workspace_id);
-    for resident_id in &resident_ids {
-        lifecycle.activate(*resident_id, None).unwrap();
+    // R44: BOTH ENDS. The plant is the failing row, so its id places the failure: all `f`
+    // sorts it LAST and all `0` sorts it FIRST -- the extremes of a UUID's text, so the
+    // placement holds against any id the fixture mints. Tampering one end only made
+    // "names the failing row" and "names that end" the same assertion.
+    for (end, fill) in [("last", "f"), ("first", "0")] {
+        let store = TestStore::new(&format!("r28t2-team-startup-{end}"));
+        let accounts = enrolled_accounts(&store);
+        let project_id = create_project(&accounts, store.workspace_id);
+        let resident_ids = admit_residents(&accounts, store.workspace_id);
+        let lifecycle = ResidentLifecycleService::new(Arc::clone(&accounts), store.workspace_id);
+        for resident_id in &resident_ids {
+            lifecycle.activate(*resident_id, None).unwrap();
+        }
+
+        let (_models, activation_id) = activate_model(&store, &accounts);
+
+        let configurations =
+            ResidentConfigurationService::new(Arc::clone(&accounts), store.workspace_id);
+        let members = resident_ids
+            .iter()
+            .map(|resident_id| {
+                let configuration = configurations
+                    .configure(
+                        *resident_id,
+                        None,
+                        activation_id,
+                        vec![BeaconCapability::WorkCreateMission],
+                    )
+                    .unwrap();
+                TeamMemberDraft {
+                    resident_id: *resident_id,
+                    expected_configuration_id: configuration.id,
+                }
+            })
+            .collect();
+
+        let teams = TeamService::new(Arc::clone(&accounts), store.workspace_id);
+        let formed = teams
+            .form(TeamDraft {
+                project_id,
+                name: "Alpha Team".to_owned(),
+                members,
+            })
+            .expect("the fixture forms a Team");
+
+        // R39.3 (kimi's HOLD): TWO rows, and the tampered one sorts LAST under this pass's own
+        // `ORDER BY workspace_id, id`. With a one-Team fixture the honest row and the failing row are
+        // the same row, so a mutant naming `rows[0]` is indistinguishable from naming the failing row
+        // -- which is exactly what kimi measured surviving. The planted id is all `f`, so it sorts
+        // last by construction, and the honest Team stays in the table as row 0.
+        let connection = Connection::open(&store.path).unwrap();
+        let columns: Vec<String> = connection
+            .prepare("SELECT name FROM pragma_table_info('teams')")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let planted = format!(
+            "{fill}{fill}{fill}{fill}{fill}{fill}{fill}{fill}-\
+         {fill}{fill}{fill}{fill}-{fill}{fill}{fill}{fill}-{fill}{fill}{fill}{fill}-\
+         {fill}{fill}{fill}{fill}{fill}{fill}{fill}{fill}{fill}{fill}{fill}{fill}"
+        )
+        .replace([' ', '\n'], "");
+        let names = columns.join(", ");
+        let values = columns
+            .iter()
+            .map(|column| match column.as_str() {
+                "id" => "?1".to_owned(),
+                "name" => "'Planted Team'".to_owned(),
+                other => other.to_owned(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let planted_rows = connection
+            .execute(
+                &format!("INSERT INTO teams ({names}) SELECT {values} FROM teams WHERE id = ?2"),
+                rusqlite::params![planted, formed.id.to_string()],
+            )
+            .expect("the planted row inserts");
+        assert_eq!(
+            planted_rows, 1,
+            "the plant inserted the wrong number of rows"
+        );
+        let honest: String = connection
+            .query_row(
+                "SELECT id FROM teams ORDER BY workspace_id, id LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if end == "last" {
+            assert_ne!(honest, planted, "{end}: the plant must not sort first");
+        } else {
+            assert_eq!(honest, planted, "{end}: the plant must sort first");
+        }
+        drop(connection);
+
+        let refusal = Supervisor::bootstrap(StartupConfig {
+            store_path: store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        })
+        .expect_err("a store holding a Team with no formation Event reopened Ready");
+        assert!(
+            matches!(
+                &refusal,
+                beacond::SupervisorError::TeamStateMismatch { team_id, .. }
+                    if team_id.to_string() == planted
+            ) || matches!(&refusal, beacond::SupervisorError::TeamTotalsMismatch(_)),
+            "refused for the wrong reason, or naming the wrong row: {refusal:?}"
+        );
+
+        // R28.4: the line is the key plus the fault's NAME (kimi's P3-2 form).
+        let line = refusal.to_string();
+        let named = line.rsplit(": ").next().unwrap().to_owned();
+        // kimi's P2: PINNED, not just shaped. A name-shaped tail is satisfied by ANY arm,
+        // so without this a pass carrying a fixed-but-wrong fault survives -- the M9 class
+        // measured surviving on the pass-7 bar.
+        assert_eq!(
+            named, "InvalidStore",
+            "the refusal carries the wrong fault: {line}"
+        );
+        assert!(
+            !named.contains(' ') && !named.contains('{'),
+            "the tail of the line is a rendering, not a name: {line}"
+        );
+        assert!(
+            format!("{refusal:?}").contains(&named),
+            "the named fault is not reachable through Debug: {refusal:?}"
+        );
     }
-
-    let (_models, activation_id) = activate_model(&store, &accounts);
-
-    let configurations =
-        ResidentConfigurationService::new(Arc::clone(&accounts), store.workspace_id);
-    let members = resident_ids
-        .iter()
-        .map(|resident_id| {
-            let configuration = configurations
-                .configure(
-                    *resident_id,
-                    None,
-                    activation_id,
-                    vec![BeaconCapability::WorkCreateMission],
-                )
-                .unwrap();
-            TeamMemberDraft {
-                resident_id: *resident_id,
-                expected_configuration_id: configuration.id,
-            }
-        })
-        .collect();
-
-    let teams = TeamService::new(Arc::clone(&accounts), store.workspace_id);
-    let formed = teams
-        .form(TeamDraft {
-            project_id,
-            name: "Alpha Team".to_owned(),
-            members,
-        })
-        .expect("the fixture forms a Team");
-
-    // R39.3 (kimi's HOLD): TWO rows, and the tampered one sorts LAST under this pass's own
-    // `ORDER BY workspace_id, id`. With a one-Team fixture the honest row and the failing row are
-    // the same row, so a mutant naming `rows[0]` is indistinguishable from naming the failing row
-    // -- which is exactly what kimi measured surviving. The planted id is all `f`, so it sorts
-    // last by construction, and the honest Team stays in the table as row 0.
-    let connection = Connection::open(&store.path).unwrap();
-    let columns: Vec<String> = connection
-        .prepare("SELECT name FROM pragma_table_info('teams')")
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    let planted = "ffffffff-ffff-ffff-ffff-ffffffffffff".to_owned();
-    let names = columns.join(", ");
-    let values = columns
-        .iter()
-        .map(|column| match column.as_str() {
-            "id" => "?1".to_owned(),
-            "name" => "'Planted Team'".to_owned(),
-            other => other.to_owned(),
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    let planted_rows = connection
-        .execute(
-            &format!("INSERT INTO teams ({names}) SELECT {values} FROM teams WHERE id = ?2"),
-            rusqlite::params![planted, formed.id.to_string()],
-        )
-        .expect("the planted row inserts");
-    assert_eq!(
-        planted_rows, 1,
-        "the plant inserted the wrong number of rows"
-    );
-    let honest: String = connection
-        .query_row(
-            "SELECT id FROM teams ORDER BY workspace_id, id LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_ne!(
-        honest, planted,
-        "the planted row must not be the first row this pass enumerates"
-    );
-    drop(connection);
-
-    let refusal = Supervisor::bootstrap(StartupConfig {
-        store_path: store.path.clone(),
-        initial_workspace_name: "Ignored".to_owned(),
-    })
-    .expect_err("a store holding a Team with no formation Event reopened Ready");
-    assert!(
-        matches!(
-            &refusal,
-            beacond::SupervisorError::TeamStateMismatch { team_id, .. }
-                if team_id.to_string() == planted
-        ) || matches!(&refusal, beacond::SupervisorError::TeamTotalsMismatch(_)),
-        "refused for the wrong reason, or naming the wrong row: {refusal:?}"
-    );
-
-    // R28.4: the line is the key plus the fault's NAME (kimi's P3-2 form).
-    let line = refusal.to_string();
-    let named = line.rsplit(": ").next().unwrap().to_owned();
-    // kimi's P2: PINNED, not just shaped. A name-shaped tail is satisfied by ANY arm,
-    // so without this a pass carrying a fixed-but-wrong fault survives -- the M9 class
-    // measured surviving on the pass-7 bar.
-    assert_eq!(
-        named, "InvalidStore",
-        "the refusal carries the wrong fault: {line}"
-    );
-    assert!(
-        !named.contains(' ') && !named.contains('{'),
-        "the tail of the line is a rendering, not a name: {line}"
-    );
-    assert!(
-        format!("{refusal:?}").contains(&named),
-        "the named fault is not reachable through Debug: {refusal:?}"
-    );
 }
