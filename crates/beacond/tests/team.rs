@@ -712,13 +712,13 @@ fn startup_refuses_an_unaccounted_team_and_names_the_row() {
             planted_rows, 1,
             "the plant inserted the wrong number of rows"
         );
-        let honest: String = connection
-            .query_row(
-                "SELECT id FROM teams ORDER BY workspace_id, id LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+        // R44.6: CALL the pass's own enumeration rather than copying its query.
+        let honest: String = beacond::enumerate_teams(&connection)
+            .expect("the pass's enumeration reads")
+            .first()
+            .expect("the fixture formed a Team")
+            .1
+            .clone();
         if end == "last" {
             assert_ne!(honest, planted, "{end}: the plant must not sort first");
         } else {

@@ -323,11 +323,12 @@ fn restart_refuses_a_decision_whose_audit_event_is_missing() {
                 rusqlite::params![planted],
             )
             .expect("the planted Workspace inserts");
-        let first: String = connection
-            .query_row("SELECT id FROM workspaces ORDER BY id LIMIT 1", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
+        // R44.6: CALL the pass's own enumeration rather than copying its query.
+        let first: String = beacond::enumerate_starter_workspaces(&connection)
+            .expect("the pass's enumeration reads")
+            .first()
+            .expect("the store holds Workspaces")
+            .clone();
         // The failing row is the HONEST Workspace (a Workspace with no starter organization is
         // legitimate, so the plant can never be the failure). Placing the PLANT therefore places
         // the failure at the other end: all `0` puts the failure last, all `f` puts it first.
@@ -336,13 +337,11 @@ fn restart_refuses_a_decision_whose_audit_event_is_missing() {
         } else {
             assert_ne!(first, planted, "{end}: the plant must not sort first");
         }
-        let honest: String = connection
-            .query_row(
-                "SELECT id FROM workspaces WHERE id <> ?1 ORDER BY id LIMIT 1",
-                rusqlite::params![planted],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let honest: String = beacond::enumerate_starter_workspaces(&connection)
+            .expect("the pass's enumeration reads")
+            .into_iter()
+            .find(|id| *id != planted)
+            .expect("the honest Workspace is enumerated");
         let removed = connection
             .execute(
                 "DELETE FROM events WHERE kind = 'starter_organization.accepted'",

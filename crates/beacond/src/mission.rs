@@ -990,17 +990,24 @@ fn verify_mission_success_conditions(
     Ok(())
 }
 
-pub(crate) fn verify_mission_state(connection: &Connection) -> Result<(), MissionStateFault> {
-    let mut statement = connection
-        .prepare("SELECT workspace_id, id FROM missions ORDER BY workspace_id, id")
-        .map_err(MissionStateFault::Store)?;
-    let ids = statement
+/// The rows `verify_mission_state` enumerates, in the order it enumerates them.
+///
+/// EXTRACTED SO A BAR CAN CALL IT (R44.6): a placement assertion that COPIES this query agrees
+/// with itself, so flipping the pass's own `ORDER BY` leaves it decorative. One function, called
+/// by both, moves the pass and the bar's view of it together.
+pub fn enumerate_missions(connection: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut statement =
+        connection.prepare("SELECT workspace_id, id FROM missions ORDER BY workspace_id, id")?;
+    let rows = statement
         .query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(MissionStateFault::Store)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(MissionStateFault::Store)?;
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub(crate) fn verify_mission_state(connection: &Connection) -> Result<(), MissionStateFault> {
+    let ids = enumerate_missions(connection).map_err(MissionStateFault::Store)?;
     for (workspace_id, mission_id) in &ids {
         let identity = || MissionStateFault::Identity {
             workspace_id: workspace_id.clone(),

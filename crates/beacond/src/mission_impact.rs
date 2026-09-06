@@ -1379,21 +1379,29 @@ impl std::error::Error for ClassificationStateFault {
 /// Where it runs: `inspect_store`, with its siblings, which is AFTER the startup transaction has
 /// committed. It holds no write lock (PR #77 / FF-49 moved the expensive arithmetic out of that
 /// lock; this pass was never in it).
+/// The rows `verify_classification_state` enumerates, in the order it enumerates them.
+///
+/// EXTRACTED SO A BAR CAN CALL IT (R44.6): a placement assertion that COPIES this query agrees
+/// with itself, so flipping the pass's own `ORDER BY` leaves it decorative. One function, called
+/// by both, moves the pass and the bar's view of it together.
+pub fn enumerate_classifications(
+    connection: &Connection,
+) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut statement = connection.prepare(
+        "SELECT workspace_id, digest_value FROM mission_impact_classifications
+         ORDER BY workspace_id, digest_value",
+    )?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 pub(crate) fn verify_classification_state(
     connection: &Connection,
 ) -> Result<(), ClassificationStateFault> {
-    let mut statement = connection
-        .prepare(
-            "SELECT workspace_id, digest_value FROM mission_impact_classifications
-             ORDER BY workspace_id, digest_value",
-        )
-        .map_err(ClassificationStateFault::Store)?;
-    let rows: Vec<(String, String)> = statement
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-        .map_err(ClassificationStateFault::Store)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(ClassificationStateFault::Store)?;
-    drop(statement);
+    let rows: Vec<(String, String)> =
+        enumerate_classifications(connection).map_err(ClassificationStateFault::Store)?;
 
     for (workspace_id, digest_value) in &rows {
         // Not `Row { workspace_id: Uuid::nil(), .. }` (R39.2). A row whose Workspace id will not

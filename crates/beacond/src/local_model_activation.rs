@@ -766,6 +766,29 @@ pub(crate) fn verify_activation_event(
     Ok(())
 }
 
+/// The ORDER BY `verify_activation_state` enumerates under. ONE definition, interpolated into the pass's own
+/// query and into `enumerate_activation_decisions` below, so a mutant on the ordering moves both (R44.6).
+///
+/// This pass reads whole rows while a bar needs only the keys, so the two cannot be one function
+/// the way the digest-keyed passes' are. Sharing the ordering is what keeps a bar's placement
+/// assertion from agreeing with a copy the pass no longer follows.
+const ENUMERATION_ORDER: &str = "ORDER BY workspace_id, provider, endpoint, model_name, sequence";
+
+/// The keys `verify_activation_state` enumerates, in its order.
+pub fn enumerate_activation_decisions(
+    connection: &Connection,
+) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT workspace_id, id FROM local_model_activation_decisions {ENUMERATION_ORDER}"
+    ))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 pub(crate) fn verify_activation_state(
     connection: &Connection,
 ) -> Result<(), LocalModelActivationStateFault> {
@@ -795,13 +818,13 @@ pub(crate) fn verify_activation_state(
         });
     }
     let mut statement = connection
-        .prepare(
+        .prepare(&format!(
             "SELECT id, workspace_id, provider, endpoint, model_name, model_digest,
                 inspection_digest, provider_features_json, unrecognized_features_json,
                 approved_features_json, state, predecessor_id, decided_at_ms
          FROM local_model_activation_decisions
-         ORDER BY workspace_id, provider, endpoint, model_name, sequence",
-        )
+         {ENUMERATION_ORDER}"
+        ))
         .map_err(LocalModelActivationStateFault::Store)?;
     let mut rows = statement
         .query([])

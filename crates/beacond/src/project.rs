@@ -913,19 +913,28 @@ pub(crate) fn verify_project_charter_revised_event(
     Ok(())
 }
 
+/// The rows `verify_project_state` enumerates, in the order it enumerates them.
+///
+/// EXTRACTED SO A BAR CAN CALL IT (R44.6): a placement assertion that COPIES this query agrees
+/// with itself, so flipping the pass's own `ORDER BY` leaves it decorative. One function, called
+/// by both, moves the pass and the bar's view of it together.
+pub fn enumerate_projects(
+    connection: &rusqlite::Connection,
+) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut statement =
+        connection.prepare("SELECT workspace_id, id FROM projects ORDER BY workspace_id, id")?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 pub(crate) fn verify_project_state(
     connection: &rusqlite::Connection,
 ) -> Result<(), ProjectStateFault> {
-    let mut statement = connection
-        .prepare("SELECT workspace_id, id FROM projects ORDER BY workspace_id, id")
-        .map_err(ProjectStateFault::Store)?;
-    let projects = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(ProjectStateFault::Store)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(ProjectStateFault::Store)?;
+    let projects = enumerate_projects(connection).map_err(ProjectStateFault::Store)?;
 
     for (workspace_id, project_id) in &projects {
         let identity = || ProjectStateFault::Identity {

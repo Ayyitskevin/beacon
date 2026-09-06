@@ -58,7 +58,7 @@ mod local_transport;
 
 pub use check_preflight::{
     CheckPreflightError, CheckPreflightService, PreflightOutcome, PreflightReceipt, Recorded,
-    ResolvedCheck, UnavailableEvidence,
+    ResolvedCheck, UnavailableEvidence, enumerate_runs,
 };
 #[cfg(unix)]
 pub use declared_checks::{
@@ -113,10 +113,11 @@ pub use evaluation::{
 pub use local_model_activation::{
     LocalModelActivation, LocalModelActivationError, LocalModelActivationReview,
     LocalModelActivationService, LocalModelActivationState, LocalModelBinding, ProviderFeature,
+    enumerate_activation_decisions,
 };
 pub use mission::{
     MissionAdmissionActor, MissionDraft, MissionError, MissionLifecycle, MissionMemberDraft,
-    MissionMemberView, MissionService, MissionView,
+    MissionMemberView, MissionService, MissionView, enumerate_missions,
 };
 pub use mission_completion::{
     COMPLETION_CANONICALIZER, CompletionActor, CompletionDigest, CompletionDisposition,
@@ -125,13 +126,13 @@ pub use mission_completion::{
     UnfinishedKind,
 };
 pub use mission_completion_store::{
-    CompletionReadRefusal, declared_conditions_digest, record_completion,
+    CompletionReadRefusal, declared_conditions_digest, enumerate_completions, record_completion,
     verified_completion_within,
 };
 pub use mission_impact::{
     CANONICALIZER as MISSION_IMPACT_CANONICALIZER, ClassificationActor, ClassificationBasis,
     ClassificationDigest, ClassificationSupersedes, ImpactLevel, MalformedClassification,
-    MissionImpactClassificationV1, PolicyRevisionRef,
+    MissionImpactClassificationV1, PolicyRevisionRef, enumerate_classifications,
 };
 pub use mission_impact::{
     ClassificationRecordError, ClassificationStoreError, MissionImpactClassification,
@@ -163,7 +164,7 @@ pub use outcome_publication::{
 };
 pub use outcome_store::{
     MAX_STORED_MANIFEST_BYTES, ManifestStoreRefusal, OutcomeCandidate, OutcomeService,
-    PrepareRefusal, RenderedPdf, StoredOutcomeManifest, manifest_reference_id,
+    PrepareRefusal, RenderedPdf, StoredOutcomeManifest, enumerate_manifests, manifest_reference_id,
     verified_manifest_within,
 };
 pub use outcome_typst::{TypstRefusal, to_typst};
@@ -172,16 +173,17 @@ pub use platform_session::{
 };
 pub use project::{
     AutonomyProfile, BudgetBoundary, ExternalEffects, ProjectCharter, ProjectCharterDraft,
-    ProjectDraft, ProjectError, ProjectService, ProjectSummary, ProjectView,
+    ProjectDraft, ProjectError, ProjectService, ProjectSummary, ProjectView, enumerate_projects,
 };
 pub use project_policy::{
     PolicyAuthor, ProjectPolicy, ProjectPolicyDraft, ProjectPolicyError, ProjectPolicyService,
     TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy,
-    TrackRecordEvidenceKind, TrackRecordRequirement,
+    TrackRecordEvidenceKind, TrackRecordRequirement, enumerate_policy_projects,
 };
 pub use project_repository::{
     DeclaredCheck, InvalidRepositoryDraft, ProjectRepository, ProjectRepositoryError,
     ProjectRepositoryService, RepositoryAuthor, RepositoryDraft, RepositorySourceKind,
+    enumerate_repository_projects,
 };
 pub use proposal::{
     BudgetEnvelope, ConstraintBinding, ContextComparison, ContextEntry, ContextMismatch,
@@ -195,11 +197,11 @@ pub use publication_seam::{PublicationCandidacy, PublicationSeamRefusal, publica
 pub use resident_configuration::{
     BeaconCapability, BeaconCapabilityDescriptor, ResidentConfiguration,
     ResidentConfigurationBinding, ResidentConfigurationError, ResidentConfigurationService,
-    ResidentConfigurationState, TeamIneligibilityReason,
+    ResidentConfigurationState, TeamIneligibilityReason, enumerate_configuration_decisions,
 };
 pub use resident_lifecycle::{
     ResidentAgentView, ResidentLifecycle, ResidentLifecycleActor, ResidentLifecycleDecision,
-    ResidentLifecycleError, ResidentLifecycleService,
+    ResidentLifecycleError, ResidentLifecycleService, enumerate_lifecycle_residents,
 };
 pub use resource_discovery::{
     DiscoveredLocalModel, DiscoveryStatus, LocalModelDetails, LocalModelDiscoveryReport,
@@ -228,11 +230,11 @@ pub use spend::{
 pub use starter_organization::{
     ResidentAgentSummary, StarterOrganizationDecision, StarterOrganizationError,
     StarterOrganizationService, StarterOrganizationView, StarterResidentDraft, StarterRole,
-    StarterRoleTemplate,
+    StarterRoleTemplate, enumerate_starter_workspaces,
 };
 pub use team::{
     TeamDraft, TeamError, TeamFormationActor, TeamMemberDraft, TeamMemberView, TeamService,
-    TeamView,
+    TeamView, enumerate_teams,
 };
 #[cfg(debug_assertions)]
 #[doc(hidden)]

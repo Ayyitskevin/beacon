@@ -883,6 +883,29 @@ pub(crate) fn verify_configuration_event(
     Ok(())
 }
 
+/// The ORDER BY `verify_configuration_state` enumerates under. ONE definition, interpolated into the pass's own
+/// query and into `enumerate_configuration_decisions` below, so a mutant on the ordering moves both (R44.6).
+///
+/// This pass reads whole rows while a bar needs only the keys, so the two cannot be one function
+/// the way the digest-keyed passes' are. Sharing the ordering is what keeps a bar's placement
+/// assertion from agreeing with a copy the pass no longer follows.
+const ENUMERATION_ORDER: &str = "ORDER BY workspace_id, resident_id, sequence";
+
+/// The keys `verify_configuration_state` enumerates, in its order.
+pub fn enumerate_configuration_decisions(
+    connection: &Connection,
+) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT workspace_id, id FROM resident_configuration_decisions {ENUMERATION_ORDER}"
+    ))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 pub(crate) fn verify_configuration_state(
     connection: &Connection,
 ) -> Result<(), ResidentConfigurationStateFault> {
@@ -912,11 +935,11 @@ pub(crate) fn verify_configuration_state(
         });
     }
     let mut statement = connection
-        .prepare(
+        .prepare(&format!(
             "SELECT id, workspace_id, resident_id, state, predecessor_id, decided_at_ms
          FROM resident_configuration_decisions
-         ORDER BY workspace_id, resident_id, sequence",
-        )
+         {ENUMERATION_ORDER}"
+        ))
         .map_err(ResidentConfigurationStateFault::Store)?;
     let mut rows = statement
         .query([])

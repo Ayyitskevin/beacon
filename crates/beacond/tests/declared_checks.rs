@@ -1679,7 +1679,7 @@ fn startup_rejects_execution_relabelled_as_preflight_without_a_preflight_event()
     // luck -- measured: one sampling had it interior (both end-mutants died) and the next
     // had it last. Two runs, targeting the first- and last-sorting `declared_checks` Run,
     // make it structural: a mutant naming one fixed end is wrong in at least one of them.
-    for (end, order) in [("last", "DESC"), ("first", "ASC")] {
+    for end in ["last", "first"] {
         if !enforcing_or_skip() {
             return;
         }
@@ -1709,18 +1709,29 @@ fn startup_rejects_execution_relabelled_as_preflight_without_a_preflight_event()
             checks.execute(project.id, bounds()).unwrap(),
         ];
         let connection = Connection::open(&store.path).unwrap();
-        let tampered: String = connection
-            .query_row(
-                // Each `execute` also records a `check_preflight` Run, so the plant picks from the
-                // kind this bar relabels.
-                &format!(
-                    "SELECT id FROM runs WHERE kind = 'declared_checks'
-                 ORDER BY workspace_id {order}, id {order} LIMIT 1"
-                ),
-                [],
-                |row| row.get(0),
-            )
-            .expect("the fixture recorded two Runs");
+        // R44.6: CALL the pass's own enumeration rather than copying its query. The pass walks every
+        // Run; this bar's tamper only fits a `declared_checks` one, so the filter stays here while the
+        // ORDER is the pass's.
+        let declared: Vec<String> = beacond::enumerate_runs(&connection)
+            .expect("the pass's enumeration reads")
+            .into_iter()
+            .map(|row| row.1)
+            .filter(|id| {
+                connection
+                    .query_row("SELECT kind FROM runs WHERE id = ?1", [id], |row| {
+                        row.get::<_, String>(0)
+                    })
+                    .map(|kind| kind == "declared_checks")
+                    .unwrap_or(false)
+            })
+            .collect();
+        let tampered: String = if end == "last" {
+            declared.last()
+        } else {
+            declared.first()
+        }
+        .expect("the fixture recorded two Runs")
+        .clone();
         let receipt = receipts
             .iter()
             .find(|receipt| receipt.run_id.to_string() == tampered)

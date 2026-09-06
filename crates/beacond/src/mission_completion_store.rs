@@ -723,17 +723,25 @@ pub(crate) fn outcome_token(outcome: ConditionOutcome) -> &'static str {
 }
 
 /// Startup: every stored completion re-proves itself, and every `mission.completed` Event names one.
-pub(crate) fn verify_completion_state(connection: &Connection) -> Result<(), CompletionStateFault> {
-    let mut statement = connection
-        .prepare("SELECT workspace_id, digest_value FROM mission_completions ORDER BY digest_value")
-        .map_err(CompletionStateFault::Store)?;
+/// The rows `verify_completion_state` enumerates, in the order it enumerates them.
+///
+/// EXTRACTED SO A BAR CAN CALL IT (R44.6): a placement assertion that COPIES this query agrees
+/// with itself, so flipping the pass's own `ORDER BY` leaves it decorative. One function, called
+/// by both, moves the pass and the bar's view of it together.
+pub fn enumerate_completions(connection: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut statement = connection.prepare(
+        "SELECT workspace_id, digest_value FROM mission_completions ORDER BY digest_value",
+    )?;
     let rows = statement
         .query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(CompletionStateFault::Store)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(CompletionStateFault::Store)?;
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub(crate) fn verify_completion_state(connection: &Connection) -> Result<(), CompletionStateFault> {
+    let rows = enumerate_completions(connection).map_err(CompletionStateFault::Store)?;
     for (workspace_id, digest_value) in &rows {
         let parsed = Uuid::parse_str(workspace_id).map_err(|_| CompletionStateFault::Identity {
             workspace_id: workspace_id.clone(),

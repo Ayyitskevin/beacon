@@ -606,16 +606,12 @@ fn startup_refuses_an_unaccounted_repository_binding_and_names_the_row() {
             .unwrap();
 
         let connection = Connection::open(&store.path).unwrap();
-        let ordered: Vec<String> = connection
-            .prepare(
-                "SELECT DISTINCT project_id FROM project_repository_revisions
-             ORDER BY workspace_id, project_id",
-            )
-            .unwrap()
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+        // R44.6: CALL the pass's own enumeration rather than copying its query.
+        let ordered: Vec<String> = beacond::enumerate_repository_projects(&connection)
+            .expect("the pass's enumeration reads")
+            .into_iter()
+            .map(|row| row.1)
+            .collect();
         assert_eq!(
             ordered.len(),
             2,

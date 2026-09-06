@@ -1538,19 +1538,25 @@ impl std::error::Error for ManifestStateFault {
     }
 }
 
+/// The rows `verify_manifest_state` enumerates, in the order it enumerates them.
+///
+/// EXTRACTED SO A BAR CAN CALL IT (R44.6): a placement assertion that COPIES this query agrees
+/// with itself, so flipping the pass's own `ORDER BY` leaves it decorative. One function, called
+/// by both, moves the pass and the bar's view of it together.
+pub fn enumerate_manifests(connection: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut statement = connection.prepare(
+        "SELECT workspace_id, manifest_digest FROM outcome_manifests
+         ORDER BY workspace_id, manifest_digest",
+    )?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 pub(crate) fn verify_manifest_state(connection: &Connection) -> Result<(), ManifestStateFault> {
-    let mut statement = connection
-        .prepare(
-            "SELECT workspace_id, manifest_digest FROM outcome_manifests
-             ORDER BY workspace_id, manifest_digest",
-        )
-        .map_err(ManifestStateFault::Store)?;
-    let rows: Vec<(String, String)> = statement
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-        .map_err(ManifestStateFault::Store)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(ManifestStateFault::Store)?;
-    drop(statement);
+    let rows: Vec<(String, String)> =
+        enumerate_manifests(connection).map_err(ManifestStateFault::Store)?;
 
     for (workspace_id, manifest_digest) in &rows {
         let parsed = Uuid::parse_str(workspace_id).map_err(|_| ManifestStateFault::Identity {

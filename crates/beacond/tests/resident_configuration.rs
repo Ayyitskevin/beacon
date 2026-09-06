@@ -634,7 +634,7 @@ fn concurrent_initial_configuration_has_one_winner() {
 fn startup_refuses_missing_or_tampered_configuration_events() {
     // R44: BOTH ENDS. Tampering only the last-sorting decision made "names the failing
     // row" and "names the last row" the same assertion; `rows.last()` survived it.
-    for (end, order) in [("last", "DESC"), ("first", "ASC")] {
+    for end in ["last", "first"] {
         for (label, tamper) in [
             (
                 "missing-event",
@@ -674,17 +674,16 @@ fn startup_refuses_missing_or_tampered_configuration_events() {
             let connection = Connection::open(&store.path).unwrap();
             // This pass enumerates `ORDER BY workspace_id, resident_id, sequence`; the tamper hits the
             // decision that sorts LAST, read back from the store rather than guessed.
-            let last_id: String = connection
-                .query_row(
-                    // R44: BOTH ENDS -- one run per end of this pass's own ORDER BY.
-                    &format!(
-                        "SELECT id FROM resident_configuration_decisions
-                     ORDER BY workspace_id {order}, resident_id {order}, sequence {order} LIMIT 1"
-                    ),
-                    [],
-                    |row| row.get(0),
-                )
-                .expect("the fixture recorded two decisions");
+            let enumerated = beacond::enumerate_configuration_decisions(&connection)
+                .expect("the pass's enumeration reads");
+            let last_id: String = if end == "last" {
+                enumerated.last()
+            } else {
+                enumerated.first()
+            }
+            .expect("the fixture recorded two decisions")
+            .1
+            .clone();
             let configuration = decisions
                 .iter()
                 .find(|decision| decision.id.to_string() == last_id)

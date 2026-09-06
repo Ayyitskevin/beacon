@@ -714,6 +714,26 @@ pub(crate) fn policy_revision_facts(
     }))
 }
 
+/// The rows `verify_project_policy_state` enumerates, in the order it enumerates them.
+///
+/// EXTRACTED SO A BAR CAN CALL IT (R44.6): a placement assertion that COPIES this query agrees
+/// with itself, so flipping the pass's own `ORDER BY` leaves it decorative. One function, called
+/// by both, moves the pass and the bar's view of it together.
+pub fn enumerate_policy_projects(
+    connection: &Connection,
+) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut statement = connection.prepare(
+        "SELECT DISTINCT workspace_id, project_id FROM project_policy_revisions
+         ORDER BY workspace_id, project_id",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 pub(crate) fn verify_project_policy_state(
     connection: &Connection,
 ) -> Result<(), ProjectPolicyStateFault> {
@@ -743,19 +763,7 @@ pub(crate) fn verify_project_policy_state(
         });
     }
 
-    let mut statement = connection
-        .prepare(
-            "SELECT DISTINCT workspace_id, project_id FROM project_policy_revisions
-             ORDER BY workspace_id, project_id",
-        )
-        .map_err(ProjectPolicyStateFault::Store)?;
-    let projects = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(ProjectPolicyStateFault::Store)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(ProjectPolicyStateFault::Store)?;
+    let projects = enumerate_policy_projects(connection).map_err(ProjectPolicyStateFault::Store)?;
     for (workspace_id, project_id) in projects {
         let identity = || ProjectPolicyStateFault::Identity {
             workspace_id: workspace_id.clone(),
