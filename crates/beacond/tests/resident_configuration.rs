@@ -1053,3 +1053,57 @@ fn astra_minimum_configuration_sequence_outward_key_is_exact() {
         "R45.CONFIGURATION.MIN_LINE_KEY_EXACT: {line}"
     );
 }
+
+/// sol1 cold-read probe: a malformed stored decision id is still the row key in the startup
+/// refusal, so its one-line rendering must use the same bounded/escaped discipline as every
+/// other unreadable stored identity.
+#[test]
+fn sol1_resident_configuration_key_is_escaped_in_startup_line() {
+    let store = TestStore::new("sol1-key-rendering");
+    let accounts = enrolled_accounts(&store);
+    let resident_id = admit_lead(&store, &accounts);
+    ResidentLifecycleService::new(Arc::clone(&accounts), store.workspace_id)
+        .activate(resident_id, None)
+        .unwrap();
+    let activation = activate_model(&store, &accounts, vec![ProviderFeature::Completion]);
+    let configurations =
+        ResidentConfigurationService::new(Arc::clone(&accounts), store.workspace_id);
+    let first = configurations
+        .configure(
+            resident_id,
+            None,
+            activation.id,
+            vec![BeaconCapability::WorkCreateMission],
+        )
+        .unwrap();
+    drop(configurations);
+    drop(accounts);
+
+    // Exactly 36 Unicode scalar values, satisfying migration 0009's only `id` CHECK while
+    // carrying terminal-control bytes that a UUID can never contain.
+    let malformed = format!("{}\r\u{1b}[2J", "x".repeat(31));
+    assert_eq!(malformed.chars().count(), 36);
+    let connection = Connection::open(&store.path).unwrap();
+    let inserted = connection
+        .execute(
+            "INSERT INTO resident_configuration_decisions (
+                id, workspace_id, resident_id, state, predecessor_id, decided_by, decided_at_ms
+             ) SELECT ?1, workspace_id, resident_id, 'cleared', id, 'operator', decided_at_ms + 1
+               FROM resident_configuration_decisions WHERE id = ?2",
+            rusqlite::params![malformed, first.id.to_string()],
+        )
+        .unwrap();
+    assert_eq!(inserted, 1, "the malformed successor did not plant");
+    drop(connection);
+
+    let error = Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .expect_err("the malformed decision id reopened Ready");
+    let line = error.to_string();
+    assert!(
+        !line.contains('\r') && !line.contains('\u{1b}') && line.lines().count() == 1,
+        "startup obeyed stored terminal controls instead of escaping them: {line:?}"
+    );
+}
