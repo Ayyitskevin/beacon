@@ -1682,7 +1682,7 @@ impl DispatchService {
             started_at_ms: opened.started_at_ms,
             ended_at_ms,
             not_verified: not_verified(outcome, decided),
-            pre_image_read_failure: decided.pre_image_read_failure,
+            pre_image_read_failure: decided.pre_image_read_failure.clone(),
         })
     }
 
@@ -2073,7 +2073,7 @@ fn pre_images_hold(
             // because it is the one that stopped the gate answering; later reads still run, so
             // the Receipt's step list stays the invocations this dispatch made.
             (_, PinnedRead::Unreadable(failure)) => {
-                unreadable.get_or_insert(*failure);
+                unreadable.get_or_insert_with(|| failure.clone());
                 false
             }
         };
