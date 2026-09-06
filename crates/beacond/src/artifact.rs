@@ -1597,20 +1597,27 @@ pub(crate) fn verify_artifact_event(
 /// Startup reconciliation: every Artifact row re-proved against its bytes, its content, its Event,
 /// its cursor, its references, and its chain. The world is not re-derived -- a later Mission or a
 /// retired Resident does not corrupt a recorded Artifact.
-pub(crate) fn verify_artifact_state(connection: &Connection) -> Result<(), ArtifactStateFault> {
-    let mut statement = connection
-        .prepare(
-            "SELECT workspace_id, digest_value FROM artifacts ORDER BY workspace_id, digest_value",
-        )
-        .map_err(ArtifactStateFault::Store)?;
+/// The rows `verify_artifact_state` enumerates, in the order it enumerates them.
+///
+/// EXTRACTED SO A BAR CAN CALL IT (R44.6). A startup bar that asserts where its plant sits was
+/// COPYING this query, so flipping the pass's own `ORDER BY` left the assertion decorative: it
+/// agreed with a copy that no longer described the pass. One function, called by both, is what
+/// makes the assertion load-bearing -- a mutant on the ordering moves the pass AND the bar's view
+/// of it, and the bar fails.
+pub fn enumerate_artifacts(connection: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut statement = connection.prepare(
+        "SELECT workspace_id, digest_value FROM artifacts ORDER BY workspace_id, digest_value",
+    )?;
     let rows = statement
         .query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(ArtifactStateFault::Store)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(ArtifactStateFault::Store)?;
-    drop(statement);
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub(crate) fn verify_artifact_state(connection: &Connection) -> Result<(), ArtifactStateFault> {
+    let rows = enumerate_artifacts(connection).map_err(ArtifactStateFault::Store)?;
 
     if !rows.is_empty() && !owner_account_exists(connection).map_err(ArtifactStateFault::Store)? {
         return Err(ArtifactStateFault::Totals(crate::TotalsMismatch {

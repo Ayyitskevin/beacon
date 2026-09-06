@@ -89,6 +89,7 @@ pub use sandbox::{
 pub use artifact::{
     Artifact, ArtifactActor, ArtifactContext, ArtifactDigest, ArtifactError, ArtifactKind,
     ArtifactService, ArtifactV1, InconsistentArtifact, MalformedArtifact, VerifiedArtifactRecord,
+    enumerate_artifacts,
 };
 pub use candidate::{
     Candidate, CandidateDigest, CandidateEntry, CandidateError, CandidateImages, CandidateService,
