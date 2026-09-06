@@ -7658,4 +7658,595 @@ mod tests {
             );
         }
     }
+
+    // ---- fold (astra read), item 2: all 72 startup templates, not the seven changed ones ------
+    //
+    // The committed S walked the seven sites this slice changes. The spec asks for every arm --
+    // "closing six arms cannot flatten a seventh" -- so the other 65 templates are pinned here
+    // too, with this table's own fixture keys. An unchanged template is still a row.
+    const R42S2_UUID: &str = "11111111-1111-4111-8111-111111111111";
+    const R42S2_SEQUENCE: u64 = 4_242;
+    const R42S2_STORED_VERSION: i64 = 4_294_967_296;
+    /// A sequence is an i64 too, but it is a different key: keep them distinguishable.
+    const R42S2_SEQUENCE_I64: i64 = 4_242;
+    const R42S2_TOTALS_TABLE: &str = "project_creation_snapshots";
+
+    fn r42s2_uuid() -> uuid::Uuid {
+        uuid::Uuid::parse_str(R42S2_UUID).expect("a fixture UUID parses")
+    }
+
+    fn r42s2_digest() -> String {
+        "a".repeat(64)
+    }
+
+    fn r42s2_driver() -> rusqlite::Error {
+        rusqlite::Error::InvalidParameterName(format!("{R42S2_NEEDLE_A} :private_binding"))
+    }
+
+    fn r42s2_totals() -> crate::TotalsMismatch {
+        crate::TotalsMismatch {
+            table: R42S2_TOTALS_TABLE,
+            expected: 7,
+            observed: 11,
+        }
+    }
+
+    /// The 72 startup lines, transcribed from the spec with this table's own fixture keys.
+    const STARTUP_LINES: [(&str, &str); 72] = [
+        ("EmptyWorkspaceName", "workspace name cannot be empty"),
+        (
+            "WorkspaceNameTooLong",
+            "workspace name cannot exceed 120 characters",
+        ),
+        (
+            "WorkspaceNameContainsControl",
+            "workspace name cannot contain control characters",
+        ),
+        (
+            "ClockBeforeUnixEpoch",
+            "system clock is before the Unix epoch",
+        ),
+        ("Io", "cannot prepare the store directory: Io"),
+        ("Store", "store operation failed"),
+        ("Json", "cannot encode an event payload: Json"),
+        (
+            "InvalidWorkspaceId",
+            "store contains an invalid Workspace id: InvalidWorkspaceId",
+        ),
+        (
+            "InvalidEventKind",
+            "store contains an unknown Event kind: InvalidEventKind",
+        ),
+        (
+            "EventPayloadScopeMismatch",
+            "Event sequence 4242 payload does not match its Workspace scope",
+        ),
+        (
+            "StarterOrganizationEventMismatch",
+            "Event sequence 4242 does not match Starter Organization state",
+        ),
+        (
+            "StarterOrganizationStateMismatch",
+            "the starter organization of Workspace 11111111-1111-4111-8111-111111111111 does not re-prove: EmptyRoster",
+        ),
+        (
+            "ProjectEventMismatch",
+            "Event sequence 4242 does not match Project creation state",
+        ),
+        (
+            "ProjectStateMismatch",
+            "Project 11111111-1111-4111-8111-111111111111 in Workspace 11111111-1111-4111-8111-111111111111 does not re-prove against its charter history or the log: NotFound",
+        ),
+        (
+            "ProjectTotalsMismatch",
+            "the Projects do not agree with the store as a whole -- project_creation_snapshots: the log accounts for 7 but the store holds 11",
+        ),
+        (
+            "LocalModelActivationEventMismatch",
+            "Event sequence 4242 does not match local-model activation state",
+        ),
+        (
+            "LocalModelActivationStateMismatch",
+            "local model activation 11111111-1111-4111-8111-111111111111 in Workspace 11111111-1111-4111-8111-111111111111 does not re-prove: ModelNotFound",
+        ),
+        (
+            "LocalModelActivationRowUnreadable",
+            "a local model activation row could not be read: ModelNotFound",
+        ),
+        (
+            "ResidentLifecycleEventMismatch",
+            "Event sequence 4242 does not match Resident lifecycle state",
+        ),
+        (
+            "ResidentLifecycleStateMismatch",
+            "the lifecycle of Resident 11111111-1111-4111-8111-111111111111 in Workspace 11111111-1111-4111-8111-111111111111 does not re-prove: NotFound",
+        ),
+        (
+            "ResidentLifecycleTotalsMismatch",
+            "the Resident lifecycle decisions do not agree with the store -- project_creation_snapshots: the log accounts for 7 but the store holds 11",
+        ),
+        (
+            "ResidentRowUnreadable",
+            "a Resident row could not be read: NotFound",
+        ),
+        (
+            "ResidentConfigurationEventMismatch",
+            "Event sequence 4242 does not match Resident configuration state",
+        ),
+        (
+            "ResidentConfigurationStateMismatch",
+            "Resident configuration decision aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa in Workspace 11111111-1111-4111-8111-111111111111 does not re-prove: ResidentNotFound",
+        ),
+        (
+            "TeamEventMismatch",
+            "Event sequence 4242 does not match Team state",
+        ),
+        (
+            "TeamStateMismatch",
+            "Team 11111111-1111-4111-8111-111111111111 in Workspace 11111111-1111-4111-8111-111111111111 does not re-prove: TeamNotFound",
+        ),
+        (
+            "TeamTotalsMismatch",
+            "the Teams do not agree with the log as a whole -- project_creation_snapshots: the log accounts for 7 but the store holds 11",
+        ),
+        (
+            "MissionEventMismatch",
+            "Event sequence 4242 does not match Mission admission state",
+        ),
+        (
+            "MissionStateMismatch",
+            "Mission 11111111-1111-4111-8111-111111111111 in Workspace 11111111-1111-4111-8111-111111111111 does not re-prove against its own record or its projections: MissionNotFound",
+        ),
+        (
+            "MissionTotalsMismatch",
+            "the Missions do not agree with the store as a whole -- project_creation_snapshots: the log accounts for 7 but the store holds 11",
+        ),
+        (
+            "ProjectPolicyEventMismatch",
+            "Event sequence 4242 does not match Project Policy state",
+        ),
+        (
+            "ProjectPolicyStateMismatch",
+            "the policy history of Project 11111111-1111-4111-8111-111111111111 in Workspace 11111111-1111-4111-8111-111111111111 does not re-prove: ProjectNotFound",
+        ),
+        (
+            "ProjectRepositoryEventMismatch",
+            "Event sequence 4242 does not match Project Repository state",
+        ),
+        (
+            "ProjectRepositoryStateMismatch",
+            "the repository history of Project 11111111-1111-4111-8111-111111111111 in Workspace 11111111-1111-4111-8111-111111111111 does not re-prove: ProjectNotFound",
+        ),
+        (
+            "SampleProjectEventMismatch",
+            "Event sequence 4242 does not match Sample Project installation state",
+        ),
+        (
+            "SampleProjectStateMismatch",
+            "the sample Project installation in Workspace 11111111-1111-4111-8111-111111111111 does not re-prove: NotInstalled",
+        ),
+        (
+            "SampleProjectTotalsMismatch",
+            "the sample Project installations do not agree with the log -- project_creation_snapshots: the log accounts for 7 but the store holds 11",
+        ),
+        (
+            "RunEventMismatch",
+            "Run event 4242 does not match its recorded Receipt",
+        ),
+        (
+            "RunStateMismatch",
+            "Run aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa in Workspace 11111111-1111-4111-8111-111111111111 does not agree with its Receipts and Events: ProjectNotFound",
+        ),
+        ("RunClockBeforeEpoch", "the clock is before the Unix epoch"),
+        (
+            "RunEventStateMismatch",
+            "Event sequence 4294967296 in Workspace 11111111-1111-4111-8111-111111111111 carries a Receipt its Run 11111111-1111-4111-8111-111111111111 does not agree with",
+        ),
+        (
+            "ProposalEventMismatch",
+            "Event sequence 4242 does not match its stored Proposal bytes",
+        ),
+        (
+            "ProposalStateMismatch",
+            "Proposal aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa in Workspace 11111111-1111-4111-8111-111111111111 does not re-prove against the records it cites: NotFound",
+        ),
+        (
+            "ProposalTotalsMismatch",
+            "the Proposals do not agree with the log as a whole -- project_creation_snapshots: the log accounts for 7 but the store holds 11",
+        ),
+        (
+            "RulingEventMismatch",
+            "Event sequence 4242 does not match its stored Ruling bytes",
+        ),
+        (
+            "EvaluationEventMismatch",
+            "Event sequence 4242 does not match its stored Evaluation bytes",
+        ),
+        (
+            "MissionCompletionEventMismatch",
+            "mission completion event 4242 does not match its stored record",
+        ),
+        (
+            "MissionCompletionStateMismatch",
+            "completion aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa in Workspace 11111111-1111-4111-8111-111111111111 does not re-prove against its own bytes or the records it cites: Absent",
+        ),
+        (
+            "MissionCompletionTotalsMismatch",
+            "the Mission completions do not agree with the log as a whole -- project_creation_snapshots: the log accounts for 7 but the store holds 11",
+        ),
+        (
+            "EvaluationStateMismatch",
+            "Evaluation aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa in Workspace 11111111-1111-4111-8111-111111111111 does not re-prove against its own bytes or the records it cites: NotFound",
+        ),
+        (
+            "EvaluationChainsMismatch",
+            "the Evaluation supersession chains do not re-prove: NotFound",
+        ),
+        (
+            "ArtifactEventMismatch",
+            "Event sequence 4242 does not match its stored Artifact bytes",
+        ),
+        (
+            "ArtifactStateMismatch",
+            "Artifact aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa in Workspace 11111111-1111-4111-8111-111111111111 does not re-prove against its own bytes: NotFound",
+        ),
+        (
+            "ArtifactTotalsMismatch",
+            "the Artifacts do not agree with the log as a whole -- project_creation_snapshots: the log accounts for 7 but the store holds 11",
+        ),
+        (
+            "ArtifactRelationMismatch",
+            "the Artifact supersession relation does not re-prove: NotFound",
+        ),
+        (
+            "MissionImpactClassificationStateMismatch",
+            "Mission impact classification aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa in Workspace 11111111-1111-4111-8111-111111111111 does not re-prove: columns_disagree",
+        ),
+        (
+            "OutcomeManifestStateMismatch",
+            "manifest aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa in Workspace 11111111-1111-4111-8111-111111111111 does not re-prove against its own bytes or the records it cites: Absent",
+        ),
+        (
+            "OutcomePublicationStateMismatch",
+            "publication version 4294967296 of Mission 11111111-1111-4111-8111-111111111111 in Workspace 11111111-1111-4111-8111-111111111111 does not re-prove against the records it cites: Absent",
+        ),
+        (
+            "RulingStateMismatch",
+            "Ruling aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa in Workspace 11111111-1111-4111-8111-111111111111 does not re-prove against its own bytes or the records it cites: NotFound",
+        ),
+        (
+            "RulingTotalsMismatch",
+            "the Rulings do not agree with the log as a whole -- project_creation_snapshots: the log accounts for 7 but the store holds 11",
+        ),
+        (
+            "RulingChainsMismatch",
+            "the Ruling chains do not re-prove: NotFound",
+        ),
+        (
+            "CandidateEventMismatch",
+            "Event sequence 4242 does not match its stored Candidate bytes",
+        ),
+        (
+            "CandidateStateMismatch",
+            "Candidate aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa in Workspace 11111111-1111-4111-8111-111111111111 does not re-prove against its own bytes or the records it cites: NotFound",
+        ),
+        (
+            "DispatchEventMismatch",
+            "Event sequence 4242 does not match its stored dispatch Receipt",
+        ),
+        (
+            "DispatchRecoveryFailed",
+            "the recovery write for an interrupted dispatch did not complete, so its Run still has no terminal Receipt",
+        ),
+        (
+            "PauseEventMismatch",
+            "Event sequence 4242 is not a well-formed Pause record",
+        ),
+        (
+            "SchemaMismatch",
+            "store schema does not match its declared version",
+        ),
+        (
+            "UnsupportedSchemaVersion",
+            "store schema version 4242 is unsupported",
+        ),
+        (
+            "IntegrityCheckFailed",
+            "SQLite integrity check failed: IntegrityCheckFailed",
+        ),
+        (
+            "StoredIdentityUnreadable",
+            "a Mission row's identity is not readable: StoredIdentityUnreadable",
+        ),
+        (
+            "StartupEnumerationFailed",
+            "the Project startup pass could not enumerate its rows",
+        ),
+        (
+            "ForeignKeyViolations",
+            "store contains 4242 foreign-key violation(s)",
+        ),
+    ];
+
+    /// The expected startup line for one root, from the transcribed table above.
+    fn startup_line(case: &str) -> String {
+        STARTUP_LINES
+            .iter()
+            .find_map(|(name, line)| (*name == case).then_some((*line).to_owned()))
+            .unwrap_or_else(|| panic!("R42S2.STARTUP.{case}.LISTED: no row in STARTUP_LINES"))
+    }
+
+    /// The same declarative-row shape the transport witness uses, defined here because a test
+    /// module cannot borrow another module's macro -- and because S's fixtures must be
+    /// independent of T's, which is the point of the fold.
+    macro_rules! closed_table {
+        (
+            $expected_fn:ident / $rows_fn:ident : $ty:ty,
+            $( $case:literal | $pattern:pat => $line:expr , $build:expr , $markers:expr ; )+
+        ) => {
+            fn $expected_fn(value: &$ty) -> (&'static str, String) {
+                match value {
+                    $( $pattern => ($case, String::from($line)), )+
+                }
+            }
+
+            fn $rows_fn() -> Vec<(&'static str, $ty, &'static [&'static str])> {
+                vec![$(($case, $build, $markers)),+]
+            }
+        };
+    }
+
+    closed_table! {
+        expected_startup / startup_rows: SupervisorError,
+        "EmptyWorkspaceName" | SupervisorError::EmptyWorkspaceName
+            => startup_line("EmptyWorkspaceName"),
+            SupervisorError::EmptyWorkspaceName, &[];
+        "WorkspaceNameTooLong" | SupervisorError::WorkspaceNameTooLong
+            => startup_line("WorkspaceNameTooLong"),
+            SupervisorError::WorkspaceNameTooLong, &[];
+        "WorkspaceNameContainsControl" | SupervisorError::WorkspaceNameContainsControl
+            => startup_line("WorkspaceNameContainsControl"),
+            SupervisorError::WorkspaceNameContainsControl, &[];
+        "ClockBeforeUnixEpoch" | SupervisorError::ClockBeforeUnixEpoch
+            => startup_line("ClockBeforeUnixEpoch"),
+            SupervisorError::ClockBeforeUnixEpoch, &[];
+        "Io" | SupervisorError::Io(..)
+            => startup_line("Io"),
+            SupervisorError::Io(std::io::Error::other(R42S2_NEEDLE_A)), &[R42S2_NEEDLE_A];
+        "Store" | SupervisorError::Store(..)
+            => startup_line("Store"),
+            SupervisorError::Store(r42s2_driver()), &[R42S2_NEEDLE_A];
+        "Json" | SupervisorError::Json(..)
+            => startup_line("Json"),
+            SupervisorError::Json(serde::de::Error::custom(R42S2_NEEDLE_A)), &[R42S2_NEEDLE_A];
+        "InvalidWorkspaceId" | SupervisorError::InvalidWorkspaceId(..)
+            => startup_line("InvalidWorkspaceId"),
+            SupervisorError::InvalidWorkspaceId(r42s2_digest()), &[];
+        "InvalidEventKind" | SupervisorError::InvalidEventKind(..)
+            => startup_line("InvalidEventKind"),
+            SupervisorError::InvalidEventKind(r42s2_digest()), &[];
+        "EventPayloadScopeMismatch" | SupervisorError::EventPayloadScopeMismatch(..)
+            => startup_line("EventPayloadScopeMismatch"),
+            SupervisorError::EventPayloadScopeMismatch(R42S2_SEQUENCE_I64), &[];
+        "StarterOrganizationEventMismatch" | SupervisorError::StarterOrganizationEventMismatch(..)
+            => startup_line("StarterOrganizationEventMismatch"),
+            SupervisorError::StarterOrganizationEventMismatch(R42S2_SEQUENCE_I64), &[];
+        "StarterOrganizationStateMismatch" | SupervisorError::StarterOrganizationStateMismatch { .. }
+            => startup_line("StarterOrganizationStateMismatch"),
+            SupervisorError::StarterOrganizationStateMismatch { workspace_id: r42s2_uuid(), cause: crate::StarterOrganizationError::EmptyRoster }, &[];
+        "ProjectEventMismatch" | SupervisorError::ProjectEventMismatch(..)
+            => startup_line("ProjectEventMismatch"),
+            SupervisorError::ProjectEventMismatch(R42S2_SEQUENCE_I64), &[];
+        "ProjectStateMismatch" | SupervisorError::ProjectStateMismatch { .. }
+            => startup_line("ProjectStateMismatch"),
+            SupervisorError::ProjectStateMismatch { workspace_id: r42s2_uuid(), project_id: r42s2_uuid(), cause: crate::ProjectError::NotFound }, &[];
+        "ProjectTotalsMismatch" | SupervisorError::ProjectTotalsMismatch(..)
+            => startup_line("ProjectTotalsMismatch"),
+            SupervisorError::ProjectTotalsMismatch(r42s2_totals()), &[];
+        "LocalModelActivationEventMismatch" | SupervisorError::LocalModelActivationEventMismatch(..)
+            => startup_line("LocalModelActivationEventMismatch"),
+            SupervisorError::LocalModelActivationEventMismatch(R42S2_SEQUENCE_I64), &[];
+        "LocalModelActivationStateMismatch" | SupervisorError::LocalModelActivationStateMismatch { .. }
+            => startup_line("LocalModelActivationStateMismatch"),
+            SupervisorError::LocalModelActivationStateMismatch { workspace_id: r42s2_uuid(), activation_id: r42s2_uuid(), cause: crate::LocalModelActivationError::ModelNotFound }, &[];
+        "LocalModelActivationRowUnreadable" | SupervisorError::LocalModelActivationRowUnreadable(..)
+            => startup_line("LocalModelActivationRowUnreadable"),
+            SupervisorError::LocalModelActivationRowUnreadable(crate::LocalModelActivationError::ModelNotFound), &[];
+        "ResidentLifecycleEventMismatch" | SupervisorError::ResidentLifecycleEventMismatch(..)
+            => startup_line("ResidentLifecycleEventMismatch"),
+            SupervisorError::ResidentLifecycleEventMismatch(R42S2_SEQUENCE_I64), &[];
+        "ResidentLifecycleStateMismatch" | SupervisorError::ResidentLifecycleStateMismatch { .. }
+            => startup_line("ResidentLifecycleStateMismatch"),
+            SupervisorError::ResidentLifecycleStateMismatch { workspace_id: r42s2_uuid(), resident_id: r42s2_uuid(), cause: crate::ResidentLifecycleError::NotFound }, &[];
+        "ResidentLifecycleTotalsMismatch" | SupervisorError::ResidentLifecycleTotalsMismatch(..)
+            => startup_line("ResidentLifecycleTotalsMismatch"),
+            SupervisorError::ResidentLifecycleTotalsMismatch(r42s2_totals()), &[];
+        "ResidentRowUnreadable" | SupervisorError::ResidentRowUnreadable(..)
+            => startup_line("ResidentRowUnreadable"),
+            SupervisorError::ResidentRowUnreadable(crate::ResidentLifecycleError::NotFound), &[];
+        "ResidentConfigurationEventMismatch" | SupervisorError::ResidentConfigurationEventMismatch(..)
+            => startup_line("ResidentConfigurationEventMismatch"),
+            SupervisorError::ResidentConfigurationEventMismatch(R42S2_SEQUENCE_I64), &[];
+        "ResidentConfigurationStateMismatch" | SupervisorError::ResidentConfigurationStateMismatch { .. }
+            => startup_line("ResidentConfigurationStateMismatch"),
+            SupervisorError::ResidentConfigurationStateMismatch { workspace_id: r42s2_uuid(), decision_id: r42s2_digest(), cause: crate::ResidentConfigurationError::ResidentNotFound }, &[];
+        "TeamEventMismatch" | SupervisorError::TeamEventMismatch(..)
+            => startup_line("TeamEventMismatch"),
+            SupervisorError::TeamEventMismatch(R42S2_SEQUENCE_I64), &[];
+        "TeamStateMismatch" | SupervisorError::TeamStateMismatch { .. }
+            => startup_line("TeamStateMismatch"),
+            SupervisorError::TeamStateMismatch { workspace_id: r42s2_uuid(), team_id: r42s2_uuid(), cause: crate::TeamError::TeamNotFound }, &[];
+        "TeamTotalsMismatch" | SupervisorError::TeamTotalsMismatch(..)
+            => startup_line("TeamTotalsMismatch"),
+            SupervisorError::TeamTotalsMismatch(r42s2_totals()), &[];
+        "MissionEventMismatch" | SupervisorError::MissionEventMismatch(..)
+            => startup_line("MissionEventMismatch"),
+            SupervisorError::MissionEventMismatch(R42S2_SEQUENCE_I64), &[];
+        "MissionStateMismatch" | SupervisorError::MissionStateMismatch { .. }
+            => startup_line("MissionStateMismatch"),
+            SupervisorError::MissionStateMismatch { workspace_id: r42s2_uuid(), mission_id: r42s2_uuid(), cause: crate::MissionError::MissionNotFound }, &[];
+        "MissionTotalsMismatch" | SupervisorError::MissionTotalsMismatch(..)
+            => startup_line("MissionTotalsMismatch"),
+            SupervisorError::MissionTotalsMismatch(r42s2_totals()), &[];
+        "ProjectPolicyEventMismatch" | SupervisorError::ProjectPolicyEventMismatch(..)
+            => startup_line("ProjectPolicyEventMismatch"),
+            SupervisorError::ProjectPolicyEventMismatch(R42S2_SEQUENCE_I64), &[];
+        "ProjectPolicyStateMismatch" | SupervisorError::ProjectPolicyStateMismatch { .. }
+            => startup_line("ProjectPolicyStateMismatch"),
+            SupervisorError::ProjectPolicyStateMismatch { workspace_id: r42s2_uuid(), project_id: r42s2_uuid(), cause: crate::ProjectPolicyError::ProjectNotFound }, &[];
+        "ProjectRepositoryEventMismatch" | SupervisorError::ProjectRepositoryEventMismatch(..)
+            => startup_line("ProjectRepositoryEventMismatch"),
+            SupervisorError::ProjectRepositoryEventMismatch(R42S2_SEQUENCE_I64), &[];
+        "ProjectRepositoryStateMismatch" | SupervisorError::ProjectRepositoryStateMismatch { .. }
+            => startup_line("ProjectRepositoryStateMismatch"),
+            SupervisorError::ProjectRepositoryStateMismatch { workspace_id: r42s2_uuid(), project_id: r42s2_uuid(), cause: crate::ProjectRepositoryError::ProjectNotFound }, &[];
+        "SampleProjectEventMismatch" | SupervisorError::SampleProjectEventMismatch(..)
+            => startup_line("SampleProjectEventMismatch"),
+            SupervisorError::SampleProjectEventMismatch(R42S2_SEQUENCE_I64), &[];
+        "SampleProjectStateMismatch" | SupervisorError::SampleProjectStateMismatch { .. }
+            => startup_line("SampleProjectStateMismatch"),
+            SupervisorError::SampleProjectStateMismatch { workspace_id: r42s2_uuid(), cause: crate::SampleProjectError::NotInstalled }, &[];
+        "SampleProjectTotalsMismatch" | SupervisorError::SampleProjectTotalsMismatch(..)
+            => startup_line("SampleProjectTotalsMismatch"),
+            SupervisorError::SampleProjectTotalsMismatch(r42s2_totals()), &[];
+        "RunEventMismatch" | SupervisorError::RunEventMismatch(..)
+            => startup_line("RunEventMismatch"),
+            SupervisorError::RunEventMismatch(R42S2_SEQUENCE_I64), &[];
+        "RunStateMismatch" | SupervisorError::RunStateMismatch { .. }
+            => startup_line("RunStateMismatch"),
+            SupervisorError::RunStateMismatch { workspace_id: r42s2_uuid(), run_id: r42s2_digest(), cause: crate::CheckPreflightError::ProjectNotFound }, &[];
+        "RunClockBeforeEpoch" | SupervisorError::RunClockBeforeEpoch
+            => startup_line("RunClockBeforeEpoch"),
+            SupervisorError::RunClockBeforeEpoch, &[];
+        "RunEventStateMismatch" | SupervisorError::RunEventStateMismatch { .. }
+            => startup_line("RunEventStateMismatch"),
+            SupervisorError::RunEventStateMismatch { sequence: R42S2_STORED_VERSION, workspace_id: r42s2_uuid(), run_id: r42s2_uuid() }, &[];
+        "ProposalEventMismatch" | SupervisorError::ProposalEventMismatch(..)
+            => startup_line("ProposalEventMismatch"),
+            SupervisorError::ProposalEventMismatch(R42S2_SEQUENCE_I64), &[];
+        "ProposalStateMismatch" | SupervisorError::ProposalStateMismatch { .. }
+            => startup_line("ProposalStateMismatch"),
+            SupervisorError::ProposalStateMismatch { workspace_id: r42s2_uuid(), digest_value: r42s2_digest(), cause: crate::ProposalError::NotFound }, &[];
+        "ProposalTotalsMismatch" | SupervisorError::ProposalTotalsMismatch(..)
+            => startup_line("ProposalTotalsMismatch"),
+            SupervisorError::ProposalTotalsMismatch(r42s2_totals()), &[];
+        "RulingEventMismatch" | SupervisorError::RulingEventMismatch(..)
+            => startup_line("RulingEventMismatch"),
+            SupervisorError::RulingEventMismatch(R42S2_SEQUENCE_I64), &[];
+        "EvaluationEventMismatch" | SupervisorError::EvaluationEventMismatch(..)
+            => startup_line("EvaluationEventMismatch"),
+            SupervisorError::EvaluationEventMismatch(R42S2_SEQUENCE_I64), &[];
+        "MissionCompletionEventMismatch" | SupervisorError::MissionCompletionEventMismatch(..)
+            => startup_line("MissionCompletionEventMismatch"),
+            SupervisorError::MissionCompletionEventMismatch(R42S2_SEQUENCE_I64), &[];
+        "MissionCompletionStateMismatch" | SupervisorError::MissionCompletionStateMismatch { .. }
+            => startup_line("MissionCompletionStateMismatch"),
+            SupervisorError::MissionCompletionStateMismatch { workspace_id: r42s2_uuid(), digest_value: r42s2_digest(), cause: crate::CompletionReadRefusal::Absent }, &[];
+        "MissionCompletionTotalsMismatch" | SupervisorError::MissionCompletionTotalsMismatch(..)
+            => startup_line("MissionCompletionTotalsMismatch"),
+            SupervisorError::MissionCompletionTotalsMismatch(r42s2_totals()), &[];
+        "EvaluationStateMismatch" | SupervisorError::EvaluationStateMismatch { .. }
+            => startup_line("EvaluationStateMismatch"),
+            SupervisorError::EvaluationStateMismatch { workspace_id: r42s2_uuid(), digest_value: r42s2_digest(), cause: crate::EvaluationError::NotFound }, &[];
+        "EvaluationChainsMismatch" | SupervisorError::EvaluationChainsMismatch(..)
+            => startup_line("EvaluationChainsMismatch"),
+            SupervisorError::EvaluationChainsMismatch(crate::EvaluationError::NotFound), &[];
+        "ArtifactEventMismatch" | SupervisorError::ArtifactEventMismatch(..)
+            => startup_line("ArtifactEventMismatch"),
+            SupervisorError::ArtifactEventMismatch(R42S2_SEQUENCE_I64), &[];
+        "ArtifactStateMismatch" | SupervisorError::ArtifactStateMismatch { .. }
+            => startup_line("ArtifactStateMismatch"),
+            SupervisorError::ArtifactStateMismatch { workspace_id: r42s2_uuid(), digest_value: r42s2_digest(), cause: crate::ArtifactError::NotFound }, &[];
+        "ArtifactTotalsMismatch" | SupervisorError::ArtifactTotalsMismatch(..)
+            => startup_line("ArtifactTotalsMismatch"),
+            SupervisorError::ArtifactTotalsMismatch(r42s2_totals()), &[];
+        "ArtifactRelationMismatch" | SupervisorError::ArtifactRelationMismatch(..)
+            => startup_line("ArtifactRelationMismatch"),
+            SupervisorError::ArtifactRelationMismatch(crate::ArtifactError::NotFound), &[];
+        "MissionImpactClassificationStateMismatch" | SupervisorError::MissionImpactClassificationStateMismatch { .. }
+            => startup_line("MissionImpactClassificationStateMismatch"),
+            SupervisorError::MissionImpactClassificationStateMismatch { workspace_id: r42s2_uuid(), digest: r42s2_digest(), cause: crate::ClassificationStoreError::ColumnsDisagree }, &[];
+        "OutcomeManifestStateMismatch" | SupervisorError::OutcomeManifestStateMismatch { .. }
+            => startup_line("OutcomeManifestStateMismatch"),
+            SupervisorError::OutcomeManifestStateMismatch { workspace_id: r42s2_uuid(), manifest_digest: r42s2_digest(), cause: crate::ManifestStoreRefusal::Absent }, &[];
+        "OutcomePublicationStateMismatch" | SupervisorError::OutcomePublicationStateMismatch { .. }
+            => startup_line("OutcomePublicationStateMismatch"),
+            SupervisorError::OutcomePublicationStateMismatch { workspace_id: r42s2_uuid(), mission_id: r42s2_uuid(), version: R42S2_STORED_VERSION, cause: crate::PublishRefusal::Absent }, &[];
+        "RulingStateMismatch" | SupervisorError::RulingStateMismatch { .. }
+            => startup_line("RulingStateMismatch"),
+            SupervisorError::RulingStateMismatch { workspace_id: r42s2_uuid(), digest_value: r42s2_digest(), cause: crate::RulingError::NotFound }, &[];
+        "RulingTotalsMismatch" | SupervisorError::RulingTotalsMismatch(..)
+            => startup_line("RulingTotalsMismatch"),
+            SupervisorError::RulingTotalsMismatch(r42s2_totals()), &[];
+        "RulingChainsMismatch" | SupervisorError::RulingChainsMismatch(..)
+            => startup_line("RulingChainsMismatch"),
+            SupervisorError::RulingChainsMismatch(crate::RulingError::NotFound), &[];
+        "CandidateEventMismatch" | SupervisorError::CandidateEventMismatch(..)
+            => startup_line("CandidateEventMismatch"),
+            SupervisorError::CandidateEventMismatch(R42S2_SEQUENCE_I64), &[];
+        "CandidateStateMismatch" | SupervisorError::CandidateStateMismatch { .. }
+            => startup_line("CandidateStateMismatch"),
+            SupervisorError::CandidateStateMismatch { workspace_id: r42s2_uuid(), digest_value: r42s2_digest(), cause: crate::CandidateError::NotFound }, &[];
+        "DispatchEventMismatch" | SupervisorError::DispatchEventMismatch(..)
+            => startup_line("DispatchEventMismatch"),
+            SupervisorError::DispatchEventMismatch(R42S2_SEQUENCE_I64), &[];
+        "DispatchRecoveryFailed" | SupervisorError::DispatchRecoveryFailed
+            => startup_line("DispatchRecoveryFailed"),
+            SupervisorError::DispatchRecoveryFailed, &[];
+        "PauseEventMismatch" | SupervisorError::PauseEventMismatch(..)
+            => startup_line("PauseEventMismatch"),
+            SupervisorError::PauseEventMismatch(R42S2_SEQUENCE_I64), &[];
+        "SchemaMismatch" | SupervisorError::SchemaMismatch
+            => startup_line("SchemaMismatch"),
+            SupervisorError::SchemaMismatch, &[];
+        "UnsupportedSchemaVersion" | SupervisorError::UnsupportedSchemaVersion(..)
+            => startup_line("UnsupportedSchemaVersion"),
+            SupervisorError::UnsupportedSchemaVersion(R42S2_SEQUENCE_I64), &[];
+        "IntegrityCheckFailed" | SupervisorError::IntegrityCheckFailed(..)
+            => startup_line("IntegrityCheckFailed"),
+            SupervisorError::IntegrityCheckFailed(r42s2_digest()), &[];
+        "StoredIdentityUnreadable" | SupervisorError::StoredIdentityUnreadable { .. }
+            => startup_line("StoredIdentityUnreadable"),
+            SupervisorError::StoredIdentityUnreadable {
+                what: "a Mission row's identity is not readable",
+                raw: format!("{R42S2_NEEDLE_A} /home/example/private.txt"),
+            }, &[R42S2_NEEDLE_A];
+        "StartupEnumerationFailed" | SupervisorError::StartupEnumerationFailed { .. }
+            => startup_line("StartupEnumerationFailed"),
+            SupervisorError::StartupEnumerationFailed { pass: crate::StartupPass::Project, source: r42s2_driver() }, &[R42S2_NEEDLE_A];
+        "ForeignKeyViolations" | SupervisorError::ForeignKeyViolations(..)
+            => startup_line("ForeignKeyViolations"),
+            SupervisorError::ForeignKeyViolations(R42S2_SEQUENCE), &[];
+    }
+
+    /// R42 slice 2, fold: every one of the 72 startup lines is what the spec says.
+    #[test]
+    fn r42_startup_templates_are_all_pinned() {
+        assert_eq!(STARTUP_LINES.len(), 72, "R42S2.STARTUP.CARDINALITY.LINES");
+        assert_eq!(startup_rows().len(), 72, "R42S2.STARTUP.CARDINALITY.ROWS");
+        let ids: std::collections::BTreeSet<&str> =
+            startup_rows().iter().map(|(case, _, _)| *case).collect();
+        assert_eq!(ids.len(), 72, "R42S2.STARTUP.CASE_IDS_UNIQUE");
+
+        for (case, value, markers) in startup_rows() {
+            let (matched, expected) = expected_startup(&value);
+            assert_eq!(matched, case, "R42S2.FIXTURE.STARTUP.{case}.PATTERN");
+            let line = value.to_string();
+            for marker in markers {
+                assert!(
+                    !line.contains(marker),
+                    "R42S2.STARTUP.{case}.NO_NEEDLE: {line}"
+                );
+                assert!(
+                    format!("{value:?}").contains(marker),
+                    "R42S2.STARTUP.{case}.DEBUG_RETAINS"
+                );
+            }
+            assert!(
+                !line.contains('\n') && !line.contains('\r'),
+                "R42S2.STARTUP.{case}.ONE_LINE: {line:?}"
+            );
+            assert_eq!(line, expected, "R42S2.STARTUP.{case}.PROJECTION");
+        }
+    }
 }
