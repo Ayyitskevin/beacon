@@ -370,6 +370,13 @@ fn restart_refuses_a_decision_whose_audit_event_is_missing() {
         "the reader's own sentence reached the line: {line}"
     );
     let named = line.rsplit(": ").next().unwrap().to_owned();
+    // kimi's P2: PINNED, not just shaped. A name-shaped tail is satisfied by ANY arm,
+    // so without this a pass carrying a fixed-but-wrong fault survives -- the M9 class
+    // measured surviving on the pass-7 bar.
+    assert_eq!(
+        named, "InvalidStore",
+        "the refusal carries the wrong fault: {line}"
+    );
     assert!(
         !named.contains(' ') && !named.contains('{'),
         "the tail of the line is a rendering, not a name: {line}"
