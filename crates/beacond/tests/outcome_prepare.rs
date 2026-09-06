@@ -5688,32 +5688,72 @@ fn a_condition_with_support_becomes_a_document_that_cites_it() {
 /// is no read. That is the gap the pass closes.
 #[test]
 fn a_superseded_classification_citing_a_predecessor_the_store_does_not_hold_fails_startup() {
-    let fixture = admitted_mission("classification-pass-forged-predecessor");
+    // R44.5 (kimi): RE-ROLL UNTIL THE PLANT SORTS INTERIOR. The forged record's
+    // `classification_id` is a fresh `Uuid::new_v4()` INSIDE the hashed bytes, so the planted
+    // digest -- and its position in this pass's `ORDER BY workspace_id, digest_value` -- is drawn
+    // again on every run. With three rows the plant lands at an end 2/3 of the time, and when it
+    // does, "names the failing row" and "names that end" coincide and a fixed-end mutant survives.
+    // Re-drawing until it is interior makes both M8 forms die on EVERY run rather than on two runs
+    // in three. Expected draws: 3.
+    let mut attempt = 0_u32;
+    let (fixture, mut forged, planted) = loop {
+        attempt += 1;
+        assert!(
+            attempt <= 40,
+            "40 draws without an interior digest: the re-roll is not reaching the hashed bytes"
+        );
+        let fixture =
+            admitted_mission(&format!("classification-pass-forged-predecessor-{attempt}"));
 
-    // Version 1, planted, citing a predecessor nothing stored.
-    let mut forged = MissionImpactClassificationV1 {
-        workspace_id: fixture.workspace_id,
-        mission_id: fixture.mission_id,
-        classification_id: Uuid::new_v4(),
-        version: 1,
-        impact: ImpactLevel::Ordinary,
-        basis: ClassificationBasis::OperatorDeclared,
-        policy: PolicyRevisionRef {
-            project_id: fixture.project_id,
-            policy_revision: fixture.policy_revision,
-            charter_revision: fixture.charter_revision,
-        },
-        rule_id: None,
-        reason: "The Mission writes to the Operator's own repository.".to_owned(),
-        classified_by: ClassificationActor::Operator,
-        classified_at_ms: 1_788_400_000_000,
-        supersedes: ClassificationSupersedes::Record("ab".repeat(32)),
+        // Version 1, planted, citing a predecessor nothing stored.
+        let forged = MissionImpactClassificationV1 {
+            workspace_id: fixture.workspace_id,
+            mission_id: fixture.mission_id,
+            classification_id: Uuid::new_v4(),
+            version: 1,
+            impact: ImpactLevel::Ordinary,
+            basis: ClassificationBasis::OperatorDeclared,
+            policy: PolicyRevisionRef {
+                project_id: fixture.project_id,
+                policy_revision: fixture.policy_revision,
+                charter_revision: fixture.charter_revision,
+            },
+            rule_id: None,
+            reason: "The Mission writes to the Operator's own repository.".to_owned(),
+            classified_by: ClassificationActor::Operator,
+            classified_at_ms: 1_788_400_000_000,
+            supersedes: ClassificationSupersedes::Record("ab".repeat(32)),
+        };
+        let planted = fixture.plant_classification(&forged);
+
+        // Versions 2 and 3, honest, recorded through the Command. From here nothing reads version 1.
+        // Their digests depend on the planted one, so the ordering cannot be settled before the draw.
+        let second =
+            fixture.classify_superseding(2, ClassificationSupersedes::Record(planted.clone()));
+        fixture.classify_superseding(3, ClassificationSupersedes::Record(second));
+
+        // R44.4: the placement is READ BACK from the pass's own query, not assumed.
+        let connection = fixture.store.connect();
+        let ends: Vec<String> = ["ASC", "DESC"]
+            .iter()
+            .map(|order| {
+                connection
+                    .query_row(
+                        &format!(
+                            "SELECT digest_value FROM mission_impact_classifications
+                             ORDER BY workspace_id {order}, digest_value {order} LIMIT 1"
+                        ),
+                        [],
+                        |row| row.get(0),
+                    )
+                    .expect("the fixture holds three classifications")
+            })
+            .collect();
+        drop(connection);
+        if !ends.contains(&planted) {
+            break (fixture, forged, planted);
+        }
     };
-    let planted = fixture.plant_classification(&forged);
-
-    // Versions 2 and 3, honest, recorded through the Command. From here nothing reads version 1.
-    let second = fixture.classify_superseding(2, ClassificationSupersedes::Record(planted.clone()));
-    fixture.classify_superseding(3, ClassificationSupersedes::Record(second));
 
     // The belt still refuses version 1 ON READ, so the fault is real and has a name.
     let connection = fixture.store.connect();
@@ -5732,15 +5772,8 @@ fn a_superseded_classification_citing_a_predecessor_the_store_does_not_hold_fail
     drop(connection);
     forged.version = 1;
 
-    // R44 DECLARED SURVIVOR, measured rather than assumed. This bar names the row it refused (the
-    // held `planted` literal, below), but a mutant naming a FIXED END of the pass's own ORDER BY
-    // survives it: the planted classification's digest sorts FIRST among the three, so "names the
-    // failing row" and "names rows[0]" coincide here. Measured five runs out of five, so it is
-    // deterministic, not flaky -- and it cannot be fixed by placement the way the other eighteen
-    // bars were. `digest_value` is CONTENT ADDRESSED: the fixture cannot mint a classification
-    // whose hash lands at a chosen end, and there is no second Workspace to move the row with
-    // (the ORDER BY is `workspace_id, digest_value`). Closing it needs a fixture that can place a
-    // row by identity, not a tamper that can choose an end.
+    // The plant is INTERIOR: neither `rows[0]` nor `rows.last()` of this pass's own ORDER BY,
+    // asserted above by the re-roll's exit condition rather than assumed.
 
     // And startup refuses it BY NAME. Before this slice, this reopened Ready.
     let refusal = Supervisor::bootstrap(StartupConfig {
