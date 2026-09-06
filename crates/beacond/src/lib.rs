@@ -610,6 +610,15 @@ pub enum SupervisorError {
         what: &'static str,
         raw: String,
     },
+    /// A stored integer key is outside the public reader's domain. Textual owner fields remain
+    /// escaped and bounded, while the typed key is rendered outside that bound so it cannot be
+    /// truncated out of the operator line (R45).
+    StoredIntegerKeyUnreadable {
+        what: &'static str,
+        raw: String,
+        key_name: &'static str,
+        key: i64,
+    },
     /// A startup pass could not enumerate its rows. Names WHICH pass; the driver's own error
     /// travels in `Debug` and `source()` only (sol1's P1-3, R28.4).
     StartupEnumerationFailed {
@@ -1169,6 +1178,16 @@ impl fmt::Display for SupervisorError {
             Self::StoredIdentityUnreadable { what, raw } => {
                 write!(formatter, "{what}: {}", quoted_store_text(raw))
             }
+            Self::StoredIntegerKeyUnreadable {
+                what,
+                raw,
+                key_name,
+                key,
+            } => write!(
+                formatter,
+                "{what}: {}, {key_name} {key}",
+                quoted_store_text(raw)
+            ),
             Self::StartupEnumerationFailed { pass, .. } => write!(
                 formatter,
                 "the {} startup pass could not enumerate its rows",
@@ -2262,9 +2281,11 @@ fn map_resident_lifecycle_state_fault(
             workspace_id,
             resident_id,
             sequence,
-        } => SupervisorError::StoredIdentityUnreadable {
+        } => SupervisorError::StoredIntegerKeyUnreadable {
             what: "a Resident lifecycle decision's ordering key is not readable",
-            raw: format!("Workspace {workspace_id}, Resident {resident_id}, sequence {sequence}"),
+            raw: format!("Workspace {workspace_id}, Resident {resident_id}"),
+            key_name: "sequence",
+            key: sequence,
         },
     }
 }
@@ -2300,9 +2321,11 @@ fn map_resident_configuration_state_fault(
             workspace_id,
             decision_id,
             sequence,
-        } => SupervisorError::StoredIdentityUnreadable {
+        } => SupervisorError::StoredIntegerKeyUnreadable {
             what: "a Resident configuration decision's ordering key is not readable",
-            raw: format!("Workspace {workspace_id}, decision {decision_id}, sequence {sequence}"),
+            raw: format!("Workspace {workspace_id}, decision {decision_id}"),
+            key_name: "sequence",
+            key: sequence,
         },
     }
 }
@@ -2334,11 +2357,11 @@ fn map_local_model_activation_state_fault(
             workspace_id,
             activation_id,
             sequence,
-        } => SupervisorError::StoredIdentityUnreadable {
+        } => SupervisorError::StoredIntegerKeyUnreadable {
             what: "a local-model activation decision's ordering key is not readable",
-            raw: format!(
-                "Workspace {workspace_id}, activation {activation_id}, sequence {sequence}"
-            ),
+            raw: format!("Workspace {workspace_id}, activation {activation_id}"),
+            key_name: "sequence",
+            key: sequence,
         },
     }
 }

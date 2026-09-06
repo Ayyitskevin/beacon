@@ -585,7 +585,13 @@ fn sol1_startup_refuses_minimum_activation_sequence() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .expect_err("startup accepted activation sequence i64::MIN as Ready");
-    let SupervisorError::StoredIdentityUnreadable { what, raw } = &error else {
+    let SupervisorError::StoredIntegerKeyUnreadable {
+        what,
+        raw,
+        key_name,
+        key,
+    } = &error
+    else {
         panic!("the activation ordering key was refused under the wrong name: {error:?}");
     };
     assert_eq!(
@@ -593,5 +599,204 @@ fn sol1_startup_refuses_minimum_activation_sequence() {
         "a local-model activation decision's ordering key is not readable"
     );
     assert!(raw.contains(&active.id.to_string()));
-    assert!(raw.contains(&i64::MIN.to_string()));
+    assert_eq!(*key_name, "sequence");
+    assert_eq!(*key, i64::MIN);
+}
+
+#[test]
+fn astra_startup_refuses_zero_activation_sequence() {
+    let store = TestStore::new("sol1-min-sequence");
+    let accounts = enrolled_accounts(&store);
+    let mut responses = two_model_inspection_responses();
+    responses.extend(two_model_inspection_responses());
+    let (address, server) = serve_ollama(responses);
+    let service = LocalModelActivationService::new(
+        accounts,
+        store.workspace_id,
+        LocalModelEndpoint::new(address).unwrap(),
+    );
+    let review = service.inspect(MODEL_NAME, MODEL_DIGEST).unwrap();
+    let active = service
+        .activate(review, vec![ProviderFeature::Completion])
+        .unwrap();
+    server.join().unwrap();
+    drop(service);
+
+    let connection = Connection::open(&store.path).unwrap();
+    let trigger: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema
+             WHERE type = 'trigger' AND name = 'local_model_activation_decisions_no_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute_batch("DROP TRIGGER local_model_activation_decisions_no_update")
+        .unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE local_model_activation_decisions SET sequence = ?1 WHERE id = ?2",
+                rusqlite::params![0_i64, active.id.to_string()],
+            )
+            .unwrap(),
+        1,
+        "the 0_i64 sequence did not plant"
+    );
+    connection.execute_batch(&trigger).unwrap();
+    drop(connection);
+
+    let error = Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .expect_err("R45.ACTIVATION.ZERO_REFUSED");
+    let SupervisorError::StoredIntegerKeyUnreadable {
+        what,
+        raw,
+        key_name,
+        key,
+    } = &error
+    else {
+        panic!("the activation ordering key was refused under the wrong name: {error:?}");
+    };
+    assert_eq!(
+        *what,
+        "a local-model activation decision's ordering key is not readable"
+    );
+    assert!(raw.contains(&active.id.to_string()));
+    assert_eq!(*key_name, "sequence");
+    assert_eq!(*key, 0, "R45.ACTIVATION.ZERO_KEY");
+    assert!(
+        error.to_string().contains("sequence 0"),
+        "R45.ACTIVATION.ZERO_LINE_KEY"
+    );
+}
+
+#[test]
+fn astra_startup_accepts_maximum_activation_sequence() {
+    let store = TestStore::new("sol1-min-sequence");
+    let accounts = enrolled_accounts(&store);
+    let mut responses = two_model_inspection_responses();
+    responses.extend(two_model_inspection_responses());
+    let (address, server) = serve_ollama(responses);
+    let service = LocalModelActivationService::new(
+        accounts,
+        store.workspace_id,
+        LocalModelEndpoint::new(address).unwrap(),
+    );
+    let review = service.inspect(MODEL_NAME, MODEL_DIGEST).unwrap();
+    let active = service
+        .activate(review, vec![ProviderFeature::Completion])
+        .unwrap();
+    server.join().unwrap();
+    drop(service);
+
+    let connection = Connection::open(&store.path).unwrap();
+    let trigger: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema
+             WHERE type = 'trigger' AND name = 'local_model_activation_decisions_no_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute_batch("DROP TRIGGER local_model_activation_decisions_no_update")
+        .unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE local_model_activation_decisions SET sequence = ?1 WHERE id = ?2",
+                rusqlite::params![i64::MAX, active.id.to_string()],
+            )
+            .unwrap(),
+        1,
+        "the i64::MAX sequence did not plant"
+    );
+    connection.execute_batch(&trigger).unwrap();
+    drop(connection);
+
+    let result = Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    });
+    assert!(
+        result.is_ok(),
+        "R45.ACTIVATION.MAX_POSITIVE_ORDER_KEY: {result:?}"
+    );
+}
+
+#[test]
+fn astra_minimum_activation_sequence_outward_key_is_exact() {
+    let store = TestStore::new("sol1-min-sequence");
+    let accounts = enrolled_accounts(&store);
+    let mut responses = two_model_inspection_responses();
+    responses.extend(two_model_inspection_responses());
+    let (address, server) = serve_ollama(responses);
+    let service = LocalModelActivationService::new(
+        accounts,
+        store.workspace_id,
+        LocalModelEndpoint::new(address).unwrap(),
+    );
+    let review = service.inspect(MODEL_NAME, MODEL_DIGEST).unwrap();
+    let active = service
+        .activate(review, vec![ProviderFeature::Completion])
+        .unwrap();
+    server.join().unwrap();
+    drop(service);
+
+    let connection = Connection::open(&store.path).unwrap();
+    let trigger: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema
+             WHERE type = 'trigger' AND name = 'local_model_activation_decisions_no_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute_batch("DROP TRIGGER local_model_activation_decisions_no_update")
+        .unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE local_model_activation_decisions SET sequence = ?1 WHERE id = ?2",
+                rusqlite::params![i64::MIN, active.id.to_string()],
+            )
+            .unwrap(),
+        1,
+        "the i64::MIN sequence did not plant"
+    );
+    connection.execute_batch(&trigger).unwrap();
+    drop(connection);
+
+    let error = Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .expect_err("startup accepted activation sequence i64::MIN as Ready");
+    let SupervisorError::StoredIntegerKeyUnreadable {
+        what,
+        raw,
+        key_name,
+        key,
+    } = &error
+    else {
+        panic!("the activation ordering key was refused under the wrong name: {error:?}");
+    };
+    assert_eq!(
+        *what,
+        "a local-model activation decision's ordering key is not readable"
+    );
+    assert!(raw.contains(&active.id.to_string()));
+    assert_eq!(*key_name, "sequence");
+    assert_eq!(*key, i64::MIN);
+    let line = error.to_string();
+    eprintln!("OUTWARD {line}");
+    assert!(
+        line.contains(&i64::MIN.to_string()),
+        "R45.ACTIVATION.MIN_LINE_KEY_EXACT: {line}"
+    );
 }
