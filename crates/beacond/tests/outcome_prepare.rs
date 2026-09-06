@@ -3998,88 +3998,102 @@ END;",
 /// back, and the tamper lands on whichever sorts LAST.
 #[test]
 fn startup_refuses_a_mission_whose_condition_projection_disagrees_and_names_the_row() {
-    let fixture = admitted_mission("r28-mission-startup");
-    let other = sol1_admit_other_mission(&fixture, "A second admitted Mission");
-    assert_ne!(other, fixture.mission_id);
+    // R44: BOTH ENDS. Tampering only the last-sorting row makes "names the
+    // failing row" and "names the last row" the same assertion, and a Row arm
+    // naming `rows.last()` satisfies it. One run per end, so `rows[0]` and
+    // `rows.last()` are each wrong in exactly one of them.
+    for end in ["last", "first"] {
+        let fixture = admitted_mission(&format!("r28-mission-startup-{end}"));
+        let other = sol1_admit_other_mission(&fixture, "A second admitted Mission");
+        assert_ne!(other, fixture.mission_id);
 
-    let connection = fixture.store.connect();
-    let ordered: Vec<String> = connection
-        .prepare("SELECT id FROM missions ORDER BY workspace_id, id")
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    assert_eq!(
-        ordered.len(),
-        2,
-        "the fixture must hold two Missions: {ordered:?}"
-    );
-    let target = Uuid::parse_str(ordered.last().unwrap()).unwrap();
-
-    connection
-        .execute_batch("DROP TRIGGER mission_success_conditions_no_delete;")
-        .unwrap();
-    let removed = connection
-        .execute(
-            "DELETE FROM mission_success_conditions WHERE mission_id = ?1",
-            params![target.to_string()],
+        let connection = fixture.store.connect();
+        let ordered: Vec<String> = connection
+            .prepare("SELECT id FROM missions ORDER BY workspace_id, id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            ordered.len(),
+            2,
+            "the fixture must hold two Missions: {ordered:?}"
+        );
+        let target = Uuid::parse_str(
+            if end == "last" {
+                ordered.last()
+            } else {
+                ordered.first()
+            }
+            .unwrap(),
         )
         .unwrap();
-    assert!(
-        removed > 0,
-        "the plant removed nothing, so it plants nothing"
-    );
-    // Byte-exact, as migration 0024 wrote it (R39.3).
-    connection
-        .execute_batch(
-            "CREATE TRIGGER mission_success_conditions_no_delete
+
+        connection
+            .execute_batch("DROP TRIGGER mission_success_conditions_no_delete;")
+            .unwrap();
+        let removed = connection
+            .execute(
+                "DELETE FROM mission_success_conditions WHERE mission_id = ?1",
+                params![target.to_string()],
+            )
+            .unwrap();
+        assert!(
+            removed > 0,
+            "the plant removed nothing, so it plants nothing"
+        );
+        // Byte-exact, as migration 0024 wrote it (R39.3).
+        connection
+            .execute_batch(
+                "CREATE TRIGGER mission_success_conditions_no_delete
 BEFORE DELETE ON mission_success_conditions
 BEGIN
     SELECT RAISE(ABORT, 'Mission success conditions are immutable');
 END;",
-        )
-        .unwrap();
-    drop(connection);
+            )
+            .unwrap();
+        drop(connection);
 
-    // The direct reader still answers: this fault lives in a projection `get` never consults, which
-    // is exactly why the startup pass exists and why the pass owns the refusal.
-    MissionService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
-        .get(target)
-        .expect("the Mission's own record is untouched");
+        // The direct reader still answers: this fault lives in a projection `get` never consults, which
+        // is exactly why the startup pass exists and why the pass owns the refusal.
+        MissionService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+            .get(target)
+            .expect("the Mission's own record is untouched");
 
-    let refusal = astra_boot(&fixture)
-        .expect_err("a store whose condition projection disagrees reopened Ready");
-    assert!(
-        matches!(
-            &refusal,
-            beacond::SupervisorError::MissionStateMismatch {
-                workspace_id,
-                mission_id,
-                cause: MissionError::InvalidStore,
-            } if *workspace_id == fixture.workspace_id && *mission_id == target
-        ),
-        "refused for the wrong reason, or naming the wrong row: {refusal:?}"
-    );
+        let refusal = astra_boot(&fixture)
+            .expect_err("a store whose condition projection disagrees reopened Ready");
+        assert!(
+            matches!(
+                &refusal,
+                beacond::SupervisorError::MissionStateMismatch {
+                    workspace_id,
+                    mission_id,
+                    cause: MissionError::InvalidStore,
+                } if *workspace_id == fixture.workspace_id && *mission_id == target
+            ),
+            "refused for the wrong reason, or naming the wrong row: {refusal:?}"
+        );
 
-    // R28.4: the key and the fault's NAME.
-    let line = refusal.to_string();
-    assert!(
-        line.contains(&target.to_string()) && line.contains(&fixture.workspace_id.to_string()),
-        "the refusal does not name the row it refused: {line}"
-    );
-    assert!(
-        line.contains("InvalidStore"),
-        "the refusal does not name the fault: {line}"
-    );
-    // NOTE, and it is why this pass has no "cause flattened" mutant: `InvalidStore` is the ONLY
-    // cause this pass can reach for a row. Every column of `missions` is compared against the
-    // admission event by an earlier pass, so a richer fault never gets here. The row identity is
-    // the whole of what widening buys for this pass today.
-    assert!(
-        format!("{refusal:?}").contains("InvalidStore"),
-        "the carried fault is not reachable through Debug: {refusal:?}"
-    );
+        // R28.4: the key and the fault's NAME.
+        let line = refusal.to_string();
+        assert!(
+            line.contains(&target.to_string()) && line.contains(&fixture.workspace_id.to_string()),
+            "the refusal does not name the row it refused: {line}"
+        );
+        assert!(
+            line.contains("InvalidStore"),
+            "the refusal does not name the fault: {line}"
+        );
+        // NOTE, and it is why this pass has no "cause flattened" mutant: `InvalidStore` is the ONLY
+        // cause this pass can reach for a row. Every column of `missions` is compared against the
+        // admission event by an earlier pass, so a richer fault never gets here. The row identity is
+        // the whole of what widening buys for this pass today.
+        assert!(
+            format!("{refusal:?}").contains("InvalidStore"),
+            "the carried fault is not reachable through Debug: {refusal:?}"
+        );
+    }
 }
 
 /// R28.1 pass 4 of 5: a Project whose charter history disagrees with its current revision is
@@ -4089,46 +4103,59 @@ END;",
 /// whichever sorts LAST in the pass's own `ORDER BY`.
 #[test]
 fn startup_refuses_a_project_whose_charter_history_disagrees_and_names_the_row() {
-    let fixture = admitted_mission("r28-project-startup");
-    let second = ProjectService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
-        .create(ProjectDraft {
-            name: "Beacon Beta".to_owned(),
-            charter: ProjectCharterDraft {
-                purpose: "A second Project, so rows[0] is not the tampered row.".to_owned(),
-                desired_outcomes: vec!["Exist".to_owned()],
-                constraints: vec!["Keep authority explicit".to_owned()],
-                prohibitions: vec!["Do not deploy".to_owned()],
-                autonomy_profile: AutonomyProfile::Supervised,
-            },
-        })
-        .expect("the second Project is created");
-    assert_ne!(second.id, fixture.project_id);
+    // R44: BOTH ENDS. Tampering only the last-sorting row makes "names the
+    // failing row" and "names the last row" the same assertion, and a Row arm
+    // naming `rows.last()` satisfies it. One run per end, so `rows[0]` and
+    // `rows.last()` are each wrong in exactly one of them.
+    for end in ["last", "first"] {
+        let fixture = admitted_mission(&format!("r28-project-startup-{end}"));
+        let second = ProjectService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+            .create(ProjectDraft {
+                name: "Beacon Beta".to_owned(),
+                charter: ProjectCharterDraft {
+                    purpose: "A second Project, so rows[0] is not the tampered row.".to_owned(),
+                    desired_outcomes: vec!["Exist".to_owned()],
+                    constraints: vec!["Keep authority explicit".to_owned()],
+                    prohibitions: vec!["Do not deploy".to_owned()],
+                    autonomy_profile: AutonomyProfile::Supervised,
+                },
+            })
+            .expect("the second Project is created");
+        assert_ne!(second.id, fixture.project_id);
 
-    let connection = fixture.store.connect();
-    let ordered: Vec<String> = connection
-        .prepare("SELECT id FROM projects ORDER BY workspace_id, id")
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
+        let connection = fixture.store.connect();
+        let ordered: Vec<String> = connection
+            .prepare("SELECT id FROM projects ORDER BY workspace_id, id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            ordered.len(),
+            2,
+            "the fixture must hold two Projects: {ordered:?}"
+        );
+        let target = Uuid::parse_str(
+            if end == "last" {
+                ordered.last()
+            } else {
+                ordered.first()
+            }
+            .unwrap(),
+        )
         .unwrap();
-    assert_eq!(
-        ordered.len(),
-        2,
-        "the fixture must hold two Projects: {ordered:?}"
-    );
-    let target = Uuid::parse_str(ordered.last().unwrap()).unwrap();
 
-    // `project_charter_revisions` carries no immutability trigger, so this needs no drop-and-restore
-    // -- and that absence is itself worth knowing: the history a Project's terminal revision is
-    // checked against is not protected the way the records it summarises are.
-    // ADDED, not removed: the Project row references its own charter revision, so deleting the
-    // history trips a foreign key before the pass ever sees it (measured -- the first version of
-    // this bar got `FOREIGN KEY constraint failed`). A revision the Project does not point at
-    // makes the terminal revision disagree with the current one, which is this pass's own check.
-    let added = connection
-        .execute(
-            "INSERT INTO project_charter_revisions (
+        // `project_charter_revisions` carries no immutability trigger, so this needs no drop-and-restore
+        // -- and that absence is itself worth knowing: the history a Project's terminal revision is
+        // checked against is not protected the way the records it summarises are.
+        // ADDED, not removed: the Project row references its own charter revision, so deleting the
+        // history trips a foreign key before the pass ever sees it (measured -- the first version of
+        // this bar got `FOREIGN KEY constraint failed`). A revision the Project does not point at
+        // makes the terminal revision disagree with the current one, which is this pass's own check.
+        let added = connection
+            .execute(
+                "INSERT INTO project_charter_revisions (
                  workspace_id, project_id, revision, purpose, desired_outcomes_json,
                  constraints_json, prohibitions_json, autonomy_profile, budget_boundary,
                  external_effects, author_kind, authored_at_ms
@@ -4137,40 +4164,41 @@ fn startup_refuses_a_project_whose_charter_history_disagrees_and_names_the_row()
                     constraints_json, prohibitions_json, autonomy_profile, budget_boundary,
                     external_effects, author_kind, authored_at_ms + 1
              FROM project_charter_revisions WHERE project_id = ?1",
-            params![target.to_string()],
-        )
-        .unwrap();
-    assert!(added > 0, "the plant added nothing, so it plants nothing");
-    drop(connection);
+                params![target.to_string()],
+            )
+            .unwrap();
+        assert!(added > 0, "the plant added nothing, so it plants nothing");
+        drop(connection);
 
-    let refusal =
-        astra_boot(&fixture).expect_err("a store whose charter history disagrees reopened Ready");
-    assert!(
-        matches!(
-            &refusal,
-            beacond::SupervisorError::ProjectStateMismatch {
-                workspace_id,
-                project_id,
-                cause: ProjectError::InvalidStore,
-            } if *workspace_id == fixture.workspace_id && *project_id == target
-        ),
-        "refused for the wrong reason, or naming the wrong row: {refusal:?}"
-    );
+        let refusal = astra_boot(&fixture)
+            .expect_err("a store whose charter history disagrees reopened Ready");
+        assert!(
+            matches!(
+                &refusal,
+                beacond::SupervisorError::ProjectStateMismatch {
+                    workspace_id,
+                    project_id,
+                    cause: ProjectError::InvalidStore,
+                } if *workspace_id == fixture.workspace_id && *project_id == target
+            ),
+            "refused for the wrong reason, or naming the wrong row: {refusal:?}"
+        );
 
-    // R28.4: the key and the fault's NAME.
-    let line = refusal.to_string();
-    assert!(
-        line.contains(&target.to_string()) && line.contains(&fixture.workspace_id.to_string()),
-        "the refusal does not name the row it refused: {line}"
-    );
-    assert!(
-        line.contains("InvalidStore"),
-        "the refusal does not name the fault: {line}"
-    );
-    assert!(
-        format!("{refusal:?}").contains("InvalidStore"),
-        "the carried fault is not reachable through Debug: {refusal:?}"
-    );
+        // R28.4: the key and the fault's NAME.
+        let line = refusal.to_string();
+        assert!(
+            line.contains(&target.to_string()) && line.contains(&fixture.workspace_id.to_string()),
+            "the refusal does not name the row it refused: {line}"
+        );
+        assert!(
+            line.contains("InvalidStore"),
+            "the refusal does not name the fault: {line}"
+        );
+        assert!(
+            format!("{refusal:?}").contains("InvalidStore"),
+            "the carried fault is not reachable through Debug: {refusal:?}"
+        );
+    }
 }
 
 /// R28.1 pass 5 of 5: a completion whose projection disagrees with its own bytes is refused at
@@ -4180,116 +4208,131 @@ fn startup_refuses_a_project_whose_charter_history_disagrees_and_names_the_row()
 /// `ORDER BY digest_value` is read back, and the tamper lands on whichever sorts LAST.
 #[test]
 fn startup_refuses_a_completion_whose_column_disagrees_and_names_the_row() {
-    let fixture = admitted_mission("r28-completion-startup");
-    fixture.classify(ImpactLevel::Ordinary);
-    let (first_digest, first) = fixture.complete((fixture.resident_id, fixture.configuration_id));
+    // R44: BOTH ENDS. Tampering only the last-sorting row makes "names the
+    // failing row" and "names the last row" the same assertion, and a Row arm
+    // naming `rows.last()` satisfies it. One run per end, so `rows[0]` and
+    // `rows.last()` are each wrong in exactly one of them.
+    for end in ["last", "first"] {
+        let fixture = admitted_mission(&format!("r28-completion-startup-{end}"));
+        fixture.classify(ImpactLevel::Ordinary);
+        let (first_digest, first) =
+            fixture.complete((fixture.resident_id, fixture.configuration_id));
 
-    // A SECOND completion needs a second Mission: `mission_completions` is UNIQUE on
-    // (workspace_id, mission_id), so a superseding completion cannot sit beside its predecessor
-    // (measured -- the first version of this bar got that constraint back). Two Missions, one
-    // completion each.
-    let other = sol1_admit_other_mission(&fixture, "A second Mission to complete");
-    let second = MissionCompletionV1 {
-        mission_id: other,
-        // `completion_id` is an R15 reference identity carried INSIDE the bytes, so it has to be
-        // its own -- copying the predecessor's collides on (workspace_id, completion_id).
-        completion_id: Uuid::new_v4(),
-        // The second Mission's admission moved the log, so the predecessor's boundary is no longer
-        // a cut this completion can claim (`BoundaryOutOfRange`, measured).
-        boundary_event_seq: fixture.latest_event_seq(),
-        summary: "The second Mission's own completion.".to_owned(),
-        ..first.clone()
-    };
-    let mut connection = fixture.store.connect();
-    let second_digest =
-        record_completion(&mut connection, &second).expect("the second completion records");
-    assert_ne!(second_digest, first_digest);
-    drop(connection);
+        // A SECOND completion needs a second Mission: `mission_completions` is UNIQUE on
+        // (workspace_id, mission_id), so a superseding completion cannot sit beside its predecessor
+        // (measured -- the first version of this bar got that constraint back). Two Missions, one
+        // completion each.
+        let other = sol1_admit_other_mission(&fixture, "A second Mission to complete");
+        let second = MissionCompletionV1 {
+            mission_id: other,
+            // `completion_id` is an R15 reference identity carried INSIDE the bytes, so it has to be
+            // its own -- copying the predecessor's collides on (workspace_id, completion_id).
+            completion_id: Uuid::new_v4(),
+            // The second Mission's admission moved the log, so the predecessor's boundary is no longer
+            // a cut this completion can claim (`BoundaryOutOfRange`, measured).
+            boundary_event_seq: fixture.latest_event_seq(),
+            summary: "The second Mission's own completion.".to_owned(),
+            ..first.clone()
+        };
+        let mut connection = fixture.store.connect();
+        let second_digest =
+            record_completion(&mut connection, &second).expect("the second completion records");
+        assert_ne!(second_digest, first_digest);
+        drop(connection);
 
-    let connection = fixture.store.connect();
-    let ordered: Vec<String> = connection
-        .prepare("SELECT digest_value FROM mission_completions ORDER BY digest_value")
+        let connection = fixture.store.connect();
+        let ordered: Vec<String> = connection
+            .prepare("SELECT digest_value FROM mission_completions ORDER BY digest_value")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            ordered.len(),
+            2,
+            "the fixture must hold two completions: {ordered:?}"
+        );
+        let target = if end == "last" {
+            ordered.last()
+        } else {
+            ordered.first()
+        }
         .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    assert_eq!(
-        ordered.len(),
-        2,
-        "the fixture must hold two completions: {ordered:?}"
-    );
-    let target = ordered.last().unwrap().clone();
+        .clone();
 
-    connection
-        .execute_batch("DROP TRIGGER mission_completions_no_update;")
-        .unwrap();
-    connection
-        .execute(
-            "UPDATE mission_completions SET completed_at_ms = completed_at_ms + 1
+        connection
+            .execute_batch("DROP TRIGGER mission_completions_no_update;")
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE mission_completions SET completed_at_ms = completed_at_ms + 1
              WHERE digest_value = ?1",
-            params![target],
-        )
-        .unwrap();
-    // Byte-exact, as migration 0026 wrote it (R39.3).
-    connection
-        .execute_batch(
-            "CREATE TRIGGER mission_completions_no_update
+                params![target],
+            )
+            .unwrap();
+        // Byte-exact, as migration 0026 wrote it (R39.3).
+        connection
+            .execute_batch(
+                "CREATE TRIGGER mission_completions_no_update
 BEFORE UPDATE ON mission_completions
 BEGIN
     SELECT RAISE(ABORT, 'Mission completions are immutable');
 END;",
-        )
-        .unwrap();
-    drop(connection);
+            )
+            .unwrap();
+        drop(connection);
 
-    // The belt refuses it ON READ, so the planted fault is real and has a name of its own.
-    let read_connection = fixture.store.connect();
-    let read = beacond::verified_completion_within(&read_connection, fixture.workspace_id, &target)
-        .expect_err("the reader trusted a projection its bytes do not support");
-    assert!(
-        matches!(
-            read,
-            CompletionReadRefusal::ColumnDisagrees("completed_at_ms")
-        ),
-        "the planted fault is not the one this test is about: {read:?}"
-    );
-    drop(read_connection);
+        // The belt refuses it ON READ, so the planted fault is real and has a name of its own.
+        let read_connection = fixture.store.connect();
+        let read =
+            beacond::verified_completion_within(&read_connection, fixture.workspace_id, &target)
+                .expect_err("the reader trusted a projection its bytes do not support");
+        assert!(
+            matches!(
+                read,
+                CompletionReadRefusal::ColumnDisagrees("completed_at_ms")
+            ),
+            "the planted fault is not the one this test is about: {read:?}"
+        );
+        drop(read_connection);
 
-    let refusal = astra_boot(&fixture)
-        .expect_err("a store holding a completion that disagrees with its bytes reopened Ready");
-    assert!(
-        matches!(
-            &refusal,
-            beacond::SupervisorError::MissionCompletionStateMismatch {
-                workspace_id,
-                digest_value,
-                cause: CompletionReadRefusal::ColumnDisagrees("completed_at_ms"),
-            } if *workspace_id == fixture.workspace_id && digest_value == &target
-        ),
-        "refused for the wrong reason, with the cause flattened, or naming the wrong row: \
+        let refusal = astra_boot(&fixture).expect_err(
+            "a store holding a completion that disagrees with its bytes reopened Ready",
+        );
+        assert!(
+            matches!(
+                &refusal,
+                beacond::SupervisorError::MissionCompletionStateMismatch {
+                    workspace_id,
+                    digest_value,
+                    cause: CompletionReadRefusal::ColumnDisagrees("completed_at_ms"),
+                } if *workspace_id == fixture.workspace_id && digest_value == &target
+            ),
+            "refused for the wrong reason, with the cause flattened, or naming the wrong row: \
          {refusal:?}"
-    );
+        );
 
-    // R28.4: the key and the fault's NAME, and not the carried refusal's own text.
-    let line = refusal.to_string();
-    assert!(
-        line.contains(&target) && line.contains(&fixture.workspace_id.to_string()),
-        "the refusal does not name the row it refused: {line}"
-    );
-    assert!(
-        line.contains("ColumnDisagrees"),
-        "the refusal does not name the fault: {line}"
-    );
-    let carried = CompletionReadRefusal::ColumnDisagrees("completed_at_ms").to_string();
-    assert!(
-        !line.contains(&carried),
-        "the carried refusal's own text reached the one-line message: {line}"
-    );
-    assert!(
-        format!("{refusal:?}").contains("completed_at_ms"),
-        "the carried fault is not reachable through Debug: {refusal:?}"
-    );
+        // R28.4: the key and the fault's NAME, and not the carried refusal's own text.
+        let line = refusal.to_string();
+        assert!(
+            line.contains(&target) && line.contains(&fixture.workspace_id.to_string()),
+            "the refusal does not name the row it refused: {line}"
+        );
+        assert!(
+            line.contains("ColumnDisagrees"),
+            "the refusal does not name the fault: {line}"
+        );
+        let carried = CompletionReadRefusal::ColumnDisagrees("completed_at_ms").to_string();
+        assert!(
+            !line.contains(&carried),
+            "the carried refusal's own text reached the one-line message: {line}"
+        );
+        assert!(
+            format!("{refusal:?}").contains("completed_at_ms"),
+            "the carried fault is not reachable through Debug: {refusal:?}"
+        );
+    }
 }
 
 /// R28.4 at the innermost point (Fable's addendum 2, from opus2's R28.4-D lane): the driver's own
