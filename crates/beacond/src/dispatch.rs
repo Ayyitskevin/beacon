@@ -2102,36 +2102,41 @@ fn pre_images_hold(
         before_read();
         let read = read_pinned_bytes(repository, &cat_file, READ_BUDGET);
         decided.record_step(GitStepName::CatFile, &cat_file, read.bytes().is_some());
-        let record_holds = match (&declared_pre_image, &read) {
-            // Declared absent, and absent: Git ran and reported no such object in the tree. This
-            // is the ONE no-bytes answer that is evidence (R46.1); the other is below.
-            (None, PinnedRead::NotFound) => true,
-            (None, PinnedRead::Bytes(_)) => false,
-            // R46.7: a declared-present pre-image whose path is ABSENT is a truthful mismatch with
-            // nothing to read. The absence is the observation, and it is recorded as one.
-            (Some(_), PinnedRead::NotFound) => {
-                observed.push((declared_path.clone(), ObservedPreImage::Absent));
-                false
-            }
-            (Some(declared), PinnedRead::Bytes(bytes)) => {
-                // R46.5: what was READ, recorded whether or not it agreed. A Receipt that claims a
-                // comparison has to carry the thing it compared against.
-                let read_digest = hex(&crate::proposal::sha256(bytes));
-                let holds = read_digest == *declared;
-                observed.push((
-                    declared_path.clone(),
-                    ObservedPreImage::Bytes {
-                        digest: read_digest,
-                    },
-                ));
-                holds
-            }
-            // R46: the read FAILED. This gate cannot say whether the pre-image holds, so it does
+        // R46.8: THE OBSERVATION IS RECORDED FIRST, for every read that produced one, and the
+        // verdict is then read off the table. Four rounds of this lane fixed the contract one cell
+        // at a time -- the declared-present branches in item 6, the declared-present-absent branch
+        // in item 8 -- and each time the cell nobody had written was the one that bricked a store.
+        // Recording and deciding are separate steps now, so a cell cannot be decided without its
+        // evidence.
+        let observation = match &read {
+            PinnedRead::Bytes(bytes) => Some(ObservedPreImage::Bytes {
+                digest: hex(&crate::proposal::sha256(bytes)),
+            }),
+            PinnedRead::NotFound => Some(ObservedPreImage::Absent),
+            // A read that FAILED establishes nothing, so it observes nothing. It is not a cell of
+            // this table at all: it refuses as `PreImageUnreadable` below.
+            PinnedRead::Unreadable(_) => None,
+        };
+        if let Some(value) = &observation {
+            observed.push((declared_path.clone(), value.clone()));
+        }
+        let record_holds = match (&declared_pre_image, &observation) {
+            // The two cells that HOLD: a declared absence the tree agrees is absent, and a
+            // declared digest the tree's bytes hash to.
+            (None, Some(ObservedPreImage::Absent)) => true,
+            (Some(declared), Some(ObservedPreImage::Bytes { digest })) => digest == declared,
+            // The three cells that MISMATCH, each carrying the observation above:
+            //   (present, Bytes != declared) · (present, Absent) · (absent, Bytes)
+            (None, Some(ObservedPreImage::Bytes { .. }))
+            | (Some(_), Some(ObservedPreImage::Absent)) => false,
+            // R46: the read failed. This gate cannot say whether the pre-image holds, so it does
             // not say it does and it does not say it disagrees. The first such failure is kept
             // because it is the one that stopped the gate answering; later reads still run, so
             // the Receipt's step list stays the invocations this dispatch made.
-            (_, PinnedRead::Unreadable(failure)) => {
-                unreadable.get_or_insert_with(|| failure.clone());
+            (_, None) => {
+                if let PinnedRead::Unreadable(failure) = &read {
+                    unreadable.get_or_insert_with(|| failure.clone());
+                }
                 false
             }
         };
@@ -2651,6 +2656,30 @@ pub(crate) fn verify_dispatch_event(
 /// Byte equality between a Receipt and its Event proves the two copies agree; it does not prove
 /// either says something a dispatch could have produced. An `Applied` naming no commit, or a
 /// refusal naming a resulting revision, is incoherent whatever its bytes (gpt2).
+/// Is this record's `(declared, observed)` pair one of the three cells that mean MISMATCH?
+///
+/// R46.8, the contract as ONE table rather than per-branch arithmetic. Five cells, and which side
+/// they fall on is the whole of what a mismatch Receipt claims:
+///
+/// | declared | observed        | verdict                     |
+/// |----------|-----------------|-----------------------------|
+/// | present  | `Bytes` ≠       | mismatch, carrying `Bytes`  |
+/// | present  | `Absent`        | mismatch, carrying `Absent` |
+/// | absent   | `Bytes`         | mismatch, carrying `Bytes`  — the create conflict |
+/// | absent   | `Absent`        | holds → `Applied`           |
+/// | present  | `Bytes` =       | holds → `Applied`           |
+///
+/// A missing observation is no cell at all: at version 4 it is incoherent, and the caller reads a
+/// version-3 Receipt as unrecorded before it ever asks this (R46.7.1).
+fn is_mismatch_cell(record: &MutationRecord) -> bool {
+    match (&record.pre_image, &record.observed_pre_image) {
+        (Some(declared), Some(ObservedPreImage::Bytes { digest })) => digest != declared,
+        (Some(_), Some(ObservedPreImage::Absent))
+        | (None, Some(ObservedPreImage::Bytes { .. })) => true,
+        (None, Some(ObservedPreImage::Absent)) | (_, None) => false,
+    }
+}
+
 fn verify_outcome_invariants(receipt: &DispatchReceipt) -> Result<(), DispatchError> {
     let names = |token: NotVerified| receipt.not_verified.contains(&token);
     let reconstructed = names(NotVerified::ReconstructedAfterInterruption);
@@ -2695,20 +2724,7 @@ fn verify_outcome_invariants(receipt: &DispatchReceipt) -> Result<(), DispatchEr
             // fabrication and refusing it would make every historical refusal unreadable after an
             // upgrade (the lockout R46.7 named, in the other direction).
             let observation = if receipt.version >= RECEIPT_VERSION {
-                receipt.per_mutation.iter().any(|record| {
-                    // R46.7: exactly two truthful shapes. Bytes that DIFFER from the declaration,
-                    // or an absence where something was declared. `Absent` against a declared
-                    // absence is what HOLDING looks like, and bytes equal to the declaration say
-                    // the comparison held while the outcome refused.
-                    match (&record.observed_pre_image, &record.pre_image) {
-                        (Some(ObservedPreImage::Bytes { digest }), Some(declared)) => {
-                            digest != declared
-                        }
-                        (Some(ObservedPreImage::Bytes { .. }), None) => true,
-                        (Some(ObservedPreImage::Absent), Some(_)) => true,
-                        (Some(ObservedPreImage::Absent), None) | (None, _) => false,
-                    }
-                })
+                receipt.per_mutation.iter().any(is_mismatch_cell)
             } else {
                 true
             };
