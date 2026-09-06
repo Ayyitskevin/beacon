@@ -399,7 +399,14 @@ pub enum SupervisorError {
     /// admitted-event count that does not match the number of Missions. No row to name.
     MissionTotalsMismatch(TotalsMismatch),
     ProjectPolicyEventMismatch(i64),
-    ProjectPolicyStateMismatch,
+    /// A Project's policy history does not re-prove against its own records.
+    ///
+    /// Names the row and carries the owning reader's own error (R28.1). No `Totals` twin.
+    ProjectPolicyStateMismatch {
+        workspace_id: Uuid,
+        project_id: Uuid,
+        cause: project_policy::ProjectPolicyError,
+    },
     ProjectRepositoryEventMismatch(i64),
     /// A Project's repository history does not re-prove against its own records.
     ///
@@ -607,6 +614,7 @@ pub enum StartupPass {
     ProjectRepository,
     SampleProject,
     Team,
+    ProjectPolicy,
 }
 
 impl StartupPass {
@@ -627,6 +635,7 @@ impl StartupPass {
             Self::ProjectRepository => "ProjectRepository",
             Self::SampleProject => "SampleProject",
             Self::Team => "Team",
+            Self::ProjectPolicy => "ProjectPolicy",
         }
     }
 }
@@ -792,9 +801,17 @@ impl fmt::Display for SupervisorError {
                 formatter,
                 "Event sequence {sequence} does not match Project Policy state"
             ),
-            Self::ProjectPolicyStateMismatch => {
-                write!(formatter, "Project Policy state has no exact audit Event")
-            }
+            // R28.4: the key and the fault's NAME.
+            Self::ProjectPolicyStateMismatch {
+                workspace_id,
+                project_id,
+                cause,
+            } => write!(
+                formatter,
+                "the policy history of Project {project_id} in Workspace {workspace_id} does not \
+                 re-prove: {}",
+                cause.name()
+            ),
             Self::ProjectRepositoryEventMismatch(sequence) => write!(
                 formatter,
                 "Event sequence {sequence} does not match Project Repository state"
@@ -2039,6 +2056,36 @@ fn map_team_state_fault(fault: team::TeamStateFault) -> SupervisorError {
     }
 }
 
+/// The production mapping for the ProjectPolicy startup pass, NAMED so a bar can drive it.
+fn map_project_policy_state_fault(
+    fault: project_policy::ProjectPolicyStateFault,
+) -> SupervisorError {
+    match fault {
+        project_policy::ProjectPolicyStateFault::Store(source) => {
+            SupervisorError::StartupEnumerationFailed {
+                pass: StartupPass::ProjectPolicy,
+                source,
+            }
+        }
+        project_policy::ProjectPolicyStateFault::Row {
+            workspace_id,
+            project_id,
+            cause,
+        } => SupervisorError::ProjectPolicyStateMismatch {
+            workspace_id,
+            project_id,
+            cause,
+        },
+        project_policy::ProjectPolicyStateFault::Identity {
+            workspace_id,
+            project_id,
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "a Project policy row's identity is not readable",
+            raw: format!("Workspace {workspace_id}, Project {project_id}"),
+        },
+    }
+}
+
 fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, SupervisorError> {
     let schema_version = connection.query_row(
         "SELECT version FROM schema_meta WHERE singleton = 1",
@@ -2072,7 +2119,7 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
         .map_err(|_| SupervisorError::StarterOrganizationStateMismatch)?;
     project::verify_project_state(connection).map_err(map_project_state_fault)?;
     project_policy::verify_project_policy_state(connection)
-        .map_err(|_| SupervisorError::ProjectPolicyStateMismatch)?;
+        .map_err(map_project_policy_state_fault)?;
     project_repository::verify_project_repository_state(connection)
         .map_err(map_project_repository_state_fault)?;
     sample_project::verify_sample_project_state(connection)
@@ -2518,6 +2565,13 @@ mod tests {
                 ),
             ),
             (
+                "ProjectPolicy",
+                super::map_project_policy_state_fault(
+                    crate::project_policy::verify_project_policy_state(&connection)
+                        .expect_err("no `project_policy_revisions` table"),
+                ),
+            ),
+            (
                 "Team",
                 super::map_team_state_fault(
                     crate::team::verify_team_state(&connection).expect_err("no `teams` table"),
@@ -2533,7 +2587,7 @@ mod tests {
         ];
         assert_eq!(
             refusals.len(),
-            14,
+            15,
             "a pass was added without a fixture here"
         );
 
@@ -2557,7 +2611,7 @@ mod tests {
         }
         assert_eq!(
             lines.len(),
-            14,
+            15,
             "two passes render the same line, so an operator cannot tell them apart: {lines:?}"
         );
     }
