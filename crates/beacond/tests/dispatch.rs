@@ -3666,6 +3666,32 @@ fn a_modification_whose_declared_before_bytes_are_not_there_is_refused() {
     assert_eq!(receipt.outcome, DispatchOutcome::PreImageMismatch);
     assert_eq!(receipt.prepared_commit, None);
     assert_eq!(receipt.repository_effect(), RepositoryEffect::ByteIdentical);
+
+    // R46.5 / grok's `R46.MISMATCH.OBSERVED_DIGEST`: a Receipt that claims a comparison carries
+    // the digest it COMPARED AGAINST. Before this it carried the declared pre-image, the declared
+    // post-image and the path -- everything the Candidate said, and nothing that was read.
+    let record = receipt
+        .per_mutation
+        .iter()
+        .find(|record| record.path == TARGET)
+        .expect("the refused mutation is recorded");
+    let observed = record
+        .observed_pre_image
+        .as_deref()
+        .expect("a mismatch Receipt records the digest it read");
+    assert_eq!(
+        observed,
+        sha256(BASE_LIB_BYTES)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+        "the observed digest is not what the base revision holds"
+    );
+    assert_ne!(
+        Some(observed),
+        record.pre_image.as_deref(),
+        "a mismatch whose observed digest equals the declared one is not a mismatch"
+    );
 }
 
 #[test]
