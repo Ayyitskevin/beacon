@@ -4399,106 +4399,112 @@ fn an_unverifiable_predecessors_reason_stays_out_of_the_one_line_message() {
 /// it sorts last in the pass's own `ORDER BY` by construction (R39.3).
 #[test]
 fn startup_refuses_an_unaccounted_artifact_row_and_names_the_row() {
-    let fixture = admitted_mission("r28t2-artifact-startup");
-    // A bare admitted Mission records no Artifact, so the fixture makes one to copy.
-    fixture
-        .artifacts()
-        .record(
-            ArtifactKind::OutcomeDocument,
-            b"# An Artifact for the plant to copy\n",
-            ArtifactContext::Mission {
-                project_id: fixture.project_id,
-                mission_id: fixture.mission_id,
-            },
-            fixture.resident_id,
-            fixture.configuration_id,
-            None,
-        )
-        .expect("the Artifact records");
-    let connection = fixture.store.connect();
-    let existing: String = connection
-        .query_row(
-            "SELECT digest_value FROM artifacts ORDER BY digest_value LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .expect("the fixture recorded an Artifact");
+    // R44: BOTH ENDS. A planted digest of all `f` sorts LAST in this pass's own
+    // ORDER BY and all `0` sorts FIRST -- the extremes of the hex space, so the
+    // placement holds against any honest digest. Tampering only one end makes
+    // "names the failing row" and "names that end" the same assertion.
+    for (end, fill) in [("last", "f"), ("first", "0")] {
+        let fixture = admitted_mission(&format!("r28t2-artifact-startup-{end}"));
+        // A bare admitted Mission records no Artifact, so the fixture makes one to copy.
+        fixture
+            .artifacts()
+            .record(
+                ArtifactKind::OutcomeDocument,
+                b"# An Artifact for the plant to copy\n",
+                ArtifactContext::Mission {
+                    project_id: fixture.project_id,
+                    mission_id: fixture.mission_id,
+                },
+                fixture.resident_id,
+                fixture.configuration_id,
+                None,
+            )
+            .expect("the Artifact records");
+        let connection = fixture.store.connect();
+        let existing: String = connection
+            .query_row(
+                "SELECT digest_value FROM artifacts ORDER BY digest_value LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the fixture recorded an Artifact");
 
-    let columns: Vec<String> = connection
-        .prepare("SELECT name FROM pragma_table_info('artifacts')")
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    let planted = "f".repeat(64);
-    let names = columns.join(", ");
-    let values = columns
-        .iter()
-        .map(|column| {
-            if column == "digest_value" {
-                "?1".to_owned()
-            } else {
-                column.clone()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    connection
-        .execute(
-            &format!(
-                "INSERT INTO artifacts ({names}) SELECT {values} FROM artifacts
+        let columns: Vec<String> = connection
+            .prepare("SELECT name FROM pragma_table_info('artifacts')")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let planted = fill.repeat(64);
+        let names = columns.join(", ");
+        let values = columns
+            .iter()
+            .map(|column| {
+                if column == "digest_value" {
+                    "?1".to_owned()
+                } else {
+                    column.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        connection
+            .execute(
+                &format!(
+                    "INSERT INTO artifacts ({names}) SELECT {values} FROM artifacts
                  WHERE digest_value = ?2"
+                ),
+                params![planted, existing],
+            )
+            .expect("the planted row inserts");
+
+        let read = fixture
+            .artifacts()
+            .get(&planted)
+            .expect_err("the reader trusted a row whose bytes do not hash to its digest");
+        // MEASURED, and it bounds what this pass can prove: the Artifact reader answers a
+        // digest-mismatched row with the FLAT `InvalidStore`, not with an `Inconsistent(..)` of its
+        // own. `digest_value` hashes `canonical_bytes`, so a plant that both carries a fresh digest and
+        // reaches a domain fault would have to mint new canonical bytes through the artifact codec --
+        // a fixture that builds records rather than copying one. So this pass ships row-identity-only
+        // (R41.1), exactly as tier 1's `mission` and `project` did, and its "cause flattened" mutant is
+        // not killable.
+        assert!(
+            matches!(read, ArtifactError::InvalidStore),
+            "the planted fault is not the one this test is about: {read:?}"
+        );
+        drop(connection);
+
+        let refusal = astra_boot(&fixture)
+            .expect_err("a store holding an unaccounted Artifact row reopened Ready");
+        assert!(
+            matches!(
+                &refusal,
+                beacond::SupervisorError::ArtifactStateMismatch {
+                    workspace_id,
+                    digest_value,
+                    cause: ArtifactError::InvalidStore,
+                } if *workspace_id == fixture.workspace_id && digest_value == &planted
             ),
-            params![planted, existing],
-        )
-        .expect("the planted row inserts");
+            "refused for the wrong reason, or naming the wrong row: {refusal:?}"
+        );
 
-    let read = fixture
-        .artifacts()
-        .get(&planted)
-        .expect_err("the reader trusted a row whose bytes do not hash to its digest");
-    // MEASURED, and it bounds what this pass can prove: the Artifact reader answers a
-    // digest-mismatched row with the FLAT `InvalidStore`, not with an `Inconsistent(..)` of its
-    // own. `digest_value` hashes `canonical_bytes`, so a plant that both carries a fresh digest and
-    // reaches a domain fault would have to mint new canonical bytes through the artifact codec --
-    // a fixture that builds records rather than copying one. So this pass ships row-identity-only
-    // (R41.1), exactly as tier 1's `mission` and `project` did, and its "cause flattened" mutant is
-    // not killable.
-    assert!(
-        matches!(read, ArtifactError::InvalidStore),
-        "the planted fault is not the one this test is about: {read:?}"
-    );
-    drop(connection);
-
-    let refusal = astra_boot(&fixture)
-        .expect_err("a store holding an unaccounted Artifact row reopened Ready");
-    assert!(
-        matches!(
-            &refusal,
-            beacond::SupervisorError::ArtifactStateMismatch {
-                workspace_id,
-                digest_value,
-                cause: ArtifactError::InvalidStore,
-            } if *workspace_id == fixture.workspace_id && digest_value == &planted
-        ),
-        "refused for the wrong reason, or naming the wrong row: {refusal:?}"
-    );
-
-    // R28.4: the key and the fault's NAME.
-    let line = refusal.to_string();
-    assert!(
-        line.contains(&planted) && line.contains(&fixture.workspace_id.to_string()),
-        "the refusal does not name the row it refused: {line}"
-    );
-    assert!(
-        line.contains("InvalidStore"),
-        "the refusal does not name the fault: {line}"
-    );
-    assert!(
-        format!("{refusal:?}").contains("InvalidStore"),
-        "the carried fault is not reachable through Debug: {refusal:?}"
-    );
+        // R28.4: the key and the fault's NAME.
+        let line = refusal.to_string();
+        assert!(
+            line.contains(&planted) && line.contains(&fixture.workspace_id.to_string()),
+            "the refusal does not name the row it refused: {line}"
+        );
+        assert!(
+            line.contains("InvalidStore"),
+            "the refusal does not name the fault: {line}"
+        );
+        assert!(
+            format!("{refusal:?}").contains("InvalidStore"),
+            "the carried fault is not reachable through Debug: {refusal:?}"
+        );
+    }
 }
 
 /// R28 tier 2 pass 1 of 14: an Evaluation row the log does not account for is refused at startup,
@@ -4517,100 +4523,107 @@ fn startup_refuses_an_unaccounted_artifact_row_and_names_the_row() {
 /// the order back: the planted digest is all `f`, which sorts after every real sha256.
 #[test]
 fn startup_refuses_an_unaccounted_evaluation_row_and_names_the_row() {
-    let fixture = admitted_mission("r28t2-evaluation-startup");
-    fixture.classify(ImpactLevel::Ordinary);
-    fixture.complete((fixture.resident_id, fixture.configuration_id));
-    fixture.publishable();
+    // R44: BOTH ENDS. A planted digest of all `f` sorts LAST in this pass's own
+    // ORDER BY and all `0` sorts FIRST -- the extremes of the hex space, so the
+    // placement holds against any honest digest. Tampering only one end makes
+    // "names the failing row" and "names that end" the same assertion.
+    for (end, fill) in [("last", "f"), ("first", "0")] {
+        let fixture = admitted_mission(&format!("r28t2-evaluation-startup-{end}"));
+        fixture.classify(ImpactLevel::Ordinary);
+        fixture.complete((fixture.resident_id, fixture.configuration_id));
+        fixture.publishable();
 
-    let connection = fixture.store.connect();
-    let existing: String = connection
-        .query_row(
-            "SELECT digest_value FROM evaluations ORDER BY digest_value LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .expect("the fixture recorded an Evaluation");
+        let connection = fixture.store.connect();
+        let existing: String = connection
+            .query_row(
+                "SELECT digest_value FROM evaluations ORDER BY digest_value LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the fixture recorded an Evaluation");
 
-    // A copy of an honest row under a digest its bytes do not hash to, and with no Event naming it.
-    // Column list read from the schema, so this plant does not go stale when a column is added.
-    let columns: Vec<String> = connection
-        .prepare("SELECT name FROM pragma_table_info('evaluations')")
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    let planted = "f".repeat(64);
-    let names = columns.join(", ");
-    let values = columns
-        .iter()
-        .map(|column| {
-            if column == "digest_value" {
-                "?1".to_owned()
-            } else {
-                column.clone()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    connection
-        .execute(
-            &format!(
-                "INSERT INTO evaluations ({names}) SELECT {values} FROM evaluations
+        // A copy of an honest row under a digest its bytes do not hash to, and with no Event naming it.
+        // Column list read from the schema, so this plant does not go stale when a column is added.
+        let columns: Vec<String> = connection
+            .prepare("SELECT name FROM pragma_table_info('evaluations')")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let planted = fill.repeat(64);
+        let names = columns.join(", ");
+        let values = columns
+            .iter()
+            .map(|column| {
+                if column == "digest_value" {
+                    "?1".to_owned()
+                } else {
+                    column.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        connection
+            .execute(
+                &format!(
+                    "INSERT INTO evaluations ({names}) SELECT {values} FROM evaluations
                  WHERE digest_value = ?2"
+                ),
+                params![planted, existing],
+            )
+            .expect("the planted row inserts");
+
+        // The belt refuses it ON READ, so the planted fault is real and has a name of its own.
+        let read = fixture
+            .evaluations()
+            .get(&planted)
+            .expect_err("the reader trusted a row whose bytes do not hash to its digest");
+        assert!(
+            matches!(
+                read,
+                EvaluationError::Inconsistent(InconsistentEvaluation::DigestMismatch)
             ),
-            params![planted, existing],
-        )
-        .expect("the planted row inserts");
+            "the planted fault is not the one this test is about: {read:?}"
+        );
+        drop(connection);
 
-    // The belt refuses it ON READ, so the planted fault is real and has a name of its own.
-    let read = fixture
-        .evaluations()
-        .get(&planted)
-        .expect_err("the reader trusted a row whose bytes do not hash to its digest");
-    assert!(
-        matches!(
-            read,
-            EvaluationError::Inconsistent(InconsistentEvaluation::DigestMismatch)
-        ),
-        "the planted fault is not the one this test is about: {read:?}"
-    );
-    drop(connection);
-
-    let refusal = astra_boot(&fixture)
-        .expect_err("a store holding an unaccounted Evaluation row reopened Ready");
-    assert!(
-        matches!(
-            &refusal,
-            beacond::SupervisorError::EvaluationStateMismatch {
-                workspace_id,
-                digest_value,
-                cause: EvaluationError::Inconsistent(InconsistentEvaluation::DigestMismatch),
-            } if *workspace_id == fixture.workspace_id && digest_value == &planted
-        ),
-        "refused for the wrong reason, with the cause flattened, or naming the wrong row: \
+        let refusal = astra_boot(&fixture)
+            .expect_err("a store holding an unaccounted Evaluation row reopened Ready");
+        assert!(
+            matches!(
+                &refusal,
+                beacond::SupervisorError::EvaluationStateMismatch {
+                    workspace_id,
+                    digest_value,
+                    cause: EvaluationError::Inconsistent(InconsistentEvaluation::DigestMismatch),
+                } if *workspace_id == fixture.workspace_id && digest_value == &planted
+            ),
+            "refused for the wrong reason, with the cause flattened, or naming the wrong row: \
          {refusal:?}"
-    );
+        );
 
-    // R28.4: the key and the fault's NAME, and not the carried error's own text.
-    let line = refusal.to_string();
-    assert!(
-        line.contains(&planted) && line.contains(&fixture.workspace_id.to_string()),
-        "the refusal does not name the row it refused: {line}"
-    );
-    assert!(
-        line.contains("Inconsistent"),
-        "the refusal does not name the fault: {line}"
-    );
-    let carried = EvaluationError::Inconsistent(InconsistentEvaluation::DigestMismatch).to_string();
-    assert!(
-        !line.contains(&carried),
-        "the carried error's own text reached the one-line message: {line}"
-    );
-    assert!(
-        format!("{refusal:?}").contains("DigestMismatch"),
-        "the carried fault is not reachable through Debug: {refusal:?}"
-    );
+        // R28.4: the key and the fault's NAME, and not the carried error's own text.
+        let line = refusal.to_string();
+        assert!(
+            line.contains(&planted) && line.contains(&fixture.workspace_id.to_string()),
+            "the refusal does not name the row it refused: {line}"
+        );
+        assert!(
+            line.contains("Inconsistent"),
+            "the refusal does not name the fault: {line}"
+        );
+        let carried =
+            EvaluationError::Inconsistent(InconsistentEvaluation::DigestMismatch).to_string();
+        assert!(
+            !line.contains(&carried),
+            "the carried error's own text reached the one-line message: {line}"
+        );
+        assert!(
+            format!("{refusal:?}").contains("DigestMismatch"),
+            "the carried fault is not reachable through Debug: {refusal:?}"
+        );
+    }
 }
 
 /// R28.1 pass 1 of 5: a publication that does not re-prove is refused at startup, and the refusal

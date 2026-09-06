@@ -2361,105 +2361,111 @@ fn startup_refuses_when_the_owner_account_is_gone() {
 /// plant does not go stale when a column is added.
 #[test]
 fn startup_refuses_an_unaccounted_proposal_row_and_names_the_row() {
-    let fixture = admitted_mission("r28t2-proposal-startup");
-    fixture.proposals.submit(&fixture.record().bytes()).unwrap();
+    // R44: BOTH ENDS. A planted digest of all `f` sorts LAST in this pass's own
+    // ORDER BY and all `0` sorts FIRST -- the extremes of the hex space, so the
+    // placement holds against any honest digest. Tampering only one end makes
+    // "names the failing row" and "names that end" the same assertion.
+    for (end, fill) in [("last", "f"), ("first", "0")] {
+        let fixture = admitted_mission(&format!("r28t2-proposal-startup-{end}"));
+        fixture.proposals.submit(&fixture.record().bytes()).unwrap();
 
-    let connection = fixture.store.connect();
-    let existing: String = connection
-        .query_row(
-            "SELECT digest_value FROM proposals ORDER BY digest_value LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .expect("the fixture recorded a Proposal");
-    let columns: Vec<String> = connection
-        .prepare("SELECT name FROM pragma_table_info('proposals')")
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    let planted = "f".repeat(64);
-    let names = columns.join(", ");
-    let values = columns
-        .iter()
-        .map(|column| {
-            if column == "digest_value" {
-                "?1".to_owned()
-            } else {
-                column.clone()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    connection
-        .execute(
-            &format!(
-                "INSERT INTO proposals ({names}) SELECT {values} FROM proposals
+        let connection = fixture.store.connect();
+        let existing: String = connection
+            .query_row(
+                "SELECT digest_value FROM proposals ORDER BY digest_value LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the fixture recorded a Proposal");
+        let columns: Vec<String> = connection
+            .prepare("SELECT name FROM pragma_table_info('proposals')")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let planted = fill.repeat(64);
+        let names = columns.join(", ");
+        let values = columns
+            .iter()
+            .map(|column| {
+                if column == "digest_value" {
+                    "?1".to_owned()
+                } else {
+                    column.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        connection
+            .execute(
+                &format!(
+                    "INSERT INTO proposals ({names}) SELECT {values} FROM proposals
                  WHERE digest_value = ?2"
+                ),
+                rusqlite::params![planted, existing],
+            )
+            .expect("the planted row inserts");
+        drop(connection);
+
+        // The belt refuses it ON READ, so the planted fault is real and has a name of its own.
+        let read = fixture
+            .proposals
+            .get(&planted)
+            .expect_err("the reader trusted a row whose bytes do not hash to its digest");
+        assert!(
+            matches!(
+                read,
+                ProposalError::InvalidStore | ProposalError::Inconsistent(_)
             ),
-            rusqlite::params![planted, existing],
-        )
-        .expect("the planted row inserts");
-    drop(connection);
+            "the planted fault is not the one this test is about: {read:?}"
+        );
 
-    // The belt refuses it ON READ, so the planted fault is real and has a name of its own.
-    let read = fixture
-        .proposals
-        .get(&planted)
-        .expect_err("the reader trusted a row whose bytes do not hash to its digest");
-    assert!(
-        matches!(
-            read,
-            ProposalError::InvalidStore | ProposalError::Inconsistent(_)
-        ),
-        "the planted fault is not the one this test is about: {read:?}"
-    );
-
-    let refusal = fixture
-        .restart()
-        .expect_err("a store holding an unaccounted Proposal row reopened Ready");
-    assert!(
-        matches!(
-            &refusal,
-            SupervisorError::ProposalStateMismatch {
-                workspace_id,
-                digest_value,
-                ..
-            } if *workspace_id == fixture.workspace_id && digest_value == &planted
-        ),
-        "refused for the wrong reason, or naming the wrong row: {refusal:?}"
-    );
-    // R28.4: the key and the fault's NAME. `name()` is `pub(crate)`, so this bar reads the name
-    // out of the line itself and checks `Debug` agrees -- which is the property that matters: the
-    // one-line message names a fault the Debug channel can be opened on.
-    let line = refusal.to_string();
-    assert!(
-        line.contains(&planted) && line.contains(&fixture.workspace_id.to_string()),
-        "the refusal does not name the row it refused: {line}"
-    );
-    let named = line
-        .rsplit(": ")
-        .next()
-        .expect("the line ends with the fault's name")
-        .to_owned();
-    assert!(
-        !named.is_empty() && !named.contains(' ') && !named.contains('{'),
-        "the tail of the line is a rendering, not a name: {line}"
-    );
-    assert!(
-        format!("{refusal:?}").contains(&named),
-        "the named fault is not reachable through Debug: {refusal:?}"
-    );
-    // kimi's P3-2: pin the fault, and assert the carried TEXT is absent -- the form the
-    // Evaluation and Artifact bars use. Reading the name out of the line proves it is
-    // name-SHAPED; this proves it is the RIGHT name and that no reader sentence rode in with it.
-    assert_eq!(
-        named, "InvalidStore",
-        "the planted row's fault is not the one this bar pins: {line}"
-    );
-    assert!(
-        !line.contains("the stored digest is not the hash"),
-        "a reader's own sentence reached the one-line message: {line}"
-    );
+        let refusal = fixture
+            .restart()
+            .expect_err("a store holding an unaccounted Proposal row reopened Ready");
+        assert!(
+            matches!(
+                &refusal,
+                SupervisorError::ProposalStateMismatch {
+                    workspace_id,
+                    digest_value,
+                    ..
+                } if *workspace_id == fixture.workspace_id && digest_value == &planted
+            ),
+            "refused for the wrong reason, or naming the wrong row: {refusal:?}"
+        );
+        // R28.4: the key and the fault's NAME. `name()` is `pub(crate)`, so this bar reads the name
+        // out of the line itself and checks `Debug` agrees -- which is the property that matters: the
+        // one-line message names a fault the Debug channel can be opened on.
+        let line = refusal.to_string();
+        assert!(
+            line.contains(&planted) && line.contains(&fixture.workspace_id.to_string()),
+            "the refusal does not name the row it refused: {line}"
+        );
+        let named = line
+            .rsplit(": ")
+            .next()
+            .expect("the line ends with the fault's name")
+            .to_owned();
+        assert!(
+            !named.is_empty() && !named.contains(' ') && !named.contains('{'),
+            "the tail of the line is a rendering, not a name: {line}"
+        );
+        assert!(
+            format!("{refusal:?}").contains(&named),
+            "the named fault is not reachable through Debug: {refusal:?}"
+        );
+        // kimi's P3-2: pin the fault, and assert the carried TEXT is absent -- the form the
+        // Evaluation and Artifact bars use. Reading the name out of the line proves it is
+        // name-SHAPED; this proves it is the RIGHT name and that no reader sentence rode in with it.
+        assert_eq!(
+            named, "InvalidStore",
+            "the planted row's fault is not the one this bar pins: {line}"
+        );
+        assert!(
+            !line.contains("the stored digest is not the hash"),
+            "a reader's own sentence reached the one-line message: {line}"
+        );
+    }
 }
