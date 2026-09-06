@@ -305,7 +305,7 @@ fn operator_admits_a_finite_mission_from_exact_current_team_evidence() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 33);
+    assert_eq!(report.diagnostics.schema_version, 34);
 }
 
 #[test]
@@ -656,7 +656,7 @@ fn schema_ten_migrates_without_rewriting_events_or_the_team_roster_guard() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 33);
+    assert_eq!(report.diagnostics.schema_version, 34);
     let connection = Connection::open(&path).unwrap();
     let after = connection
         .query_row(
@@ -990,10 +990,11 @@ fn the_condition_migration_adds_triggers_and_rewrites_none() {
 /// tables come back empty.
 /// R46: `receipts` back to its 0022 shape.
 ///
-/// 0033 rebuilds it to widen the outcome CHECK, and rewrites `evaluation_cited_runs` with it (a
-/// foreign key follows a rename). Any fixture that rolls a store below 33 has to unwind that too --
-/// before R46 `receipts` had been untouched since 0022, so no rollback named it. The CREATE and its
-/// two triggers only: 0022's own carry-over INSERT from `receipts_v21` belongs to that rebuild.
+/// 0033 added the final SQL outcome variant and 0034 removed that membership CHECK; both rebuild
+/// `receipts` and rewrite `evaluation_cited_runs` with it (a foreign key follows a rename). Any
+/// fixture that rolls a store below 33 has to unwind both -- before R46 `receipts` had been untouched
+/// since 0022, so no rollback named it. The CREATE and its two triggers only: 0022's own carry-over
+/// INSERT from `receipts_v21` belongs to that rebuild.
 fn restore_pre_0033_receipts(connection: &Connection) {
     let source = include_str!("../migrations/0022_candidates.sql");
     let block = &source[source
@@ -1200,7 +1201,7 @@ fn a_store_at_the_previous_schema_version_migrates_and_keeps_its_condition_rows(
         initial_workspace_name: "Ignored".to_owned(),
     })
     .expect("a store at the previous schema version must migrate");
-    assert_eq!(report.diagnostics.schema_version, 33);
+    assert_eq!(report.diagnostics.schema_version, 34);
 
     assert_eq!(
         condition_rows(&store.path, mission.id),
