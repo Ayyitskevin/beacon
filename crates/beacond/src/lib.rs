@@ -376,7 +376,16 @@ pub enum SupervisorError {
     /// The Projects do not agree with the store as a whole. No row to name.
     ProjectTotalsMismatch(TotalsMismatch),
     LocalModelActivationEventMismatch(i64),
-    LocalModelActivationStateMismatch,
+    /// A local model activation decision does not re-prove against its record or its Event.
+    ///
+    /// Names the row and carries the owning reader's own error (R28.1).
+    LocalModelActivationStateMismatch {
+        workspace_id: Uuid,
+        activation_id: Uuid,
+        cause: local_model_activation::LocalModelActivationError,
+    },
+    /// An activation row that could not be read at all, so it cannot be named.
+    LocalModelActivationRowUnreadable(local_model_activation::LocalModelActivationError),
     ResidentLifecycleEventMismatch(i64),
     /// A Resident's lifecycle chain does not re-prove against its decisions.
     ///
@@ -643,6 +652,7 @@ pub enum StartupPass {
     StarterOrganization,
     ResidentLifecycle,
     ResidentConfiguration,
+    LocalModelActivation,
 }
 
 impl StartupPass {
@@ -667,6 +677,7 @@ impl StartupPass {
             Self::StarterOrganization => "StarterOrganization",
             Self::ResidentLifecycle => "ResidentLifecycle",
             Self::ResidentConfiguration => "ResidentConfiguration",
+            Self::LocalModelActivation => "LocalModelActivation",
         }
     }
 }
@@ -766,9 +777,21 @@ impl fmt::Display for SupervisorError {
                 formatter,
                 "Event sequence {sequence} does not match local-model activation state"
             ),
-            Self::LocalModelActivationStateMismatch => write!(
+            // R28.4: the key and the fault's NAME.
+            Self::LocalModelActivationStateMismatch {
+                workspace_id,
+                activation_id,
+                cause,
+            } => write!(
                 formatter,
-                "local-model activation state has no exact audit Event"
+                "local model activation {activation_id} in Workspace {workspace_id} does not \
+                 re-prove: {}",
+                cause.name()
+            ),
+            Self::LocalModelActivationRowUnreadable(cause) => write!(
+                formatter,
+                "a local model activation row could not be read: {}",
+                cause.name()
             ),
             Self::ResidentLifecycleEventMismatch(sequence) => write!(
                 formatter,
@@ -2236,6 +2259,39 @@ fn map_resident_configuration_state_fault(
     }
 }
 
+/// The production mapping for the LocalModelActivation startup pass, NAMED so a bar can drive it.
+fn map_local_model_activation_state_fault(
+    fault: local_model_activation::LocalModelActivationStateFault,
+) -> SupervisorError {
+    match fault {
+        local_model_activation::LocalModelActivationStateFault::Store(source) => {
+            SupervisorError::StartupEnumerationFailed {
+                pass: StartupPass::LocalModelActivation,
+                source,
+            }
+        }
+        local_model_activation::LocalModelActivationStateFault::Row {
+            workspace_id,
+            activation_id,
+            cause,
+        } => SupervisorError::LocalModelActivationStateMismatch {
+            workspace_id,
+            activation_id,
+            cause,
+        },
+        local_model_activation::LocalModelActivationStateFault::Unreadable(cause) => {
+            SupervisorError::LocalModelActivationRowUnreadable(cause)
+        }
+        local_model_activation::LocalModelActivationStateFault::Identity {
+            workspace_id,
+            activation_id,
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "a local model activation row's identity is not readable",
+            raw: format!("Workspace {workspace_id}, activation {activation_id}"),
+        },
+    }
+}
+
 fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, SupervisorError> {
     let schema_version = connection.query_row(
         "SELECT version FROM schema_meta WHERE singleton = 1",
@@ -2297,7 +2353,7 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     // here. Lease expiry is what proves that state; the Run is never removed.
     check_preflight::verify_run_state(connection).map_err(|_| SupervisorError::RunStateMismatch)?;
     local_model_activation::verify_activation_state(connection)
-        .map_err(|_| SupervisorError::LocalModelActivationStateMismatch)?;
+        .map_err(map_local_model_activation_state_fault)?;
     resident_lifecycle::verify_lifecycle_state(connection)
         .map_err(map_resident_lifecycle_state_fault)?;
     resident_configuration::verify_configuration_state(connection)
@@ -2714,6 +2770,13 @@ mod tests {
                 ),
             ),
             (
+                "LocalModelActivation",
+                super::map_local_model_activation_state_fault(
+                    crate::local_model_activation::verify_activation_state(&connection)
+                        .expect_err("no `local_model_activation_decisions` table"),
+                ),
+            ),
+            (
                 "ResidentConfiguration",
                 super::map_resident_configuration_state_fault(
                     crate::resident_configuration::verify_configuration_state(&connection)
@@ -2757,7 +2820,7 @@ mod tests {
         ];
         assert_eq!(
             refusals.len(),
-            18,
+            19,
             "a pass was added without a fixture here"
         );
 
@@ -2781,7 +2844,7 @@ mod tests {
         }
         assert_eq!(
             lines.len(),
-            18,
+            19,
             "two passes render the same line, so an operator cannot tell them apart: {lines:?}"
         );
     }
