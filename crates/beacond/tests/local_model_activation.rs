@@ -17,6 +17,24 @@ use uuid::Uuid;
 
 const MODEL_NAME: &str = "qwen3.8:27b";
 const MODEL_DIGEST: &str = "22130167c4c20e20c7b71454612966ca8e8171e9b3cc8ab6ce8aa6cbfec79643";
+/// Sorts before `MODEL_NAME` under this pass's `ORDER BY ... model_name`, which is the point.
+const OTHER_MODEL_NAME: &str = "aaa-model:1b";
+const OTHER_MODEL_DIGEST: &str = "11130167c4c20e20c7b71454612966ca8e8171e9b3cc8ab6ce8aa6cbfec79643";
+
+fn two_model_inspection_responses() -> Vec<(&'static str, String)> {
+    vec![
+        ("GET /api/tags HTTP/1.1\r\n", two_model_tags_response()),
+        (
+            "POST /api/show HTTP/1.1\r\n",
+            json!({
+                "capabilities": ["completion", "tools", "thinking"],
+                "modified_at": "2026-08-14T14:38:20.13373148-04:00"
+            })
+            .to_string(),
+        ),
+        ("GET /api/tags HTTP/1.1\r\n", two_model_tags_response()),
+    ]
+}
 
 struct TestStore {
     path: PathBuf,
@@ -63,6 +81,34 @@ fn enrolled_accounts(store: &TestStore) -> Arc<OperatorAccountService> {
         OperatorSessionPhase::Unlocked
     );
     accounts
+}
+
+fn model_entry(name: &str, digest: &str) -> serde_json::Value {
+    json!({
+        "name": name,
+        "model": name,
+        "modified_at": "2026-08-14T14:38:20.13373148-04:00",
+        "size": 17_741_872_154_u64,
+        "digest": digest,
+        "details": {
+            "format": "gguf",
+            "family": "qwen35",
+            "families": ["qwen35"],
+            "parameter_size": "27.3B",
+            "quantization_level": "Q4_K_M"
+        }
+    })
+}
+
+/// Both models in one listing, so a fixture can activate two and give a startup bar two rows.
+fn two_model_tags_response() -> String {
+    json!({
+        "models": [
+            model_entry(OTHER_MODEL_NAME, OTHER_MODEL_DIGEST),
+            model_entry(MODEL_NAME, MODEL_DIGEST),
+        ]
+    })
+    .to_string()
 }
 
 fn tags_response(digest: &str) -> String {
@@ -390,35 +436,83 @@ fn activation_refuses_a_review_when_provider_features_change() {
 fn restart_refuses_an_activation_decision_without_its_exact_event() {
     let store = TestStore::new("missing-event");
     let accounts = enrolled_accounts(&store);
-    let mut responses = inspection_responses();
-    responses.extend(inspection_responses());
+    let mut responses = two_model_inspection_responses();
+    responses.extend(two_model_inspection_responses());
+    responses.extend(two_model_inspection_responses());
+    responses.extend(two_model_inspection_responses());
     let (address, server) = serve_ollama(responses);
     let service = LocalModelActivationService::new(
         accounts,
         store.workspace_id,
         LocalModelEndpoint::new(address).unwrap(),
     );
-    let review = service.inspect(MODEL_NAME, MODEL_DIGEST).unwrap();
+    let other = service
+        .inspect(OTHER_MODEL_NAME, OTHER_MODEL_DIGEST)
+        .unwrap();
     service
+        .activate(other, vec![ProviderFeature::Completion])
+        .unwrap();
+    let review = service.inspect(MODEL_NAME, MODEL_DIGEST).unwrap();
+    let activation = service
         .activate(review, vec![ProviderFeature::Completion])
         .unwrap();
     server.join().unwrap();
     drop(service);
 
+    // R39.3 (kimi's HOLD): TWO real decisions, and the tampered one is NOT the row this pass
+    // reads first. It enumerates `ORDER BY workspace_id, provider, endpoint, model_name,
+    // sequence`, and `aaa-model:1b` sorts before `qwen3.8:27b`, so the honest second activation
+    // keeps its Event and the FIRST-sorting one is not the failure. With a single decision a
+    // mutant naming `rows[0]` was indistinguishable from naming the failing row.
     let connection = Connection::open(&store.path).unwrap();
-    connection
-        .execute(
-            "DELETE FROM events WHERE kind = 'local_model.activated'",
+    let first: String = connection
+        .query_row(
+            "SELECT id FROM local_model_activation_decisions
+             ORDER BY workspace_id, provider, endpoint, model_name, sequence LIMIT 1",
             [],
+            |row| row.get(0),
         )
         .unwrap();
+    assert_ne!(
+        first,
+        activation.id.to_string(),
+        "the failing decision must not be the row this pass reads first"
+    );
+    let removed = connection
+        .execute(
+            "DELETE FROM events WHERE kind = 'local_model.activated'
+             AND payload_json LIKE '%' || ?1 || '%'",
+            rusqlite::params![activation.id.to_string()],
+        )
+        .unwrap();
+    assert_eq!(removed, 1, "the plant removed the wrong number of Events");
     drop(connection);
 
-    assert!(matches!(
-        Supervisor::bootstrap(StartupConfig {
-            store_path: store.path.clone(),
-            initial_workspace_name: "Ignored".to_owned(),
-        }),
-        Err(SupervisorError::LocalModelActivationStateMismatch { .. })
-    ));
+    let error = Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .unwrap_err();
+    // The variant alone let three mutants through: the row it names and the fault NAME it ends in
+    // are what R28.1/R28.4 buy, so both are asserted here rather than read.
+    let SupervisorError::LocalModelActivationStateMismatch {
+        activation_id: named,
+        ..
+    } = &error
+    else {
+        panic!("expected a named activation refusal, got {error:?}");
+    };
+    assert_eq!(*named, activation.id, "the wrong activation was named");
+    let line = error.to_string();
+    assert!(
+        line.contains(&activation.id.to_string()),
+        "the line does not name the activation: {line}"
+    );
+    let tail = line.rsplit(": ").next().unwrap();
+    assert_eq!(tail, "InvalidStore", "wrong fault name: {line}");
+    // blue's HOLD: the carried reader's OWN sentence never reaches the line (R28.4).
+    assert!(
+        !line.contains("local model activation state is invalid"),
+        "the reader's own sentence reached the line: {line}"
+    );
 }
