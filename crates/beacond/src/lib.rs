@@ -391,7 +391,15 @@ pub enum SupervisorError {
     /// A Resident row that could not be read at all, so it cannot be named.
     ResidentRowUnreadable(resident_lifecycle::ResidentLifecycleError),
     ResidentConfigurationEventMismatch(i64),
-    ResidentConfigurationStateMismatch,
+    /// A Resident configuration decision does not re-prove against its record or its Event.
+    ///
+    /// Names the row and carries the owning reader's own error (R28.1). `decision_id` is the
+    /// relation's own text, which is how this pass reads it.
+    ResidentConfigurationStateMismatch {
+        workspace_id: Uuid,
+        decision_id: String,
+        cause: resident_configuration::ResidentConfigurationError,
+    },
     TeamEventMismatch(i64),
     /// A stored Team does not re-prove against its own record or the log.
     ///
@@ -634,6 +642,7 @@ pub enum StartupPass {
     ProjectPolicy,
     StarterOrganization,
     ResidentLifecycle,
+    ResidentConfiguration,
 }
 
 impl StartupPass {
@@ -657,6 +666,7 @@ impl StartupPass {
             Self::ProjectPolicy => "ProjectPolicy",
             Self::StarterOrganization => "StarterOrganization",
             Self::ResidentLifecycle => "ResidentLifecycle",
+            Self::ResidentConfiguration => "ResidentConfiguration",
         }
     }
 }
@@ -790,9 +800,16 @@ impl fmt::Display for SupervisorError {
                 formatter,
                 "Event sequence {sequence} does not match Resident configuration state"
             ),
-            Self::ResidentConfigurationStateMismatch => write!(
+            // R28.4: the key and the fault's NAME.
+            Self::ResidentConfigurationStateMismatch {
+                workspace_id,
+                decision_id,
+                cause,
+            } => write!(
                 formatter,
-                "Resident configuration state has no exact audit Event"
+                "Resident configuration decision {decision_id} in Workspace {workspace_id} does \
+                 not re-prove: {}",
+                cause.name()
             ),
             Self::TeamEventMismatch(sequence) => {
                 write!(
@@ -2189,6 +2206,36 @@ fn map_resident_lifecycle_state_fault(
     }
 }
 
+/// The production mapping for the ResidentConfiguration startup pass, NAMED so a bar can drive it.
+fn map_resident_configuration_state_fault(
+    fault: resident_configuration::ResidentConfigurationStateFault,
+) -> SupervisorError {
+    match fault {
+        resident_configuration::ResidentConfigurationStateFault::Store(source) => {
+            SupervisorError::StartupEnumerationFailed {
+                pass: StartupPass::ResidentConfiguration,
+                source,
+            }
+        }
+        resident_configuration::ResidentConfigurationStateFault::Row {
+            workspace_id,
+            decision_id,
+            cause,
+        } => SupervisorError::ResidentConfigurationStateMismatch {
+            workspace_id,
+            decision_id,
+            cause,
+        },
+        resident_configuration::ResidentConfigurationStateFault::Identity {
+            workspace_id,
+            decision_id,
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "a Resident configuration row's identity is not readable",
+            raw: format!("Workspace {workspace_id}, decision {decision_id}"),
+        },
+    }
+}
+
 fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, SupervisorError> {
     let schema_version = connection.query_row(
         "SELECT version FROM schema_meta WHERE singleton = 1",
@@ -2254,7 +2301,7 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     resident_lifecycle::verify_lifecycle_state(connection)
         .map_err(map_resident_lifecycle_state_fault)?;
     resident_configuration::verify_configuration_state(connection)
-        .map_err(|_| SupervisorError::ResidentConfigurationStateMismatch)?;
+        .map_err(map_resident_configuration_state_fault)?;
     team::verify_team_state(connection).map_err(map_team_state_fault)?;
     mission::verify_mission_state(connection).map_err(map_mission_state_fault)?;
     // After Mission state, because every completion re-derives its conditions from the Mission's own
@@ -2667,6 +2714,13 @@ mod tests {
                 ),
             ),
             (
+                "ResidentConfiguration",
+                super::map_resident_configuration_state_fault(
+                    crate::resident_configuration::verify_configuration_state(&connection)
+                        .expect_err("no `resident_configuration_decisions` table"),
+                ),
+            ),
+            (
                 "ResidentLifecycle",
                 super::map_resident_lifecycle_state_fault(
                     crate::resident_lifecycle::verify_lifecycle_state(&connection)
@@ -2703,7 +2757,7 @@ mod tests {
         ];
         assert_eq!(
             refusals.len(),
-            17,
+            18,
             "a pass was added without a fixture here"
         );
 
@@ -2727,7 +2781,7 @@ mod tests {
         }
         assert_eq!(
             lines.len(),
-            17,
+            18,
             "two passes render the same line, so an operator cannot tell them apart: {lines:?}"
         );
     }

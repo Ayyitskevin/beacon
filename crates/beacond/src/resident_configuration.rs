@@ -150,6 +150,107 @@ struct ResidentConfigurationDecisionPayload {
     decision: StoredResidentConfigurationDecision,
 }
 
+/// Which fault the ResidentConfiguration startup pass hit, and WHICH ROW hit it (R27.1's shape, R28.1).
+pub(crate) enum ResidentConfigurationStateFault {
+    /// The enumeration itself failed: no row to name, because none was reached.
+    Store(rusqlite::Error),
+    /// One ResidentConfiguration did not re-prove. `cause` is the owning reader's OWN error, carried whole.
+    Row {
+        workspace_id: Uuid,
+        decision_id: String,
+        cause: ResidentConfigurationError,
+    },
+    // NO `Totals` ARM. Every check here belongs to one decision and its own Event.
+    /// A row whose Workspace column is not a UUID. Unreachable while the foreign-key check and
+    /// the Workspace pass run first.
+    Identity {
+        workspace_id: String,
+        decision_id: String,
+    },
+}
+
+impl ResidentConfigurationError {
+    /// The variant's NAME, for R28.4's one-line startup message.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Account(_) => "Account",
+            Self::ResidentNotFound => "ResidentNotFound",
+            Self::ResidentRetired => "ResidentRetired",
+            Self::ModelActivationUnavailable => "ModelActivationUnavailable",
+            Self::ModelMissingCompletion => "ModelMissingCompletion",
+            Self::InvalidCapabilities => "InvalidCapabilities",
+            Self::StaleDecision => "StaleDecision",
+            Self::AlreadyCleared => "AlreadyCleared",
+            Self::InvalidStore => "InvalidStore",
+            Self::Store(_) => "Store",
+            Self::Json(_) => "Json",
+        }
+    }
+}
+
+impl fmt::Display for ResidentConfigurationStateFault {
+    /// R28.4: the KEY and the fault's NAME, never the carried error's own text.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(_) => formatter.write_str("the ResidentConfigurations could not be read"),
+            Self::Row {
+                workspace_id,
+                decision_id,
+                cause,
+            } => write!(
+                formatter,
+                "ResidentConfiguration {decision_id} in Workspace {workspace_id} does not re-prove: {}",
+                cause.name()
+            ),
+            Self::Identity {
+                workspace_id,
+                decision_id,
+            } => write!(
+                formatter,
+                "a ResidentConfiguration row's Workspace is not readable: {workspace_id}, ResidentConfiguration \
+                 {decision_id}"
+            ),
+        }
+    }
+}
+
+/// Hand-written and NOT delegating to `Display`: R28.4 keeps the carried text reachable here.
+impl fmt::Debug for ResidentConfigurationStateFault {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => formatter.debug_tuple("Store").field(error).finish(),
+            Self::Row {
+                workspace_id,
+                decision_id,
+                cause,
+            } => formatter
+                .debug_struct("Row")
+                .field("workspace_id", workspace_id)
+                .field("decision_id", decision_id)
+                .field("cause", cause)
+                .finish(),
+            Self::Identity {
+                workspace_id,
+                decision_id,
+            } => formatter
+                .debug_struct("Identity")
+                .field("workspace_id", workspace_id)
+                .field("decision_id", decision_id)
+                .finish(),
+        }
+    }
+}
+
+impl std::error::Error for ResidentConfigurationStateFault {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::Row { cause, .. } => Some(cause),
+            Self::Identity { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum ResidentConfigurationError {
     Account(OperatorAccountError),
@@ -765,28 +866,70 @@ pub(crate) fn verify_configuration_event(
 
 pub(crate) fn verify_configuration_state(
     connection: &Connection,
-) -> Result<(), ResidentConfigurationError> {
-    let mut statement = connection.prepare(
-        "SELECT id, workspace_id, resident_id, state, predecessor_id, decided_at_ms
+) -> Result<(), ResidentConfigurationStateFault> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, workspace_id, resident_id, state, predecessor_id, decided_at_ms
          FROM resident_configuration_decisions
          ORDER BY workspace_id, resident_id, sequence",
-    )?;
-    let mut rows = statement.query([])?;
+        )
+        .map_err(ResidentConfigurationStateFault::Store)?;
+    let mut rows = statement
+        .query([])
+        .map_err(ResidentConfigurationStateFault::Store)?;
     let mut bases = Vec::new();
-    while let Some(row) = rows.next()? {
+    while let Some(row) = rows
+        .next()
+        .map_err(ResidentConfigurationStateFault::Store)?
+    {
         bases.push((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, Option<String>>(4)?,
-            row.get::<_, i64>(5)?,
+            row.get::<_, String>(0)
+                .map_err(ResidentConfigurationStateFault::Store)?,
+            row.get::<_, String>(1)
+                .map_err(ResidentConfigurationStateFault::Store)?,
+            row.get::<_, String>(2)
+                .map_err(ResidentConfigurationStateFault::Store)?,
+            row.get::<_, String>(3)
+                .map_err(ResidentConfigurationStateFault::Store)?,
+            row.get::<_, Option<String>>(4)
+                .map_err(ResidentConfigurationStateFault::Store)?,
+            row.get::<_, i64>(5)
+                .map_err(ResidentConfigurationStateFault::Store)?,
         ));
     }
     drop(rows);
     drop(statement);
     let mut latest: HashMap<(Uuid, Uuid), (Uuid, u64)> = HashMap::new();
     for base in bases {
+        // The decision's own id and Workspace, as the relation holds them: this pass reads them
+        // as text, so the key is the reader's own type here (R28.2) rather than a parsed one.
+        let decision_id = base.0.clone();
+        let workspace_text = base.1.clone();
+        verify_one_configuration_decision(connection, base, &mut latest).map_err(|cause| {
+            match Uuid::parse_str(&workspace_text) {
+                Ok(workspace_id) => ResidentConfigurationStateFault::Row {
+                    workspace_id,
+                    decision_id: decision_id.clone(),
+                    cause,
+                },
+                Err(_) => ResidentConfigurationStateFault::Identity {
+                    workspace_id: workspace_text.clone(),
+                    decision_id: decision_id.clone(),
+                },
+            }
+        })?;
+    }
+    Ok(())
+}
+
+/// One stored configuration decision, re-proved. Unchanged from what the loop held inline.
+#[allow(clippy::type_complexity)]
+fn verify_one_configuration_decision(
+    connection: &Connection,
+    base: (String, String, String, String, Option<String>, i64),
+    latest: &mut HashMap<(Uuid, Uuid), (Uuid, u64)>,
+) -> Result<(), ResidentConfigurationError> {
+    {
         let decision = read_stored_decision(connection, base)?;
         load_resident(connection, decision.workspace_id, decision.resident_id)
             .map_err(map_resident_error)?
@@ -832,4 +975,73 @@ pub(crate) fn verify_configuration_state(
         latest.insert(key, (decision.id, decision.decided_at_ms));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod name_witness {
+    use super::*;
+
+    /// Pinned independently of `name()` (the fold at 30d2a20): an exhaustive `name()` catches an
+    /// added arm, only a second table catches a wrong or duplicated name.
+    fn expected_name(error: &ResidentConfigurationError) -> &'static str {
+        match error {
+            ResidentConfigurationError::Account(_) => "Account",
+            ResidentConfigurationError::ResidentNotFound => "ResidentNotFound",
+            ResidentConfigurationError::ResidentRetired => "ResidentRetired",
+            ResidentConfigurationError::ModelActivationUnavailable => "ModelActivationUnavailable",
+            ResidentConfigurationError::ModelMissingCompletion => "ModelMissingCompletion",
+            ResidentConfigurationError::InvalidCapabilities => "InvalidCapabilities",
+            ResidentConfigurationError::StaleDecision => "StaleDecision",
+            ResidentConfigurationError::AlreadyCleared => "AlreadyCleared",
+            ResidentConfigurationError::InvalidStore => "InvalidStore",
+            ResidentConfigurationError::Store(_) => "Store",
+            ResidentConfigurationError::Json(_) => "Json",
+        }
+    }
+
+    #[test]
+    fn every_resident_configuration_error_arm_has_its_own_pinned_name() {
+        let every_arm = [
+            ResidentConfigurationError::Account(
+                crate::operator_account::OperatorAccountError::PasswordTooShort,
+            ),
+            ResidentConfigurationError::ResidentNotFound,
+            ResidentConfigurationError::ResidentRetired,
+            ResidentConfigurationError::ModelActivationUnavailable,
+            ResidentConfigurationError::ModelMissingCompletion,
+            ResidentConfigurationError::InvalidCapabilities,
+            ResidentConfigurationError::StaleDecision,
+            ResidentConfigurationError::AlreadyCleared,
+            ResidentConfigurationError::InvalidStore,
+            ResidentConfigurationError::Store(rusqlite::Error::QueryReturnedNoRows),
+            ResidentConfigurationError::Json(serde_json::from_str::<u8>("\"x\"").unwrap_err()),
+        ];
+        assert_eq!(
+            every_arm.len(),
+            11,
+            "an arm was added to `ResidentConfigurationError` without a fixture here"
+        );
+        for arm in &every_arm {
+            assert_eq!(
+                arm.name(),
+                expected_name(arm),
+                "the startup name does not match the pinned table: {arm:?}"
+            );
+        }
+        let names: std::collections::BTreeSet<&str> = every_arm
+            .iter()
+            .map(ResidentConfigurationError::name)
+            .collect();
+        assert_eq!(
+            names.len(),
+            11,
+            "two arms share a startup name, so a swap between them is invisible: {names:?}"
+        );
+        for name in names {
+            assert!(
+                !name.contains(' ') && !name.contains('{'),
+                "a name is a name, not a rendering: {name}"
+            );
+        }
+    }
 }
