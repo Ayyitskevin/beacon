@@ -841,6 +841,14 @@ pub enum PinnedReadFailure {
     /// The filter-driver inventory could not be read, so the hardening this read depends on could
     /// not be established. Nothing was asked of the object store.
     FilterInventoryUnreadable,
+    /// R47: git REFUSED the filter-driver inventory read and said why -- an unreadable, missing or
+    /// malformed configuration file. Its own subcase rather than a shape change to the variant
+    /// above, because that one is already serialized into stored Receipts and a struct variant
+    /// where a unit variant was would make them undecodable (R46.7's lockout, in miniature).
+    ///
+    /// The inventory decides which filter drivers the hardening suppresses, so proceeding past it
+    /// with an empty set is not a missing diagnostic -- it is the hardening switched off.
+    FilterInventoryRefused { message: String },
     /// The `cat-file` child could not be started or could not be waited on.
     ChildFailed,
     /// The child was terminated by a signal and has no exit code.
@@ -855,6 +863,36 @@ pub enum PinnedReadFailure {
     /// the exit code alone cannot separate them. Anything git says that is not the absence
     /// message is this -- FAIL CLOSED -- and it carries what git said so the evidence survives.
     ReadRefused { message: String },
+}
+
+/// How a read site can SHOW that a non-zero exit is an absence rather than a failure (R47).
+///
+/// R46.3 keyed `cat-file`'s absence on what git said ABOUT THE PATH. R47 generalises that one
+/// site's rule to every site: a non-zero exit is an absence only when the site can point at the
+/// evidence for it, and different reads evidence an absence differently. Nothing is classified on
+/// the exit code, anywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AbsenceWitness {
+    /// git said NOTHING -- no output and no diagnostic. `merge-base --is-ancestor` answering "no",
+    /// and a configuration that names no entries. Measured, not assumed: at these sites git is
+    /// silent when the answer is negative and speaks when it failed.
+    Silence,
+    /// git NAMED the subject as absent. `cat-file`'s `path 'x' does not exist in 'REV'` (R46.3).
+    Message(&'static str),
+}
+
+/// Does this finished child SHOW the absence its site would need to see?
+///
+/// Empty stdout is required of both witnesses and is not negotiable: a child that produced bytes
+/// produced OUTPUT, and calling that an absence discards the very bytes it read.
+fn shows_absence(witness: AbsenceWitness, stdout: &[u8], stderr: &[u8]) -> bool {
+    if !stdout.is_empty() {
+        return false;
+    }
+    match witness {
+        AbsenceWitness::Silence => String::from_utf8_lossy(stderr).trim().is_empty(),
+        AbsenceWitness::Message(said) => String::from_utf8_lossy(stderr).contains(said),
+    }
 }
 
 /// What git says when the path is simply not in that tree: `path 'x' does not exist in 'REV'`.
@@ -880,6 +918,7 @@ impl PinnedReadFailure {
     pub fn name(&self) -> &'static str {
         match self {
             Self::FilterInventoryUnreadable => "filter_inventory_unreadable",
+            Self::FilterInventoryRefused { .. } => "filter_inventory_refused",
             Self::ChildFailed => "child_failed",
             Self::Signalled => "signalled",
             Self::TimedOut => "timed_out",
@@ -932,6 +971,8 @@ pub(crate) fn read_pinned_bytes(
     classify_pinned_read(
         run_git_bounded_raw(command, None, budget),
         repository.still_pinned(),
+        // `cat-file` says so when the path is not in the tree; silence from it is not an absence.
+        AbsenceWitness::Message(PATH_ABSENT_FROM_TREE),
     )
 }
 
@@ -942,7 +983,11 @@ pub(crate) fn read_pinned_bytes(
 /// broken after the read -- cannot be constructed from an integration test without racing the
 /// kernel or removing `git` from the machine. The one that can (an unreadable filter inventory)
 /// has its constructed-fault test at the dispatch level as well.
-fn classify_pinned_read(raw: BoundedRaw, still_pinned: bool) -> PinnedRead {
+fn classify_pinned_read(
+    raw: BoundedRaw,
+    still_pinned: bool,
+    absence: AbsenceWitness,
+) -> PinnedRead {
     match raw {
         // The pin is checked BEFORE the code is read: bytes from a repository that is no longer
         // the pinned one are not evidence about it, whatever the child's status said.
@@ -956,10 +1001,9 @@ fn classify_pinned_read(raw: BoundedRaw, still_pinned: bool) -> PinnedRead {
             }
             match code {
                 Some(0) => PinnedRead::Bytes(stdout),
-                // R46.3: NotFound is what GIT SAID about the path, never what the exit code was.
-                Some(_) if String::from_utf8_lossy(&stderr).contains(PATH_ABSENT_FROM_TREE) => {
-                    PinnedRead::NotFound
-                }
+                // R46.3, generalised by R47: an absence is what the site can SHOW, never what the
+                // exit code was. Anything else non-zero is a failure carrying what git said.
+                Some(_) if shows_absence(absence, &stdout, &stderr) => PinnedRead::NotFound,
                 Some(_) => PinnedRead::Unreadable(PinnedReadFailure::ReadRefused {
                     message: quoted_git_message(&stderr),
                 }),
@@ -1324,7 +1368,13 @@ fn run_git_bounded_raw(
 
 #[cfg(test)]
 mod r46_read_classification {
-    use super::{BoundedRaw, PinnedRead, PinnedReadFailure, classify_pinned_read};
+    use super::{
+        AbsenceWitness, BoundedRaw, PATH_ABSENT_FROM_TREE, PinnedRead, PinnedReadFailure,
+        classify_pinned_read,
+    };
+
+    /// Every R46 case is a `cat-file` read, whose absence witness is git naming the path.
+    const CAT_FILE: AbsenceWitness = AbsenceWitness::Message(PATH_ABSENT_FROM_TREE);
 
     /// R46: each subcase is DRIVEN, one per constructed fault, and asserted BY NAME.
     ///
@@ -1335,7 +1385,7 @@ mod r46_read_classification {
     #[test]
     fn a_child_that_could_not_start_is_unreadable_and_says_so() {
         assert_eq!(
-            classify_pinned_read(BoundedRaw::Failed, true),
+            classify_pinned_read(BoundedRaw::Failed, true, CAT_FILE),
             PinnedRead::Unreadable(PinnedReadFailure::ChildFailed)
         );
     }
@@ -1349,7 +1399,8 @@ mod r46_read_classification {
                     stdout: Vec::new(),
                     stderr: Vec::new(),
                 },
-                true
+                true,
+                CAT_FILE,
             ),
             PinnedRead::Unreadable(PinnedReadFailure::Signalled)
         );
@@ -1358,7 +1409,7 @@ mod r46_read_classification {
     #[test]
     fn a_child_that_outlived_its_budget_is_unreadable_and_says_so() {
         assert_eq!(
-            classify_pinned_read(BoundedRaw::TimedOut, true),
+            classify_pinned_read(BoundedRaw::TimedOut, true, CAT_FILE),
             PinnedRead::Unreadable(PinnedReadFailure::TimedOut)
         );
     }
@@ -1375,7 +1426,8 @@ mod r46_read_classification {
                     stdout: b"bytes this attempt never measured".to_vec(),
                     stderr: Vec::new(),
                 },
-                false
+                false,
+                CAT_FILE,
             ),
             PinnedRead::Unreadable(PinnedReadFailure::PinBrokenAfterRead)
         );
@@ -1386,9 +1438,34 @@ mod r46_read_classification {
                     stdout: Vec::new(),
                     stderr: Vec::new(),
                 },
-                false
+                false,
+                CAT_FILE,
             ),
             PinnedRead::Unreadable(PinnedReadFailure::PinBrokenAfterRead)
+        );
+    }
+
+    /// R47 (RED against R46's classifier, kept as the item-1 bar): an absence has NOTHING to show.
+    ///
+    /// A child that wrote bytes to stdout and then exited non-zero produced OUTPUT, not an
+    /// absence. R46 keyed only on stderr, so a truncated read whose diagnostic happened to carry
+    /// the absence wording read as "Git says it is not there" while its own bytes sat in `stdout`.
+    #[test]
+    fn a_non_zero_exit_that_produced_output_is_never_an_absence() {
+        assert_eq!(
+            classify_pinned_read(
+                BoundedRaw::Finished {
+                    code: Some(128),
+                    stdout: b"half a blob".to_vec(),
+                    stderr: b"fatal: path 'a.txt' does not exist in 'HEAD'".to_vec(),
+                },
+                true,
+                CAT_FILE,
+            ),
+            PinnedRead::Unreadable(PinnedReadFailure::ReadRefused {
+                message: "fatal: path 'a.txt' does not exist in 'HEAD'".to_owned(),
+            }),
+            "a read that produced bytes and then failed was reported as an absence"
         );
     }
 
@@ -1407,6 +1484,7 @@ mod r46_read_classification {
                     .to_vec(),
             },
             true,
+            CAT_FILE,
         );
         assert_eq!(
             broken,
@@ -1433,6 +1511,7 @@ mod r46_read_classification {
                     stderr: b"fatal: something this build has never seen".to_vec(),
                 },
                 true,
+                CAT_FILE,
             ),
             PinnedRead::Unreadable(PinnedReadFailure::ReadRefused {
                 message: "fatal: something this build has never seen".to_owned(),
@@ -1447,6 +1526,7 @@ mod r46_read_classification {
                     stderr: Vec::new(),
                 },
                 true,
+                CAT_FILE,
             ),
             PinnedRead::Unreadable(PinnedReadFailure::ReadRefused { .. })
         ));
@@ -1464,6 +1544,7 @@ mod r46_read_classification {
                     stderr: long,
                 },
                 true,
+                CAT_FILE,
             )
         else {
             panic!("a refused read must carry what git said");
@@ -1482,7 +1563,8 @@ mod r46_read_classification {
                     stdout: Vec::new(),
                     stderr: b"fatal: path 'gone.txt' does not exist in 'HEAD'".to_vec(),
                 },
-                true
+                true,
+                CAT_FILE,
             ),
             PinnedRead::NotFound,
             "Git ran and reported no such object: that is evidence about the tree"
@@ -1494,7 +1576,8 @@ mod r46_read_classification {
                     stdout: b"the bytes".to_vec(),
                     stderr: Vec::new(),
                 },
-                true
+                true,
+                CAT_FILE,
             ),
             PinnedRead::Bytes(b"the bytes".to_vec())
         );
@@ -1514,6 +1597,79 @@ mod r46_read_classification {
             PinnedRead::Bytes(b"x".to_vec()).bytes(),
             Some(b"x".as_slice())
         );
+    }
+
+    /// R47: the two witnesses are not interchangeable, and neither is the exit code.
+    ///
+    /// `config --list` and `merge-base --is-ancestor` answer negatively in SILENCE; `cat-file`
+    /// answers negatively by NAMING the path. A site that accepted the other's evidence would be
+    /// back to classifying on the exit code with extra steps.
+    #[test]
+    fn an_absence_is_what_the_site_can_show_and_the_sites_show_it_differently() {
+        let silent = || BoundedRaw::Finished {
+            code: Some(1),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+        assert_eq!(
+            classify_pinned_read(silent(), true, AbsenceWitness::Silence),
+            PinnedRead::NotFound,
+            "a silent non-zero exit is the negative answer at a site whose witness is silence"
+        );
+        assert_eq!(
+            classify_pinned_read(silent(), true, CAT_FILE),
+            PinnedRead::Unreadable(PinnedReadFailure::ReadRefused {
+                message: String::new(),
+            }),
+            "cat-file said nothing about the path, so nothing shows the path is absent"
+        );
+
+        let spoke = || BoundedRaw::Finished {
+            code: Some(128),
+            stdout: Vec::new(),
+            stderr:
+                b"fatal: unable to read config file '/proc/self/fd/100/config': Permission denied"
+                    .to_vec(),
+        };
+        assert_eq!(
+            classify_pinned_read(spoke(), true, AbsenceWitness::Silence),
+            PinnedRead::Unreadable(PinnedReadFailure::ReadRefused {
+                message:
+                    "fatal: unable to read config file '/proc/self/fd/100/config': Permission denied"
+                        .to_owned(),
+            }),
+            "git explained why it failed and the site read that as an empty answer"
+        );
+        assert_eq!(
+            classify_pinned_read(spoke(), true, CAT_FILE),
+            PinnedRead::Unreadable(PinnedReadFailure::ReadRefused {
+                message:
+                    "fatal: unable to read config file '/proc/self/fd/100/config': Permission denied"
+                        .to_owned(),
+            })
+        );
+    }
+
+    /// Output plus a non-zero exit is never an absence at EITHER site.
+    #[test]
+    fn output_defeats_both_witnesses() {
+        for witness in [AbsenceWitness::Silence, CAT_FILE] {
+            assert!(
+                matches!(
+                    classify_pinned_read(
+                        BoundedRaw::Finished {
+                            code: Some(1),
+                            stdout: b"filter.lfs.smudge\0".to_vec(),
+                            stderr: Vec::new(),
+                        },
+                        true,
+                        witness,
+                    ),
+                    PinnedRead::Unreadable(PinnedReadFailure::ReadRefused { .. })
+                ),
+                "{witness:?}: bytes were read and then discarded as an absence"
+            );
+        }
     }
 }
 
