@@ -2414,4 +2414,77 @@ mod tests {
             "the refusal does not carry what git said: {message}"
         );
     }
+
+    /// R47: every shape of a configuration git cannot read is a failure that carries WHY.
+    ///
+    /// Three faults at one site, because "could not read" arrives three ways and a rule that
+    /// caught only the one that was measured first would leave the others open. Missing and
+    /// malformed exit 128 with a `fatal:` line; mode 000 adds a `warning:` before it.
+    #[test]
+    fn every_configuration_git_cannot_read_is_a_refusal_that_carries_why() {
+        for (label, break_it) in [
+            (
+                "missing",
+                Box::new(|git_dir: &Path| fs::remove_file(git_dir.join("config")).unwrap())
+                    as Box<dyn Fn(&Path)>,
+            ),
+            (
+                "malformed",
+                Box::new(|git_dir: &Path| {
+                    fs::write(git_dir.join("config"), "[core\nnot a config\n").unwrap()
+                }),
+            ),
+            (
+                "unreadable",
+                Box::new(|git_dir: &Path| {
+                    fs::set_permissions(git_dir.join("config"), fs::Permissions::from_mode(0o000))
+                        .unwrap()
+                }),
+            ),
+        ] {
+            let (root, pinned) = pinned_one_commit(&format!("inventory-{label}"));
+            let git_dir = root.path.join(".git");
+            break_it(&git_dir);
+            let answer = pinned_filter_drivers(&pinned);
+            // Restored before the assertion, so a failure does not leave an undeletable tree.
+            let _ = fs::set_permissions(git_dir.join("config"), fs::Permissions::from_mode(0o644));
+            let Err(PinnedReadFailure::FilterInventoryRefused { message }) = answer else {
+                panic!("{label}: the inventory did not refuse: {answer:?}");
+            };
+            assert!(
+                message.starts_with("fatal:") || message.contains("fatal:"),
+                "{label}: the refusal carries no diagnostic from git: {message}"
+            );
+        }
+    }
+
+    /// R47, measured against the brief: a corrupt OBJECT STORE does not make the INVENTORY
+    /// unreadable, so the two sites fail apart and each names itself.
+    ///
+    /// The brief expected a repository whose object store is corrupt at inventory time to refuse
+    /// at the inventory. It does not: the inventory reads `.git/config`, a plain file the object
+    /// store has nothing to do with, and it exits 0 with the configuration intact
+    /// (tools/r47/logs/measure-git-reads.log). The corruption is caught one read later, by R46.3's
+    /// classification of `cat-file`. Asserting that here is what keeps a future "simplification"
+    /// from collapsing the two sites onto one witness.
+    #[test]
+    fn a_corrupt_object_store_leaves_the_inventory_readable_and_fails_at_the_byte_read() {
+        let (root, pinned) = pinned_one_commit("inventory-vs-objects");
+        let head = read_pinned(&pinned, &["rev-parse", "--verify", "HEAD"], READ_BUDGET)
+            .expect("the head reads before the store is broken");
+        fs::remove_dir_all(root.path.join(".git").join("objects")).unwrap();
+
+        assert!(
+            pinned_filter_drivers(&pinned).is_ok(),
+            "a corrupt object store was reported as an unreadable filter inventory"
+        );
+        let object = format!("{}:a.txt", head.trim());
+        assert!(
+            matches!(
+                read_pinned_bytes(&pinned, &["cat-file", "blob", object.as_str()], READ_BUDGET),
+                PinnedRead::Unreadable(PinnedReadFailure::ReadRefused { .. })
+            ),
+            "a broken object store was read as a path that is simply not there"
+        );
+    }
 }
