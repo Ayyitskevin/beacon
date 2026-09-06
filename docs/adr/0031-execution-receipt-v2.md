@@ -109,6 +109,19 @@ refusal point, and that no check ran. Dynamic Git or filesystem error display te
 
 ## Persistence and replay
 
+### Proposed R48 amendment — the typed owner owns the outcome vocabulary
+
+Proposed pending Product Steward acceptance when R48 merges. Per FABLE-RULINGS R46.4, membership
+in a Receipt outcome vocabulary is defined by the closed, versioned Rust type and its owning
+decoder, not by a shared SQL `CHECK`. The `receipts.outcome` column remains a projection which must
+equal the decoded Receipt at every owning read before any value is returned. SQL continues to own
+structural durability—Receipt version bounds, valid JSON, identity and time constraints, foreign
+keys, indexes, and immutability—but does not duplicate the variants of several typed producers in
+one schema constraint. Consequently, a reader presented with a token outside its compiled enum
+refuses through the typed owner even when the row is otherwise SQL-valid; historical versions and
+their closed decoders remain readable, and a known token still must satisfy its owner-specific
+coherence invariants.
+
 Migration 0016 preserves every existing Receipt and event byte-for-byte. It admits Receipt
 versions 1 and 2, admits the execution outcome `incomplete`, adds the terminal Run state
 `incomplete`, and retains all existing values. The migration changes no live installation in this
