@@ -589,6 +589,11 @@ pub struct DispatchFailpoints {
     /// Inside the landing transaction, after the swap was observed and before Beacon updates the
     /// copy's working tree -- the window a checkout that moves the ref would overwrite.
     pub before_checkout: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Immediately before each pre-image byte read, so a test can break THAT read and no other
+    /// (R46). Breaking the repository from outside trips an earlier gate -- an unreadable
+    /// `.git/config` refuses as `SourceNotBeaconMade` long before the pre-image gate runs -- so
+    /// the fault has to be constructed at the read it is about.
+    pub before_pre_image_read: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// One declared mutation's content, supplied by the caller at dispatch time.
@@ -610,6 +615,22 @@ impl DispatchService {
             failpoints: DispatchFailpoints::default(),
         }
     }
+
+    /// Fire the pre-image read failpoint, when this build has failpoints at all.
+    ///
+    /// `DispatchFailpoints` is `debug_assertions`-only, so the gate cannot take one as a
+    /// parameter: a release build has no such type, and `cargo build` said so. The gate takes a
+    /// `&dyn Fn()` and this decides what that is.
+    #[cfg(debug_assertions)]
+    fn before_pre_image_read(&self) {
+        if let Some(failpoint) = &self.failpoints.before_pre_image_read {
+            failpoint();
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[allow(clippy::unused_self)]
+    fn before_pre_image_read(&self) {}
 
     /// The same service, interruptible at the points above. Debug builds only.
     #[cfg(debug_assertions)]
@@ -879,7 +900,9 @@ impl DispatchService {
         // anyway, and refused as its own reason rather than as a content mismatch: the supplied
         // content is not what disagrees.
         let pinned_base = ruling.payload().bindings.pinned_base_revision.clone();
-        match pre_images_hold(&repository, &pinned_base, &mut decided) {
+        match pre_images_hold(&repository, &pinned_base, &mut decided, &|| {
+            self.before_pre_image_read();
+        }) {
             PreImageVerdict::Hold => {}
             PreImageVerdict::Mismatch => {
                 return Ok(decided.refused(DispatchOutcome::PreImageMismatch));
@@ -2022,6 +2045,7 @@ fn pre_images_hold(
     repository: &PinnedRepository,
     base: &str,
     decided: &mut Decided,
+    before_read: &dyn Fn(),
 ) -> PreImageVerdict {
     let records: Vec<(Option<String>, String)> = decided
         .per_mutation
@@ -2033,6 +2057,7 @@ fn pre_images_hold(
     for (declared_pre_image, declared_path) in records {
         let path = format!("{base}:{declared_path}");
         let cat_file = ["cat-file", "blob", path.as_str()];
+        before_read();
         let read = read_pinned_bytes(repository, &cat_file, READ_BUDGET);
         decided.record_step(GitStepName::CatFile, &cat_file, read.bytes().is_some());
         let record_holds = match (&declared_pre_image, &read) {

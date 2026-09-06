@@ -27,14 +27,15 @@ use beacond::{
     CopyFailpoints, DeclaredCheck, DispatchFailpoints, DispatchOutcome, DispatchService,
     LocalModelActivationService, LocalModelEndpoint, MissionDraft, MissionMemberDraft,
     MissionService, MutationEffect, NotVerified, OperatorAccountService, OperatorSessionPhase,
-    PauseService, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService,
-    ProjectRepositoryService, ProjectService, ProposalService, ProviderFeature, RepositoryDraft,
-    RepositoryEffect, RepositorySourceKind, ResidentConfigurationService, ResidentLifecycleService,
-    RulingDecision, RulingService, RulingSupersedes, SampleProjectError, SampleProjectService,
-    SecretString, StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig,
-    Supervisor, SupervisorError, SuppliedContent, TeamDraft, TeamLeadAmbiguityRule,
-    TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
-    TeamService, TrackRecordEvidenceKind, TrackRecordRequirement,
+    PauseService, PinnedReadFailure, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft,
+    ProjectPolicyService, ProjectRepositoryService, ProjectService, ProposalService,
+    ProviderFeature, RepositoryDraft, RepositoryEffect, RepositorySourceKind,
+    ResidentConfigurationService, ResidentLifecycleService, RulingDecision, RulingService,
+    RulingSupersedes, SampleProjectError, SampleProjectService, SecretString,
+    StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig, Supervisor,
+    SupervisorError, SuppliedContent, TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
+    TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft, TeamService,
+    TrackRecordEvidenceKind, TrackRecordRequirement,
 };
 use data_encoding::HEXLOWER;
 use rusqlite::{Connection, OptionalExtension};
@@ -3470,6 +3471,78 @@ fn a_reconstructed_receipt_has_the_same_shape_and_says_what_it_is() {
             .iter()
             .any(|entry| entry == "reconstructed_after_interruption")
     );
+}
+
+/// R46: a pre-image the product could NOT READ refuses as `PreImageUnreadable`, naming the read.
+///
+/// The constructed fault is the one subcase reachable end to end: `.git/config` is made unreadable,
+/// so `pinned_filter_drivers` cannot establish which filter drivers the hardening must suppress and
+/// the byte read never runs. Nothing was compared, so the refusal must not claim a comparison --
+/// before R46 this same store refused `PreImageMismatch`, which is the Receipt blue reproduced with
+/// `observed=READ_NONE`.
+///
+/// The other four subcases are driven at their own boundary in
+/// `worktree::r46_read_classification`: a child that cannot start, one killed by a signal, one that
+/// outlives its budget and a pin broken after the read cannot be constructed from here without
+/// removing `git` from the machine or racing a rename.
+#[test]
+fn a_pre_image_the_product_could_not_read_is_refused_as_unreadable_not_as_a_mismatch() {
+    let fixture = admitted_mission("pre-image-unreadable");
+    let repository = CopyRepository::create(&fixture.copies_root, "pre-image-unreadable");
+    let (proposal_digest, _) = fixture.candidate_for_with_pre_image(
+        &repository,
+        "Modify the library root, with the filter inventory made unreadable.",
+        BASE_LIB_BYTES,
+    );
+    let ruling = fixture
+        .rulings
+        .rule_on_candidate(
+            &fixture.candidates.present(&proposal_digest).unwrap(),
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap();
+
+    // THE CONSTRUCTED FAULT, at the read it is about: `.git` is replaced with a fresh directory of
+    // the same name, so the repository the pre-image gate is about to read is no longer the one
+    // this attempt pinned. The subcase asserted below is the one the product actually reaches --
+    // MEASURED, not predicted: the filter-driver inventory is the first read to touch the
+    // replacement, and it fails there before `cat-file` is ever spawned.
+    //
+    // Breaking the repository from OUTSIDE the dispatch does not reach this gate: an unreadable
+    // `.git/config` refuses as `SourceNotBeaconMade` several gates earlier, which is why the fault
+    // is installed at the read through a failpoint rather than before the call.
+    let git_dir = repository.path.join(".git");
+    let receipt = DispatchService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .with_failpoints(DispatchFailpoints {
+            before_pre_image_read: Some(Arc::new(move || {
+                let moved = git_dir.with_extension("moved");
+                if git_dir.exists() {
+                    fs::rename(&git_dir, &moved).unwrap();
+                    fs::create_dir(&git_dir).unwrap();
+                }
+            })),
+            ..DispatchFailpoints::default()
+        })
+        .dispatch(&ruling.digest().value, &content_for(NEW_BYTES))
+        .unwrap();
+
+    // THE NAMED ASSERTION. Not `PreImageMismatch`: no bytes were read, so nothing was compared.
+    assert_eq!(
+        receipt.outcome,
+        DispatchOutcome::PreImageUnreadable,
+        "a read that failed was reported as a comparison that differed"
+    );
+    // ...and WHICH read failed, by name, so the evidence is not erased.
+    assert_eq!(
+        receipt.pre_image_read_failure,
+        Some(PinnedReadFailure::FilterInventoryUnreadable),
+        "the Receipt does not say which read failed"
+    );
+    // Nothing was prepared, and the repository is untouched: this is a gate refusal like any other.
+    assert_eq!(receipt.prepared_commit, None);
+    assert_eq!(receipt.repository_effect(), RepositoryEffect::ByteIdentical);
 }
 
 #[test]
