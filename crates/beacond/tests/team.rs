@@ -668,14 +668,51 @@ fn startup_refuses_an_unaccounted_team_and_names_the_row() {
         })
         .expect("the fixture forms a Team");
 
+    // R39.3 (kimi's HOLD): TWO rows, and the tampered one sorts LAST under this pass's own
+    // `ORDER BY workspace_id, id`. With a one-Team fixture the honest row and the failing row are
+    // the same row, so a mutant naming `rows[0]` is indistinguishable from naming the failing row
+    // -- which is exactly what kimi measured surviving. The planted id is all `f`, so it sorts
+    // last by construction, and the honest Team stays in the table as row 0.
     let connection = Connection::open(&store.path).unwrap();
-    let removed = connection
+    let columns: Vec<String> = connection
+        .prepare("SELECT name FROM pragma_table_info('teams')")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let planted = "ffffffff-ffff-ffff-ffff-ffffffffffff".to_owned();
+    let names = columns.join(", ");
+    let values = columns
+        .iter()
+        .map(|column| match column.as_str() {
+            "id" => "?1".to_owned(),
+            "name" => "'Planted Team'".to_owned(),
+            other => other.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let planted_rows = connection
         .execute(
-            "DELETE FROM events WHERE kind = 'team.formed' AND payload_json LIKE '%' || ?1 || '%'",
-            rusqlite::params![formed.id.to_string()],
+            &format!("INSERT INTO teams ({names}) SELECT {values} FROM teams WHERE id = ?2"),
+            rusqlite::params![planted, formed.id.to_string()],
+        )
+        .expect("the planted row inserts");
+    assert_eq!(
+        planted_rows, 1,
+        "the plant inserted the wrong number of rows"
+    );
+    let honest: String = connection
+        .query_row(
+            "SELECT id FROM teams ORDER BY workspace_id, id LIMIT 1",
+            [],
+            |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(removed, 1, "the plant removed the wrong number of Events");
+    assert_ne!(
+        honest, planted,
+        "the planted row must not be the first row this pass enumerates"
+    );
     drop(connection);
 
     let refusal = Supervisor::bootstrap(StartupConfig {
@@ -686,7 +723,8 @@ fn startup_refuses_an_unaccounted_team_and_names_the_row() {
     assert!(
         matches!(
             &refusal,
-            beacond::SupervisorError::TeamStateMismatch { team_id, .. } if *team_id == formed.id
+            beacond::SupervisorError::TeamStateMismatch { team_id, .. }
+                if team_id.to_string() == planted
         ) || matches!(&refusal, beacond::SupervisorError::TeamTotalsMismatch(_)),
         "refused for the wrong reason, or naming the wrong row: {refusal:?}"
     );
