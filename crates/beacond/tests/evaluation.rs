@@ -1310,6 +1310,225 @@ fn a_cited_run_without_a_receipt_is_refused() {
     assert_eq!(evaluation.payload().cited_runs, vec![run_id]);
 }
 
+#[test]
+fn astra_migration_0033_copies_populated_parent_and_child_with_constraints() {
+    let fixture = admitted_mission("evaluation-cited-run");
+    let record = fixture.record();
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    let evaluations = EvaluationService::new(Arc::clone(&fixture.accounts), fixture.workspace_id);
+
+    // A real Run row, in this Workspace and Project, that recorded no Receipt.
+    let run_id = Uuid::new_v4();
+    let connection = fixture.store.connect();
+    connection
+        .execute(
+            "INSERT INTO runs (
+                 workspace_id, id, project_id, kind, repository_revision, charter_revision,
+                 state, lease_expires_at_ms, started_at_ms, ended_at_ms
+             ) VALUES (?1, ?2, ?3, 'check_preflight', 1, 1, 'unconfirmed', 9, 5, NULL)",
+            rusqlite::params![
+                fixture.workspace_id.to_string(),
+                run_id.to_string(),
+                fixture.project_id.to_string(),
+            ],
+        )
+        .expect("the Run inserts");
+    assert_eq!(
+        fixture.count(&format!("SELECT count(*) FROM runs WHERE id = '{run_id}'")),
+        1,
+        "the fixture Run was not created"
+    );
+    assert_eq!(
+        fixture.count(&format!(
+            "SELECT count(*) FROM receipts WHERE run_id = '{run_id}'"
+        )),
+        0,
+        "the fixture Run has a Receipt"
+    );
+    drop(connection);
+
+    let mut draft = evaluation_draft(&fixture, &proposal.digest().value);
+    draft.cited_runs = vec![run_id];
+    assert!(
+        evaluations.record(draft).is_err(),
+        "a real Run with no Receipt was cited"
+    );
+    assert_eq!(
+        fixture.count("SELECT count(*) FROM evaluations"),
+        0,
+        "a refused citation left the Evaluation behind"
+    );
+
+    // And a Run that DID record a Receipt is citable, so the refusal above is the Receipt and not
+    // citation in general.
+    let connection = fixture.store.connect();
+    connection
+        .execute(
+            "INSERT INTO receipts (
+                 workspace_id, run_id, version, outcome, receipt_json, recorded_at_ms
+             ) VALUES (?1, ?2, 1, 'verified', '{}', 6)",
+            rusqlite::params![fixture.workspace_id.to_string(), run_id.to_string()],
+        )
+        .expect("the Receipt inserts");
+    drop(connection);
+
+    let mut draft = evaluation_draft(&fixture, &proposal.digest().value);
+    draft.cited_runs = vec![run_id];
+    let evaluation = evaluations
+        .record(draft)
+        .expect("a receipted Run is citable");
+    assert_eq!(evaluation.payload().cited_runs, vec![run_id]);
+    // Structural migration witness: this existing fixture deliberately plants its Run/Receipt.
+    // Its owner-invalid '{}' JSON is NOT represented as a startup-valid Receipt.
+    let connection = fixture.store.connect();
+    let second = Uuid::new_v4().to_string();
+    connection.execute("INSERT INTO runs SELECT workspace_id,?1,project_id,kind,repository_revision,charter_revision,state,lease_expires_at_ms,started_at_ms,ended_at_ms FROM runs WHERE id=?2", rusqlite::params![second,run_id.to_string()]).unwrap();
+    connection.execute("INSERT INTO receipts SELECT workspace_id,?1,2,'completed',?2,23 FROM receipts WHERE run_id=?3", rusqlite::params![second,"{ \"migrationSpecimen\": \"retained bytes\" }\n",run_id.to_string()]).unwrap();
+    connection
+        .execute(
+            "INSERT INTO evaluation_cited_runs VALUES (?1,?2,?3)",
+            rusqlite::params![
+                fixture.workspace_id.to_string(),
+                evaluation.digest().value,
+                second
+            ],
+        )
+        .unwrap();
+
+    let row_snapshot = |c: &Connection, sql: &str| {
+        let mut statement = c.prepare(sql).unwrap();
+        let n = statement.column_count();
+        statement
+            .query_map([], |r| {
+                (0..n)
+                    .map(|i| r.get::<_, rusqlite::types::Value>(i))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    let receipt_query = "SELECT workspace_id,run_id,version,outcome,receipt_json,recorded_at_ms FROM receipts ORDER BY workspace_id,run_id";
+    let child_query = "SELECT workspace_id,evaluation_digest,run_id FROM evaluation_cited_runs ORDER BY workspace_id,evaluation_digest,run_id";
+    let objects_query = "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE type IN ('trigger','index') ORDER BY type,name";
+    let parent_before = row_snapshot(&connection, receipt_query);
+    let child_before = row_snapshot(&connection, child_query);
+    let objects_before = row_snapshot(&connection, objects_query);
+    assert_eq!(parent_before.len(), 2, "R46.MIGRATION.TWO_PARENT_ROWS");
+    assert_eq!(child_before.len(), 2, "R46.MIGRATION.TWO_CHILD_ROWS");
+    let migration = include_str!("../migrations/0033_receipt_pre_image_unreadable.sql");
+    let old = include_str!("../migrations/0022_candidates.sql");
+    let old_table = &old[old.find("CREATE TABLE receipts (").unwrap()..];
+    let old_create = &old_table[..old_table.find(") STRICT;").unwrap() + 9];
+    let parent_triggers = &migration[migration.find("CREATE TRIGGER receipts_no_update").unwrap()
+        ..migration.find("UPDATE schema_meta").unwrap()];
+    let child_table = &migration[migration
+        .find("CREATE TABLE evaluation_cited_runs (")
+        .unwrap()..];
+    let child_create = &child_table[..child_table.find(") STRICT;").unwrap() + 9];
+    let child_triggers = &migration[migration
+        .find("CREATE TRIGGER evaluation_cited_runs_no_update")
+        .unwrap()
+        ..migration.find("-- Recreated byte-exactly").unwrap()];
+    // Reconstruct the exact v32 definitions around the populated relation, in the same FK-on shape.
+    connection.execute_batch("BEGIN; DROP TRIGGER evaluation_cited_runs_no_update; DROP TRIGGER evaluation_cited_runs_no_delete; DROP TRIGGER receipts_no_update; DROP TRIGGER receipts_no_delete; ALTER TABLE evaluation_cited_runs RENAME TO child_fixture_33; ALTER TABLE receipts RENAME TO parent_fixture_33;").unwrap();
+    connection.execute_batch(old_create).unwrap();
+    connection
+        .execute_batch("INSERT INTO receipts SELECT * FROM parent_fixture_33;")
+        .unwrap();
+    connection.execute_batch(child_create).unwrap();
+    connection.execute_batch("INSERT INTO evaluation_cited_runs SELECT * FROM child_fixture_33; DROP TABLE child_fixture_33; DROP TABLE parent_fixture_33;").unwrap();
+    connection.execute_batch(parent_triggers).unwrap();
+    connection.execute_batch(child_triggers).unwrap();
+    connection
+        .execute_batch("UPDATE schema_meta SET version=32 WHERE singleton=1; COMMIT;")
+        .unwrap();
+    assert!(
+        row_snapshot(&connection, "PRAGMA foreign_key_check").is_empty(),
+        "R46.MIGRATION.FK_BEFORE"
+    );
+    assert_eq!(
+        row_snapshot(&connection, receipt_query),
+        parent_before,
+        "R46.MIGRATION.FIXTURE_PARENT_BYTES"
+    );
+    assert_eq!(
+        row_snapshot(&connection, child_query),
+        child_before,
+        "R46.MIGRATION.FIXTURE_CHILD_BYTES"
+    );
+    assert_eq!(
+        row_snapshot(&connection, objects_query),
+        objects_before,
+        "R46.MIGRATION.FIXTURE_OBJECT_NAMES"
+    );
+    assert_eq!(
+        connection
+            .query_row("PRAGMA foreign_keys", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1,
+        "R46.MIGRATION.FOREIGN_KEYS_ON"
+    );
+    connection.execute_batch("BEGIN IMMEDIATE;").unwrap();
+    connection
+        .execute_batch(migration)
+        .expect("R46.MIGRATION.0033_EXECUTES");
+    connection.execute_batch("COMMIT;").unwrap();
+    assert_eq!(
+        row_snapshot(&connection, receipt_query),
+        parent_before,
+        "R46.MIGRATION.ALL_SIX_PARENT_COLUMNS_EXACT"
+    );
+    assert_eq!(
+        row_snapshot(&connection, child_query),
+        child_before,
+        "R46.MIGRATION.ALL_THREE_CHILD_COLUMNS_EXACT"
+    );
+    assert_eq!(
+        row_snapshot(&connection, objects_query),
+        objects_before,
+        "R46.MIGRATION.ALL_INDEX_TRIGGER_NAMES_AND_SQL_EXACT"
+    );
+    assert!(
+        row_snapshot(&connection, "PRAGMA foreign_key_check").is_empty(),
+        "R46.MIGRATION.FK_AFTER"
+    );
+    for (sql, required) in [
+        (
+            "UPDATE receipts SET recorded_at_ms=recorded_at_ms",
+            "Receipts are immutable",
+        ),
+        ("DELETE FROM receipts", "Receipts are immutable"),
+        (
+            "UPDATE evaluation_cited_runs SET run_id=run_id",
+            "Evaluation cited Runs are immutable",
+        ),
+        (
+            "DELETE FROM evaluation_cited_runs",
+            "Evaluation cited Runs are immutable",
+        ),
+    ] {
+        let error = connection.execute(sql, []).unwrap_err().to_string();
+        assert!(
+            error.contains(required),
+            "R46.MIGRATION.TRIGGER_NAME {} {}",
+            sql,
+            error
+        );
+    }
+    println!(
+        "R46.MIGRATION parent_rows=2 columns=6 child_rows=2 columns=3 schema_objects={}",
+        objects_before.len()
+    );
+    println!(
+        "R46.MIGRATION_OBJECTS {:?}",
+        row_snapshot(
+            &connection,
+            "SELECT type,name FROM sqlite_master WHERE tbl_name IN ('receipts','evaluation_cited_runs') AND type IN ('index','trigger') ORDER BY type,name"
+        )
+    );
+}
+
 /// gpt2's E1: the two-layer proof needs BOTH controls committed, and only the trigger half was.
 ///
 /// This is the other half — the reachable decoy. The canonical bytes name one Proposal; the
