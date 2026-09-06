@@ -1807,8 +1807,12 @@ mod name_witness {
     const NEEDLE_A: &str = "R42S3_PRIVATE_A";
     const NEEDLE_B: &str = "R42S3_PRIVATE_B";
     /// Two compile-time statics, because the two guarded fields are `&'static str`.
-    const STATIC_NEEDLE_A: &str = "R42S3_PRIVATE_A /home/example/private.db column=private_column";
-    const STATIC_NEEDLE_B: &str = "R42S3_PRIVATE_B /home/example/other.db column=other_column";
+    /// Compile-time statics, because the two guarded fields are `&'static str` -- and carrying the
+    /// CR/LF the spec lists, so ONE_LINE is a real rung for them and not a formality.
+    const STATIC_NEEDLE_A: &str =
+        "R42S3_PRIVATE_A /home/example/private.db column=private_column\r\nsecond-line";
+    const STATIC_NEEDLE_B: &str =
+        "R42S3_PRIVATE_B /home/example/other.db column=other_column\r\nsecond-line";
 
     const FIRST_CONFIGURED: u64 = 1024;
     const FIRST_OBSERVED: u64 = 2048;
@@ -1965,8 +1969,14 @@ mod name_witness {
         "R42S3.MANIFEST.CandidateNotAccounted.Unknown",
     ];
 
-    /// The 50 base rows: six leaf roots + 25 malformed tokens + 10 known columns + 1 unknown +
-    /// 7 known reasons + 1 unknown.
+    /// The 55 required inputs: the 50 base rows (six leaf roots + 25 malformed tokens + 10 known
+    /// columns + 1 unknown + 7 known reasons + 1 unknown), plus the four B payloads and the second
+    /// bounds pair.
+    ///
+    /// astra's read (P1): the committed version started the parent assertion inside the base loop,
+    /// so the B payloads and the alternate bounds never reached the real
+    /// `PrepareRefusal::Manifest` -- 50 parents for 55 inputs, and a parent-only wrong-bound
+    /// mutant survived. They are cases now, so the one loop walks all 55 through the parent.
     fn manifest_cases() -> Vec<Case> {
         let mut cases = Vec::new();
         for (stem, value, markers) in manifest_rows() {
@@ -2015,6 +2025,42 @@ mod name_witness {
                 }),
             }
         }
+        // The B payloads and the alternate bounds are constructed inputs too.
+        cases.push(Case {
+            id: "R42S3.MANIFEST.Store.B".to_owned(),
+            value: ManifestStoreRefusal::Store(payload_b()),
+            markers: &[NEEDLE_B],
+        });
+        cases.push(Case {
+            id: "R42S3.MANIFEST.Irreconcilable.B".to_owned(),
+            value: ManifestStoreRefusal::Irreconcilable {
+                detail: payload_b(),
+            },
+            markers: &[NEEDLE_B],
+        });
+        cases.push(Case {
+            id: "R42S3.MANIFEST.ColumnDisagrees.Unknown.B".to_owned(),
+            value: ManifestStoreRefusal::ColumnDisagrees {
+                column: STATIC_NEEDLE_B,
+            },
+            markers: &[NEEDLE_B],
+        });
+        cases.push(Case {
+            id: "R42S3.MANIFEST.CandidateNotAccounted.Unknown.B".to_owned(),
+            value: ManifestStoreRefusal::CandidateNotAccounted {
+                reason: STATIC_NEEDLE_B,
+            },
+            markers: &[NEEDLE_B],
+        });
+        cases.push(Case {
+            id: "R42S3.MANIFEST.ManifestTooLarge.Second".to_owned(),
+            value: ManifestStoreRefusal::ManifestTooLarge {
+                configured: SECOND_CONFIGURED,
+                observed: SECOND_OBSERVED,
+            },
+            markers: &[],
+        });
+
         cases.sort_by_key(|case| {
             MANIFEST_LEADS
                 .iter()
@@ -2050,7 +2096,7 @@ mod name_witness {
             7,
             "R42S3.MANIFEST.CARDINALITY.REASONS"
         );
-        assert_eq!(cases.len(), 50, "R42S3.MANIFEST.CARDINALITY.CASES");
+        assert_eq!(cases.len(), 55, "R42S3.MANIFEST.CARDINALITY.CASES");
         let ids: std::collections::BTreeSet<&str> =
             cases.iter().map(|case| case.id.as_str()).collect();
         assert_eq!(ids.len(), cases.len(), "R42S3.MANIFEST.CASE_IDS_UNIQUE");

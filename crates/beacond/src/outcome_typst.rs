@@ -591,19 +591,22 @@ mod refusal_text_witness {
         // The four call-through cases: the real parser, not a hand-built fixture.
         for (case, version, markdown) in [
             ("UnknownRendererVersion", NEEDLE_A, ""),
+            // The supported version is written as the independently specified literal, not read
+            // from `READS_RENDERER_VERSION`: an input pinned from the implementation is not an
+            // independent input (astra's read).
             (
                 "FrontMatterNotKeyValue",
-                READS_RENDERER_VERSION,
+                "beacon.outcome.md.v1",
                 "---\nR42S3_PRIVATE_A\n---\n",
             ),
             (
                 "HeadingTooDeep",
-                READS_RENDERER_VERSION,
+                "beacon.outcome.md.v1",
                 "#### R42S3_PRIVATE_A\n",
             ),
             (
                 "UnescapedConstruct",
-                READS_RENDERER_VERSION,
+                "beacon.outcome.md.v1",
                 "Some * R42S3_PRIVATE_A\n",
             ),
         ] {
