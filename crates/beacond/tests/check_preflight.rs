@@ -775,6 +775,44 @@ fn startup_reconciles_every_preflight_identity_field_with_its_run_row() {
     }
 }
 
+#[test]
+fn startup_refuses_a_preflight_event_with_an_unknown_serialized_outcome() {
+    let (store, receipt, _project) = bind_and_preflight(
+        "unknown-outcome-event",
+        draft(
+            RepositorySourceKind::GitUrl,
+            "https://example.invalid/future-preflight-outcome.git",
+            &"a".repeat(40),
+        ),
+    );
+    assert_eq!(receipt.outcome, PreflightOutcome::SourceKindUnsupported);
+
+    let connection = Connection::open(&store.path).unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE events
+                 SET payload_json = json_set(payload_json, '$.outcome', 'future_outcome')
+                 WHERE kind = 'run.preflighted'
+                   AND json_extract(payload_json, '$.runId') = ?1",
+                [receipt.run_id.to_string()],
+            )
+            .unwrap(),
+        1
+    );
+    drop(connection);
+
+    let error = Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .expect_err("an unknown preflight outcome Event opened Ready");
+    assert!(
+        matches!(error, SupervisorError::RunEventMismatch(_)),
+        "the preflight owner returned the wrong typed replay error: {error:?}"
+    );
+}
+
 fn replace_receipt_update_trigger(
     connection: &Connection,
     tamper: impl FnOnce(&Connection) -> rusqlite::Result<usize>,

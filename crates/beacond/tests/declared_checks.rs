@@ -1511,6 +1511,52 @@ fn startup_rejects_execution_when_its_nested_preflight_differs_from_stored_evide
 }
 
 #[test]
+fn startup_refuses_an_execution_event_with_an_unknown_serialized_outcome() {
+    let (store, projects, repositories, checks) = enrolled("unknown-execution-outcome-event");
+    let project = projects.create(project_draft()).unwrap();
+    repositories
+        .bind(
+            project.id,
+            project.charter.revision,
+            None,
+            RepositoryDraft {
+                source_kind: RepositorySourceKind::GitUrl,
+                source: "https://example.invalid/future-execution-outcome.git".to_owned(),
+                base_revision: "a".repeat(40),
+                declared_checks: vec![check("never", &["/bin/true"], ".")],
+            },
+        )
+        .unwrap();
+    let receipt = checks.execute(project.id, bounds()).unwrap();
+    assert_eq!(receipt.summary, ExecutionSummary::NotAdmissible);
+
+    let connection = Connection::open(&store.path).unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE events
+                 SET payload_json = json_set(payload_json, '$.summary', 'future_outcome')
+                 WHERE kind = 'run.executed'
+                   AND json_extract(payload_json, '$.runId') = ?1",
+                [receipt.run_id.to_string()],
+            )
+            .unwrap(),
+        1
+    );
+    drop(connection);
+
+    let error = Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .expect_err("an unknown execution outcome Event opened Ready");
+    assert!(
+        matches!(error, SupervisorError::RunEventMismatch(_)),
+        "the execution owner returned the wrong typed replay error: {error:?}"
+    );
+}
+
+#[test]
 fn startup_replay_requires_not_admissible_to_carry_a_refusing_preflight() {
     if !enforcing_or_skip() {
         return;
