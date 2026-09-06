@@ -2616,6 +2616,16 @@ pub(crate) fn verify_dispatch_event(
 fn verify_outcome_invariants(receipt: &DispatchReceipt) -> Result<(), DispatchError> {
     let names = |token: NotVerified| receipt.not_verified.contains(&token);
     let reconstructed = names(NotVerified::ReconstructedAfterInterruption);
+    // R46.6(b), astra's HOLD: the field's doc comment says `pre_image_read_failure` belongs to
+    // `PreImageUnreadable` and to nothing else, and the owner did not hold it to that. A promise
+    // only a comment makes is one a stored Receipt can break -- an unreadable refusal carrying no
+    // subcase says a read failed and refuses to say which, and any other outcome carrying one
+    // names a read failure it did not have.
+    if (receipt.outcome == DispatchOutcome::PreImageUnreadable)
+        != receipt.pre_image_read_failure.is_some()
+    {
+        return Err(DispatchError::InvalidStore);
+    }
     let coherent = match receipt.outcome {
         DispatchOutcome::Applied => {
             receipt.prepared_commit.is_some()
@@ -3129,6 +3139,25 @@ mod tests {
             })
             .collect(),
         }
+    }
+
+    #[test]
+    fn astra_unreadable_receipt_requires_its_failure() {
+        let receipt = specimen(DispatchOutcome::PreImageUnreadable);
+        assert!(
+            verify_outcome_invariants(&receipt).is_err(),
+            "R46.OWNER.UNREADABLE_REQUIRES_FAILURE"
+        );
+    }
+
+    #[test]
+    fn astra_other_outcome_rejects_a_pre_image_failure() {
+        let mut receipt = specimen(DispatchOutcome::RulingRefused);
+        receipt.pre_image_read_failure = Some(PinnedReadFailure::TimedOut);
+        assert!(
+            verify_outcome_invariants(&receipt).is_err(),
+            "R46.OWNER.OTHER_OUTCOME_REJECTS_FAILURE"
+        );
     }
 
     /// The members a Receipt of this outcome leaves absent, in declaration order.
