@@ -446,6 +446,7 @@ impl Record {
 
 struct Fixture {
     workspace_id: Uuid,
+    accounts: Arc<OperatorAccountService>,
     projects: ProjectService,
     store: TestStore,
 }
@@ -455,6 +456,7 @@ fn enrolled(label: &str) -> Fixture {
     let accounts = enrolled_accounts(&store);
     Fixture {
         workspace_id: store.workspace_id,
+        accounts: Arc::clone(&accounts),
         projects: ProjectService::new(Arc::clone(&accounts), store.workspace_id),
         store,
     }
@@ -486,45 +488,30 @@ impl Fixture {
                      base_revision, declared_checks_json, author_kind, authored_at_ms
                  ) VALUES (?1, ?2, 1, 1, 'local_path', '/private/beacon/repo',
                            '0123456789012345678901234567890123456789',
-                           '[{\"name\":\"unit\"}]', 'operator', 0)",
+                           '[{\"name\":\"unit\",\"argv\":[\"cargo\",\"test\"],
+                              \"workingDirectory\":\".\"}]', 'operator', 0)",
                 params![self.workspace_id.to_string(), project_id.to_string()],
             )
             .unwrap();
         project_id
     }
 
-    /// One Run and its Receipt, written straight to the store. `outcome_column` is the denormalized
-    /// projection beside `receipt_json`; the tests vary it deliberately.
-    fn receipt(&self, project_id: Uuid, body: &str, outcome_column: &str) -> Uuid {
-        let run_id = Uuid::new_v4();
+    /// One Run, Receipt and owner Event through the production preflight command.
+    fn receipt(&self, project_id: Uuid) -> (Uuid, Vec<u8>) {
+        let receipt = CheckPreflightService::new(Arc::clone(&self.accounts), self.workspace_id)
+            .preflight(project_id)
+            .expect("the preflight service writes a run, Receipt and owner Event");
+        let run_id = receipt.run_id;
         let connection = self.store.connection();
-        connection
-            .execute(
-                "INSERT INTO runs (
-                     workspace_id, id, project_id, kind, repository_revision, charter_revision,
-                     state, lease_expires_at_ms, started_at_ms, ended_at_ms
-                 ) VALUES (?1, ?2, ?3, 'check_preflight', 1, 1, 'verified', 0, 10, 11)",
-                params![
-                    self.workspace_id.to_string(),
-                    run_id.to_string(),
-                    project_id.to_string(),
-                ],
+        let stored = connection
+            .query_row(
+                "SELECT CAST(receipt_json AS BLOB) FROM receipts
+                 WHERE workspace_id = ?1 AND run_id = ?2",
+                params![self.workspace_id.to_string(), run_id.to_string()],
+                |row| row.get(0),
             )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO receipts (
-                     workspace_id, run_id, version, outcome, receipt_json, recorded_at_ms
-                 ) VALUES (?1, ?2, 1, ?3, ?4, 11)",
-                params![
-                    self.workspace_id.to_string(),
-                    run_id.to_string(),
-                    outcome_column,
-                    body,
-                ],
-            )
-            .unwrap();
-        run_id
+            .expect("the Receipt the preflight service wrote");
+        (run_id, stored)
     }
 }
 
@@ -904,9 +891,7 @@ fn collector_bound_is_owned_by_outcome_and_refuses_before_partial_manifest() {
 fn collector_receipt_checksum_is_over_exact_stored_receipt_json_bytes() {
     let fixture = enrolled("receipt-checksum");
     let project_id = fixture.project();
-    let run_id = Uuid::new_v4();
-    let body = receipt_body(fixture.workspace_id, project_id, run_id);
-    let stored_run = fixture.receipt(project_id, &body, "verified");
+    let (stored_run, stored_bytes) = fixture.receipt(project_id);
 
     let connection = fixture.store.connection();
     let collector = Collector::new(&connection, fixture.workspace_id);
@@ -932,16 +917,14 @@ fn collector_receipt_checksum_is_over_exact_stored_receipt_json_bytes() {
             |row| row.get(0),
         )
         .unwrap();
+    assert_eq!(bytes, stored_bytes);
     assert_eq!(receipt.outcome_checksum, sha256_hex(&bytes));
 
-    // One byte of difference changes the checksum: it covers the bytes, not a summary of them. The
-    // store refuses to mutate a Receipt -- `Receipts are immutable` -- so the probe is a second
-    // Receipt rather than an edit, which is the store being right rather than the test being coy.
-    let nudged = fixture.receipt(
-        project_id,
-        &body.replace("the bytes are the record", "the bytes are the recorD"),
-        "verified",
-    );
+    // Different exact bytes change the checksum: it covers the bytes, not a summary of them. The
+    // store refuses to mutate a Receipt, so the probe uses a second Receipt written through the
+    // owner; its distinct run identity guarantees distinct stored bytes.
+    let (nudged, nudged_bytes) = fixture.receipt(project_id);
+    assert_ne!(nudged_bytes, bytes);
     let after = collector
         .collect(&CollectionRequest {
             receipt_run_uuids: vec![nudged],
@@ -966,12 +949,7 @@ fn collector_labels_receipt_checksum_as_outcome_verification_not_receipt_identit
 
     let fixture = enrolled("receipt-label");
     let project_id = fixture.project();
-    let run_id = Uuid::new_v4();
-    let stored_run = fixture.receipt(
-        project_id,
-        &receipt_body(fixture.workspace_id, project_id, run_id),
-        "verified",
-    );
+    let (stored_run, _) = fixture.receipt(project_id);
     let connection = fixture.store.connection();
     let collected = Collector::new(&connection, fixture.workspace_id)
         .collect(&CollectionRequest {
@@ -1003,62 +981,70 @@ fn collector_labels_receipt_checksum_as_outcome_verification_not_receipt_identit
 
 /// §7 slice 2's centrepiece. A joined projection can never change a rendered claim.
 ///
-/// `receipts.outcome` is a denormalized copy of a value inside `receipt_json`, and nothing in the
-/// store reconciles the two. Two Receipts with identical bytes and *different* columns must produce
-/// identical citations: the column is allowed to identify a candidate and is never allowed to
-/// supply a claim.
+/// `receipts.outcome` is a denormalized copy of a value inside `receipt_json`. It may identify a
+/// candidate, but an Event-based owning verifier must reconcile it before a citation is returned.
 #[test]
 fn collector_joined_projection_decoys_cannot_change_rendered_claims() {
     let fixture = enrolled("decoy");
     let project_id = fixture.project();
-
-    // Identical bytes, deliberately different projection columns. The body says `verified` in both.
-    let run_a = Uuid::new_v4();
-    let body = receipt_body(fixture.workspace_id, project_id, run_a);
-    let honest = fixture.receipt(project_id, &body, "verified");
-    let decoy = fixture.receipt(project_id, &body, "preflight_failed");
+    let (run_id, receipt_bytes) = fixture.receipt(project_id);
 
     let connection = fixture.store.connection();
-    let collected = Collector::new(&connection, fixture.workspace_id)
+    let control = Collector::new(&connection, fixture.workspace_id)
         .collect(&CollectionRequest {
-            receipt_run_uuids: vec![honest, decoy],
+            receipt_run_uuids: vec![run_id],
             ..CollectionRequest::default()
         })
-        .expect("both are stored");
-
-    assert_eq!(collected.receipts.len(), 2);
+        .expect("the owner-backed Receipt collects");
+    assert_eq!(control.receipts.len(), 1);
     assert_eq!(
-        collected.receipts[0].outcome_checksum, collected.receipts[1].outcome_checksum,
-        "the projection column reached the citation"
+        control.receipts[0].outcome_checksum,
+        sha256_hex(&receipt_bytes)
     );
 
-    // The decoy really is a decoy: the two rows disagree in the store, so a collector that read the
-    // column would have had something different to say.
-    let columns: Vec<String> = connection
-        .prepare("SELECT outcome FROM receipts WHERE workspace_id = ?1 ORDER BY run_id")
-        .unwrap()
-        .query_map(params![fixture.workspace_id.to_string()], |row| row.get(0))
-        .unwrap()
-        .map(Result::unwrap)
-        .collect();
-    let mut distinct = columns.clone();
-    distinct.sort();
-    distinct.dedup();
+    // Both replacement values are known vocabulary. Pick the one different from the actual
+    // projection, bypass immutability only for the corruption probe, and leave the serialized
+    // Receipt plus its Event untouched.
+    connection
+        .execute_batch("DROP TRIGGER receipts_no_update;")
+        .unwrap();
     assert_eq!(
-        distinct.len(),
-        2,
-        "the fixture did not create a disagreement"
+        connection
+            .execute(
+                "UPDATE receipts
+                 SET outcome = CASE outcome
+                     WHEN 'verified' THEN 'preflight_failed'
+                     ELSE 'verified'
+                 END
+                 WHERE workspace_id = ?1 AND run_id = ?2",
+                params![fixture.workspace_id.to_string(), run_id.to_string()],
+            )
+            .unwrap(),
+        1
     );
-
-    // And the honest row's own bytes still say `verified`, so the disagreement is the column's.
-    let bytes: Vec<u8> = connection
+    let stored_bytes: Vec<u8> = connection
         .query_row(
             "SELECT CAST(receipt_json AS BLOB) FROM receipts WHERE workspace_id = ?1 AND run_id = ?2",
-            params![fixture.workspace_id.to_string(), decoy.to_string()],
+            params![fixture.workspace_id.to_string(), run_id.to_string()],
             |row| row.get(0),
         )
         .unwrap();
-    assert!(String::from_utf8_lossy(&bytes).contains(r#""outcome":"verified""#));
+    assert_eq!(stored_bytes, receipt_bytes, "only the projection changed");
+
+    let result = Collector::new(&connection, fixture.workspace_id).collect(&CollectionRequest {
+        receipt_run_uuids: vec![run_id],
+        ..CollectionRequest::default()
+    });
+    assert!(
+        matches!(
+            result,
+            Err(CollectorRefusal::Unverified {
+                kind: "receipt",
+                ..
+            })
+        ),
+        "a SQL-valid projection decoy reached the citation: {result:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2304,9 +2290,9 @@ fn collector_freezes_all_sources_at_completion_event_boundary() {
     assert!(collected.classification.unwrap().policy_high_impact);
 
     // The third state, and the reason it is not folded into either of the other two: a Receipt row
-    // whose run has no Event cannot be placed relative to the cut at all. "The log does not account
-    // for it" is not "it arrived late" and not "it is not there", and a freeze that cannot be
-    // evaluated must not be assumed to pass.
+    // whose run has no Event has neither an owning verification nor a position. "The log does not
+    // account for it" is not "it arrived late" and not "it is not there", and neither an unbounded
+    // citation nor a freeze may be assumed to pass.
     let seeded = admitted("boundary-unpositioned", vec!["Gates pass".to_owned()]);
     let run_id = seeded.seeded_receipt();
     let seeded_boundary = newest_event(&seeded.store);
@@ -2319,15 +2305,21 @@ fn collector_freezes_all_sources_at_completion_event_boundary() {
     let seeded_connection = seeded.connection();
     let seeded_collector = Collector::new(&seeded_connection, seeded.store.workspace_id);
 
-    // With no completion there is no cut, so the same Receipt collects.
-    seeded_collector
-        .collect(&CollectionRequest {
-            receipt_run_uuids: vec![run_id],
-            ..CollectionRequest::default()
-        })
-        .expect("with no completion there is no cut to place it against");
+    // With no completion there is no cut, but there is still no owner Event to verify the Receipt.
+    assert_eq!(
+        seeded_collector
+            .collect(&CollectionRequest {
+                receipt_run_uuids: vec![run_id],
+                ..CollectionRequest::default()
+            })
+            .expect_err("no owner Event verifies this Receipt"),
+        CollectorRefusal::Unpositioned {
+            kind: "receipt",
+            id: run_id.hyphenated().to_string(),
+        }
+    );
 
-    // With one, it is refused -- and as its own third state, not as absence or lateness.
+    // With a completion it is the same typed refusal, not absence or lateness.
     match seeded_collector
         .collect(&CollectionRequest {
             completion_digest: Some(seeded_digest),
@@ -4208,5 +4200,52 @@ fn sol1_receipt_support_the_owner_refuses_is_not_collected() {
             })
         ),
         "collector accepted a Receipt its owner refuses: {result:?}"
+    );
+}
+
+#[test]
+fn astra_r48_unbounded_collection_requires_a_receipt_owner_event() {
+    let fixture = admitted("r48-eventless", vec!["Gates pass".to_owned()]);
+    fixture.repository_revision();
+    let run = real_preflight_receipt(&fixture).0;
+    let connection = fixture.connection();
+    let request = CollectionRequest {
+        receipt_run_uuids: vec![run],
+        ..CollectionRequest::default()
+    };
+
+    assert_eq!(
+        Collector::new(&connection, fixture.store.workspace_id)
+            .collect(&request)
+            .expect("R48.COLLECTOR.EVENT_CONTROL")
+            .receipts
+            .len(),
+        1
+    );
+    assert_eq!(
+        connection
+            .execute(
+                "DELETE FROM events
+                 WHERE kind = 'run.preflighted'
+                   AND json_extract(payload_json, '$.runId') = ?1",
+                [run.to_string()],
+            )
+            .unwrap(),
+        1
+    );
+
+    let result = Collector::new(&connection, fixture.store.workspace_id).collect(&request);
+    assert!(
+        matches!(
+            result,
+            Err(CollectorRefusal::Unverified {
+                kind: "receipt",
+                ..
+            }) | Err(CollectorRefusal::Unpositioned {
+                kind: "receipt",
+                ..
+            })
+        ),
+        "R48.COLLECTOR.EVENT_REQUIRED: {result:?}"
     );
 }
