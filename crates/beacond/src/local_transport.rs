@@ -2283,7 +2283,16 @@ fn response_from_transport_error(error: LocalTransportError) -> ResponseEnvelope
             code,
             retry_after_ms,
         },
-        _ => WireError {
+        // Was `_`. Same six inputs, same result -- named so that a NEW transport variant is a
+        // compile error here instead of silently joining the coarsest wire code the protocol has
+        // (R42). Deliberately NOT a finer diagnosis: changing what these six report would change
+        // wire semantics, which is outside this slice.
+        LocalTransportError::Io(_)
+        | LocalTransportError::Json(_)
+        | LocalTransportError::InvalidTokenFile
+        | LocalTransportError::InsecurePermissions
+        | LocalTransportError::Protocol
+        | LocalTransportError::Supervisor(_) => WireError {
             code: LocalErrorCode::ProtocolError,
             retry_after_ms: None,
         },
@@ -2604,7 +2613,15 @@ fn wire_error_from_account(error: OperatorAccountError) -> WireError {
         OperatorAccountError::InvalidSessionTimeout => {
             (LocalErrorCode::InvalidSessionTimeout, None)
         }
-        _ => (LocalErrorCode::AccountServiceUnavailable, None),
+        // Was `_`. Same five inputs, same result; a new account fault now has to be classified
+        // here rather than inheriting "the account service is unavailable" by default.
+        OperatorAccountError::CredentialProcessing
+        | OperatorAccountError::InvalidStore
+        | OperatorAccountError::ClockBeforeUnixEpoch
+        | OperatorAccountError::Store(_)
+        | OperatorAccountError::StateUnavailable => {
+            (LocalErrorCode::AccountServiceUnavailable, None)
+        }
     };
     WireError {
         code,
@@ -2624,7 +2641,8 @@ mod tests {
 
     use super::{
         LocalErrorCode, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
-        LocalTransportError, initialize_local_auth_token,
+        LocalTransportError, ResponseEnvelope, WireError, initialize_local_auth_token,
+        response_from_transport_error,
     };
     use crate::outcome::MalformedOutcome;
     use crate::outcome_pdf::PdfRefusal;
@@ -4311,5 +4329,1141 @@ mod tests {
             "local transport I/O failed: Io",
             "R42S2.TRANSPORT.FromIo.PROJECTION"
         );
+    }
+    /// The spec's 153 immediate domain mappings, transcribed. `Account` means "recurse on
+    /// the account payload", exactly as the production mapper does.
+    const WIRE_MAP: [(&str, WireExpectation); 153] = [
+        (
+            "Account.PasswordTooShort",
+            WireExpectation::Code("password_too_short"),
+        ),
+        (
+            "Account.PasswordTooLong",
+            WireExpectation::Code("password_too_long"),
+        ),
+        (
+            "Account.PasswordConfirmationMismatch",
+            WireExpectation::Code("password_confirmation_mismatch"),
+        ),
+        (
+            "Account.RecoveryNotConfirmed",
+            WireExpectation::Code("recovery_not_confirmed"),
+        ),
+        (
+            "Account.SetupNotStarted",
+            WireExpectation::Code("setup_not_started"),
+        ),
+        (
+            "Account.AccountAlreadyExists",
+            WireExpectation::Code("account_already_exists"),
+        ),
+        (
+            "Account.AccountMissing",
+            WireExpectation::Code("account_missing"),
+        ),
+        (
+            "Account.AuthenticationFailed",
+            WireExpectation::Code("authentication_failed"),
+        ),
+        (
+            "Account.AuthenticationThrottled",
+            WireExpectation::Code("authentication_throttled"),
+        ),
+        (
+            "Account.CredentialDisabled",
+            WireExpectation::Code("credential_disabled"),
+        ),
+        (
+            "Account.RemotePasswordNotAllowed",
+            WireExpectation::Code("remote_password_not_allowed"),
+        ),
+        (
+            "Account.NotAuthenticated",
+            WireExpectation::Code("not_authenticated"),
+        ),
+        (
+            "Account.InvalidSessionTimeout",
+            WireExpectation::Code("invalid_session_timeout"),
+        ),
+        (
+            "Account.CredentialProcessing",
+            WireExpectation::Code("account_service_unavailable"),
+        ),
+        (
+            "Account.InvalidStore",
+            WireExpectation::Code("account_service_unavailable"),
+        ),
+        (
+            "Account.ClockBeforeUnixEpoch",
+            WireExpectation::Code("account_service_unavailable"),
+        ),
+        (
+            "Account.Store",
+            WireExpectation::Code("account_service_unavailable"),
+        ),
+        (
+            "Account.StateUnavailable",
+            WireExpectation::Code("account_service_unavailable"),
+        ),
+        ("StarterOrganization.Account", WireExpectation::Account),
+        (
+            "StarterOrganization.UnsupportedProposalVersion",
+            WireExpectation::Code("unsupported_starter_proposal"),
+        ),
+        (
+            "StarterOrganization.EmptyRoster",
+            WireExpectation::Code("invalid_starter_roster"),
+        ),
+        (
+            "StarterOrganization.DuplicateRole",
+            WireExpectation::Code("invalid_starter_roster"),
+        ),
+        (
+            "StarterOrganization.InvalidDisplayName",
+            WireExpectation::Code("invalid_starter_roster"),
+        ),
+        (
+            "StarterOrganization.DecisionAlreadyRecorded",
+            WireExpectation::Code("starter_decision_recorded"),
+        ),
+        (
+            "StarterOrganization.InvalidStore",
+            WireExpectation::Code("starter_organization_unavailable"),
+        ),
+        (
+            "StarterOrganization.Store",
+            WireExpectation::Code("starter_organization_unavailable"),
+        ),
+        (
+            "StarterOrganization.Json",
+            WireExpectation::Code("starter_organization_unavailable"),
+        ),
+        ("ResidentLifecycle.Account", WireExpectation::Account),
+        (
+            "ResidentLifecycle.NotFound",
+            WireExpectation::Code("resident_not_found"),
+        ),
+        (
+            "ResidentLifecycle.InvalidTransition",
+            WireExpectation::Code("invalid_resident_transition"),
+        ),
+        (
+            "ResidentLifecycle.StaleDecision",
+            WireExpectation::Code("stale_resident_decision"),
+        ),
+        (
+            "ResidentLifecycle.InvalidStore",
+            WireExpectation::Code("resident_lifecycle_unavailable"),
+        ),
+        (
+            "ResidentLifecycle.Store",
+            WireExpectation::Code("resident_lifecycle_unavailable"),
+        ),
+        (
+            "ResidentLifecycle.Json",
+            WireExpectation::Code("resident_lifecycle_unavailable"),
+        ),
+        ("ResidentConfiguration.Account", WireExpectation::Account),
+        (
+            "ResidentConfiguration.ResidentNotFound",
+            WireExpectation::Code("resident_not_found"),
+        ),
+        (
+            "ResidentConfiguration.ResidentRetired",
+            WireExpectation::Code("invalid_resident_configuration"),
+        ),
+        (
+            "ResidentConfiguration.ModelActivationUnavailable",
+            WireExpectation::Code("invalid_resident_configuration"),
+        ),
+        (
+            "ResidentConfiguration.ModelMissingCompletion",
+            WireExpectation::Code("invalid_resident_configuration"),
+        ),
+        (
+            "ResidentConfiguration.InvalidCapabilities",
+            WireExpectation::Code("invalid_resident_configuration"),
+        ),
+        (
+            "ResidentConfiguration.AlreadyCleared",
+            WireExpectation::Code("invalid_resident_configuration"),
+        ),
+        (
+            "ResidentConfiguration.StaleDecision",
+            WireExpectation::Code("stale_resident_configuration"),
+        ),
+        (
+            "ResidentConfiguration.InvalidStore",
+            WireExpectation::Code("resident_configuration_unavailable"),
+        ),
+        (
+            "ResidentConfiguration.Store",
+            WireExpectation::Code("resident_configuration_unavailable"),
+        ),
+        (
+            "ResidentConfiguration.Json",
+            WireExpectation::Code("resident_configuration_unavailable"),
+        ),
+        ("Project.Account", WireExpectation::Account),
+        (
+            "Project.InvalidName",
+            WireExpectation::Code("invalid_project"),
+        ),
+        (
+            "Project.InvalidPurpose",
+            WireExpectation::Code("invalid_project"),
+        ),
+        (
+            "Project.InvalidDesiredOutcomes",
+            WireExpectation::Code("invalid_project"),
+        ),
+        (
+            "Project.InvalidConstraint",
+            WireExpectation::Code("invalid_project"),
+        ),
+        (
+            "Project.InvalidProhibition",
+            WireExpectation::Code("invalid_project"),
+        ),
+        (
+            "Project.DuplicateCharterEntry",
+            WireExpectation::Code("invalid_project"),
+        ),
+        (
+            "Project.StaleCharterRevision",
+            WireExpectation::Code("stale_charter_revision"),
+        ),
+        (
+            "Project.UnchangedCharter",
+            WireExpectation::Code("unchanged_charter"),
+        ),
+        (
+            "Project.NotFound",
+            WireExpectation::Code("project_not_found"),
+        ),
+        (
+            "Project.InvalidStore",
+            WireExpectation::Code("project_unavailable"),
+        ),
+        (
+            "Project.Store",
+            WireExpectation::Code("project_unavailable"),
+        ),
+        ("Project.Json", WireExpectation::Code("project_unavailable")),
+        ("ProjectPolicy.Account", WireExpectation::Account),
+        (
+            "ProjectPolicy.ProjectNotFound",
+            WireExpectation::Code("project_not_found"),
+        ),
+        (
+            "ProjectPolicy.StaleCharterRevision",
+            WireExpectation::Code("stale_charter_revision"),
+        ),
+        (
+            "ProjectPolicy.StalePolicyRevision",
+            WireExpectation::Code("stale_project_policy"),
+        ),
+        (
+            "ProjectPolicy.InvalidRequiredCapabilities",
+            WireExpectation::Code("invalid_project_policy"),
+        ),
+        (
+            "ProjectPolicy.InvalidTrackRecordRequirements",
+            WireExpectation::Code("invalid_project_policy"),
+        ),
+        (
+            "ProjectPolicy.UnchangedPolicy",
+            WireExpectation::Code("unchanged_project_policy"),
+        ),
+        (
+            "ProjectPolicy.InvalidStore",
+            WireExpectation::Code("project_policy_unavailable"),
+        ),
+        (
+            "ProjectPolicy.Store",
+            WireExpectation::Code("project_policy_unavailable"),
+        ),
+        (
+            "ProjectPolicy.Json",
+            WireExpectation::Code("project_policy_unavailable"),
+        ),
+        ("ProjectRepository.Account", WireExpectation::Account),
+        (
+            "ProjectRepository.ProjectNotFound",
+            WireExpectation::Code("project_not_found"),
+        ),
+        (
+            "ProjectRepository.StaleCharterRevision",
+            WireExpectation::Code("stale_charter_revision"),
+        ),
+        (
+            "ProjectRepository.StaleRepositoryRevision",
+            WireExpectation::Code("stale_project_repository"),
+        ),
+        (
+            "ProjectRepository.InvalidDraft",
+            WireExpectation::Code("invalid_project_repository"),
+        ),
+        (
+            "ProjectRepository.UnchangedRepository",
+            WireExpectation::Code("unchanged_project_repository"),
+        ),
+        (
+            "ProjectRepository.InvalidStore",
+            WireExpectation::Code("project_repository_unavailable"),
+        ),
+        (
+            "ProjectRepository.Store",
+            WireExpectation::Code("project_repository_unavailable"),
+        ),
+        (
+            "ProjectRepository.Json",
+            WireExpectation::Code("project_repository_unavailable"),
+        ),
+        ("CheckPreflight.Account", WireExpectation::Account),
+        (
+            "CheckPreflight.ProjectNotFound",
+            WireExpectation::Code("project_not_found"),
+        ),
+        (
+            "CheckPreflight.RepositoryNotBound",
+            WireExpectation::Code("repository_not_bound"),
+        ),
+        (
+            "CheckPreflight.InvalidStore",
+            WireExpectation::Code("preflight_unavailable"),
+        ),
+        (
+            "CheckPreflight.Store",
+            WireExpectation::Code("preflight_unavailable"),
+        ),
+        (
+            "CheckPreflight.Json",
+            WireExpectation::Code("preflight_unavailable"),
+        ),
+        ("RecentReceipt.Account", WireExpectation::Account),
+        (
+            "RecentReceipt.InvalidStore",
+            WireExpectation::Code("preflight_unavailable"),
+        ),
+        (
+            "RecentReceipt.Store",
+            WireExpectation::Code("preflight_unavailable"),
+        ),
+        ("SampleProject.Account", WireExpectation::Account),
+        (
+            "SampleProject.NotInstalled",
+            WireExpectation::Code("sample_project_unavailable"),
+        ),
+        (
+            "SampleProject.UnsafeDestination",
+            WireExpectation::Code("sample_project_unavailable"),
+        ),
+        (
+            "SampleProject.BundleMismatch",
+            WireExpectation::Code("sample_project_unavailable"),
+        ),
+        (
+            "SampleProject.MaterializationFailed",
+            WireExpectation::Code("sample_project_unavailable"),
+        ),
+        (
+            "SampleProject.TamperedInstallation",
+            WireExpectation::Code("sample_project_unavailable"),
+        ),
+        (
+            "SampleProject.InvalidStore",
+            WireExpectation::Code("sample_project_unavailable"),
+        ),
+        (
+            "SampleProject.Store",
+            WireExpectation::Code("sample_project_unavailable"),
+        ),
+        (
+            "SampleProject.Io",
+            WireExpectation::Code("sample_project_unavailable"),
+        ),
+        (
+            "SampleProject.Json",
+            WireExpectation::Code("sample_project_unavailable"),
+        ),
+        ("Team.Account", WireExpectation::Account),
+        (
+            "Team.ProjectNotFound",
+            WireExpectation::Code("project_not_found"),
+        ),
+        ("Team.TeamNotFound", WireExpectation::Code("team_not_found")),
+        ("Team.InvalidName", WireExpectation::Code("invalid_team")),
+        ("Team.InvalidMembers", WireExpectation::Code("invalid_team")),
+        (
+            "Team.ResidentConfigurationUnavailable",
+            WireExpectation::Code("invalid_team"),
+        ),
+        (
+            "Team.StaleResidentConfiguration",
+            WireExpectation::Code("stale_team_member_configuration"),
+        ),
+        (
+            "Team.ResidentIneligible",
+            WireExpectation::Code("team_member_ineligible"),
+        ),
+        (
+            "Team.InvalidStore",
+            WireExpectation::Code("team_unavailable"),
+        ),
+        ("Team.Store", WireExpectation::Code("team_unavailable")),
+        ("Team.Json", WireExpectation::Code("team_unavailable")),
+        ("Mission.Account", WireExpectation::Account),
+        (
+            "Mission.ProjectNotFound",
+            WireExpectation::Code("project_not_found"),
+        ),
+        (
+            "Mission.TeamNotFound",
+            WireExpectation::Code("team_not_found"),
+        ),
+        (
+            "Mission.MissionNotFound",
+            WireExpectation::Code("mission_not_found"),
+        ),
+        (
+            "Mission.StaleCharterRevision",
+            WireExpectation::Code("stale_charter_revision"),
+        ),
+        (
+            "Mission.InvalidDesiredOutcome",
+            WireExpectation::Code("invalid_mission"),
+        ),
+        (
+            "Mission.InvalidSuccessConditions",
+            WireExpectation::Code("invalid_mission"),
+        ),
+        (
+            "Mission.InvalidConstraint",
+            WireExpectation::Code("invalid_mission"),
+        ),
+        (
+            "Mission.InvalidProhibition",
+            WireExpectation::Code("invalid_mission"),
+        ),
+        (
+            "Mission.DuplicateMissionEntry",
+            WireExpectation::Code("invalid_mission"),
+        ),
+        (
+            "Mission.InvalidMembers",
+            WireExpectation::Code("invalid_mission"),
+        ),
+        (
+            "Mission.StaleTeamEligibility",
+            WireExpectation::Code("stale_mission_team"),
+        ),
+        (
+            "Mission.ResidentIneligible",
+            WireExpectation::Code("mission_member_ineligible"),
+        ),
+        (
+            "Mission.InvalidStore",
+            WireExpectation::Code("mission_unavailable"),
+        ),
+        (
+            "Mission.Store",
+            WireExpectation::Code("mission_unavailable"),
+        ),
+        ("Mission.Json", WireExpectation::Code("mission_unavailable")),
+        ("ResourceDiscovery.Account", WireExpectation::Account),
+        (
+            "ResourceDiscovery.EndpointNotLoopback",
+            WireExpectation::Code("protocol_error"),
+        ),
+        ("LocalModelActivation.Account", WireExpectation::Account),
+        (
+            "LocalModelActivation.ResourceUnavailable",
+            WireExpectation::Code("local_model_unavailable"),
+        ),
+        (
+            "LocalModelActivation.InvalidProviderResponse",
+            WireExpectation::Code("local_model_unavailable"),
+        ),
+        (
+            "LocalModelActivation.ModelNotFound",
+            WireExpectation::Code("local_model_not_found"),
+        ),
+        (
+            "LocalModelActivation.ModelDrift",
+            WireExpectation::Code("local_model_changed"),
+        ),
+        (
+            "LocalModelActivation.InvalidApproval",
+            WireExpectation::Code("invalid_local_model_approval"),
+        ),
+        (
+            "LocalModelActivation.AlreadyActive",
+            WireExpectation::Code("local_model_already_active"),
+        ),
+        (
+            "LocalModelActivation.StaleDecision",
+            WireExpectation::Code("stale_local_model_decision"),
+        ),
+        (
+            "LocalModelActivation.InvalidStore",
+            WireExpectation::Code("local_model_activation_unavailable"),
+        ),
+        (
+            "LocalModelActivation.Store",
+            WireExpectation::Code("local_model_activation_unavailable"),
+        ),
+        (
+            "LocalModelActivation.Json",
+            WireExpectation::Code("local_model_activation_unavailable"),
+        ),
+        ("Outcome.Seam", WireExpectation::Code("outcome_unavailable")),
+        (
+            "Outcome.NoManifestForCandidate",
+            WireExpectation::Code("outcome_unavailable"),
+        ),
+        (
+            "Outcome.Manifest",
+            WireExpectation::Code("outcome_unavailable"),
+        ),
+        (
+            "Outcome.ManifestMissionDiffers",
+            WireExpectation::Code("outcome_unavailable"),
+        ),
+        (
+            "Outcome.Completion",
+            WireExpectation::Code("outcome_unavailable"),
+        ),
+        (
+            "Outcome.AppendixRequired",
+            WireExpectation::Code("outcome_unavailable"),
+        ),
+        (
+            "Outcome.VersionGap",
+            WireExpectation::Code("outcome_unavailable"),
+        ),
+        (
+            "Outcome.AlreadyPublished",
+            WireExpectation::Code("outcome_unavailable"),
+        ),
+        (
+            "Outcome.HistoryNotContiguous",
+            WireExpectation::Code("outcome_unavailable"),
+        ),
+        (
+            "Outcome.QualifyingVerdictNotMeets",
+            WireExpectation::Code("outcome_unavailable"),
+        ),
+        (
+            "Outcome.MissionBindingBroken",
+            WireExpectation::Code("outcome_unavailable"),
+        ),
+        (
+            "Outcome.CandidateIsNotMissionScoped",
+            WireExpectation::Code("outcome_unavailable"),
+        ),
+        ("Outcome.Pdf", WireExpectation::Code("outcome_unavailable")),
+        (
+            "Outcome.Unverified",
+            WireExpectation::Code("outcome_unavailable"),
+        ),
+        (
+            "Outcome.Store",
+            WireExpectation::Code("outcome_unavailable"),
+        ),
+        ("Outcome.Absent", WireExpectation::Code("outcome_absent")),
+        ("Outcome.Account", WireExpectation::Account),
+    ];
+
+    /// The 62 code spellings: wire literal and reviewed Remote NAME, both independent.
+    const CODE_SPELLINGS: [(&str, &str, &str); 62] = [
+        ("PasswordTooShort", "password_too_short", "PasswordTooShort"),
+        ("PasswordTooLong", "password_too_long", "PasswordTooLong"),
+        (
+            "PasswordConfirmationMismatch",
+            "password_confirmation_mismatch",
+            "PasswordConfirmationMismatch",
+        ),
+        (
+            "RecoveryNotConfirmed",
+            "recovery_not_confirmed",
+            "RecoveryNotConfirmed",
+        ),
+        ("SetupNotStarted", "setup_not_started", "SetupNotStarted"),
+        (
+            "AccountAlreadyExists",
+            "account_already_exists",
+            "AccountAlreadyExists",
+        ),
+        ("AccountMissing", "account_missing", "AccountMissing"),
+        (
+            "AuthenticationFailed",
+            "authentication_failed",
+            "AuthenticationFailed",
+        ),
+        (
+            "AuthenticationThrottled",
+            "authentication_throttled",
+            "AuthenticationThrottled",
+        ),
+        (
+            "CredentialDisabled",
+            "credential_disabled",
+            "CredentialDisabled",
+        ),
+        (
+            "RemotePasswordNotAllowed",
+            "remote_password_not_allowed",
+            "RemotePasswordNotAllowed",
+        ),
+        ("NotAuthenticated", "not_authenticated", "NotAuthenticated"),
+        (
+            "InvalidSessionTimeout",
+            "invalid_session_timeout",
+            "InvalidSessionTimeout",
+        ),
+        (
+            "UnsupportedStarterProposal",
+            "unsupported_starter_proposal",
+            "UnsupportedStarterProposal",
+        ),
+        (
+            "InvalidStarterRoster",
+            "invalid_starter_roster",
+            "InvalidStarterRoster",
+        ),
+        (
+            "StarterDecisionRecorded",
+            "starter_decision_recorded",
+            "StarterDecisionRecorded",
+        ),
+        (
+            "StarterOrganizationUnavailable",
+            "starter_organization_unavailable",
+            "StarterOrganizationUnavailable",
+        ),
+        ("ResidentNotFound", "resident_not_found", "ResidentNotFound"),
+        (
+            "InvalidResidentTransition",
+            "invalid_resident_transition",
+            "InvalidResidentTransition",
+        ),
+        (
+            "StaleResidentDecision",
+            "stale_resident_decision",
+            "StaleResidentDecision",
+        ),
+        (
+            "ResidentLifecycleUnavailable",
+            "resident_lifecycle_unavailable",
+            "ResidentLifecycleUnavailable",
+        ),
+        (
+            "InvalidResidentConfiguration",
+            "invalid_resident_configuration",
+            "InvalidResidentConfiguration",
+        ),
+        (
+            "StaleResidentConfiguration",
+            "stale_resident_configuration",
+            "StaleResidentConfiguration",
+        ),
+        (
+            "ResidentConfigurationUnavailable",
+            "resident_configuration_unavailable",
+            "ResidentConfigurationUnavailable",
+        ),
+        ("InvalidProject", "invalid_project", "InvalidProject"),
+        ("ProjectNotFound", "project_not_found", "ProjectNotFound"),
+        (
+            "StaleCharterRevision",
+            "stale_charter_revision",
+            "StaleCharterRevision",
+        ),
+        ("UnchangedCharter", "unchanged_charter", "UnchangedCharter"),
+        (
+            "ProjectUnavailable",
+            "project_unavailable",
+            "ProjectUnavailable",
+        ),
+        (
+            "InvalidProjectPolicy",
+            "invalid_project_policy",
+            "InvalidProjectPolicy",
+        ),
+        (
+            "StaleProjectPolicy",
+            "stale_project_policy",
+            "StaleProjectPolicy",
+        ),
+        (
+            "UnchangedProjectPolicy",
+            "unchanged_project_policy",
+            "UnchangedProjectPolicy",
+        ),
+        (
+            "ProjectPolicyUnavailable",
+            "project_policy_unavailable",
+            "ProjectPolicyUnavailable",
+        ),
+        (
+            "InvalidProjectRepository",
+            "invalid_project_repository",
+            "InvalidProjectRepository",
+        ),
+        (
+            "StaleProjectRepository",
+            "stale_project_repository",
+            "StaleProjectRepository",
+        ),
+        (
+            "UnchangedProjectRepository",
+            "unchanged_project_repository",
+            "UnchangedProjectRepository",
+        ),
+        (
+            "ProjectRepositoryUnavailable",
+            "project_repository_unavailable",
+            "ProjectRepositoryUnavailable",
+        ),
+        (
+            "RepositoryNotBound",
+            "repository_not_bound",
+            "RepositoryNotBound",
+        ),
+        (
+            "PreflightUnavailable",
+            "preflight_unavailable",
+            "PreflightUnavailable",
+        ),
+        (
+            "SampleProjectUnavailable",
+            "sample_project_unavailable",
+            "SampleProjectUnavailable",
+        ),
+        ("InvalidTeam", "invalid_team", "InvalidTeam"),
+        ("TeamNotFound", "team_not_found", "TeamNotFound"),
+        (
+            "StaleTeamMemberConfiguration",
+            "stale_team_member_configuration",
+            "StaleTeamMemberConfiguration",
+        ),
+        (
+            "TeamMemberIneligible",
+            "team_member_ineligible",
+            "TeamMemberIneligible",
+        ),
+        ("TeamUnavailable", "team_unavailable", "TeamUnavailable"),
+        ("InvalidMission", "invalid_mission", "InvalidMission"),
+        ("MissionNotFound", "mission_not_found", "MissionNotFound"),
+        ("StaleMissionTeam", "stale_mission_team", "StaleMissionTeam"),
+        (
+            "MissionMemberIneligible",
+            "mission_member_ineligible",
+            "MissionMemberIneligible",
+        ),
+        (
+            "MissionUnavailable",
+            "mission_unavailable",
+            "MissionUnavailable",
+        ),
+        ("OutcomeAbsent", "outcome_absent", "OutcomeAbsent"),
+        (
+            "OutcomeUnavailable",
+            "outcome_unavailable",
+            "OutcomeUnavailable",
+        ),
+        (
+            "LocalModelUnavailable",
+            "local_model_unavailable",
+            "LocalModelUnavailable",
+        ),
+        (
+            "LocalModelNotFound",
+            "local_model_not_found",
+            "LocalModelNotFound",
+        ),
+        (
+            "LocalModelChanged",
+            "local_model_changed",
+            "LocalModelChanged",
+        ),
+        (
+            "InvalidLocalModelApproval",
+            "invalid_local_model_approval",
+            "InvalidLocalModelApproval",
+        ),
+        (
+            "LocalModelAlreadyActive",
+            "local_model_already_active",
+            "LocalModelAlreadyActive",
+        ),
+        (
+            "StaleLocalModelDecision",
+            "stale_local_model_decision",
+            "StaleLocalModelDecision",
+        ),
+        (
+            "LocalModelActivationUnavailable",
+            "local_model_activation_unavailable",
+            "LocalModelActivationUnavailable",
+        ),
+        (
+            "AccountServiceUnavailable",
+            "account_service_unavailable",
+            "AccountServiceUnavailable",
+        ),
+        (
+            "UnauthorizedClient",
+            "unauthorized_client",
+            "UnauthorizedClient",
+        ),
+        ("ProtocolError", "protocol_error", "ProtocolError"),
+    ];
+
+    // -------------------------------------------------------------------------------------
+    // R42 slice 2, commit 3: the wire contract, pinned so a refactor cannot move it quietly.
+    // -------------------------------------------------------------------------------------
+
+    #[derive(Clone, Copy)]
+    enum WireExpectation {
+        /// A fixed code with no retry.
+        Code(&'static str),
+        /// "Recurse on the account payload" -- the same thing the production mapper does, but
+        /// resolved here through this table's own account rows, never by calling the mapper.
+        Account,
+    }
+
+    /// Look the expected code up in the transcribed table rather than deriving it.
+    fn wire_expectation(key: &str) -> WireExpectation {
+        *WIRE_MAP
+            .iter()
+            .find_map(|(k, v)| (*k == key).then_some(v))
+            .unwrap_or_else(|| panic!("R42S2.FIXTURE.WIRE.{key}.MAPPED: no row in WIRE_MAP"))
+    }
+
+    /// The whole envelope, built from independent literals -- not from the value under test.
+    fn expected_envelope(code: &str, retry: Option<u64>) -> serde_json::Value {
+        let retry = match retry {
+            Some(ms) => serde_json::Value::from(ms),
+            None => serde_json::Value::Null,
+        };
+        serde_json::json!({
+            "protocol": 1,
+            "result": serde_json::Value::Null,
+            "error": { "code": code, "retry_after_ms": retry },
+        })
+    }
+
+    fn envelope_of(error: LocalTransportError) -> serde_json::Value {
+        serde_json::to_value(response_from_transport_error(error))
+            .expect("the response envelope serializes")
+    }
+
+    /// The account code for one account variant, from this table's own rows.
+    fn account_expectation(variant: &str) -> (&'static str, Option<u64>) {
+        match wire_expectation(&format!("Account.{variant}")) {
+            WireExpectation::Code(code) => (
+                code,
+                (variant == "AuthenticationThrottled").then_some(THROTTLE_MS),
+            ),
+            WireExpectation::Account => {
+                unreachable!("the account table never recurses into itself")
+            }
+        }
+    }
+
+    /// R42 slice 2: the wire's closed code table is unchanged, and both former catch-alls now
+    /// name their inputs.
+    ///
+    /// This commit closes no disclosure site. It pins semantics at the next interface, so that
+    /// replacing two `_` arms with explicit groups is provably a no-op -- and so a later refactor
+    /// cannot change a code or a retry without a named failure here.
+    #[test]
+    fn r42_wire_projection_preserves_the_closed_contract() {
+        assert_eq!(WIRE_MAP.len(), 153, "R42S2.WIRE.CARDINALITY.MAP");
+        assert_eq!(CODE_SPELLINGS.len(), 62, "R42S2.WIRE.CARDINALITY.CODES");
+
+        // Lead cases, in the spec's order, so a mutant's first RED is predictable.
+        let leads: Vec<(String, LocalTransportError, &'static str, Option<u64>)> = vec![
+            (
+                "R42S2.WIRE.Account.Store".to_owned(),
+                LocalTransportError::Account(OperatorAccountError::Store(driver_error(NEEDLE_A))),
+                account_expectation("Store").0,
+                None,
+            ),
+            (
+                "R42S2.WIRE.Account.NotAuthenticated".to_owned(),
+                LocalTransportError::Account(OperatorAccountError::NotAuthenticated),
+                account_expectation("NotAuthenticated").0,
+                None,
+            ),
+            (
+                "R42S2.WIRE.Account.AuthenticationThrottled".to_owned(),
+                LocalTransportError::Account(OperatorAccountError::AuthenticationThrottled {
+                    retry_after_ms: THROTTLE_MS,
+                }),
+                account_expectation("AuthenticationThrottled").0,
+                Some(THROTTLE_MS),
+            ),
+            (
+                "R42S2.WIRE.Io".to_owned(),
+                LocalTransportError::Io(io_error(NEEDLE_A)),
+                "protocol_error",
+                None,
+            ),
+            (
+                "R42S2.WIRE.Project.NotFound".to_owned(),
+                LocalTransportError::Project(ProjectError::NotFound),
+                match wire_expectation("Project.NotFound") {
+                    WireExpectation::Code(code) => code,
+                    WireExpectation::Account => unreachable!(),
+                },
+                None,
+            ),
+            (
+                "R42S2.WIRE.Outcome.Absent".to_owned(),
+                LocalTransportError::Outcome(PublishRefusal::Absent),
+                match wire_expectation("Outcome.Absent") {
+                    WireExpectation::Code(code) => code,
+                    WireExpectation::Account => unreachable!(),
+                },
+                None,
+            ),
+        ];
+        for (id, error, code, retry) in leads {
+            let envelope = envelope_of(error);
+            assert!(
+                !serde_json::to_string(&envelope)
+                    .expect("the envelope stringifies")
+                    .contains(NEEDLE_A),
+                "{id}.NO_NEEDLE: {envelope}"
+            );
+            assert_eq!(envelope, expected_envelope(code, retry), "{id}.ENVELOPE");
+        }
+
+        // The five root groups the first catch-all used to swallow, now named.
+        for (id, error) in [
+            (
+                "R42S2.WIRE.Json",
+                LocalTransportError::Json(json_error(NEEDLE_A)),
+            ),
+            (
+                "R42S2.WIRE.InvalidTokenFile",
+                LocalTransportError::InvalidTokenFile,
+            ),
+            (
+                "R42S2.WIRE.InsecurePermissions",
+                LocalTransportError::InsecurePermissions,
+            ),
+            ("R42S2.WIRE.Protocol", LocalTransportError::Protocol),
+            (
+                "R42S2.WIRE.Supervisor",
+                LocalTransportError::Supervisor(crate::SupervisorError::SchemaMismatch),
+            ),
+        ] {
+            assert_eq!(
+                envelope_of(error),
+                expected_envelope("protocol_error", None),
+                "{id}.ENVELOPE"
+            );
+        }
+
+        // Every immediate domain arm, through its own wrapper, against the transcribed table.
+        let mut checked = 0_usize;
+        for (stem, wrap) in domain_wire_cases() {
+            for (variant, error) in wrap {
+                let key = format!("{stem}.{variant}");
+                let (code, retry) = match wire_expectation(&key) {
+                    WireExpectation::Code(code) => (code, None),
+                    // A nested Account resolves through the account rows, which is the recursion
+                    // the production mapper performs -- checked here, not assumed.
+                    WireExpectation::Account => account_expectation("Store"),
+                };
+                let envelope = envelope_of(error);
+                assert!(
+                    !serde_json::to_string(&envelope)
+                        .expect("the envelope stringifies")
+                        .contains(NEEDLE_A),
+                    "R42S2.WIRE.{key}.NO_NEEDLE: {envelope}"
+                );
+                assert_eq!(
+                    envelope,
+                    expected_envelope(code, retry),
+                    "R42S2.WIRE.{key}.ENVELOPE"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 135, "R42S2.WIRE.CARDINALITY.DOMAIN_ARMS");
+
+        // All 18 account faults, and every one of the 14 carriers that recurses into them.
+        for (variant, account, _) in account_rows() {
+            let (code, retry) = account_expectation(variant);
+            assert_eq!(
+                envelope_of(LocalTransportError::Account(account)),
+                expected_envelope(code, retry),
+                "R42S2.WIRE.Account.{variant}.ENVELOPE"
+            );
+        }
+
+        // All 62 Remote codes relay BOTH fields unchanged, including a retry on a code that does
+        // not otherwise carry one. Existing behaviour, pinned -- not a new promise.
+        for (variant, literal, _) in CODE_SPELLINGS {
+            let code = code_rows()
+                .into_iter()
+                .find_map(|(name, code, _)| (name == variant).then_some(code))
+                .expect("every spelling row has a constructor row");
+            assert_eq!(
+                envelope_of(LocalTransportError::Remote {
+                    code,
+                    retry_after_ms: Some(THROTTLE_MS),
+                }),
+                expected_envelope(literal, Some(THROTTLE_MS)),
+                "R42S2.WIRE.Remote.{variant}.ENVELOPE"
+            );
+        }
+    }
+
+    /// R42 slice 2: the wire schema and all 62 code spellings are closed.
+    #[test]
+    fn r42_wire_schema_and_code_spellings_are_closed() {
+        for (variant, literal, name) in CODE_SPELLINGS {
+            let code = code_rows()
+                .into_iter()
+                .find_map(|(row, code, _)| (row == variant).then_some(code))
+                .expect("every spelling row has a constructor row");
+            let value = serde_json::to_value(code).expect("a code serializes");
+            assert_eq!(
+                value,
+                serde_json::Value::from(literal),
+                "R42S2.WIRE.CODE.{variant}.SERIALIZED"
+            );
+            let back: LocalErrorCode = serde_json::from_value(value).expect("a code round trips");
+            assert_eq!(
+                serde_json::to_value(back).expect("the round trip serializes"),
+                serde_json::Value::from(literal),
+                "R42S2.WIRE.CODE.{variant}.ROUND_TRIP"
+            );
+            assert_eq!(
+                format!("{code:?}"),
+                name,
+                "R42S2.WIRE.CODE.{variant}.REMOTE_NAME"
+            );
+        }
+
+        // The decoder refuses what the schema does not declare. `is_err()` only: a driver
+        // sentence is not a contract.
+        assert!(
+            serde_json::from_str::<WireError>(
+                r#"{"code":"protocol_error","retry_after_ms":null,"message":"extra"}"#
+            )
+            .is_err(),
+            "R42S2.WIRE.SCHEMA.WireErrorExtraField.REFUSED"
+        );
+        assert!(
+            serde_json::from_str::<ResponseEnvelope>(
+                r#"{"protocol":1,"result":null,"error":null,"message":"extra"}"#
+            )
+            .is_err(),
+            "R42S2.WIRE.SCHEMA.EnvelopeExtraField.REFUSED"
+        );
+        assert!(
+            serde_json::from_str::<WireError>(
+                r#"{"code":"a_code_this_protocol_does_not_have","retry_after_ms":null}"#
+            )
+            .is_err(),
+            "R42S2.WIRE.SCHEMA.UnknownCode.REFUSED"
+        );
+        // The shape that must still parse, so the three refusals above are not vacuous.
+        assert!(
+            serde_json::from_str::<WireError>(r#"{"code":"protocol_error","retry_after_ms":null}"#)
+                .is_ok(),
+            "R42S2.WIRE.SCHEMA.WellFormed.ACCEPTED"
+        );
+    }
+
+    /// Each domain's immediate arms, wrapped in its transport root. The variant name is the row's
+    /// own case ID, so the WIRE_MAP key is built from the table rather than from the value.
+    #[allow(clippy::type_complexity)]
+    fn domain_wire_cases() -> Vec<(&'static str, Vec<(&'static str, LocalTransportError)>)> {
+        macro_rules! domain {
+            ($stem:literal, $wrap:path, $rows:ident) => {
+                (
+                    $stem,
+                    $rows()
+                        .into_iter()
+                        .map(|(case, value, _)| (case, $wrap(value)))
+                        .collect::<Vec<_>>(),
+                )
+            };
+        }
+        vec![
+            domain!(
+                "StarterOrganization",
+                LocalTransportError::StarterOrganization,
+                starter_rows
+            ),
+            domain!(
+                "ResidentLifecycle",
+                LocalTransportError::ResidentLifecycle,
+                lifecycle_rows
+            ),
+            domain!(
+                "ResidentConfiguration",
+                LocalTransportError::ResidentConfiguration,
+                configuration_rows
+            ),
+            domain!("Project", LocalTransportError::Project, project_rows),
+            domain!(
+                "ProjectPolicy",
+                LocalTransportError::ProjectPolicy,
+                policy_rows
+            ),
+            domain!(
+                "ProjectRepository",
+                LocalTransportError::ProjectRepository,
+                repository_rows
+            ),
+            domain!(
+                "CheckPreflight",
+                LocalTransportError::CheckPreflight,
+                preflight_rows
+            ),
+            domain!(
+                "RecentReceipt",
+                LocalTransportError::RecentReceipt,
+                receipt_rows
+            ),
+            domain!(
+                "SampleProject",
+                LocalTransportError::SampleProject,
+                sample_rows
+            ),
+            domain!("Team", LocalTransportError::Team, team_rows),
+            domain!("Mission", LocalTransportError::Mission, mission_rows),
+            domain!(
+                "ResourceDiscovery",
+                LocalTransportError::ResourceDiscovery,
+                discovery_rows
+            ),
+            domain!(
+                "LocalModelActivation",
+                LocalTransportError::LocalModelActivation,
+                activation_rows
+            ),
+            (
+                "Outcome",
+                publish_rows()
+                    .into_iter()
+                    .map(|(case, value, _)| {
+                        (
+                            case.trim_start_matches("R42S2.OUTCOME."),
+                            LocalTransportError::Outcome(value),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+        ]
     }
 }
