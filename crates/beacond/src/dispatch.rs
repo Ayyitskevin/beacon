@@ -3593,16 +3593,57 @@ mod tests {
         // Both are refusals; the Run state does not distinguish them and must not be asked to.
         assert_eq!(DispatchOutcome::PreImageUnreadable.run_state(), "refused");
         // Every read-failure subcase has a name of its own, so a Receipt can say WHICH read failed.
+        //
+        // R47 made this witness EXHAUSTIVE, the way the outcome table above already is. It listed
+        // five of six -- `ReadRefused` was left out because it carries data -- so R46's own new
+        // subcase was the one variant no row covered, and R47 could have added a seventh the same
+        // way. The `match` is what closes it: a variant added without a row does not compile, and
+        // the separate `rows` list is what catches a row deleted from it.
+        fn expected_subcase(value: &PinnedReadFailure) -> &'static str {
+            match value {
+                PinnedReadFailure::FilterInventoryUnreadable => "filter_inventory_unreadable",
+                PinnedReadFailure::FilterInventoryRefused { .. } => "filter_inventory_refused",
+                PinnedReadFailure::ChildFailed => "child_failed",
+                PinnedReadFailure::Signalled => "signalled",
+                PinnedReadFailure::TimedOut => "timed_out",
+                PinnedReadFailure::PinBrokenAfterRead => "pin_broken_after_read",
+                PinnedReadFailure::ReadRefused { .. } => "read_refused",
+            }
+        }
         let subcases = [
             PinnedReadFailure::FilterInventoryUnreadable,
+            // R47: the inventory read git REFUSED, carrying what git said. Its own subcase, so a
+            // Receipt distinguishes "the hardening could not be established, and here is why" from
+            // an inventory lost to a broken pin or a child that never started.
+            PinnedReadFailure::FilterInventoryRefused {
+                message: "fatal: unable to access '/proc/self/fd/100/config': Permission denied"
+                    .to_owned(),
+            },
             PinnedReadFailure::ChildFailed,
             PinnedReadFailure::Signalled,
             PinnedReadFailure::TimedOut,
             PinnedReadFailure::PinBrokenAfterRead,
+            PinnedReadFailure::ReadRefused {
+                message: "fatal: not a git repository".to_owned(),
+            },
         ];
-        let names: std::collections::BTreeSet<&str> =
-            subcases.iter().map(PinnedReadFailure::name).collect();
-        assert_eq!(names.len(), 5, "two read failures share a name: {names:?}");
+        assert_eq!(
+            subcases.len(),
+            7,
+            "a read-failure subcase was added or a row was deleted: the vocabulary is closed"
+        );
+        let names: std::collections::BTreeSet<&str> = subcases
+            .iter()
+            .map(|subcase| {
+                assert_eq!(
+                    subcase.name(),
+                    expected_subcase(subcase),
+                    "the outward name does not match the pinned table: {subcase:?}"
+                );
+                subcase.name()
+            })
+            .collect();
+        assert_eq!(names.len(), 7, "two read failures share a name: {names:?}");
         for name in names {
             assert!(
                 !name.contains(' '),
