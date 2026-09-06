@@ -59,6 +59,11 @@ use crate::{AutonomyProfile, CandidateDigest, RepositorySourceKind};
 /// A dispatch Run's lease.
 const LEASE_MS: u64 = 60_000;
 
+/// The Receipt shape this build writes. Version 4 is the R46 era: a mismatch Receipt carries its
+/// observed pre-image as a closed value. Version 3 Receipts predate the field and are read as
+/// "unrecorded" -- accepted, never repaired, never invented (R46.7.1).
+const RECEIPT_VERSION: u32 = 4;
+
 /// Who Beacon says wrote a dispatched commit. Permanent, public-facing bytes in someone else's
 /// repository: ADR 0039 asks the Product Steward to confirm this identity before any dispatch into
 /// a repository that is not a Beacon-made copy.
@@ -213,14 +218,33 @@ pub struct MutationRecord {
     /// asserted a comparison and recorded nothing that was read -- the same shape of claim R46
     /// exists to remove one level up. This is the evidence that a comparison happened at all.
     ///
-    /// Absent when nothing was read: the tree held no such object, or the read failed
-    /// (`PreImageUnreadable`, which by construction never compared anything). Skipped when absent
-    /// so every Receipt that records no comparison is byte-for-byte what it was.
+    /// A CLOSED VALUE, never a missing field, on a version-4 mismatch (R46.7): a path that turns
+    /// out absent is an OBSERVATION, and writing nothing for it made an honest refusal
+    /// indistinguishable from one that recorded no evidence -- which item 6's owner rule then
+    /// refused, bricking a store at its next start (blue's HOLD).
+    ///
+    /// Absent from the Receipt only where no observation belongs: an outcome that is not a
+    /// mismatch, or a version-3 Receipt written before this lane, which the owner reads as
+    /// "unrecorded" rather than repairing or inventing one (R46.7.1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub observed_pre_image: Option<String>,
+    pub observed_pre_image: Option<ObservedPreImage>,
     /// What this dispatch did with it. Recorded per mutation rather than once, so an attempt that
     /// wrote some and not others has a place to say so.
     pub effect: MutationEffect,
+}
+
+/// What the pinned base revision held at a declared path, as the pre-image gate observed it.
+///
+/// Two arms because there are two observations, and "no bytes" is not the same fact as "no object"
+/// -- the distinction this whole lane exists to keep (R46.7). A read that FAILED is neither: it
+/// produces `PreImageUnreadable` and no observation at all.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservedPreImage {
+    /// The tree held bytes, and they hash to this, in the same encoding as `pre_image`.
+    Bytes { digest: String },
+    /// The tree held no such object. Git ran, under the hardening, and said so.
+    Absent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -1651,7 +1675,7 @@ impl DispatchService {
             .max(opened.started_at_ms);
         let bindings = decided.bindings.clone();
         Ok(DispatchReceipt {
-            version: 3,
+            version: RECEIPT_VERSION,
             run_id: opened.run_id,
             workspace_id: self.workspace_id,
             project_id: opened.project_id,
@@ -1744,13 +1768,16 @@ fn write_receipt(
     connection.execute(
         "INSERT INTO receipts (
              workspace_id, run_id, version, outcome, receipt_json, recorded_at_ms
-         ) VALUES (?1, ?2, 3, ?3, ?4, ?5)",
+         ) VALUES (?1, ?2, ?6, ?3, ?4, ?5)",
         params![
             workspace_id.to_string(),
             run_id.to_string(),
             receipt.outcome.as_str(),
             payload.as_str(),
             ended_at_ms,
+            // The COLUMN and the JSON carry the same version, from one constant: the owner
+            // compares them, and a literal here would drift the moment the shape moved (R46.7.1).
+            receipt.version,
         ],
     )?;
     connection.execute(
@@ -2068,7 +2095,7 @@ fn pre_images_hold(
         .collect();
     let mut held = true;
     let mut unreadable: Option<PinnedReadFailure> = None;
-    let mut observed: Vec<(String, String)> = Vec::new();
+    let mut observed: Vec<(String, ObservedPreImage)> = Vec::new();
     for (declared_pre_image, declared_path) in records {
         let path = format!("{base}:{declared_path}");
         let cat_file = ["cat-file", "blob", path.as_str()];
@@ -2079,13 +2106,24 @@ fn pre_images_hold(
             // Declared absent, and absent: Git ran and reported no such object in the tree. This
             // is the ONE no-bytes answer that is evidence (R46.1); the other is below.
             (None, PinnedRead::NotFound) => true,
-            (None, PinnedRead::Bytes(_)) | (Some(_), PinnedRead::NotFound) => false,
+            (None, PinnedRead::Bytes(_)) => false,
+            // R46.7: a declared-present pre-image whose path is ABSENT is a truthful mismatch with
+            // nothing to read. The absence is the observation, and it is recorded as one.
+            (Some(_), PinnedRead::NotFound) => {
+                observed.push((declared_path.clone(), ObservedPreImage::Absent));
+                false
+            }
             (Some(declared), PinnedRead::Bytes(bytes)) => {
                 // R46.5: what was READ, recorded whether or not it agreed. A Receipt that claims a
                 // comparison has to carry the thing it compared against.
                 let read_digest = hex(&crate::proposal::sha256(bytes));
                 let holds = read_digest == *declared;
-                observed.push((declared_path.clone(), read_digest));
+                observed.push((
+                    declared_path.clone(),
+                    ObservedPreImage::Bytes {
+                        digest: read_digest,
+                    },
+                ));
                 holds
             }
             // R46: the read FAILED. This gate cannot say whether the pre-image holds, so it does
@@ -2411,7 +2449,7 @@ fn interrupted_receipt(
         not_verified.push(NotVerified::ObjectResidueUnknown);
     }
     DispatchReceipt {
-        version: 3,
+        version: RECEIPT_VERSION,
         run_id,
         workspace_id,
         project_id,
@@ -2564,7 +2602,7 @@ pub(crate) fn verify_dispatch_event(
     payload_json: &str,
 ) -> Result<(), DispatchError> {
     let receipt: DispatchReceipt = serde_json::from_str(payload_json)?;
-    if receipt.version != 3
+    if !(3..=RECEIPT_VERSION).contains(&receipt.version)
         || receipt.workspace_id != workspace_id
         || receipt.started_at_ms > receipt.ended_at_ms
         || receipt.ended_at_ms != occurred_at_ms
@@ -2595,7 +2633,7 @@ pub(crate) fn verify_dispatch_event(
         return Err(DispatchError::InvalidStore);
     };
     let stored_receipt: DispatchReceipt = serde_json::from_str(&receipt_json)?;
-    if version != 3
+    if i64::from(receipt.version) != version
         || kind != "proposal_dispatch"
         || outcome != receipt.outcome.as_str()
         || state != receipt.outcome.run_state()
@@ -2651,13 +2689,33 @@ fn verify_outcome_invariants(receipt: &DispatchReceipt) -> Result<(), DispatchEr
         // mismatch carrying none asserts a comparison it kept no evidence of. Both refuse here as
         // `InvalidStore`, the same way every other incoherent Receipt does.
         DispatchOutcome::PreImageMismatch => {
+            // R46.7.1: keyed on the Receipt's VERSION, the house era marker, never on whether the
+            // field happens to be there. A version-3 mismatch predates the field and is read as
+            // UNRECORDED -- accepted as it stands, because inventing a digest for it would be a
+            // fabrication and refusing it would make every historical refusal unreadable after an
+            // upgrade (the lockout R46.7 named, in the other direction).
+            let observation = if receipt.version >= RECEIPT_VERSION {
+                receipt.per_mutation.iter().any(|record| {
+                    // R46.7: exactly two truthful shapes. Bytes that DIFFER from the declaration,
+                    // or an absence where something was declared. `Absent` against a declared
+                    // absence is what HOLDING looks like, and bytes equal to the declaration say
+                    // the comparison held while the outcome refused.
+                    match (&record.observed_pre_image, &record.pre_image) {
+                        (Some(ObservedPreImage::Bytes { digest }), Some(declared)) => {
+                            digest != declared
+                        }
+                        (Some(ObservedPreImage::Bytes { .. }), None) => true,
+                        (Some(ObservedPreImage::Absent), Some(_)) => true,
+                        (Some(ObservedPreImage::Absent), None) | (None, _) => false,
+                    }
+                })
+            } else {
+                true
+            };
             receipt.resulting_revision.is_none()
                 && !receipt.checkout_updated
                 && names(NotVerified::ChangeNotApplied)
-                && receipt.per_mutation.iter().any(|record| {
-                    record.observed_pre_image.is_some()
-                        && record.observed_pre_image != record.pre_image
-                })
+                && observation
         }
         // Every other arm refused. Objects it wrote may survive -- that is what the residue token
         // is for, and a diff digest measured over a commit that was never published is still a
@@ -3047,7 +3105,7 @@ mod tests {
         // `tests/dispatch.rs`.
         let applied = outcome == DispatchOutcome::Applied;
         DispatchReceipt {
-            version: 3,
+            version: RECEIPT_VERSION,
             run_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap(),
             workspace_id: Uuid::parse_str("00000000-0000-4000-8000-000000000002").unwrap(),
             project_id: Uuid::parse_str("00000000-0000-4000-8000-000000000003").unwrap(),
@@ -3225,7 +3283,7 @@ mod tests {
         assert_eq!(bytes.len(), 2048);
         assert_eq!(
             hex(&crate::proposal::sha256(bytes.as_bytes())),
-            "6d13ab8b7a003b679985758f61bf190f4c0ed538772c9b2e5c21b77d1ece069a"
+            "fe71ea0e9fa2d8d45baedc9104e02f0dd3d680d75ae3b63cfe56405d389cabfb"
         );
         assert_eq!(bytes, APPLIED_SPECIMEN);
         // An Applied establishes every fact, so nothing in it is absent -- and it is a record this
@@ -3241,22 +3299,29 @@ mod tests {
     /// which is what a reconciling reader calls before it believes a stored refusal.
     #[test]
     fn a_mismatch_receipt_owes_the_digest_it_read() {
-        let mismatch = |observed: Option<&str>| {
+        let mismatch = |observed: Option<ObservedPreImage>| {
             let mut receipt = specimen(DispatchOutcome::PreImageMismatch);
             receipt.per_mutation = vec![MutationRecord {
                 kind: MutationKind::ModifyFile,
                 path: "src/lib.rs".to_owned(),
                 pre_image: Some("7".repeat(64)),
                 post_image: Some("8".repeat(64)),
-                observed_pre_image: observed.map(str::to_owned),
+                observed_pre_image: observed,
                 effect: MutationEffect::NotAttempted,
             }];
             receipt
         };
 
         // A digest that DISAGREES: the comparison happened and the outcome follows from it.
-        verify_outcome_invariants(&mismatch(Some(&"9".repeat(64))))
-            .expect("a mismatch carrying what it read is coherent");
+        verify_outcome_invariants(&mismatch(Some(ObservedPreImage::Bytes {
+            digest: "9".repeat(64),
+        })))
+        .expect("a mismatch carrying what it read is coherent");
+
+        // R46.7: an ABSENCE where something was declared is equally truthful -- the path is not
+        // there, which is exactly why the declared pre-image does not hold.
+        verify_outcome_invariants(&mismatch(Some(ObservedPreImage::Absent)))
+            .expect("a truthful absent pre-image is a coherent mismatch");
 
         // NONE: the Receipt asserts a comparison and keeps no evidence of one.
         assert!(
@@ -3271,11 +3336,30 @@ mod tests {
         // be true, and this is the shape a plausible-looking forgery would take.
         assert!(
             matches!(
-                verify_outcome_invariants(&mismatch(Some(&"7".repeat(64)))),
+                verify_outcome_invariants(&mismatch(Some(ObservedPreImage::Bytes {
+                    digest: "7".repeat(64)
+                }))),
                 Err(DispatchError::InvalidStore)
             ),
             "a mismatch whose observed digest equals the declared one was accepted"
         );
+
+        // R46.7: `Absent` against a DECLARED ABSENCE is what holding looks like, not a mismatch.
+        let mut declared_absent = mismatch(Some(ObservedPreImage::Absent));
+        declared_absent.per_mutation[0].pre_image = None;
+        assert!(
+            matches!(
+                verify_outcome_invariants(&declared_absent),
+                Err(DispatchError::InvalidStore)
+            ),
+            "a mismatch declaring absence and observing absence was accepted"
+        );
+
+        // R46.7.1: a version-3 Receipt predates the field. Unrecorded, not a liar.
+        let mut legacy = mismatch(None);
+        legacy.version = 3;
+        verify_outcome_invariants(&legacy)
+            .expect("a version-3 mismatch without the field is unrecorded, not incoherent");
     }
 
     #[test]
@@ -3288,7 +3372,7 @@ mod tests {
         assert_eq!(bytes.len(), 1301);
         assert_eq!(
             hex(&crate::proposal::sha256(bytes.as_bytes())),
-            "76305395d931d8464ed38b6980ba6f8abb649014ca44899380c19e67546af8e3"
+            "d55faf2cf80d698a88ba30aba5c71464948209841d3e535b234ff0df4019726f"
         );
         assert_eq!(bytes, REFUSED_SPECIMEN);
         assert_eq!(
@@ -3299,7 +3383,7 @@ mod tests {
     }
 
     const APPLIED_SPECIMEN: &str = concat!(
-        r#"{"version":3,"runId":"00000000-0000-4000-8000-000000000001","workspaceId":"00000000-0000-4000-80"#,
+        r#"{"version":4,"runId":"00000000-0000-4000-8000-000000000001","workspaceId":"00000000-0000-4000-80"#,
         r#"00-000000000002","projectId":"00000000-0000-4000-8000-000000000003","actor":"owner","rulingDiges"#,
         r#"t":{"algorithm":"sha256","canonicalizer":"beacon.ruling.v2","value":"111111111111111111111111111"#,
         r#"1111111111111111111111111111111111111"},"proposalDigest":{"algorithm":"sha256","canonicalizer":""#,
@@ -3324,7 +3408,7 @@ mod tests {
     );
 
     const REFUSED_SPECIMEN: &str = concat!(
-        r#"{"version":3,"runId":"00000000-0000-4000-8000-000000000001","workspaceId":"00000000-0000-4000-80"#,
+        r#"{"version":4,"runId":"00000000-0000-4000-8000-000000000001","workspaceId":"00000000-0000-4000-80"#,
         r#"00-000000000002","projectId":"00000000-0000-4000-8000-000000000003","actor":"owner","rulingDiges"#,
         r#"t":{"algorithm":"sha256","canonicalizer":"beacon.ruling.v2","value":"111111111111111111111111111"#,
         r#"1111111111111111111111111111111111111"},"proposalDigest":{"algorithm":"sha256","canonicalizer":""#,

@@ -26,10 +26,10 @@ use beacond::{
     AccessOrigin, AutonomyProfile, BeaconCapability, CandidateImages, CandidateService,
     CopyFailpoints, DeclaredCheck, DispatchFailpoints, DispatchOutcome, DispatchService,
     LocalModelActivationService, LocalModelEndpoint, MissionDraft, MissionMemberDraft,
-    MissionService, MutationEffect, NotVerified, OperatorAccountService, OperatorSessionPhase,
-    PauseService, PinnedReadFailure, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft,
-    ProjectPolicyService, ProjectRepositoryService, ProjectService, ProposalService,
-    ProviderFeature, RepositoryDraft, RepositoryEffect, RepositorySourceKind,
+    MissionService, MutationEffect, NotVerified, ObservedPreImage, OperatorAccountService,
+    OperatorSessionPhase, PauseService, PinnedReadFailure, ProjectCharterDraft, ProjectDraft,
+    ProjectPolicyDraft, ProjectPolicyService, ProjectRepositoryService, ProjectService,
+    ProposalService, ProviderFeature, RepositoryDraft, RepositoryEffect, RepositorySourceKind,
     ResidentConfigurationService, ResidentLifecycleService, RulingDecision, RulingService,
     RulingSupersedes, SampleProjectError, SampleProjectService, SecretString,
     StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig, Supervisor,
@@ -1304,7 +1304,8 @@ fn every_gate_holding_lands_the_declared_change_and_nothing_else() {
 
     // The Receipt is the record: actor, both identities, the mutation's effect, and what was not
     // established -- including the seven families ADR 0034 leaves undeclarable.
-    assert_eq!(receipt.version, 3);
+    // R46.7.1: version 4 is the R46 era.
+    assert_eq!(receipt.version, 4);
     assert_eq!(receipt.per_mutation[0].effect, MutationEffect::Written);
     assert_eq!(receipt.autonomy_profile, Some(AutonomyProfile::Supervised));
     // The seven undeclared constraint families are named on every Receipt, in the closed
@@ -2595,6 +2596,165 @@ fn a_candidate_describing_a_tree_that_is_not_there_is_refused_before_any_object_
     assert_eq!(receipt.resulting_revision, None);
 }
 
+/// R46.7.1: a Receipt written BEFORE this lane carries no observed pre-image, and startup accepts
+/// it as UNRECORDED -- never repaired, never invented.
+///
+/// The lockout R46.7 named, in the other direction: item 6's owner rule refuses a mismatch with no
+/// observation, and every historical mismatch has none. Keying the rule on the Receipt's VERSION
+/// rather than on the field's presence is what keeps an upgraded store readable.
+#[test]
+fn a_version_three_mismatch_without_the_observed_field_still_reopens() {
+    let fixture = admitted_mission("legacy-mismatch");
+    let repository = CopyRepository::create(&fixture.copies_root, "legacy-mismatch");
+    let (proposal_digest, _) = fixture.candidate_for_with_pre_image(
+        &repository,
+        "Modify the library root from bytes it no longer holds.",
+        b"what the file held some time ago\n",
+    );
+    let ruling = fixture
+        .rulings
+        .rule_on_candidate(
+            &fixture.candidates.present(&proposal_digest).unwrap(),
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap();
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling.digest().value, &content_for(NEW_BYTES))
+        .unwrap();
+    assert_eq!(receipt.outcome, DispatchOutcome::PreImageMismatch);
+
+    // Rewrite the stored Receipt and its Event as a version-3 record with no observed field: what
+    // this store would hold had the dispatch run before R46. The two copies stay byte-identical,
+    // because the owner compares them.
+    let connection = Connection::open(&fixture.store.path).unwrap();
+    let stored: String = connection
+        .query_row("SELECT receipt_json FROM receipts", [], |row| row.get(0))
+        .unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&stored).unwrap();
+    value["version"] = serde_json::json!(3);
+    for record in value["perMutation"].as_array_mut().unwrap() {
+        record.as_object_mut().unwrap().remove("observedPreImage");
+    }
+    let legacy = serde_json::to_string(&value).unwrap();
+    assert!(
+        !legacy.contains("observedPreImage"),
+        "the legacy Receipt still carries the field"
+    );
+    // Receipts are immutable, so the trigger comes off and goes back byte-exactly as 0033 wrote
+    // it -- the schema signature is compared at startup and an indented re-CREATE would refuse
+    // before this test's own question was reached.
+    connection
+        .execute_batch("DROP TRIGGER receipts_no_update;")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE receipts SET version = 3, receipt_json = ?1",
+            [legacy.as_str()],
+        )
+        .unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER receipts_no_update
+BEFORE UPDATE ON receipts
+BEGIN
+    SELECT RAISE(ABORT, 'Receipts are immutable');
+END;",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE events SET payload_json = ?1 WHERE kind = 'proposal.dispatched'",
+            [legacy.as_str()],
+        )
+        .unwrap();
+    drop(connection);
+
+    fixture
+        .restart()
+        .expect("a version-3 mismatch without the observed field is unrecorded, not incoherent");
+}
+
+#[test]
+fn astra_a_truthful_absent_pre_image_mismatch_remains_readable_after_restart() {
+    // A Candidate may declare a deletion of a path the base revision does not hold. This used to
+    // reach the object writes and be caught by the effect post-condition -- after residue existed --
+    // because nothing before that read the base tree at all (gpt1). The pre-image gate reads it
+    // now, so the refusal costs the repository nothing.
+    let fixture = admitted_mission("effect");
+    let repository = CopyRepository::create(&fixture.copies_root, "effect");
+    let absent = "src/never-there.rs";
+
+    let mut record = fixture.proposal("Delete a file that is not in the tree.");
+    record.mutations = vec![(MUTATION_DELETE, absent.to_owned())];
+    record.repository_revision = fixture.rebind_repository(&repository);
+    record.base_revision = repository.revision.clone();
+    record.context_digest = sha256(BASE_LIB_BYTES);
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    fixture
+        .candidates
+        .record(
+            &proposal.digest().value,
+            &[CandidateImages {
+                pre_image_sha256: Some(sha256(b"whatever it would have held\n")),
+                post_image_sha256: None,
+            }],
+        )
+        .unwrap();
+    let ruling = fixture
+        .rulings
+        .rule_on_candidate(
+            &fixture
+                .candidates
+                .present(&proposal.digest().value)
+                .unwrap(),
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap();
+
+    let head_before = CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]);
+    let receipt = fixture
+        .dispatches
+        .dispatch(
+            &ruling.digest().value,
+            &[SuppliedContent {
+                path: absent.to_owned(),
+                bytes: None,
+            }],
+        )
+        .unwrap();
+
+    assert_eq!(receipt.outcome, DispatchOutcome::PreImageMismatch);
+    // Nothing was prepared, so the repository is byte-identical rather than carrying residue --
+    // which is the improvement: the same defect used to be caught after objects existed.
+    assert_eq!(receipt.prepared_commit, None);
+    assert_eq!(receipt.repository_effect(), RepositoryEffect::ByteIdentical);
+    assert_eq!(
+        CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]),
+        head_before
+    );
+    assert_eq!(receipt.resulting_revision, None);
+    // astra wrote this line as `observed_pre_image.is_none()`, which was the shape of the DEFECT:
+    // the absence went unrecorded and the owner then refused the store. R46.7 rules that an
+    // observed absence is a VALUE, so the assertion becomes the ruling's shape -- still "no byte
+    // digest", now stated as the observation it is. The probe's real property, the restart below,
+    // is unchanged.
+    assert!(
+        receipt
+            .per_mutation
+            .iter()
+            .all(|record| matches!(record.observed_pre_image, Some(ObservedPreImage::Absent))),
+        "R46.MISMATCH.ABSENCE_HAS_NO_BYTE_DIGEST"
+    );
+    fixture
+        .restart()
+        .expect("R46.MISMATCH.OBSERVED_ABSENCE_REOPENS");
+}
+
 #[test]
 fn a_corrupt_ruling_or_proposal_record_refuses_with_a_receipt_rather_than_an_error() {
     // gpt1's P0: a Run is opened before the gates run, so an owning-reader failure that escaped as
@@ -3289,7 +3449,7 @@ fn an_applied_receipt_has_the_published_shape() {
 
     // The measurements an Applied Receipt must carry, each one a fact this dispatch established.
     let value: serde_json::Value = serde_json::from_str(&stored).unwrap();
-    assert_eq!(value["version"], 3);
+    assert_eq!(value["version"], 4);
     assert_eq!(value["actor"], "owner");
     assert_eq!(value["outcome"], "applied");
     assert_eq!(value["autonomyProfile"], "supervised");
@@ -3675,12 +3835,14 @@ fn a_modification_whose_declared_before_bytes_are_not_there_is_refused() {
         .iter()
         .find(|record| record.path == TARGET)
         .expect("the refused mutation is recorded");
-    let observed = record
-        .observed_pre_image
-        .as_deref()
-        .expect("a mismatch Receipt records the digest it read");
+    let Some(ObservedPreImage::Bytes { digest }) = record.observed_pre_image.as_ref() else {
+        panic!(
+            "a mismatch Receipt records the digest it read: {:?}",
+            record.observed_pre_image
+        );
+    };
     assert_eq!(
-        observed,
+        *digest,
         sha256(BASE_LIB_BYTES)
             .iter()
             .map(|byte| format!("{byte:02x}"))
@@ -3688,7 +3850,7 @@ fn a_modification_whose_declared_before_bytes_are_not_there_is_refused() {
         "the observed digest is not what the base revision holds"
     );
     assert_ne!(
-        Some(observed),
+        Some(digest.as_str()),
         record.pre_image.as_deref(),
         "a mismatch whose observed digest equals the declared one is not a mismatch"
     );

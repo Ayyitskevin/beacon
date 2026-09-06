@@ -28,7 +28,10 @@ ALTER TABLE receipts RENAME TO receipts_v32;
 CREATE TABLE receipts (
     workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
     run_id TEXT NOT NULL,
-    version INTEGER NOT NULL CHECK (version IN (1, 2, 3)),
+    -- R46.7.1: version 4 is the R46 era -- a mismatch Receipt carrying its observed pre-image as a
+    -- closed value. Extended HERE rather than in a second rebuild, because this migration already
+    -- rebuilds this table and a second one would be two rewrites of the same rows.
+    version INTEGER NOT NULL CHECK (version IN (1, 2, 3, 4)),
     outcome TEXT NOT NULL CHECK (outcome IN (
         'source_kind_unsupported',
         'binding_stale_for_charter',
