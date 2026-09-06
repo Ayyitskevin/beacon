@@ -157,6 +157,107 @@ struct ProjectPolicyPublishedPayload {
     policy: StoredProjectPolicy,
 }
 
+/// Which fault the ProjectPolicy startup pass hit, and WHICH ROW hit it (R27.1's shape, R28.1).
+pub(crate) enum ProjectPolicyStateFault {
+    /// The enumeration itself failed: no row to name, because none was reached.
+    Store(rusqlite::Error),
+    /// One ProjectPolicy did not re-prove. `cause` is the owning reader's OWN error, carried whole.
+    Row {
+        workspace_id: Uuid,
+        project_id: Uuid,
+        cause: ProjectPolicyError,
+    },
+    // NO `Totals` ARM. Like the repository pass, this one walks the Projects that have policy
+    // revisions and checks each one's own history and Events; no whole-store count is left over.
+    /// A row whose Workspace column is not a UUID. Unreachable while the foreign-key check and
+    /// the Workspace pass run first.
+    Identity {
+        workspace_id: String,
+        project_id: String,
+    },
+}
+
+impl ProjectPolicyError {
+    /// The variant's NAME, for R28.4's one-line startup message.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Account(_) => "Account",
+            Self::ProjectNotFound => "ProjectNotFound",
+            Self::StaleCharterRevision { .. } => "StaleCharterRevision",
+            Self::StalePolicyRevision => "StalePolicyRevision",
+            Self::InvalidRequiredCapabilities => "InvalidRequiredCapabilities",
+            Self::InvalidTrackRecordRequirements => "InvalidTrackRecordRequirements",
+            Self::UnchangedPolicy => "UnchangedPolicy",
+            Self::InvalidStore => "InvalidStore",
+            Self::Store(_) => "Store",
+            Self::Json(_) => "Json",
+        }
+    }
+}
+
+impl fmt::Display for ProjectPolicyStateFault {
+    /// R28.4: the KEY and the fault's NAME, never the carried error's own text.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(_) => formatter.write_str("the ProjectPolicys could not be read"),
+            Self::Row {
+                workspace_id,
+                project_id,
+                cause,
+            } => write!(
+                formatter,
+                "ProjectPolicy {project_id} in Workspace {workspace_id} does not re-prove: {}",
+                cause.name()
+            ),
+            Self::Identity {
+                workspace_id,
+                project_id,
+            } => write!(
+                formatter,
+                "a ProjectPolicy row's Workspace is not readable: {workspace_id}, ProjectPolicy \
+                 {project_id}"
+            ),
+        }
+    }
+}
+
+/// Hand-written and NOT delegating to `Display`: R28.4 keeps the carried text reachable here.
+impl fmt::Debug for ProjectPolicyStateFault {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => formatter.debug_tuple("Store").field(error).finish(),
+            Self::Row {
+                workspace_id,
+                project_id,
+                cause,
+            } => formatter
+                .debug_struct("Row")
+                .field("workspace_id", workspace_id)
+                .field("project_id", project_id)
+                .field("cause", cause)
+                .finish(),
+            Self::Identity {
+                workspace_id,
+                project_id,
+            } => formatter
+                .debug_struct("Identity")
+                .field("workspace_id", workspace_id)
+                .field("project_id", project_id)
+                .finish(),
+        }
+    }
+}
+
+impl std::error::Error for ProjectPolicyStateFault {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::Row { cause, .. } => Some(cause),
+            Self::Identity { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum ProjectPolicyError {
     Account(OperatorAccountError),
@@ -596,19 +697,45 @@ pub(crate) fn policy_revision_facts(
 
 pub(crate) fn verify_project_policy_state(
     connection: &Connection,
-) -> Result<(), ProjectPolicyError> {
-    let mut statement = connection.prepare(
-        "SELECT DISTINCT workspace_id, project_id FROM project_policy_revisions
-         ORDER BY workspace_id, project_id",
-    )?;
+) -> Result<(), ProjectPolicyStateFault> {
+    let mut statement = connection
+        .prepare(
+            "SELECT DISTINCT workspace_id, project_id FROM project_policy_revisions
+             ORDER BY workspace_id, project_id",
+        )
+        .map_err(ProjectPolicyStateFault::Store)?;
     let projects = statement
         .query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+        })
+        .map_err(ProjectPolicyStateFault::Store)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(ProjectPolicyStateFault::Store)?;
     for (workspace_id, project_id) in projects {
-        let workspace_id = parse_uuid(workspace_id)?;
-        let project_id = parse_uuid(project_id)?;
+        let identity = || ProjectPolicyStateFault::Identity {
+            workspace_id: workspace_id.clone(),
+            project_id: project_id.clone(),
+        };
+        let parsed_workspace = Uuid::parse_str(&workspace_id).map_err(|_| identity())?;
+        let parsed_project = Uuid::parse_str(&project_id).map_err(|_| identity())?;
+        verify_one_project_policy(connection, parsed_workspace, parsed_project).map_err(
+            |cause| ProjectPolicyStateFault::Row {
+                workspace_id: parsed_workspace,
+                project_id: parsed_project,
+                cause,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// One Project's policy history, re-proved. Unchanged from what the loop held inline.
+fn verify_one_project_policy(
+    connection: &Connection,
+    workspace_id: Uuid,
+    project_id: Uuid,
+) -> Result<(), ProjectPolicyError> {
+    {
         let policies = load_policy_history(connection, workspace_id, project_id)?;
         if policies.iter().enumerate().any(|(index, policy)| {
             usize::try_from(policy.revision) != Ok(index + 1)
@@ -678,4 +805,72 @@ fn positive_u32(value: i64) -> Result<u32, ProjectPolicyError> {
 
 fn nonnegative_u64(value: i64) -> Result<u64, ProjectPolicyError> {
     u64::try_from(value).map_err(|_| ProjectPolicyError::InvalidStore)
+}
+
+#[cfg(test)]
+mod name_witness {
+    use super::*;
+
+    /// Pinned independently of `name()` (the fold at 30d2a20): an exhaustive `name()` catches an
+    /// added arm, only a second table catches a wrong or duplicated name.
+    fn expected_name(error: &ProjectPolicyError) -> &'static str {
+        match error {
+            ProjectPolicyError::Account(_) => "Account",
+            ProjectPolicyError::ProjectNotFound => "ProjectNotFound",
+            ProjectPolicyError::StaleCharterRevision { .. } => "StaleCharterRevision",
+            ProjectPolicyError::StalePolicyRevision => "StalePolicyRevision",
+            ProjectPolicyError::InvalidRequiredCapabilities => "InvalidRequiredCapabilities",
+            ProjectPolicyError::InvalidTrackRecordRequirements => "InvalidTrackRecordRequirements",
+            ProjectPolicyError::UnchangedPolicy => "UnchangedPolicy",
+            ProjectPolicyError::InvalidStore => "InvalidStore",
+            ProjectPolicyError::Store(_) => "Store",
+            ProjectPolicyError::Json(_) => "Json",
+        }
+    }
+
+    #[test]
+    fn every_project_policy_error_arm_has_its_own_pinned_name() {
+        let every_arm = [
+            ProjectPolicyError::Account(
+                crate::operator_account::OperatorAccountError::PasswordTooShort,
+            ),
+            ProjectPolicyError::ProjectNotFound,
+            ProjectPolicyError::StaleCharterRevision {
+                expected: 1,
+                current: 2,
+            },
+            ProjectPolicyError::StalePolicyRevision,
+            ProjectPolicyError::InvalidRequiredCapabilities,
+            ProjectPolicyError::InvalidTrackRecordRequirements,
+            ProjectPolicyError::UnchangedPolicy,
+            ProjectPolicyError::InvalidStore,
+            ProjectPolicyError::Store(rusqlite::Error::QueryReturnedNoRows),
+            ProjectPolicyError::Json(serde_json::from_str::<u8>("\"x\"").unwrap_err()),
+        ];
+        assert_eq!(
+            every_arm.len(),
+            10,
+            "an arm was added to `ProjectPolicyError` without a fixture here"
+        );
+        for arm in &every_arm {
+            assert_eq!(
+                arm.name(),
+                expected_name(arm),
+                "the startup name does not match the pinned table: {arm:?}"
+            );
+        }
+        let names: std::collections::BTreeSet<&str> =
+            every_arm.iter().map(ProjectPolicyError::name).collect();
+        assert_eq!(
+            names.len(),
+            10,
+            "two arms share a startup name, so a swap between them is invisible: {names:?}"
+        );
+        for name in names {
+            assert!(
+                !name.contains(' ') && !name.contains('{'),
+                "a name is a name, not a rendering: {name}"
+            );
+        }
+    }
 }

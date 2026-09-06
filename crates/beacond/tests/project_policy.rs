@@ -333,8 +333,27 @@ fn restart_refuses_policy_state_without_its_exact_event() {
         initial_workspace_name: "Ignored".to_owned(),
     });
     assert!(
-        matches!(result, Err(SupervisorError::ProjectPolicyStateMismatch)),
+        matches!(
+            result,
+            Err(SupervisorError::ProjectPolicyStateMismatch { .. })
+        ),
         "unexpected bootstrap result: {result:?}"
+    );
+    // R28.1: the refusal names WHICH Project, and R28.4's line is the key plus the fault's NAME
+    // with the reader's own sentence absent.
+    let refusal = result.unwrap_err();
+    assert!(
+        matches!(
+            &refusal,
+            SupervisorError::ProjectPolicyStateMismatch { project_id, .. } if !project_id.is_nil()
+        ),
+        "the refusal does not name the Project it refused: {refusal:?}"
+    );
+    let line = refusal.to_string();
+    let named = line.rsplit(": ").next().unwrap().to_owned();
+    assert!(
+        !named.contains(' ') && !named.contains('{'),
+        "the tail of the line is a rendering, not a name: {line}"
     );
 }
 
