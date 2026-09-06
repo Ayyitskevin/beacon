@@ -618,21 +618,38 @@ impl PinnedRepository {
     ///
     /// The descriptor is `O_CLOEXEC`, which is correct: `fchdir` happens before the exec that would
     /// close it.
+    ///
+    /// The Git directory is a different case, because it must survive the exec. `dup2` clears
+    /// close-on-exec on the copy it makes -- except when there is no copy to make. POSIX says
+    /// `dup2(n, n)` on an open descriptor does nothing and returns `n`, so when the pin has itself
+    /// opened on [`PINNED_GIT_DIR_FD`] the placement is a successful no-op, close-on-exec survives
+    /// it, and the exec closes the very descriptor `GIT_DIR` names (R49, grok's R41 root cause).
+    /// That case clears the flag directly instead. The child's descriptor table is its own after
+    /// the fork, so this never reaches the pin this process holds.
     pub(crate) fn enter(&self, command: &mut Command) {
         use std::os::fd::AsRawFd;
         let fd = self.directory.as_raw_fd();
         let git_fd = self.git_directory.as_raw_fd();
-        // SAFETY: `fchdir` and `dup2` are async-signal-safe, touch only this child's working
-        // directory and descriptor table, and both descriptors outlive the spawn because `self` is
-        // borrowed for the call.
+        // SAFETY: `fchdir`, `dup2` and `fcntl` are async-signal-safe, touch only this child's
+        // working directory and descriptor table, and both descriptors outlive the spawn because
+        // `self` is borrowed for the call.
         unsafe {
             command.pre_exec(move || {
                 if libc::fchdir(fd) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                // `dup2` clears `O_CLOEXEC` on the copy, which is the point: the child must still
-                // hold this descriptor after the exec that resolves `GIT_DIR`.
-                if libc::dup2(git_fd, PINNED_GIT_DIR_FD) < 0 {
+                if git_fd == PINNED_GIT_DIR_FD {
+                    // Already where it has to be, so there is nothing to copy -- only the flag to
+                    // clear. `F_SETFD` rather than a detour through a scratch descriptor: the
+                    // detour allocates in the pre-exec window and can fail with `EMFILE` in
+                    // exactly the exhausted descriptor table that produces this case, so the
+                    // fallback would be least available when it is needed most.
+                    if libc::fcntl(git_fd, libc::F_SETFD, 0) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                } else if libc::dup2(git_fd, PINNED_GIT_DIR_FD) < 0 {
+                    // `dup2` clears `O_CLOEXEC` on the copy, which is the point: the child must
+                    // still hold this descriptor after the exec that resolves `GIT_DIR`.
                     return Err(std::io::Error::last_os_error());
                 }
                 Ok(())
