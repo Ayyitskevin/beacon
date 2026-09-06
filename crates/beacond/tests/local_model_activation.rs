@@ -434,85 +434,102 @@ fn activation_refuses_a_review_when_provider_features_change() {
 
 #[test]
 fn restart_refuses_an_activation_decision_without_its_exact_event() {
-    let store = TestStore::new("missing-event");
-    let accounts = enrolled_accounts(&store);
-    let mut responses = two_model_inspection_responses();
-    responses.extend(two_model_inspection_responses());
-    responses.extend(two_model_inspection_responses());
-    responses.extend(two_model_inspection_responses());
-    let (address, server) = serve_ollama(responses);
-    let service = LocalModelActivationService::new(
-        accounts,
-        store.workspace_id,
-        LocalModelEndpoint::new(address).unwrap(),
-    );
-    let other = service
-        .inspect(OTHER_MODEL_NAME, OTHER_MODEL_DIGEST)
-        .unwrap();
-    service
-        .activate(other, vec![ProviderFeature::Completion])
-        .unwrap();
-    let review = service.inspect(MODEL_NAME, MODEL_DIGEST).unwrap();
-    let activation = service
-        .activate(review, vec![ProviderFeature::Completion])
-        .unwrap();
-    server.join().unwrap();
-    drop(service);
+    // R44: BOTH ENDS. Tampering only the last-sorting decision made "names the failing
+    // row" and "names the last row" the same assertion; `rows.last()` survived it.
+    for (end, order) in [("last", "DESC"), ("first", "ASC")] {
+        let store = TestStore::new(&format!("missing-event-{end}"));
+        let accounts = enrolled_accounts(&store);
+        let mut responses = two_model_inspection_responses();
+        responses.extend(two_model_inspection_responses());
+        responses.extend(two_model_inspection_responses());
+        responses.extend(two_model_inspection_responses());
+        let (address, server) = serve_ollama(responses);
+        let service = LocalModelActivationService::new(
+            accounts,
+            store.workspace_id,
+            LocalModelEndpoint::new(address).unwrap(),
+        );
+        let other = service
+            .inspect(OTHER_MODEL_NAME, OTHER_MODEL_DIGEST)
+            .unwrap();
+        service
+            .activate(other, vec![ProviderFeature::Completion])
+            .unwrap();
+        let review = service.inspect(MODEL_NAME, MODEL_DIGEST).unwrap();
+        let activation = service
+            .activate(review, vec![ProviderFeature::Completion])
+            .unwrap();
+        server.join().unwrap();
+        drop(service);
 
-    // R39.3 (kimi's HOLD): TWO real decisions, and the tampered one is NOT the row this pass
-    // reads first. It enumerates `ORDER BY workspace_id, provider, endpoint, model_name,
-    // sequence`, and `aaa-model:1b` sorts before `qwen3.8:27b`, so the honest second activation
-    // keeps its Event and the FIRST-sorting one is not the failure. With a single decision a
-    // mutant naming `rows[0]` was indistinguishable from naming the failing row.
-    let connection = Connection::open(&store.path).unwrap();
-    let first: String = connection
-        .query_row(
-            "SELECT id FROM local_model_activation_decisions
-             ORDER BY workspace_id, provider, endpoint, model_name, sequence LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_ne!(
-        first,
-        activation.id.to_string(),
-        "the failing decision must not be the row this pass reads first"
-    );
-    let removed = connection
-        .execute(
-            "DELETE FROM events WHERE kind = 'local_model.activated'
+        // R39.3 (kimi's HOLD): TWO real decisions, and the tampered one is NOT the row this pass
+        // reads first. It enumerates `ORDER BY workspace_id, provider, endpoint, model_name,
+        // sequence`, and `aaa-model:1b` sorts before `qwen3.8:27b`, so the honest second activation
+        // keeps its Event and the FIRST-sorting one is not the failure. With a single decision a
+        // mutant naming `rows[0]` was indistinguishable from naming the failing row.
+        let connection = Connection::open(&store.path).unwrap();
+        // R44: BOTH ENDS -- the target is read back from the pass's own ORDER BY, one end per run.
+        let target: String = connection
+            .query_row(
+                &format!(
+                    "SELECT id FROM local_model_activation_decisions
+                 ORDER BY workspace_id {order}, provider {order}, endpoint {order},
+                          model_name {order}, sequence {order} LIMIT 1"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if end == "last" {
+            assert_eq!(
+                target,
+                activation.id.to_string(),
+                "{end}: the qwen activation sorts last"
+            );
+        } else {
+            assert_ne!(
+                target,
+                activation.id.to_string(),
+                "{end}: the aaa activation sorts first"
+            );
+        }
+        let target_id = Uuid::parse_str(&target).unwrap();
+        let removed = connection
+            .execute(
+                "DELETE FROM events WHERE kind = 'local_model.activated'
              AND payload_json LIKE '%' || ?1 || '%'",
-            rusqlite::params![activation.id.to_string()],
-        )
-        .unwrap();
-    assert_eq!(removed, 1, "the plant removed the wrong number of Events");
-    drop(connection);
+                rusqlite::params![target],
+            )
+            .unwrap();
+        assert_eq!(removed, 1, "the plant removed the wrong number of Events");
+        drop(connection);
 
-    let error = Supervisor::bootstrap(StartupConfig {
-        store_path: store.path.clone(),
-        initial_workspace_name: "Ignored".to_owned(),
-    })
-    .unwrap_err();
-    // The variant alone let three mutants through: the row it names and the fault NAME it ends in
-    // are what R28.1/R28.4 buy, so both are asserted here rather than read.
-    let SupervisorError::LocalModelActivationStateMismatch {
-        activation_id: named,
-        ..
-    } = &error
-    else {
-        panic!("expected a named activation refusal, got {error:?}");
-    };
-    assert_eq!(*named, activation.id, "the wrong activation was named");
-    let line = error.to_string();
-    assert!(
-        line.contains(&activation.id.to_string()),
-        "the line does not name the activation: {line}"
-    );
-    let tail = line.rsplit(": ").next().unwrap();
-    assert_eq!(tail, "InvalidStore", "wrong fault name: {line}");
-    // blue's HOLD: the carried reader's OWN sentence never reaches the line (R28.4).
-    assert!(
-        !line.contains("local model activation state is invalid"),
-        "the reader's own sentence reached the line: {line}"
-    );
+        let error = Supervisor::bootstrap(StartupConfig {
+            store_path: store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        })
+        .unwrap_err();
+        // The variant alone let three mutants through: the row it names and the fault NAME it ends in
+        // are what R28.1/R28.4 buy, so both are asserted here rather than read.
+        let SupervisorError::LocalModelActivationStateMismatch {
+            activation_id: named,
+            ..
+        } = &error
+        else {
+            panic!("expected a named activation refusal, got {error:?}");
+        };
+        assert_eq!(*named, target_id, "{end}: the wrong activation was named");
+        let line = error.to_string();
+        assert!(
+            line.contains(&target),
+            "the line does not name the activation: {line}"
+        );
+        let tail = line.rsplit(": ").next().unwrap();
+        assert_eq!(tail, "InvalidStore", "wrong fault name: {line}");
+        // blue's HOLD: the carried reader's OWN sentence never reaches the line (R28.4).
+        assert!(
+            !line.contains("local model activation state is invalid"),
+            "the reader's own sentence reached the line: {line}"
+        );
+    }
 }

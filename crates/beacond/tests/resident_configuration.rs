@@ -679,7 +679,7 @@ fn startup_refuses_missing_or_tampered_configuration_events() {
                     // R44: BOTH ENDS -- one run per end of this pass's own ORDER BY.
                     &format!(
                         "SELECT id FROM resident_configuration_decisions
-                     ORDER BY workspace_id, resident_id {order}, sequence {order} LIMIT 1"
+                     ORDER BY workspace_id {order}, resident_id {order}, sequence {order} LIMIT 1"
                     ),
                     [],
                     |row| row.get(0),
