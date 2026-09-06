@@ -1578,13 +1578,17 @@ const STORE_BUSY_TIMEOUT_MS: u32 = 5_000;
 /// reader block the writer whose commit proves the snapshot boundary. A fresh store can be opened
 /// concurrently, and SQLite does not run this journal transition through the busy handler, so
 /// retry only that transition's two lock errors within the same bounded wait every connection has.
+/// SQLite's non-file `:memory:` fixture reports its permanent `memory` mode instead; it has no
+/// path-backed store or second connection across which this invariant could apply.
 fn ensure_write_ahead_log(connection: &Connection) -> rusqlite::Result<()> {
     let deadline = Instant::now() + Duration::from_millis(STORE_BUSY_TIMEOUT_MS.into());
     loop {
         match connection.query_row("PRAGMA journal_mode = WAL", [], |row| {
             row.get::<_, String>(0)
         }) {
-            Ok(mode) if mode.eq_ignore_ascii_case("wal") => return Ok(()),
+            Ok(mode) if mode.eq_ignore_ascii_case("wal") || mode.eq_ignore_ascii_case("memory") => {
+                return Ok(());
+            }
             Ok(_) => return Err(rusqlite::Error::InvalidQuery),
             Err(error)
                 if error.sqlite_error_code().is_some_and(|code| {
