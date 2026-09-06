@@ -491,3 +491,68 @@ fn only_the_latest_policy_revision_can_apply_to_the_current_charter() {
     assert!(!history[0].applies_to_current_charter);
     assert!(history[1].applies_to_current_charter);
 }
+
+/// sol1 cold-read probe: the policy relation's own stored key includes its integer revision.
+/// A revision outside u32 is reachable through SQL and refused by the reader, so R39.1 requires
+/// the refusal to identify that stored revision instead of only the Project containing it.
+#[test]
+fn sol1_policy_startup_names_out_of_domain_stored_revision() {
+    let (store, _accounts, projects, policies) = enrolled_services("sol1-version-edge");
+    let project = projects.create(project_draft()).unwrap();
+    policies
+        .publish(project.id, 1, None, policy_draft())
+        .unwrap();
+    drop(policies);
+    drop(projects);
+
+    let connection = Connection::open(&store.path).unwrap();
+    let columns: Vec<String> = connection
+        .prepare("SELECT name FROM pragma_table_info('project_policy_revisions')")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let names = columns.join(", ");
+    let values = columns
+        .iter()
+        .map(|column| {
+            if column == "revision" {
+                "?1".to_owned()
+            } else {
+                column.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let insert = format!(
+        "INSERT INTO project_policy_revisions ({names})
+         SELECT {values} FROM project_policy_revisions WHERE project_id = ?2 AND revision = 1"
+    );
+    for rejected in [0_i64, -1, i64::MIN] {
+        let error = connection
+            .execute(&insert, rusqlite::params![rejected, project.id.to_string()])
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("CHECK constraint failed"),
+            "revision {rejected} escaped the schema or failed under the wrong guard: {error}"
+        );
+    }
+    let stored = i64::from(u32::MAX) + 1;
+    let inserted = connection
+        .execute(&insert, rusqlite::params![stored, project.id.to_string()])
+        .unwrap();
+    assert_eq!(inserted, 1, "the u32::MAX+1 revision did not plant");
+    drop(connection);
+
+    let error = Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .expect_err("an out-of-domain policy revision reopened Ready");
+    let line = error.to_string();
+    assert!(
+        line.contains(&stored.to_string()),
+        "the refusal names only the Project, not stored revision {stored}: {line}"
+    );
+}
