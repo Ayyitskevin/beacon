@@ -290,78 +290,85 @@ fn concurrent_activation_has_one_winner_and_one_stale_command() {
 
 #[test]
 fn startup_refuses_tampered_current_state_or_missing_lifecycle_event() {
-    for (label, tamper, expected_fault) in [
-        (
-            "agent-state",
-            "UPDATE agents SET lifecycle = 'suspended' WHERE kind = 'resident' AND id = ?1",
-            "InvalidStore",
-        ),
-        (
-            "missing-event",
-            "DELETE FROM events WHERE kind = 'resident.activated'
+    // R44: BOTH ENDS. Tampering only the last-sorting Resident made "names the failing
+    // row" and "names the last row" the same assertion; `rows.last()` survived it.
+    for (end, order) in [("last", "DESC"), ("first", "ASC")] {
+        for (label, tamper, expected_fault) in [
+            (
+                "agent-state",
+                "UPDATE agents SET lifecycle = 'suspended' WHERE kind = 'resident' AND id = ?1",
+                "InvalidStore",
+            ),
+            (
+                "missing-event",
+                "DELETE FROM events WHERE kind = 'resident.activated'
              AND payload_json LIKE '%' || ?1 || '%'",
-            "InvalidStore",
-        ),
-    ] {
-        let store = TestStore::new(label);
-        let accounts = enrolled_accounts(&store);
-        // R39.3 (kimi's HOLD): TWO Residents, so "names the failing row" and "names row 0" are
-        // different claims. With one Resident a mutant naming `residents[0].id` is
-        // indistinguishable from the real thing -- kimi measured exactly that surviving.
-        let (_organization, resident_ids) = admit_two_residents(&store, &accounts);
-        let service = ResidentLifecycleService::new(accounts, store.workspace_id);
-        for resident_id in &resident_ids {
-            service.activate(*resident_id, None).unwrap();
-        }
-        drop(service);
-
-        let connection = Connection::open(&store.path).unwrap();
-        // This pass enumerates `ORDER BY agent.workspace_id, agent.id`; the tamper hits whichever
-        // Resident sorts LAST, read back from the store rather than guessed from the ids.
-        let resident_id: Uuid = connection
-            .query_row(
-                "SELECT id FROM agents WHERE kind = 'resident' ORDER BY id DESC LIMIT 1",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .map(|id| Uuid::parse_str(&id).unwrap())
-            .expect("the fixture admitted two Residents");
-        assert!(resident_ids.contains(&resident_id));
-        let touched = connection
-            .execute(tamper, rusqlite::params![resident_id.to_string()])
-            .unwrap();
-        assert_eq!(touched, 1, "{label}: the plant touched the wrong row count");
-        drop(connection);
-
-        let error = Supervisor::bootstrap(StartupConfig {
-            store_path: store.path.clone(),
-            initial_workspace_name: "Ignored".to_owned(),
-        })
-        .unwrap_err();
-        // Which guard reaches this depends on the tamper: the log walk runs first, so an Event
-        // tamper is refused there. When the state pass IS the refuser, it must name the Resident
-        // and end in a fault NAME -- the variant alone let three mutants through (pass 10's
-        // lesson, applied late).
-        match &error {
-            SupervisorError::ResidentLifecycleStateMismatch {
-                resident_id: named, ..
-            } => {
-                assert_eq!(*named, resident_id, "{label}: the wrong Resident was named");
-                let line = error.to_string();
-                assert!(
-                    line.contains(&resident_id.to_string()),
-                    "{label}: the line does not name the Resident: {line}"
-                );
-                let tail = line.rsplit(": ").next().unwrap();
-                assert_eq!(tail, expected_fault, "{label}: wrong fault name: {line}");
-                // blue's HOLD: the carried reader's OWN sentence never reaches the line (R28.4).
-                assert!(
-                    !line.contains("Resident lifecycle state is invalid"),
-                    "{label}: the reader's own sentence reached the line: {line}"
-                );
+                "InvalidStore",
+            ),
+        ] {
+            let store = TestStore::new(&format!("{label}-{end}"));
+            let accounts = enrolled_accounts(&store);
+            // R39.3 (kimi's HOLD): TWO Residents, so "names the failing row" and "names row 0" are
+            // different claims. With one Resident a mutant naming `residents[0].id` is
+            // indistinguishable from the real thing -- kimi measured exactly that surviving.
+            let (_organization, resident_ids) = admit_two_residents(&store, &accounts);
+            let service = ResidentLifecycleService::new(accounts, store.workspace_id);
+            for resident_id in &resident_ids {
+                service.activate(*resident_id, None).unwrap();
             }
-            SupervisorError::ResidentLifecycleEventMismatch(_) => {}
-            other => panic!("{label} failed through the wrong guard: {other:?}"),
+            drop(service);
+
+            let connection = Connection::open(&store.path).unwrap();
+            // This pass enumerates `ORDER BY agent.workspace_id, agent.id`; the tamper hits whichever
+            // Resident sorts LAST, read back from the store rather than guessed from the ids.
+            let resident_id: Uuid = connection
+                .query_row(
+                    // R44: BOTH ENDS -- one run per end of this pass's own ORDER BY.
+                    &format!(
+                        "SELECT id FROM agents WHERE kind = 'resident' ORDER BY id {order} LIMIT 1"
+                    ),
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .map(|id| Uuid::parse_str(&id).unwrap())
+                .expect("the fixture admitted two Residents");
+            assert!(resident_ids.contains(&resident_id));
+            let touched = connection
+                .execute(tamper, rusqlite::params![resident_id.to_string()])
+                .unwrap();
+            assert_eq!(touched, 1, "{label}: the plant touched the wrong row count");
+            drop(connection);
+
+            let error = Supervisor::bootstrap(StartupConfig {
+                store_path: store.path.clone(),
+                initial_workspace_name: "Ignored".to_owned(),
+            })
+            .unwrap_err();
+            // Which guard reaches this depends on the tamper: the log walk runs first, so an Event
+            // tamper is refused there. When the state pass IS the refuser, it must name the Resident
+            // and end in a fault NAME -- the variant alone let three mutants through (pass 10's
+            // lesson, applied late).
+            match &error {
+                SupervisorError::ResidentLifecycleStateMismatch {
+                    resident_id: named, ..
+                } => {
+                    assert_eq!(*named, resident_id, "{label}: the wrong Resident was named");
+                    let line = error.to_string();
+                    assert!(
+                        line.contains(&resident_id.to_string()),
+                        "{label}: the line does not name the Resident: {line}"
+                    );
+                    let tail = line.rsplit(": ").next().unwrap();
+                    assert_eq!(tail, expected_fault, "{label}: wrong fault name: {line}");
+                    // blue's HOLD: the carried reader's OWN sentence never reaches the line (R28.4).
+                    assert!(
+                        !line.contains("Resident lifecycle state is invalid"),
+                        "{label}: the reader's own sentence reached the line: {line}"
+                    );
+                }
+                SupervisorError::ResidentLifecycleEventMismatch(_) => {}
+                other => panic!("{label} failed through the wrong guard: {other:?}"),
+            }
         }
     }
 }
