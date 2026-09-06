@@ -56,7 +56,7 @@ pub enum ExecutionSummary {
 }
 
 impl ExecutionSummary {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::NotAdmissible => "not_admissible",
             Self::WorktreeUnavailable => "worktree_unavailable",
@@ -864,6 +864,19 @@ impl DecodedExecutionReceipt {
         }
     }
 
+    fn summary(&self) -> ExecutionSummary {
+        match self {
+            Self::V1(receipt) => match receipt.summary {
+                FrozenExecutionSummaryV1::NotAdmissible => ExecutionSummary::NotAdmissible,
+                FrozenExecutionSummaryV1::WorktreeUnavailable => {
+                    ExecutionSummary::WorktreeUnavailable
+                }
+                FrozenExecutionSummaryV1::Completed => ExecutionSummary::Completed,
+            },
+            Self::V2(receipt) => receipt.summary,
+        }
+    }
+
     fn run_state(&self) -> &'static str {
         match self {
             Self::V1(receipt) => receipt.summary.run_state(),
@@ -898,6 +911,32 @@ impl DecodedExecutionReceipt {
             Self::V2(receipt) => receipt.admitted_by.charter_revision,
         }
     }
+}
+
+/// The fields a caller may project only after the Execution owner has decoded and checked them.
+pub(crate) struct ExecutionReceiptProjection {
+    pub(crate) version: u32,
+    pub(crate) run_id: Uuid,
+    pub(crate) workspace_id: Uuid,
+    pub(crate) project_id: Uuid,
+    pub(crate) summary: ExecutionSummary,
+    pub(crate) started_at_ms: u64,
+    pub(crate) ended_at_ms: u64,
+}
+
+pub(crate) fn decode_execution_receipt_projection(
+    payload_json: &str,
+) -> Result<ExecutionReceiptProjection, DeclaredCheckError> {
+    let receipt = decode_execution_receipt(payload_json)?;
+    Ok(ExecutionReceiptProjection {
+        version: receipt.version(),
+        run_id: receipt.run_id(),
+        workspace_id: receipt.workspace_id(),
+        project_id: receipt.project_id(),
+        summary: receipt.summary(),
+        started_at_ms: receipt.started_at_ms(),
+        ended_at_ms: receipt.ended_at_ms(),
+    })
 }
 
 fn decode_execution_receipt(

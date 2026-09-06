@@ -140,7 +140,9 @@ impl Fixture {
             self.workspace_id,
             project_id,
             run_id,
+            "check_preflight",
             1,
+            "verified",
             started_at_ms,
             padding,
         );
@@ -209,16 +211,16 @@ impl Fixture {
                         //
                         // A malformed body as positive test data would make
                         // "this Query tolerates an unreadable Receipt" an
-                        // interface promise, which is the opposite of what is
-                        // true: the Query does not select the column at all.
-                        // Large, because the property is that the read cost does
-                        // not grow with the payload, and a one-byte fixture
-                        // cannot fail the plausible wrong answer.
+                        // interface promise, the opposite of R48's owner gate.
+                        // Large, because the public row must remain bounded even
+                        // though its owner now reads the complete stored body.
                         large_receipt_body(
                             self.workspace_id,
                             project_id,
                             run_id,
+                            kind,
                             version,
+                            outcome,
                             started_at_ms
                         ),
                         started_at_ms + 1
@@ -236,15 +238,16 @@ impl Fixture {
 /// Validity is asserted here rather than assumed: each body is deserialized
 /// into the real type before it is stored, so a fixture cannot drift into being
 /// the malformed data this test set is not allowed to rely on.
-/// The body is chosen by VERSION alone. The tuple tests below store an outcome
-/// or a version its kind never writes, and the inconsistency they exercise is in
-/// the row's columns; the body stays a valid Receipt because a valid body is
-/// what this Query must be indifferent to.
+/// The body is chosen by the owning Run kind. Tuple tests may put a different
+/// version or outcome in the SQL projection; the body stays independently valid
+/// so the owning read, not malformed fixture data, finds the disagreement.
 fn large_receipt_body(
     workspace_id: Uuid,
     project_id: Uuid,
     run_id: Uuid,
+    kind: &str,
     version: i64,
+    outcome: &str,
     started_at_ms: i64,
 ) -> String {
     // ~600 entries of ~100 bytes: a real Receipt field, many times over.
@@ -252,7 +255,9 @@ fn large_receipt_body(
         workspace_id,
         project_id,
         run_id,
+        kind,
         version,
+        outcome,
         started_at_ms,
         600,
     )
@@ -261,11 +266,17 @@ fn large_receipt_body(
 /// The same body at a caller-chosen size, so the invariance the Revised design
 /// requires can be MEASURED rather than stated: the returned row must not
 /// change as this grows.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a Receipt fixture names every persisted identity and projection independently"
+)]
 fn receipt_body(
     workspace_id: Uuid,
     project_id: Uuid,
     run_id: Uuid,
+    kind: &str,
     version: i64,
+    outcome: &str,
     started_at_ms: i64,
     padding_entries: usize,
 ) -> String {
@@ -276,6 +287,23 @@ fn receipt_body(
             )
         })
         .collect();
+    let preflight_outcome = if kind == "declared_checks" {
+        "source_kind_unsupported"
+    } else {
+        match outcome {
+            "verified"
+            | "source_kind_unsupported"
+            | "binding_stale_for_charter"
+            | "repository_unreadable"
+            | "base_revision_unreachable"
+            | "declared_checks_changed"
+            | "working_directory_escapes"
+            | "sandbox_unavailable"
+            | "preflight_failed"
+            | "preflight_timed_out" => outcome,
+            _ => "verified",
+        }
+    };
     let preflight = serde_json::json!({
         "version": 1,
         "runId": run_id,
@@ -283,7 +311,7 @@ fn receipt_body(
         "projectId": project_id,
         "repositoryRevision": 1,
         "charterRevision": 1,
-        "outcome": "verified",
+        "outcome": preflight_outcome,
         "sourceKind": "local_path",
         "source": "/private/beacon/repo",
         "baseRevision": "0123456789012345678901234567890123456789",
@@ -304,18 +332,33 @@ fn receipt_body(
             "costUsdMicros": { "kind": "absent", "reason": "preflight infers nothing" }
         }
     });
-    if version == 1 {
+    if kind == "check_preflight" {
         let value: PreflightReceipt =
             serde_json::from_value(preflight.clone()).expect("a valid v1 preflight Receipt");
         assert_eq!(value.version, 1);
         return serde_json::to_string(&preflight).unwrap();
     }
+    let summary = if outcome == "not_admissible" {
+        outcome
+    } else {
+        "not_admissible"
+    };
+    let not_verified = vec![
+        "repository source support for local execution",
+        "repository readability",
+        "base revision presence in the repository object store",
+        "base revision reachability from a ref (object presence verified only)",
+        "Declared Check working-directory containment",
+        "sandbox enforcement",
+        "worktree creation (preflight did not admit execution)",
+        "every Declared Check (preflight did not admit execution, so no check ran)",
+    ];
     let execution = serde_json::json!({
-        "version": 2,
+        "version": version,
         "runId": run_id,
         "workspaceId": workspace_id,
         "projectId": project_id,
-        "summary": "completed",
+        "summary": summary,
         "perCheckBounds": {
             "wallClockMs": 300000u64,
             "cpuSeconds": 240u64,
@@ -328,7 +371,7 @@ fn receipt_body(
         "worktree": null,
         "startedAtMs": started_at_ms,
         "endedAtMs": started_at_ms + 1,
-        "notVerified": ["no Declared Check ran, and this Receipt says so"]
+        "notVerified": not_verified
     });
     let value: ExecutionReceipt =
         serde_json::from_value(execution.clone()).expect("a valid v2 execution Receipt");
@@ -353,9 +396,9 @@ fn mixed_kinds_are_ordered_by_one_key_not_grouped_by_kind() {
     fixture.run(
         project,
         "declared_checks",
-        "verified",
+        "refused",
         20,
-        Some((2, "completed")),
+        Some((2, "not_admissible")),
     );
     fixture.run(
         project,
@@ -544,6 +587,59 @@ fn an_outcome_outside_its_kinds_closed_set_is_refused() {
         10,
         Some((1, "completed")),
     );
+
+    assert!(matches!(
+        fixture.recent.recent(50),
+        Err(RecentReceiptError::InvalidStore)
+    ));
+}
+
+#[test]
+fn an_unknown_serialized_outcome_is_refused_before_briefing_returns_a_value() {
+    let fixture = enrolled("unknown-serialized-outcome");
+    let project = fixture.project("Beacon Alpha");
+    let run_id = fixture.run(
+        project,
+        "check_preflight",
+        "verified",
+        10,
+        Some((1, "verified")),
+    );
+    let connection = fixture.store.connection();
+    let body: String = connection
+        .query_row(
+            "SELECT receipt_json FROM receipts WHERE run_id = ?1",
+            [run_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let unknown = body.replacen(
+        "\"outcome\":\"verified\"",
+        "\"outcome\":\"future_outcome\"",
+        1,
+    );
+    assert_ne!(
+        unknown, body,
+        "the fixture did not replace the outcome token"
+    );
+    connection
+        .execute_batch("DROP TRIGGER receipts_no_update;")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE receipts SET receipt_json = ?1 WHERE run_id = ?2",
+            params![unknown, run_id.to_string()],
+        )
+        .unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER receipts_no_update
+BEFORE UPDATE ON receipts
+BEGIN
+    SELECT RAISE(ABORT, 'Receipts are immutable');
+END;",
+        )
+        .unwrap();
 
     assert!(matches!(
         fixture.recent.recent(50),
