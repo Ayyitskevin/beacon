@@ -988,6 +988,79 @@ fn the_condition_migration_adds_triggers_and_rewrites_none() {
 /// The definitions are sliced out of 0023's own text, like `restore_pre_0025_events` above: a
 /// rollback that retyped them would be testing the test. This store has no Evaluations, so the
 /// tables come back empty.
+/// R46: `receipts` back to its 0022 shape.
+///
+/// 0033 rebuilds it to widen the outcome CHECK, and rewrites `evaluation_cited_runs` with it (a
+/// foreign key follows a rename). Any fixture that rolls a store below 33 has to unwind that too --
+/// before R46 `receipts` had been untouched since 0022, so no rollback named it. The CREATE and its
+/// two triggers only: 0022's own carry-over INSERT from `receipts_v21` belongs to that rebuild.
+fn restore_pre_0033_receipts(connection: &Connection) {
+    let source = include_str!("../migrations/0022_candidates.sql");
+    let block = &source[source
+        .find("CREATE TABLE receipts (")
+        .expect("0022 defines the receipts table")
+        ..source
+            .find("CREATE TABLE dispatch_preparations (")
+            .expect("0022 defines the table after receipts")];
+    let create = &block[..block.find(") STRICT;").expect("the table ends") + ") STRICT;".len()];
+    let triggers = &block[block
+        .find("CREATE TRIGGER receipts_no_update")
+        .expect("0022 makes receipts immutable")..];
+    connection
+        .execute_batch(
+            "DROP TRIGGER receipts_no_update;
+             DROP TRIGGER receipts_no_delete;
+             DROP TRIGGER evaluation_cited_runs_no_update;
+             DROP TRIGGER evaluation_cited_runs_no_delete;
+             ALTER TABLE evaluation_cited_runs RENAME TO evaluation_cited_runs_r46;
+             ALTER TABLE receipts RENAME TO receipts_r46;",
+        )
+        .expect("the R46 shapes come off");
+    connection.execute_batch(create).expect("0022's receipts");
+    connection.execute_batch(triggers).expect("its triggers");
+    let cited = include_str!("../migrations/0028_evaluation_subjects.sql");
+    let cited_block = &cited[cited
+        .find("CREATE TABLE evaluation_cited_runs (")
+        .expect("0028 defines the cited-runs table")..];
+    let cited_create =
+        &cited_block[..cited_block.find(") STRICT;").expect("it ends") + ") STRICT;".len()];
+    connection
+        .execute_batch(
+            "INSERT INTO receipts SELECT * FROM receipts_r46;
+             DROP TABLE receipts_r46;",
+        )
+        .expect("the rows carry across");
+    connection
+        .execute_batch(cited_create)
+        .expect("0028's child");
+    // SLICED, not retyped: SQLite keeps the literal CREATE text, so a retyped trigger differs by
+    // its indentation alone and the schema signature refuses. Measured -- the first version of
+    // this helper wrote them out and the store would not match a real store at that version.
+    // Exactly the two triggers: from the first to the END of the second, because 0028 defines
+    // other objects between here and the end of its text.
+    let triggers_from = cited_block
+        .find("CREATE TRIGGER evaluation_cited_runs_no_update")
+        .expect("0028 makes the cited runs immutable");
+    let delete_at = cited_block
+        .find("CREATE TRIGGER evaluation_cited_runs_no_delete")
+        .expect("0028 defines both cited-run triggers");
+    let triggers_to = delete_at
+        + cited_block[delete_at..]
+            .find("END;")
+            .expect("the trigger body ends")
+        + "END;".len();
+    let cited_triggers = &cited_block[triggers_from..triggers_to];
+    connection
+        .execute_batch(
+            "INSERT INTO evaluation_cited_runs SELECT * FROM evaluation_cited_runs_r46;
+             DROP TABLE evaluation_cited_runs_r46;",
+        )
+        .expect("the child's rows carry across");
+    connection
+        .execute_batch(cited_triggers)
+        .expect("the child's rules carry across");
+}
+
 fn restore_pre_0028_evaluations(connection: &Connection) {
     let source = include_str!("../migrations/0023_evaluations.sql");
     let from = source
@@ -1075,6 +1148,9 @@ fn a_store_at_the_previous_schema_version_migrates_and_keeps_its_condition_rows(
     let mission = admit_with_conditions(&store, &accounts, declared.clone());
 
     let connection = Connection::open(&store.path).unwrap();
+    // R46 first, while the schema is still whole: renaming a table validates every trigger,
+    // and the teardown below drops `artifacts`, which an `evaluations` trigger names.
+    restore_pre_0033_receipts(&connection);
     connection
         .execute_batch(
             // Newest migration first. 0029's Outcome manifest store is newest: it keys into
