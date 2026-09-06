@@ -2166,6 +2166,16 @@ fn map_project_repository_state_fault(
             what: "a Project repository row's identity is not readable",
             raw: format!("Workspace {workspace_id}, Project {project_id}"),
         },
+        project_repository::ProjectRepositoryStateFault::Revision {
+            workspace_id,
+            project_id,
+            revision,
+        } => SupervisorError::StoredIntegerKeyUnreadable {
+            what: "a Project repository revision is not readable",
+            raw: format!("Workspace {workspace_id}, Project {project_id}"),
+            key_name: "revision",
+            key: revision,
+        },
     }
 }
 
@@ -2222,6 +2232,16 @@ fn map_project_policy_state_fault(
         } => SupervisorError::StoredIdentityUnreadable {
             what: "a Project policy row's identity is not readable",
             raw: format!("Workspace {workspace_id}, Project {project_id}"),
+        },
+        project_policy::ProjectPolicyStateFault::Revision {
+            workspace_id,
+            project_id,
+            revision,
+        } => SupervisorError::StoredIntegerKeyUnreadable {
+            what: "a Project policy revision is not readable",
+            raw: format!("Workspace {workspace_id}, Project {project_id}"),
+            key_name: "revision",
+            key: revision,
         },
     }
 }

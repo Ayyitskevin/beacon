@@ -162,6 +162,12 @@ pub(crate) enum ProjectRepositoryStateFault {
         workspace_id: String,
         project_id: String,
     },
+    /// A stored revision outside the positive `u32` domain written by the service.
+    Revision {
+        workspace_id: String,
+        project_id: String,
+        revision: i64,
+    },
 }
 
 impl ProjectRepositoryError {
@@ -203,6 +209,9 @@ impl fmt::Display for ProjectRepositoryStateFault {
                 "a ProjectRepository row's Workspace is not readable: {workspace_id}, ProjectRepository \
                  {project_id}"
             ),
+            Self::Revision { .. } => {
+                formatter.write_str("a ProjectRepository revision is not readable")
+            }
         }
     }
 }
@@ -230,6 +239,16 @@ impl fmt::Debug for ProjectRepositoryStateFault {
                 .field("workspace_id", workspace_id)
                 .field("project_id", project_id)
                 .finish(),
+            Self::Revision {
+                workspace_id,
+                project_id,
+                revision,
+            } => formatter
+                .debug_struct("Revision")
+                .field("workspace_id", workspace_id)
+                .field("project_id", project_id)
+                .field("revision", revision)
+                .finish(),
         }
     }
 }
@@ -239,7 +258,7 @@ impl std::error::Error for ProjectRepositoryStateFault {
         match self {
             Self::Store(error) => Some(error),
             Self::Row { cause, .. } => Some(cause),
-            Self::Identity { .. } => None,
+            Self::Identity { .. } | Self::Revision { .. } => None,
         }
     }
 }
@@ -836,6 +855,32 @@ fn monotonic_time(
 pub(crate) fn verify_project_repository_state(
     connection: &Connection,
 ) -> Result<(), ProjectRepositoryStateFault> {
+    let invalid_revision = connection
+        .query_row(
+            "SELECT workspace_id, project_id, revision
+             FROM project_repository_revisions
+             WHERE revision < 1 OR revision > ?1
+             ORDER BY workspace_id, project_id, revision
+             LIMIT 1",
+            [i64::from(u32::MAX)],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(ProjectRepositoryStateFault::Store)?;
+    if let Some((workspace_id, project_id, revision)) = invalid_revision {
+        return Err(ProjectRepositoryStateFault::Revision {
+            workspace_id,
+            project_id,
+            revision,
+        });
+    }
+
     let mut statement = connection
         .prepare(
             "SELECT DISTINCT workspace_id, project_id FROM project_repository_revisions
