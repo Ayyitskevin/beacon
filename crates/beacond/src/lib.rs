@@ -378,7 +378,18 @@ pub enum SupervisorError {
     LocalModelActivationEventMismatch(i64),
     LocalModelActivationStateMismatch,
     ResidentLifecycleEventMismatch(i64),
-    ResidentLifecycleStateMismatch,
+    /// A Resident's lifecycle chain does not re-prove against its decisions.
+    ///
+    /// Names the row and carries the owning reader's own error (R28.1).
+    ResidentLifecycleStateMismatch {
+        workspace_id: Uuid,
+        resident_id: Uuid,
+        cause: resident_lifecycle::ResidentLifecycleError,
+    },
+    /// The Resident lifecycle decisions do not agree with the store. No row to name.
+    ResidentLifecycleTotalsMismatch(TotalsMismatch),
+    /// A Resident row that could not be read at all, so it cannot be named.
+    ResidentRowUnreadable(resident_lifecycle::ResidentLifecycleError),
     ResidentConfigurationEventMismatch(i64),
     ResidentConfigurationStateMismatch,
     TeamEventMismatch(i64),
@@ -622,6 +633,7 @@ pub enum StartupPass {
     Team,
     ProjectPolicy,
     StarterOrganization,
+    ResidentLifecycle,
 }
 
 impl StartupPass {
@@ -644,6 +656,7 @@ impl StartupPass {
             Self::Team => "Team",
             Self::ProjectPolicy => "ProjectPolicy",
             Self::StarterOrganization => "StarterOrganization",
+            Self::ResidentLifecycle => "ResidentLifecycle",
         }
     }
 }
@@ -751,10 +764,28 @@ impl fmt::Display for SupervisorError {
                 formatter,
                 "Event sequence {sequence} does not match Resident lifecycle state"
             ),
-            Self::ResidentLifecycleStateMismatch => write!(
+            // R28.4: the key and the fault's NAME.
+            Self::ResidentLifecycleStateMismatch {
+                workspace_id,
+                resident_id,
+                cause,
+            } => write!(
                 formatter,
-                "Resident lifecycle state has no exact audit Event"
+                "the lifecycle of Resident {resident_id} in Workspace {workspace_id} does not \
+                 re-prove: {}",
+                cause.name()
             ),
+            Self::ResidentLifecycleTotalsMismatch(totals) => write!(
+                formatter,
+                "the Resident lifecycle decisions do not agree with the store -- {totals}"
+            ),
+            Self::ResidentRowUnreadable(cause) => {
+                write!(
+                    formatter,
+                    "a Resident row could not be read: {}",
+                    cause.name()
+                )
+            }
             Self::ResidentConfigurationEventMismatch(sequence) => write!(
                 formatter,
                 "Event sequence {sequence} does not match Resident configuration state"
@@ -2122,6 +2153,42 @@ fn map_starter_state_fault(fault: starter_organization::StarterStateFault) -> Su
     }
 }
 
+/// The production mapping for the ResidentLifecycle startup pass, NAMED so a bar can drive it.
+fn map_resident_lifecycle_state_fault(
+    fault: resident_lifecycle::ResidentLifecycleStateFault,
+) -> SupervisorError {
+    match fault {
+        resident_lifecycle::ResidentLifecycleStateFault::Store(source) => {
+            SupervisorError::StartupEnumerationFailed {
+                pass: StartupPass::ResidentLifecycle,
+                source,
+            }
+        }
+        resident_lifecycle::ResidentLifecycleStateFault::Row {
+            workspace_id,
+            resident_id,
+            cause,
+        } => SupervisorError::ResidentLifecycleStateMismatch {
+            workspace_id,
+            resident_id,
+            cause,
+        },
+        resident_lifecycle::ResidentLifecycleStateFault::Totals(totals) => {
+            SupervisorError::ResidentLifecycleTotalsMismatch(totals)
+        }
+        resident_lifecycle::ResidentLifecycleStateFault::Unreadable(cause) => {
+            SupervisorError::ResidentRowUnreadable(cause)
+        }
+        resident_lifecycle::ResidentLifecycleStateFault::Identity {
+            workspace_id,
+            resident_id,
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "a Resident row's identity is not readable",
+            raw: format!("Workspace {workspace_id}, Resident {resident_id}"),
+        },
+    }
+}
+
 fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, SupervisorError> {
     let schema_version = connection.query_row(
         "SELECT version FROM schema_meta WHERE singleton = 1",
@@ -2185,7 +2252,7 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     local_model_activation::verify_activation_state(connection)
         .map_err(|_| SupervisorError::LocalModelActivationStateMismatch)?;
     resident_lifecycle::verify_lifecycle_state(connection)
-        .map_err(|_| SupervisorError::ResidentLifecycleStateMismatch)?;
+        .map_err(map_resident_lifecycle_state_fault)?;
     resident_configuration::verify_configuration_state(connection)
         .map_err(|_| SupervisorError::ResidentConfigurationStateMismatch)?;
     team::verify_team_state(connection).map_err(map_team_state_fault)?;
@@ -2600,6 +2667,13 @@ mod tests {
                 ),
             ),
             (
+                "ResidentLifecycle",
+                super::map_resident_lifecycle_state_fault(
+                    crate::resident_lifecycle::verify_lifecycle_state(&connection)
+                        .expect_err("no `agents` table"),
+                ),
+            ),
+            (
                 "StarterOrganization",
                 super::map_starter_state_fault(
                     crate::starter_organization::verify_starter_state(&connection)
@@ -2629,7 +2703,7 @@ mod tests {
         ];
         assert_eq!(
             refusals.len(),
-            16,
+            17,
             "a pass was added without a fixture here"
         );
 
@@ -2653,7 +2727,7 @@ mod tests {
         }
         assert_eq!(
             lines.len(),
-            16,
+            17,
             "two passes render the same line, so an operator cannot tell them apart: {lines:?}"
         );
     }

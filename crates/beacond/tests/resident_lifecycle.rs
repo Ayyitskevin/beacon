@@ -291,7 +291,7 @@ fn startup_refuses_tampered_current_state_or_missing_lifecycle_event() {
                 store_path: store.path.clone(),
                 initial_workspace_name: "Ignored".to_owned(),
             }),
-            Err(SupervisorError::ResidentLifecycleStateMismatch)
+            Err(SupervisorError::ResidentLifecycleStateMismatch { .. })
                 | Err(SupervisorError::ResidentLifecycleEventMismatch(_))
         ));
     }
