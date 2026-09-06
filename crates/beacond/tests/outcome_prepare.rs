@@ -4458,6 +4458,25 @@ fn startup_refuses_an_unaccounted_artifact_row_and_names_the_row() {
                 params![planted, existing],
             )
             .expect("the planted row inserts");
+        // R44.4 (astra): the endpoint is CONSTRUCTED, not read back, so assert it -- one ordered
+        // read per iteration, the same query the pass runs. Fixed-width lowercase hex makes all
+        // `f`/all `0` the extremes today; a migration that changed the digest encoding or the
+        // column collation would silently stop bracketing and this bar would decay to one end
+        // without failing.
+        {
+            let order = if end == "last" { "DESC" } else { "ASC" };
+            let placed: String = connection
+                .query_row(
+                    &format!("SELECT digest_value FROM artifacts ORDER BY workspace_id {order}, digest_value {order} LIMIT 1"),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the plant is in the table");
+            assert_eq!(
+                placed, planted,
+                "{end}: the planted row is not at the {end} end of this pass's own ORDER BY"
+            );
+        }
 
         let read = fixture
             .artifacts()
@@ -4573,6 +4592,27 @@ fn startup_refuses_an_unaccounted_evaluation_row_and_names_the_row() {
                 params![planted, existing],
             )
             .expect("the planted row inserts");
+        // R44.4 (astra): the endpoint is CONSTRUCTED, not read back, so assert it -- one ordered
+        // read per iteration, the same query the pass runs. Fixed-width lowercase hex makes all
+        // `f`/all `0` the extremes today; a migration that changed the digest encoding or the
+        // column collation would silently stop bracketing and this bar would decay to one end
+        // without failing.
+        {
+            let order = if end == "last" { "DESC" } else { "ASC" };
+            let placed: String = connection
+                .query_row(
+                    &format!(
+                        "SELECT digest_value FROM evaluations ORDER BY digest_value {order} LIMIT 1"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the plant is in the table");
+            assert_eq!(
+                placed, planted,
+                "{end}: the planted row is not at the {end} end of this pass's own ORDER BY"
+            );
+        }
 
         // The belt refuses it ON READ, so the planted fault is real and has a name of its own.
         let read = fixture
@@ -4716,6 +4756,27 @@ BEGIN
 END;",
             )
             .unwrap();
+
+        // R44.4 (astra): the endpoint is CONSTRUCTED (versions 1 and 2), not read back, so assert
+        // it -- one ordered read, the same query the pass runs.
+        {
+            let order = if end == "last" { "DESC" } else { "ASC" };
+            let placed: i64 = connection
+                .query_row(
+                    &format!(
+                        "SELECT publication_version FROM outcome_publications
+                         ORDER BY workspace_id {order}, mission_id {order},
+                                  publication_version {order} LIMIT 1"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the fixture published twice");
+            assert_eq!(
+                placed, target,
+                "{end}: the tampered version is not at the {end} end of the pass's own ORDER BY"
+            );
+        }
 
         // The belt refuses it ON READ, so the planted fault is real and has a name of its own.
         // Only in the `last` run: `get` answers with the LATEST publication, so when the tamper
