@@ -210,8 +210,8 @@ pub(crate) enum RunStateFault {
     // no whole-store count comparison, so there is no totals fault to report.
     /// The clock is before the Unix epoch, so no lease can be judged expired. Not a row fault.
     Clock,
-    /// A row whose Workspace column is not a UUID. Unreachable while the foreign-key check and
-    /// the Workspace pass run first.
+    /// A row whose Workspace or Run identity is not a UUID. The Workspace case is unreachable
+    /// while the foreign-key check and Workspace pass hold; the Run key has no schema UUID check.
     Identity {
         workspace_id: String,
         run_id: String,
@@ -856,16 +856,16 @@ pub(crate) fn verify_run_state(connection: &Connection) -> Result<(), RunStateFa
         dispatch_events,
     ) in rows
     {
-        let named = |cause: CheckPreflightError| match Uuid::parse_str(&workspace_text) {
-            Ok(workspace_id) => RunStateFault::Row {
-                workspace_id,
-                run_id: run_id.clone(),
-                cause,
-            },
-            Err(_) => RunStateFault::Identity {
-                workspace_id: workspace_text.clone(),
-                run_id: run_id.clone(),
-            },
+        let identity = || RunStateFault::Identity {
+            workspace_id: workspace_text.clone(),
+            run_id: run_id.clone(),
+        };
+        let workspace_id = Uuid::parse_str(&workspace_text).map_err(|_| identity())?;
+        Uuid::parse_str(&run_id).map_err(|_| identity())?;
+        let named = |cause: CheckPreflightError| RunStateFault::Row {
+            workspace_id,
+            run_id: run_id.clone(),
+            cause,
         };
         let expected = match (kind.as_str(), state.as_str()) {
             ("check_preflight", "refused" | "verified") => (1, 1, 0, 0),
