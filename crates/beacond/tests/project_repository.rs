@@ -658,6 +658,13 @@ fn startup_refuses_an_unaccounted_repository_binding_and_names_the_row() {
         "the refusal does not name the Project it refused: {line}"
     );
     let named = line.rsplit(": ").next().unwrap().to_owned();
+    // kimi's P2: PINNED, not just shaped. A name-shaped tail is satisfied by ANY arm,
+    // so without this a pass carrying a fixed-but-wrong fault survives -- the M9 class
+    // measured surviving on the pass-7 bar.
+    assert_eq!(
+        named, "InvalidStore",
+        "the refusal carries the wrong fault: {line}"
+    );
     assert!(
         !named.contains(' ') && !named.contains('{'),
         "the tail of the line is a rendering, not a name: {line}"
