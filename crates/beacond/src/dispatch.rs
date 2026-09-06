@@ -3195,4 +3195,115 @@ mod tests {
         r#"nstraint","non_author_evaluation_of_candidate","safety_snapshot","base_revision_reachability","d"#,
         r#"eclared_checks_against_result","change_not_applied"]}"#
     );
+
+    // -----------------------------------------------------------------------------------------
+    // R46 item 3: the dispatch outcome vocabulary is CLOSED, and every variant has a row.
+    //
+    // Modelled on the R42S2 TRANSPORT witness. The `match` is exhaustive, so a variant added
+    // without a row does not compile; the `rows()` list is separate, so a row DELETED from it
+    // fails `every_dispatch_outcome_has_a_row` rather than passing quietly. Both halves are
+    // needed: one catches an addition, the other catches a removal.
+    macro_rules! outcome_table {
+        ( $( $case:literal | $pattern:pat => $token:literal , $build:expr ; )+ ) => {
+            fn expected_outcome(value: &DispatchOutcome) -> (&'static str, &'static str) {
+                match value {
+                    $( $pattern => ($case, $token), )+
+                }
+            }
+
+            fn outcome_rows() -> Vec<(&'static str, DispatchOutcome)> {
+                vec![$(($case, $build)),+]
+            }
+        };
+    }
+
+    outcome_table! {
+        "R46.OUTCOME.RulingUnreadable" | DispatchOutcome::RulingUnreadable => "ruling_unreadable", DispatchOutcome::RulingUnreadable;
+        "R46.OUTCOME.RulingRefused" | DispatchOutcome::RulingRefused => "ruling_refused", DispatchOutcome::RulingRefused;
+        "R46.OUTCOME.RulingSuperseded" | DispatchOutcome::RulingSuperseded => "ruling_superseded", DispatchOutcome::RulingSuperseded;
+        "R46.OUTCOME.RulingDrifted" | DispatchOutcome::RulingDrifted => "ruling_drifted", DispatchOutcome::RulingDrifted;
+        "R46.OUTCOME.ProposalDigestMismatch" | DispatchOutcome::ProposalDigestMismatch => "proposal_digest_mismatch", DispatchOutcome::ProposalDigestMismatch;
+        "R46.OUTCOME.ProposalNotReady" | DispatchOutcome::ProposalNotReady => "proposal_not_ready", DispatchOutcome::ProposalNotReady;
+        "R46.OUTCOME.CandidateAbsent" | DispatchOutcome::CandidateAbsent => "candidate_absent", DispatchOutcome::CandidateAbsent;
+        "R46.OUTCOME.CandidateMismatch" | DispatchOutcome::CandidateMismatch => "candidate_mismatch", DispatchOutcome::CandidateMismatch;
+        "R46.OUTCOME.ContentDigestMismatch" | DispatchOutcome::ContentDigestMismatch => "content_digest_mismatch", DispatchOutcome::ContentDigestMismatch;
+        "R46.OUTCOME.ContentOverBounds" | DispatchOutcome::ContentOverBounds => "content_over_bounds", DispatchOutcome::ContentOverBounds;
+        "R46.OUTCOME.SourceNotLocal" | DispatchOutcome::SourceNotLocal => "source_not_local", DispatchOutcome::SourceNotLocal;
+        "R46.OUTCOME.SourceNotBeaconMade" | DispatchOutcome::SourceNotBeaconMade => "source_not_beacon_made", DispatchOutcome::SourceNotBeaconMade;
+        "R46.OUTCOME.RepositoryHeadMoved" | DispatchOutcome::RepositoryHeadMoved => "repository_head_moved", DispatchOutcome::RepositoryHeadMoved;
+        "R46.OUTCOME.SourceDetached" | DispatchOutcome::SourceDetached => "source_detached", DispatchOutcome::SourceDetached;
+        "R46.OUTCOME.SourceDirty" | DispatchOutcome::SourceDirty => "source_dirty", DispatchOutcome::SourceDirty;
+        "R46.OUTCOME.AutonomyProfileRefuses" | DispatchOutcome::AutonomyProfileRefuses => "autonomy_profile_refuses", DispatchOutcome::AutonomyProfileRefuses;
+        "R46.OUTCOME.InstallationPaused" | DispatchOutcome::InstallationPaused => "installation_paused", DispatchOutcome::InstallationPaused;
+        "R46.OUTCOME.PreImageMismatch" | DispatchOutcome::PreImageMismatch => "pre_image_mismatch", DispatchOutcome::PreImageMismatch;
+        "R46.OUTCOME.PreImageUnreadable" | DispatchOutcome::PreImageUnreadable => "pre_image_unreadable", DispatchOutcome::PreImageUnreadable;
+        "R46.OUTCOME.WallClockExceeded" | DispatchOutcome::WallClockExceeded => "wall_clock_exceeded", DispatchOutcome::WallClockExceeded;
+        "R46.OUTCOME.AlreadyDispatched" | DispatchOutcome::AlreadyDispatched => "already_dispatched", DispatchOutcome::AlreadyDispatched;
+        "R46.OUTCOME.Admissible" | DispatchOutcome::Admissible => "admissible", DispatchOutcome::Admissible;
+        "R46.OUTCOME.ObjectWriteFailed" | DispatchOutcome::ObjectWriteFailed => "object_write_failed", DispatchOutcome::ObjectWriteFailed;
+        "R46.OUTCOME.EffectDoesNotMatchDeclaration" | DispatchOutcome::EffectDoesNotMatchDeclaration => "effect_does_not_match_declaration", DispatchOutcome::EffectDoesNotMatchDeclaration;
+        "R46.OUTCOME.LandingRefused" | DispatchOutcome::LandingRefused => "landing_refused", DispatchOutcome::LandingRefused;
+        "R46.OUTCOME.LandingUnobserved" | DispatchOutcome::LandingUnobserved => "landing_unobserved", DispatchOutcome::LandingUnobserved;
+        "R46.OUTCOME.Applied" | DispatchOutcome::Applied => "applied", DispatchOutcome::Applied;
+    }
+
+    #[test]
+    fn every_dispatch_outcome_has_a_row_and_its_own_token() {
+        let rows = outcome_rows();
+        assert_eq!(
+            rows.len(),
+            27,
+            "a dispatch outcome was added or a row was deleted: the vocabulary is closed (R42/R46)"
+        );
+        let mut tokens = std::collections::BTreeSet::new();
+        for (case, outcome) in &rows {
+            let (named_case, token) = expected_outcome(outcome);
+            assert_eq!(
+                named_case, *case,
+                "the row's case name does not match the table"
+            );
+            assert_eq!(
+                outcome.as_str(),
+                token,
+                "{case}: the outward token does not match the pinned table"
+            );
+            assert!(
+                tokens.insert(token),
+                "{case}: two outcomes share the token {token}, so a reader cannot tell them apart"
+            );
+        }
+        assert_eq!(tokens.len(), 27);
+    }
+
+    /// R46: the new outcome is its own row, and it is NOT the mismatch it used to be reported as.
+    #[test]
+    fn pre_image_unreadable_is_its_own_outcome_and_not_a_mismatch() {
+        assert_eq!(
+            DispatchOutcome::PreImageUnreadable.as_str(),
+            "pre_image_unreadable"
+        );
+        assert_ne!(
+            DispatchOutcome::PreImageUnreadable.as_str(),
+            DispatchOutcome::PreImageMismatch.as_str()
+        );
+        // Both are refusals; the Run state does not distinguish them and must not be asked to.
+        assert_eq!(DispatchOutcome::PreImageUnreadable.run_state(), "refused");
+        // Every read-failure subcase has a name of its own, so a Receipt can say WHICH read failed.
+        let subcases = [
+            PinnedReadFailure::FilterInventoryUnreadable,
+            PinnedReadFailure::ChildFailed,
+            PinnedReadFailure::Signalled,
+            PinnedReadFailure::TimedOut,
+            PinnedReadFailure::PinBrokenAfterRead,
+        ];
+        let names: std::collections::BTreeSet<&str> =
+            subcases.iter().map(PinnedReadFailure::name).collect();
+        assert_eq!(names.len(), 5, "two read failures share a name: {names:?}");
+        for name in names {
+            assert!(
+                !name.contains(' '),
+                "a name is a name, not a rendering: {name}"
+            );
+        }
+    }
 }
