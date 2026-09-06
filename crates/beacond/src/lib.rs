@@ -2343,8 +2343,8 @@ fn map_run_state_fault(fault: check_preflight::RunStateFault) -> SupervisorError
             workspace_id,
             run_id,
         } => SupervisorError::StoredIdentityUnreadable {
-            what: "a run row's identity is not readable",
-            raw: format!("Workspace {workspace_id}, run {run_id}"),
+            what: "a Run row's identity is not readable",
+            raw: format!("Workspace {workspace_id}, Run {run_id}"),
         },
     }
 }
