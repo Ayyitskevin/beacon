@@ -1135,9 +1135,9 @@ fn verify_nested_preflight(
     ) {
         Ok(()) => Ok(()),
         Err(RunEventReplayError::Store(error)) => Err(DeclaredCheckError::Store(error)),
-        Err(RunEventReplayError::EvidenceMismatch | RunEventReplayError::RunStateMismatch) => {
-            Err(DeclaredCheckError::InvalidStore)
-        }
+        Err(
+            RunEventReplayError::EvidenceMismatch | RunEventReplayError::RunStateMismatch { .. },
+        ) => Err(DeclaredCheckError::InvalidStore),
     }
 }
 

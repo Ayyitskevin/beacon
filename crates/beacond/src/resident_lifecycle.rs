@@ -94,12 +94,6 @@ pub(crate) enum ResidentLifecycleStateFault {
     /// A row that could not be READ at all, so it cannot be named: the identity columns are part
     /// of what failed. Distinct from `Row`, which names a row that read and did not re-prove.
     Unreadable(ResidentLifecycleError),
-    /// A row whose Workspace column is not a UUID. Unreachable while the foreign-key check and
-    /// the Workspace pass run first.
-    Identity {
-        workspace_id: String,
-        resident_id: String,
-    },
 }
 
 impl ResidentLifecycleError {
@@ -140,14 +134,6 @@ impl fmt::Display for ResidentLifecycleStateFault {
                 "a Resident row could not be read: {}",
                 cause.name()
             ),
-            Self::Identity {
-                workspace_id,
-                resident_id,
-            } => write!(
-                formatter,
-                "a ResidentLifecycle row's Workspace is not readable: {workspace_id}, ResidentLifecycle \
-                 {resident_id}"
-            ),
         }
     }
 }
@@ -169,14 +155,6 @@ impl fmt::Debug for ResidentLifecycleStateFault {
                 .field("resident_id", resident_id)
                 .field("cause", cause)
                 .finish(),
-            Self::Identity {
-                workspace_id,
-                resident_id,
-            } => formatter
-                .debug_struct("Identity")
-                .field("workspace_id", workspace_id)
-                .field("resident_id", resident_id)
-                .finish(),
         }
     }
 }
@@ -187,7 +165,7 @@ impl std::error::Error for ResidentLifecycleStateFault {
             Self::Store(error) => Some(error),
             Self::Unreadable(cause) | Self::Row { cause, .. } => Some(cause),
             // A `TotalsMismatch` is DATA, not a nested error.
-            Self::Totals(_) | Self::Identity { .. } => None,
+            Self::Totals(_) => None,
         }
     }
 }

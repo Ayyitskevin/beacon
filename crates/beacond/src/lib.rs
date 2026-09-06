@@ -463,7 +463,26 @@ pub enum SupervisorError {
     /// The sample-Project installations do not agree with the log. No row to name.
     SampleProjectTotalsMismatch(TotalsMismatch),
     RunEventMismatch(i64),
-    RunStateMismatch,
+    /// A Run does not agree with its Receipts and Events.
+    ///
+    /// Names the row and carries the owning reader's own error (R28.1). `run_id` is the relation's
+    /// own text, which is how this pass reads it.
+    RunStateMismatch {
+        workspace_id: Uuid,
+        run_id: String,
+        cause: check_preflight::CheckPreflightError,
+    },
+    /// The clock is before the Unix epoch, so no lease can be judged expired.
+    RunClockBeforeEpoch,
+    /// A replayed `run.preflighted` event's Receipt disagrees with the Run it names.
+    ///
+    /// Distinct from `RunEventMismatch`, which is the evidence not matching, and from
+    /// `RunStateMismatch`, which is the startup pass reading the table rather than the log.
+    RunEventStateMismatch {
+        sequence: i64,
+        workspace_id: Uuid,
+        run_id: Uuid,
+    },
     ProposalEventMismatch(i64),
     /// A stored Proposal does not re-prove against its own bytes or the records it cites.
     ///
@@ -653,6 +672,7 @@ pub enum StartupPass {
     ResidentLifecycle,
     ResidentConfiguration,
     LocalModelActivation,
+    Run,
 }
 
 impl StartupPass {
@@ -678,6 +698,7 @@ impl StartupPass {
             Self::ResidentLifecycle => "ResidentLifecycle",
             Self::ResidentConfiguration => "ResidentConfiguration",
             Self::LocalModelActivation => "LocalModelActivation",
+            Self::Run => "Run",
         }
     }
 }
@@ -933,9 +954,27 @@ impl fmt::Display for SupervisorError {
                     "Run event {sequence} does not match its recorded Receipt"
                 )
             }
-            Self::RunStateMismatch => {
-                write!(formatter, "a Run's state does not agree with its Receipt")
-            }
+            // R28.4: the key and the fault's NAME.
+            Self::RunStateMismatch {
+                workspace_id,
+                run_id,
+                cause,
+            } => write!(
+                formatter,
+                "Run {run_id} in Workspace {workspace_id} does not agree with its Receipts and \
+                 Events: {}",
+                cause.name()
+            ),
+            Self::RunClockBeforeEpoch => formatter.write_str("the clock is before the Unix epoch"),
+            Self::RunEventStateMismatch {
+                sequence,
+                workspace_id,
+                run_id,
+            } => write!(
+                formatter,
+                "Event sequence {sequence} in Workspace {workspace_id} carries a Receipt its Run \
+                 {run_id} does not agree with"
+            ),
             Self::ProposalEventMismatch(sequence) => write!(
                 formatter,
                 "Event sequence {sequence} does not match its stored Proposal bytes"
@@ -2219,13 +2258,6 @@ fn map_resident_lifecycle_state_fault(
         resident_lifecycle::ResidentLifecycleStateFault::Unreadable(cause) => {
             SupervisorError::ResidentRowUnreadable(cause)
         }
-        resident_lifecycle::ResidentLifecycleStateFault::Identity {
-            workspace_id,
-            resident_id,
-        } => SupervisorError::StoredIdentityUnreadable {
-            what: "a Resident row's identity is not readable",
-            raw: format!("Workspace {workspace_id}, Resident {resident_id}"),
-        },
     }
 }
 
@@ -2282,12 +2314,37 @@ fn map_local_model_activation_state_fault(
         local_model_activation::LocalModelActivationStateFault::Unreadable(cause) => {
             SupervisorError::LocalModelActivationRowUnreadable(cause)
         }
-        local_model_activation::LocalModelActivationStateFault::Identity {
+    }
+}
+
+/// The Run-state pass's fault, as the startup error that names the Run it refused.
+///
+/// `Clock` is the one arm with no row: it fails before any Run is read, so there is nothing to
+/// name and inventing one would be a decoy (R39.2).
+fn map_run_state_fault(fault: check_preflight::RunStateFault) -> SupervisorError {
+    match fault {
+        check_preflight::RunStateFault::Store(source) => {
+            SupervisorError::StartupEnumerationFailed {
+                pass: StartupPass::Run,
+                source,
+            }
+        }
+        check_preflight::RunStateFault::Row {
             workspace_id,
-            activation_id,
+            run_id,
+            cause,
+        } => SupervisorError::RunStateMismatch {
+            workspace_id,
+            run_id,
+            cause,
+        },
+        check_preflight::RunStateFault::Clock => SupervisorError::RunClockBeforeEpoch,
+        check_preflight::RunStateFault::Identity {
+            workspace_id,
+            run_id,
         } => SupervisorError::StoredIdentityUnreadable {
-            what: "a local model activation row's identity is not readable",
-            raw: format!("Workspace {workspace_id}, activation {activation_id}"),
+            what: "a run row's identity is not readable",
+            raw: format!("Workspace {workspace_id}, run {run_id}"),
         },
     }
 }
@@ -2351,7 +2408,7 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     artifact::verify_artifact_state(connection).map_err(map_artifact_state_fault)?;
     // A Run whose lease expired without a terminal Receipt becomes unconfirmed
     // here. Lease expiry is what proves that state; the Run is never removed.
-    check_preflight::verify_run_state(connection).map_err(|_| SupervisorError::RunStateMismatch)?;
+    check_preflight::verify_run_state(connection).map_err(map_run_state_fault)?;
     local_model_activation::verify_activation_state(connection)
         .map_err(map_local_model_activation_state_fault)?;
     resident_lifecycle::verify_lifecycle_state(connection)
@@ -2477,8 +2534,12 @@ fn verify_persisted_events(connection: &Connection) -> Result<u64, SupervisorErr
                     &payload_json,
                 ) {
                     Ok(()) => {}
-                    Err(check_preflight::RunEventReplayError::RunStateMismatch) => {
-                        return Err(SupervisorError::RunStateMismatch);
+                    Err(check_preflight::RunEventReplayError::RunStateMismatch { run_id }) => {
+                        return Err(SupervisorError::RunEventStateMismatch {
+                            sequence,
+                            workspace_id,
+                            run_id,
+                        });
                     }
                     Err(check_preflight::RunEventReplayError::EvidenceMismatch) => {
                         return Err(SupervisorError::RunEventMismatch(sequence));
@@ -2817,10 +2878,17 @@ mod tests {
                         .expect_err("no `sample_project_installations` table"),
                 ),
             ),
+            (
+                "Run",
+                super::map_run_state_fault(
+                    crate::check_preflight::verify_run_state(&connection)
+                        .expect_err("no `runs` table"),
+                ),
+            ),
         ];
         assert_eq!(
             refusals.len(),
-            19,
+            20,
             "a pass was added without a fixture here"
         );
 
@@ -2844,7 +2912,7 @@ mod tests {
         }
         assert_eq!(
             lines.len(),
-            19,
+            20,
             "two passes render the same line, so an operator cannot tell them apart: {lines:?}"
         );
     }
@@ -2865,13 +2933,29 @@ mod tests {
             .chars()
             .filter(|character| !character.is_whitespace())
             .collect();
+        // Every state-fault enum in the crate, not the six the sixth-site fold happened to
+        // name: a pass added later that maps its enumeration generically is the same bug.
         for fault in [
-            "ProjectStateFault",
-            "MissionStateFault",
+            "ArtifactStateFault",
+            "CandidateStateFault",
             "ClassificationStateFault",
-            "ManifestStateFault",
-            "PublicationStateFault",
             "CompletionStateFault",
+            "EvaluationStateFault",
+            "LocalModelActivationStateFault",
+            "ManifestStateFault",
+            "MissionStateFault",
+            "ProjectPolicyStateFault",
+            "ProjectRepositoryStateFault",
+            "ProjectStateFault",
+            "ProposalStateFault",
+            "PublicationStateFault",
+            "ResidentConfigurationStateFault",
+            "ResidentLifecycleStateFault",
+            "RulingStateFault",
+            "RunStateFault",
+            "SampleProjectStateFault",
+            "StarterStateFault",
+            "TeamStateFault",
         ] {
             for binding in ["error", "source"] {
                 let arrow = format!("{fault}::Store({binding})=>");
@@ -3297,7 +3381,13 @@ mod tests {
 
         let error = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap_err();
 
-        assert!(matches!(error, SupervisorError::RunStateMismatch));
+        // The Run-state pass compares kind/state to cardinalities, which this tamper preserves,
+        // so the log walk is what refuses -- and it now NAMES the Run rather than saying only that
+        // one disagreed.
+        let SupervisorError::RunEventStateMismatch { run_id, .. } = error else {
+            panic!("expected a named Run-event state refusal, got {error:?}");
+        };
+        assert_eq!(run_id, receipt.run_id);
     }
 
     #[test]
@@ -3311,7 +3401,13 @@ mod tests {
 
         let error = Supervisor::bootstrap(config(&store.path, "Ignored")).unwrap_err();
 
-        assert!(matches!(error, SupervisorError::RunStateMismatch));
+        // The Run-state pass compares kind/state to cardinalities, which this tamper preserves,
+        // so the log walk is what refuses -- and it now NAMES the Run rather than saying only that
+        // one disagreed.
+        let SupervisorError::RunEventStateMismatch { run_id, .. } = error else {
+            panic!("expected a named Run-event state refusal, got {error:?}");
+        };
+        assert_eq!(run_id, receipt.run_id);
     }
 
     #[test]
