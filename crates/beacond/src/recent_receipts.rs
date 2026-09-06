@@ -18,19 +18,18 @@
 //! The alternative -- limit a Receipt-driven stream -- cannot bound its scan when
 //! a run of receiptless Runs sits at the head of the order.
 //!
-//! **No payload body crosses this Query, and none is parsed.** An execution
-//! Receipt embeds the whole preflight Receipt that admitted it, so returning
-//! Receipts would put a Receipt inside a Receipt inside a list and make the cost
-//! scale with payload size rather than row count. `receipt_json` is not in the
-//! projection at all.
+//! **No payload body crosses this Query.** The body is nevertheless read and
+//! decoded by its owning module before the bounded projection becomes a value.
+//! That owner read is the I9 gate for unknown tags, versions and fields, and it
+//! proves the SQL outcome projection agrees with the typed Receipt.
 
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::check_preflight::PreflightOutcome;
-use crate::declared_checks::ExecutionSummary;
+use crate::check_preflight::{PreflightOutcome, decode_preflight_receipt};
+use crate::declared_checks::{ExecutionSummary, decode_execution_receipt_projection};
 use crate::operator_account::{OperatorAccountError, OperatorAccountService};
 
 /// The largest Run window one reading may walk. A request above it is clamped
@@ -43,13 +42,12 @@ pub const DEFAULT_RECENT_RUN_WINDOW: u32 = 50;
 
 /// Which Run this was, and what it concluded.
 ///
-/// Closed PER KIND. The `receipts.outcome` column is one 14-value CHECK shared
-/// by both kinds, so a flat wire enum would let a `check_preflight` row carry
-/// `completed` and a `declared_checks` row carry `preflight_failed` -- a widened
-/// vocabulary wearing a closed one. `deny_unknown_fields` is on this type as
-/// well as on the row: without it Rust ignores the other arm's field while the
-/// TypeScript adapter refuses it, which is two halves of one wire disagreeing
-/// about what "closed" means.
+/// Closed PER KIND. SQL deliberately carries no shared outcome-membership
+/// vocabulary; the Preflight and Execution owners decode their complete Receipt
+/// first, then this projection carries the already-verified typed outcome.
+/// `deny_unknown_fields` is on this type as well as on the row: without it Rust
+/// ignores the other arm's field while the TypeScript adapter refuses it, which
+/// is two halves of one wire disagreeing about what "closed" means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RecentReceiptOutcome {
@@ -106,8 +104,9 @@ pub struct RecentReceiptPage {
 
 /// Why a reading could not be produced.
 ///
-/// There is no `Json` arm, and that absence is the point: this Query parses no
-/// Receipt body, so it has no way to fail at one.
+/// Owner decoding failures become `InvalidStore`: malformed or unknown persisted
+/// bytes are a typed store refusal, not an implementation detail exposed to the
+/// Briefing caller as a serde error.
 #[derive(Debug)]
 pub enum RecentReceiptError {
     Account(OperatorAccountError),
@@ -192,6 +191,7 @@ fn read_recent(
             version: row.get::<_, Option<i64>>(7)?,
             outcome: row.get::<_, Option<String>>(8)?,
             recorded_at_ms: row.get::<_, Option<i64>>(9)?,
+            receipt_json: row.get::<_, Option<String>>(10)?,
         })
     })?;
 
@@ -214,7 +214,7 @@ fn read_recent(
             more_runs_exist = true;
             break;
         }
-        match stored?.classify()? {
+        match stored?.classify(workspace_id)? {
             Classified::Receipt(receipt) => receipts.push(*receipt),
             Classified::InFlight => runs_in_flight_in_window += 1,
             Classified::Unconfirmed => runs_unconfirmed_in_window += 1,
@@ -230,10 +230,10 @@ fn read_recent(
     })
 }
 
-/// `receipt_json` is deliberately absent from this projection.
 const RECENT_RUNS_SQL: &str = "SELECT runs.id, runs.project_id, projects.name, runs.kind,
                 runs.state, runs.started_at_ms, runs.ended_at_ms,
-                receipts.version, receipts.outcome, receipts.recorded_at_ms
+                receipts.version, receipts.outcome, receipts.recorded_at_ms,
+                receipts.receipt_json
          FROM runs
          JOIN projects
            ON projects.workspace_id = runs.workspace_id AND projects.id = runs.project_id
@@ -254,6 +254,7 @@ struct StoredRun {
     version: Option<i64>,
     outcome: Option<String>,
     recorded_at_ms: Option<i64>,
+    receipt_json: Option<String>,
 }
 
 enum Classified {
@@ -269,7 +270,7 @@ impl StoredRun {
     /// 0031 makes the state pairing part of the Receipt contract, not startup
     /// trivia. `runs.state` is deliberately not on the wire, so the adapter
     /// cannot check it -- which is why it is checked here, where the field is.
-    fn classify(self) -> Result<Classified, RecentReceiptError> {
+    fn classify(self, workspace_id: Uuid) -> Result<Classified, RecentReceiptError> {
         let Some(outcome) = self.outcome.as_deref() else {
             // No Receipt. Both writers insert the Run's terminal state and its
             // Receipt in one transaction, and only lease reconciliation sets
@@ -289,29 +290,59 @@ impl StoredRun {
                 _ => Err(RecentReceiptError::InvalidStore),
             };
         };
-        let (version, recorded_at_ms, ended_at_ms) =
-            match (self.version, self.recorded_at_ms, self.ended_at_ms) {
-                (Some(version), Some(recorded), Some(ended)) => (version, recorded, ended),
-                // A Receipt with no recorded time, or attached to a Run that
-                // never ended, is not a Receipt this reader can have written.
-                _ => return Err(RecentReceiptError::InvalidStore),
-            };
+        let (version, recorded_at_ms, ended_at_ms, receipt_json) = match (
+            self.version,
+            self.recorded_at_ms,
+            self.ended_at_ms,
+            self.receipt_json.as_deref(),
+        ) {
+            (Some(version), Some(recorded), Some(ended), Some(receipt_json)) => {
+                (version, recorded, ended, receipt_json)
+            }
+            // A Receipt with no recorded time, or attached to a Run that
+            // never ended, is not a Receipt this reader can have written.
+            _ => return Err(RecentReceiptError::InvalidStore),
+        };
+        let run_id = parse_uuid(&self.run_id)?;
+        let project_id = parse_uuid(&self.project_id)?;
+        let started_at_ms = nonnegative(self.started_at_ms)?;
+        let ended_at_ms = nonnegative(ended_at_ms)?;
+        let recorded_at_ms = nonnegative(recorded_at_ms)?;
         let outcome = match self.kind.as_str() {
             "check_preflight" => {
-                if version != 1 {
+                let receipt = decode_preflight_receipt(receipt_json)
+                    .map_err(|_| RecentReceiptError::InvalidStore)?;
+                if version != i64::from(receipt.version)
+                    || outcome != receipt.outcome.as_str()
+                    || receipt.run_id != run_id
+                    || receipt.workspace_id != workspace_id
+                    || receipt.project_id != project_id
+                    || receipt.started_at_ms != started_at_ms
+                    || receipt.ended_at_ms != ended_at_ms
+                    || receipt.ended_at_ms != recorded_at_ms
+                {
                     return Err(RecentReceiptError::InvalidStore);
                 }
                 RecentReceiptOutcome::CheckPreflight {
-                    outcome: preflight_outcome(outcome)?,
+                    outcome: receipt.outcome,
                 }
             }
             "declared_checks" => {
-                // v1 is historical and still decodable; v2 is current.
-                if version != 1 && version != 2 {
+                let receipt = decode_execution_receipt_projection(receipt_json)
+                    .map_err(|_| RecentReceiptError::InvalidStore)?;
+                if version != i64::from(receipt.version)
+                    || outcome != receipt.summary.as_str()
+                    || receipt.run_id != run_id
+                    || receipt.workspace_id != workspace_id
+                    || receipt.project_id != project_id
+                    || receipt.started_at_ms != started_at_ms
+                    || receipt.ended_at_ms != ended_at_ms
+                    || receipt.ended_at_ms != recorded_at_ms
+                {
                     return Err(RecentReceiptError::InvalidStore);
                 }
                 RecentReceiptOutcome::DeclaredChecks {
-                    summary: execution_summary(outcome)?,
+                    summary: receipt.summary,
                 }
             }
             _ => return Err(RecentReceiptError::InvalidStore),
@@ -320,14 +351,14 @@ impl StoredRun {
             return Err(RecentReceiptError::InvalidStore);
         }
         Ok(Classified::Receipt(Box::new(RecentReceipt {
-            run_id: parse_uuid(&self.run_id)?,
-            project_id: parse_uuid(&self.project_id)?,
+            run_id,
+            project_id,
             project_name: self.project_name,
             version: u32::try_from(version).map_err(|_| RecentReceiptError::InvalidStore)?,
             outcome,
-            started_at_ms: nonnegative(self.started_at_ms)?,
-            ended_at_ms: nonnegative(ended_at_ms)?,
-            recorded_at_ms: nonnegative(recorded_at_ms)?,
+            started_at_ms,
+            ended_at_ms,
+            recorded_at_ms,
         })))
     }
 }
@@ -343,32 +374,6 @@ fn terminal_state_for(outcome: RecentReceiptOutcome) -> &'static str {
     match outcome {
         RecentReceiptOutcome::CheckPreflight { outcome } => outcome.run_state(),
         RecentReceiptOutcome::DeclaredChecks { summary } => summary.run_state(),
-    }
-}
-
-fn preflight_outcome(value: &str) -> Result<PreflightOutcome, RecentReceiptError> {
-    match value {
-        "verified" => Ok(PreflightOutcome::Verified),
-        "source_kind_unsupported" => Ok(PreflightOutcome::SourceKindUnsupported),
-        "binding_stale_for_charter" => Ok(PreflightOutcome::BindingStaleForCharter),
-        "repository_unreadable" => Ok(PreflightOutcome::RepositoryUnreadable),
-        "base_revision_unreachable" => Ok(PreflightOutcome::BaseRevisionUnreachable),
-        "declared_checks_changed" => Ok(PreflightOutcome::DeclaredChecksChanged),
-        "working_directory_escapes" => Ok(PreflightOutcome::WorkingDirectoryEscapes),
-        "sandbox_unavailable" => Ok(PreflightOutcome::SandboxUnavailable),
-        "preflight_failed" => Ok(PreflightOutcome::PreflightFailed),
-        "preflight_timed_out" => Ok(PreflightOutcome::PreflightTimedOut),
-        _ => Err(RecentReceiptError::InvalidStore),
-    }
-}
-
-fn execution_summary(value: &str) -> Result<ExecutionSummary, RecentReceiptError> {
-    match value {
-        "not_admissible" => Ok(ExecutionSummary::NotAdmissible),
-        "worktree_unavailable" => Ok(ExecutionSummary::WorktreeUnavailable),
-        "completed" => Ok(ExecutionSummary::Completed),
-        "incomplete" => Ok(ExecutionSummary::Incomplete),
-        _ => Err(RecentReceiptError::InvalidStore),
     }
 }
 
@@ -393,19 +398,18 @@ mod tests {
         connection
     }
 
-    /// gpt1's P1: the previous guards read a serialized `RecentReceiptPage` and
-    /// a COPY of the SQL kept in the test file. Adding `receipts.receipt_json`
-    /// to the production projection left all 14 tests green, because neither
-    /// assertion could see the production statement. Both now read the constant
-    /// itself, so the mutant has nowhere to hide.
+    /// R48: the owner cannot decode bytes the Query never reads. This assertion
+    /// names the production projection so removing the typed-deserialization
+    /// gate is visible before an unknown stored token reaches Briefing.
     #[test]
-    fn the_production_statement_selects_no_receipt_payload() {
+    fn the_production_statement_selects_the_payload_for_owner_verification() {
         assert!(
-            !RECENT_RUNS_SQL.contains("receipt_json"),
-            "the projection grew a payload column:\n{RECENT_RUNS_SQL}"
+            RECENT_RUNS_SQL.contains("receipts.receipt_json"),
+            "the typed owner lost its Receipt bytes:\n{RECENT_RUNS_SQL}"
         );
         // The whole projection, named: a new column has to be added here on
-        // purpose, and a payload column cannot arrive as a silent widening.
+        // purpose; the payload column exists only for the owner gate and never
+        // crosses the public `RecentReceipt` interface.
         let selected = RECENT_RUNS_SQL
             .split_once("SELECT ")
             .and_then(|(_, rest)| rest.split_once("FROM "))
@@ -429,6 +433,7 @@ mod tests {
                 "receipts.version",
                 "receipts.outcome",
                 "receipts.recorded_at_ms",
+                "receipts.receipt_json",
             ]
         );
     }

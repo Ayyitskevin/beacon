@@ -75,7 +75,7 @@ pub enum PreflightOutcome {
 }
 
 impl PreflightOutcome {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Verified => "verified",
             Self::SourceKindUnsupported => "source_kind_unsupported",
@@ -954,6 +954,17 @@ impl From<serde_json::Error> for RunEventReplayError {
     }
 }
 
+/// Decode the versioned Receipt through its owning module before any projection becomes a value.
+pub(crate) fn decode_preflight_receipt(
+    payload_json: &str,
+) -> Result<PreflightReceipt, RunEventReplayError> {
+    let receipt: PreflightReceipt = serde_json::from_str(payload_json)?;
+    if receipt.version != 1 {
+        return Err(RunEventReplayError::EvidenceMismatch);
+    }
+    Ok(receipt)
+}
+
 /// Replay one `run.preflighted` event against the stored Receipt.
 pub(crate) fn verify_run_event(
     connection: &Connection,
@@ -961,9 +972,8 @@ pub(crate) fn verify_run_event(
     occurred_at_ms: u64,
     payload_json: &str,
 ) -> Result<(), RunEventReplayError> {
-    let receipt: PreflightReceipt = serde_json::from_str(payload_json)?;
-    if receipt.version != 1
-        || receipt.workspace_id != workspace_id
+    let receipt = decode_preflight_receipt(payload_json)?;
+    if receipt.workspace_id != workspace_id
         || receipt.started_at_ms > receipt.ended_at_ms
         || receipt.ended_at_ms != occurred_at_ms
     {
