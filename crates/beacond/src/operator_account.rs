@@ -976,9 +976,10 @@ mod refusal_text_witness {
     const SECOND_RETRY: u64 = 4242;
     const THIRD_RETRY: u64 = u64::MAX;
 
+    /// Carrying the CR/LF the spec lists, so ONE_LINE is a real rung here too.
     fn driver_error(needle: &str) -> rusqlite::Error {
         rusqlite::Error::InvalidParameterName(format!(
-            "{needle} /home/example/private.db :private_binding"
+            "{needle} /home/example/private.db :private_binding\r\nsecond-line"
         ))
     }
 
