@@ -292,7 +292,7 @@ fn concurrent_activation_has_one_winner_and_one_stale_command() {
 fn startup_refuses_tampered_current_state_or_missing_lifecycle_event() {
     // R44: BOTH ENDS. Tampering only the last-sorting Resident made "names the failing
     // row" and "names the last row" the same assertion; `rows.last()` survived it.
-    for (end, order) in [("last", "DESC"), ("first", "ASC")] {
+    for end in ["last", "first"] {
         for (label, tamper, expected_fault) in [
             (
                 "agent-state",
@@ -321,17 +321,19 @@ fn startup_refuses_tampered_current_state_or_missing_lifecycle_event() {
             let connection = Connection::open(&store.path).unwrap();
             // This pass enumerates `ORDER BY agent.workspace_id, agent.id`; the tamper hits whichever
             // Resident sorts LAST, read back from the store rather than guessed from the ids.
-            let resident_id: Uuid = connection
-                .query_row(
-                    // R44: BOTH ENDS -- one run per end of this pass's own ORDER BY.
-                    &format!(
-                        "SELECT id FROM agents WHERE kind = 'resident' ORDER BY id {order} LIMIT 1"
-                    ),
-                    [],
-                    |row| row.get::<_, String>(0),
-                )
-                .map(|id| Uuid::parse_str(&id).unwrap())
-                .expect("the fixture admitted two Residents");
+            let enumerated = beacond::enumerate_lifecycle_residents(&connection)
+                .expect("the pass's enumeration reads");
+            // R44.6: CALL the pass's own enumeration rather than copying its query.
+            let resident_id = Uuid::parse_str(
+                &if end == "last" {
+                    enumerated.last()
+                } else {
+                    enumerated.first()
+                }
+                .expect("the fixture admitted two Residents")
+                .1,
+            )
+            .unwrap();
             assert!(resident_ids.contains(&resident_id));
             let touched = connection
                 .execute(tamper, rusqlite::params![resident_id.to_string()])

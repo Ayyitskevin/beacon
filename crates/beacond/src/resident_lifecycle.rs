@@ -592,6 +592,29 @@ pub(crate) fn verify_lifecycle_event(
     Ok(())
 }
 
+/// The ORDER BY `verify_lifecycle_state` enumerates under. ONE definition, interpolated into the pass's own
+/// query and into `enumerate_lifecycle_residents` below, so a mutant on the ordering moves both (R44.6).
+///
+/// This pass reads whole rows while a bar needs only the keys, so the two cannot be one function
+/// the way the digest-keyed passes' are. Sharing the ordering is what keeps a bar's placement
+/// assertion from agreeing with a copy the pass no longer follows.
+const ENUMERATION_ORDER: &str = "ORDER BY agent.workspace_id, agent.id";
+
+/// The keys `verify_lifecycle_state` enumerates, in its order.
+pub fn enumerate_lifecycle_residents(
+    connection: &Connection,
+) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT agent.workspace_id, agent.id FROM agents AS agent {ENUMERATION_ORDER}"
+    ))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 pub(crate) fn verify_lifecycle_state(
     connection: &Connection,
 ) -> Result<(), ResidentLifecycleStateFault> {
@@ -621,7 +644,7 @@ pub(crate) fn verify_lifecycle_state(
         });
     }
     let mut statement = connection
-        .prepare(
+        .prepare(&format!(
             "SELECT agent.id, agent.workspace_id, agent.role, agent.display_name_state,
                 agent.display_name, agent.lifecycle, latest.id,
                 agent.created_at_ms, agent.updated_at_ms
@@ -636,8 +659,8 @@ pub(crate) fn verify_lifecycle_state(
                 AND newer.sequence > latest.sequence
           )
          WHERE agent.kind = 'resident'
-         ORDER BY agent.workspace_id, agent.id",
-        )
+         {ENUMERATION_ORDER}"
+        ))
         .map_err(ResidentLifecycleStateFault::Store)?;
     let mut resident_rows = statement
         .query([])

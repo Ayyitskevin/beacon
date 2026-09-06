@@ -3883,15 +3883,13 @@ fn startup_refuses_a_manifest_whose_column_disagrees_and_names_the_row() {
             .expect("a second honest manifest, so rows[0] is not the tampered row");
 
         let connection = fixture.store.connect();
-        let ordered: Vec<String> = connection
-        .prepare(
-            "SELECT manifest_digest FROM outcome_manifests ORDER BY workspace_id, manifest_digest",
-        )
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
+        // R44.6: CALL the pass's own enumeration rather than copying its query -- a copy agrees
+        // with itself, so flipping the pass's ORDER BY would leave this read decorative.
+        let ordered: Vec<String> = beacond::enumerate_manifests(&connection)
+            .expect("the pass's enumeration reads")
+            .into_iter()
+            .map(|row| row.1)
+            .collect();
         assert_eq!(
             ordered.len(),
             2,
@@ -4008,13 +4006,13 @@ fn startup_refuses_a_mission_whose_condition_projection_disagrees_and_names_the_
         assert_ne!(other, fixture.mission_id);
 
         let connection = fixture.store.connect();
-        let ordered: Vec<String> = connection
-            .prepare("SELECT id FROM missions ORDER BY workspace_id, id")
-            .unwrap()
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+        // R44.6: CALL the pass's own enumeration rather than copying its query -- a copy agrees
+        // with itself, so flipping the pass's ORDER BY would leave this read decorative.
+        let ordered: Vec<String> = beacond::enumerate_missions(&connection)
+            .expect("the pass's enumeration reads")
+            .into_iter()
+            .map(|row| row.1)
+            .collect();
         assert_eq!(
             ordered.len(),
             2,
@@ -4124,13 +4122,13 @@ fn startup_refuses_a_project_whose_charter_history_disagrees_and_names_the_row()
         assert_ne!(second.id, fixture.project_id);
 
         let connection = fixture.store.connect();
-        let ordered: Vec<String> = connection
-            .prepare("SELECT id FROM projects ORDER BY workspace_id, id")
-            .unwrap()
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+        // R44.6: CALL the pass's own enumeration rather than copying its query -- a copy agrees
+        // with itself, so flipping the pass's ORDER BY would leave this read decorative.
+        let ordered: Vec<String> = beacond::enumerate_projects(&connection)
+            .expect("the pass's enumeration reads")
+            .into_iter()
+            .map(|row| row.1)
+            .collect();
         assert_eq!(
             ordered.len(),
             2,
@@ -4241,13 +4239,13 @@ fn startup_refuses_a_completion_whose_column_disagrees_and_names_the_row() {
         drop(connection);
 
         let connection = fixture.store.connect();
-        let ordered: Vec<String> = connection
-            .prepare("SELECT digest_value FROM mission_completions ORDER BY digest_value")
-            .unwrap()
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+        // R44.6: CALL the pass's own enumeration rather than copying its query -- a copy agrees
+        // with itself, so flipping the pass's ORDER BY would leave this read decorative.
+        let ordered: Vec<String> = beacond::enumerate_completions(&connection)
+            .expect("the pass's enumeration reads")
+            .into_iter()
+            .map(|row| row.1)
+            .collect();
         assert_eq!(
             ordered.len(),
             2,
@@ -5733,19 +5731,15 @@ fn a_superseded_classification_citing_a_predecessor_the_store_does_not_hold_fail
 
         // R44.4: the placement is READ BACK from the pass's own query, not assumed.
         let connection = fixture.store.connect();
-        let ends: Vec<String> = ["ASC", "DESC"]
-            .iter()
-            .map(|order| {
-                connection
-                    .query_row(
-                        &format!(
-                            "SELECT digest_value FROM mission_impact_classifications
-                             ORDER BY workspace_id {order}, digest_value {order} LIMIT 1"
-                        ),
-                        [],
-                        |row| row.get(0),
-                    )
-                    .expect("the fixture holds three classifications")
+        // R44.6: CALL the pass's own enumeration rather than copying its query.
+        let enumerated =
+            beacond::enumerate_classifications(&connection).expect("the pass's enumeration reads");
+        let ends: Vec<String> = [enumerated.first(), enumerated.last()]
+            .into_iter()
+            .map(|row| {
+                row.expect("the fixture holds three classifications")
+                    .1
+                    .clone()
             })
             .collect();
         drop(connection);

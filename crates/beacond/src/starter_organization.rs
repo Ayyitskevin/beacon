@@ -523,17 +523,26 @@ pub(crate) fn verify_starter_event(
     Ok(())
 }
 
+/// The rows `verify_starter_state` enumerates, in the order it enumerates them.
+///
+/// EXTRACTED SO A BAR CAN CALL IT (R44.6): a placement assertion that COPIES this query agrees
+/// with itself, so flipping the pass's own `ORDER BY` leaves it decorative. One function, called
+/// by both, moves the pass and the bar's view of it together.
+pub fn enumerate_starter_workspaces(
+    connection: &rusqlite::Connection,
+) -> rusqlite::Result<Vec<String>> {
+    let mut statement = connection.prepare("SELECT id FROM workspaces ORDER BY id")?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 pub(crate) fn verify_starter_state(
     connection: &rusqlite::Connection,
 ) -> Result<(), StarterStateFault> {
-    let mut statement = connection
-        .prepare("SELECT id FROM workspaces ORDER BY id")
-        .map_err(StarterStateFault::Store)?;
-    let workspace_ids = statement
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(StarterStateFault::Store)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(StarterStateFault::Store)?;
+    let workspace_ids =
+        enumerate_starter_workspaces(connection).map_err(StarterStateFault::Store)?;
 
     for workspace_id in workspace_ids {
         let parsed = Uuid::parse_str(&workspace_id).map_err(|_| StarterStateFault::Identity {
