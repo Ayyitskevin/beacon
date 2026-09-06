@@ -2807,8 +2807,8 @@ fn an_interruption_after_the_swap_is_finished_as_applied_at_startup() {
 
 #[test]
 fn a_recovery_that_cannot_name_its_run_is_a_failed_write() {
-    // `finish_prepared_dispatches` is the one step in `inspect_store` that WRITES: it turns an
-    // interrupted attempt into a Run with a terminal Receipt. Nothing here asserted what startup
+    // `finish_prepared_dispatches` is the startup reconciliation step that turns an interrupted
+    // attempt into a Run with a terminal Receipt. Nothing here asserted what startup
     // says when that write cannot complete, so the name it reported was never compile-checked by
     // anything -- which is how it kept a `...StateMismatch` name while not being a verification
     // pass (R28.1).
