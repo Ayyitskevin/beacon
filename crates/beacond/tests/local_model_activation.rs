@@ -800,3 +800,73 @@ fn astra_minimum_activation_sequence_outward_key_is_exact() {
         "R45.ACTIVATION.MIN_LINE_KEY_EXACT: {line}"
     );
 }
+
+/// sol1 cold-read probe: a 36-character non-UUID activation id passes the schema and reaches the
+/// pass. The refusal must preserve a bounded/escaped witness instead of collapsing to an unnamed
+/// unreadable row.
+#[test]
+fn sol1_activation_with_unreadable_identity_is_still_named() {
+    let store = TestStore::new("sol1-unreadable-id");
+    let accounts = enrolled_accounts(&store);
+    let mut responses = two_model_inspection_responses();
+    responses.extend(two_model_inspection_responses());
+    let (address, server) = serve_ollama(responses);
+    let service = LocalModelActivationService::new(
+        accounts,
+        store.workspace_id,
+        LocalModelEndpoint::new(address).unwrap(),
+    );
+    let review = service.inspect(MODEL_NAME, MODEL_DIGEST).unwrap();
+    let active = service
+        .activate(review, vec![ProviderFeature::Completion])
+        .unwrap();
+    server.join().unwrap();
+    drop(service);
+
+    let malformed = format!("{}\r\u{1b}[2J", "x".repeat(31));
+    assert_eq!(malformed.chars().count(), 36);
+    let connection = Connection::open(&store.path).unwrap();
+    let columns: Vec<String> = connection
+        .prepare("SELECT name FROM pragma_table_info('local_model_activation_decisions')")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let names = columns.join(", ");
+    let values = columns
+        .iter()
+        .map(|column| {
+            if column == "sequence" {
+                "NULL".to_owned()
+            } else if column == "id" {
+                "?1".to_owned()
+            } else {
+                column.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let inserted = connection
+        .execute(
+            &format!(
+                "INSERT INTO local_model_activation_decisions ({names})
+                 SELECT {values} FROM local_model_activation_decisions WHERE id = ?2"
+            ),
+            rusqlite::params![malformed, active.id.to_string()],
+        )
+        .unwrap();
+    assert_eq!(inserted, 1, "the malformed activation row did not plant");
+    drop(connection);
+
+    let error = Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .expect_err("the malformed activation id reopened Ready");
+    let line = error.to_string();
+    assert!(
+        line.contains(&"x".repeat(31)) && !line.contains('\r') && !line.contains('\u{1b}'),
+        "the refusal did not name the unreadable activation with an escaped witness: {line:?}"
+    );
+}
