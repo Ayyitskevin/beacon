@@ -632,97 +632,104 @@ fn concurrent_initial_configuration_has_one_winner() {
 
 #[test]
 fn startup_refuses_missing_or_tampered_configuration_events() {
-    for (label, tamper) in [
-        (
-            "missing-event",
-            "DELETE FROM events WHERE kind = 'resident.configuration_set'
+    // R44: BOTH ENDS. Tampering only the last-sorting decision made "names the failing
+    // row" and "names the last row" the same assertion; `rows.last()` survived it.
+    for (end, order) in [("last", "DESC"), ("first", "ASC")] {
+        for (label, tamper) in [
+            (
+                "missing-event",
+                "DELETE FROM events WHERE kind = 'resident.configuration_set'
              AND payload_json LIKE '%' || ?1 || '%'",
-        ),
-        (
-            "tampered-event",
-            "UPDATE events SET payload_json = '{}'
+            ),
+            (
+                "tampered-event",
+                "UPDATE events SET payload_json = '{}'
              WHERE kind = 'resident.configuration_set'
                AND payload_json LIKE '%' || ?1 || '%'",
-        ),
-    ] {
-        let store = TestStore::new(label);
-        let accounts = enrolled_accounts(&store);
-        // R39.3 (kimi's HOLD): TWO configured Residents, so the failing decision is not row 0.
-        let resident_ids = admit_two(&store, &accounts);
-        let activation = activate_model(&store, &accounts, vec![ProviderFeature::Completion]);
-        let configurations =
-            ResidentConfigurationService::new(Arc::clone(&accounts), store.workspace_id);
-        let decisions: Vec<_> = resident_ids
-            .iter()
-            .map(|resident_id| {
-                configurations
-                    .configure(
-                        *resident_id,
-                        None,
-                        activation.id,
-                        vec![BeaconCapability::WorkCreateMission],
-                    )
-                    .unwrap()
+            ),
+        ] {
+            let store = TestStore::new(&format!("{label}-{end}"));
+            let accounts = enrolled_accounts(&store);
+            // R39.3 (kimi's HOLD): TWO configured Residents, so the failing decision is not row 0.
+            let resident_ids = admit_two(&store, &accounts);
+            let activation = activate_model(&store, &accounts, vec![ProviderFeature::Completion]);
+            let configurations =
+                ResidentConfigurationService::new(Arc::clone(&accounts), store.workspace_id);
+            let decisions: Vec<_> = resident_ids
+                .iter()
+                .map(|resident_id| {
+                    configurations
+                        .configure(
+                            *resident_id,
+                            None,
+                            activation.id,
+                            vec![BeaconCapability::WorkCreateMission],
+                        )
+                        .unwrap()
+                })
+                .collect();
+            drop(configurations);
+            drop(accounts);
+
+            let connection = Connection::open(&store.path).unwrap();
+            // This pass enumerates `ORDER BY workspace_id, resident_id, sequence`; the tamper hits the
+            // decision that sorts LAST, read back from the store rather than guessed.
+            let last_id: String = connection
+                .query_row(
+                    // R44: BOTH ENDS -- one run per end of this pass's own ORDER BY.
+                    &format!(
+                        "SELECT id FROM resident_configuration_decisions
+                     ORDER BY workspace_id, resident_id {order}, sequence {order} LIMIT 1"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the fixture recorded two decisions");
+            let configuration = decisions
+                .iter()
+                .find(|decision| decision.id.to_string() == last_id)
+                .expect("the last-sorting decision is one the fixture made");
+            let touched = connection
+                .execute(tamper, rusqlite::params![last_id])
+                .unwrap();
+            assert_eq!(touched, 1, "{label}: the plant touched the wrong row count");
+            drop(connection);
+
+            let error = Supervisor::bootstrap(StartupConfig {
+                store_path: store.path.clone(),
+                initial_workspace_name: "Ignored".to_owned(),
             })
-            .collect();
-        drop(configurations);
-        drop(accounts);
-
-        let connection = Connection::open(&store.path).unwrap();
-        // This pass enumerates `ORDER BY workspace_id, resident_id, sequence`; the tamper hits the
-        // decision that sorts LAST, read back from the store rather than guessed.
-        let last_id: String = connection
-            .query_row(
-                "SELECT id FROM resident_configuration_decisions
-                 ORDER BY workspace_id, resident_id DESC, sequence DESC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .expect("the fixture recorded two decisions");
-        let configuration = decisions
-            .iter()
-            .find(|decision| decision.id.to_string() == last_id)
-            .expect("the last-sorting decision is one the fixture made");
-        let touched = connection
-            .execute(tamper, rusqlite::params![last_id])
-            .unwrap();
-        assert_eq!(touched, 1, "{label}: the plant touched the wrong row count");
-        drop(connection);
-
-        let error = Supervisor::bootstrap(StartupConfig {
-            store_path: store.path.clone(),
-            initial_workspace_name: "Ignored".to_owned(),
-        })
-        .unwrap_err();
-        // Which guard reaches this depends on the tamper: the log walk runs first, so an Event
-        // tamper is refused there. When the state pass IS the refuser, it must name the decision
-        // and end in a fault NAME -- the variant alone let three mutants through.
-        match &error {
-            beacond::SupervisorError::ResidentConfigurationStateMismatch {
-                decision_id: named,
-                ..
-            } => {
-                assert_eq!(
-                    named,
-                    &configuration.id.to_string(),
-                    "{label}: the wrong decision was named"
-                );
-                let line = error.to_string();
-                assert!(
-                    line.contains(&configuration.id.to_string()),
-                    "{label}: the line does not name the decision: {line}"
-                );
-                let tail = line.rsplit(": ").next().unwrap();
-                assert_eq!(tail, "InvalidStore", "{label}: wrong fault name: {line}");
-                // blue's HOLD: the reader's OWN sentence never reaches the line (R28.4).
-                assert!(
-                    !line.contains("Resident configuration state is invalid"),
-                    "{label}: the reader's own sentence reached the line: {line}"
-                );
+            .unwrap_err();
+            // Which guard reaches this depends on the tamper: the log walk runs first, so an Event
+            // tamper is refused there. When the state pass IS the refuser, it must name the decision
+            // and end in a fault NAME -- the variant alone let three mutants through.
+            match &error {
+                beacond::SupervisorError::ResidentConfigurationStateMismatch {
+                    decision_id: named,
+                    ..
+                } => {
+                    assert_eq!(
+                        named,
+                        &configuration.id.to_string(),
+                        "{label}: the wrong decision was named"
+                    );
+                    let line = error.to_string();
+                    assert!(
+                        line.contains(&configuration.id.to_string()),
+                        "{label}: the line does not name the decision: {line}"
+                    );
+                    let tail = line.rsplit(": ").next().unwrap();
+                    assert_eq!(tail, "InvalidStore", "{label}: wrong fault name: {line}");
+                    // blue's HOLD: the reader's OWN sentence never reaches the line (R28.4).
+                    assert!(
+                        !line.contains("Resident configuration state is invalid"),
+                        "{label}: the reader's own sentence reached the line: {line}"
+                    );
+                }
+                beacond::SupervisorError::ResidentConfigurationEventMismatch(_)
+                | beacond::SupervisorError::Json(_) => {}
+                other => panic!("{label} failed through the wrong guard: {other:?}"),
             }
-            beacond::SupervisorError::ResidentConfigurationEventMismatch(_)
-            | beacond::SupervisorError::Json(_) => {}
-            other => panic!("{label} failed through the wrong guard: {other:?}"),
         }
     }
 }
