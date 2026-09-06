@@ -3796,6 +3796,126 @@ fn a_declared_create_against_a_broken_repository_is_refused_as_unreadable_not_ap
     assert_eq!(receipt.prepared_commit, None);
 }
 
+/// R47: an inventory git REFUSED refuses the dispatch, naming the inventory and carrying why.
+///
+/// The filter-driver inventory decides which drivers the hardening suppresses, and the comment at
+/// its call site says so. Before R47 a `.git/config` git could not read produced an EMPTY
+/// inventory -- `if !success { still_pinned().then(Vec::new) }` -- so the byte read then ran with
+/// the hardening switched off, against a repository the product had just failed to read. That is
+/// the second route to the Receipt R46 exists to prevent, and it is a hardening boundary rather
+/// than only an evidence one (opus, R46 report, "A finding beyond the brief").
+///
+/// The fault is installed AT the read through R46's failpoint, not before the call: an unreadable
+/// `.git/config` refuses as `SourceNotBeaconMade` several gates earlier, because the provenance
+/// read is the dispatch's first pinned read. That earlier refusal is still misnamed and is the one
+/// thing this lane could not fix without a new outcome token -- see the report.
+#[test]
+fn an_inventory_git_refused_refuses_the_dispatch_and_never_runs_with_the_hardening_off() {
+    let fixture = admitted_mission("inventory-refused");
+    let repository = CopyRepository::create(&fixture.copies_root, "inventory-refused");
+    let (proposal_digest, _) = fixture.candidate_for_with_pre_image(
+        &repository,
+        "Modify the library root, with the filter inventory refused at the read.",
+        BASE_LIB_BYTES,
+    );
+    let ruling = fixture
+        .rulings
+        .rule_on_candidate(
+            &fixture.candidates.present(&proposal_digest).unwrap(),
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap();
+
+    // THE CONSTRUCTED FAULT: the configuration the inventory reads is made unreadable, at the read.
+    // MEASURED (tools/r47/logs/measure-config-site.log): `config --file F --includes --name-only
+    // --null --list` exits 128 with `Permission denied` on stderr, while a configuration that
+    // simply names no entries exits 0 in silence -- so this shape is a failure and never an
+    // absence.
+    let configuration = repository.path.join(".git").join("config");
+    let broken = configuration.clone();
+    let restore = fs::metadata(&configuration).unwrap().permissions();
+    let receipt = DispatchService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .with_failpoints(DispatchFailpoints {
+            before_pre_image_read: Some(Arc::new(move || {
+                fs::set_permissions(&broken, fs::Permissions::from_mode(0o000)).unwrap();
+            })),
+            ..DispatchFailpoints::default()
+        })
+        .dispatch(&ruling.digest().value, &content_for(NEW_BYTES))
+        .unwrap();
+    fs::set_permissions(&configuration, restore).unwrap();
+
+    // THE NAMED ASSERTION. Not a mismatch -- nothing was compared -- and not `Applied`.
+    assert_eq!(
+        receipt.outcome,
+        DispatchOutcome::PreImageUnreadable,
+        "a dispatch proceeded past a filter inventory git refused"
+    );
+    // ...and WHICH read failed is the INVENTORY, not the byte read. Before R47 the inventory
+    // returned an empty set and the refusal that eventually arrived described `cat-file` instead --
+    // the right outcome for the wrong reason, with the hardening silently skipped on the way.
+    let Some(PinnedReadFailure::FilterInventoryRefused { message }) =
+        receipt.pre_image_read_failure.as_ref()
+    else {
+        panic!(
+            "the Receipt does not name the inventory as the read that failed: {:?}",
+            receipt.pre_image_read_failure
+        );
+    };
+    assert!(
+        message.contains("Permission denied"),
+        "the refusal does not carry what git said: {message}"
+    );
+    assert_eq!(receipt.prepared_commit, None);
+    assert_eq!(receipt.repository_effect(), RepositoryEffect::ByteIdentical);
+}
+
+/// R47: the legitimate empty inventory is NOT a refusal -- it is exit 0 and no drivers.
+///
+/// Measured rather than assumed, and it is the premise this lane turned out to correct: at this
+/// argv git exits 0 for a configuration that names no filter drivers (empty file, section-only,
+/// comment-only, `/dev/null` -- tools/r47/logs/measure-config-site.log). Every dispatch in this
+/// suite already runs against such a repository, so the bar is that they still Apply; this asserts
+/// it where a reader can see it, so tightening the inventory cannot quietly refuse the normal case.
+#[test]
+fn a_repository_that_configures_no_filter_drivers_still_applies() {
+    let fixture = admitted_mission("inventory-empty");
+    let repository = CopyRepository::create(&fixture.copies_root, "inventory-empty");
+    let (proposal_digest, _) = fixture.candidate_for_with_pre_image(
+        &repository,
+        "Modify the library root in a repository that names no filter drivers.",
+        BASE_LIB_BYTES,
+    );
+    let ruling = fixture
+        .rulings
+        .rule_on_candidate(
+            &fixture.candidates.present(&proposal_digest).unwrap(),
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap();
+    let configuration = fs::read_to_string(repository.path.join(".git").join("config")).unwrap();
+    assert!(
+        !configuration.contains("[filter"),
+        "this repository configures a filter driver, so it is not the empty-inventory case"
+    );
+
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling.digest().value, &content_for(NEW_BYTES))
+        .unwrap();
+
+    assert_eq!(
+        receipt.outcome,
+        DispatchOutcome::Applied,
+        "an inventory that names no drivers was refused as one that could not be read"
+    );
+    assert_eq!(receipt.pre_image_read_failure, None);
+}
+
 #[test]
 fn a_modification_whose_declared_before_bytes_are_not_there_is_refused() {
     // The deletion arm above proves the gate reads the base tree. This is the modification arm:
