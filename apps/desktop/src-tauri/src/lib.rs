@@ -3071,4 +3071,50 @@ mod tests {
             );
         }
     }
+
+    /// R42 slice 2: the DTO's retry metadata is exactly what it was, at three input values.
+    ///
+    /// Test-only, and deliberately narrow: slice 2 changes no desktop production line. What it
+    /// pins is that the retry field a caller sees depends only on the CODE -- carried for the
+    /// throttle, omitted for every other code -- so a later refactor of the mapper cannot start
+    /// forwarding a peer's retry advice under a code that never promised one.
+    #[test]
+    fn r42_desktop_retry_projection_is_unchanged() {
+        for retry in [None, Some(0_u64), Some(THROTTLE_RETRY_MS)] {
+            for (case, code) in remote_rows() {
+                let (_, dto_code, message, expected_retry) = expected_remote(&code);
+                let dto = CommandError::from(LocalTransportError::Remote {
+                    code,
+                    retry_after_ms: retry,
+                });
+                // The throttle row forwards the INPUT; every other row omits the field entirely,
+                // whatever the input carried.
+                let expected_retry = match (expected_retry, retry) {
+                    (Some(_), Some(input)) => Some(input),
+                    (Some(_), None) => None,
+                    (None, _) => None,
+                };
+                let mut expected = serde_json::json!({ "code": dto_code, "message": message });
+                if let Some(ms) = expected_retry {
+                    expected["retryAfterMs"] = serde_json::Value::from(ms);
+                }
+                assert_eq!(
+                    serde_json::to_value(&dto).expect("the DTO serializes"),
+                    expected,
+                    "R42S2.DESKTOP.RETRY.{case}.DTO: input retry {retry:?}"
+                );
+            }
+        }
+
+        // A local variant carries no code-borne retry at all, at any input.
+        let dto = CommandError::from(LocalTransportError::InvalidTokenFile);
+        assert_eq!(
+            serde_json::to_value(&dto).expect("the DTO serializes"),
+            serde_json::json!({
+                "code": "local_request_failed",
+                "message": "Beacon could not complete that local request.",
+            }),
+            "R42S2.DESKTOP.RETRY.Local.DTO"
+        );
+    }
 }
