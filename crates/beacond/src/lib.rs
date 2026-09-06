@@ -644,12 +644,283 @@ pub struct TotalsMismatch {
     pub observed: u64,
 }
 
+/// The identity labels a startup refusal may print, and nothing else (R42).
+///
+/// `StoredIdentityUnreadable` carries `what` (which owner could not name its row) beside `raw`
+/// (the unreadable identity). `what` is a `&'static str` at every production site -- but static is
+/// where a string lives, not who wrote it, and this is a public enum. An unrecognized label is
+/// reported as unrecognized rather than echoed; both `what` and `raw` stay in `Debug`.
+fn identity_label(what: &str) -> &'static str {
+    match what {
+        "a Project row's identity is not readable" => "a Project row's identity is not readable",
+        "a Mission row's identity is not readable" => "a Mission row's identity is not readable",
+        "a completion row's Workspace is not readable" => {
+            "a completion row's Workspace is not readable"
+        }
+        "a manifest row's Workspace is not readable" => {
+            "a manifest row's Workspace is not readable"
+        }
+        "a publication row's identity is not readable" => {
+            "a publication row's identity is not readable"
+        }
+        "a sample Project row's Workspace is not readable" => {
+            "a sample Project row's Workspace is not readable"
+        }
+        "a Proposal row's Workspace is not readable" => {
+            "a Proposal row's Workspace is not readable"
+        }
+        "a Ruling row's Workspace is not readable" => "a Ruling row's Workspace is not readable",
+        "a Candidate row's Workspace is not readable" => {
+            "a Candidate row's Workspace is not readable"
+        }
+        "an Evaluation row's Workspace is not readable" => {
+            "an Evaluation row's Workspace is not readable"
+        }
+        "an Artifact row's Workspace is not readable" => {
+            "an Artifact row's Workspace is not readable"
+        }
+        "a Project repository row's identity is not readable" => {
+            "a Project repository row's identity is not readable"
+        }
+        "a Team row's identity is not readable" => "a Team row's identity is not readable",
+        "a Project policy row's identity is not readable" => {
+            "a Project policy row's identity is not readable"
+        }
+        "a Workspace id is not readable" => "a Workspace id is not readable",
+        "a Resident configuration row's identity is not readable" => {
+            "a Resident configuration row's identity is not readable"
+        }
+        "a run row's identity is not readable" => "a run row's identity is not readable",
+        _ => "stored row identity could not be read",
+    }
+}
+
+/// The totals relations a startup refusal may name. Same reasoning as `identity_label`; the two
+/// counts are approved context and are printed either way.
+fn totals_label(table: &str) -> &'static str {
+    match table {
+        "operator_accounts (an owner for the stored Artifacts)" => {
+            "operator_accounts (an owner for the stored Artifacts)"
+        }
+        "events (mission.completed)" => "events (mission.completed)",
+        "mission_success_conditions (rows whose Mission does not exist)" => {
+            "mission_success_conditions (rows whose Mission does not exist)"
+        }
+        "events (mission.admitted)" => "events (mission.admitted)",
+        "project_creation_snapshots" => "project_creation_snapshots",
+        "events (project.created)" => "events (project.created)",
+        "events (project.charter_revised)" => "events (project.charter_revised)",
+        "operator_accounts (an owner for the stored Proposals)" => {
+            "operator_accounts (an owner for the stored Proposals)"
+        }
+        "events (proposal.submitted)" => "events (proposal.submitted)",
+        "resident_lifecycle_decisions" => "resident_lifecycle_decisions",
+        "operator_accounts (an owner for the stored Rulings)" => {
+            "operator_accounts (an owner for the stored Rulings)"
+        }
+        "events (ruling.recorded)" => "events (ruling.recorded)",
+        "events (sample_project.installed)" => "events (sample_project.installed)",
+        "events (team.formed)" => "events (team.formed)",
+        _ => "unrecognized totals relation",
+    }
+}
+
+/// The Supervisor fault's NAME, for a caller of the local transport (R42).
+///
+/// Startup is allowed to name rows -- an operator reading a startup refusal owns the store. A
+/// transport caller may own none of it, so this projection emits the root's name plus, where the
+/// refusal carries one, the owning child's NAME: no Workspace, Mission, Project, Resident, run or
+/// activation id, no digest, no version, no counts, no driver text. Everything stays in `Debug`.
+///
+/// It lives here rather than in `local_transport.rs` because all 72 variants and their private
+/// children are visible from this module. Exhaustive and wildcard-free: a new startup fault is a
+/// compile error here, not a new sentence at the transport boundary.
+pub(crate) fn supervisor_caller_tag(error: &SupervisorError) -> String {
+    match error {
+        SupervisorError::EmptyWorkspaceName => "EmptyWorkspaceName".to_owned(),
+        SupervisorError::WorkspaceNameTooLong => "WorkspaceNameTooLong".to_owned(),
+        SupervisorError::WorkspaceNameContainsControl => "WorkspaceNameContainsControl".to_owned(),
+        SupervisorError::ClockBeforeUnixEpoch => "ClockBeforeUnixEpoch".to_owned(),
+        SupervisorError::Io(..) => "Io".to_owned(),
+        SupervisorError::Store(..) => "Store".to_owned(),
+        SupervisorError::Json(..) => "Json".to_owned(),
+        SupervisorError::InvalidWorkspaceId(..) => "InvalidWorkspaceId".to_owned(),
+        SupervisorError::InvalidEventKind(..) => "InvalidEventKind".to_owned(),
+        SupervisorError::EventPayloadScopeMismatch(..) => "EventPayloadScopeMismatch".to_owned(),
+        SupervisorError::StarterOrganizationEventMismatch(..) => {
+            "StarterOrganizationEventMismatch".to_owned()
+        }
+        SupervisorError::StarterOrganizationStateMismatch { cause, .. } => {
+            format!("StarterOrganizationStateMismatch.{}", cause.name())
+        }
+        SupervisorError::ProjectEventMismatch(..) => "ProjectEventMismatch".to_owned(),
+        SupervisorError::ProjectStateMismatch { cause, .. } => {
+            format!("ProjectStateMismatch.{}", cause.name())
+        }
+        SupervisorError::ProjectTotalsMismatch(..) => "ProjectTotalsMismatch".to_owned(),
+        SupervisorError::LocalModelActivationEventMismatch(..) => {
+            "LocalModelActivationEventMismatch".to_owned()
+        }
+        SupervisorError::LocalModelActivationStateMismatch { cause, .. } => {
+            format!("LocalModelActivationStateMismatch.{}", cause.name())
+        }
+        SupervisorError::LocalModelActivationRowUnreadable(cause) => {
+            format!("LocalModelActivationRowUnreadable.{}", cause.name())
+        }
+        SupervisorError::ResidentLifecycleEventMismatch(..) => {
+            "ResidentLifecycleEventMismatch".to_owned()
+        }
+        SupervisorError::ResidentLifecycleStateMismatch { cause, .. } => {
+            format!("ResidentLifecycleStateMismatch.{}", cause.name())
+        }
+        SupervisorError::ResidentLifecycleTotalsMismatch(..) => {
+            "ResidentLifecycleTotalsMismatch".to_owned()
+        }
+        SupervisorError::ResidentRowUnreadable(cause) => {
+            format!("ResidentRowUnreadable.{}", cause.name())
+        }
+        SupervisorError::ResidentConfigurationEventMismatch(..) => {
+            "ResidentConfigurationEventMismatch".to_owned()
+        }
+        SupervisorError::ResidentConfigurationStateMismatch { cause, .. } => {
+            format!("ResidentConfigurationStateMismatch.{}", cause.name())
+        }
+        SupervisorError::TeamEventMismatch(..) => "TeamEventMismatch".to_owned(),
+        SupervisorError::TeamStateMismatch { cause, .. } => {
+            format!("TeamStateMismatch.{}", cause.name())
+        }
+        SupervisorError::TeamTotalsMismatch(..) => "TeamTotalsMismatch".to_owned(),
+        SupervisorError::MissionEventMismatch(..) => "MissionEventMismatch".to_owned(),
+        SupervisorError::MissionStateMismatch { cause, .. } => {
+            format!("MissionStateMismatch.{}", cause.name())
+        }
+        SupervisorError::MissionTotalsMismatch(..) => "MissionTotalsMismatch".to_owned(),
+        SupervisorError::ProjectPolicyEventMismatch(..) => "ProjectPolicyEventMismatch".to_owned(),
+        SupervisorError::ProjectPolicyStateMismatch { cause, .. } => {
+            format!("ProjectPolicyStateMismatch.{}", cause.name())
+        }
+        SupervisorError::ProjectRepositoryEventMismatch(..) => {
+            "ProjectRepositoryEventMismatch".to_owned()
+        }
+        SupervisorError::ProjectRepositoryStateMismatch { cause, .. } => {
+            format!("ProjectRepositoryStateMismatch.{}", cause.name())
+        }
+        SupervisorError::SampleProjectEventMismatch(..) => "SampleProjectEventMismatch".to_owned(),
+        SupervisorError::SampleProjectStateMismatch { cause, .. } => {
+            format!("SampleProjectStateMismatch.{}", cause.name())
+        }
+        SupervisorError::SampleProjectTotalsMismatch(..) => {
+            "SampleProjectTotalsMismatch".to_owned()
+        }
+        SupervisorError::RunEventMismatch(..) => "RunEventMismatch".to_owned(),
+        SupervisorError::RunStateMismatch { cause, .. } => {
+            format!("RunStateMismatch.{}", cause.name())
+        }
+        SupervisorError::RunClockBeforeEpoch => "RunClockBeforeEpoch".to_owned(),
+        SupervisorError::RunEventStateMismatch { .. } => "RunEventStateMismatch".to_owned(),
+        SupervisorError::ProposalEventMismatch(..) => "ProposalEventMismatch".to_owned(),
+        SupervisorError::ProposalStateMismatch { cause, .. } => {
+            format!("ProposalStateMismatch.{}", cause.name())
+        }
+        SupervisorError::ProposalTotalsMismatch(..) => "ProposalTotalsMismatch".to_owned(),
+        SupervisorError::RulingEventMismatch(..) => "RulingEventMismatch".to_owned(),
+        SupervisorError::EvaluationEventMismatch(..) => "EvaluationEventMismatch".to_owned(),
+        SupervisorError::MissionCompletionEventMismatch(..) => {
+            "MissionCompletionEventMismatch".to_owned()
+        }
+        SupervisorError::MissionCompletionStateMismatch { cause, .. } => {
+            format!("MissionCompletionStateMismatch.{}", cause.name())
+        }
+        SupervisorError::MissionCompletionTotalsMismatch(..) => {
+            "MissionCompletionTotalsMismatch".to_owned()
+        }
+        SupervisorError::EvaluationStateMismatch { cause, .. } => {
+            format!("EvaluationStateMismatch.{}", cause.name())
+        }
+        SupervisorError::EvaluationChainsMismatch(cause) => {
+            format!("EvaluationChainsMismatch.{}", cause.name())
+        }
+        SupervisorError::ArtifactEventMismatch(..) => "ArtifactEventMismatch".to_owned(),
+        SupervisorError::ArtifactStateMismatch { cause, .. } => {
+            format!("ArtifactStateMismatch.{}", cause.name())
+        }
+        SupervisorError::ArtifactTotalsMismatch(..) => "ArtifactTotalsMismatch".to_owned(),
+        SupervisorError::ArtifactRelationMismatch(cause) => {
+            format!("ArtifactRelationMismatch.{}", cause.name())
+        }
+        SupervisorError::MissionImpactClassificationStateMismatch { cause, .. } => {
+            format!(
+                "MissionImpactClassificationStateMismatch.{}",
+                classification_tag(cause)
+            )
+        }
+        SupervisorError::OutcomeManifestStateMismatch { cause, .. } => {
+            format!("OutcomeManifestStateMismatch.{}", cause.name())
+        }
+        SupervisorError::OutcomePublicationStateMismatch { cause, .. } => {
+            format!("OutcomePublicationStateMismatch.{}", cause.name())
+        }
+        SupervisorError::RulingStateMismatch { cause, .. } => {
+            format!("RulingStateMismatch.{}", cause.name())
+        }
+        SupervisorError::RulingTotalsMismatch(..) => "RulingTotalsMismatch".to_owned(),
+        SupervisorError::RulingChainsMismatch(cause) => {
+            format!("RulingChainsMismatch.{}", cause.name())
+        }
+        SupervisorError::CandidateEventMismatch(..) => "CandidateEventMismatch".to_owned(),
+        SupervisorError::CandidateStateMismatch { cause, .. } => {
+            format!("CandidateStateMismatch.{}", cause.name())
+        }
+        SupervisorError::DispatchEventMismatch(..) => "DispatchEventMismatch".to_owned(),
+        SupervisorError::DispatchRecoveryFailed => "DispatchRecoveryFailed".to_owned(),
+        SupervisorError::PauseEventMismatch(..) => "PauseEventMismatch".to_owned(),
+        SupervisorError::SchemaMismatch => "SchemaMismatch".to_owned(),
+        SupervisorError::UnsupportedSchemaVersion(..) => "UnsupportedSchemaVersion".to_owned(),
+        SupervisorError::IntegrityCheckFailed(..) => "IntegrityCheckFailed".to_owned(),
+        SupervisorError::StoredIdentityUnreadable { .. } => "StoredIdentityUnreadable".to_owned(),
+        SupervisorError::StartupEnumerationFailed { pass, .. } => {
+            format!("StartupEnumerationFailed.{}", pass.name())
+        }
+        SupervisorError::ForeignKeyViolations(..) => "ForeignKeyViolations".to_owned(),
+    }
+}
+
+/// The classification fault's token for the TRANSPORT tag only.
+///
+/// Startup keeps its existing spelling, which includes the validated predecessor digest -- an
+/// approved row key there. This projection drops it: at the transport boundary that digest is a
+/// record identity the caller may not own.
+fn classification_tag(cause: &mission_impact::ClassificationStoreError) -> String {
+    use mission_impact::ClassificationStoreError as Fault;
+    match cause {
+        Fault::DigestMismatch => "digest_mismatch".to_owned(),
+        Fault::Malformed(reason) => format!("malformed.{reason}"),
+        Fault::ColumnsDisagree => "columns_disagree".to_owned(),
+        Fault::CitedIdentityMismatch => "cited_identity_mismatch".to_owned(),
+        Fault::CrossWorkspace => "cross_workspace".to_owned(),
+        Fault::CopiedBitDisagrees => "copied_bit_disagrees".to_owned(),
+        Fault::PolicyProjectIsNotTheMissions => "policy_project_is_not_the_missions".to_owned(),
+        Fault::PolicyRevisionHasAnotherCharter => "policy_revision_has_another_charter".to_owned(),
+        Fault::Predecessor { fault, .. } => format!("predecessor.{fault}"),
+        Fault::Store(_) => "store".to_owned(),
+    }
+}
+
 impl fmt::Display for TotalsMismatch {
+    /// R42: both counts are approved context and stay; `table` goes through the allowlist.
+    ///
+    /// Preventive, and worth saying plainly: all 14 production labels are source literals today,
+    /// and no store-controlled path to this field has been demonstrated. But `table` is a public
+    /// `&'static str` on a public struct, and a static lifetime says where a string lives, not who
+    /// wrote it -- the same shape slice 1 hid in the publisher. An unrecognized label is reported
+    /// as unrecognized rather than normalized to a table it might not be.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
             "{}: the log accounts for {} but the store holds {}",
-            self.table, self.expected, self.observed
+            totals_label(self.table),
+            self.expected,
+            self.observed
         )
     }
 }
@@ -712,25 +983,6 @@ impl StartupPass {
     }
 }
 
-/// Store-derived text, made safe for a ONE-LINE operator message (sol1's P1-1).
-///
-/// Bounded and escaped. A stored identifier is attacker-controlled in the only sense that matters
-/// at startup -- a row can hold any text at all -- and a newline in it forges an extra line in the
-/// operator's log, which is a claim the daemon never made. `{:?}` escapes the newline rather than
-/// obeying it, and the cap stops one row from pushing the rest of the line off the screen.
-///
-/// The RAW value is never lost: it stays in the variant, so `Debug` and `source()` still carry it
-/// whole. Only the one-line rendering is bounded.
-fn quoted_store_text(value: &str) -> String {
-    const CAP: usize = 120;
-    let count = value.chars().count();
-    if count <= CAP {
-        return format!("{value:?}");
-    }
-    let head: String = value.chars().take(CAP).collect();
-    format!("{head:?} (truncated from {count} characters)")
-}
-
 impl fmt::Display for SupervisorError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -748,22 +1000,26 @@ impl fmt::Display for SupervisorError {
             Self::ClockBeforeUnixEpoch => {
                 write!(formatter, "system clock is before the Unix epoch")
             }
-            Self::Io(error) => write!(formatter, "cannot prepare the store directory: {error}"),
+            Self::Io(_) => write!(formatter, "cannot prepare the store directory: Io"),
             // R28.4 at the INNERMOST point: the driver's own words never reach a printed line.
             // Every mapping onto this arm -- every pass's `Store` fault, `lib.rs`'s generic store
             // failures -- becomes compliant here rather than at each call site. The text stays
             // reachable through `Debug` (derived on this enum, so the `rusqlite::Error` is in it).
             Self::Store(_) => formatter.write_str("store operation failed"),
-            Self::Json(error) => write!(formatter, "cannot encode an event payload: {error}"),
-            Self::InvalidWorkspaceId(value) => {
+            Self::Json(_) => write!(formatter, "cannot encode an event payload: Json"),
+            // R42: quoting and truncating bounded the disclosure; it did not remove it. The
+            // rejected String stays in `Debug`.
+            Self::InvalidWorkspaceId(_) => {
                 write!(
                     formatter,
-                    "store contains an invalid Workspace id: {}",
-                    quoted_store_text(value)
+                    "store contains an invalid Workspace id: InvalidWorkspaceId"
                 )
             }
-            Self::InvalidEventKind(value) => {
-                write!(formatter, "store contains an unknown Event kind: {value}")
+            Self::InvalidEventKind(_) => {
+                write!(
+                    formatter,
+                    "store contains an unknown Event kind: InvalidEventKind"
+                )
             }
             Self::EventPayloadScopeMismatch(sequence) => write!(
                 formatter,
@@ -1172,11 +1428,20 @@ impl fmt::Display for SupervisorError {
             Self::UnsupportedSchemaVersion(version) => {
                 write!(formatter, "store schema version {version} is unsupported")
             }
-            Self::IntegrityCheckFailed(result) => {
-                write!(formatter, "SQLite integrity check failed: {result}")
+            Self::IntegrityCheckFailed(_) => {
+                write!(
+                    formatter,
+                    "SQLite integrity check failed: IntegrityCheckFailed"
+                )
             }
-            Self::StoredIdentityUnreadable { what, raw } => {
-                write!(formatter, "{what}: {}", quoted_store_text(raw))
+            // R42: `what` says WHICH owner could not name its row -- useful, and closed by the
+            // allowlist below. `raw` is the unreadable identity itself and stays in `Debug`.
+            Self::StoredIdentityUnreadable { what, .. } => {
+                write!(
+                    formatter,
+                    "{}: StoredIdentityUnreadable",
+                    identity_label(what)
+                )
             }
             Self::StoredIntegerKeyUnreadable {
                 what,
@@ -3151,8 +3416,13 @@ mod tests {
     ///
     /// A stored identity column can hold anything. Interpolated raw, a newline in it puts a line
     /// the daemon never wrote into the operator's log, and 4 KB of padding pushes the real message
-    /// out of view. The one-line message is bounded and escaped; the raw value stays whole in
-    /// `Debug`, which is where R28.4 already sends everything else.
+    /// out of view.
+    ///
+    /// R42 amended what this bar requires. Escaping and truncating BOUNDED the disclosure; they
+    /// did not remove it, and "the line must contain an escaped `\n`" was a requirement to
+    /// disclose a substring of store text. The invariant kept here is the one that always
+    /// mattered: one line, bounded, naming the owner and the fault -- and now carrying nothing of
+    /// the raw value at all. The raw value stays whole in `Debug`.
     #[test]
     fn sol1_stored_identity_text_cannot_forge_a_startup_line() {
         let forged = format!("\nSOL1_FORGED_STARTUP_LINE{}", "x".repeat(4096));
@@ -3165,28 +3435,20 @@ mod tests {
         assert_eq!(
             line.lines().count(),
             1,
-            "the refusal spans more than one line, so the store wrote to the operator log: {line}"
+            "R42S2.IDENTITY.Forged.ONE_LINE: the store wrote to the operator log: {line}"
         );
         assert!(
-            !line.contains('\n'),
-            "a raw newline reached the line: {line}"
+            !line.contains('\n') && !line.contains('\r'),
+            "R42S2.IDENTITY.Forged.ONE_LINE: a raw newline reached the line: {line}"
         );
         assert!(
-            line.contains("\\n"),
-            "the newline is not escaped, only absent: {line}"
+            !line.contains("SOL1_FORGED_STARTUP_LINE"),
+            "R42S2.IDENTITY.Forged.NO_NEEDLE: {line}"
         );
-        assert!(
-            line.contains("a Mission row's identity is not readable"),
-            "the refusal lost its name: {line}"
-        );
-        assert!(
-            line.chars().count() < 300,
-            "the line is not bounded: {} characters",
-            line.chars().count()
-        );
-        assert!(
-            line.contains("truncated from 4121 characters"),
-            "the line does not say it truncated: {line}"
+        // The whole line, independently written, not a substring check.
+        assert_eq!(
+            line, "a Mission row's identity is not readable: StoredIdentityUnreadable",
+            "R42S2.IDENTITY.Forged.PROJECTION"
         );
 
         // ...and nothing is thrown away: Debug still carries the whole value.
@@ -3200,12 +3462,31 @@ mod tests {
     /// The same rule on the older arm sol1 also cited.
     #[test]
     fn sol1_an_invalid_workspace_id_is_bounded_and_escaped_too() {
-        let refusal =
-            SupervisorError::InvalidWorkspaceId(format!("\nSOL1_FORGED{}", "y".repeat(4096)));
+        let raw = format!("\nSOL1_FORGED{}", "y".repeat(4096));
+        let refusal = SupervisorError::InvalidWorkspaceId(raw.clone());
         let line = refusal.to_string();
-        assert_eq!(line.lines().count(), 1, "{line}");
-        assert!(!line.contains('\n') && line.contains("\\n"), "{line}");
-        assert!(line.chars().count() < 300, "{}", line.chars().count());
+        assert_eq!(
+            line.lines().count(),
+            1,
+            "R42S2.IDENTITY.Workspace.ONE_LINE: {line}"
+        );
+        assert!(
+            !line.contains('\n') && !line.contains('\r'),
+            "R42S2.IDENTITY.Workspace.ONE_LINE: {line}"
+        );
+        assert!(
+            !line.contains("SOL1_FORGED"),
+            "R42S2.IDENTITY.Workspace.NO_NEEDLE: {line}"
+        );
+        assert_eq!(
+            line, "store contains an invalid Workspace id: InvalidWorkspaceId",
+            "R42S2.IDENTITY.Workspace.PROJECTION"
+        );
+        // Bounded is now trivially true, and the rejected String is still whole in Debug.
+        assert!(
+            format!("{refusal:?}").contains("SOL1_FORGED"),
+            "R42S2.IDENTITY.Workspace.DEBUG_RETAINS"
+        );
     }
     use crate::SCHEMA_VERSION;
     use std::fs;
@@ -7074,5 +7355,302 @@ mod tests {
         assert_eq!(version(&current), 26);
         current.execute_batch(MIGRATION_V27).unwrap();
         assert_eq!(version(&current), 27);
+    }
+
+    // -------------------------------------------------------------------------------------
+    // R42 slice 2, commit 1: the startup projections and the caller-safe Supervisor tag.
+    // -------------------------------------------------------------------------------------
+
+    const R42S2_NEEDLE_A: &str = "R42S2_PRIVATE_A";
+    const R42S2_NEEDLE_B: &str = "R42S2_PRIVATE_B";
+    /// Static, because `what` and `table` are `&'static str`: the point is that static says where
+    /// a string lives, not who wrote it.
+    const R42S2_STATIC_A: &str = "R42S2_PRIVATE_A /home/example/private.txt column=private_column";
+    const R42S2_STATIC_B: &str = "R42S2_PRIVATE_B /home/example/other.txt column=other_column";
+
+    /// The 17 identity labels a startup refusal may print, written here from the reviewed list --
+    /// never read back from the production allowlist this test constrains.
+    const R42S2_IDENTITY_LABELS: [&str; 17] = [
+        "a Project row's identity is not readable",
+        "a Mission row's identity is not readable",
+        "a completion row's Workspace is not readable",
+        "a manifest row's Workspace is not readable",
+        "a publication row's identity is not readable",
+        "a sample Project row's Workspace is not readable",
+        "a Proposal row's Workspace is not readable",
+        "a Ruling row's Workspace is not readable",
+        "a Candidate row's Workspace is not readable",
+        "an Evaluation row's Workspace is not readable",
+        "an Artifact row's Workspace is not readable",
+        "a Project repository row's identity is not readable",
+        "a Team row's identity is not readable",
+        "a Project policy row's identity is not readable",
+        "a Workspace id is not readable",
+        "a Resident configuration row's identity is not readable",
+        "a run row's identity is not readable",
+    ];
+
+    /// The 14 totals labels, likewise.
+    const R42S2_TOTALS_LABELS: [&str; 14] = [
+        "operator_accounts (an owner for the stored Artifacts)",
+        "events (mission.completed)",
+        "mission_success_conditions (rows whose Mission does not exist)",
+        "events (mission.admitted)",
+        "project_creation_snapshots",
+        "events (project.created)",
+        "events (project.charter_revised)",
+        "operator_accounts (an owner for the stored Proposals)",
+        "events (proposal.submitted)",
+        "resident_lifecycle_decisions",
+        "operator_accounts (an owner for the stored Rulings)",
+        "events (ruling.recorded)",
+        "events (sample_project.installed)",
+        "events (team.formed)",
+    ];
+
+    /// R42 slice 2: the two label vocabularies are closed, and an unknown label is reported as
+    /// unknown rather than echoed or normalized.
+    #[test]
+    fn r42_startup_labels_are_closed() {
+        assert_eq!(
+            R42S2_IDENTITY_LABELS.len(),
+            17,
+            "R42S2.LABELS.CARDINALITY.Identity"
+        );
+        assert_eq!(
+            R42S2_TOTALS_LABELS.len(),
+            14,
+            "R42S2.LABELS.CARDINALITY.Totals"
+        );
+
+        // Unknown labels lead, so a guard that echoes its input fails here first.
+        for (case, what, raw, needle) in [
+            (
+                "Identity.UnknownLabel.A",
+                R42S2_STATIC_A,
+                R42S2_STATIC_A,
+                R42S2_NEEDLE_A,
+            ),
+            (
+                "Identity.UnknownLabel.B",
+                R42S2_STATIC_B,
+                R42S2_STATIC_B,
+                R42S2_NEEDLE_B,
+            ),
+        ] {
+            let refusal = SupervisorError::StoredIdentityUnreadable {
+                what,
+                raw: raw.to_owned(),
+            };
+            let line = refusal.to_string();
+            assert!(
+                !line.contains(needle),
+                "R42S2.LABELS.{case}.NO_NEEDLE: {line}"
+            );
+            assert!(
+                !line.contains('\n') && !line.contains('\r'),
+                "R42S2.LABELS.{case}.ONE_LINE: {line:?}"
+            );
+            assert!(
+                format!("{refusal:?}").contains(needle),
+                "R42S2.LABELS.{case}.DEBUG_RETAINS"
+            );
+            assert_eq!(
+                line, "stored row identity could not be read: StoredIdentityUnreadable",
+                "R42S2.LABELS.{case}.PROJECTION"
+            );
+        }
+
+        for (case, table, needle) in [
+            ("Totals.UnknownLabel.A", R42S2_STATIC_A, R42S2_NEEDLE_A),
+            ("Totals.UnknownLabel.B", R42S2_STATIC_B, R42S2_NEEDLE_B),
+        ] {
+            let totals = crate::TotalsMismatch {
+                table,
+                expected: 7,
+                observed: 11,
+            };
+            let line = totals.to_string();
+            assert!(
+                !line.contains(needle),
+                "R42S2.LABELS.{case}.NO_NEEDLE: {line}"
+            );
+            assert!(
+                format!("{totals:?}").contains(needle),
+                "R42S2.LABELS.{case}.DEBUG_RETAINS"
+            );
+            // Both counts survive, and they differ, so a guard printing one twice fails.
+            assert_eq!(
+                line, "unrecognized totals relation: the log accounts for 7 but the store holds 11",
+                "R42S2.LABELS.{case}.PROJECTION"
+            );
+        }
+
+        // Every known identity label is preserved exactly, with a hidden raw payload.
+        for label in R42S2_IDENTITY_LABELS {
+            let refusal = SupervisorError::StoredIdentityUnreadable {
+                what: label,
+                raw: format!("{R42S2_NEEDLE_A} /home/example/private.txt"),
+            };
+            let line = refusal.to_string();
+            assert!(
+                !line.contains(R42S2_NEEDLE_A),
+                "R42S2.LABELS.Identity.{label}.NO_NEEDLE: {line}"
+            );
+            assert!(
+                format!("{refusal:?}").contains(R42S2_NEEDLE_A),
+                "R42S2.LABELS.Identity.{label}.DEBUG_RETAINS"
+            );
+            assert_eq!(
+                line,
+                format!("{label}: StoredIdentityUnreadable"),
+                "R42S2.LABELS.Identity.{label}.PROJECTION"
+            );
+        }
+
+        // Every known totals label, with both independent count pairs.
+        for label in R42S2_TOTALS_LABELS {
+            for (expected, observed) in [(7_u64, 11_u64), (13, 17)] {
+                let totals = crate::TotalsMismatch {
+                    table: label,
+                    expected,
+                    observed,
+                };
+                assert_eq!(
+                    totals.to_string(),
+                    format!(
+                        "{label}: the log accounts for {expected} but the store holds {observed}"
+                    ),
+                    "R42S2.LABELS.Totals.{label}.CONTEXT"
+                );
+            }
+        }
+    }
+
+    /// R42 slice 2: the seven changed startup lines, and the caller-safe tag for all 72 roots.
+    ///
+    /// Scope, stated rather than implied: the CALLER projection is checked for every one of the
+    /// 72 roots (its literals are the spec's, resolved through one representative child per
+    /// parent). The STARTUP line is checked for the seven sites this commit changes; the other 65
+    /// startup lines are untouched by this commit and are covered by the suites that already own
+    /// them -- see the build report's NOT PROBED list.
+    #[test]
+    fn r42_supervisor_projection_is_closed() {
+        // The five original arms, in the spec's lead order.
+        for (case, refusal, expected, needle) in [
+            (
+                "Io",
+                SupervisorError::Io(std::io::Error::other(format!(
+                    "{R42S2_NEEDLE_A} /home/example/private.txt"
+                ))),
+                "cannot prepare the store directory: Io",
+                Some(R42S2_NEEDLE_A),
+            ),
+            (
+                "Json",
+                SupervisorError::Json(serde::de::Error::custom(format!(
+                    "{R42S2_NEEDLE_A} /home/example/private.txt"
+                ))),
+                "cannot encode an event payload: Json",
+                Some(R42S2_NEEDLE_A),
+            ),
+            (
+                "InvalidWorkspaceId",
+                SupervisorError::InvalidWorkspaceId(format!("{R42S2_NEEDLE_A} not-a-uuid")),
+                "store contains an invalid Workspace id: InvalidWorkspaceId",
+                Some(R42S2_NEEDLE_A),
+            ),
+            (
+                "InvalidEventKind",
+                SupervisorError::InvalidEventKind(format!("{R42S2_NEEDLE_A}.kind")),
+                "store contains an unknown Event kind: InvalidEventKind",
+                Some(R42S2_NEEDLE_A),
+            ),
+            (
+                "IntegrityCheckFailed",
+                SupervisorError::IntegrityCheckFailed(format!("{R42S2_NEEDLE_A} row 3 missing")),
+                "SQLite integrity check failed: IntegrityCheckFailed",
+                Some(R42S2_NEEDLE_A),
+            ),
+            (
+                "StoredIdentityUnreadable.UnknownLabel",
+                SupervisorError::StoredIdentityUnreadable {
+                    what: R42S2_STATIC_A,
+                    raw: format!("{R42S2_NEEDLE_A} /home/example/private.txt"),
+                },
+                "stored row identity could not be read: StoredIdentityUnreadable",
+                Some(R42S2_NEEDLE_A),
+            ),
+        ] {
+            let line = refusal.to_string();
+            if let Some(needle) = needle {
+                assert!(
+                    !line.contains(needle),
+                    "R42S2.SUPERVISOR.{case}.NO_NEEDLE: {line}"
+                );
+                assert!(
+                    format!("{refusal:?}").contains(needle),
+                    "R42S2.SUPERVISOR.{case}.DEBUG_RETAINS"
+                );
+            }
+            assert!(
+                !line.contains('\n') && !line.contains('\r'),
+                "R42S2.SUPERVISOR.{case}.ONE_LINE: {line:?}"
+            );
+            assert_eq!(line, expected, "R42S2.SUPERVISOR.{case}.PROJECTION");
+        }
+
+        // The seventh changed site: a totals-bearing root still carries both counts and its label.
+        let totals_root = SupervisorError::ProjectTotalsMismatch(crate::TotalsMismatch {
+            table: "project_creation_snapshots",
+            expected: 7,
+            observed: 11,
+        });
+        assert_eq!(
+            totals_root.to_string(),
+            "the Projects do not agree with the store as a whole -- project_creation_snapshots: \
+             the log accounts for 7 but the store holds 11",
+            "R42S2.SUPERVISOR.ProjectTotalsMismatch.CONTEXT"
+        );
+
+        // An own key still appears in the startup line, and changing it changes the line.
+        let first = SupervisorError::EventPayloadScopeMismatch(11);
+        let second = SupervisorError::EventPayloadScopeMismatch(17);
+        assert!(
+            first.to_string().contains("11"),
+            "R42S2.SUPERVISOR.OwnKey.KEYS"
+        );
+        assert_ne!(
+            first.to_string(),
+            second.to_string(),
+            "R42S2.SUPERVISOR.OwnKey.KEYS"
+        );
+
+        // And the caller tag for all 72 roots carries no key at all.
+        let keyed = SupervisorError::ProjectStateMismatch {
+            workspace_id: uuid::Uuid::new_v4(),
+            project_id: uuid::Uuid::new_v4(),
+            cause: crate::ProjectError::NotFound,
+        };
+        let tag = crate::supervisor_caller_tag(&keyed);
+        assert_eq!(
+            tag, "ProjectStateMismatch.NotFound",
+            "R42S2.SUPERVISOR.Tag.PROJECTION"
+        );
+        for uuid in [
+            match &keyed {
+                SupervisorError::ProjectStateMismatch { workspace_id, .. } => *workspace_id,
+                _ => unreachable!(),
+            },
+            match &keyed {
+                SupervisorError::ProjectStateMismatch { project_id, .. } => *project_id,
+                _ => unreachable!(),
+            },
+        ] {
+            assert!(
+                !tag.contains(&uuid.to_string()),
+                "R42S2.SUPERVISOR.Tag.KEYS: {tag}"
+            );
+        }
     }
 }
