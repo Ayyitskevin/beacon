@@ -533,3 +533,65 @@ fn restart_refuses_an_activation_decision_without_its_exact_event() {
         );
     }
 }
+
+/// R45.1: activation history is ordered by a service-generated positive sequence. A stored
+/// negative key must be refused and named, not accepted as an alternative history.
+#[test]
+fn sol1_startup_refuses_minimum_activation_sequence() {
+    let store = TestStore::new("sol1-min-sequence");
+    let accounts = enrolled_accounts(&store);
+    let mut responses = two_model_inspection_responses();
+    responses.extend(two_model_inspection_responses());
+    let (address, server) = serve_ollama(responses);
+    let service = LocalModelActivationService::new(
+        accounts,
+        store.workspace_id,
+        LocalModelEndpoint::new(address).unwrap(),
+    );
+    let review = service.inspect(MODEL_NAME, MODEL_DIGEST).unwrap();
+    let active = service
+        .activate(review, vec![ProviderFeature::Completion])
+        .unwrap();
+    server.join().unwrap();
+    drop(service);
+
+    let connection = Connection::open(&store.path).unwrap();
+    let trigger: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema
+             WHERE type = 'trigger' AND name = 'local_model_activation_decisions_no_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute_batch("DROP TRIGGER local_model_activation_decisions_no_update")
+        .unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE local_model_activation_decisions SET sequence = ?1 WHERE id = ?2",
+                rusqlite::params![i64::MIN, active.id.to_string()],
+            )
+            .unwrap(),
+        1,
+        "the i64::MIN sequence did not plant"
+    );
+    connection.execute_batch(&trigger).unwrap();
+    drop(connection);
+
+    let error = Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .expect_err("startup accepted activation sequence i64::MIN as Ready");
+    let SupervisorError::StoredIdentityUnreadable { what, raw } = &error else {
+        panic!("the activation ordering key was refused under the wrong name: {error:?}");
+    };
+    assert_eq!(
+        *what,
+        "a local-model activation decision's ordering key is not readable"
+    );
+    assert!(raw.contains(&active.id.to_string()));
+    assert!(raw.contains(&i64::MIN.to_string()));
+}
