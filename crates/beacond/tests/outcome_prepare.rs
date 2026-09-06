@@ -3866,19 +3866,24 @@ fn sol1_get_refuses_a_valid_evaluation_swapped_into_the_relation() {
 /// so the fixture reads the order back and picks — it does not hope.
 #[test]
 fn startup_refuses_a_manifest_whose_column_disagrees_and_names_the_row() {
-    let (fixture, manifest, sources) = ordinary("r28-manifest-startup");
-    fixture.outcomes.prepare(&manifest, &sources).unwrap();
-    let second = OutcomeManifestV1 {
-        appendix_request: AppendixRequest::Include,
-        ..manifest.clone()
-    };
-    fixture
-        .outcomes
-        .prepare(&second, &sources)
-        .expect("a second honest manifest, so rows[0] is not the tampered row");
+    // R44: BOTH ENDS. Tampering only the last-sorting row makes "names the
+    // failing row" and "names the last row" the same assertion, and a Row arm
+    // naming `rows.last()` satisfies it. One run per end, so `rows[0]` and
+    // `rows.last()` are each wrong in exactly one of them.
+    for end in ["last", "first"] {
+        let (fixture, manifest, sources) = ordinary(&format!("r28-manifest-startup-{end}"));
+        fixture.outcomes.prepare(&manifest, &sources).unwrap();
+        let second = OutcomeManifestV1 {
+            appendix_request: AppendixRequest::Include,
+            ..manifest.clone()
+        };
+        fixture
+            .outcomes
+            .prepare(&second, &sources)
+            .expect("a second honest manifest, so rows[0] is not the tampered row");
 
-    let connection = fixture.store.connect();
-    let ordered: Vec<String> = connection
+        let connection = fixture.store.connect();
+        let ordered: Vec<String> = connection
         .prepare(
             "SELECT manifest_digest FROM outcome_manifests ORDER BY workspace_id, manifest_digest",
         )
@@ -3887,89 +3892,96 @@ fn startup_refuses_a_manifest_whose_column_disagrees_and_names_the_row() {
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    assert_eq!(
-        ordered.len(),
-        2,
-        "the fixture must hold two manifests: {ordered:?}"
-    );
-    let target = ordered.last().unwrap().clone();
+        assert_eq!(
+            ordered.len(),
+            2,
+            "the fixture must hold two manifests: {ordered:?}"
+        );
+        let target = if end == "last" {
+            ordered.last()
+        } else {
+            ordered.first()
+        }
+        .unwrap()
+        .clone();
 
-    connection
-        .execute_batch("DROP TRIGGER outcome_manifests_no_update;")
-        .unwrap();
-    connection
-        .execute(
-            "UPDATE outcome_manifests SET renderer_version = ?1 WHERE manifest_digest = ?2",
-            params!["r28-not-what-the-bytes-say", target],
-        )
-        .unwrap();
-    // Byte-exact, as migration 0030 wrote it (R39.3): SQLite keeps the literal CREATE text, and
-    // startup compares the schema before it reaches any verification pass.
-    connection
-        .execute_batch(
-            "CREATE TRIGGER outcome_manifests_no_update
+        connection
+            .execute_batch("DROP TRIGGER outcome_manifests_no_update;")
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE outcome_manifests SET renderer_version = ?1 WHERE manifest_digest = ?2",
+                params!["r28-not-what-the-bytes-say", target],
+            )
+            .unwrap();
+        // Byte-exact, as migration 0030 wrote it (R39.3): SQLite keeps the literal CREATE text, and
+        // startup compares the schema before it reaches any verification pass.
+        connection
+            .execute_batch(
+                "CREATE TRIGGER outcome_manifests_no_update
 BEFORE UPDATE ON outcome_manifests
 BEGIN
     SELECT RAISE(ABORT, 'Outcome manifests are immutable');
 END;",
-        )
-        .unwrap();
+            )
+            .unwrap();
 
-    // The belt refuses it ON READ, so the planted fault is real and has a name of its own.
-    let read = fixture
-        .outcomes
-        .manifest(&target)
-        .expect_err("the reader trusted a projection its bytes do not support");
-    assert!(
-        matches!(
-            read,
-            PrepareRefusal::Manifest(ManifestStoreRefusal::ColumnDisagrees {
-                column: "renderer_version"
-            })
-        ),
-        "the planted fault is not the one this test is about: {read:?}"
-    );
-    drop(connection);
-
-    let refusal = astra_boot(&fixture)
-        .expect_err("a store holding a manifest that disagrees with its bytes reopened Ready");
-    assert!(
-        matches!(
-            &refusal,
-            beacond::SupervisorError::OutcomeManifestStateMismatch {
-                workspace_id,
-                manifest_digest,
-                cause: ManifestStoreRefusal::ColumnDisagrees {
+        // The belt refuses it ON READ, so the planted fault is real and has a name of its own.
+        let read = fixture
+            .outcomes
+            .manifest(&target)
+            .expect_err("the reader trusted a projection its bytes do not support");
+        assert!(
+            matches!(
+                read,
+                PrepareRefusal::Manifest(ManifestStoreRefusal::ColumnDisagrees {
                     column: "renderer_version"
-                },
-            } if *workspace_id == fixture.workspace_id && manifest_digest == &target
-        ),
-        "refused for the wrong reason, with the cause flattened, or naming the wrong row: \
-         {refusal:?}"
-    );
+                })
+            ),
+            "the planted fault is not the one this test is about: {read:?}"
+        );
+        drop(connection);
 
-    // R28.4: the key and the fault's NAME, and not the carried refusal's own text.
-    let line = refusal.to_string();
-    assert!(
-        line.contains(&target) && line.contains(&fixture.workspace_id.to_string()),
-        "the refusal does not name the row it refused: {line}"
-    );
-    assert!(
-        line.contains("ColumnDisagrees"),
-        "the refusal does not name the fault: {line}"
-    );
-    let carried = ManifestStoreRefusal::ColumnDisagrees {
-        column: "renderer_version",
+        let refusal = astra_boot(&fixture)
+            .expect_err("a store holding a manifest that disagrees with its bytes reopened Ready");
+        assert!(
+            matches!(
+                &refusal,
+                beacond::SupervisorError::OutcomeManifestStateMismatch {
+                    workspace_id,
+                    manifest_digest,
+                    cause: ManifestStoreRefusal::ColumnDisagrees {
+                        column: "renderer_version"
+                    },
+                } if *workspace_id == fixture.workspace_id && manifest_digest == &target
+            ),
+            "refused for the wrong reason, with the cause flattened, or naming the wrong row: \
+         {refusal:?}"
+        );
+
+        // R28.4: the key and the fault's NAME, and not the carried refusal's own text.
+        let line = refusal.to_string();
+        assert!(
+            line.contains(&target) && line.contains(&fixture.workspace_id.to_string()),
+            "the refusal does not name the row it refused: {line}"
+        );
+        assert!(
+            line.contains("ColumnDisagrees"),
+            "the refusal does not name the fault: {line}"
+        );
+        let carried = ManifestStoreRefusal::ColumnDisagrees {
+            column: "renderer_version",
+        }
+        .to_string();
+        assert!(
+            !line.contains(&carried),
+            "the carried refusal's own text reached the one-line message: {line}"
+        );
+        assert!(
+            format!("{refusal:?}").contains("renderer_version"),
+            "the carried fault is not reachable through Debug: {refusal:?}"
+        );
     }
-    .to_string();
-    assert!(
-        !line.contains(&carried),
-        "the carried refusal's own text reached the one-line message: {line}"
-    );
-    assert!(
-        format!("{refusal:?}").contains("renderer_version"),
-        "the carried fault is not reachable through Debug: {refusal:?}"
-    );
 }
 
 /// R28.1 pass 3 of 5: a Mission whose success-condition projection disagrees with its own bytes is
