@@ -1821,7 +1821,7 @@ fn a_store_with_classifications_crosses_0032_and_keeps_them() {
     })
     .expect("a store written before 0032 migrates forward");
     assert_eq!(report.diagnostics.status, DiagnosticStatus::Ready);
-    assert_eq!(report.diagnostics.schema_version, 32);
+    assert_eq!(report.diagnostics.schema_version, 33);
 
     let connection = stored.connection();
     let carried: Vec<u8> = connection
