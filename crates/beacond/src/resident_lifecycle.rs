@@ -79,6 +79,119 @@ pub struct ResidentAgentView {
     pub updated_at_ms: u64,
 }
 
+/// Which fault the ResidentLifecycle startup pass hit, and WHICH ROW hit it (R27.1's shape, R28.1).
+pub(crate) enum ResidentLifecycleStateFault {
+    /// The enumeration itself failed: no row to name, because none was reached.
+    Store(rusqlite::Error),
+    /// One ResidentLifecycle did not re-prove. `cause` is the owning reader's OWN error, carried whole.
+    Row {
+        workspace_id: Uuid,
+        resident_id: Uuid,
+        cause: ResidentLifecycleError,
+    },
+    /// A COUNT across the store that does not match the log: numbers, never an invented row.
+    Totals(crate::TotalsMismatch),
+    /// A row that could not be READ at all, so it cannot be named: the identity columns are part
+    /// of what failed. Distinct from `Row`, which names a row that read and did not re-prove.
+    Unreadable(ResidentLifecycleError),
+    /// A row whose Workspace column is not a UUID. Unreachable while the foreign-key check and
+    /// the Workspace pass run first.
+    Identity {
+        workspace_id: String,
+        resident_id: String,
+    },
+}
+
+impl ResidentLifecycleError {
+    /// The variant's NAME, for R28.4's one-line startup message.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Account(_) => "Account",
+            Self::NotFound => "NotFound",
+            Self::InvalidTransition => "InvalidTransition",
+            Self::StaleDecision => "StaleDecision",
+            Self::InvalidStore => "InvalidStore",
+            Self::Store(_) => "Store",
+            Self::Json(_) => "Json",
+        }
+    }
+}
+
+impl fmt::Display for ResidentLifecycleStateFault {
+    /// R28.4: the KEY and the fault's NAME, never the carried error's own text.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(_) => formatter.write_str("the ResidentLifecycles could not be read"),
+            Self::Row {
+                workspace_id,
+                resident_id,
+                cause,
+            } => write!(
+                formatter,
+                "ResidentLifecycle {resident_id} in Workspace {workspace_id} does not re-prove: {}",
+                cause.name()
+            ),
+            Self::Totals(totals) => write!(
+                formatter,
+                "the Resident lifecycle decisions do not agree with the store -- {totals}"
+            ),
+            Self::Unreadable(cause) => write!(
+                formatter,
+                "a Resident row could not be read: {}",
+                cause.name()
+            ),
+            Self::Identity {
+                workspace_id,
+                resident_id,
+            } => write!(
+                formatter,
+                "a ResidentLifecycle row's Workspace is not readable: {workspace_id}, ResidentLifecycle \
+                 {resident_id}"
+            ),
+        }
+    }
+}
+
+/// Hand-written and NOT delegating to `Display`: R28.4 keeps the carried text reachable here.
+impl fmt::Debug for ResidentLifecycleStateFault {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => formatter.debug_tuple("Store").field(error).finish(),
+            Self::Totals(totals) => formatter.debug_tuple("Totals").field(totals).finish(),
+            Self::Unreadable(cause) => formatter.debug_tuple("Unreadable").field(cause).finish(),
+            Self::Row {
+                workspace_id,
+                resident_id,
+                cause,
+            } => formatter
+                .debug_struct("Row")
+                .field("workspace_id", workspace_id)
+                .field("resident_id", resident_id)
+                .field("cause", cause)
+                .finish(),
+            Self::Identity {
+                workspace_id,
+                resident_id,
+            } => formatter
+                .debug_struct("Identity")
+                .field("workspace_id", workspace_id)
+                .field("resident_id", resident_id)
+                .finish(),
+        }
+    }
+}
+
+impl std::error::Error for ResidentLifecycleStateFault {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::Unreadable(cause) | Self::Row { cause, .. } => Some(cause),
+            // A `TotalsMismatch` is DATA, not a nested error.
+            Self::Totals(_) | Self::Identity { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum ResidentLifecycleError {
     Account(OperatorAccountError),
@@ -484,9 +597,10 @@ pub(crate) fn verify_lifecycle_event(
 
 pub(crate) fn verify_lifecycle_state(
     connection: &Connection,
-) -> Result<(), ResidentLifecycleError> {
-    let mut statement = connection.prepare(
-        "SELECT agent.id, agent.workspace_id, agent.role, agent.display_name_state,
+) -> Result<(), ResidentLifecycleStateFault> {
+    let mut statement = connection
+        .prepare(
+            "SELECT agent.id, agent.workspace_id, agent.role, agent.display_name_state,
                 agent.display_name, agent.lifecycle, latest.id,
                 agent.created_at_ms, agent.updated_at_ms
          FROM agents AS agent
@@ -501,83 +615,113 @@ pub(crate) fn verify_lifecycle_state(
           )
          WHERE agent.kind = 'resident'
          ORDER BY agent.workspace_id, agent.id",
-    )?;
-    let mut resident_rows = statement.query([])?;
+        )
+        .map_err(ResidentLifecycleStateFault::Store)?;
+    let mut resident_rows = statement
+        .query([])
+        .map_err(ResidentLifecycleStateFault::Store)?;
     let mut residents = Vec::new();
-    while let Some(row) = resident_rows.next()? {
-        residents.push(read_resident_row(row)?);
+    while let Some(row) = resident_rows
+        .next()
+        .map_err(ResidentLifecycleStateFault::Store)?
+    {
+        residents.push(read_resident_row(row).map_err(ResidentLifecycleStateFault::Unreadable)?);
     }
     let mut verified_decisions = 0_i64;
     for resident in residents {
-        let mut decisions_statement = connection.prepare(
-            "SELECT id, workspace_id, resident_id, from_lifecycle, to_lifecycle,
+        verified_decisions +=
+            verify_one_resident_lifecycle(connection, &resident).map_err(|cause| {
+                ResidentLifecycleStateFault::Row {
+                    workspace_id: resident.workspace_id,
+                    resident_id: resident.id,
+                    cause,
+                }
+            })?;
+    }
+    let stored_decisions: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM resident_lifecycle_decisions",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(ResidentLifecycleStateFault::Store)?;
+    if stored_decisions != verified_decisions {
+        return Err(ResidentLifecycleStateFault::Totals(crate::TotalsMismatch {
+            table: "resident_lifecycle_decisions",
+            expected: verified_decisions.unsigned_abs(),
+            observed: stored_decisions.unsigned_abs(),
+        }));
+    }
+    Ok(())
+}
+
+/// One Resident's lifecycle chain, re-proved. Unchanged from what the loop held inline; it
+/// returns the decisions it verified so the pass can compare the total.
+fn verify_one_resident_lifecycle(
+    connection: &Connection,
+    resident: &ResidentAgentView,
+) -> Result<i64, ResidentLifecycleError> {
+    let mut verified_decisions = 0_i64;
+    let mut decisions_statement = connection.prepare(
+        "SELECT id, workspace_id, resident_id, from_lifecycle, to_lifecycle,
                     predecessor_id, decided_by, decided_at_ms
              FROM resident_lifecycle_decisions
              WHERE workspace_id = ?1 AND resident_id = ?2
              ORDER BY sequence",
-        )?;
-        let mut decision_rows = decisions_statement.query(params![
-            resident.workspace_id.to_string(),
-            resident.id.to_string()
-        ])?;
-        let mut decisions = Vec::new();
-        while let Some(row) = decision_rows.next()? {
-            decisions.push(read_decision_row(row)?);
-        }
-        let mut current = ResidentLifecycle::Inactive;
-        let mut predecessor = None;
-        let mut updated_at_ms = resident.created_at_ms;
-        for decision in &decisions {
-            if decision.workspace_id != resident.workspace_id
-                || decision.resident_id != resident.id
-                || decision.from_lifecycle != current
-                || decision.predecessor_id != predecessor
-                || decision.decided_by != ResidentLifecycleActor::Operator
-                || decision.decided_at_ms < updated_at_ms
-            {
-                return Err(ResidentLifecycleError::InvalidStore);
-            }
-            event_kind(decision)?;
-            let payload = serde_json::to_string(&ResidentLifecycleDecisionPayload {
-                decision: decision.clone(),
-            })?;
-            let event_count: i64 = connection.query_row(
-                "SELECT count(*) FROM events
-                 WHERE workspace_id = ?1 AND kind = ?2 AND payload_json = ?3
-                   AND occurred_at_ms = ?4",
-                params![
-                    resident.workspace_id.to_string(),
-                    event_kind(decision)?,
-                    payload,
-                    i64::try_from(decision.decided_at_ms)
-                        .map_err(|_| ResidentLifecycleError::InvalidStore)?,
-                ],
-                |row| row.get(0),
-            )?;
-            if event_count != 1 {
-                return Err(ResidentLifecycleError::InvalidStore);
-            }
-            current = decision.to_lifecycle;
-            predecessor = Some(decision.id);
-            updated_at_ms = decision.decided_at_ms;
-            verified_decisions += 1;
-        }
-        if current != resident.lifecycle
-            || predecessor != resident.latest_decision_id
-            || updated_at_ms != resident.updated_at_ms
+    )?;
+    let mut decision_rows = decisions_statement.query(params![
+        resident.workspace_id.to_string(),
+        resident.id.to_string()
+    ])?;
+    let mut decisions = Vec::new();
+    while let Some(row) = decision_rows.next()? {
+        decisions.push(read_decision_row(row)?);
+    }
+    let mut current = ResidentLifecycle::Inactive;
+    let mut predecessor = None;
+    let mut updated_at_ms = resident.created_at_ms;
+    for decision in &decisions {
+        if decision.workspace_id != resident.workspace_id
+            || decision.resident_id != resident.id
+            || decision.from_lifecycle != current
+            || decision.predecessor_id != predecessor
+            || decision.decided_by != ResidentLifecycleActor::Operator
+            || decision.decided_at_ms < updated_at_ms
         {
             return Err(ResidentLifecycleError::InvalidStore);
         }
+        event_kind(decision)?;
+        let payload = serde_json::to_string(&ResidentLifecycleDecisionPayload {
+            decision: decision.clone(),
+        })?;
+        let event_count: i64 = connection.query_row(
+            "SELECT count(*) FROM events
+                 WHERE workspace_id = ?1 AND kind = ?2 AND payload_json = ?3
+                   AND occurred_at_ms = ?4",
+            params![
+                resident.workspace_id.to_string(),
+                event_kind(decision)?,
+                payload,
+                i64::try_from(decision.decided_at_ms)
+                    .map_err(|_| ResidentLifecycleError::InvalidStore)?,
+            ],
+            |row| row.get(0),
+        )?;
+        if event_count != 1 {
+            return Err(ResidentLifecycleError::InvalidStore);
+        }
+        current = decision.to_lifecycle;
+        predecessor = Some(decision.id);
+        updated_at_ms = decision.decided_at_ms;
+        verified_decisions += 1;
     }
-    let stored_decisions: i64 = connection.query_row(
-        "SELECT count(*) FROM resident_lifecycle_decisions",
-        [],
-        |row| row.get(0),
-    )?;
-    if stored_decisions != verified_decisions {
+    if current != resident.lifecycle
+        || predecessor != resident.latest_decision_id
+        || updated_at_ms != resident.updated_at_ms
+    {
         return Err(ResidentLifecycleError::InvalidStore);
     }
-    Ok(())
+    Ok(verified_decisions)
 }
 
 fn event_kind(
@@ -592,5 +736,64 @@ fn event_kind(
             ResidentLifecycle::Retired,
         ) => Ok("resident.retired"),
         _ => Err(ResidentLifecycleError::InvalidStore),
+    }
+}
+
+#[cfg(test)]
+mod name_witness {
+    use super::*;
+
+    /// Pinned independently of `name()` (the fold at 30d2a20): an exhaustive `name()` catches an
+    /// added arm, only a second table catches a wrong or duplicated name.
+    fn expected_name(error: &ResidentLifecycleError) -> &'static str {
+        match error {
+            ResidentLifecycleError::Account(_) => "Account",
+            ResidentLifecycleError::NotFound => "NotFound",
+            ResidentLifecycleError::InvalidTransition => "InvalidTransition",
+            ResidentLifecycleError::StaleDecision => "StaleDecision",
+            ResidentLifecycleError::InvalidStore => "InvalidStore",
+            ResidentLifecycleError::Store(_) => "Store",
+            ResidentLifecycleError::Json(_) => "Json",
+        }
+    }
+
+    #[test]
+    fn every_resident_lifecycle_error_arm_has_its_own_pinned_name() {
+        let every_arm = [
+            ResidentLifecycleError::Account(
+                crate::operator_account::OperatorAccountError::PasswordTooShort,
+            ),
+            ResidentLifecycleError::NotFound,
+            ResidentLifecycleError::InvalidTransition,
+            ResidentLifecycleError::StaleDecision,
+            ResidentLifecycleError::InvalidStore,
+            ResidentLifecycleError::Store(rusqlite::Error::QueryReturnedNoRows),
+            ResidentLifecycleError::Json(serde_json::from_str::<u8>("\"x\"").unwrap_err()),
+        ];
+        assert_eq!(
+            every_arm.len(),
+            7,
+            "an arm was added to `ResidentLifecycleError` without a fixture here"
+        );
+        for arm in &every_arm {
+            assert_eq!(
+                arm.name(),
+                expected_name(arm),
+                "the startup name does not match the pinned table: {arm:?}"
+            );
+        }
+        let names: std::collections::BTreeSet<&str> =
+            every_arm.iter().map(ResidentLifecycleError::name).collect();
+        assert_eq!(
+            names.len(),
+            7,
+            "two arms share a startup name, so a swap between them is invisible: {names:?}"
+        );
+        for name in names {
+            assert!(
+                !name.contains(' ') && !name.contains('{'),
+                "a name is a name, not a rendering: {name}"
+            );
+        }
     }
 }
