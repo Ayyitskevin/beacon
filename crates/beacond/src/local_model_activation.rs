@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use data_encoding::HEXLOWER;
-use rusqlite::{Connection, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -122,6 +122,12 @@ pub(crate) enum LocalModelActivationStateFault {
     /// A row that could not be READ at all, so it cannot be named -- the identity columns are
     /// part of what failed. Distinct from `Row` (pass 11's shape).
     Unreadable(LocalModelActivationError),
+    /// A decision whose stored ordering key is outside the positive domain the service writes.
+    Sequence {
+        workspace_id: String,
+        activation_id: String,
+        sequence: i64,
+    },
 }
 
 impl LocalModelActivationError {
@@ -162,6 +168,8 @@ impl fmt::Display for LocalModelActivationStateFault {
                 "a local model activation row could not be read: {}",
                 cause.name()
             ),
+            Self::Sequence { .. } => formatter
+                .write_str("a local-model activation decision's ordering key is not readable"),
         }
     }
 }
@@ -182,6 +190,16 @@ impl fmt::Debug for LocalModelActivationStateFault {
                 .field("cause", cause)
                 .finish(),
             Self::Unreadable(cause) => formatter.debug_tuple("Unreadable").field(cause).finish(),
+            Self::Sequence {
+                workspace_id,
+                activation_id,
+                sequence,
+            } => formatter
+                .debug_struct("Sequence")
+                .field("workspace_id", workspace_id)
+                .field("activation_id", activation_id)
+                .field("sequence", sequence)
+                .finish(),
         }
     }
 }
@@ -191,6 +209,7 @@ impl std::error::Error for LocalModelActivationStateFault {
         match self {
             Self::Store(error) => Some(error),
             Self::Unreadable(cause) | Self::Row { cause, .. } => Some(cause),
+            Self::Sequence { .. } => None,
         }
     }
 }
@@ -733,6 +752,31 @@ pub(crate) fn verify_activation_event(
 pub(crate) fn verify_activation_state(
     connection: &Connection,
 ) -> Result<(), LocalModelActivationStateFault> {
+    let invalid_sequence = connection
+        .query_row(
+            "SELECT workspace_id, id, sequence
+             FROM local_model_activation_decisions
+             WHERE sequence < 1
+             ORDER BY workspace_id, id, sequence
+             LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(LocalModelActivationStateFault::Store)?;
+    if let Some((workspace_id, activation_id, sequence)) = invalid_sequence {
+        return Err(LocalModelActivationStateFault::Sequence {
+            workspace_id,
+            activation_id,
+            sequence,
+        });
+    }
     let mut statement = connection
         .prepare(
             "SELECT id, workspace_id, provider, endpoint, model_name, model_digest,

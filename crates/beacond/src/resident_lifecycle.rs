@@ -1,7 +1,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use rusqlite::{Connection, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -94,6 +94,12 @@ pub(crate) enum ResidentLifecycleStateFault {
     /// A row that could not be READ at all, so it cannot be named: the identity columns are part
     /// of what failed. Distinct from `Row`, which names a row that read and did not re-prove.
     Unreadable(ResidentLifecycleError),
+    /// A decision whose stored ordering key is outside the positive domain the service writes.
+    Sequence {
+        workspace_id: String,
+        resident_id: String,
+        sequence: i64,
+    },
 }
 
 impl ResidentLifecycleError {
@@ -134,6 +140,9 @@ impl fmt::Display for ResidentLifecycleStateFault {
                 "a Resident row could not be read: {}",
                 cause.name()
             ),
+            Self::Sequence { .. } => {
+                formatter.write_str("a Resident lifecycle decision's ordering key is not readable")
+            }
         }
     }
 }
@@ -145,6 +154,16 @@ impl fmt::Debug for ResidentLifecycleStateFault {
             Self::Store(error) => formatter.debug_tuple("Store").field(error).finish(),
             Self::Totals(totals) => formatter.debug_tuple("Totals").field(totals).finish(),
             Self::Unreadable(cause) => formatter.debug_tuple("Unreadable").field(cause).finish(),
+            Self::Sequence {
+                workspace_id,
+                resident_id,
+                sequence,
+            } => formatter
+                .debug_struct("Sequence")
+                .field("workspace_id", workspace_id)
+                .field("resident_id", resident_id)
+                .field("sequence", sequence)
+                .finish(),
             Self::Row {
                 workspace_id,
                 resident_id,
@@ -165,7 +184,7 @@ impl std::error::Error for ResidentLifecycleStateFault {
             Self::Store(error) => Some(error),
             Self::Unreadable(cause) | Self::Row { cause, .. } => Some(cause),
             // A `TotalsMismatch` is DATA, not a nested error.
-            Self::Totals(_) => None,
+            Self::Totals(_) | Self::Sequence { .. } => None,
         }
     }
 }
@@ -576,6 +595,31 @@ pub(crate) fn verify_lifecycle_event(
 pub(crate) fn verify_lifecycle_state(
     connection: &Connection,
 ) -> Result<(), ResidentLifecycleStateFault> {
+    let invalid_sequence = connection
+        .query_row(
+            "SELECT workspace_id, resident_id, sequence
+             FROM resident_lifecycle_decisions
+             WHERE sequence < 1
+             ORDER BY workspace_id, resident_id, sequence
+             LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(ResidentLifecycleStateFault::Store)?;
+    if let Some((workspace_id, resident_id, sequence)) = invalid_sequence {
+        return Err(ResidentLifecycleStateFault::Sequence {
+            workspace_id,
+            resident_id,
+            sequence,
+        });
+    }
     let mut statement = connection
         .prepare(
             "SELECT agent.id, agent.workspace_id, agent.role, agent.display_name_state,

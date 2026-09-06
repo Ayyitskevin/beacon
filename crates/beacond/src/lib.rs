@@ -2258,6 +2258,14 @@ fn map_resident_lifecycle_state_fault(
         resident_lifecycle::ResidentLifecycleStateFault::Unreadable(cause) => {
             SupervisorError::ResidentRowUnreadable(cause)
         }
+        resident_lifecycle::ResidentLifecycleStateFault::Sequence {
+            workspace_id,
+            resident_id,
+            sequence,
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "a Resident lifecycle decision's ordering key is not readable",
+            raw: format!("Workspace {workspace_id}, Resident {resident_id}, sequence {sequence}"),
+        },
     }
 }
 
@@ -2288,6 +2296,14 @@ fn map_resident_configuration_state_fault(
             what: "a Resident configuration row's identity is not readable",
             raw: format!("Workspace {workspace_id}, decision {decision_id}"),
         },
+        resident_configuration::ResidentConfigurationStateFault::Sequence {
+            workspace_id,
+            decision_id,
+            sequence,
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "a Resident configuration decision's ordering key is not readable",
+            raw: format!("Workspace {workspace_id}, decision {decision_id}, sequence {sequence}"),
+        },
     }
 }
 
@@ -2314,6 +2330,16 @@ fn map_local_model_activation_state_fault(
         local_model_activation::LocalModelActivationStateFault::Unreadable(cause) => {
             SupervisorError::LocalModelActivationRowUnreadable(cause)
         }
+        local_model_activation::LocalModelActivationStateFault::Sequence {
+            workspace_id,
+            activation_id,
+            sequence,
+        } => SupervisorError::StoredIdentityUnreadable {
+            what: "a local-model activation decision's ordering key is not readable",
+            raw: format!(
+                "Workspace {workspace_id}, activation {activation_id}, sequence {sequence}"
+            ),
+        },
     }
 }
 
