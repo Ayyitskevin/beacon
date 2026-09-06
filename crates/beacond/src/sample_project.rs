@@ -3132,13 +3132,93 @@ mod tests {
     fn startup_reconciliation_refuses_missing_installation_event() {
         let store = TestStore::new("event-corruption");
         store.isolated_service().install().unwrap();
+
+        // R43.1: TWO honest installations, so "the refusal names the failing row" and "the
+        // refusal names row 0" are different claims. The old bar had one row and could only
+        // assert `!workspace_id.is_nil()` -- naming ANY real Workspace satisfied it, and a
+        // mutant naming `workspaces[0]` was unkillable by construction (kimi's HOLD).
+        //
+        // The INSTALLATION is minted through the service, not copied: `install()` materializes
+        // the repository, writes the row, and appends its `sample_project.installed` Event on
+        // the real path, which is why a copied row could never be made honest -- four
+        // copy-based plants failed on UNIQUE(project_id), the three foreign keys, and finally
+        // on the log walk re-deriving the copied Event.
+        //
+        // The WORKSPACE is inserted directly, because nothing can mint one: `Supervisor::
+        // bootstrap` is the only site in the crate that creates a Workspace and it does so ONLY
+        // when the store has none (`lib.rs`, the `None` arm of the `existing` query). Every
+        // multi-Workspace fixture in this crate inserts the second one the same way. And a
+        // second Workspace is required rather than a second Project, because
+        // `sample_project_installations.workspace_id` is the PRIMARY KEY and `install()`
+        // returns `AlreadyInstalled` for a Workspace that has one -- it also mints its own
+        // `project_id` rather than taking one, so there is no "install into this Project" call.
+        //
+        // The planted Workspace's id is all `f`, so it sorts LAST under this pass's own
+        // `ORDER BY workspace_id` by construction (R39.3), and it is the one that loses its
+        // Event. The first-enumerated row stays honest.
+        let second_workspace = "ffffffff-ffff-ffff-ffff-ffffffffffff";
         let connection = Connection::open(&store.path).unwrap();
         connection
             .execute(
-                "DELETE FROM events WHERE kind = 'sample_project.installed'",
+                "INSERT INTO workspaces (id, name, created_at_ms) VALUES (?1, 'Second', 7)",
+                rusqlite::params![second_workspace],
+            )
+            .expect("the second Workspace inserts");
+        connection
+            .execute(
+                "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
+                 VALUES (?1, 'workspace.created', ?2, 7)",
+                rusqlite::params![
+                    second_workspace,
+                    format!("{{\"workspace_id\":\"{second_workspace}\",\"name\":\"Second\"}}")
+                ],
+            )
+            .expect("the second Workspace's Event inserts");
+        drop(connection);
+
+        let second_id = Uuid::parse_str(second_workspace).unwrap();
+        SampleProjectService::new(
+            Arc::new(OperatorAccountService::open(&store.path).unwrap()),
+            second_id,
+            &store.path,
+        )
+        .unwrap()
+        .with_test_authenticated_store(&store.path)
+        .install()
+        .expect("the second installation is minted through the service");
+
+        let connection = Connection::open(&store.path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM sample_project_installations",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            2,
+            "the fixture must hold two honest installations"
+        );
+        let last: String = connection
+            .query_row(
+                "SELECT workspace_id FROM sample_project_installations
+                 ORDER BY workspace_id DESC LIMIT 1",
                 [],
+                |row| row.get(0),
             )
             .unwrap();
+        assert_eq!(
+            last, second_workspace,
+            "the plant must sort last, or the failing row is row 0 again"
+        );
+        let removed = connection
+            .execute(
+                "DELETE FROM events
+                 WHERE kind = 'sample_project.installed' AND workspace_id = ?1",
+                rusqlite::params![second_workspace],
+            )
+            .unwrap();
+        assert_eq!(removed, 1, "the plant removed the wrong number of Events");
         drop(connection);
 
         let error = Supervisor::bootstrap(StartupConfig {
@@ -3152,29 +3232,32 @@ mod tests {
             matches!(
                 &error,
                 crate::SupervisorError::SampleProjectStateMismatch { workspace_id, .. }
-                    if !workspace_id.is_nil()
+                    if *workspace_id == second_id
             ),
             "the refusal does not name the Workspace it refused: {error:?}"
         );
         let line = error.to_string();
+        assert!(
+            line.contains(second_workspace),
+            "the line does not name the Workspace it refused: {line}"
+        );
         let named = line.rsplit(": ").next().unwrap().to_owned();
         assert!(
             !named.contains(' ') && !named.contains('{'),
             "the tail of the line is a rendering, not a name: {line}"
+        );
+        // PINNED, not just shaped: a name-shaped tail is satisfied by ANY arm, so without this
+        // a pass that carried a fixed fault instead of the reader's own would still pass
+        // (measured -- that mutant survived until this line existed).
+        assert_eq!(
+            named, "InvalidStore",
+            "the refusal carries the wrong fault: {line}"
         );
         // blue's HOLD: the carried reader's OWN sentence never reaches the line (R28.4).
         assert!(
             !line.contains("Sample Project state is invalid"),
             "the reader's own sentence reached the line: {line}"
         );
-        // KNOWN GAP, measured and not dressed up (kimi's HOLD): this bar asserts the refusal
-        // names A Workspace, not THE failing Workspace, so a mutant naming `workspaces[0]`
-        // survives here. The R39.3 two-row shape needs a SECOND honest installation, and
-        // `sample_project_installations` is bound by three foreign keys (projects,
-        // project_charter_revisions, project_repository_revisions) with an Event the log walk
-        // re-derives -- so it must be MINTED through the services, not copied from the first
-        // row. That is a fixture this bar does not have; four copy-based attempts each failed
-        // on a different constraint. Named for whoever builds it.
         assert!(
             format!("{error:?}").contains(&named),
             "the named fault is not reachable through Debug: {error:?}"
