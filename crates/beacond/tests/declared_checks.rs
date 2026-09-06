@@ -2238,3 +2238,87 @@ fn sol1_startup_refuses_untyped_run_identity_edges() {
         }
     }
 }
+
+#[test]
+fn astra_run_identity_precedes_lease_state_judgement() {
+    for (label, run_id) in [("empty", String::new())] {
+        let (repository, revision) = fixture_repository(label);
+        let source = repository.path.to_string_lossy().into_owned();
+        let (store, projects, repositories, _checks) = enrolled(label);
+        let project = projects.create(project_draft()).unwrap();
+        repositories
+            .bind(
+                project.id,
+                project.charter.revision,
+                None,
+                RepositoryDraft {
+                    source_kind: RepositorySourceKind::LocalPath,
+                    source,
+                    base_revision: revision,
+                    declared_checks: vec![check("ok", &["/bin/true"], ".")],
+                },
+            )
+            .unwrap();
+        let connection = Connection::open(&store.path).unwrap();
+        let workspace_id: String = connection
+            .query_row("SELECT id FROM workspaces", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            connection
+                .execute(
+                    "INSERT INTO runs (
+                        workspace_id, id, project_id, kind, repository_revision, charter_revision,
+                        state, lease_expires_at_ms, started_at_ms, ended_at_ms
+                     ) VALUES (?1, ?2, ?3, 'declared_checks', 1, 1, 'preflighting', 0, 0, NULL)",
+                    rusqlite::params![workspace_id, run_id, project.id.to_string()],
+                )
+                .unwrap(),
+            1,
+            "{label}: the edge row did not plant"
+        );
+        drop(connection);
+
+        let error = Supervisor::bootstrap(StartupConfig {
+            store_path: store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        })
+        .expect_err("startup accepted an unrepresentable Run identity");
+        let SupervisorError::StoredIdentityUnreadable { what, raw } = &error else {
+            panic!("{label}: the Run identity was refused under the wrong name: {error:?}");
+        };
+        assert_eq!(*what, "a Run row's identity is not readable");
+        assert!(
+            raw.ends_with(&format!("Run {run_id}")),
+            "{label}: the typed reader fault lost the raw Run key"
+        );
+        let connection = Connection::open(&store.path).unwrap();
+        let after: (String, Option<i64>) = connection
+            .query_row(
+                "SELECT state, ended_at_ms FROM runs WHERE workspace_id = ?1 AND id = ?2",
+                rusqlite::params![workspace_id, run_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            after,
+            ("preflighting".to_owned(), None),
+            "R45.RUN.IDENTITY_BEFORE_LEASE_STATE: refusing an unrepresentable Run changed its stored state"
+        );
+        let line = error.to_string();
+        assert!(
+            !line.contains('\r') && !line.contains('\n') && !line.contains('\u{1b}'),
+            "{label}: the one-line refusal obeyed stored control bytes: {line:?}"
+        );
+        assert!(
+            line.chars().count() <= 256,
+            "{label}: the one-line refusal was not bounded: {} characters",
+            line.chars().count()
+        );
+        if label == "one-megabyte" {
+            assert!(
+                line.contains("truncated from 1048628 characters"),
+                "the bounded refusal did not report truncation: {line}"
+            );
+        }
+    }
+}
