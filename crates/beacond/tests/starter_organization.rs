@@ -278,113 +278,125 @@ fn concurrent_owner_decisions_commit_exactly_once() {
 
 #[test]
 fn restart_refuses_a_decision_whose_audit_event_is_missing() {
-    let (store, accounts, organization) = enrolled_service("missing-event");
-    organization
-        .accept(1, vec![draft(StarterRole::Lead, None)])
-        .unwrap();
-    drop(organization);
-    drop(accounts);
-    // R39.3 (kimi's HOLD): TWO Workspaces, and the tampered one sorts LAST under this pass's own
-    // `ORDER BY id`. With one Workspace the bar could only read the id back OUT of the refusal and
-    // assert it was IN the refusal's line -- self-referential, satisfied by naming any row.
-    let connection = Connection::open(&store.path).unwrap();
-    let columns: Vec<String> = connection
-        .prepare("SELECT name FROM pragma_table_info('workspaces')")
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    // Sorted FIRST, not last: a Workspace with no starter organization at all is legitimate, so
-    // the planted row cannot be the failing one. The honest Workspace loses its Event and is the
-    // failure; the plant's job is to make sure the failing row is NOT the row this pass reads
-    // first, which is the property a `rows[0]` mutant exploits.
-    let planted = "00000000-0000-0000-0000-000000000001".to_owned();
-    let names = columns.join(", ");
-    let values = columns
-        .iter()
-        .map(|column| match column.as_str() {
-            "id" => "?1".to_owned(),
-            "name" => "'Planted Workspace'".to_owned(),
-            other => other.to_owned(),
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    connection
-        .execute(
-            &format!("INSERT INTO workspaces ({names}) SELECT {values} FROM workspaces LIMIT 1"),
-            rusqlite::params![planted],
-        )
-        .expect("the planted Workspace inserts");
-    let first: String = connection
-        .query_row("SELECT id FROM workspaces ORDER BY id LIMIT 1", [], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    assert_eq!(
-        first, planted,
-        "the plant must sort first, or the failing row is row 0 again"
-    );
-    let honest: String = connection
-        .query_row(
-            "SELECT id FROM workspaces WHERE id <> ?1 ORDER BY id LIMIT 1",
-            rusqlite::params![planted],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let removed = connection
-        .execute(
-            "DELETE FROM events WHERE kind = 'starter_organization.accepted'",
-            [],
-        )
-        .unwrap();
-    assert_eq!(removed, 1, "the plant removed the wrong number of Events");
-    drop(connection);
-
-    // R28.1/R28.4: the refusal names the Workspace it refused, and the line is the key plus the
-    // fault's NAME -- without this the Display could print the reader's whole sentence and no bar
-    // would notice (measured: mutant 10 survived until this was here).
-    let refusal = Supervisor::bootstrap(StartupConfig {
-        store_path: store.path.clone(),
-        initial_workspace_name: "Ignored".to_owned(),
-    })
-    .unwrap_err();
-    match &refusal {
-        beacond::SupervisorError::StarterOrganizationStateMismatch { workspace_id, .. } => {
-            assert_eq!(
-                workspace_id.to_string(),
-                honest,
-                "the refusal names the wrong Workspace"
-            );
+    // R44: BOTH ENDS. Tampering one end only made "names the failing row" and "names that
+    // end" the same assertion, and a Row arm naming `rows.last()` survived it.
+    for (end, fill) in [("last", "0"), ("first", "f")] {
+        let (store, accounts, organization) = enrolled_service(&format!("missing-event-{end}"));
+        organization
+            .accept(1, vec![draft(StarterRole::Lead, None)])
+            .unwrap();
+        drop(organization);
+        drop(accounts);
+        // R39.3 (kimi's HOLD): TWO Workspaces, and the tampered one sorts LAST under this pass's own
+        // `ORDER BY id`. With one Workspace the bar could only read the id back OUT of the refusal and
+        // assert it was IN the refusal's line -- self-referential, satisfied by naming any row.
+        let connection = Connection::open(&store.path).unwrap();
+        let columns: Vec<String> = connection
+            .prepare("SELECT name FROM pragma_table_info('workspaces')")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        // Sorted FIRST, not last: a Workspace with no starter organization at all is legitimate, so
+        // the planted row cannot be the failing one. The honest Workspace loses its Event and is the
+        // failure; the plant's job is to make sure the failing row is NOT the row this pass reads
+        // first, which is the property a `rows[0]` mutant exploits.
+        let planted = format!("{fill}{fill}{fill}{fill}{fill}{fill}{fill}{fill}-{fill}{fill}{fill}{fill}-\
+         {fill}{fill}{fill}{fill}-{fill}{fill}{fill}{fill}-{fill}{fill}{fill}{fill}{fill}{fill}{fill}{fill}{fill}{fill}{fill}{fill}")
+        .replace([' ', '\n'], "");
+        let names = columns.join(", ");
+        let values = columns
+            .iter()
+            .map(|column| match column.as_str() {
+                "id" => "?1".to_owned(),
+                "name" => "'Planted Workspace'".to_owned(),
+                other => other.to_owned(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        connection
+            .execute(
+                &format!(
+                    "INSERT INTO workspaces ({names}) SELECT {values} FROM workspaces LIMIT 1"
+                ),
+                rusqlite::params![planted],
+            )
+            .expect("the planted Workspace inserts");
+        let first: String = connection
+            .query_row("SELECT id FROM workspaces ORDER BY id LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        // The failing row is the HONEST Workspace (a Workspace with no starter organization is
+        // legitimate, so the plant can never be the failure). Placing the PLANT therefore places
+        // the failure at the other end: all `0` puts the failure last, all `f` puts it first.
+        if end == "last" {
+            assert_eq!(first, planted, "{end}: the plant must sort first");
+        } else {
+            assert_ne!(first, planted, "{end}: the plant must not sort first");
         }
-        other => panic!("not the refusal this bar is about: {other:?}"),
+        let honest: String = connection
+            .query_row(
+                "SELECT id FROM workspaces WHERE id <> ?1 ORDER BY id LIMIT 1",
+                rusqlite::params![planted],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let removed = connection
+            .execute(
+                "DELETE FROM events WHERE kind = 'starter_organization.accepted'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(removed, 1, "the plant removed the wrong number of Events");
+        drop(connection);
+
+        // R28.1/R28.4: the refusal names the Workspace it refused, and the line is the key plus the
+        // fault's NAME -- without this the Display could print the reader's whole sentence and no bar
+        // would notice (measured: mutant 10 survived until this was here).
+        let refusal = Supervisor::bootstrap(StartupConfig {
+            store_path: store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        })
+        .unwrap_err();
+        match &refusal {
+            beacond::SupervisorError::StarterOrganizationStateMismatch { workspace_id, .. } => {
+                assert_eq!(
+                    workspace_id.to_string(),
+                    honest,
+                    "the refusal names the wrong Workspace"
+                );
+            }
+            other => panic!("not the refusal this bar is about: {other:?}"),
+        }
+        let line = refusal.to_string();
+        assert!(
+            line.contains(&honest),
+            "the refusal does not name the Workspace it refused: {line}"
+        );
+        // blue's HOLD: the carried reader's OWN sentence must not reach the operator's line (R28.4).
+        assert!(
+            !line.contains("starter organization state is invalid"),
+            "the reader's own sentence reached the line: {line}"
+        );
+        let named = line.rsplit(": ").next().unwrap().to_owned();
+        // kimi's P2: PINNED, not just shaped. A name-shaped tail is satisfied by ANY arm,
+        // so without this a pass carrying a fixed-but-wrong fault survives -- the M9 class
+        // measured surviving on the pass-7 bar.
+        assert_eq!(
+            named, "InvalidStore",
+            "the refusal carries the wrong fault: {line}"
+        );
+        assert!(
+            !named.contains(' ') && !named.contains('{'),
+            "the tail of the line is a rendering, not a name: {line}"
+        );
+        assert!(
+            format!("{refusal:?}").contains(&named),
+            "the named fault is not reachable through Debug: {refusal:?}"
+        );
     }
-    let line = refusal.to_string();
-    assert!(
-        line.contains(&honest),
-        "the refusal does not name the Workspace it refused: {line}"
-    );
-    // blue's HOLD: the carried reader's OWN sentence must not reach the operator's line (R28.4).
-    assert!(
-        !line.contains("starter organization state is invalid"),
-        "the reader's own sentence reached the line: {line}"
-    );
-    let named = line.rsplit(": ").next().unwrap().to_owned();
-    // kimi's P2: PINNED, not just shaped. A name-shaped tail is satisfied by ANY arm,
-    // so without this a pass carrying a fixed-but-wrong fault survives -- the M9 class
-    // measured surviving on the pass-7 bar.
-    assert_eq!(
-        named, "InvalidStore",
-        "the refusal carries the wrong fault: {line}"
-    );
-    assert!(
-        !named.contains(' ') && !named.contains('{'),
-        "the tail of the line is a rendering, not a name: {line}"
-    );
-    assert!(
-        format!("{refusal:?}").contains(&named),
-        "the named fault is not reachable through Debug: {refusal:?}"
-    );
 }
 
 fn draft(role: StarterRole, display_name: Option<&str>) -> StarterResidentDraft {
