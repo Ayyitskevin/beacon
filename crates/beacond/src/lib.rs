@@ -243,8 +243,9 @@ pub use team::{
 #[doc(hidden)]
 pub use worktree::set_pinned_spawn_hook;
 pub use worktree::{CleanupOutcome, KeepReason, Worktree, WorktreeError};
+pub use worktree::{PinnedRead, PinnedReadFailure};
 
-const SCHEMA_VERSION: i64 = 32;
+const SCHEMA_VERSION: i64 = 33;
 const MAX_WORKSPACE_NAME_CHARS: usize = 120;
 
 const SCHEMA_V1: &str = include_str!("../migrations/0001_initial.sql");
@@ -306,6 +307,7 @@ const MIGRATION_V31: &str = include_str!("../migrations/0031_outcome_publication
 // contiguous and this number is final: 30 -> 31 -> 32.
 const MIGRATION_V32: &str =
     include_str!("../migrations/0032_classification_mission_project_key.sql");
+const MIGRATION_V33: &str = include_str!("../migrations/0033_receipt_pre_image_unreadable.sql");
 
 #[derive(Debug, Clone)]
 pub struct StartupConfig {
@@ -1874,6 +1876,7 @@ const MIGRATION_LADDER: &[(i64, &str)] = &[
     (30, MIGRATION_V30),
     (31, MIGRATION_V31),
     (32, MIGRATION_V32),
+    (33, MIGRATION_V33),
 ];
 
 /// Applies the ladder up to and including `version` -- a store at that schema, from nothing.
