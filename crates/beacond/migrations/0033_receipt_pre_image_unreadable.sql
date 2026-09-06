@@ -106,6 +106,7 @@ BEFORE UPDATE ON evaluation_cited_runs
 BEGIN
     SELECT RAISE(ABORT, 'Evaluation cited Runs are immutable');
 END;
+
 CREATE TRIGGER evaluation_cited_runs_no_delete
 BEFORE DELETE ON evaluation_cited_runs
 BEGIN
