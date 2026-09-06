@@ -823,7 +823,10 @@ pub(crate) fn verify_run_state(connection: &Connection) -> Result<(), RunStateFa
                  WHERE events.workspace_id = runs.workspace_id
                    AND events.kind = 'proposal.dispatched'
                    AND json_extract(events.payload_json, '$.runId') = runs.id)
-         FROM runs",
+         FROM runs
+         -- Ordered like every other pass, so a bar can plant a failing row that is NOT the row
+         -- this pass reads first. Without it the enumeration order is whatever SQLite returns.
+         ORDER BY runs.workspace_id, runs.id",
         )
         .map_err(RunStateFault::Store)?;
     let rows = statement
