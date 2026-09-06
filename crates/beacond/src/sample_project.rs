@@ -3162,6 +3162,19 @@ mod tests {
             !named.contains(' ') && !named.contains('{'),
             "the tail of the line is a rendering, not a name: {line}"
         );
+        // blue's HOLD: the carried reader's OWN sentence never reaches the line (R28.4).
+        assert!(
+            !line.contains("Sample Project state is invalid"),
+            "the reader's own sentence reached the line: {line}"
+        );
+        // KNOWN GAP, measured and not dressed up (kimi's HOLD): this bar asserts the refusal
+        // names A Workspace, not THE failing Workspace, so a mutant naming `workspaces[0]`
+        // survives here. The R39.3 two-row shape needs a SECOND honest installation, and
+        // `sample_project_installations` is bound by three foreign keys (projects,
+        // project_charter_revisions, project_repository_revisions) with an Event the log walk
+        // re-derives -- so it must be MINTED through the services, not copied from the first
+        // row. That is a fixture this bar does not have; four copy-based attempts each failed
+        // on a different constraint. Named for whoever builds it.
         assert!(
             format!("{error:?}").contains(&named),
             "the named fault is not reachable through Debug: {error:?}"

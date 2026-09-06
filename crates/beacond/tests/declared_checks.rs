@@ -1695,9 +1695,28 @@ fn startup_rejects_execution_relabelled_as_preflight_without_a_preflight_event()
             },
         )
         .unwrap();
-    let receipt = checks.execute(project.id, bounds()).unwrap();
-
+    // R39.3 (kimi's HOLD): TWO Runs, and the tampered one sorts LAST under the pass's own
+    // `ORDER BY runs.workspace_id, runs.id`. With one Run "names the failing row" and "names row
+    // 0" are the same claim, and a mutant naming `rows[0]` survives.
+    let receipts = [
+        checks.execute(project.id, bounds()).unwrap(),
+        checks.execute(project.id, bounds()).unwrap(),
+    ];
     let connection = Connection::open(&store.path).unwrap();
+    let tampered: String = connection
+        .query_row(
+            // Each `execute` also records a `check_preflight` Run, so the plant picks from the
+            // kind this bar relabels.
+            "SELECT id FROM runs WHERE kind = 'declared_checks'
+             ORDER BY workspace_id, id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the fixture recorded two Runs");
+    let receipt = receipts
+        .iter()
+        .find(|receipt| receipt.run_id.to_string() == tampered)
+        .expect("the last-sorting Run is one the fixture made");
     replace_run_update_trigger(&connection, |connection| {
         connection.execute(
             "UPDATE runs SET kind = 'check_preflight' WHERE id = ?1",
