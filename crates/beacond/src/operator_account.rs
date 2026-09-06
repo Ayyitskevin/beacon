@@ -189,7 +189,10 @@ impl fmt::Display for OperatorAccountError {
             Self::CredentialProcessing => write!(formatter, "credential processing failed"),
             Self::InvalidStore => write!(formatter, "the account store failed validation"),
             Self::ClockBeforeUnixEpoch => write!(formatter, "the system clock is invalid"),
-            Self::Store(error) => write!(formatter, "account store operation failed: {error}"),
+            // R42: the driver's own words -- table and column names, file paths, constraint
+            // text. The `rusqlite::Error` stays whole in the derived `Debug`, which is this
+            // enum's diagnostic channel; it gains no `source()` here.
+            Self::Store(_) => write!(formatter, "account store operation failed: Store"),
             Self::StateUnavailable => write!(formatter, "account state is unavailable"),
         }
     }
@@ -957,5 +960,208 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = fs::remove_file(format!("{}{suffix}", path.display()));
         }
+    }
+}
+
+#[cfg(test)]
+mod refusal_text_witness {
+    use super::*;
+
+    const NEEDLE_A: &str = "R42S3_PRIVATE_A";
+    const NEEDLE_B: &str = "R42S3_PRIVATE_B";
+
+    /// Approved retry context, chosen here. The spec asks for 0, a distinct value and the
+    /// saturating end of the range, so a selector printing a constant fails on at least two.
+    const FIRST_RETRY: u64 = 0;
+    const SECOND_RETRY: u64 = 4242;
+    const THIRD_RETRY: u64 = u64::MAX;
+
+    fn driver_error(needle: &str) -> rusqlite::Error {
+        rusqlite::Error::InvalidParameterName(format!(
+            "{needle} /home/example/private.db :private_binding"
+        ))
+    }
+
+    macro_rules! closed_table {
+        (
+            $expected_fn:ident / $rows_fn:ident : $ty:ty,
+            $( $case:literal | $pattern:pat => $line:expr , $build:expr , $markers:expr ; )+
+        ) => {
+            fn $expected_fn(value: &$ty) -> (&'static str, String) {
+                match value {
+                    $( $pattern => ($case, String::from($line)), )+
+                }
+            }
+
+            fn $rows_fn() -> Vec<(&'static str, $ty, &'static [&'static str])> {
+                vec![$(($case, $build, $markers)),+]
+            }
+        };
+    }
+
+    closed_table! {
+        expected_account / account_rows: OperatorAccountError,
+        "Store" | OperatorAccountError::Store(_)
+            => "account store operation failed: Store",
+            OperatorAccountError::Store(driver_error(NEEDLE_A)), &[NEEDLE_A];
+        "PasswordTooShort" | OperatorAccountError::PasswordTooShort
+            => "password must contain at least 15 characters",
+            OperatorAccountError::PasswordTooShort, &[];
+        "PasswordTooLong" | OperatorAccountError::PasswordTooLong
+            => "password cannot exceed 1024 characters",
+            OperatorAccountError::PasswordTooLong, &[];
+        "PasswordConfirmationMismatch" | OperatorAccountError::PasswordConfirmationMismatch
+            => "password confirmation does not match",
+            OperatorAccountError::PasswordConfirmationMismatch, &[];
+        "RecoveryNotConfirmed" | OperatorAccountError::RecoveryNotConfirmed
+            => "Recovery Key was not confirmed saved",
+            OperatorAccountError::RecoveryNotConfirmed, &[];
+        "SetupNotStarted" | OperatorAccountError::SetupNotStarted
+            => "operator setup has not started",
+            OperatorAccountError::SetupNotStarted, &[];
+        "AccountAlreadyExists" | OperatorAccountError::AccountAlreadyExists
+            => "the Owner account already exists",
+            OperatorAccountError::AccountAlreadyExists, &[];
+        "AccountMissing" | OperatorAccountError::AccountMissing
+            => "the Owner account does not exist",
+            OperatorAccountError::AccountMissing, &[];
+        "AuthenticationFailed" | OperatorAccountError::AuthenticationFailed
+            => "authentication failed", OperatorAccountError::AuthenticationFailed, &[];
+        "AuthenticationThrottled" | OperatorAccountError::AuthenticationThrottled { retry_after_ms }
+            => format!("try again in {retry_after_ms} milliseconds"),
+            OperatorAccountError::AuthenticationThrottled {
+                retry_after_ms: SECOND_RETRY,
+            },
+            &[];
+        "CredentialDisabled" | OperatorAccountError::CredentialDisabled
+            => "this credential is disabled until account recovery",
+            OperatorAccountError::CredentialDisabled, &[];
+        "RemotePasswordNotAllowed" | OperatorAccountError::RemotePasswordNotAllowed
+            => "password fallback is restricted to this machine",
+            OperatorAccountError::RemotePasswordNotAllowed, &[];
+        "NotAuthenticated" | OperatorAccountError::NotAuthenticated
+            => "the Operator session is locked",
+            OperatorAccountError::NotAuthenticated, &[];
+        "InvalidSessionTimeout" | OperatorAccountError::InvalidSessionTimeout
+            => "session timeout must be between 1 and 1440 minutes",
+            OperatorAccountError::InvalidSessionTimeout, &[];
+        "CredentialProcessing" | OperatorAccountError::CredentialProcessing
+            => "credential processing failed",
+            OperatorAccountError::CredentialProcessing, &[];
+        "InvalidStore" | OperatorAccountError::InvalidStore
+            => "the account store failed validation",
+            OperatorAccountError::InvalidStore, &[];
+        "ClockBeforeUnixEpoch" | OperatorAccountError::ClockBeforeUnixEpoch
+            => "the system clock is invalid",
+            OperatorAccountError::ClockBeforeUnixEpoch, &[];
+        "StateUnavailable" | OperatorAccountError::StateUnavailable
+            => "account state is unavailable",
+            OperatorAccountError::StateUnavailable, &[];
+    }
+
+    /// R42 slice 3: the account error's only data-bearing line is closed, and the other 17 are
+    /// pinned so closing one cannot reword the rest.
+    ///
+    /// `Store` carried the driver's own words -- table and column names, file paths, constraint
+    /// text -- to every ordinary account caller. The `rusqlite::Error` stays whole in `Debug`.
+    /// The configured bounds (15 / 1024 characters, 1 / 1440 minutes) and the retry duration are
+    /// pinned here independently; this slice adds no validation and changes none of them.
+    #[test]
+    fn r42_account_projection_is_closed() {
+        let rows = account_rows();
+        assert_eq!(rows.len(), 18, "R42S3.ACCOUNT.CARDINALITY.ROOT");
+        let ids: std::collections::BTreeSet<&str> = rows.iter().map(|(case, _, _)| *case).collect();
+        assert_eq!(ids.len(), rows.len(), "R42S3.ACCOUNT.CASE_IDS_UNIQUE");
+        assert_eq!(rows[0].0, "Store", "R42S3.ACCOUNT.LEAD_IS_STORE");
+
+        for (case, value, markers) in &rows {
+            // 1. Fixture premise.
+            let (matched, expected) = expected_account(value);
+            assert_eq!(matched, *case, "R42S3.FIXTURE.{case}.PATTERN");
+            let debug = format!("{value:?}");
+            for marker in *markers {
+                assert!(debug.contains(marker), "R42S3.FIXTURE.{case}.NEEDLE");
+            }
+
+            // 2. Nothing hidden reaches the line; one line; Debug still carries it.
+            let line = value.to_string();
+            for marker in *markers {
+                assert!(
+                    !line.contains(marker),
+                    "R42S3.ACCOUNT.{case}.NO_NEEDLE: {line}"
+                );
+            }
+            assert!(
+                !line.contains('\n') && !line.contains('\r'),
+                "R42S3.ACCOUNT.{case}.ONE_LINE: {line:?}"
+            );
+            for marker in *markers {
+                assert!(debug.contains(marker), "R42S3.ACCOUNT.{case}.DEBUG_RETAINS");
+            }
+
+            // 3. The whole line against the independent literal.
+            assert_eq!(line, expected, "R42S3.ACCOUNT.{case}.PROJECTION");
+        }
+
+        // The B seed: a different driver payload, the same independently fixed line.
+        let first = OperatorAccountError::Store(driver_error(NEEDLE_A));
+        let second = OperatorAccountError::Store(driver_error(NEEDLE_B));
+        assert!(
+            !second.to_string().contains(NEEDLE_B),
+            "R42S3.ACCOUNT.Store.NO_NEEDLE"
+        );
+        assert_eq!(
+            first.to_string(),
+            second.to_string(),
+            "R42S3.ACCOUNT.Store.HIDDEN_CHANGE_SAME_LINE"
+        );
+        assert!(
+            format!("{second:?}").contains(NEEDLE_B),
+            "R42S3.ACCOUNT.Store.DEBUG_RETAINS"
+        );
+
+        // 4. Approved context: the retry duration at three independently chosen values, and the
+        // configured bounds, pinned exactly as they read today.
+        for retry_after_ms in [FIRST_RETRY, SECOND_RETRY, THIRD_RETRY] {
+            assert_eq!(
+                OperatorAccountError::AuthenticationThrottled { retry_after_ms }.to_string(),
+                format!("try again in {retry_after_ms} milliseconds"),
+                "R42S3.ACCOUNT.AuthenticationThrottled.PROJECTION"
+            );
+        }
+        assert_eq!(
+            OperatorAccountError::PasswordTooShort.to_string(),
+            "password must contain at least 15 characters",
+            "R42S3.ACCOUNT.PasswordTooShort.CONTEXT"
+        );
+        assert_eq!(
+            OperatorAccountError::PasswordTooLong.to_string(),
+            "password cannot exceed 1024 characters",
+            "R42S3.ACCOUNT.PasswordTooLong.CONTEXT"
+        );
+        assert_eq!(
+            OperatorAccountError::InvalidSessionTimeout.to_string(),
+            "session timeout must be between 1 and 1440 minutes",
+            "R42S3.ACCOUNT.InvalidSessionTimeout.CONTEXT"
+        );
+
+        // The real `From<rusqlite::Error>`: the marker is verified on the ORIGINAL, before the
+        // conversion, so a carrier-erasure mutant fails the retention contract rather than merely
+        // breaking a fixture premise.
+        let original = driver_error(NEEDLE_A);
+        assert!(
+            format!("{original:?}").contains(NEEDLE_A),
+            "R42S3.FIXTURE.FromStore.NEEDLE"
+        );
+        let converted = OperatorAccountError::from(original);
+        assert!(
+            format!("{converted:?}").contains(NEEDLE_A),
+            "R42S3.ACCOUNT.FromStore.DEBUG_RETAINS"
+        );
+        assert_eq!(
+            converted.to_string(),
+            "account store operation failed: Store",
+            "R42S3.ACCOUNT.FromStore.PROJECTION"
+        );
     }
 }
