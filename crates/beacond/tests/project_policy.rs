@@ -83,6 +83,14 @@ fn project_draft() -> ProjectDraft {
     }
 }
 
+/// A second Project, so the startup bar has two rows to tell apart (R39.3).
+fn other_project_draft() -> ProjectDraft {
+    ProjectDraft {
+        name: "Beacon Beta".to_owned(),
+        ..project_draft()
+    }
+}
+
 fn policy_draft() -> ProjectPolicyDraft {
     ProjectPolicyDraft {
         team_lead_selection: TeamLeadSelectionPolicy {
@@ -312,20 +320,39 @@ fn concurrent_publications_from_the_same_revision_commit_exactly_once() {
 #[test]
 fn restart_refuses_policy_state_without_its_exact_event() {
     let (store, accounts, projects, policies) = enrolled_services("missing-event");
-    let project = projects.create(project_draft()).unwrap();
-    policies
-        .publish(project.id, 1, None, policy_draft())
-        .unwrap();
+    // R39.3 (kimi's HOLD): TWO Projects carry policies, and the tamper hits whichever sorts LAST
+    // under this pass's own `ORDER BY workspace_id, project_id`. The old fixture had ONE Project,
+    // so `!project_id.is_nil()` was all the bar could assert -- naming ANY real Project satisfied
+    // it, and a mutant naming `rows[0]` was unkillable by construction.
+    let first = projects.create(project_draft()).unwrap();
+    let second = projects.create(other_project_draft()).unwrap();
+    for project in [&first, &second] {
+        policies
+            .publish(project.id, 1, None, policy_draft())
+            .unwrap();
+    }
     drop(policies);
     drop(projects);
     drop(accounts);
     let connection = Connection::open(&store.path).unwrap();
-    connection
-        .execute(
-            "DELETE FROM events WHERE kind = 'project.policy_published'",
+    // The pass's own order, read back from the store rather than assumed from the ids.
+    let tampered: String = connection
+        .query_row(
+            "SELECT DISTINCT project_id FROM project_policy_revisions
+             ORDER BY workspace_id, project_id DESC LIMIT 1",
             [],
+            |row| row.get(0),
+        )
+        .expect("both Projects have policy revisions");
+    let removed = connection
+        .execute(
+            "DELETE FROM events
+             WHERE kind = 'project.policy_published'
+               AND payload_json LIKE '%' || ?1 || '%'",
+            rusqlite::params![tampered],
         )
         .unwrap();
+    assert_eq!(removed, 1, "the plant removed the wrong number of Events");
     drop(connection);
 
     let result = Supervisor::bootstrap(StartupConfig {
@@ -345,9 +372,14 @@ fn restart_refuses_policy_state_without_its_exact_event() {
     assert!(
         matches!(
             &refusal,
-            SupervisorError::ProjectPolicyStateMismatch { project_id, .. } if !project_id.is_nil()
+            SupervisorError::ProjectPolicyStateMismatch { project_id, .. }
+                if project_id.to_string() == tampered
         ),
         "the refusal does not name the Project it refused: {refusal:?}"
+    );
+    assert!(
+        refusal.to_string().contains(&tampered),
+        "the line does not name the Project it refused: {refusal}"
     );
     let line = refusal.to_string();
     let named = line.rsplit(": ").next().unwrap().to_owned();
