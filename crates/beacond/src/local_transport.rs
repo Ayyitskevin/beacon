@@ -4412,6 +4412,17 @@ mod tests {
         "StoredIdentityUnreadable" | SupervisorError::StoredIdentityUnreadable { .. }
             => "StoredIdentityUnreadable",
             SupervisorError::StoredIdentityUnreadable { what: STATIC_NEEDLE_A, raw: digest_a() }, &[NEEDLE_A];
+        // R45's 73rd arm. Its transport tag drops every field, which is why a marker-bearing
+        // `raw` is safe HERE -- and why its own startup line, which prints that raw, is not.
+        "StoredIntegerKeyUnreadable" | SupervisorError::StoredIntegerKeyUnreadable { .. }
+            => "StoredIntegerKeyUnreadable",
+            SupervisorError::StoredIntegerKeyUnreadable {
+                what: STATIC_NEEDLE_A,
+                raw: payload_a(),
+                key_name: "boundary_event_seq",
+                key: 11,
+            },
+            &[NEEDLE_A];
         "StartupEnumerationFailed" | SupervisorError::StartupEnumerationFailed { pass, .. }
             => format!("StartupEnumerationFailed.{}", expected_startup_pass(pass).1),
             SupervisorError::StartupEnumerationFailed { pass: StartupPass::Project, source: driver_error(NEEDLE_A) }, &[NEEDLE_A];
@@ -5088,10 +5099,10 @@ mod tests {
         // cause-bearing Supervisor parents (including the two nested classification
         // vocabularies), 18 account faults at each of 14 wrappers, the three draft reasons, both
         // charter-revision pairs, and slice 1's 83-case Outcome tree.
-        assert_eq!(cases.len(), 873, "R42S2.TRANSPORT.CARDINALITY.CASES");
+        assert_eq!(cases.len(), 874, "R42S2.TRANSPORT.CARDINALITY.CASES");
         assert_eq!(
             supervisor_rows().len(),
-            72,
+            73,
             "R42S2.TRANSPORT.CARDINALITY.Supervisor"
         );
         let ids: std::collections::BTreeSet<&str> =
