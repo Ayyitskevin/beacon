@@ -161,8 +161,9 @@ pub(crate) enum ResidentConfigurationStateFault {
         cause: ResidentConfigurationError,
     },
     // NO `Totals` ARM. Every check here belongs to one decision and its own Event.
-    /// A row whose Workspace column is not a UUID. Unreachable while the foreign-key check and
-    /// the Workspace pass run first.
+    /// A row whose Workspace or decision identity is not a UUID. A malformed decision id can
+    /// satisfy the provisional schema's length check, so its raw key must reach the escaped
+    /// startup boundary rather than the ordinary typed-row fault.
     Identity {
         workspace_id: String,
         decision_id: String,
@@ -948,19 +949,22 @@ pub(crate) fn verify_configuration_state(
         // as text, so the key is the reader's own type here (R28.2) rather than a parsed one.
         let decision_id = base.0.clone();
         let workspace_text = base.1.clone();
-        verify_one_configuration_decision(connection, base, &mut latest).map_err(|cause| {
-            match Uuid::parse_str(&workspace_text) {
-                Ok(workspace_id) => ResidentConfigurationStateFault::Row {
+        verify_one_configuration_decision(connection, base, &mut latest).map_err(
+            |cause| match (
+                Uuid::parse_str(&workspace_text),
+                Uuid::parse_str(&decision_id),
+            ) {
+                (Ok(workspace_id), Ok(_)) => ResidentConfigurationStateFault::Row {
                     workspace_id,
                     decision_id: decision_id.clone(),
                     cause,
                 },
-                Err(_) => ResidentConfigurationStateFault::Identity {
+                _ => ResidentConfigurationStateFault::Identity {
                     workspace_id: workspace_text.clone(),
                     decision_id: decision_id.clone(),
                 },
-            }
-        })?;
+            },
+        )?;
     }
     Ok(())
 }
