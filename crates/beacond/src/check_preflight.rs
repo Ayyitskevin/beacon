@@ -790,6 +790,31 @@ pub(crate) fn verify_run_state(connection: &Connection) -> Result<(), RunStateFa
         .map_err(|_| RunStateFault::Clock)?
         .as_millis();
     let now = i64::try_from(now).map_err(|_| RunStateFault::Clock)?;
+
+    // Identity is part of deciding whether a stored Run is representable at all. Establish it
+    // before lease reconciliation so a row that startup must refuse cannot be changed on the way
+    // to that refusal (R45.RUN.IDENTITY_BEFORE_LEASE_STATE).
+    let identities = {
+        let mut statement = connection
+            .prepare("SELECT workspace_id, id FROM runs ORDER BY workspace_id, id")
+            .map_err(RunStateFault::Store)?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(RunStateFault::Store)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(RunStateFault::Store)?
+    };
+    for (workspace_id, run_id) in identities {
+        let identity = || RunStateFault::Identity {
+            workspace_id: workspace_id.clone(),
+            run_id: run_id.clone(),
+        };
+        Uuid::parse_str(&workspace_id).map_err(|_| identity())?;
+        Uuid::parse_str(&run_id).map_err(|_| identity())?;
+    }
+
     // Both open states expire the same way: a lease that ran out without a terminal Receipt is
     // `unconfirmed` whatever kind of Run held it.
     connection
