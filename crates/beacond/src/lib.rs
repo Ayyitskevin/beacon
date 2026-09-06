@@ -690,8 +690,44 @@ fn identity_label(what: &str) -> &'static str {
         "a Resident configuration row's identity is not readable" => {
             "a Resident configuration row's identity is not readable"
         }
-        "a run row's identity is not readable" => "a run row's identity is not readable",
+        // NOTE the capital R. astra's spec table spelled this "a run row's..."; production spells
+        // it "a Run row's...". The allowlist entry therefore matched nothing and the real producer
+        // fell through to the fallback -- a known label silently losing its line, which is exactly
+        // what this guard exists to prevent. Caught on the post-R45 rebase by R45's own bar.
+        "a Run row's identity is not readable" => "a Run row's identity is not readable",
+        // R45's activation owner, which had no allowlist entry at all.
+        "a local-model activation row's identity is not readable" => {
+            "a local-model activation row's identity is not readable"
+        }
+        // R45's owners, folded in when its arm was closed against this same projection.
+        "a Project repository revision is not readable" => {
+            "a Project repository revision is not readable"
+        }
+        "a Project policy revision is not readable" => "a Project policy revision is not readable",
+        "a Resident lifecycle decision's ordering key is not readable" => {
+            "a Resident lifecycle decision's ordering key is not readable"
+        }
+        "a Resident configuration decision's ordering key is not readable" => {
+            "a Resident configuration decision's ordering key is not readable"
+        }
+        "a local-model activation decision's ordering key is not readable" => {
+            "a local-model activation decision's ordering key is not readable"
+        }
         _ => "stored row identity could not be read",
+    }
+}
+
+/// The ordering-key NAMES a startup refusal may print (R42).
+///
+/// `key_name` is another public `&'static str`, and the same rule applies to it: a static lifetime
+/// says where a string lives, not who wrote it. The key VALUE beside it is an i64 the store owns
+/// and the reader is entitled to -- a typed key, not free text -- so it is printed as it is.
+fn ordering_key_label(key_name: &str) -> &'static str {
+    match key_name {
+        "revision" => "revision",
+        "sequence" => "sequence",
+        "boundary_event_seq" => "boundary_event_seq",
+        _ => "an unrecognized ordering key",
     }
 }
 
@@ -878,6 +914,11 @@ pub(crate) fn supervisor_caller_tag(error: &SupervisorError) -> String {
         SupervisorError::UnsupportedSchemaVersion(..) => "UnsupportedSchemaVersion".to_owned(),
         SupervisorError::IntegrityCheckFailed(..) => "IntegrityCheckFailed".to_owned(),
         SupervisorError::StoredIdentityUnreadable { .. } => "StoredIdentityUnreadable".to_owned(),
+        // R45 added this arm after slice 2's census. Its caller tag is closed like every other
+        // root; its own STARTUP line is not -- see the build report.
+        SupervisorError::StoredIntegerKeyUnreadable { .. } => {
+            "StoredIntegerKeyUnreadable".to_owned()
+        }
         SupervisorError::StartupEnumerationFailed { pass, .. } => {
             format!("StartupEnumerationFailed.{}", pass.name())
         }
@@ -1443,15 +1484,21 @@ impl fmt::Display for SupervisorError {
                     identity_label(what)
                 )
             }
+            // R45 added this arm after slice 2's census, printing the raw stored text through
+            // the helper this slice had removed -- the same disclosure closed one arm above,
+            // under a new name. Routed through the same projection: the owner label, the fault
+            // name, and the typed ordering key, which is an i64 the reader is entitled to.
+            // `raw` stays in `Debug`, where R45's own bars read it.
             Self::StoredIntegerKeyUnreadable {
                 what,
-                raw,
                 key_name,
                 key,
+                ..
             } => write!(
                 formatter,
-                "{what}: {}, {key_name} {key}",
-                quoted_store_text(raw)
+                "{}: StoredIntegerKeyUnreadable, {} {key}",
+                identity_label(what),
+                ordering_key_label(key_name)
             ),
             Self::StartupEnumerationFailed { pass, .. } => write!(
                 formatter,
@@ -7370,7 +7417,10 @@ mod tests {
 
     /// The 17 identity labels a startup refusal may print, written here from the reviewed list --
     /// never read back from the production allowlist this test constrains.
-    const R42S2_IDENTITY_LABELS: [&str; 17] = [
+    /// The three approved ordering-key names, written here from the reviewed list.
+    const R42S2_KEY_NAMES: [&str; 3] = ["revision", "sequence", "boundary_event_seq"];
+
+    const R42S2_IDENTITY_LABELS: [&str; 23] = [
         "a Project row's identity is not readable",
         "a Mission row's identity is not readable",
         "a completion row's Workspace is not readable",
@@ -7387,7 +7437,14 @@ mod tests {
         "a Project policy row's identity is not readable",
         "a Workspace id is not readable",
         "a Resident configuration row's identity is not readable",
-        "a run row's identity is not readable",
+        "a Run row's identity is not readable",
+        "a local-model activation row's identity is not readable",
+        // R45's owners, folded in with its arm.
+        "a Project repository revision is not readable",
+        "a Project policy revision is not readable",
+        "a Resident lifecycle decision's ordering key is not readable",
+        "a Resident configuration decision's ordering key is not readable",
+        "a local-model activation decision's ordering key is not readable",
     ];
 
     /// The 14 totals labels, likewise.
@@ -7414,7 +7471,7 @@ mod tests {
     fn r42_startup_labels_are_closed() {
         assert_eq!(
             R42S2_IDENTITY_LABELS.len(),
-            17,
+            23,
             "R42S2.LABELS.CARDINALITY.Identity"
         );
         assert_eq!(
@@ -7506,6 +7563,61 @@ mod tests {
                 format!("{label}: StoredIdentityUnreadable"),
                 "R42S2.LABELS.Identity.{label}.PROJECTION"
             );
+        }
+
+        // R45's arm, through the same guards: every known owner label and ordering key keeps its
+        // exact text, an unknown one of either is declined, and the raw never appears.
+        for label in R42S2_IDENTITY_LABELS {
+            for key_name in R42S2_KEY_NAMES {
+                let refusal = SupervisorError::StoredIntegerKeyUnreadable {
+                    what: label,
+                    raw: format!("{R42S2_NEEDLE_A} /home/example/private.txt"),
+                    key_name,
+                    key: 11,
+                };
+                let line = refusal.to_string();
+                assert!(
+                    !line.contains(R42S2_NEEDLE_A),
+                    "R42S2.LABELS.IntegerKey.{label}.NO_NEEDLE: {line}"
+                );
+                assert_eq!(
+                    line,
+                    format!("{label}: StoredIntegerKeyUnreadable, {key_name} 11"),
+                    "R42S2.LABELS.IntegerKey.{label}.PROJECTION"
+                );
+            }
+        }
+        for (case, what, key_name, expected) in [
+            (
+                "IntegerKey.UnknownLabel",
+                R42S2_STATIC_A,
+                "sequence",
+                "stored row identity could not be read: StoredIntegerKeyUnreadable, sequence 11",
+            ),
+            (
+                "IntegerKey.UnknownKeyName",
+                "a Run row's identity is not readable",
+                R42S2_STATIC_B,
+                "a Run row's identity is not readable: StoredIntegerKeyUnreadable, an unrecognized \
+                 ordering key 11",
+            ),
+        ] {
+            let refusal = SupervisorError::StoredIntegerKeyUnreadable {
+                what,
+                raw: format!("{R42S2_NEEDLE_A} /home/example/private.txt"),
+                key_name,
+                key: 11,
+            };
+            let line = refusal.to_string();
+            assert!(
+                !line.contains(R42S2_NEEDLE_A) && !line.contains(R42S2_NEEDLE_B),
+                "R42S2.LABELS.{case}.NO_NEEDLE: {line}"
+            );
+            assert!(
+                format!("{refusal:?}").contains(R42S2_NEEDLE_A),
+                "R42S2.LABELS.{case}.DEBUG_RETAINS"
+            );
+            assert_eq!(line, expected, "R42S2.LABELS.{case}.PROJECTION");
         }
 
         // Every known totals label, with both independent count pairs.
@@ -7687,7 +7799,7 @@ mod tests {
     }
 
     /// The 72 startup lines, transcribed from the spec with this table's own fixture keys.
-    const STARTUP_LINES: [(&str, &str); 72] = [
+    const STARTUP_LINES: [(&str, &str); 73] = [
         ("EmptyWorkspaceName", "workspace name cannot be empty"),
         (
             "WorkspaceNameTooLong",
@@ -7954,6 +8066,11 @@ mod tests {
             "a Mission row's identity is not readable: StoredIdentityUnreadable",
         ),
         (
+            "StoredIntegerKeyUnreadable",
+            "a Run row's identity is not readable: StoredIntegerKeyUnreadable, \
+             boundary_event_seq 11",
+        ),
+        (
             "StartupEnumerationFailed",
             "the Project startup pass could not enumerate its rows",
         ),
@@ -8206,6 +8323,17 @@ mod tests {
                 what: "a Mission row's identity is not readable",
                 raw: format!("{R42S2_NEEDLE_A} /home/example/private.txt"),
             }, &[R42S2_NEEDLE_A];
+        // R45's 73rd arm, now closed against the same projection as the arm above it. The raw
+        // carries a marker BECAUSE the line no longer does -- which is the whole point.
+        "StoredIntegerKeyUnreadable" | SupervisorError::StoredIntegerKeyUnreadable { .. }
+            => startup_line("StoredIntegerKeyUnreadable"),
+            SupervisorError::StoredIntegerKeyUnreadable {
+                what: "a Run row's identity is not readable",
+                raw: format!("{R42S2_NEEDLE_A} /home/example/private.txt"),
+                key_name: "boundary_event_seq",
+                key: 11,
+            },
+            &[R42S2_NEEDLE_A];
         "StartupEnumerationFailed" | SupervisorError::StartupEnumerationFailed { .. }
             => startup_line("StartupEnumerationFailed"),
             SupervisorError::StartupEnumerationFailed { pass: crate::StartupPass::Project, source: r42s2_driver() }, &[R42S2_NEEDLE_A];
@@ -8217,11 +8345,11 @@ mod tests {
     /// R42 slice 2, fold: every one of the 72 startup lines is what the spec says.
     #[test]
     fn r42_startup_templates_are_all_pinned() {
-        assert_eq!(STARTUP_LINES.len(), 72, "R42S2.STARTUP.CARDINALITY.LINES");
-        assert_eq!(startup_rows().len(), 72, "R42S2.STARTUP.CARDINALITY.ROWS");
+        assert_eq!(STARTUP_LINES.len(), 73, "R42S2.STARTUP.CARDINALITY.LINES");
+        assert_eq!(startup_rows().len(), 73, "R42S2.STARTUP.CARDINALITY.ROWS");
         let ids: std::collections::BTreeSet<&str> =
             startup_rows().iter().map(|(case, _, _)| *case).collect();
-        assert_eq!(ids.len(), 72, "R42S2.STARTUP.CASE_IDS_UNIQUE");
+        assert_eq!(ids.len(), 73, "R42S2.STARTUP.CASE_IDS_UNIQUE");
 
         for (case, value, markers) in startup_rows() {
             let (matched, expected) = expected_startup(&value);

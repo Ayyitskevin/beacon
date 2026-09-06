@@ -2230,12 +2230,15 @@ fn sol1_startup_refuses_untyped_run_identity_edges() {
             "{label}: the one-line refusal was not bounded: {} characters",
             line.chars().count()
         );
-        if label == "one-megabyte" {
-            assert!(
-                line.contains("truncated from 1048628 characters"),
-                "the bounded refusal did not report truncation: {line}"
-            );
-        }
+        // R42 amended what this rung requires. "the line reports it truncated N characters" is a
+        // claim about a bounded DISCLOSURE of stored text; the projection now carries none, so
+        // there is nothing left to bound. The line is instead held to the whole closed
+        // projection, which is the same for every edge here -- and retention is already asserted
+        // above, on the TYPED `raw` field, which is where it belongs.
+        assert_eq!(
+            line, "a Run row's identity is not readable: StoredIdentityUnreadable",
+            "{label}: the one-line refusal is not the closed projection"
+        );
     }
 }
 
@@ -2317,11 +2320,14 @@ fn astra_run_identity_precedes_lease_state_judgement() {
             "{label}: the one-line refusal was not bounded: {} characters",
             line.chars().count()
         );
-        if label == "one-megabyte" {
-            assert!(
-                line.contains("truncated from 1048628 characters"),
-                "the bounded refusal did not report truncation: {line}"
-            );
-        }
+        // R42 amended what this rung requires. "the line reports it truncated N characters" is a
+        // claim about a bounded DISCLOSURE of stored text; the projection now carries none, so
+        // there is nothing left to bound. The line is instead held to the whole closed
+        // projection, which is the same for every edge here -- and retention is already asserted
+        // above, on the TYPED `raw` field, which is where it belongs.
+        assert_eq!(
+            line, "a Run row's identity is not readable: StoredIdentityUnreadable",
+            "{label}: the one-line refusal is not the closed projection"
+        );
     }
 }

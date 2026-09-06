@@ -802,8 +802,14 @@ fn astra_minimum_activation_sequence_outward_key_is_exact() {
 }
 
 /// sol1 cold-read probe: a 36-character non-UUID activation id passes the schema and reaches the
-/// pass. The refusal must preserve a bounded/escaped witness instead of collapsing to an unnamed
-/// unreadable row.
+/// pass. The refusal must still NAME the owner rather than collapsing to an unnamed unreadable row.
+///
+/// R42 amended what this bar requires, exactly as it amended the two `sol1_*` bars in `lib.rs`:
+/// "the line contains an escaped fragment of the stored id" is a requirement to DISCLOSE a
+/// substring of store text. Escaping and bounding limited that disclosure; they did not remove it.
+/// What is kept is the invariant that always mattered -- one line, bounded, naming which owner
+/// could not read its row -- plus the stored text absent from the line and still whole in `Debug`,
+/// where this suite's sibling bars already read it.
 #[test]
 fn sol1_activation_with_unreadable_identity_is_still_named() {
     let store = TestStore::new("sol1-unreadable-id");
@@ -866,7 +872,19 @@ fn sol1_activation_with_unreadable_identity_is_still_named() {
     .expect_err("the malformed activation id reopened Ready");
     let line = error.to_string();
     assert!(
-        line.contains(&"x".repeat(31)) && !line.contains('\r') && !line.contains('\u{1b}'),
-        "the refusal did not name the unreadable activation with an escaped witness: {line:?}"
+        !line.contains('\n') && !line.contains('\r') && !line.contains('\u{1b}'),
+        "R42S2.IDENTITY.Activation.ONE_LINE: {line:?}"
+    );
+    assert!(
+        !line.contains(&"x".repeat(31)),
+        "R42S2.IDENTITY.Activation.NO_NEEDLE: {line:?}"
+    );
+    assert_eq!(
+        line, "a local-model activation row's identity is not readable: StoredIdentityUnreadable",
+        "R42S2.IDENTITY.Activation.PROJECTION"
+    );
+    assert!(
+        format!("{error:?}").contains(&"x".repeat(31)),
+        "R42S2.IDENTITY.Activation.DEBUG_RETAINS"
     );
 }
