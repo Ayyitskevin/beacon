@@ -298,8 +298,37 @@ fn restart_refuses_a_decision_whose_audit_event_is_missing() {
             store_path: store.path.clone(),
             initial_workspace_name: "Ignored".to_owned(),
         }),
-        Err(beacond::SupervisorError::StarterOrganizationStateMismatch)
+        Err(beacond::SupervisorError::StarterOrganizationStateMismatch { .. })
     ));
+
+    // R28.1/R28.4: the refusal names the Workspace it refused, and the line is the key plus the
+    // fault's NAME -- without this the Display could print the reader's whole sentence and no bar
+    // would notice (measured: mutant 10 survived until this was here).
+    let refusal = Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .unwrap_err();
+    let workspace_id = match &refusal {
+        beacond::SupervisorError::StarterOrganizationStateMismatch { workspace_id, .. } => {
+            *workspace_id
+        }
+        other => panic!("not the refusal this bar is about: {other:?}"),
+    };
+    let line = refusal.to_string();
+    assert!(
+        line.contains(&workspace_id.to_string()),
+        "the refusal does not name the Workspace it refused: {line}"
+    );
+    let named = line.rsplit(": ").next().unwrap().to_owned();
+    assert!(
+        !named.contains(' ') && !named.contains('{'),
+        "the tail of the line is a rendering, not a name: {line}"
+    );
+    assert!(
+        format!("{refusal:?}").contains(&named),
+        "the named fault is not reachable through Debug: {refusal:?}"
+    );
 }
 
 fn draft(role: StarterRole, display_name: Option<&str>) -> StarterResidentDraft {

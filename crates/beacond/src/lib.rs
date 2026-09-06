@@ -357,7 +357,13 @@ pub enum SupervisorError {
     InvalidEventKind(String),
     EventPayloadScopeMismatch(i64),
     StarterOrganizationEventMismatch(i64),
-    StarterOrganizationStateMismatch,
+    /// A Workspace's starter organization does not re-prove.
+    ///
+    /// Names the Workspace -- this pass's whole key -- and carries the reader's own error (R28.1).
+    StarterOrganizationStateMismatch {
+        workspace_id: Uuid,
+        cause: starter_organization::StarterOrganizationError,
+    },
     ProjectEventMismatch(i64),
     /// A stored Project does not re-prove against its charter history or the log.
     ///
@@ -615,6 +621,7 @@ pub enum StartupPass {
     SampleProject,
     Team,
     ProjectPolicy,
+    StarterOrganization,
 }
 
 impl StartupPass {
@@ -636,6 +643,7 @@ impl StartupPass {
             Self::SampleProject => "SampleProject",
             Self::Team => "Team",
             Self::ProjectPolicy => "ProjectPolicy",
+            Self::StarterOrganization => "StarterOrganization",
         }
     }
 }
@@ -701,12 +709,15 @@ impl fmt::Display for SupervisorError {
                 formatter,
                 "Event sequence {sequence} does not match Starter Organization state"
             ),
-            Self::StarterOrganizationStateMismatch => {
-                write!(
-                    formatter,
-                    "Starter Organization state has no exact audit Event"
-                )
-            }
+            // R28.4: the key and the fault's NAME.
+            Self::StarterOrganizationStateMismatch {
+                workspace_id,
+                cause,
+            } => write!(
+                formatter,
+                "the starter organization of Workspace {workspace_id} does not re-prove: {}",
+                cause.name()
+            ),
             Self::ProjectEventMismatch(sequence) => write!(
                 formatter,
                 "Event sequence {sequence} does not match Project creation state"
@@ -2086,6 +2097,31 @@ fn map_project_policy_state_fault(
     }
 }
 
+/// The production mapping for the StarterOrganization startup pass, NAMED so a bar can drive it.
+fn map_starter_state_fault(fault: starter_organization::StarterStateFault) -> SupervisorError {
+    match fault {
+        starter_organization::StarterStateFault::Store(source) => {
+            SupervisorError::StartupEnumerationFailed {
+                pass: StartupPass::StarterOrganization,
+                source,
+            }
+        }
+        starter_organization::StarterStateFault::Row {
+            workspace_id,
+            cause,
+        } => SupervisorError::StarterOrganizationStateMismatch {
+            workspace_id,
+            cause,
+        },
+        starter_organization::StarterStateFault::Identity { workspace_id } => {
+            SupervisorError::StoredIdentityUnreadable {
+                what: "a Workspace id is not readable",
+                raw: workspace_id,
+            }
+        }
+    }
+}
+
 fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, SupervisorError> {
     let schema_version = connection.query_row(
         "SELECT version FROM schema_meta WHERE singleton = 1",
@@ -2115,8 +2151,7 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     }
 
     let persisted_event_count = verify_persisted_events(connection)?;
-    starter_organization::verify_starter_state(connection)
-        .map_err(|_| SupervisorError::StarterOrganizationStateMismatch)?;
+    starter_organization::verify_starter_state(connection).map_err(map_starter_state_fault)?;
     project::verify_project_state(connection).map_err(map_project_state_fault)?;
     project_policy::verify_project_policy_state(connection)
         .map_err(map_project_policy_state_fault)?;
@@ -2565,6 +2600,13 @@ mod tests {
                 ),
             ),
             (
+                "StarterOrganization",
+                super::map_starter_state_fault(
+                    crate::starter_organization::verify_starter_state(&connection)
+                        .expect_err("no `workspaces` table"),
+                ),
+            ),
+            (
                 "ProjectPolicy",
                 super::map_project_policy_state_fault(
                     crate::project_policy::verify_project_policy_state(&connection)
@@ -2587,7 +2629,7 @@ mod tests {
         ];
         assert_eq!(
             refusals.len(),
-            15,
+            16,
             "a pass was added without a fixture here"
         );
 
@@ -2611,7 +2653,7 @@ mod tests {
         }
         assert_eq!(
             lines.len(),
-            15,
+            16,
             "two passes render the same line, so an operator cannot tell them apart: {lines:?}"
         );
     }

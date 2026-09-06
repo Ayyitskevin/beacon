@@ -91,6 +91,89 @@ pub struct StarterOrganizationView {
     pub residents: Vec<ResidentAgentSummary>,
 }
 
+/// Which fault the starter-organization startup pass hit, and WHICH ROW hit it (R28.1).
+///
+/// The row is a Workspace -- this pass walks `workspaces` -- so the key has no second field.
+pub(crate) enum StarterStateFault {
+    /// The enumeration itself failed: no row to name, because none was reached.
+    Store(rusqlite::Error),
+    /// One Workspace's starter organization did not re-prove.
+    Row {
+        workspace_id: Uuid,
+        cause: StarterOrganizationError,
+    },
+    /// A row whose id is not a UUID. Unreachable while the Workspace pass runs first.
+    Identity { workspace_id: String },
+}
+
+impl StarterOrganizationError {
+    /// The variant's NAME, for R28.4's one-line startup message.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Account(_) => "Account",
+            Self::UnsupportedProposalVersion => "UnsupportedProposalVersion",
+            Self::EmptyRoster => "EmptyRoster",
+            Self::DuplicateRole => "DuplicateRole",
+            Self::InvalidDisplayName => "InvalidDisplayName",
+            Self::DecisionAlreadyRecorded => "DecisionAlreadyRecorded",
+            Self::InvalidStore => "InvalidStore",
+            Self::Store(_) => "Store",
+            Self::Json(_) => "Json",
+        }
+    }
+}
+
+impl fmt::Display for StarterStateFault {
+    /// R28.4: the KEY and the fault's NAME, never the carried error's own text.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(_) => formatter.write_str("the starter organizations could not be read"),
+            Self::Row {
+                workspace_id,
+                cause,
+            } => write!(
+                formatter,
+                "the starter organization of Workspace {workspace_id} does not re-prove: {}",
+                cause.name()
+            ),
+            Self::Identity { workspace_id } => {
+                write!(formatter, "a Workspace id is not readable: {workspace_id}")
+            }
+        }
+    }
+}
+
+/// Hand-written and NOT delegating to `Display`: R28.4 keeps the carried text reachable here.
+impl fmt::Debug for StarterStateFault {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => formatter.debug_tuple("Store").field(error).finish(),
+            Self::Row {
+                workspace_id,
+                cause,
+            } => formatter
+                .debug_struct("Row")
+                .field("workspace_id", workspace_id)
+                .field("cause", cause)
+                .finish(),
+            Self::Identity { workspace_id } => formatter
+                .debug_struct("Identity")
+                .field("workspace_id", workspace_id)
+                .finish(),
+        }
+    }
+}
+
+impl std::error::Error for StarterStateFault {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::Row { cause, .. } => Some(cause),
+            Self::Identity { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum StarterOrganizationError {
     Account(OperatorAccountError),
@@ -442,15 +525,36 @@ pub(crate) fn verify_starter_event(
 
 pub(crate) fn verify_starter_state(
     connection: &rusqlite::Connection,
-) -> Result<(), StarterOrganizationError> {
-    let mut statement = connection.prepare("SELECT id FROM workspaces ORDER BY id")?;
+) -> Result<(), StarterStateFault> {
+    let mut statement = connection
+        .prepare("SELECT id FROM workspaces ORDER BY id")
+        .map_err(StarterStateFault::Store)?;
     let workspace_ids = statement
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(StarterStateFault::Store)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StarterStateFault::Store)?;
 
     for workspace_id in workspace_ids {
-        let workspace_id =
-            Uuid::parse_str(&workspace_id).map_err(|_| StarterOrganizationError::InvalidStore)?;
+        let parsed = Uuid::parse_str(&workspace_id).map_err(|_| StarterStateFault::Identity {
+            workspace_id: workspace_id.clone(),
+        })?;
+        verify_one_starter_organization(connection, parsed).map_err(|cause| {
+            StarterStateFault::Row {
+                workspace_id: parsed,
+                cause,
+            }
+        })?;
+    }
+    Ok(())
+}
+
+/// One Workspace's starter organization, re-proved. Unchanged from what the loop held inline.
+fn verify_one_starter_organization(
+    connection: &rusqlite::Connection,
+    workspace_id: Uuid,
+) -> Result<(), StarterOrganizationError> {
+    {
         let view = load_view(connection, workspace_id)?;
         let (accepted_events, discarded_events): (i64, i64) = connection.query_row(
             "SELECT
@@ -568,4 +672,69 @@ fn load_admissions(
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod name_witness {
+    use super::*;
+
+    /// Pinned independently of `name()` (the fold at 30d2a20): an exhaustive `name()` catches an
+    /// added arm, only a second table catches a wrong or duplicated name.
+    fn expected_name(error: &StarterOrganizationError) -> &'static str {
+        match error {
+            StarterOrganizationError::Account(_) => "Account",
+            StarterOrganizationError::UnsupportedProposalVersion => "UnsupportedProposalVersion",
+            StarterOrganizationError::EmptyRoster => "EmptyRoster",
+            StarterOrganizationError::DuplicateRole => "DuplicateRole",
+            StarterOrganizationError::InvalidDisplayName => "InvalidDisplayName",
+            StarterOrganizationError::DecisionAlreadyRecorded => "DecisionAlreadyRecorded",
+            StarterOrganizationError::InvalidStore => "InvalidStore",
+            StarterOrganizationError::Store(_) => "Store",
+            StarterOrganizationError::Json(_) => "Json",
+        }
+    }
+
+    #[test]
+    fn every_starter_organization_error_arm_has_its_own_pinned_name() {
+        let every_arm = [
+            StarterOrganizationError::Account(
+                crate::operator_account::OperatorAccountError::PasswordTooShort,
+            ),
+            StarterOrganizationError::UnsupportedProposalVersion,
+            StarterOrganizationError::EmptyRoster,
+            StarterOrganizationError::DuplicateRole,
+            StarterOrganizationError::InvalidDisplayName,
+            StarterOrganizationError::DecisionAlreadyRecorded,
+            StarterOrganizationError::InvalidStore,
+            StarterOrganizationError::Store(rusqlite::Error::QueryReturnedNoRows),
+            StarterOrganizationError::Json(serde_json::from_str::<u8>("\"x\"").unwrap_err()),
+        ];
+        assert_eq!(
+            every_arm.len(),
+            9,
+            "an arm was added to `StarterOrganizationError` without a fixture here"
+        );
+        for arm in &every_arm {
+            assert_eq!(
+                arm.name(),
+                expected_name(arm),
+                "the startup name does not match the pinned table: {arm:?}"
+            );
+        }
+        let names: std::collections::BTreeSet<&str> = every_arm
+            .iter()
+            .map(StarterOrganizationError::name)
+            .collect();
+        assert_eq!(
+            names.len(),
+            9,
+            "two arms share a startup name, so a swap between them is invisible: {names:?}"
+        );
+        for name in names {
+            assert!(
+                !name.contains(' ') && !name.contains('{'),
+                "a name is a name, not a rendering: {name}"
+            );
+        }
+    }
 }
