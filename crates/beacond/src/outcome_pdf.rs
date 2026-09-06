@@ -114,9 +114,9 @@ pub enum PdfRefusal {
 
 /// The translator refusal's NAME, for this caller's outward line (R42).
 ///
-/// `TypstRefusal`'s own `Display` is a translator diagnostic: it prints the renderer version the
-/// document named, the offending source line, and the construct character. Useful to whoever is
-/// authoring the document; not something a render refusal should hand to whoever asked for a PDF.
+/// `TypstRefusal`'s `Display` is now a closed caller line. The original version, source line and
+/// character remain in the typed refusal and Debug. This PDF selector keeps its own established
+/// projection; it does not forward the translator's wording.
 /// The exhaustive match is the point -- a new translator arm is a compile error here rather than a
 /// new sentence nobody read.
 ///
