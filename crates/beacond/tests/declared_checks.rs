@@ -1675,81 +1675,90 @@ fn startup_requires_exactly_one_execution_event_for_every_terminal_execution() {
 
 #[test]
 fn startup_rejects_execution_relabelled_as_preflight_without_a_preflight_event() {
-    if !enforcing_or_skip() {
-        return;
-    }
-    let (repository, revision) = fixture_repository("relabelled-execution");
-    let source = repository.path.to_string_lossy().into_owned();
-    let (store, projects, repositories, checks) = enrolled("relabelled-execution");
-    let project = projects.create(project_draft()).unwrap();
-    repositories
-        .bind(
-            project.id,
-            project.charter.revision,
-            None,
-            RepositoryDraft {
-                source_kind: RepositorySourceKind::LocalPath,
-                source,
-                base_revision: revision,
-                declared_checks: vec![check("ok", &["/bin/true"], ".")],
-            },
-        )
-        .unwrap();
-    // R39.3 (kimi's HOLD): TWO Runs, and the tampered one sorts LAST under the pass's own
-    // `ORDER BY runs.workspace_id, runs.id`. With one Run "names the failing row" and "names row
-    // 0" are the same claim, and a mutant naming `rows[0]` survives.
-    let receipts = [
-        checks.execute(project.id, bounds()).unwrap(),
-        checks.execute(project.id, bounds()).unwrap(),
-    ];
-    let connection = Connection::open(&store.path).unwrap();
-    let tampered: String = connection
-        .query_row(
-            // Each `execute` also records a `check_preflight` Run, so the plant picks from the
-            // kind this bar relabels.
-            "SELECT id FROM runs WHERE kind = 'declared_checks'
-             ORDER BY workspace_id, id DESC LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .expect("the fixture recorded two Runs");
-    let receipt = receipts
-        .iter()
-        .find(|receipt| receipt.run_id.to_string() == tampered)
-        .expect("the last-sorting Run is one the fixture made");
-    replace_run_update_trigger(&connection, |connection| {
-        connection.execute(
-            "UPDATE runs SET kind = 'check_preflight' WHERE id = ?1",
-            [receipt.run_id.to_string()],
-        )
-    });
-    connection
-        .execute(
-            "DELETE FROM events
+    // R44: BOTH ENDS. Run ids are random UUIDs, so which end the tampered Run lands on is
+    // luck -- measured: one sampling had it interior (both end-mutants died) and the next
+    // had it last. Two runs, targeting the first- and last-sorting `declared_checks` Run,
+    // make it structural: a mutant naming one fixed end is wrong in at least one of them.
+    for (end, order) in [("last", "DESC"), ("first", "ASC")] {
+        if !enforcing_or_skip() {
+            return;
+        }
+        let (repository, revision) = fixture_repository(&format!("relabelled-execution-{end}"));
+        let source = repository.path.to_string_lossy().into_owned();
+        let (store, projects, repositories, checks) =
+            enrolled(&format!("relabelled-execution-{end}"));
+        let project = projects.create(project_draft()).unwrap();
+        repositories
+            .bind(
+                project.id,
+                project.charter.revision,
+                None,
+                RepositoryDraft {
+                    source_kind: RepositorySourceKind::LocalPath,
+                    source,
+                    base_revision: revision,
+                    declared_checks: vec![check("ok", &["/bin/true"], ".")],
+                },
+            )
+            .unwrap();
+        // R39.3 (kimi's HOLD): TWO Runs, and the tampered one sorts LAST under the pass's own
+        // `ORDER BY runs.workspace_id, runs.id`. With one Run "names the failing row" and "names row
+        // 0" are the same claim, and a mutant naming `rows[0]` survives.
+        let receipts = [
+            checks.execute(project.id, bounds()).unwrap(),
+            checks.execute(project.id, bounds()).unwrap(),
+        ];
+        let connection = Connection::open(&store.path).unwrap();
+        let tampered: String = connection
+            .query_row(
+                // Each `execute` also records a `check_preflight` Run, so the plant picks from the
+                // kind this bar relabels.
+                &format!(
+                    "SELECT id FROM runs WHERE kind = 'declared_checks'
+                 ORDER BY workspace_id {order}, id {order} LIMIT 1"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .expect("the fixture recorded two Runs");
+        let receipt = receipts
+            .iter()
+            .find(|receipt| receipt.run_id.to_string() == tampered)
+            .expect("the last-sorting Run is one the fixture made");
+        replace_run_update_trigger(&connection, |connection| {
+            connection.execute(
+                "UPDATE runs SET kind = 'check_preflight' WHERE id = ?1",
+                [receipt.run_id.to_string()],
+            )
+        });
+        connection
+            .execute(
+                "DELETE FROM events
              WHERE kind = 'run.executed'
                AND json_extract(payload_json, '$.runId') = ?1",
-            [receipt.run_id.to_string()],
-        )
-        .unwrap();
-    drop(connection);
+                [receipt.run_id.to_string()],
+            )
+            .unwrap();
+        drop(connection);
 
-    let error = Supervisor::bootstrap(StartupConfig {
-        store_path: store.path.clone(),
-        initial_workspace_name: "Ignored".to_owned(),
-    })
-    .unwrap_err();
-    let SupervisorError::RunStateMismatch { run_id, .. } = &error else {
-        panic!("expected a named Run-state refusal, got {error:?}");
-    };
-    assert_eq!(run_id, &receipt.run_id.to_string());
-    // The LINE, not just the variant: R28.4's operator message carries the row and the owning
-    // reader's fault NAME, so a Display that drops either is caught here rather than by reading.
-    // This bar and not the state-column one below, because this tamper is what reaches the pass.
-    let line = error.to_string();
-    assert!(
-        line.contains(&receipt.run_id.to_string()) && line.contains("InvalidStore"),
-        "the operator's line names neither the Run nor the fault it hit: {line}"
-    );
+        let error = Supervisor::bootstrap(StartupConfig {
+            store_path: store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        })
+        .unwrap_err();
+        let SupervisorError::RunStateMismatch { run_id, .. } = &error else {
+            panic!("expected a named Run-state refusal, got {error:?}");
+        };
+        assert_eq!(run_id, &receipt.run_id.to_string());
+        // The LINE, not just the variant: R28.4's operator message carries the row and the owning
+        // reader's fault NAME, so a Display that drops either is caught here rather than by reading.
+        // This bar and not the state-column one below, because this tamper is what reaches the pass.
+        let line = error.to_string();
+        assert!(
+            line.contains(&receipt.run_id.to_string()) && line.contains("InvalidStore"),
+            "the operator's line names neither the Run nor the fault it hit: {line}"
+        );
+    }
 }
 
 #[test]
