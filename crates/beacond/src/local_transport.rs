@@ -423,11 +423,13 @@ impl fmt::Display for LocalTransportError {
             // closed name vocabulary. Pinned by the code table in the wire witness -- a
             // payload-bearing code would break that table before it could reach this line.
             Self::Remote { code, .. } => write!(formatter, "local supervisor refused: {code:?}"),
-            // OPEN UNTIL COMMIT 1. The caller-safe Supervisor tag is a lib.rs selector (it needs
-            // all 72 variants and the private children), and this lane builds local_transport.rs
-            // first to stay out of a write race on lib.rs. The witness row for this arm records
-            // the still-open line rather than pretending otherwise.
-            Self::Supervisor(error) => write!(formatter, "supervisor startup failed: {error}"),
+            Self::Supervisor(error) => {
+                write!(
+                    formatter,
+                    "supervisor startup failed: {}",
+                    crate::supervisor_caller_tag(error)
+                )
+            }
             Self::Account(error) => {
                 write!(formatter, "account service failed: {}", account_tag(error))
             }
@@ -2650,6 +2652,11 @@ mod tests {
     use crate::outcome_typst::TypstRefusal;
     use crate::publication_seam::PublicationSeamRefusal;
     use crate::{
+        ArtifactError, CandidateError, ClassificationStoreError, CompletionReadRefusal,
+        EvaluationError, LocalModelActivationError, ProposalError, RulingError, StartupPass,
+        SupervisorError, TotalsMismatch,
+    };
+    use crate::{
         CheckPreflightError, LocalModelEndpoint, MissionError, OperatorAccountError, ProjectError,
         ProjectPolicyError, ProjectRepositoryError, PublishRefusal, ResidentConfigurationError,
         ResidentLifecycleError, ResourceDiscoveryError, SampleProjectError,
@@ -3510,10 +3517,8 @@ mod tests {
         "R42S2.TRANSPORT.Remote" | LocalTransportError::Remote { code, .. }
             => format!("local supervisor refused: {}", expected_code(code).1),
             LocalTransportError::Remote { code: LocalErrorCode::ProtocolError, retry_after_ms: None }, &[];
-        // OPEN UNTIL COMMIT 1 -- see the Display arm. Its expected line is the CURRENT
-        // forwarding text, deliberately, so this row must be rewritten when the arm closes.
         "R42S2.TRANSPORT.Supervisor" | LocalTransportError::Supervisor(error)
-            => format!("supervisor startup failed: {error}"),
+            => format!("supervisor startup failed: {}", expected_supervisor(error).1),
             LocalTransportError::Supervisor(crate::SupervisorError::SchemaMismatch), &[];
         "R42S2.TRANSPORT.Account" | LocalTransportError::Account(error)
             => format!("account service failed: {}", expected_account(error).1),
@@ -3823,6 +3828,240 @@ mod tests {
             PublishRefusal::CandidateIsNotMissionScoped { relation: second_uuid() }, &[];
     }
 
+    // ---- the 72 Supervisor roots, as a transport caller sees them ---------------------------
+    //
+    // Every fixture carries arbitrary-but-valid keys, because the whole point of the caller tag is
+    // that none of them appears. Each parent that carries a child is exercised with ONE
+    // representative child here; the full child-vocabulary walk is `r42_supervisor_projection_is_closed`
+    // in lib.rs, where startup's own line is checked too.
+    const SEQUENCE: u64 = 4_242;
+    const STORED_VERSION: i64 = 4_294_967_296;
+    const KNOWN_TOTALS_LABEL: &str = "project_creation_snapshots";
+
+    fn digest_a() -> String {
+        "a".repeat(64)
+    }
+
+    closed_table! {
+        expected_supervisor / supervisor_rows: crate::SupervisorError,
+        "EmptyWorkspaceName" | SupervisorError::EmptyWorkspaceName
+            => "EmptyWorkspaceName",
+            SupervisorError::EmptyWorkspaceName, &[];
+        "WorkspaceNameTooLong" | SupervisorError::WorkspaceNameTooLong
+            => "WorkspaceNameTooLong",
+            SupervisorError::WorkspaceNameTooLong, &[];
+        "WorkspaceNameContainsControl" | SupervisorError::WorkspaceNameContainsControl
+            => "WorkspaceNameContainsControl",
+            SupervisorError::WorkspaceNameContainsControl, &[];
+        "ClockBeforeUnixEpoch" | SupervisorError::ClockBeforeUnixEpoch
+            => "ClockBeforeUnixEpoch",
+            SupervisorError::ClockBeforeUnixEpoch, &[];
+        "Io" | SupervisorError::Io(..)
+            => "Io",
+            SupervisorError::Io(io_error(NEEDLE_A)), &[NEEDLE_A];
+        "Store" | SupervisorError::Store(..)
+            => "Store",
+            SupervisorError::Store(driver_error(NEEDLE_A)), &[NEEDLE_A];
+        "Json" | SupervisorError::Json(..)
+            => "Json",
+            SupervisorError::Json(json_error(NEEDLE_A)), &[NEEDLE_A];
+        "InvalidWorkspaceId" | SupervisorError::InvalidWorkspaceId(..)
+            => "InvalidWorkspaceId",
+            SupervisorError::InvalidWorkspaceId(digest_a()), &[];
+        "InvalidEventKind" | SupervisorError::InvalidEventKind(..)
+            => "InvalidEventKind",
+            SupervisorError::InvalidEventKind(digest_a()), &[];
+        "EventPayloadScopeMismatch" | SupervisorError::EventPayloadScopeMismatch(..)
+            => "EventPayloadScopeMismatch",
+            SupervisorError::EventPayloadScopeMismatch(STORED_VERSION), &[];
+        "StarterOrganizationEventMismatch" | SupervisorError::StarterOrganizationEventMismatch(..)
+            => "StarterOrganizationEventMismatch",
+            SupervisorError::StarterOrganizationEventMismatch(STORED_VERSION), &[];
+        "StarterOrganizationStateMismatch" | SupervisorError::StarterOrganizationStateMismatch { .. }
+            => "StarterOrganizationStateMismatch.EmptyRoster",
+            SupervisorError::StarterOrganizationStateMismatch { workspace_id: first_uuid(), cause: StarterOrganizationError::EmptyRoster }, &[];
+        "ProjectEventMismatch" | SupervisorError::ProjectEventMismatch(..)
+            => "ProjectEventMismatch",
+            SupervisorError::ProjectEventMismatch(STORED_VERSION), &[];
+        "ProjectStateMismatch" | SupervisorError::ProjectStateMismatch { .. }
+            => "ProjectStateMismatch.NotFound",
+            SupervisorError::ProjectStateMismatch { workspace_id: first_uuid(), project_id: first_uuid(), cause: ProjectError::NotFound }, &[];
+        "ProjectTotalsMismatch" | SupervisorError::ProjectTotalsMismatch(..)
+            => "ProjectTotalsMismatch",
+            SupervisorError::ProjectTotalsMismatch(TotalsMismatch { table: KNOWN_TOTALS_LABEL, expected: 7, observed: 11 }), &[];
+        "LocalModelActivationEventMismatch" | SupervisorError::LocalModelActivationEventMismatch(..)
+            => "LocalModelActivationEventMismatch",
+            SupervisorError::LocalModelActivationEventMismatch(STORED_VERSION), &[];
+        "LocalModelActivationStateMismatch" | SupervisorError::LocalModelActivationStateMismatch { .. }
+            => "LocalModelActivationStateMismatch.ModelNotFound",
+            SupervisorError::LocalModelActivationStateMismatch { workspace_id: first_uuid(), activation_id: first_uuid(), cause: LocalModelActivationError::ModelNotFound }, &[];
+        "LocalModelActivationRowUnreadable" | SupervisorError::LocalModelActivationRowUnreadable(..)
+            => "LocalModelActivationRowUnreadable.ModelNotFound",
+            SupervisorError::LocalModelActivationRowUnreadable(LocalModelActivationError::ModelNotFound), &[];
+        "ResidentLifecycleEventMismatch" | SupervisorError::ResidentLifecycleEventMismatch(..)
+            => "ResidentLifecycleEventMismatch",
+            SupervisorError::ResidentLifecycleEventMismatch(STORED_VERSION), &[];
+        "ResidentLifecycleStateMismatch" | SupervisorError::ResidentLifecycleStateMismatch { .. }
+            => "ResidentLifecycleStateMismatch.NotFound",
+            SupervisorError::ResidentLifecycleStateMismatch { workspace_id: first_uuid(), resident_id: first_uuid(), cause: ResidentLifecycleError::NotFound }, &[];
+        "ResidentLifecycleTotalsMismatch" | SupervisorError::ResidentLifecycleTotalsMismatch(..)
+            => "ResidentLifecycleTotalsMismatch",
+            SupervisorError::ResidentLifecycleTotalsMismatch(TotalsMismatch { table: KNOWN_TOTALS_LABEL, expected: 7, observed: 11 }), &[];
+        "ResidentRowUnreadable" | SupervisorError::ResidentRowUnreadable(..)
+            => "ResidentRowUnreadable.NotFound",
+            SupervisorError::ResidentRowUnreadable(ResidentLifecycleError::NotFound), &[];
+        "ResidentConfigurationEventMismatch" | SupervisorError::ResidentConfigurationEventMismatch(..)
+            => "ResidentConfigurationEventMismatch",
+            SupervisorError::ResidentConfigurationEventMismatch(STORED_VERSION), &[];
+        "ResidentConfigurationStateMismatch" | SupervisorError::ResidentConfigurationStateMismatch { .. }
+            => "ResidentConfigurationStateMismatch.ResidentNotFound",
+            SupervisorError::ResidentConfigurationStateMismatch { workspace_id: first_uuid(), decision_id: digest_a(), cause: ResidentConfigurationError::ResidentNotFound }, &[];
+        "TeamEventMismatch" | SupervisorError::TeamEventMismatch(..)
+            => "TeamEventMismatch",
+            SupervisorError::TeamEventMismatch(STORED_VERSION), &[];
+        "TeamStateMismatch" | SupervisorError::TeamStateMismatch { .. }
+            => "TeamStateMismatch.TeamNotFound",
+            SupervisorError::TeamStateMismatch { workspace_id: first_uuid(), team_id: first_uuid(), cause: TeamError::TeamNotFound }, &[];
+        "TeamTotalsMismatch" | SupervisorError::TeamTotalsMismatch(..)
+            => "TeamTotalsMismatch",
+            SupervisorError::TeamTotalsMismatch(TotalsMismatch { table: KNOWN_TOTALS_LABEL, expected: 7, observed: 11 }), &[];
+        "MissionEventMismatch" | SupervisorError::MissionEventMismatch(..)
+            => "MissionEventMismatch",
+            SupervisorError::MissionEventMismatch(STORED_VERSION), &[];
+        "MissionStateMismatch" | SupervisorError::MissionStateMismatch { .. }
+            => "MissionStateMismatch.MissionNotFound",
+            SupervisorError::MissionStateMismatch { workspace_id: first_uuid(), mission_id: first_uuid(), cause: MissionError::MissionNotFound }, &[];
+        "MissionTotalsMismatch" | SupervisorError::MissionTotalsMismatch(..)
+            => "MissionTotalsMismatch",
+            SupervisorError::MissionTotalsMismatch(TotalsMismatch { table: KNOWN_TOTALS_LABEL, expected: 7, observed: 11 }), &[];
+        "ProjectPolicyEventMismatch" | SupervisorError::ProjectPolicyEventMismatch(..)
+            => "ProjectPolicyEventMismatch",
+            SupervisorError::ProjectPolicyEventMismatch(STORED_VERSION), &[];
+        "ProjectPolicyStateMismatch" | SupervisorError::ProjectPolicyStateMismatch { .. }
+            => "ProjectPolicyStateMismatch.ProjectNotFound",
+            SupervisorError::ProjectPolicyStateMismatch { workspace_id: first_uuid(), project_id: first_uuid(), cause: ProjectPolicyError::ProjectNotFound }, &[];
+        "ProjectRepositoryEventMismatch" | SupervisorError::ProjectRepositoryEventMismatch(..)
+            => "ProjectRepositoryEventMismatch",
+            SupervisorError::ProjectRepositoryEventMismatch(STORED_VERSION), &[];
+        "ProjectRepositoryStateMismatch" | SupervisorError::ProjectRepositoryStateMismatch { .. }
+            => "ProjectRepositoryStateMismatch.ProjectNotFound",
+            SupervisorError::ProjectRepositoryStateMismatch { workspace_id: first_uuid(), project_id: first_uuid(), cause: ProjectRepositoryError::ProjectNotFound }, &[];
+        "SampleProjectEventMismatch" | SupervisorError::SampleProjectEventMismatch(..)
+            => "SampleProjectEventMismatch",
+            SupervisorError::SampleProjectEventMismatch(STORED_VERSION), &[];
+        "SampleProjectStateMismatch" | SupervisorError::SampleProjectStateMismatch { .. }
+            => "SampleProjectStateMismatch.NotInstalled",
+            SupervisorError::SampleProjectStateMismatch { workspace_id: first_uuid(), cause: SampleProjectError::NotInstalled }, &[];
+        "SampleProjectTotalsMismatch" | SupervisorError::SampleProjectTotalsMismatch(..)
+            => "SampleProjectTotalsMismatch",
+            SupervisorError::SampleProjectTotalsMismatch(TotalsMismatch { table: KNOWN_TOTALS_LABEL, expected: 7, observed: 11 }), &[];
+        "RunEventMismatch" | SupervisorError::RunEventMismatch(..)
+            => "RunEventMismatch",
+            SupervisorError::RunEventMismatch(STORED_VERSION), &[];
+        "RunStateMismatch" | SupervisorError::RunStateMismatch { .. }
+            => "RunStateMismatch.ProjectNotFound",
+            SupervisorError::RunStateMismatch { workspace_id: first_uuid(), run_id: digest_a(), cause: CheckPreflightError::ProjectNotFound }, &[];
+        "RunClockBeforeEpoch" | SupervisorError::RunClockBeforeEpoch
+            => "RunClockBeforeEpoch",
+            SupervisorError::RunClockBeforeEpoch, &[];
+        "RunEventStateMismatch" | SupervisorError::RunEventStateMismatch { .. }
+            => "RunEventStateMismatch",
+            SupervisorError::RunEventStateMismatch { sequence: STORED_VERSION, workspace_id: first_uuid(), run_id: first_uuid() }, &[];
+        "ProposalEventMismatch" | SupervisorError::ProposalEventMismatch(..)
+            => "ProposalEventMismatch",
+            SupervisorError::ProposalEventMismatch(STORED_VERSION), &[];
+        "ProposalStateMismatch" | SupervisorError::ProposalStateMismatch { .. }
+            => "ProposalStateMismatch.NotFound",
+            SupervisorError::ProposalStateMismatch { workspace_id: first_uuid(), digest_value: digest_a(), cause: ProposalError::NotFound }, &[];
+        "ProposalTotalsMismatch" | SupervisorError::ProposalTotalsMismatch(..)
+            => "ProposalTotalsMismatch",
+            SupervisorError::ProposalTotalsMismatch(TotalsMismatch { table: KNOWN_TOTALS_LABEL, expected: 7, observed: 11 }), &[];
+        "RulingEventMismatch" | SupervisorError::RulingEventMismatch(..)
+            => "RulingEventMismatch",
+            SupervisorError::RulingEventMismatch(STORED_VERSION), &[];
+        "EvaluationEventMismatch" | SupervisorError::EvaluationEventMismatch(..)
+            => "EvaluationEventMismatch",
+            SupervisorError::EvaluationEventMismatch(STORED_VERSION), &[];
+        "MissionCompletionEventMismatch" | SupervisorError::MissionCompletionEventMismatch(..)
+            => "MissionCompletionEventMismatch",
+            SupervisorError::MissionCompletionEventMismatch(STORED_VERSION), &[];
+        "MissionCompletionStateMismatch" | SupervisorError::MissionCompletionStateMismatch { .. }
+            => "MissionCompletionStateMismatch.Absent",
+            SupervisorError::MissionCompletionStateMismatch { workspace_id: first_uuid(), digest_value: digest_a(), cause: CompletionReadRefusal::Absent }, &[];
+        "MissionCompletionTotalsMismatch" | SupervisorError::MissionCompletionTotalsMismatch(..)
+            => "MissionCompletionTotalsMismatch",
+            SupervisorError::MissionCompletionTotalsMismatch(TotalsMismatch { table: KNOWN_TOTALS_LABEL, expected: 7, observed: 11 }), &[];
+        "EvaluationStateMismatch" | SupervisorError::EvaluationStateMismatch { .. }
+            => "EvaluationStateMismatch.NotFound",
+            SupervisorError::EvaluationStateMismatch { workspace_id: first_uuid(), digest_value: digest_a(), cause: EvaluationError::NotFound }, &[];
+        "EvaluationChainsMismatch" | SupervisorError::EvaluationChainsMismatch(..)
+            => "EvaluationChainsMismatch.NotFound",
+            SupervisorError::EvaluationChainsMismatch(EvaluationError::NotFound), &[];
+        "ArtifactEventMismatch" | SupervisorError::ArtifactEventMismatch(..)
+            => "ArtifactEventMismatch",
+            SupervisorError::ArtifactEventMismatch(STORED_VERSION), &[];
+        "ArtifactStateMismatch" | SupervisorError::ArtifactStateMismatch { .. }
+            => "ArtifactStateMismatch.NotFound",
+            SupervisorError::ArtifactStateMismatch { workspace_id: first_uuid(), digest_value: digest_a(), cause: ArtifactError::NotFound }, &[];
+        "ArtifactTotalsMismatch" | SupervisorError::ArtifactTotalsMismatch(..)
+            => "ArtifactTotalsMismatch",
+            SupervisorError::ArtifactTotalsMismatch(TotalsMismatch { table: KNOWN_TOTALS_LABEL, expected: 7, observed: 11 }), &[];
+        "ArtifactRelationMismatch" | SupervisorError::ArtifactRelationMismatch(..)
+            => "ArtifactRelationMismatch.NotFound",
+            SupervisorError::ArtifactRelationMismatch(ArtifactError::NotFound), &[];
+        "MissionImpactClassificationStateMismatch" | SupervisorError::MissionImpactClassificationStateMismatch { .. }
+            => "MissionImpactClassificationStateMismatch.columns_disagree",
+            SupervisorError::MissionImpactClassificationStateMismatch { workspace_id: first_uuid(), digest: digest_a(), cause: ClassificationStoreError::ColumnsDisagree }, &[];
+        "OutcomeManifestStateMismatch" | SupervisorError::OutcomeManifestStateMismatch { .. }
+            => "OutcomeManifestStateMismatch.Absent",
+            SupervisorError::OutcomeManifestStateMismatch { workspace_id: first_uuid(), manifest_digest: digest_a(), cause: ManifestStoreRefusal::Absent }, &[];
+        "OutcomePublicationStateMismatch" | SupervisorError::OutcomePublicationStateMismatch { .. }
+            => "OutcomePublicationStateMismatch.Absent",
+            SupervisorError::OutcomePublicationStateMismatch { workspace_id: first_uuid(), mission_id: first_uuid(), version: STORED_VERSION, cause: PublishRefusal::Absent }, &[];
+        "RulingStateMismatch" | SupervisorError::RulingStateMismatch { .. }
+            => "RulingStateMismatch.NotFound",
+            SupervisorError::RulingStateMismatch { workspace_id: first_uuid(), digest_value: digest_a(), cause: RulingError::NotFound }, &[];
+        "RulingTotalsMismatch" | SupervisorError::RulingTotalsMismatch(..)
+            => "RulingTotalsMismatch",
+            SupervisorError::RulingTotalsMismatch(TotalsMismatch { table: KNOWN_TOTALS_LABEL, expected: 7, observed: 11 }), &[];
+        "RulingChainsMismatch" | SupervisorError::RulingChainsMismatch(..)
+            => "RulingChainsMismatch.NotFound",
+            SupervisorError::RulingChainsMismatch(RulingError::NotFound), &[];
+        "CandidateEventMismatch" | SupervisorError::CandidateEventMismatch(..)
+            => "CandidateEventMismatch",
+            SupervisorError::CandidateEventMismatch(STORED_VERSION), &[];
+        "CandidateStateMismatch" | SupervisorError::CandidateStateMismatch { .. }
+            => "CandidateStateMismatch.NotFound",
+            SupervisorError::CandidateStateMismatch { workspace_id: first_uuid(), digest_value: digest_a(), cause: CandidateError::NotFound }, &[];
+        "DispatchEventMismatch" | SupervisorError::DispatchEventMismatch(..)
+            => "DispatchEventMismatch",
+            SupervisorError::DispatchEventMismatch(STORED_VERSION), &[];
+        "DispatchRecoveryFailed" | SupervisorError::DispatchRecoveryFailed
+            => "DispatchRecoveryFailed",
+            SupervisorError::DispatchRecoveryFailed, &[];
+        "PauseEventMismatch" | SupervisorError::PauseEventMismatch(..)
+            => "PauseEventMismatch",
+            SupervisorError::PauseEventMismatch(STORED_VERSION), &[];
+        "SchemaMismatch" | SupervisorError::SchemaMismatch
+            => "SchemaMismatch",
+            SupervisorError::SchemaMismatch, &[];
+        "UnsupportedSchemaVersion" | SupervisorError::UnsupportedSchemaVersion(..)
+            => "UnsupportedSchemaVersion",
+            SupervisorError::UnsupportedSchemaVersion(STORED_VERSION), &[];
+        "IntegrityCheckFailed" | SupervisorError::IntegrityCheckFailed(..)
+            => "IntegrityCheckFailed",
+            SupervisorError::IntegrityCheckFailed(digest_a()), &[];
+        "StoredIdentityUnreadable" | SupervisorError::StoredIdentityUnreadable { .. }
+            => "StoredIdentityUnreadable",
+            SupervisorError::StoredIdentityUnreadable { what: STATIC_NEEDLE_A, raw: digest_a() }, &[NEEDLE_A];
+        "StartupEnumerationFailed" | SupervisorError::StartupEnumerationFailed { .. }
+            => "StartupEnumerationFailed.Project",
+            SupervisorError::StartupEnumerationFailed { pass: StartupPass::Project, source: driver_error(NEEDLE_A) }, &[NEEDLE_A];
+        "ForeignKeyViolations" | SupervisorError::ForeignKeyViolations(..)
+            => "ForeignKeyViolations",
+            SupervisorError::ForeignKeyViolations(SEQUENCE), &[];
+    }
+
     struct Case {
         id: String,
         value: LocalTransportError,
@@ -4034,12 +4273,15 @@ mod tests {
     );
 
     /// The declaration-order lead cases, so a mutant's FIRST failing label is predictable.
-    const TRANSPORT_LEADS: [&str; 5] = [
+    const TRANSPORT_LEADS: [&str; 6] = [
         "R42S2.TRANSPORT.Io",
         "R42S2.TRANSPORT.Json",
         "R42S2.TRANSPORT.Account.Store",
         "R42S2.TRANSPORT.Project.Account.Store",
         "R42S2.TRANSPORT.ProjectRepository.InvalidDraft.Source",
+        // The Supervisor sub-tree's own lead: payload-free after commit 1's startup fix, so a
+        // forwarding mutant fails on the TEXT rather than on a needle.
+        "R42S2.TRANSPORT.Supervisor.Io",
     ];
 
     fn transport_cases() -> Vec<Case> {
@@ -4080,6 +4322,15 @@ mod tests {
                 "R42S2.TRANSPORT.Mission" => mission_cases(&mut cases),
                 "R42S2.TRANSPORT.ResourceDiscovery" => discovery_cases(&mut cases),
                 "R42S2.TRANSPORT.LocalModelActivation" => activation_cases(&mut cases),
+                "R42S2.TRANSPORT.Supervisor" => {
+                    for (child, fault, child_markers) in supervisor_rows() {
+                        cases.push(Case {
+                            id: format!("{stem}.{child}"),
+                            value: LocalTransportError::Supervisor(fault),
+                            markers: child_markers,
+                        });
+                    }
+                }
                 "R42S2.TRANSPORT.Outcome" => {
                     for (child, refusal, child_markers) in publish_rows() {
                         match child {
@@ -4235,9 +4486,15 @@ mod tests {
             22,
             "R42S2.TRANSPORT.CARDINALITY.ROOT"
         );
-        // 22 roots expanded: 62 Remote codes, 18 account faults at each of 14 wrappers, the
-        // three draft reasons, both charter-revision pairs, and slice 1's 83-case Outcome tree.
-        assert_eq!(cases.len(), 514, "R42S2.TRANSPORT.CARDINALITY.CASES");
+        // 22 roots expanded: 62 Remote codes, 72 Supervisor roots, 18 account faults at each of
+        // 14 wrappers, the three draft reasons, both charter-revision pairs, and slice 1's
+        // 83-case Outcome tree.
+        assert_eq!(cases.len(), 585, "R42S2.TRANSPORT.CARDINALITY.CASES");
+        assert_eq!(
+            supervisor_rows().len(),
+            72,
+            "R42S2.TRANSPORT.CARDINALITY.Supervisor"
+        );
         let ids: std::collections::BTreeSet<&str> =
             cases.iter().map(|case| case.id.as_str()).collect();
         assert_eq!(ids.len(), cases.len(), "R42S2.TRANSPORT.CASE_IDS_UNIQUE");
