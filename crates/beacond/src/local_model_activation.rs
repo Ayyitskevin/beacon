@@ -122,6 +122,12 @@ pub(crate) enum LocalModelActivationStateFault {
     /// A row that could not be READ at all, so it cannot be named -- the identity columns are
     /// part of what failed. Distinct from `Row` (pass 11's shape).
     Unreadable(LocalModelActivationError),
+    /// A row whose raw identity columns cannot be represented by the public UUID keys. Those
+    /// columns are read before the typed row so startup can preserve an escaped witness.
+    Identity {
+        workspace_id: String,
+        activation_id: String,
+    },
     /// A decision whose stored ordering key is outside the positive domain the service writes.
     Sequence {
         workspace_id: String,
@@ -168,6 +174,9 @@ impl fmt::Display for LocalModelActivationStateFault {
                 "a local model activation row could not be read: {}",
                 cause.name()
             ),
+            Self::Identity { .. } => {
+                formatter.write_str("a local-model activation row's identity is not readable")
+            }
             Self::Sequence { .. } => formatter
                 .write_str("a local-model activation decision's ordering key is not readable"),
         }
@@ -190,6 +199,14 @@ impl fmt::Debug for LocalModelActivationStateFault {
                 .field("cause", cause)
                 .finish(),
             Self::Unreadable(cause) => formatter.debug_tuple("Unreadable").field(cause).finish(),
+            Self::Identity {
+                workspace_id,
+                activation_id,
+            } => formatter
+                .debug_struct("Identity")
+                .field("workspace_id", workspace_id)
+                .field("activation_id", activation_id)
+                .finish(),
             Self::Sequence {
                 workspace_id,
                 activation_id,
@@ -209,7 +226,7 @@ impl std::error::Error for LocalModelActivationStateFault {
         match self {
             Self::Store(error) => Some(error),
             Self::Unreadable(cause) | Self::Row { cause, .. } => Some(cause),
-            Self::Sequence { .. } => None,
+            Self::Identity { .. } | Self::Sequence { .. } => None,
         }
     }
 }
@@ -791,8 +808,22 @@ pub(crate) fn verify_activation_state(
         .map_err(LocalModelActivationStateFault::Store)?;
     let mut previous: HashMap<(Uuid, String, String), LocalModelActivation> = HashMap::new();
     while let Some(row) = rows.next().map_err(LocalModelActivationStateFault::Store)? {
-        let activation =
-            read_activation_row(row).map_err(LocalModelActivationStateFault::Unreadable)?;
+        let activation_id = row
+            .get::<_, String>(0)
+            .map_err(LocalModelActivationStateFault::Store)?;
+        let workspace_id = row
+            .get::<_, String>(1)
+            .map_err(LocalModelActivationStateFault::Store)?;
+        let activation = read_activation_row(row).map_err(|cause| {
+            if Uuid::parse_str(&workspace_id).is_err() || Uuid::parse_str(&activation_id).is_err() {
+                LocalModelActivationStateFault::Identity {
+                    workspace_id: workspace_id.clone(),
+                    activation_id: activation_id.clone(),
+                }
+            } else {
+                LocalModelActivationStateFault::Unreadable(cause)
+            }
+        })?;
         let named_workspace = activation.workspace_id;
         let named_activation = activation.id;
         let key = (
