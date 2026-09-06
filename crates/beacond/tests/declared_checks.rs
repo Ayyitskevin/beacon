@@ -2241,7 +2241,10 @@ fn sol1_startup_refuses_untyped_run_identity_edges() {
 
 #[test]
 fn astra_run_identity_precedes_lease_state_judgement() {
-    for (label, run_id) in [("empty", String::new())] {
+    for (label, run_id) in [
+        ("empty", String::new()),
+        ("one-megabyte", "r".repeat(1 << 20)),
+    ] {
         let (repository, revision) = fixture_repository(label);
         let source = repository.path.to_string_lossy().into_owned();
         let (store, projects, repositories, _checks) = enrolled(label);
