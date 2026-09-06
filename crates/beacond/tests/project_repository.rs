@@ -689,3 +689,59 @@ fn startup_refuses_an_unaccounted_repository_binding_and_names_the_row() {
         );
     }
 }
+
+#[test]
+fn sol1_repository_startup_names_out_of_domain_stored_revision() {
+    let (store, _accounts, projects, repositories) = enrolled_services("sol1-version-edge");
+    let project = projects.create(project_draft()).unwrap();
+    repositories
+        .bind(project.id, 1, None, repository_draft())
+        .unwrap();
+    drop(repositories);
+    drop(projects);
+
+    let connection = Connection::open(&store.path).unwrap();
+    let columns: Vec<String> = connection
+        .prepare("SELECT name FROM pragma_table_info('project_repository_revisions')")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let names = columns.join(", ");
+    let values = columns
+        .iter()
+        .map(|column| {
+            if column == "revision" {
+                "?1".to_owned()
+            } else {
+                column.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let stored = i64::from(u32::MAX) + 1;
+    let inserted = connection
+        .execute(
+            &format!(
+                "INSERT INTO project_repository_revisions ({names})
+                 SELECT {values} FROM project_repository_revisions
+                 WHERE project_id = ?2 AND revision = 1"
+            ),
+            rusqlite::params![stored, project.id.to_string()],
+        )
+        .unwrap();
+    assert_eq!(inserted, 1, "the u32::MAX+1 revision did not plant");
+    drop(connection);
+
+    let error = Supervisor::bootstrap(StartupConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .expect_err("an out-of-domain repository revision reopened Ready");
+    let line = error.to_string();
+    assert!(
+        line.contains(&stored.to_string()),
+        "the refusal names only the Project, not stored revision {stored}: {line}"
+    );
+}
