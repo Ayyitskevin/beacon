@@ -1146,21 +1146,29 @@ impl std::error::Error for PublicationStateFault {
 }
 
 /// Re-prove every stored publication at startup, naming the row that fails (R28.1).
+/// The rows `verify_publication_state` enumerates, in the order it enumerates them.
+///
+/// EXTRACTED SO A BAR CAN CALL IT (R44.6): a placement assertion that COPIES this query agrees
+/// with itself, so flipping the pass's own `ORDER BY` leaves it decorative. One function, called
+/// by both, moves the pass and the bar's view of it together.
+pub fn enumerate_publications(
+    connection: &Connection,
+) -> rusqlite::Result<Vec<(String, String, i64)>> {
+    let mut statement = connection.prepare(
+        "SELECT workspace_id, mission_id, publication_version FROM outcome_publications
+         ORDER BY workspace_id, mission_id, publication_version",
+    )?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 pub(crate) fn verify_publication_state(
     connection: &Connection,
 ) -> Result<(), PublicationStateFault> {
-    let mut statement = connection
-        .prepare(
-            "SELECT workspace_id, mission_id, publication_version FROM outcome_publications
-             ORDER BY workspace_id, mission_id, publication_version",
-        )
-        .map_err(PublicationStateFault::Store)?;
-    let rows: Vec<(String, String, i64)> = statement
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-        .map_err(PublicationStateFault::Store)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(PublicationStateFault::Store)?;
-    drop(statement);
+    let rows: Vec<(String, String, i64)> =
+        enumerate_publications(connection).map_err(PublicationStateFault::Store)?;
 
     for (workspace_id, mission_id, publication_version) in &rows {
         let identity = || PublicationStateFault::Identity {

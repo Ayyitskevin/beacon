@@ -1481,17 +1481,19 @@ fn startup_refuses_an_unaccounted_candidate_row_and_names_the_row() {
         // column collation would silently stop bracketing and this bar would decay to one end
         // without failing.
         {
-            let order = if end == "last" { "DESC" } else { "ASC" };
-            let placed: String = connection
-                .query_row(
-                    &format!("SELECT digest_value FROM candidates ORDER BY workspace_id {order}, digest_value {order} LIMIT 1"),
-                    [],
-                    |row| row.get(0),
-                )
-                .expect("the plant is in the table");
+            // R44.6: CALL the pass's own enumeration, do not copy its query -- a copied SELECT
+            // agrees with itself, so flipping the pass's ORDER BY left this assertion decorative.
+            let enumerated =
+                beacond::enumerate_candidates(&connection).expect("the pass's enumeration reads");
+            let placed = if end == "last" {
+                enumerated.last()
+            } else {
+                enumerated.first()
+            }
+            .expect("the plant is in the table");
             assert_eq!(
-                placed, planted,
-                "{end}: the planted row is not at the {end} end of this pass's own ORDER BY"
+                placed.1, planted,
+                "{end}: the planted row is not at the {end} end of the pass's OWN enumeration"
             );
         }
 

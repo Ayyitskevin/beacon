@@ -2370,10 +2370,33 @@ fn evaluated_at_ms_of(connection: &Connection, digest_value: &str) -> Result<u64
 
 /// Startup reconciliation: every stored Evaluation is re-verified against its own bytes, its bound
 /// Proposal, and its children, and every row must have exactly one `evaluation.recorded` Event.
+/// The ORDER BY `verify_evaluation_state` enumerates under. ONE definition, used by the pass's
+/// own query and by `enumerate_evaluation_keys` below, so a mutant on the ordering moves both.
+///
+/// This pass reads whole rows and a bar only needs the keys, so the two queries cannot be one
+/// function the way the other passes' are (R44.6). Sharing the ordering is what keeps a bar's
+/// placement assertion from agreeing with a copy the pass no longer follows.
+const ENUMERATION_ORDER: &str = "ORDER BY digest_value";
+
+/// The `(workspace_id, digest_value)` keys `verify_evaluation_state` enumerates, in its order.
+pub fn enumerate_evaluation_keys(
+    connection: &Connection,
+) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT workspace_id, digest_value FROM evaluations {ENUMERATION_ORDER}"
+    ))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 pub(crate) fn verify_evaluation_state(connection: &Connection) -> Result<(), EvaluationStateFault> {
     let mut statement = connection
         .prepare(&format!(
-            "SELECT workspace_id, {SELECT_COLUMNS} FROM evaluations ORDER BY digest_value"
+            "SELECT workspace_id, {SELECT_COLUMNS} FROM evaluations {ENUMERATION_ORDER}"
         ))
         .map_err(EvaluationStateFault::Store)?;
     let rows: Vec<(String, StoredRow)> = statement
