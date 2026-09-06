@@ -419,6 +419,6 @@ fn restart_refuses_an_activation_decision_without_its_exact_event() {
             store_path: store.path.clone(),
             initial_workspace_name: "Ignored".to_owned(),
         }),
-        Err(SupervisorError::LocalModelActivationStateMismatch)
+        Err(SupervisorError::LocalModelActivationStateMismatch { .. })
     ));
 }

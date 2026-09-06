@@ -108,6 +108,116 @@ pub struct LocalModelActivation {
     pub decided_at_ms: u64,
 }
 
+/// Which fault the LocalModelActivation startup pass hit, and WHICH ROW hit it (R27.1's shape, R28.1).
+pub(crate) enum LocalModelActivationStateFault {
+    /// The enumeration itself failed: no row to name, because none was reached.
+    Store(rusqlite::Error),
+    /// One LocalModelActivation did not re-prove. `cause` is the owning reader's OWN error, carried whole.
+    Row {
+        workspace_id: Uuid,
+        activation_id: Uuid,
+        cause: LocalModelActivationError,
+    },
+    // NO `Totals` ARM. Every check belongs to one activation decision and its own Event.
+    /// A row that could not be READ at all, so it cannot be named -- the identity columns are
+    /// part of what failed. Distinct from `Row` (pass 11's shape).
+    Unreadable(LocalModelActivationError),
+    /// A row whose Workspace column is not a UUID. Unreachable while the foreign-key check and
+    /// the Workspace pass run first.
+    Identity {
+        workspace_id: String,
+        activation_id: String,
+    },
+}
+
+impl LocalModelActivationError {
+    /// The variant's NAME, for R28.4's one-line startup message.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Account(_) => "Account",
+            Self::ResourceUnavailable => "ResourceUnavailable",
+            Self::InvalidProviderResponse => "InvalidProviderResponse",
+            Self::ModelNotFound => "ModelNotFound",
+            Self::ModelDrift => "ModelDrift",
+            Self::InvalidApproval => "InvalidApproval",
+            Self::AlreadyActive => "AlreadyActive",
+            Self::StaleDecision => "StaleDecision",
+            Self::InvalidStore => "InvalidStore",
+            Self::Store(_) => "Store",
+            Self::Json(_) => "Json",
+        }
+    }
+}
+
+impl fmt::Display for LocalModelActivationStateFault {
+    /// R28.4: the KEY and the fault's NAME, never the carried error's own text.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(_) => formatter.write_str("the LocalModelActivations could not be read"),
+            Self::Row {
+                workspace_id,
+                activation_id,
+                cause,
+            } => write!(
+                formatter,
+                "LocalModelActivation {activation_id} in Workspace {workspace_id} does not re-prove: {}",
+                cause.name()
+            ),
+            Self::Unreadable(cause) => write!(
+                formatter,
+                "a local model activation row could not be read: {}",
+                cause.name()
+            ),
+            Self::Identity {
+                workspace_id,
+                activation_id,
+            } => write!(
+                formatter,
+                "a LocalModelActivation row's Workspace is not readable: {workspace_id}, LocalModelActivation \
+                 {activation_id}"
+            ),
+        }
+    }
+}
+
+/// Hand-written and NOT delegating to `Display`: R28.4 keeps the carried text reachable here.
+impl fmt::Debug for LocalModelActivationStateFault {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => formatter.debug_tuple("Store").field(error).finish(),
+            Self::Row {
+                workspace_id,
+                activation_id,
+                cause,
+            } => formatter
+                .debug_struct("Row")
+                .field("workspace_id", workspace_id)
+                .field("activation_id", activation_id)
+                .field("cause", cause)
+                .finish(),
+            Self::Unreadable(cause) => formatter.debug_tuple("Unreadable").field(cause).finish(),
+            Self::Identity {
+                workspace_id,
+                activation_id,
+            } => formatter
+                .debug_struct("Identity")
+                .field("workspace_id", workspace_id)
+                .field("activation_id", activation_id)
+                .finish(),
+        }
+    }
+}
+
+impl std::error::Error for LocalModelActivationStateFault {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::Unreadable(cause) | Self::Row { cause, .. } => Some(cause),
+            Self::Identity { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum LocalModelActivationError {
     Account(OperatorAccountError),
@@ -645,18 +755,25 @@ pub(crate) fn verify_activation_event(
 
 pub(crate) fn verify_activation_state(
     connection: &Connection,
-) -> Result<(), LocalModelActivationError> {
-    let mut statement = connection.prepare(
-        "SELECT id, workspace_id, provider, endpoint, model_name, model_digest,
+) -> Result<(), LocalModelActivationStateFault> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, workspace_id, provider, endpoint, model_name, model_digest,
                 inspection_digest, provider_features_json, unrecognized_features_json,
                 approved_features_json, state, predecessor_id, decided_at_ms
          FROM local_model_activation_decisions
          ORDER BY workspace_id, provider, endpoint, model_name, sequence",
-    )?;
-    let mut rows = statement.query([])?;
+        )
+        .map_err(LocalModelActivationStateFault::Store)?;
+    let mut rows = statement
+        .query([])
+        .map_err(LocalModelActivationStateFault::Store)?;
     let mut previous: HashMap<(Uuid, String, String), LocalModelActivation> = HashMap::new();
-    while let Some(row) = rows.next()? {
-        let activation = read_activation_row(row)?;
+    while let Some(row) = rows.next().map_err(LocalModelActivationStateFault::Store)? {
+        let activation =
+            read_activation_row(row).map_err(LocalModelActivationStateFault::Unreadable)?;
+        let named_workspace = activation.workspace_id;
+        let named_activation = activation.id;
         let key = (
             activation.workspace_id,
             activation.binding.endpoint.clone(),
@@ -667,7 +784,11 @@ pub(crate) fn verify_activation_state(
                 if activation.predecessor_id.is_some()
                     || activation.state != LocalModelActivationState::Active
                 {
-                    return Err(LocalModelActivationError::InvalidStore);
+                    return Err(LocalModelActivationStateFault::Row {
+                        workspace_id: named_workspace,
+                        activation_id: named_activation,
+                        cause: LocalModelActivationError::InvalidStore,
+                    });
                 }
             }
             Some(prior) => {
@@ -675,31 +796,51 @@ pub(crate) fn verify_activation_state(
                     || activation.state == prior.state
                     || activation.decided_at_ms < prior.decided_at_ms
                 {
-                    return Err(LocalModelActivationError::InvalidStore);
+                    return Err(LocalModelActivationStateFault::Row {
+                        workspace_id: named_workspace,
+                        activation_id: named_activation,
+                        cause: LocalModelActivationError::InvalidStore,
+                    });
                 }
             }
         }
         let payload = serde_json::to_string(&LocalModelActivationDecisionPayload {
             activation: activation.clone(),
+        })
+        .map_err(|cause| LocalModelActivationStateFault::Row {
+            workspace_id: named_workspace,
+            activation_id: named_activation,
+            cause: LocalModelActivationError::Json(cause),
         })?;
         let kind = match activation.state {
             LocalModelActivationState::Active => "local_model.activated",
             LocalModelActivationState::Inactive => "local_model.deactivated",
         };
-        let event_count: i64 = connection.query_row(
-            "SELECT count(*) FROM events
+        let event_count: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM events
              WHERE workspace_id = ?1 AND kind = ?2 AND payload_json = ?3 AND occurred_at_ms = ?4",
-            params![
-                activation.workspace_id.to_string(),
-                kind,
-                payload,
-                i64::try_from(activation.decided_at_ms)
-                    .map_err(|_| LocalModelActivationError::InvalidStore)?,
-            ],
-            |row| row.get(0),
-        )?;
+                params![
+                    activation.workspace_id.to_string(),
+                    kind,
+                    payload,
+                    i64::try_from(activation.decided_at_ms).map_err(|_| {
+                        LocalModelActivationStateFault::Row {
+                            workspace_id: named_workspace,
+                            activation_id: named_activation,
+                            cause: LocalModelActivationError::InvalidStore,
+                        }
+                    })?,
+                ],
+                |row| row.get(0),
+            )
+            .map_err(LocalModelActivationStateFault::Store)?;
         if event_count != 1 {
-            return Err(LocalModelActivationError::InvalidStore);
+            return Err(LocalModelActivationStateFault::Row {
+                workspace_id: named_workspace,
+                activation_id: named_activation,
+                cause: LocalModelActivationError::InvalidStore,
+            });
         }
         previous.insert(key, activation);
     }
@@ -770,4 +911,73 @@ fn inspection_digest(
         "beacon.local-model-inspection.v1\nprovider=ollama\nendpoint={endpoint}\nmodel={model_name}\nmodel_digest={model_digest}\nprovider_features={provider_features}\nunrecognized_features={unrecognized_features}\n"
     );
     HEXLOWER.encode(&Sha256::digest(canonical.as_bytes()))
+}
+
+#[cfg(test)]
+mod name_witness {
+    use super::*;
+
+    /// Pinned independently of `name()` (the fold at 30d2a20): an exhaustive `name()` catches an
+    /// added arm, only a second table catches a wrong or duplicated name.
+    fn expected_name(error: &LocalModelActivationError) -> &'static str {
+        match error {
+            LocalModelActivationError::Account(_) => "Account",
+            LocalModelActivationError::ResourceUnavailable => "ResourceUnavailable",
+            LocalModelActivationError::InvalidProviderResponse => "InvalidProviderResponse",
+            LocalModelActivationError::ModelNotFound => "ModelNotFound",
+            LocalModelActivationError::ModelDrift => "ModelDrift",
+            LocalModelActivationError::InvalidApproval => "InvalidApproval",
+            LocalModelActivationError::AlreadyActive => "AlreadyActive",
+            LocalModelActivationError::StaleDecision => "StaleDecision",
+            LocalModelActivationError::InvalidStore => "InvalidStore",
+            LocalModelActivationError::Store(_) => "Store",
+            LocalModelActivationError::Json(_) => "Json",
+        }
+    }
+
+    #[test]
+    fn every_local_model_activation_error_arm_has_its_own_pinned_name() {
+        let every_arm = [
+            LocalModelActivationError::Account(
+                crate::operator_account::OperatorAccountError::PasswordTooShort,
+            ),
+            LocalModelActivationError::ResourceUnavailable,
+            LocalModelActivationError::InvalidProviderResponse,
+            LocalModelActivationError::ModelNotFound,
+            LocalModelActivationError::ModelDrift,
+            LocalModelActivationError::InvalidApproval,
+            LocalModelActivationError::AlreadyActive,
+            LocalModelActivationError::StaleDecision,
+            LocalModelActivationError::InvalidStore,
+            LocalModelActivationError::Store(rusqlite::Error::QueryReturnedNoRows),
+            LocalModelActivationError::Json(serde_json::from_str::<u8>("\"x\"").unwrap_err()),
+        ];
+        assert_eq!(
+            every_arm.len(),
+            11,
+            "an arm was added to `LocalModelActivationError` without a fixture here"
+        );
+        for arm in &every_arm {
+            assert_eq!(
+                arm.name(),
+                expected_name(arm),
+                "the startup name does not match the pinned table: {arm:?}"
+            );
+        }
+        let names: std::collections::BTreeSet<&str> = every_arm
+            .iter()
+            .map(LocalModelActivationError::name)
+            .collect();
+        assert_eq!(
+            names.len(),
+            11,
+            "two arms share a startup name, so a swap between them is invisible: {names:?}"
+        );
+        for name in names {
+            assert!(
+                !name.contains(' ') && !name.contains('{'),
+                "a name is a name, not a rendering: {name}"
+            );
+        }
+    }
 }
