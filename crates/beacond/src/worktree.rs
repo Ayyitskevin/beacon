@@ -1532,7 +1532,7 @@ mod tests {
 
     use super::{
         Bounded, CLOSED_GIT_ENVIRONMENT_KEYS, CleanupOutcome, GIT, KeepReason, PINNED_GIT_DIR_FD,
-        PinnedRepository, READ_BUDGET, Worktree, closed_git_command,
+        PinnedRead, PinnedRepository, READ_BUDGET, Worktree, closed_git_command,
         configure_closed_git_environment, read_only_git_command, read_pinned, read_pinned_bytes,
         read_pinned_exit, run_git_bounded, status_holds,
     };
@@ -2101,10 +2101,14 @@ mod tests {
         // ...and the read the dispatch pre-image gate makes through that pin answers, rather than
         // arriving as an absent blob the gate can only read as a disagreement.
         let object = format!("{head}:a.txt");
+        // R46 typed this read, so the assertion names the answer rather than "some bytes": a pin
+        // closed by exec produced `Unreadable(ReadRefused)` carrying git's
+        // `not a git repository: '/proc/self/fd/100'` -- which is how R49's cause became visible
+        // at all. Asserting `Bytes` is asserting the fix; asserting `Some(..)` would also accept a
+        // future in which the read answers for the wrong reason.
         assert_eq!(
-            read_pinned_bytes(&pinned, &["cat-file", "blob", object.as_str()], READ_BUDGET)
-                .as_deref(),
-            Some(b"three\n".as_slice()),
+            read_pinned_bytes(&pinned, &["cat-file", "blob", object.as_str()], READ_BUDGET),
+            PinnedRead::Bytes(b"three\n".to_vec()),
             "the pre-image read through a pin placed on its own descriptor did not answer"
         );
     }
