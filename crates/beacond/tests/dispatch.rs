@@ -3545,6 +3545,97 @@ fn a_pre_image_the_product_could_not_read_is_refused_as_unreadable_not_as_a_mism
     assert_eq!(receipt.repository_effect(), RepositoryEffect::ByteIdentical);
 }
 
+/// R46.3: a BROKEN repository is refused as unreadable -- never as "absent", never Applied.
+///
+/// `cat-file` exits 128 both for "path does not exist in this tree" and for "this repository is
+/// broken", so classifying on the exit code made the second satisfy "declared absent, and absent".
+/// A declared CREATE is the shape that exposes it: its pre-image is `None`, so the collapse does
+/// not merely mis-name a refusal, it turns a broken repository into an APPLIED change.
+#[test]
+fn a_declared_create_against_a_broken_repository_is_refused_as_unreadable_not_applied() {
+    let fixture = admitted_mission("broken-object-store");
+    let repository = CopyRepository::create(&fixture.copies_root, "broken-object-store");
+    fixture.beacon_made(&repository);
+    let revision = fixture.rebind_repository_at(&repository, 1);
+    let created = b"a file this repository does not hold\n".to_vec();
+    let mut record = fixture.proposal("Create a file, against a repository that breaks first.");
+    record.mutations = vec![(MUTATION_CREATE, "src/created.rs".to_owned())];
+    record.repository_revision = revision;
+    record.base_revision = repository.revision.clone();
+    record.context_digest = sha256(BASE_LIB_BYTES);
+    let proposal = fixture.proposals.submit(&record.bytes()).unwrap();
+    fixture
+        .candidates
+        .record(
+            &proposal.digest().value,
+            &[CandidateImages {
+                // A CREATE: nothing is declared before it, which is the shape the collapse turned
+                // into an application.
+                pre_image_sha256: None,
+                post_image_sha256: Some(sha256(&created)),
+            }],
+        )
+        .unwrap();
+    let ruling = fixture
+        .rulings
+        .rule_on_candidate(
+            &fixture
+                .candidates
+                .present(&proposal.digest().value)
+                .unwrap(),
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap();
+
+    // THE CONSTRUCTED FAULT: the object store is removed at the read. Every `cat-file` then exits
+    // 128 saying the repository is not there -- which is not a statement about this path.
+    let objects = repository.path.join(".git").join("objects");
+    let receipt = DispatchService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .with_failpoints(DispatchFailpoints {
+            before_pre_image_read: Some(Arc::new(move || {
+                if objects.exists() {
+                    fs::remove_dir_all(&objects).unwrap();
+                }
+            })),
+            ..DispatchFailpoints::default()
+        })
+        .dispatch(
+            &ruling.digest().value,
+            &[SuppliedContent {
+                path: "src/created.rs".to_owned(),
+                bytes: Some(created),
+            }],
+        )
+        .unwrap();
+
+    // THE NAMED ASSERTION.
+    assert_eq!(
+        receipt.outcome,
+        DispatchOutcome::PreImageUnreadable,
+        "a broken repository was read as a path that is simply not there"
+    );
+    assert_ne!(
+        receipt.outcome,
+        DispatchOutcome::Applied,
+        "a declared create Applied against a repository that could not be read"
+    );
+    // ...carrying what git said, so the evidence is not erased.
+    let Some(PinnedReadFailure::ReadRefused { message }) = receipt.pre_image_read_failure.as_ref()
+    else {
+        panic!(
+            "the Receipt does not say which read failed: {:?}",
+            receipt.pre_image_read_failure
+        );
+    };
+    assert!(
+        !message.is_empty(),
+        "the refusal carries no message from git"
+    );
+    assert_eq!(receipt.prepared_commit, None);
+}
+
 #[test]
 fn a_modification_whose_declared_before_bytes_are_not_there_is_refused() {
     // The deletion arm above proves the gate reads the base tree. This is the modification arm:
