@@ -905,11 +905,25 @@ pub(crate) fn read_pinned_bytes(
     for argument in arguments {
         command.arg(argument);
     }
-    match run_git_bounded_raw(command, None, budget) {
+    classify_pinned_read(
+        run_git_bounded_raw(command, None, budget),
+        repository.still_pinned(),
+    )
+}
+
+/// Which of the three answers a finished (or unfinished) child amounts to.
+///
+/// Split out from `read_pinned_bytes` so every subcase can be DRIVEN in a test: four of the five
+/// -- a child that cannot start, one killed by a signal, one that outlives its budget, and a pin
+/// broken after the read -- cannot be constructed from an integration test without racing the
+/// kernel or removing `git` from the machine. The one that can (an unreadable filter inventory)
+/// has its constructed-fault test at the dispatch level as well.
+fn classify_pinned_read(raw: BoundedRaw, still_pinned: bool) -> PinnedRead {
+    match raw {
         // The pin is checked BEFORE the code is read: bytes from a repository that is no longer
         // the pinned one are not evidence about it, whatever the child's status said.
         BoundedRaw::Finished { code, stdout } => {
-            if !repository.still_pinned() {
+            if !still_pinned {
                 return PinnedRead::Unreadable(PinnedReadFailure::PinBrokenAfterRead);
             }
             match code {
@@ -1258,6 +1272,116 @@ fn run_git_bounded_raw(
     BoundedRaw::Finished {
         code: status.code(),
         stdout,
+    }
+}
+
+#[cfg(test)]
+mod r46_read_classification {
+    use super::{BoundedRaw, PinnedRead, PinnedReadFailure, classify_pinned_read};
+
+    /// R46: each subcase is DRIVEN, one per constructed fault, and asserted BY NAME.
+    ///
+    /// The fault is constructed at the boundary the product itself classifies: a child that could
+    /// not start, one killed by a signal, one that outlived its budget, a pin that broke after the
+    /// read. Driving them here rather than through a live `git` is deliberate -- a test that
+    /// removed `git` from the machine or raced a rename would be testing the harness.
+    #[test]
+    fn a_child_that_could_not_start_is_unreadable_and_says_so() {
+        assert_eq!(
+            classify_pinned_read(BoundedRaw::Failed, true),
+            PinnedRead::Unreadable(PinnedReadFailure::ChildFailed)
+        );
+    }
+
+    #[test]
+    fn a_child_killed_by_a_signal_is_unreadable_and_says_so() {
+        assert_eq!(
+            classify_pinned_read(
+                BoundedRaw::Finished {
+                    code: None,
+                    stdout: Vec::new()
+                },
+                true
+            ),
+            PinnedRead::Unreadable(PinnedReadFailure::Signalled)
+        );
+    }
+
+    #[test]
+    fn a_child_that_outlived_its_budget_is_unreadable_and_says_so() {
+        assert_eq!(
+            classify_pinned_read(BoundedRaw::TimedOut, true),
+            PinnedRead::Unreadable(PinnedReadFailure::TimedOut)
+        );
+    }
+
+    /// The pin is checked BEFORE the exit code, so bytes from a repository that is no longer the
+    /// pinned one are `Unreadable` even though the child succeeded. The old code guarded only the
+    /// success arm, which let a non-zero exit in an unpinned repository read as "not there".
+    #[test]
+    fn a_pin_broken_after_the_read_is_unreadable_even_when_the_child_succeeded() {
+        assert_eq!(
+            classify_pinned_read(
+                BoundedRaw::Finished {
+                    code: Some(0),
+                    stdout: b"bytes this attempt never measured".to_vec()
+                },
+                false
+            ),
+            PinnedRead::Unreadable(PinnedReadFailure::PinBrokenAfterRead)
+        );
+        assert_eq!(
+            classify_pinned_read(
+                BoundedRaw::Finished {
+                    code: Some(1),
+                    stdout: Vec::new()
+                },
+                false
+            ),
+            PinnedRead::Unreadable(PinnedReadFailure::PinBrokenAfterRead)
+        );
+    }
+
+    /// The two answers that are FACTS, and they are not the same fact.
+    #[test]
+    fn a_non_zero_exit_in_a_pinned_repository_is_not_found_and_never_unreadable() {
+        assert_eq!(
+            classify_pinned_read(
+                BoundedRaw::Finished {
+                    code: Some(128),
+                    stdout: Vec::new()
+                },
+                true
+            ),
+            PinnedRead::NotFound,
+            "Git ran and reported no such object: that is evidence about the tree"
+        );
+        assert_eq!(
+            classify_pinned_read(
+                BoundedRaw::Finished {
+                    code: Some(0),
+                    stdout: b"the bytes".to_vec()
+                },
+                true
+            ),
+            PinnedRead::Bytes(b"the bytes".to_vec())
+        );
+    }
+
+    /// `bytes()` folds the two no-bytes answers for callers that do not refuse on the difference,
+    /// and a caller that DOES refuse must not reach for it.
+    #[test]
+    fn bytes_is_none_for_both_no_bytes_answers() {
+        assert!(PinnedRead::NotFound.bytes().is_none());
+        assert!(
+            PinnedRead::Unreadable(PinnedReadFailure::TimedOut)
+                .bytes()
+                .is_none()
+        );
+        assert_eq!(
+            PinnedRead::Bytes(b"x".to_vec()).bytes(),
+            Some(b"x".as_slice())
+        );
     }
 }
 
