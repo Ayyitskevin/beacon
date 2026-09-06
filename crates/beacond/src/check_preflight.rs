@@ -12,6 +12,8 @@
 //! That outcome stays correct whenever a sandbox is absent, unsupported, or
 //! unhealthy; it does not become obsolete when one ships.
 
+use std::fmt;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -194,6 +196,107 @@ pub struct PreflightReceipt {
 
 /// Why a preflight could not be attempted at all. These produce no Run and no
 /// Receipt: there was nothing to preflight.
+/// Which fault the Run startup pass hit, and WHICH ROW hit it (R27.1's shape, R28.1).
+pub(crate) enum RunStateFault {
+    /// The enumeration itself failed: no row to name, because none was reached.
+    Store(rusqlite::Error),
+    /// One Run did not re-prove. `cause` is the owning reader's OWN error, carried whole.
+    Row {
+        workspace_id: Uuid,
+        run_id: String,
+        cause: CheckPreflightError,
+    },
+    // NO `Totals` ARM. This pass compares each Run against its OWN Receipts and Events; it makes
+    // no whole-store count comparison, so there is no totals fault to report.
+    /// The clock is before the Unix epoch, so no lease can be judged expired. Not a row fault.
+    Clock,
+    /// A row whose Workspace column is not a UUID. Unreachable while the foreign-key check and
+    /// the Workspace pass run first.
+    Identity {
+        workspace_id: String,
+        run_id: String,
+    },
+}
+
+impl CheckPreflightError {
+    /// The variant's NAME, for R28.4's one-line startup message.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Account(_) => "Account",
+            Self::ProjectNotFound => "ProjectNotFound",
+            Self::RepositoryNotBound => "RepositoryNotBound",
+            Self::InvalidStore => "InvalidStore",
+            Self::Store(_) => "Store",
+            Self::Json(_) => "Json",
+        }
+    }
+}
+
+impl fmt::Display for RunStateFault {
+    /// R28.4: the KEY and the fault's NAME, never the carried error's own text.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(_) => formatter.write_str("the Runs could not be read"),
+            Self::Row {
+                workspace_id,
+                run_id,
+                cause,
+            } => write!(
+                formatter,
+                "Run {run_id} in Workspace {workspace_id} does not re-prove: {}",
+                cause.name()
+            ),
+            Self::Clock => formatter.write_str("the clock is before the Unix epoch"),
+            Self::Identity {
+                workspace_id,
+                run_id,
+            } => write!(
+                formatter,
+                "a Run row's Workspace is not readable: {workspace_id}, Run \
+                 {run_id}"
+            ),
+        }
+    }
+}
+
+/// Hand-written and NOT delegating to `Display`: R28.4 keeps the carried text reachable here.
+impl fmt::Debug for RunStateFault {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => formatter.debug_tuple("Store").field(error).finish(),
+            Self::Row {
+                workspace_id,
+                run_id,
+                cause,
+            } => formatter
+                .debug_struct("Row")
+                .field("workspace_id", workspace_id)
+                .field("run_id", run_id)
+                .field("cause", cause)
+                .finish(),
+            Self::Clock => formatter.debug_struct("Clock").finish(),
+            Self::Identity {
+                workspace_id,
+                run_id,
+            } => formatter
+                .debug_struct("Identity")
+                .field("workspace_id", workspace_id)
+                .field("run_id", run_id)
+                .finish(),
+        }
+    }
+}
+
+impl std::error::Error for RunStateFault {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::Row { cause, .. } => Some(cause),
+            Self::Clock | Self::Identity { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum CheckPreflightError {
     Account(OperatorAccountError),
@@ -676,25 +779,35 @@ fn resolve_within(root: &Path, declared: &str) -> Containment {
 
 /// Startup reconciliation: a Run whose lease expired without a terminal Receipt
 /// is `unconfirmed`, never absent. Lease expiry is what proves that state.
-pub(crate) fn verify_run_state(connection: &Connection) -> Result<u64, CheckPreflightError> {
+/// Reconcile every Run against its Receipts and Events.
+///
+/// Returns nothing. It used to return the number of leases it expired, which no caller read, and
+/// that dead `u64` was the pass's only fallible conversion -- forcing a fault arm that would have
+/// had to be named for a count rather than for anything a reader could act on.
+pub(crate) fn verify_run_state(connection: &Connection) -> Result<(), RunStateFault> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| CheckPreflightError::InvalidStore)?
+        .map_err(|_| RunStateFault::Clock)?
         .as_millis();
-    let now = i64::try_from(now).map_err(|_| CheckPreflightError::InvalidStore)?;
+    let now = i64::try_from(now).map_err(|_| RunStateFault::Clock)?;
     // Both open states expire the same way: a lease that ran out without a terminal Receipt is
     // `unconfirmed` whatever kind of Run held it.
-    let expired = connection.execute(
-        "UPDATE runs SET state = 'unconfirmed', ended_at_ms = ?1
+    connection
+        .execute(
+            "UPDATE runs SET state = 'unconfirmed', ended_at_ms = ?1
          WHERE state IN ('preflighting', 'dispatching') AND lease_expires_at_ms < ?1",
-        params![now],
-    )?;
+            params![now],
+        )
+        .map_err(RunStateFault::Store)?;
 
     // One reconciliation owns kind, state, Receipt, and terminal-event
     // cardinality so compound relabelling cannot move a Run between separate
     // validators and disappear from both.
-    let mut statement = connection.prepare(
-        "SELECT runs.kind, runs.state,
+    let mut statement = connection
+        .prepare(
+            // `runs.id` is selected so a refusal can NAME the Run (R28.1). Before this the loop had
+            // no identity at all -- the pass could say a Run disagreed with the log and never which.
+            "SELECT runs.id, runs.workspace_id, runs.kind, runs.state,
                 (SELECT count(*) FROM receipts
                  WHERE receipts.workspace_id = runs.workspace_id
                    AND receipts.run_id = runs.id),
@@ -711,20 +824,46 @@ pub(crate) fn verify_run_state(connection: &Connection) -> Result<u64, CheckPref
                    AND events.kind = 'proposal.dispatched'
                    AND json_extract(events.payload_json, '$.runId') = runs.id)
          FROM runs",
-    )?;
+        )
+        .map_err(RunStateFault::Store)?;
     let rows = statement
         .query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
                 row.get::<_, i64>(4)?,
                 row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
             ))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    for (kind, state, receipts, preflight_events, execution_events, dispatch_events) in rows {
+        })
+        .map_err(RunStateFault::Store)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(RunStateFault::Store)?;
+    for (
+        run_id,
+        workspace_text,
+        kind,
+        state,
+        receipts,
+        preflight_events,
+        execution_events,
+        dispatch_events,
+    ) in rows
+    {
+        let named = |cause: CheckPreflightError| match Uuid::parse_str(&workspace_text) {
+            Ok(workspace_id) => RunStateFault::Row {
+                workspace_id,
+                run_id: run_id.clone(),
+                cause,
+            },
+            Err(_) => RunStateFault::Identity {
+                workspace_id: workspace_text.clone(),
+                run_id: run_id.clone(),
+            },
+        };
         let expected = match (kind.as_str(), state.as_str()) {
             ("check_preflight", "refused" | "verified") => (1, 1, 0, 0),
             ("declared_checks", "refused" | "verified" | "incomplete") => (1, 0, 1, 0),
@@ -737,7 +876,7 @@ pub(crate) fn verify_run_state(connection: &Connection) -> Result<u64, CheckPref
                 "check_preflight" | "declared_checks" | "proposal_dispatch",
                 "preflighting" | "dispatching" | "unconfirmed",
             ) => (0, 0, 0, 0),
-            _ => return Err(CheckPreflightError::InvalidStore),
+            _ => return Err(named(CheckPreflightError::InvalidStore)),
         };
         if (
             receipts,
@@ -746,16 +885,22 @@ pub(crate) fn verify_run_state(connection: &Connection) -> Result<u64, CheckPref
             dispatch_events,
         ) != expected
         {
-            return Err(CheckPreflightError::InvalidStore);
+            return Err(named(CheckPreflightError::InvalidStore));
         }
     }
-    u64::try_from(expired).map_err(|_| CheckPreflightError::InvalidStore)
+    Ok(())
 }
 
 #[derive(Debug)]
 pub(crate) enum RunEventReplayError {
     EvidenceMismatch,
-    RunStateMismatch,
+    /// The stored Run disagrees with the Receipt this event carries. It names the Run, because a
+    /// replay that says only "a Run disagreed" leaves the reader the whole table to search
+    /// (R28.1); the id is the one the event's own payload cites and the stored row was proved
+    /// equal to above, not a fresh one.
+    RunStateMismatch {
+        run_id: Uuid,
+    },
     Store(rusqlite::Error),
 }
 
@@ -844,7 +989,9 @@ pub(crate) fn verify_run_event(
         return Err(RunEventReplayError::EvidenceMismatch);
     }
     if metadata.kind != "check_preflight" || metadata.state != receipt.outcome.run_state() {
-        return Err(RunEventReplayError::RunStateMismatch);
+        return Err(RunEventReplayError::RunStateMismatch {
+            run_id: receipt.run_id,
+        });
     }
     Ok(())
 }
@@ -862,6 +1009,63 @@ struct StoredPreflightMetadata {
     state: String,
     started_at_ms: i64,
     ended_at_ms: i64,
+}
+
+#[cfg(test)]
+mod name_witness {
+    use super::*;
+
+    /// Pinned independently of `name()` (the fold at 30d2a20): an exhaustive `name()` catches an
+    /// added arm, only a second table catches a wrong or duplicated name.
+    fn expected_name(error: &CheckPreflightError) -> &'static str {
+        match error {
+            CheckPreflightError::Account(_) => "Account",
+            CheckPreflightError::ProjectNotFound => "ProjectNotFound",
+            CheckPreflightError::RepositoryNotBound => "RepositoryNotBound",
+            CheckPreflightError::InvalidStore => "InvalidStore",
+            CheckPreflightError::Store(_) => "Store",
+            CheckPreflightError::Json(_) => "Json",
+        }
+    }
+
+    #[test]
+    fn every_check_preflight_error_arm_has_its_own_pinned_name() {
+        let every_arm = [
+            CheckPreflightError::Account(
+                crate::operator_account::OperatorAccountError::PasswordTooShort,
+            ),
+            CheckPreflightError::ProjectNotFound,
+            CheckPreflightError::RepositoryNotBound,
+            CheckPreflightError::InvalidStore,
+            CheckPreflightError::Store(rusqlite::Error::QueryReturnedNoRows),
+            CheckPreflightError::Json(serde_json::from_str::<u8>("\"x\"").unwrap_err()),
+        ];
+        assert_eq!(
+            every_arm.len(),
+            6,
+            "an arm was added to `CheckPreflightError` without a fixture here"
+        );
+        for arm in &every_arm {
+            assert_eq!(
+                arm.name(),
+                expected_name(arm),
+                "the startup name does not match the pinned table: {arm:?}"
+            );
+        }
+        let names: std::collections::BTreeSet<&str> =
+            every_arm.iter().map(CheckPreflightError::name).collect();
+        assert_eq!(
+            names.len(),
+            6,
+            "two arms share a startup name, so a swap between them is invisible: {names:?}"
+        );
+        for name in names {
+            assert!(
+                !name.contains(' ') && !name.contains('{'),
+                "a name is a name, not a rendering: {name}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
