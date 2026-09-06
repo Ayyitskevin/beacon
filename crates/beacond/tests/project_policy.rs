@@ -319,81 +319,88 @@ fn concurrent_publications_from_the_same_revision_commit_exactly_once() {
 
 #[test]
 fn restart_refuses_policy_state_without_its_exact_event() {
-    let (store, accounts, projects, policies) = enrolled_services("missing-event");
-    // R39.3 (kimi's HOLD): TWO Projects carry policies, and the tamper hits whichever sorts LAST
-    // under this pass's own `ORDER BY workspace_id, project_id`. The old fixture had ONE Project,
-    // so `!project_id.is_nil()` was all the bar could assert -- naming ANY real Project satisfied
-    // it, and a mutant naming `rows[0]` was unkillable by construction.
-    let first = projects.create(project_draft()).unwrap();
-    let second = projects.create(other_project_draft()).unwrap();
-    for project in [&first, &second] {
-        policies
-            .publish(project.id, 1, None, policy_draft())
-            .unwrap();
-    }
-    drop(policies);
-    drop(projects);
-    drop(accounts);
-    let connection = Connection::open(&store.path).unwrap();
-    // The pass's own order, read back from the store rather than assumed from the ids.
-    let tampered: String = connection
-        .query_row(
-            "SELECT DISTINCT project_id FROM project_policy_revisions
-             ORDER BY workspace_id, project_id DESC LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .expect("both Projects have policy revisions");
-    let removed = connection
-        .execute(
-            "DELETE FROM events
+    // R44: BOTH ENDS. Tampering only the last-sorting Project made "names the failing row"
+    // and "names the last row" one assertion, and a Row arm naming `rows.last()` survived.
+    for (end, order) in [("last", "DESC"), ("first", "ASC")] {
+        let (store, accounts, projects, policies) =
+            enrolled_services(&format!("missing-event-{end}"));
+        // R39.3 (kimi's HOLD): TWO Projects carry policies, and the tamper hits whichever sorts LAST
+        // under this pass's own `ORDER BY workspace_id, project_id`. The old fixture had ONE Project,
+        // so `!project_id.is_nil()` was all the bar could assert -- naming ANY real Project satisfied
+        // it, and a mutant naming `rows[0]` was unkillable by construction.
+        let first = projects.create(project_draft()).unwrap();
+        let second = projects.create(other_project_draft()).unwrap();
+        for project in [&first, &second] {
+            policies
+                .publish(project.id, 1, None, policy_draft())
+                .unwrap();
+        }
+        drop(policies);
+        drop(projects);
+        drop(accounts);
+        let connection = Connection::open(&store.path).unwrap();
+        // The pass's own order, read back from the store rather than assumed from the ids.
+        let tampered: String = connection
+            .query_row(
+                &format!(
+                    "SELECT DISTINCT project_id FROM project_policy_revisions
+                 ORDER BY workspace_id, project_id {order} LIMIT 1"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .expect("both Projects have policy revisions");
+        let removed = connection
+            .execute(
+                "DELETE FROM events
              WHERE kind = 'project.policy_published'
                AND payload_json LIKE '%' || ?1 || '%'",
-            rusqlite::params![tampered],
-        )
-        .unwrap();
-    assert_eq!(removed, 1, "the plant removed the wrong number of Events");
-    drop(connection);
+                rusqlite::params![tampered],
+            )
+            .unwrap();
+        assert_eq!(removed, 1, "the plant removed the wrong number of Events");
+        drop(connection);
 
-    let result = Supervisor::bootstrap(StartupConfig {
-        store_path: store.path.clone(),
-        initial_workspace_name: "Ignored".to_owned(),
-    });
-    assert!(
-        matches!(
-            result,
-            Err(SupervisorError::ProjectPolicyStateMismatch { .. })
-        ),
-        "unexpected bootstrap result: {result:?}"
-    );
-    // R28.1: the refusal names WHICH Project, and R28.4's line is the key plus the fault's NAME
-    // with the reader's own sentence absent.
-    let refusal = result.unwrap_err();
-    assert!(
-        matches!(
-            &refusal,
-            SupervisorError::ProjectPolicyStateMismatch { project_id, .. }
-                if project_id.to_string() == tampered
-        ),
-        "the refusal does not name the Project it refused: {refusal:?}"
-    );
-    assert!(
-        refusal.to_string().contains(&tampered),
-        "the line does not name the Project it refused: {refusal}"
-    );
-    let line = refusal.to_string();
-    let named = line.rsplit(": ").next().unwrap().to_owned();
-    // kimi's P2: PINNED, not just shaped. A name-shaped tail is satisfied by ANY arm,
-    // so without this a pass carrying a fixed-but-wrong fault survives -- the M9 class
-    // measured surviving on the pass-7 bar.
-    assert_eq!(
-        named, "InvalidStore",
-        "the refusal carries the wrong fault: {line}"
-    );
-    assert!(
-        !named.contains(' ') && !named.contains('{'),
-        "the tail of the line is a rendering, not a name: {line}"
-    );
+        let result = Supervisor::bootstrap(StartupConfig {
+            store_path: store.path.clone(),
+            initial_workspace_name: "Ignored".to_owned(),
+        });
+        assert!(
+            matches!(
+                result,
+                Err(SupervisorError::ProjectPolicyStateMismatch { .. })
+            ),
+            "unexpected bootstrap result: {result:?}"
+        );
+        // R28.1: the refusal names WHICH Project, and R28.4's line is the key plus the fault's NAME
+        // with the reader's own sentence absent.
+        let refusal = result.unwrap_err();
+        assert!(
+            matches!(
+                &refusal,
+                SupervisorError::ProjectPolicyStateMismatch { project_id, .. }
+                    if project_id.to_string() == tampered
+            ),
+            "the refusal does not name the Project it refused: {refusal:?}"
+        );
+        assert!(
+            refusal.to_string().contains(&tampered),
+            "the line does not name the Project it refused: {refusal}"
+        );
+        let line = refusal.to_string();
+        let named = line.rsplit(": ").next().unwrap().to_owned();
+        // kimi's P2: PINNED, not just shaped. A name-shaped tail is satisfied by ANY arm,
+        // so without this a pass carrying a fixed-but-wrong fault survives -- the M9 class
+        // measured surviving on the pass-7 bar.
+        assert_eq!(
+            named, "InvalidStore",
+            "the refusal carries the wrong fault: {line}"
+        );
+        assert!(
+            !named.contains(' ') && !named.contains('{'),
+            "the tail of the line is a rendering, not a name: {line}"
+        );
+    }
 }
 
 #[test]
