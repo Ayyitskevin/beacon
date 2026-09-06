@@ -1355,12 +1355,15 @@ impl DispatchService {
         for (declared_path, post) in posts {
             let path = format!("{commit}:{declared_path}");
             let cat_file = ["cat-file", "blob", path.as_str()];
-            let blob = read_pinned_bytes(repository, &cat_file, READ_BUDGET);
-            decided.record_step(GitStepName::CatFile, &cat_file, blob.is_some());
-            let Some(blob) = blob else {
+            let read = read_pinned_bytes(repository, &cat_file, READ_BUDGET);
+            decided.record_step(GitStepName::CatFile, &cat_file, read.bytes().is_some());
+            // Unchanged behaviour: this post-condition answers "did the effect match", and both
+            // no-bytes answers mean it did not. The pre-image gate below is the one that must
+            // distinguish them, because it REFUSES and its refusal names a comparison.
+            let Some(blob) = read.bytes() else {
                 return Ok(false);
             };
-            if hex(&crate::proposal::sha256(&blob)) != post {
+            if hex(&crate::proposal::sha256(blob)) != post {
                 return Ok(false);
             }
         }
@@ -1987,8 +1990,9 @@ fn pre_images_hold(repository: &PinnedRepository, base: &str, decided: &mut Deci
     for (declared_pre_image, declared_path) in records {
         let path = format!("{base}:{declared_path}");
         let cat_file = ["cat-file", "blob", path.as_str()];
-        let blob = read_pinned_bytes(repository, &cat_file, READ_BUDGET);
-        decided.record_step(GitStepName::CatFile, &cat_file, blob.is_some());
+        let read = read_pinned_bytes(repository, &cat_file, READ_BUDGET);
+        decided.record_step(GitStepName::CatFile, &cat_file, read.bytes().is_some());
+        let blob = read.bytes().map(<[u8]>::to_vec);
         let record_holds = match (&declared_pre_image, blob) {
             // Declared absent, and absent: `cat-file` fails for a path the tree does not hold.
             (None, None) => true,

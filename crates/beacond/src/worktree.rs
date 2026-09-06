@@ -829,12 +829,63 @@ pub(crate) fn read_pinned_exit(
 /// For the two reads whose subject IS bytes -- the pre-image gate and the effect post-condition,
 /// both `cat-file blob` -- where a declared file that is not valid UTF-8 must survive the round
 /// trip rather than refuse a change Beacon wrote correctly.
+/// WHY a pinned byte read produced no bytes, when the reason is not "Git says it is not there".
+///
+/// R46: an `Option` here erased the difference between a comparison that could not be made and an
+/// object that is absent, and `pre_images_hold` then reported both as `PreImageMismatch` -- a
+/// claim about a comparison that never happened. Each arm is a read that FAILED; none of them is
+/// evidence about the tree's contents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PinnedReadFailure {
+    /// The filter-driver inventory could not be read, so the hardening this read depends on could
+    /// not be established. Nothing was asked of the object store.
+    FilterInventoryUnreadable,
+    /// The `cat-file` child could not be started or could not be waited on.
+    ChildFailed,
+    /// The child was terminated by a signal and has no exit code.
+    Signalled,
+    /// The child outlived the read budget.
+    TimedOut,
+    /// The read returned, but the repository was no longer the one that was pinned, so its bytes
+    /// describe something this attempt never measured.
+    PinBrokenAfterRead,
+}
+
+/// What a pinned byte read established. THREE answers, never two (R46/R46.1).
+///
+/// `NotFound` is a fact about the tree -- Git ran, under the hardening, in the pinned repository,
+/// and reported no such object. `Unreadable` is the absence of a fact. Collapsing them is the
+/// absent/broken collapse this codebase refuses on the write side already (R28.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PinnedRead {
+    /// The child exited 0 in the still-pinned repository. These are its bytes.
+    Bytes(Vec<u8>),
+    /// The child ran and reported a non-zero status: Git says the object is not there.
+    NotFound,
+    /// The read did not happen, or its result cannot be trusted. It says NOTHING about the tree.
+    Unreadable(PinnedReadFailure),
+}
+
+impl PinnedRead {
+    /// The bytes, if any were read. For callers whose behaviour does not distinguish the two
+    /// no-bytes answers; a caller that refuses must distinguish them.
+    pub(crate) fn bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Bytes(bytes) => Some(bytes),
+            Self::NotFound | Self::Unreadable(_) => None,
+        }
+    }
+}
+
 pub(crate) fn read_pinned_bytes(
     repository: &PinnedRepository,
     arguments: &[&str],
     budget: Duration,
-) -> Option<Vec<u8>> {
-    let filter_drivers = pinned_filter_drivers(repository)?;
+) -> PinnedRead {
+    let Some(filter_drivers) = pinned_filter_drivers(repository) else {
+        return PinnedRead::Unreadable(PinnedReadFailure::FilterInventoryUnreadable);
+    };
     let mut command = read_only_git_command(Path::new(GIT), &filter_drivers);
     repository.enter(&mut command);
     // `--literal-pathspecs` is not needed here: `cat-file` takes an object name, not a pathspec.
@@ -842,11 +893,20 @@ pub(crate) fn read_pinned_bytes(
         command.arg(argument);
     }
     match run_git_bounded_raw(command, None, budget) {
-        BoundedRaw::Finished {
-            code: Some(0),
-            stdout,
-        } if repository.still_pinned() => Some(stdout),
-        _ => None,
+        // The pin is checked BEFORE the code is read: bytes from a repository that is no longer
+        // the pinned one are not evidence about it, whatever the child's status said.
+        BoundedRaw::Finished { code, stdout } => {
+            if !repository.still_pinned() {
+                return PinnedRead::Unreadable(PinnedReadFailure::PinBrokenAfterRead);
+            }
+            match code {
+                Some(0) => PinnedRead::Bytes(stdout),
+                Some(_) => PinnedRead::NotFound,
+                None => PinnedRead::Unreadable(PinnedReadFailure::Signalled),
+            }
+        }
+        BoundedRaw::TimedOut => PinnedRead::Unreadable(PinnedReadFailure::TimedOut),
+        BoundedRaw::Failed => PinnedRead::Unreadable(PinnedReadFailure::ChildFailed),
     }
 }
 
