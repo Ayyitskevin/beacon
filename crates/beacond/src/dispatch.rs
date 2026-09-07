@@ -4144,7 +4144,7 @@ mod tests {
                 subcase.name()
             })
             .collect();
-        assert_eq!(names.len(), 7, "two read failures share a name: {names:?}");
+        assert_eq!(names.len(), 8, "two read failures share a name: {names:?}");
         for name in names {
             assert!(
                 !name.contains(' '),
