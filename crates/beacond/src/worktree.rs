@@ -856,7 +856,9 @@ pub(crate) fn read_pinned_exit(
     match classify_pinned_read(raw, repository.still_pinned(), AbsenceWitness::ExitCode) {
         PinnedRead::Bytes(_) => Some(0),
         PinnedRead::NotFound => code,
-        PinnedRead::Unreadable(PinnedReadFailure::SilentExit { .. }) if false => code,
+        // R56: a `SilentExit` arm guarded by a literal `false` stood here. It could never be
+        // taken, and an `ExitCode` site cannot produce that subcase in any case -- the classifier
+        // emits it only at a `Silence` site. The arm below already answered for it.
         PinnedRead::Unreadable(_) => None,
     }
 }
@@ -1221,15 +1223,23 @@ fn pinned_filter_drivers(
             // Unchanged: an inventory that is not text is not an inventory.
             Err(_) => Err(FilterInventoryFailure::Unreadable),
         },
-        // Silence with a non-zero exit: git found nothing to list and said nothing about it.
-        PinnedRead::NotFound => Ok(Vec::new()),
         // git said WHY, so the Receipt can too.
         PinnedRead::Unreadable(PinnedReadFailure::ReadRefused { message }) => {
             Err(FilterInventoryFailure::Refused { message })
         }
         // A pin broken under the read, a child that could not start, a signal, a timeout: the
         // inventory was not established and there is no message to carry.
-        PinnedRead::Unreadable(_) => Err(FilterInventoryFailure::Unreadable),
+        //
+        // R56: `NotFound` joins them, and its old arm is gone. It used to return an EMPTY
+        // inventory under the comment "git found nothing to list and said nothing about it", which
+        // R55 made false twice over: an empty inventory is exit 0 with empty bytes, and a silent
+        // non-zero at a `Silence` site is now `SilentExit`. `NotFound` cannot arrive here at all --
+        // the `SilentExit` guard is the same condition as `shows_absence(Silence, ..)` and is
+        // evaluated first -- and the pattern survives only because the `match` must be exhaustive.
+        // It folds in with the other unestablished cases rather than into `Ok`, because an
+        // inventory git declined to list is not an inventory with nothing in it, and proceeding
+        // with an empty filter set is exactly the hardening bypass R47 closed.
+        PinnedRead::NotFound | PinnedRead::Unreadable(_) => Err(FilterInventoryFailure::Unreadable),
     }
 }
 
