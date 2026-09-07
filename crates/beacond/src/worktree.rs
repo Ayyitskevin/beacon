@@ -786,11 +786,22 @@ pub(crate) fn read_pinned(
     repository: &PinnedRepository,
     arguments: &[&str],
     budget: Duration,
-) -> Option<String> {
+) -> Result<Option<String>, FilterInventoryFailure> {
     // The filter inventory is read through the SAME pinned directory: reading it by pathname would
     // let a swap decide which drivers the hardening neutralizes, before the write enters the
     // original descriptor (gpt1).
-    let filter_drivers = pinned_filter_drivers(repository).ok()?;
+    //
+    // R52: `?`, not `.ok()?`. This read is a PRECONDITION -- it decides which filter drivers the
+    // hardening suppresses, so until it answers no child may be spawned at all -- and collapsing
+    // its typed failure into `None` handed every caller one value for "the inventory says nothing
+    // is configured" and "the inventory could not be read". `read_pinned_bytes` was given this
+    // shape at R46/R47; this was the last read path in the file still throwing the answer away,
+    // and the evidence it threw away was git's own message (opus, R51).
+    //
+    // The error is R50's `FilterInventoryFailure`, so this function's `Err` means exactly what
+    // `read_pinned_bytes`'s does and the two reads cannot drift into two vocabularies for one
+    // fact.
+    let filter_drivers = pinned_filter_drivers(repository)?;
     let mut command = read_only_git_command(Path::new(GIT), &filter_drivers);
     repository.enter(&mut command);
     for argument in arguments {
@@ -798,16 +809,23 @@ pub(crate) fn read_pinned(
     }
     // R47: no exit arithmetic here either. These reads answer negatively in silence --
     // `symbolic-ref --quiet` on a detached HEAD is the one that does -- and every other non-zero
-    // exit carries a diagnostic. The caller's `Option` still folds the negative answer and the
-    // failure together; that collapse is one layer UP and outside this lane (see the report).
-    match classify_pinned_read(
-        run_git_bounded_raw(command, None, budget),
-        repository.still_pinned(),
-        AbsenceWitness::Silence,
-    ) {
-        PinnedRead::Bytes(stdout) => String::from_utf8(stdout).ok(),
-        PinnedRead::NotFound | PinnedRead::Unreadable(_) => None,
-    }
+    // exit carries a diagnostic.
+    //
+    // The CHILD's own three answers are still folded into `Option` here, and R52 does not change
+    // that: `Ok(None)` is "the child ran and did not produce text", whether it answered negatively
+    // or failed. That is the collapse R47 recorded one layer up, and it is a different question
+    // from this function's `Err`, which means NO CHILD RAN. Separating the two is what lets the
+    // provenance gate tell "this repository is not Beacon-made" from "I could not ask".
+    Ok(
+        match classify_pinned_read(
+            run_git_bounded_raw(command, None, budget),
+            repository.still_pinned(),
+            AbsenceWitness::Silence,
+        ) {
+            PinnedRead::Bytes(stdout) => String::from_utf8(stdout).ok(),
+            PinnedRead::NotFound | PinnedRead::Unreadable(_) => None,
+        },
+    )
 }
 
 /// [`read_pinned`], returning the child's **exit code** rather than its output.
@@ -2603,6 +2621,7 @@ mod tests {
     fn a_corrupt_object_store_leaves_the_inventory_readable_and_fails_at_the_byte_read() {
         let (root, pinned) = pinned_one_commit("inventory-vs-objects");
         let head = read_pinned(&pinned, &["rev-parse", "--verify", "HEAD"], READ_BUDGET)
+            .expect("the inventory reads before the store is broken")
             .expect("the head reads before the store is broken");
         fs::remove_dir_all(root.path.join(".git").join("objects")).unwrap();
 
