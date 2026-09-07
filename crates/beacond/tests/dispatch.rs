@@ -14,6 +14,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::ExitStatusExt;
@@ -1250,6 +1251,85 @@ fn row_34_superseded_ruling_leaves_every_repository_byte_identical() {
 // ---------------------------------------------------------------------------------------------
 // The rest of the gates
 // ---------------------------------------------------------------------------------------------
+
+/// R51: R49's fd-100 collision, at the level a dispatch actually fails on.
+///
+/// `worktree::tests::a_git_directory_that_opens_on_the_placement_descriptor_still_reaches_the_child`
+/// proves the mechanism at the read: with the descriptor table grown past the placement number,
+/// `openat(.git)` returns that very number, `dup2(n, n)` is a successful no-op, close-on-exec
+/// survives, and the exec closes the pin. This is the same condition through the PUBLIC services --
+/// a real dispatch, which is where the loss was actually met: it arrived four gates later as a
+/// content disagreement about a repository that was never read.
+///
+/// The descriptors are held across the whole dispatch rather than around one open, because the
+/// dispatch opens the repository itself and this test cannot hand it a pinned one. Placement is not
+/// asserted directly for the same reason; what proves this test reaches the condition is its
+/// MUTANT: removing `enter()`'s `F_SETFD` branch makes this dispatch refuse.
+///
+/// WHICH GATE IT REFUSES AT, measured rather than predicted. A pin lost from the FIRST exec is not
+/// met at the pre-image gate: the earliest pinned read is the filter-driver inventory, inside
+/// `read_pinned`, and it fails with git's `fatal: not a git repository: '/proc/self/fd/100'`. That
+/// read serves the provenance gate (`is_beacon_made`, `dispatch.rs:926`), which runs well before
+/// the pre-image gate (`:941`), so the dispatch refuses `SourceNotBeaconMade`.
+///
+/// blue's flake reached the pre-image gate instead because its loss was TRANSIENT -- it arrived
+/// after the early gates had already read successfully. A deterministic loss cannot get that far.
+///
+/// The message is real but does not reach the Receipt: `pinned_filter_drivers` returns
+/// `FilterInventoryRefused { message }` (R47) and `read_pinned` discards it with `.ok()?`. That is
+/// the last untyped read path, and it is named in the R51 report rather than changed here -- this
+/// lane is test-only.
+#[test]
+fn a_dispatch_whose_git_directory_lands_on_the_placement_descriptor_still_applies() {
+    // `PINNED_GIT_DIR_FD` is crate-internal, so the number is stated once here with the reason it
+    // is fixed at all: `GIT_DIR` is baked before the fork, so the destination cannot be chosen at
+    // run time. If the constant ever moves, this test stops reproducing R49 rather than failing --
+    // which is what the mutant in the report actually guards.
+    const PLACEMENT_DESCRIPTOR: std::os::fd::RawFd = 100;
+
+    let fixture = admitted_mission("fd100-dispatch");
+    let (repository, ruling_digest) = fixture.approved("fd100-dispatch");
+    let base = repository.revision.clone();
+
+    // Two descriptors below the placement number are left free -- what `PinnedRepository::open`
+    // consumes in order, the root and then `.git` through it -- so the dispatch's own open lands
+    // the Git directory exactly on the placement descriptor.
+    let mut held: Vec<fs::File> = Vec::new();
+    loop {
+        let file = fs::File::open("/dev/null").expect("/dev/null opens");
+        let number = file.as_raw_fd();
+        if number > PLACEMENT_DESCRIPTOR - 2 {
+            break;
+        }
+        held.push(file);
+        if number == PLACEMENT_DESCRIPTOR - 2 {
+            break;
+        }
+    }
+
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+    drop(held);
+
+    assert_eq!(
+        receipt.outcome,
+        DispatchOutcome::Applied,
+        "R51.FD100.APPLIES -- pre-image read failure: {:?}",
+        receipt.pre_image_read_failure
+    );
+    let landed = receipt
+        .resulting_revision
+        .clone()
+        .expect("an applied dispatch names the revision it produced");
+    assert_ne!(landed, base, "R51.FD100.BRANCH_MOVED");
+    assert_eq!(
+        CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]),
+        landed,
+        "R51.FD100.HEAD_IS_THE_LANDED_COMMIT"
+    );
+}
 
 #[test]
 fn every_gate_holding_lands_the_declared_change_and_nothing_else() {
