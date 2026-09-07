@@ -849,16 +849,16 @@ pub(crate) fn read_pinned_exit(
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PinnedReadFailure {
-    /// The filter-driver inventory could not be read, so the hardening this read depends on could
-    /// not be established. Nothing was asked of the object store.
-    FilterInventoryUnreadable,
-    /// R47: git REFUSED the filter-driver inventory read and said why -- an unreadable, missing or
-    /// malformed configuration file. Its own subcase rather than a shape change to the variant
-    /// above, because that one is already serialized into stored Receipts and a struct variant
-    /// where a unit variant was would make them undecodable (R46.7's lockout, in miniature).
+    /// RETIRED (R50). The filter-driver inventory could not be read.
     ///
-    /// The inventory decides which filter drivers the hardening suppresses, so proceeding past it
-    /// with an empty set is not a missing diagnostic -- it is the hardening switched off.
+    /// Emitted by the builds between R46 and R50, which carried an inventory failure as a
+    /// `PreImageUnreadable` subcase because a distinct outcome would have rebuilt the receipts
+    /// CHECK. R48 removed that CHECK and R50 gave the fact its own outcome, so no new dispatch
+    /// produces this. Retained so Receipts already recorded stay decodable -- the same reason
+    /// `DispatchOutcome::Admissible` is retained -- and for no other.
+    FilterInventoryUnreadable,
+    /// RETIRED (R50), for the same reason and on the same terms as the variant above. Was R47's
+    /// "git refused the inventory read and said why".
     FilterInventoryRefused { message: String },
     /// The `cat-file` child could not be started or could not be waited on.
     ChildFailed,
@@ -874,6 +874,36 @@ pub enum PinnedReadFailure {
     /// the exit code alone cannot separate them. Anything git says that is not the absence
     /// message is this -- FAIL CLOSED -- and it carries what git said so the evidence survives.
     ReadRefused { message: String },
+}
+
+/// Why the filter-driver inventory could not be established (R50).
+///
+/// R47 carried this as two `PinnedReadFailure` subcases under `PreImageUnreadable`, because a
+/// distinct outcome would have rebuilt the receipts CHECK (opus2's contradiction 5). R48 removed
+/// the CHECK, so the fact gets its own type and its own outcome. It is not a pre-image failure and
+/// never was: the inventory is a PRECONDITION of every pinned read -- it decides which filter
+/// drivers the hardening suppresses -- so a Receipt reporting it as a pre-image failure named the
+/// wrong read, and the two reads it could name are not even in the same gate.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FilterInventoryFailure {
+    /// git refused the read and said why: a configuration that is missing, malformed, or one this
+    /// process may not read. The message is bounded and escaped for a Receipt (R28.4).
+    Refused { message: String },
+    /// The read did not happen, or its result cannot be trusted: a pin broken under it, a child
+    /// that could not start, a signal, a timeout, or output that is not text. There is no message
+    /// because git produced none.
+    Unreadable,
+}
+
+impl FilterInventoryFailure {
+    /// The failure's NAME, for the Receipt line that says why the inventory could not be read.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Refused { .. } => "refused",
+            Self::Unreadable => "unreadable",
+        }
+    }
 }
 
 /// How a read site can SHOW that a non-zero exit is an absence rather than a failure (R47).

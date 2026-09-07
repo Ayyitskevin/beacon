@@ -243,7 +243,7 @@ pub use team::{
 #[doc(hidden)]
 pub use worktree::set_pinned_spawn_hook;
 pub use worktree::{CleanupOutcome, KeepReason, Worktree, WorktreeError};
-pub use worktree::{PinnedRead, PinnedReadFailure};
+pub use worktree::{FilterInventoryFailure, PinnedRead, PinnedReadFailure};
 
 const SCHEMA_VERSION: i64 = 34;
 const MAX_WORKSPACE_NAME_CHARS: usize = 120;

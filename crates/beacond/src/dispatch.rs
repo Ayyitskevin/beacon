@@ -51,8 +51,8 @@ use crate::ruling::{
     RulingDecision, RulingDigest, ruling_event_sequence, ruling_row_scope, verified_ruling_within,
 };
 use crate::worktree::{
-    GitIdentity, PinnedRead, PinnedReadFailure, PinnedRepository, READ_BUDGET, WRITE_BUDGET,
-    read_pinned, read_pinned_bytes, read_pinned_exit, write_pinned,
+    FilterInventoryFailure, GitIdentity, PinnedRead, PinnedReadFailure, PinnedRepository,
+    READ_BUDGET, WRITE_BUDGET, read_pinned, read_pinned_bytes, read_pinned_exit, write_pinned,
 };
 use crate::{AutonomyProfile, CandidateDigest, RepositorySourceKind};
 
@@ -124,6 +124,19 @@ pub enum DispatchOutcome {
     /// never took place, which is the absent/broken collapse the write side already refuses
     /// (R28.1: "a failed write, never a mismatch, because nothing here was compared").
     PreImageUnreadable,
+    /// The filter-driver inventory could not be established, so no Git child could be run safely.
+    ///
+    /// The inventory is read from the repository's own configuration through the pinned
+    /// descriptor, and it decides which filter drivers the hardened command must neutralize. A
+    /// configuration Beacon cannot read leaves that undecided, and running anyway with an empty
+    /// inventory is not a missing diagnostic -- it is the hardening switched off, in a repository
+    /// the product has just failed to read (R47).
+    ///
+    /// R50 gives it its own outcome. R47 could not: it carried the fact as a `PreImageUnreadable`
+    /// subcase, which named the pre-image read as the one that failed when the read that failed
+    /// was a precondition of every gate. R48 removed the receipts CHECK, so the correct name now
+    /// costs no migration.
+    FilterInventoryUnreadable,
     /// The attempt exceeded the wall-clock bound the Proposal itself declared.
     WallClockExceeded,
     /// This Ruling has already been dispatched. One decision authorizes one application: an attempt
@@ -173,6 +186,7 @@ impl DispatchOutcome {
             Self::InstallationPaused => "installation_paused",
             Self::PreImageMismatch => "pre_image_mismatch",
             Self::PreImageUnreadable => "pre_image_unreadable",
+            Self::FilterInventoryUnreadable => "filter_inventory_unreadable",
             Self::WallClockExceeded => "wall_clock_exceeded",
             Self::AlreadyDispatched => "already_dispatched",
             Self::Admissible => "admissible",
@@ -325,6 +339,16 @@ pub struct DispatchReceipt {
     /// none of them can carry the outcome this field belongs to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pre_image_read_failure: Option<PinnedReadFailure>,
+    /// WHY the filter-driver inventory could not be read, present only with
+    /// `FilterInventoryUnreadable` (R50).
+    ///
+    /// Defaulted for the same reason its R46 neighbour is, and the reason is not "so old records
+    /// still parse" in general -- it is that no Receipt recorded before this build can carry the
+    /// outcome this field belongs to, so its absence in one is not missing evidence. The Receipt
+    /// version does not move: version 4 is the R46 era's marker for the observed pre-image, and
+    /// this field says nothing about a pre-image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter_inventory_failure: Option<FilterInventoryFailure>,
 }
 
 /// What a Receipt can say about the repository it names, afterwards.
@@ -1641,6 +1665,8 @@ struct Decided {
     git_steps: Vec<GitStep>,
     /// Which pre-image read failed, when the gate could not answer (R46).
     pre_image_read_failure: Option<PinnedReadFailure>,
+    /// Why the filter-driver inventory could not be established (R50).
+    filter_inventory_failure: Option<FilterInventoryFailure>,
     source_identity: Option<SourceIdentity>,
     /// SHA-256 over the commit's own NUL-delimited name-status output: a measured diff digest,
     /// which a Candidate digest is not.
@@ -1721,6 +1747,7 @@ impl DispatchService {
             ended_at_ms,
             not_verified: not_verified(outcome, decided),
             pre_image_read_failure: decided.pre_image_read_failure.clone(),
+            filter_inventory_failure: decided.filter_inventory_failure.clone(),
         })
     }
 
@@ -2495,6 +2522,7 @@ fn interrupted_receipt(
         ended_at_ms: started_at_ms,
         // A reconstruction never ran the pre-image gate, so it carries no read failure.
         pre_image_read_failure: None,
+        filter_inventory_failure: None,
         not_verified,
     }
 }
@@ -2690,6 +2718,16 @@ fn verify_outcome_invariants(receipt: &DispatchReceipt) -> Result<(), DispatchEr
     // names a read failure it did not have.
     if (receipt.outcome == DispatchOutcome::PreImageUnreadable)
         != receipt.pre_image_read_failure.is_some()
+    {
+        return Err(DispatchError::InvalidStore);
+    }
+    // R50: the same rule for the same reason, one gate earlier. `FilterInventoryUnreadable`
+    // carries WHY the inventory could not be read and every other outcome carries nothing, so a
+    // refusal that will not say why is as incoherent as an `Applied` naming a read failure it
+    // never had. Two independent fields rather than one reused: the two failures are about
+    // different reads, and a Receipt that could carry either in one slot could not say which.
+    if (receipt.outcome == DispatchOutcome::FilterInventoryUnreadable)
+        != receipt.filter_inventory_failure.is_some()
     {
         return Err(DispatchError::InvalidStore);
     }
@@ -3202,6 +3240,7 @@ mod tests {
             started_at_ms: 1,
             ended_at_ms: 2,
             pre_image_read_failure: None,
+            filter_inventory_failure: None,
             not_verified: vec![
                 NotVerified::ExecutionPolicyConstraint,
                 NotVerified::SandboxConstraint,
@@ -3242,6 +3281,85 @@ mod tests {
             verify_outcome_invariants(&receipt).is_err(),
             "R46.OWNER.OTHER_OUTCOME_REJECTS_FAILURE"
         );
+    }
+
+    /// R50: the same owner rule, for the read one gate earlier.
+    #[test]
+    fn r50_inventory_receipt_requires_its_failure() {
+        let receipt = specimen(DispatchOutcome::FilterInventoryUnreadable);
+        assert!(
+            verify_outcome_invariants(&receipt).is_err(),
+            "R50.OWNER.INVENTORY_REQUIRES_FAILURE"
+        );
+    }
+
+    #[test]
+    fn r50_other_outcome_rejects_an_inventory_failure() {
+        let mut receipt = specimen(DispatchOutcome::RulingRefused);
+        receipt.filter_inventory_failure = Some(FilterInventoryFailure::Unreadable);
+        assert!(
+            verify_outcome_invariants(&receipt).is_err(),
+            "R50.OWNER.OTHER_OUTCOME_REJECTS_INVENTORY_FAILURE"
+        );
+    }
+
+    /// R50: the two failure fields belong to two different outcomes and never to each other's.
+    ///
+    /// One field reused for both reads could not say WHICH read failed, which is the whole reason
+    /// R47's subcase was the wrong shape. This is the assertion that keeps them apart.
+    #[test]
+    fn r50_the_two_read_failures_are_not_interchangeable() {
+        let mut inventory = specimen(DispatchOutcome::FilterInventoryUnreadable);
+        inventory.pre_image_read_failure = Some(PinnedReadFailure::TimedOut);
+        assert!(
+            verify_outcome_invariants(&inventory).is_err(),
+            "R50.OWNER.INVENTORY_OUTCOME_REJECTS_PRE_IMAGE_FAILURE"
+        );
+
+        let mut unreadable = specimen(DispatchOutcome::PreImageUnreadable);
+        unreadable.pre_image_read_failure = Some(PinnedReadFailure::TimedOut);
+        unreadable.filter_inventory_failure = Some(FilterInventoryFailure::Unreadable);
+        assert!(
+            verify_outcome_invariants(&unreadable).is_err(),
+            "R50.OWNER.PRE_IMAGE_OUTCOME_REJECTS_INVENTORY_FAILURE"
+        );
+
+        // ...and the coherent pair is accepted, so the rule refuses the wrong shape rather than
+        // every shape.
+        let mut coherent = specimen(DispatchOutcome::FilterInventoryUnreadable);
+        coherent.filter_inventory_failure = Some(FilterInventoryFailure::Refused {
+            message: "fatal: unable to access '/proc/self/fd/100/config': Permission denied"
+                .to_owned(),
+        });
+        assert!(
+            verify_outcome_invariants(&coherent).is_ok(),
+            "R50.OWNER.COHERENT_INVENTORY_RECEIPT_IS_ACCEPTED"
+        );
+    }
+
+    /// R50: the retired R47 subcases still DECODE, so Receipts already recorded stay readable.
+    ///
+    /// `PinnedReadFailure::FilterInventory*` are retained on `DispatchOutcome::Admissible`'s terms:
+    /// no new dispatch produces them, and deleting them would make a stored Receipt undecodable --
+    /// the lockout R46.7 named. A Receipt from the R46..R50 builds is still coherent.
+    #[test]
+    fn r50_a_receipt_from_the_retired_subcase_path_still_decodes_and_is_coherent() {
+        for retired in [
+            PinnedReadFailure::FilterInventoryUnreadable,
+            PinnedReadFailure::FilterInventoryRefused {
+                message: "fatal: unable to read config file".to_owned(),
+            },
+        ] {
+            let mut receipt = specimen(DispatchOutcome::PreImageUnreadable);
+            receipt.pre_image_read_failure = Some(retired.clone());
+            let encoded = serde_json::to_string(&receipt).unwrap();
+            let decoded: DispatchReceipt = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(decoded.pre_image_read_failure, Some(retired));
+            assert!(
+                verify_outcome_invariants(&decoded).is_ok(),
+                "a Receipt recorded before R50 stopped being readable"
+            );
+        }
     }
 
     /// The members a Receipt of this outcome leaves absent, in declaration order.
@@ -3541,6 +3659,7 @@ mod tests {
         "R46.OUTCOME.InstallationPaused" | DispatchOutcome::InstallationPaused => "installation_paused", DispatchOutcome::InstallationPaused;
         "R46.OUTCOME.PreImageMismatch" | DispatchOutcome::PreImageMismatch => "pre_image_mismatch", DispatchOutcome::PreImageMismatch;
         "R46.OUTCOME.PreImageUnreadable" | DispatchOutcome::PreImageUnreadable => "pre_image_unreadable", DispatchOutcome::PreImageUnreadable;
+        "R50.OUTCOME.FilterInventoryUnreadable" | DispatchOutcome::FilterInventoryUnreadable => "filter_inventory_unreadable", DispatchOutcome::FilterInventoryUnreadable;
         "R46.OUTCOME.WallClockExceeded" | DispatchOutcome::WallClockExceeded => "wall_clock_exceeded", DispatchOutcome::WallClockExceeded;
         "R46.OUTCOME.AlreadyDispatched" | DispatchOutcome::AlreadyDispatched => "already_dispatched", DispatchOutcome::AlreadyDispatched;
         "R46.OUTCOME.Admissible" | DispatchOutcome::Admissible => "admissible", DispatchOutcome::Admissible;
@@ -3556,7 +3675,7 @@ mod tests {
         let rows = outcome_rows();
         assert_eq!(
             rows.len(),
-            27,
+            28,
             "a dispatch outcome was added or a row was deleted: the vocabulary is closed (R42/R46)"
         );
         let mut tokens = std::collections::BTreeSet::new();
@@ -3576,7 +3695,7 @@ mod tests {
                 "{case}: two outcomes share the token {token}, so a reader cannot tell them apart"
             );
         }
-        assert_eq!(tokens.len(), 27);
+        assert_eq!(tokens.len(), 28);
     }
 
     /// R46: the new outcome is its own row, and it is NOT the mismatch it used to be reported as.
