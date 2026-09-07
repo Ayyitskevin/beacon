@@ -13,18 +13,19 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use beacond::{
-    AutonomyProfile, BeaconCapability, ClassificationStoreError, DiagnosticStatus,
-    LocalModelActivationService, LocalModelEndpoint, MeasuredSpendV1, MissionDraft,
-    MissionImpactClassificationV1, MissionMemberDraft, MissionService, OperatorAccountService,
-    OperatorSessionPhase, PredecessorFault, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft,
-    ProjectPolicyService, ProjectService, ProjectView, ProviderFeature, ResidentConfiguration,
-    ResidentConfigurationService, ResidentLifecycleService, SPEND_CANONICALIZER_V1,
-    SPEND_CANONICALIZER_V2, SPEND_V1_ERA_REASON, SecretString, SpendAttribution, SpendEra,
-    SpendStoreError, StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig,
-    Supervisor, TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule,
-    TeamLeadSelectionPolicy, TeamMemberDraft, TeamService, TeamView, TrackRecordEvidenceKind,
-    TrackRecordRequirement, open_store_connection, verified_classification_for_citation,
-    verified_classification_within, verified_spend_for_citation, verified_spend_within,
+    AutonomyProfile, BeaconCapability, ClassificationStoreError, ColumnDisagreement,
+    DiagnosticStatus, LocalModelActivationService, LocalModelEndpoint, MeasuredSpendV1,
+    MissionDraft, MissionImpactClassificationV1, MissionMemberDraft, MissionService,
+    OperatorAccountService, OperatorSessionPhase, PredecessorFault, ProjectCharterDraft,
+    ProjectDraft, ProjectPolicyDraft, ProjectPolicyService, ProjectService, ProjectView,
+    ProviderFeature, ResidentConfiguration, ResidentConfigurationService, ResidentLifecycleService,
+    SPEND_CANONICALIZER_V1, SPEND_CANONICALIZER_V2, SPEND_V1_ERA_REASON, SecretString,
+    SpendAttribution, SpendEra, SpendStoreError, StarterOrganizationService, StarterResidentDraft,
+    StarterRole, StartupConfig, Supervisor, TeamDraft, TeamLeadAmbiguityRule,
+    TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
+    TeamService, TeamView, TrackRecordEvidenceKind, TrackRecordRequirement, open_store_connection,
+    verified_classification_for_citation, verified_classification_within,
+    verified_spend_for_citation, verified_spend_within,
 };
 use rusqlite::{Connection, params};
 use serde_json::json;
@@ -396,6 +397,57 @@ impl Stored {
                 ],
             )
             .unwrap();
+        self.project_spend_lines(bytes, digest);
+    }
+
+    /// The line projection the write path would have derived, for a row this helper inserted by
+    /// hand.
+    ///
+    /// Without it every decoy would be refused as a projection with no rows -- which is a real
+    /// fault, and the wrong one for a test about some other column. Bytes that do not decode get no
+    /// rows, because there is nothing honest to derive; those decoys are refused earlier, on the
+    /// digest.
+    fn project_spend_lines(&self, bytes: &[u8], digest: &str) {
+        let Ok(payload) = MeasuredSpendV1::from_canonical_bytes(bytes) else {
+            return;
+        };
+        if payload.era != SpendEra::V2 {
+            return;
+        }
+        let Some(totals) = payload.measurement.totals() else {
+            return;
+        };
+        let connection = self.connection();
+        for (index, line) in totals.lines.iter().enumerate() {
+            let agent = line.attribution.agent.projection();
+            let route = line.attribution.route.projection();
+            let provider = line.attribution.provider.projection();
+            let model = line.attribution.model.projection();
+            connection
+                .execute(
+                    "INSERT INTO measured_spend_lines (
+                         digest_value, line_index, unit, amount_minor, minor_units_exponent,
+                         agent_state, agent_value, route_state, route_value,
+                         provider_state, provider_value, model_state, model_value
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    params![
+                        digest,
+                        i64::try_from(index).unwrap(),
+                        line.unit,
+                        line.amount_minor,
+                        i64::from(line.minor_units_exponent),
+                        agent.0,
+                        agent.1,
+                        route.0,
+                        route.1,
+                        provider.0,
+                        provider.1,
+                        model.0,
+                        model.1,
+                    ],
+                )
+                .unwrap();
+        }
     }
 
     fn classification_record(
@@ -510,7 +562,7 @@ fn the_verified_reader_refuses_a_row_whose_columns_disagree_with_its_bytes() {
     assert_eq!(
         verified_spend_within(&connection, stored.store.workspace_id, &digest)
             .expect_err("refuses"),
-        SpendStoreError::ColumnsDisagree
+        SpendStoreError::ColumnsDisagree(ColumnDisagreement::Record { column: "version" })
     );
 }
 
@@ -621,7 +673,7 @@ fn the_cited_id_is_read_from_the_decoded_bytes_not_the_projection_column() {
             &digest
         )
         .expect_err("refuses"),
-        SpendStoreError::ColumnsDisagree
+        SpendStoreError::ColumnsDisagree(ColumnDisagreement::Record { column: "spend_id" })
     );
 }
 
@@ -1730,8 +1782,19 @@ fn the_verified_readers_refuse_a_stored_successor_by_its_predecessors_own_bytes(
             "spend, {label} predecessor"
         );
         // The spend ladder is (workspace, mission, origin, version)-unique; make room for the next.
+        // The line projection goes first: it holds a RESTRICT reference to the parent, so a store
+        // that let the parent go while its lines stayed would be the orphan this test is not about.
         connection
-            .execute_batch("DROP TRIGGER measured_spend_no_delete;")
+            .execute_batch(
+                "DROP TRIGGER measured_spend_lines_no_delete;
+                 DROP TRIGGER measured_spend_no_delete;",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "DELETE FROM measured_spend_lines WHERE digest_value = ?1",
+                [&digest],
+            )
             .unwrap();
         connection
             .execute(
@@ -1742,6 +1805,9 @@ fn the_verified_readers_refuse_a_stored_successor_by_its_predecessors_own_bytes(
         connection
             .execute_batch(
                 "CREATE TRIGGER measured_spend_no_delete BEFORE DELETE ON measured_spend
+                 BEGIN SELECT RAISE(ABORT, 'Measured spend records are immutable'); END;
+                 CREATE TRIGGER measured_spend_lines_no_delete
+                 BEFORE DELETE ON measured_spend_lines
                  BEGIN SELECT RAISE(ABORT, 'Measured spend records are immutable'); END;",
             )
             .unwrap();
@@ -2245,6 +2311,53 @@ fn a_recorded_v2_record_projects_one_row_per_line_with_each_dimensions_state_and
     );
 }
 
+/// The projection is derived from the bytes, so the owning read compares it against them.
+///
+/// sol1's cold read of B39 found this: `measured_spend_lines` was written from the canonical bytes
+/// and then never checked against them again. Flipping one child from `unattributed`/'fixture' to
+/// the equally SQL-valid `not_applicable`/NULL -- with the immutability trigger dropped, edited
+/// around and recreated, so the schema is again complete -- left one store holding two attribution
+/// answers, and `verified_spend_within` returned one of them.
+///
+/// The pairing CHECK cannot see this: it constrains a row against itself, not against the record.
+/// Neither can the immutability trigger, which refuses an UPDATE but does not survive being
+/// recreated around one. Only the owner can, which is what R46 means by a verified reader.
+#[test]
+fn the_verified_reader_refuses_a_sql_valid_dimension_state_collapse_in_the_line_projection() {
+    let stored = stored("sol1-dimension-projection-collapse");
+    let record = stored.spend_record(Uuid::new_v4(), 1);
+    let recorded = stored
+        .spend_service()
+        .record(&record.canonical_bytes().unwrap())
+        .expect("the honest record is stored");
+    let digest = recorded.digest().value.clone();
+
+    // The bytes say `unattributed("fixture")`. Rewrite only the immutable SQL projection to the
+    // other SQL-valid state, then restore the trigger so the schema itself is again complete.
+    let connection = stored.connection();
+    connection
+        .execute_batch(
+            "DROP TRIGGER measured_spend_lines_no_update;
+             UPDATE measured_spend_lines
+                SET agent_state = 'not_applicable', agent_value = NULL;
+             CREATE TRIGGER measured_spend_lines_no_update
+             BEFORE UPDATE ON measured_spend_lines
+             BEGIN
+                 SELECT RAISE(ABORT, 'Measured spend records are immutable');
+             END;",
+        )
+        .unwrap();
+
+    assert_eq!(
+        verified_spend_within(&connection, stored.store.workspace_id, &digest)
+            .expect_err("the typed owner must refuse a SQL projection that changes the state"),
+        SpendStoreError::ColumnsDisagree(ColumnDisagreement::Line {
+            line_index: 0,
+            field: "agent"
+        })
+    );
+}
+
 /// A store holding a `beacon.spend.v1` row crosses 0035 and still reads it -- as unattributed,
 /// never refused, never rewritten.
 ///
@@ -2436,6 +2549,173 @@ fn the_verified_reader_refuses_a_row_whose_canonicalizer_disagrees_with_its_byte
     assert_eq!(
         verified_spend_within(&connection, stored.store.workspace_id, &digest)
             .expect_err("a row whose canonicalizer disagrees with its bytes is refused"),
-        SpendStoreError::ColumnsDisagree
+        SpendStoreError::ColumnsDisagree(ColumnDisagreement::Record {
+            column: "digest_canonicalizer"
+        })
     );
+}
+
+/// The symmetric cases of the same rule: every way the line projection can say something the bytes
+/// do not, each refused by name.
+///
+/// A missing row, an extra row, a swapped value on an `attributed` line and a v1 record with any
+/// row at all are four different corruptions, and a reader that answered "columns disagree" to all
+/// four would leave an operator to diff the store by hand.
+#[test]
+fn every_way_the_line_projection_can_drift_from_the_bytes_is_refused_and_named() {
+    let stored = stored("line-projection-drift");
+    let unlocked = |connection: &Connection, work: &str| {
+        connection
+            .execute_batch(&format!(
+                "DROP TRIGGER measured_spend_lines_no_update;
+                 DROP TRIGGER measured_spend_lines_no_delete;
+                 {work}
+                 CREATE TRIGGER measured_spend_lines_no_update
+                 BEFORE UPDATE ON measured_spend_lines
+                 BEGIN SELECT RAISE(ABORT, 'Measured spend records are immutable'); END;
+                 CREATE TRIGGER measured_spend_lines_no_delete
+                 BEFORE DELETE ON measured_spend_lines
+                 BEGIN SELECT RAISE(ABORT, 'Measured spend records are immutable'); END;"
+            ))
+            .unwrap();
+    };
+
+    // Each case gets its own record, because the corruption is permanent by design.
+    // `(workspace, mission, origin, version)` is unique, so each case takes the next version.
+    let record_two_lines = |label: &str, version: u32| {
+        let mut record = stored.spend_record(Uuid::new_v4(), version);
+        let line = |unit: &str, amount: i64| SpendLine {
+            attribution: LineAttribution {
+                agent: SpendAttribution::Attributed(Uuid::new_v4()),
+                route: SpendAttribution::Attributed("chat".to_owned()),
+                provider: SpendAttribution::Attributed("local".to_owned()),
+                model: SpendAttribution::NotApplicable,
+            },
+            unit: unit.to_owned(),
+            amount_minor: amount,
+            minor_units_exponent: 2,
+        };
+        record.measurement = SpendMeasurement::Measured(SpendTotals {
+            counted_units: 2,
+            lines: vec![line("EUR", 100), line("USD", 200)],
+        });
+        stored
+            .spend_service()
+            .record(&record.canonical_bytes().unwrap())
+            .unwrap_or_else(|error| panic!("{label} records: {error:?}"))
+            .digest()
+            .value
+            .clone()
+    };
+
+    // 1. A missing row: the projection now describes one line where the bytes hold two.
+    let digest = record_two_lines("missing", 1);
+    let connection = stored.connection();
+    unlocked(
+        &connection,
+        &format!(
+            "DELETE FROM measured_spend_lines WHERE digest_value = '{digest}' AND line_index = 1;"
+        ),
+    );
+    assert_eq!(
+        verified_spend_within(&connection, stored.store.workspace_id, &digest)
+            .expect_err("refuses"),
+        SpendStoreError::ColumnsDisagree(ColumnDisagreement::LineCount {
+            stored: 1,
+            in_bytes: 2
+        })
+    );
+
+    // 2. An extra row: a third line nobody recorded, indistinguishable from a real one to a query.
+    let digest = record_two_lines("extra", 2);
+    unlocked(
+        &connection,
+        &format!(
+            "INSERT INTO measured_spend_lines (
+                 digest_value, line_index, unit, amount_minor, minor_units_exponent,
+                 agent_state, agent_value, route_state, route_value,
+                 provider_state, provider_value, model_state, model_value
+             ) VALUES ('{digest}', 2, 'GBP', 999, 2,
+                       'not_applicable', NULL, 'not_applicable', NULL,
+                       'not_applicable', NULL, 'not_applicable', NULL);"
+        ),
+    );
+    assert_eq!(
+        verified_spend_within(&connection, stored.store.workspace_id, &digest)
+            .expect_err("refuses"),
+        SpendStoreError::ColumnsDisagree(ColumnDisagreement::LineCount {
+            stored: 3,
+            in_bytes: 2
+        })
+    );
+
+    // 3. A value swap on an `attributed` line: the state still says `attributed`, so every CHECK
+    //    passes and only the bytes know the agent is wrong. This is the one a roll-up would report.
+    let digest = record_two_lines("swap", 3);
+    unlocked(
+        &connection,
+        &format!(
+            "UPDATE measured_spend_lines
+                SET agent_value = '{}'
+              WHERE digest_value = '{digest}' AND line_index = 1;",
+            Uuid::new_v4()
+        ),
+    );
+    assert_eq!(
+        verified_spend_within(&connection, stored.store.workspace_id, &digest)
+            .expect_err("refuses"),
+        SpendStoreError::ColumnsDisagree(ColumnDisagreement::Line {
+            line_index: 1,
+            field: "agent"
+        })
+    );
+
+    // 4. A v1 record with any row at all: its era recorded no dimensions, so a row here is not
+    //    extra data -- it is a fact its era could not have known.
+    let mut v1 = stored.spend_record(Uuid::new_v4(), 4);
+    v1.era = SpendEra::V1;
+    v1.measurement = SpendMeasurement::Measured(SpendTotals {
+        counted_units: 412,
+        lines: vec![SpendLine {
+            attribution: LineAttribution::unattributed(SPEND_V1_ERA_REASON),
+            unit: "USD".to_owned(),
+            amount_minor: 123_456,
+            minor_units_exponent: 2,
+        }],
+    });
+    let bytes = v1.canonical_bytes().expect("a v1 record encodes");
+    let v1_digest = v1.digest().expect("digest").value;
+    stored.insert_spend(&bytes, &v1_digest, v1.spend_id, v1.version, "daemon_ledger");
+    assert_eq!(
+        load_line_count(&connection, &v1_digest),
+        0,
+        "a v1 record projects nothing, so this case has something to add"
+    );
+    unlocked(
+        &connection,
+        &format!(
+            "INSERT INTO measured_spend_lines (
+                 digest_value, line_index, unit, amount_minor, minor_units_exponent,
+                 agent_state, agent_value, route_state, route_value,
+                 provider_state, provider_value, model_state, model_value
+             ) VALUES ('{v1_digest}', 0, 'USD', 123456, 2,
+                       'attributed', '00000000-0000-4000-8000-000000000009',
+                       'not_applicable', NULL, 'not_applicable', NULL, 'not_applicable', NULL);"
+        ),
+    );
+    assert_eq!(
+        verified_spend_within(&connection, stored.store.workspace_id, &v1_digest)
+            .expect_err("refuses"),
+        SpendStoreError::ColumnsDisagree(ColumnDisagreement::LinesInV1Era { stored: 1 })
+    );
+}
+
+fn load_line_count(connection: &Connection, digest: &str) -> i64 {
+    connection
+        .query_row(
+            "SELECT count(*) FROM measured_spend_lines WHERE digest_value = ?1",
+            [digest],
+            |row| row.get(0),
+        )
+        .unwrap()
 }

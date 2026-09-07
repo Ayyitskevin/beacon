@@ -226,10 +226,10 @@ pub use sample_project::{
 };
 pub use spend::{
     CANONICALIZER as SPEND_CANONICALIZER, CANONICALIZER_V1 as SPEND_CANONICALIZER_V1,
-    CANONICALIZER_V2 as SPEND_CANONICALIZER_V2, LineAttribution, MalformedSpend, MeasuredSpend,
-    MeasuredSpendService, MeasuredSpendV1, PredecessorFault, SpendAttribution, SpendDigest,
-    SpendEra, SpendLine, SpendMeasurement, SpendOrigin, SpendRecordError, SpendStoreError,
-    SpendSupersedes, SpendTotals, UncountedEntry, UncountedKind,
+    CANONICALIZER_V2 as SPEND_CANONICALIZER_V2, ColumnDisagreement, LineAttribution,
+    MalformedSpend, MeasuredSpend, MeasuredSpendService, MeasuredSpendV1, PredecessorFault,
+    SpendAttribution, SpendDigest, SpendEra, SpendLine, SpendMeasurement, SpendOrigin,
+    SpendRecordError, SpendStoreError, SpendSupersedes, SpendTotals, UncountedEntry, UncountedKind,
     V1_ERA_REASON as SPEND_V1_ERA_REASON, compare_units, verified_spend_for_citation,
     verified_spend_within,
 };
