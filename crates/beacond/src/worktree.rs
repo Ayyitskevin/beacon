@@ -2101,6 +2101,36 @@ mod tests {
     }
 
     #[test]
+    fn sol1_a_zero_budget_never_starts_the_child() {
+        let directory = TempDir::new("zero-budget");
+        let marker = directory.path.join("child-started");
+        let marker_file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&marker)
+            .unwrap();
+        let marker_fd = marker_file.as_raw_fd();
+        let mut command = Command::new("/bin/true");
+        unsafe {
+            command.pre_exec(move || {
+                libc::write(marker_fd, b"started".as_ptr().cast(), 7);
+                Ok(())
+            });
+        }
+
+        assert!(matches!(
+            run_git_bounded(command, Duration::ZERO),
+            Bounded::TimedOut
+        ));
+        assert_eq!(
+            fs::metadata(marker).unwrap().len(),
+            0,
+            "R53.BOUND.ZERO: a child started after its invocation deadline had already elapsed"
+        );
+    }
+
+    #[test]
     fn a_check_that_never_finishes_is_a_timeout_and_never_a_clean_answer() {
         let directory = TempDir::new("gate-timeout");
         let hanging = program(&directory.path, "sleep 30\n");
