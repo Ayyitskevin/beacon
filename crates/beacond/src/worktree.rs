@@ -828,9 +828,10 @@ pub(crate) fn read_pinned_exit(
     // R47: the classifier decides whether the code is an ANSWER; only then is it carried through.
     // Before, any finished child in a pinned repository handed its code back, so a broken
     // repository's 128 arrived beside the 0 and 1 that mean yes and no.
-    match classify_pinned_read(raw, repository.still_pinned(), AbsenceWitness::Silence) {
+    match classify_pinned_read(raw, repository.still_pinned(), AbsenceWitness::ExitCode) {
         PinnedRead::Bytes(_) => Some(0),
         PinnedRead::NotFound => code,
+        PinnedRead::Unreadable(PinnedReadFailure::SilentExit { .. }) if false => code,
         PinnedRead::Unreadable(_) => None,
     }
 }
@@ -920,6 +921,8 @@ pub(crate) enum AbsenceWitness {
     /// and a configuration that names no entries. Measured, not assumed: at these sites git is
     /// silent when the answer is negative and speaks when it failed.
     Silence,
+    /// The exit code itself is the site's answer (merge-base --is-ancestor).
+    ExitCode,
     /// git NAMED the subject as absent. `cat-file`'s `path 'x' does not exist in 'REV'` (R46.3).
     Message(&'static str),
 }
@@ -935,6 +938,7 @@ fn shows_absence(witness: AbsenceWitness, stdout: &[u8], stderr: &[u8]) -> bool 
     match witness {
         AbsenceWitness::Silence => !said_anything_diagnostic(stderr),
         AbsenceWitness::Message(said) => String::from_utf8_lossy(stderr).contains(said),
+        AbsenceWitness::ExitCode => false,
     }
 }
 
@@ -1071,6 +1075,8 @@ fn classify_pinned_read(
                 Some(0) => PinnedRead::Bytes(stdout),
                 // R46.3, generalised by R47: an absence is what the site can SHOW, never what the
                 // exit code was. Anything else non-zero is a failure carrying what git said.
+                Some(_code) if matches!(absence, AbsenceWitness::ExitCode) && stdout.is_empty() && !said_anything_diagnostic(&stderr) =>
+                    PinnedRead::NotFound,
                 Some(code) if matches!(absence, AbsenceWitness::Silence) && !said_anything_diagnostic(&stderr) && stdout.is_empty() =>
                     PinnedRead::Unreadable(PinnedReadFailure::SilentExit { code }),
                 Some(_) if shows_absence(absence, &stdout, &stderr) => PinnedRead::NotFound,

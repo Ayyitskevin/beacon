@@ -53,7 +53,7 @@ passed. The exact sol1 command passed 1/1. I temporarily restored the old
 the implementation; rerun passed (GREEN).
 
 <!-- seat-report:v1 -->
-HEAD: 0e80d546abcef43b0d15baeb33001631a9893bc1
+HEAD: ba122bb44632f320e45389f6327d1f36ae0a928a
 GATE: {"status":"FAIL","exit":2,"log":"/home/kevin-lee/ai-workspace/codex/beacon-astra2-r55/gate-2aa015a.log","reason":"gate requires a local .venv; beacon-review3/.venv is absent"}
 VERDICT: HOLD
 PROBES: {"pass":16,"fail":0,"skip":1}
