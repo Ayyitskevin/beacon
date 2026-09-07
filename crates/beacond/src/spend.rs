@@ -1359,7 +1359,13 @@ impl fmt::Display for SpendRecordError {
             Self::NotCanonical => formatter.write_str("not_canonical"),
             Self::CrossWorkspace => formatter.write_str("cross_workspace"),
             Self::IdentityTaken => formatter.write_str("identity_taken"),
-            Self::MissionUnknown { .. } => formatter.write_str("mission_unknown"),
+            Self::MissionUnknown {
+                workspace_id,
+                mission_id,
+            } => write!(
+                formatter,
+                "mission_unknown: workspace {workspace_id} has no mission {mission_id}"
+            ),
             Self::CoverageBeyondStore {
                 claimed_to_event_seq,
                 last_event_seq,
