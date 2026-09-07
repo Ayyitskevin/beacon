@@ -915,12 +915,24 @@ fn a_spend_record_naming_a_mission_that_does_not_exist_says_so() {
         .record(&record.canonical_bytes().unwrap())
         .expect_err("a spend for a Mission that does not exist must be refused");
 
-    // Stated as the falsifiable claim rather than as the eventual variant, so this commit compiles
-    // and fails for its own reason. The next commit gives the fact a name and asserts it here.
     assert!(
         !matches!(refusal, SpendRecordError::IdentityTaken),
         "an unknown Mission was reported as a taken identity: {refusal:?}"
     );
+    // Not-IdentityTaken is not enough: a store fault would satisfy it and say nothing. The refusal
+    // has to NAME the Mission it could not find, in the Workspace it looked in.
+    match &refusal {
+        SpendRecordError::MissionUnknown {
+            workspace_id,
+            mission_id,
+        } => {
+            assert_eq!(*workspace_id, stored.store.workspace_id);
+            assert_eq!(*mission_id, absent, "the refusal named the wrong Mission");
+        }
+        other => panic!("the refusal did not name the unknown Mission: {other:?}"),
+    }
+    // The outward name a caller reads, and it is not the identity one.
+    assert_eq!(refusal.to_string(), "mission_unknown");
     // Nothing was written: a refusal that stored the row would be worse than the wrong name.
     assert_eq!(
         Connection::open(&stored.store.path)
