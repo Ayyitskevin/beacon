@@ -83,6 +83,13 @@ const REMOVE_BUDGET: Duration = Duration::from_secs(30);
 /// How often a bounded Git invocation is checked for completion.
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
+/// Whether the one clock for a bounded invocation has reached its deadline.
+///
+/// Equality is expired: a budget is a bound, not a target plus an implicit polling grace.
+fn reached_deadline(elapsed: Duration, budget: Duration) -> bool {
+    elapsed >= budget
+}
+
 /// Why cleanup refused to remove a worktree.
 ///
 /// Each variant is a fact Beacon observed, never a severity. One reason is
@@ -1372,7 +1379,7 @@ fn run_git_bounded_raw(
             // exec (rust-lang/rust#114554). Wait it out inside the budget rather than record a
             // failure. Every other spawn error is the answer.
             Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) => {
-                if started.elapsed() >= budget {
+                if reached_deadline(started.elapsed(), budget) {
                     return BoundedRaw::TimedOut;
                 }
                 thread::sleep(POLL_INTERVAL);
@@ -1393,9 +1400,18 @@ fn run_git_bounded_raw(
     }
     let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break status,
+            Ok(Some(status)) => {
+                // Completion is an answer only while it is inside the same invocation budget
+                // whose clock started before spawn. Observing a finished child after that clock
+                // reached the deadline cannot add a grace window merely because `try_wait` was
+                // polled first.
+                if reached_deadline(started.elapsed(), budget) {
+                    return BoundedRaw::TimedOut;
+                }
+                break status;
+            }
             Ok(None) => {
-                if started.elapsed() >= budget {
+                if reached_deadline(started.elapsed(), budget) {
                     let _ = child.kill();
                     let _ = child.wait();
                     return BoundedRaw::TimedOut;
@@ -2032,6 +2048,23 @@ mod tests {
             closed(&root.path, &["rev-list", "--parents", "-n1", &third]),
             format!("{third} {second}"),
             "the closed environment honoured .git/shallow"
+        );
+    }
+
+    #[test]
+    fn sol1_a_child_finishing_one_millisecond_past_the_bound_is_timed_out() {
+        let budget = Duration::from_millis(5);
+        assert!(
+            !super::reached_deadline(Duration::from_millis(4), budget),
+            "R53.BOUND.MINUS_ONE: a child finished inside the bound was timed out"
+        );
+        assert!(
+            super::reached_deadline(Duration::from_millis(5), budget),
+            "R53.BOUND.NO_GRACE: the deadline itself was treated as inside the bound"
+        );
+        assert!(
+            super::reached_deadline(Duration::from_millis(6), budget),
+            "R53.BOUND.PLUS_ONE: a child finished outside the bound was published as finished"
         );
     }
 
