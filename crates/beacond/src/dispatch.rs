@@ -4217,6 +4217,7 @@ mod tests {
                 PinnedReadFailure::TimedOut => "timed_out",
                 PinnedReadFailure::PinBrokenAfterRead => "pin_broken_after_read",
                 PinnedReadFailure::ReadRefused { .. } => "read_refused",
+                PinnedReadFailure::SilentExit { .. } => "silent_exit",
             }
         }
         let subcases = [
@@ -4232,6 +4233,7 @@ mod tests {
             PinnedReadFailure::Signalled,
             PinnedReadFailure::TimedOut,
             PinnedReadFailure::PinBrokenAfterRead,
+            PinnedReadFailure::SilentExit { code: 128 },
             PinnedReadFailure::ReadRefused {
                 message: "fatal: not a git repository".to_owned(),
             },
