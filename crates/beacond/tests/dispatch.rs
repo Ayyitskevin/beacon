@@ -1758,6 +1758,100 @@ fn a_detached_head_is_detached_and_never_an_unreadable_read() {
     assert_eq!(repository.snapshot(), before);
 }
 
+/// R52.1: a repository broken at the provenance gate is never "not Beacon-made".
+///
+/// DP-r52.1 row 7 said the provenance TOKEN child's own failure folds into `SourceNotBeaconMade` --
+/// a read that produced no answer deciding a fact about the source. MEASURED at this head, it does
+/// not, and the reason is R52 itself: the token read and the filter-inventory read are the same
+/// `read_pinned` call, in that order, **against the same file**. Whatever breaks the token child
+/// has already broken the inventory child one step earlier, and R52 gave that refusal its own
+/// outcome and git's own message.
+///
+/// So this is a TRIPWIRE, not a fix's bar: it pins that the earlier gate keeps catching these, and
+/// fails the day someone reorders the two reads or points them at different paths. It asserts the
+/// negative first, because asserting only the inventory outcome would pass if the gate stopped
+/// being reached at all.
+#[test]
+fn a_repository_broken_at_the_provenance_gate_is_never_reported_as_not_beacon_made() {
+    // The `.git` directory swapped: the inventory reads through the pinned DESCRIPTOR, so its
+    // child succeeds -- and its pin check then fails, because the pathname now names a different
+    // directory. `Unreadable`, carrying no message, because git said nothing; the pin did.
+    let fixture = admitted_mission("r521-pin-swap");
+    let (repository, ruling_digest) = fixture.approved("r521-pin-swap");
+    let git_dir = repository.path.join(".git");
+    let receipt = DispatchService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .with_failpoints(DispatchFailpoints {
+            before_provenance_read: Some(Arc::new(move || {
+                let moved = git_dir.with_extension("moved");
+                if git_dir.exists() {
+                    fs::rename(&git_dir, &moved).unwrap();
+                    fs::create_dir(&git_dir).unwrap();
+                }
+            })),
+            ..DispatchFailpoints::default()
+        })
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+    assert_ne!(
+        receipt.outcome,
+        DispatchOutcome::SourceNotBeaconMade,
+        "R52.1.PIN_LOST_IS_NOT_A_CLAIM_ABOUT_THE_SOURCE"
+    );
+    assert_eq!(
+        receipt.outcome,
+        DispatchOutcome::FilterInventoryUnreadable,
+        "R52.1.PIN_LOST_IS_CAUGHT_AT_THE_INVENTORY"
+    );
+    assert_eq!(
+        receipt.filter_inventory_failure,
+        Some(FilterInventoryFailure::Unreadable)
+    );
+}
+
+/// R52.1: a missing configuration file is "this repository cannot be read", not "no token".
+///
+/// grok measured the collision this was meant to disentangle: `config --get` exits 1 in silence
+/// for a key that is unset AND for a file that is not there
+/// (`tools/r52.1/logs/measure-token-child-b1203fd.log`). The brief asked for a file-presence check
+/// at the token site to keep the two apart.
+///
+/// It is not needed, and this is the measurement that says so: the inventory read reaches the same
+/// file first with `--list`, which exits **128 with `fatal: unable to read config file`**, so the
+/// distinction is already made -- and made with git's own words, which a presence check could not
+/// have produced.
+#[test]
+fn a_missing_configuration_file_is_refused_with_gits_own_words_not_as_an_absent_token() {
+    let fixture = admitted_mission("r521-config-gone");
+    let (repository, ruling_digest) = fixture.approved("r521-config-gone");
+    let config = repository.path.join(".git").join("config");
+    let receipt = DispatchService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .with_failpoints(DispatchFailpoints {
+            before_provenance_read: Some(Arc::new(move || {
+                fs::remove_file(&config).unwrap();
+            })),
+            ..DispatchFailpoints::default()
+        })
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+    assert_ne!(
+        receipt.outcome,
+        DispatchOutcome::SourceNotBeaconMade,
+        "R52.1.NO_CONFIG_IS_NOT_AN_ABSENT_TOKEN"
+    );
+    let Some(FilterInventoryFailure::Refused { message }) =
+        receipt.filter_inventory_failure.as_ref()
+    else {
+        panic!(
+            "R52.1.NO_CONFIG_CARRIES_GITS_WORDS -- {:?}",
+            receipt.filter_inventory_failure
+        );
+    };
+    assert!(
+        message.contains("unable to read config file"),
+        "R52.1.NO_CONFIG_CARRIES_GITS_WORDS -- {message}"
+    );
+}
+
 #[test]
 fn a_gate_read_does_not_write_to_the_repository_it_measures() {
     // gpt1's probe, as a committed control: `git status --porcelain` refreshes and rewrites

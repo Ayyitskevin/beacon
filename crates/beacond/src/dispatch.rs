@@ -728,9 +728,15 @@ pub struct DispatchFailpoints {
     pub before_checkout: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Immediately before each pre-image byte read, so a test can break THAT read and no other
     /// (R46). Breaking the repository from outside trips an earlier gate -- an unreadable
-    /// `.git/config` refuses as `SourceNotBeaconMade` long before the pre-image gate runs -- so
+    /// `.git/config` refuses at the filter inventory, as `FilterInventoryUnreadable`, long before
+    /// the pre-image gate runs (R52 renamed that refusal; this comment named the old one) -- so
     /// the fault has to be constructed at the read it is about.
     pub before_pre_image_read: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Immediately before the provenance TOKEN read, for the same reason one gate earlier (R52.1).
+    /// The token read is the dispatch's second pinned read -- the filter inventory is the first,
+    /// and both read the same file -- so a fault installed before the call is met by the inventory
+    /// and never reaches the token child at all.
+    pub before_provenance_read: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// One declared mutation's content, supplied by the caller at dispatch time.
@@ -759,11 +765,22 @@ impl DispatchService {
     /// parameter: a release build has no such type, and `cargo build` said so. The gate takes a
     /// `&dyn Fn()` and this decides what that is.
     #[cfg(debug_assertions)]
+    fn before_provenance_read(&self) {
+        if let Some(failpoint) = &self.failpoints.before_provenance_read {
+            failpoint();
+        }
+    }
+
+    #[cfg(debug_assertions)]
     fn before_pre_image_read(&self) {
         if let Some(failpoint) = &self.failpoints.before_pre_image_read {
             failpoint();
         }
     }
+
+    #[cfg(not(debug_assertions))]
+    #[allow(clippy::unused_self)]
+    fn before_provenance_read(&self) {}
 
     #[cfg(not(debug_assertions))]
     #[allow(clippy::unused_self)]
@@ -1026,6 +1043,7 @@ impl DispatchService {
         let Ok(repository) = PinnedRepository::open(Path::new(&binding.source)) else {
             return Ok(decided.refused(DispatchOutcome::SourceNotBeaconMade));
         };
+        self.before_provenance_read();
         match provenance_of(connection, self.workspace_id, &repository, &mut decided)? {
             ProvenanceVerdict::BeaconMade => {}
             ProvenanceVerdict::NotBeaconMade => {
