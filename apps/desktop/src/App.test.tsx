@@ -1105,9 +1105,9 @@ describe("Beacon desktop shell", () => {
       }
       expect(container.textContent).not.toContain("Beacon-encrypted");
       expect(container.textContent).not.toMatch(/Beacon (encrypts|has encrypted) (your|the) live/);
+      await expectNoWcagViolations(document.body);
       unmount();
     }
-    await expectNoWcagViolations(document.body);
   });
 
   it("discovers installed local models as inactive resources from Briefing", async () => {
@@ -2379,6 +2379,7 @@ describe("Beacon desktop shell", () => {
 
     expect(screen.getByRole("heading", { name: "Welcome back" })).toBeVisible();
     expect(screen.getByText("Workspace access locked")).toBeVisible();
+    vi.useRealTimers();
     await expectNoWcagViolations(document.body);
   });
 

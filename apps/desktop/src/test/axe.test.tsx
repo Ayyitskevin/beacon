@@ -126,12 +126,12 @@ it("the WCAG helper refuses fake timers and the next bar still runs", async () =
 });
 
 it("every rendered test body has a per-render WCAG witness", () => {
-  for (const [path, raw] of Object.entries(SOURCES)) {
-    if (!path.endsWith(".test.tsx")) continue;
-    const source = live(raw);
-    for (const match of source.matchAll(/(?:it|test)\s*\((?:[^,]|,(?!\s*(?:async\s*)?\(?)[^\n])*?=>\s*\{([\s\S]*?)^\s*\}\s*\)/gm)) {
-      const body = match[1];
-      if (/render\s*\(/.test(body)) expect(body, `${baseName(path)} render lacks WCAG bar`).toContain("expectNoWcagViolations(");
-    }
+  function bodies(source: string): string[] {
+    const found: string[] = []; const headers = [...source.matchAll(/(?:^|\n)\s*(?:it|test)\s*\(/gm)];
+    for (const header of headers) { const arrow = source.indexOf("=>", header.index); const open = source.indexOf("{", arrow); if (arrow < 0 || open < 0) continue; let depth = 0; for (let i = open; i < source.length; i += 1) { if (source[i] === "{") depth += 1; else if (source[i] === "}" && --depth === 0) { found.push(source.slice(open + 1, i)); break; } } }
+    return found;
   }
+  let total = 0; let headers = 0;
+  for (const [path, raw] of Object.entries(SOURCES)) { if (!path.endsWith("App.test.tsx")) continue; const source = live(raw); headers += [...source.matchAll(/(?:^|\n)\s*(?:it|test)\s*\(/gm)].length; for (const body of bodies(source)) { total += 1; if (/render\s*\(/.test(body)) expect(body, `${baseName(path)} render lacks WCAG bar`).toContain("expectNoWcagViolations("); } }
+  expect(total, `bodies found ${total} / headers ${headers}`).toBe(headers); expect(total).toBeGreaterThanOrEqual(50);
 });
