@@ -25,11 +25,11 @@ use std::thread::{self, JoinHandle};
 
 use beacond::{
     AccessOrigin, AutonomyProfile, BeaconCapability, CandidateImages, CandidateService,
-    CopyFailpoints, DeclaredCheck, DispatchFailpoints, DispatchOutcome, DispatchService,
-    FilterInventoryFailure, LocalModelActivationService, LocalModelEndpoint, MissionDraft,
-    MissionMemberDraft, MissionService, MutationEffect, NotVerified, ObservedPreImage,
-    OperatorAccountService, OperatorSessionPhase, PauseService, PinnedReadFailure,
-    ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService,
+    CopyFailpoints, DeclaredCheck, DispatchError, DispatchFailpoints, DispatchOutcome,
+    DispatchService, FilterInventoryFailure, LocalModelActivationService, LocalModelEndpoint,
+    MissionDraft, MissionMemberDraft, MissionService, MutationEffect, NotVerified,
+    ObservedPreImage, OperatorAccountService, OperatorSessionPhase, PauseService,
+    PinnedReadFailure, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService,
     ProjectRepositoryService, ProjectService, ProposalService, ProviderFeature, RepositoryDraft,
     RepositoryEffect, RepositorySourceKind, ResidentConfigurationService, ResidentLifecycleService,
     RulingDecision, RulingService, RulingSupersedes, SampleProjectError, SampleProjectService,
@@ -2365,6 +2365,85 @@ fn a_symlink_planted_inside_beacons_own_copy_is_refused_rather_than_followed() {
 // ---------------------------------------------------------------------------------------------
 // The walking skeleton
 // ---------------------------------------------------------------------------------------------
+
+/// BLUEPRINT alpha criterion: "Two Workspaces in one Installation cannot see, spend, EXECUTE, or
+/// reuse each other's state or authority by default."
+///
+/// The execute clause, which had no bar of its own. The reads have several
+/// (`artifact :: a_cross_workspace_read_is_not_found_never_a_value`,
+/// `mission :: a_cross_workspace_read_is_a_refusal_and_not_an_empty_result`,
+/// `outcome_collector :: collector_refuses_cross_workspace_reference_even_when_ids_exist`); nothing
+/// asked whether one Workspace can make another Workspace's approved change HAPPEN.
+///
+/// The attempt is the strongest one available: a real Ruling, approved by the Operator in the
+/// Workspace that owns it, dispatched through a service scoped to a different Workspace. Every
+/// identity is genuine; only the scope differs.
+///
+/// The refusal has to be BY NAME. `RulingNotFound` says "no Ruling in this Workspace has that
+/// digest", which is the true statement; a silent empty result, or an `InvalidStore`, would report
+/// a broken installation for what is an ordinary boundary holding.
+#[test]
+fn a_ruling_cannot_be_dispatched_from_another_workspace() {
+    let fixture = admitted_mission("execute-cross-workspace");
+    let repository = CopyRepository::create(&fixture.copies_root, "execute-cross-workspace");
+    let (proposal_digest, _) = fixture.candidate_for(&repository, "Rewrite it.", BASE_LIB_BYTES);
+    let ruling = fixture
+        .rulings
+        .rule_on_candidate(
+            &fixture.candidates.present(&proposal_digest).unwrap(),
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap();
+
+    let head_before = CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]);
+    let bytes_before = fs::read(repository.path.join(TARGET)).unwrap();
+
+    // A second Workspace in the same Installation. It exists as a row, the way a real one would.
+    let elsewhere = Uuid::new_v4();
+    fixture
+        .store
+        .connect()
+        .execute(
+            "INSERT INTO workspaces (id, name, created_at_ms) VALUES (?1, 'Elsewhere', 1)",
+            [elsewhere.to_string()],
+        )
+        .unwrap();
+
+    let stranger = DispatchService::new(Arc::clone(&fixture.accounts), elsewhere);
+    let refusal = stranger
+        .dispatch(&ruling.digest().value, &content_for(NEW_BYTES))
+        .expect_err("another Workspace dispatched this Workspace's Ruling");
+    assert!(
+        matches!(refusal, DispatchError::RulingNotFound),
+        "the crossing was refused, but not as a Ruling this Workspace does not have: {refusal:?}"
+    );
+
+    // Refused is not enough: nothing may have happened. The repository is byte-identical, its head
+    // has not moved, and no Receipt was written -- a refusal that still executed would satisfy the
+    // assertion above and break the criterion.
+    assert_eq!(
+        CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]),
+        head_before,
+        "the foreign dispatch moved the head it was refused"
+    );
+    assert_eq!(
+        fs::read(repository.path.join(TARGET)).unwrap(),
+        bytes_before,
+        "the foreign dispatch wrote the bytes it was refused"
+    );
+    assert_eq!(
+        fixture
+            .store
+            .connect()
+            .query_row("SELECT count(*) FROM receipts", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0,
+        "the foreign dispatch recorded a Receipt"
+    );
+}
 
 #[test]
 fn the_first_end_to_end_loop_applies_one_canned_change_to_a_sample_project_copy() {
