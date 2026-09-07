@@ -1,5 +1,5 @@
 import { render } from "@testing-library/react";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 
 import { expectNoWcagViolations } from "./axe";
 
@@ -114,5 +114,24 @@ it("every surface test file runs the WCAG bar", () => {
       source.includes("expectNoWcagViolations("),
       `${entry} renders ${rendered.join(", ")} and never runs the WCAG bar`,
     ).toBe(true);
+  }
+});
+
+
+it("the WCAG helper refuses fake timers and the next bar still runs", async () => {
+  vi.useFakeTimers();
+  await expect(expectNoWcagViolations(document.body)).rejects.toThrow("WCAG bar cannot run under fake timers — switch to real timers around the bar");
+  vi.useRealTimers();
+  await expectNoWcagViolations(document.body);
+});
+
+it("every rendered test body has a per-render WCAG witness", () => {
+  for (const [path, raw] of Object.entries(SOURCES)) {
+    if (!path.endsWith(".test.tsx")) continue;
+    const source = live(raw);
+    for (const match of source.matchAll(/(?:it|test)\s*\((?:[^,]|,(?!\s*(?:async\s*)?\(?)[^\n])*?=>\s*\{([\s\S]*?)^\s*\}\s*\)/gm)) {
+      const body = match[1];
+      if (/render\s*\(/.test(body)) expect(body, `${baseName(path)} render lacks WCAG bar`).toContain("expectNoWcagViolations(");
+    }
   }
 });

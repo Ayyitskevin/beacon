@@ -1,4 +1,5 @@
 import axe from "axe-core";
+import { vi } from "vitest";
 
 /// The rule set this project's automated accessibility bar is: WCAG 2.1 Level AA.
 ///
@@ -31,6 +32,9 @@ const DISABLED: Readonly<Record<string, { enabled: false }>> = {
 /// here names the rule id, its help text, its WCAG tags and the offending HTML, because the point
 /// of the bar is that somebody can act on it.
 export async function expectNoWcagViolations(container: HTMLElement): Promise<void> {
+  if (vi.isFakeTimers()) {
+    throw new Error("WCAG bar cannot run under fake timers — switch to real timers around the bar");
+  }
   const results = await axe.run(container, {
     runOnly: { type: "tag", values: [...WCAG_21_AA] },
     rules: DISABLED,
