@@ -1,8 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
-import axe from "axe-core";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
+import { expectNoWcagViolations } from "./test/axe";
 
 import { SampleProject } from "./SampleProject";
 
@@ -54,10 +54,7 @@ it("offers an explicit inert install and reports the created Project accessibly"
 
   expect(await screen.findByText("Optional local proving project")).toBeVisible();
   expect(screen.getByText(/starts no Run, model, network request, or execution/i)).toBeVisible();
-  const results = await axe.run(container, {
-    rules: { "color-contrast": { enabled: false } },
-  });
-  expect(results.violations).toEqual([]);
+  await expectNoWcagViolations(container);
   await user.click(screen.getByRole("button", { name: "Install Sample Project" }));
 
   expect(invokeMock).toHaveBeenCalledWith("install_sample_project");
