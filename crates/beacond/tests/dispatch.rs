@@ -4023,10 +4023,15 @@ fn a_declared_create_against_a_broken_repository_is_refused_as_unreadable_not_ap
 /// the second route to the Receipt R46 exists to prevent, and it is a hardening boundary rather
 /// than only an evidence one (opus, R46 report, "A finding beyond the brief").
 ///
-/// The fault is installed AT the read through R46's failpoint, not before the call: an unreadable
-/// `.git/config` refuses as `SourceNotBeaconMade` several gates earlier, because the provenance
-/// read is the dispatch's first pinned read. That earlier refusal is still misnamed and is the one
-/// thing this lane could not fix without a new outcome token -- see the report.
+/// The fault is installed AT the read through R46's failpoint, which keeps this test about the
+/// PRE-IMAGE read specifically: the provenance read is the dispatch's first pinned read, so a
+/// `.git/config` broken before the call is met several gates earlier.
+///
+/// R52 UPDATE: that earlier gate used to refuse `SourceNotBeaconMade` -- a claim about the source
+/// drawn from a read that never ran -- and R47 recorded it as the one thing it could not fix. It
+/// is fixed;
+/// `an_unreadable_inventory_at_the_provenance_gate_is_not_a_claim_about_the_source` is the
+/// companion that holds the earlier gate to the same standard this one holds the later one to.
 #[test]
 fn an_inventory_git_refused_refuses_the_dispatch_and_never_runs_with_the_hardening_off() {
     let fixture = admitted_mission("inventory-refused");
@@ -4098,6 +4103,78 @@ fn an_inventory_git_refused_refuses_the_dispatch_and_never_runs_with_the_hardeni
     );
     assert_eq!(receipt.prepared_commit, None);
     assert_eq!(receipt.repository_effect(), RepositoryEffect::ByteIdentical);
+}
+
+/// R52: an inventory the product could not read is not evidence about the source's PROVENANCE.
+///
+/// The counterpart of the test above, one gate earlier and without a failpoint. `.git/config` is
+/// made unreadable BEFORE the dispatch, so the very first pinned read -- the filter-driver
+/// inventory serving the provenance gate -- fails. Until R52 that failure was
+/// `pinned_filter_drivers(repository).ok()?`: the typed failure collapsed to `None`, the token
+/// looked absent, and the Receipt said `SourceNotBeaconMade` -- "this is not a repository Beacon
+/// made" -- about a repository nobody had managed to ask. git's message was discarded on the way
+/// (opus, R51).
+///
+/// The refusal must name the READ and carry what git said, and it must NOT name the source. This
+/// asserts both directions, because only asserting the new outcome would still pass if some later
+/// gate started producing the old lie.
+#[test]
+fn an_unreadable_inventory_at_the_provenance_gate_is_not_a_claim_about_the_source() {
+    let fixture = admitted_mission("provenance-inventory");
+    let (repository, ruling_digest) = fixture.approved("provenance-inventory");
+    let before = repository.snapshot();
+
+    // THE CONSTRUCTED FAULT, in front of the call rather than at a failpoint: this is the state a
+    // dispatch can actually START in, which is what makes the provenance gate the one that meets
+    // it. Measured shape (R47): `config --file ... --list` exits 128 with `Permission denied` on
+    // stderr, so it is a failure and never an absence.
+    let configuration = repository.path.join(".git").join("config");
+    let restore = fs::metadata(&configuration).unwrap().permissions();
+    fs::set_permissions(&configuration, fs::Permissions::from_mode(0o000)).unwrap();
+
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+
+    fs::set_permissions(&configuration, restore).unwrap();
+
+    // THE NAMED ASSERTION, in the direction that matters most: NOT a claim about the source.
+    assert_ne!(
+        receipt.outcome,
+        DispatchOutcome::SourceNotBeaconMade,
+        "R52.PROVENANCE.NOT_A_CLAIM_ABOUT_THE_SOURCE -- a read that never ran decided the source \
+         was not Beacon-made"
+    );
+    // ...and it names the read that did fail, with R50's own outcome for it. Not
+    // `PreImageUnreadable`: at the provenance gate no pre-image read has been attempted, which is
+    // the misnomer R50 removed and the reason these two lanes are one fix in two halves.
+    assert_eq!(
+        receipt.outcome,
+        DispatchOutcome::FilterInventoryUnreadable,
+        "R52.PROVENANCE.NAMES_THE_READ"
+    );
+    assert_eq!(
+        receipt.pre_image_read_failure, None,
+        "R52.PROVENANCE.NAMES_THE_READ -- a gate that never read a pre-image named one"
+    );
+    let Some(FilterInventoryFailure::Refused { message }) =
+        receipt.filter_inventory_failure.as_ref()
+    else {
+        panic!(
+            "R52.PROVENANCE.CARRIES_THE_MESSAGE -- the Receipt does not name the inventory: {:?}",
+            receipt.filter_inventory_failure
+        );
+    };
+    // git's own words, which `.ok()?` used to throw away.
+    assert!(
+        message.contains("Permission denied"),
+        "R52.PROVENANCE.CARRIES_THE_MESSAGE -- no message from git: {message}"
+    );
+    // A gate refusal, so the repository is untouched.
+    assert_eq!(receipt.prepared_commit, None);
+    assert_eq!(receipt.repository_effect(), RepositoryEffect::ByteIdentical);
+    assert_eq!(repository.snapshot(), before);
 }
 
 /// R47: the legitimate empty inventory is NOT a refusal -- it is exit 0 and no drivers.
