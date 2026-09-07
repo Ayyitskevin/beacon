@@ -892,6 +892,47 @@ fn daemon_and_operator_records_coexist_and_never_merge() {
     // origin it means.
 }
 
+/// A19.1: a spend record naming a Mission that does not exist is refused for THAT, by name.
+///
+/// It was refused as `IdentityTaken`, whose own doc comment says the identity is already in use.
+/// Nothing was in use. A caller obeying that message does the documented thing -- record a
+/// correction at the next version -- and the next version fails identically, forever, because the
+/// Mission is what is missing. Absent and taken are two facts, and the owner said the wrong one.
+///
+/// The mistake was one line: `From<rusqlite::Error>` returned `IdentityTaken` for every
+/// `ConstraintViolation`, and a foreign key is a constraint. The same crate already gets this
+/// right for classifications (`mission_impact.rs`, `SQLITE_CONSTRAINT_FOREIGNKEY =>
+/// PolicyRevisionNotFound`), which is where the shape of the fix comes from.
+#[test]
+fn a_spend_record_naming_a_mission_that_does_not_exist_says_so() {
+    let stored = stored("spend-mission-unknown");
+    let absent = Uuid::new_v4();
+    let mut record = stored.spend_record(Uuid::new_v4(), 1);
+    record.mission_id = absent;
+
+    let refusal = stored
+        .spend_service()
+        .record(&record.canonical_bytes().unwrap())
+        .expect_err("a spend for a Mission that does not exist must be refused");
+
+    // Stated as the falsifiable claim rather than as the eventual variant, so this commit compiles
+    // and fails for its own reason. The next commit gives the fact a name and asserts it here.
+    assert!(
+        !matches!(refusal, SpendRecordError::IdentityTaken),
+        "an unknown Mission was reported as a taken identity: {refusal:?}"
+    );
+    // Nothing was written: a refusal that stored the row would be worse than the wrong name.
+    assert_eq!(
+        Connection::open(&stored.store.path)
+            .unwrap()
+            .query_row("SELECT count(*) FROM measured_spend", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0,
+        "the refused spend record was stored anyway"
+    );
+}
+
 /// A version that is already taken is refused, not merged and not overwritten.
 #[test]
 fn a_second_record_at_a_taken_identity_is_refused_rather_than_updated() {
