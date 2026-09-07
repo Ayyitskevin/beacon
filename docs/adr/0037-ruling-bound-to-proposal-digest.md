@@ -315,11 +315,10 @@ from 18.
   refused;
 - no accessor reports force as a boolean — enforced by review of the public
   surface, not by a test; and
-- recording a Ruling adds exactly one Ruling row and one Event and leaves every
-  other **stored** count unchanged — no Run, no Receipt, no security event, and
-  no Invocation or capability state. Process, network and filesystem inertness
-  rest on this module having no such call sites: that is a review property, and
-  the test for this bullet does not observe it.
+- recording a Ruling adds exactly one Ruling row and one Event; Run, Receipt and
+  security-event counts remain unchanged, and Invocation and capability tables
+  remain absent. The ruling module has no direct process, network or non-store
+  filesystem call sites; that is a review property the test does not observe.
 
 Each bullet above maps to one or more named tests, **except where the bullet
 itself says otherwise** — two now do, in whole or in part, and each says so in
