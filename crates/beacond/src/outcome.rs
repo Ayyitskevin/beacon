@@ -85,13 +85,24 @@ const MAX_COLLECTION_ENTRIES: u32 = 4_096;
 ///
 /// Each figure is the structural minimum: every fixed-width field, every length prefix, and the
 /// cheapest arm of every tag, with zero-length strings.
-// A source reference's cheapest shape is identity-absent: 16 (Workspace) + 1 (kind) + 1 (identity
-// presence) + 32 (sha256) + 8 + 8 (two zero-length token prefixes) + 1 (revision state tag) + 8
-// (zero-length reason prefix). The identity-present shape adds 16 + 4 and is never the minimum.
-const MIN_SOURCE_REF_BYTES: usize = 75;
-const MIN_RECEIPT_REF_BYTES: usize = 84;
-const MIN_NARRATIVE_REF_BYTES: usize = 12;
-const MIN_CONDITION_BYTES: usize = 19;
+// MEASURED, not derived: `outcome::tests::min_*_bytes_is_the_measured_minimum` encodes the
+// smallest legal element through the real encoder and asserts each figure equals the result, so a
+// change to any encoder moves the test before it can move the guard.
+//
+// The hand-computed figures these replace were all too LOW, because they costed the records'
+// pinned tokens as empty. No token here may be: `require_digest` fixes `algorithm` to `"sha256"`
+// and demands a non-empty `canonicalizer`, `require_token` refuses an empty item id, and
+// `require_narrative_text` refuses an empty absence reason.
+//
+// A source reference's cheapest shape is identity-absent (the identity-present shape adds 16 + 4)
+// with an ABSENT pinned revision -- a one-character reason costs 10 where a verified git commit
+// costs 50. A receipt reference has exactly one size: every field is fixed width or a pinned
+// literal, and the two literals (`"sha256"` and the 34-byte `RECEIPT_CHECKSUM_LABEL`) are 40 of
+// its 124 bytes.
+const MIN_SOURCE_REF_BYTES: usize = 83;
+const MIN_RECEIPT_REF_BYTES: usize = 124;
+const MIN_NARRATIVE_REF_BYTES: usize = 13;
+const MIN_CONDITION_BYTES: usize = 20;
 const DIGEST_HEX_CHARS: usize = 64;
 const GIT_COMMIT_HEX_CHARS: usize = 40;
 
