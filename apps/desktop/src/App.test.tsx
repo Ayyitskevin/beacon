@@ -1405,6 +1405,13 @@ describe("Beacon desktop shell", () => {
     expect(invokeMock).toHaveBeenCalledWith("project_charter_history", {
       projectId: project.id,
     });
+
+    // A12 (grok): the Projects view that mounts CheckPreflightSection was mounted here and never measured.
+    // The surface is pinned before it is measured: a bar that runs against
+    // whatever the test happened to leave on screen reports a pass for a view
+    // nobody chose.
+    expect(screen.getByRole("heading", { name: "Check preflight" })).toBeVisible();
+    await expectNoWcagViolations(document.body);
   });
 
   it("publishes Team Lead selection criteria without selecting a Lead or granting authority", async () => {
@@ -2309,6 +2316,13 @@ describe("Beacon desktop shell", () => {
     expect(await screen.findByRole("heading", { name: "Briefing" })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Lock Beacon" }));
     expect(await screen.findByRole("heading", { name: "Welcome back" })).toBeVisible();
+
+    // A12 (grok): the LOCK view was mounted here and never measured.
+    // The surface is pinned before it is measured: a bar that runs against
+    // whatever the test happened to leave on screen reports a pass for a view
+    // nobody chose.
+    expect(screen.getByRole("heading", { name: "Welcome back" })).toBeVisible();
+    await expectNoWcagViolations(document.body);
   });
 
   it("closes Workspace access when the supervisor reports session expiry", async () => {
@@ -2364,6 +2378,11 @@ describe("Beacon desktop shell", () => {
     fireEvent.blur(window);
     expect(screen.getByRole("heading", { name: "Beacon is concealed" })).toBeVisible();
     expect(screen.queryByRole("heading", { name: "Briefing" })).not.toBeInTheDocument();
+    // A12 (grok): the CONCEALED view, measured WHILE concealed. Placed here rather than at the end
+    // of the test on purpose -- by the last line the window has been refocused and the surface on
+    // screen is the reverify prompt, so a bar there would measure a different view and report a
+    // pass for one nobody checked.
+    await expectNoWcagViolations(document.body);
     fireEvent.focus(window);
 
     expect(await screen.findByRole("heading", { name: "Welcome back" })).toBeVisible();
@@ -2428,6 +2447,9 @@ describe("Beacon desktop shell", () => {
     expect(
       await screen.findByRole("heading", { name: "Set up your operator account" }),
     ).toBeVisible();
+
+    // A12 (grok): the session-ERROR view was mounted here and never measured.
+    await expectNoWcagViolations(document.body);
   });
 
   it("persists the session timeout and renews only on explicit operator activity", async () => {
