@@ -35,9 +35,15 @@ use crate::proposal::sha256;
 
 /// The canonicalizer identity. Any future grammar is a new canonicalizer; existing v1 bytes are
 /// never reinterpreted under v2 rules.
-pub const CANONICALIZER: &str = "beacon.spend.v1";
+/// The canonicalizer a NEW record is written under.
+pub const CANONICALIZER: &str = CANONICALIZER_V2;
+
+/// The two eras, as names. A record carries one of these and is read under the grammar it names.
+pub const CANONICALIZER_V1: &str = "beacon.spend.v1";
+pub const CANONICALIZER_V2: &str = "beacon.spend.v2";
 /// The literal ASCII magic that starts every record, including its terminating NUL: 16 bytes.
-const MAGIC: &[u8] = b"beacon.spend.v1\0";
+const MAGIC_V1: &[u8] = b"beacon.spend.v1\0";
+const MAGIC_V2: &[u8] = b"beacon.spend.v2\0";
 const DIGEST_ALGORITHM: &str = "sha256";
 
 /// The store's envelope for `measured_spend.canonical_bytes`, enforced here first so an over-large
@@ -60,11 +66,29 @@ const DIGEST_HEX_CHARS: usize = 64;
 /// smallest possible size of one entry, before the first entry is read and before anything reserves
 /// capacity for it. Each figure is structural -- every fixed-width field and every length prefix,
 /// with zero-length strings.
-const MIN_LINE_BYTES: usize = 17;
+/// The smallest a line can be, per era. MEASURED, not hand-computed: `min_line_bytes_are_measured`
+/// encodes the smallest legal line of each era and asserts these figures, because four hand-typed
+/// figures in the Outcome Document module were all wrong when they were finally measured.
+/// The smallest a v1 line can be: an eight-byte unit length, one byte of unit (empty units are
+/// refused), an `i64` amount and a one-byte exponent. Measured in `spend_attribution.rs` rather
+/// than argued for here.
+const MIN_LINE_BYTES_V1: usize = 18;
+const MIN_LINE_BYTES_V2: usize = MIN_LINE_BYTES_V1 + 4;
+
+const fn min_line_bytes(era: SpendEra) -> usize {
+    match era {
+        SpendEra::V1 => MIN_LINE_BYTES_V1,
+        SpendEra::V2 => MIN_LINE_BYTES_V2,
+    }
+}
 const MIN_UNCOUNTED_BYTES: usize = 9;
 
 // One-byte tags. Assigned explicitly and never renumbered. `supersedes` is the one position where
 // 0x00 is assigned, because absence is a value there and must encode as one.
+const TAG_ATTRIBUTED: u8 = 0x01;
+const TAG_UNATTRIBUTED: u8 = 0x02;
+const TAG_NOT_APPLICABLE: u8 = 0x03;
+
 const TAG_ORIGIN_DAEMON_LEDGER: u8 = 0x01;
 const TAG_ORIGIN_OPERATOR_DECLARED: u8 = 0x02;
 
@@ -147,12 +171,113 @@ impl SpendOrigin {
 /// is refused as a value, not erased from the grammar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpendLine {
+    /// The four dimensions this amount is attributed by (v2). A v1 line reads as `Unattributed`
+    /// on all four, because its era had no dimensions to carry.
+    pub attribution: LineAttribution,
     pub unit: String,
     /// Stored integer minor units. Never binary floating point.
     pub amount_minor: i64,
     /// How many decimal places the minor units carry.
     pub minor_units_exponent: u8,
 }
+
+/// Which era's grammar a record was written in, read from its magic.
+///
+/// R46.7.1's rule, in this module: the era marker is what licenses a reading. A v1 record has no
+/// attribution because its grammar had none — it is read as `Unattributed`, never refused, and
+/// never silently upgraded, because inventing `NotApplicable` for it would be a fabrication and
+/// refusing it would make every stored measurement unreadable after the bump.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpendEra {
+    V1,
+    V2,
+}
+
+impl SpendEra {
+    /// The canonicalizer name a record of this era carries.
+    pub fn canonicalizer(self) -> &'static str {
+        match self {
+            Self::V1 => CANONICALIZER_V1,
+            Self::V2 => CANONICALIZER_V2,
+        }
+    }
+}
+
+/// What a measured line says about ONE of its dimensions. THREE answers, never two.
+///
+/// `Unattributed` says the dimension applies and nobody could say which; `NotApplicable` says the
+/// question does not apply to this measurement at all — an operator invoice has no Route. A
+/// nullable column would make those one value, and bullet 25's envelopes would then charge an
+/// envelope for spend nobody attributed to it. This is the absent/broken separation R46 made for
+/// the read layer, at the point where money is attributed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpendAttribution<T> {
+    /// The dimension is known, and this is it.
+    Attributed(T),
+    /// The dimension applies; the measurement could not say which. Carries why, so a reader can
+    /// tell an unpriced provider from an aggregate invoice.
+    Unattributed(String),
+    /// The dimension does not apply to this measurement.
+    NotApplicable,
+}
+
+impl<T> SpendAttribution<T> {
+    fn tag(&self) -> u8 {
+        match self {
+            Self::Attributed(_) => TAG_ATTRIBUTED,
+            Self::Unattributed(_) => TAG_UNATTRIBUTED,
+            Self::NotApplicable => TAG_NOT_APPLICABLE,
+        }
+    }
+
+    /// The state's NAME, for a reader that reports which of the three a line carried.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Attributed(_) => "attributed",
+            Self::Unattributed(_) => "unattributed",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+}
+
+/// The four dimensions a line is attributed by, beside the Mission the record already names.
+///
+/// On the LINE rather than the record, because "reconciles by X" means totals group by X and one
+/// record covers an event window that may span many Residents and models. A per-record field could
+/// only say "this whole window was one Agent", which is true of narrow measurements and
+/// `Unattributed` for the rest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineAttribution {
+    pub agent: SpendAttribution<Uuid>,
+    pub route: SpendAttribution<String>,
+    pub provider: SpendAttribution<String>,
+    pub model: SpendAttribution<String>,
+}
+
+impl LineAttribution {
+    /// Every dimension unattributed with one reason: what a v1 line reads as under v2.
+    pub fn unattributed(reason: &str) -> Self {
+        Self {
+            agent: SpendAttribution::Unattributed(reason.to_owned()),
+            route: SpendAttribution::Unattributed(reason.to_owned()),
+            provider: SpendAttribution::Unattributed(reason.to_owned()),
+            model: SpendAttribution::Unattributed(reason.to_owned()),
+        }
+    }
+
+    /// The four states in declaration order, for a reader that must treat them exhaustively.
+    pub fn states(&self) -> [(&'static str, &'static str); 4] {
+        [
+            ("agent", self.agent.name()),
+            ("route", self.route.name()),
+            ("provider", self.provider.name()),
+            ("model", self.model.name()),
+        ]
+    }
+}
+
+/// What a v1 line's dimensions say, in words, when read under v2.
+pub const V1_ERA_REASON: &str = "recorded before spend carried dimensions";
 
 /// What was counted, and how much of it.
 ///
@@ -583,7 +708,7 @@ struct Encoder {
 impl Encoder {
     fn new() -> Self {
         Self {
-            out: MAGIC.to_vec(),
+            out: MAGIC_V2.to_vec(),
         }
     }
 
@@ -656,9 +781,18 @@ impl<'a> Decoder<'a> {
         Ok(slice)
     }
 
-    fn magic(&mut self) -> Result<(), MalformedSpend> {
-        if self.take(MAGIC.len()).map_err(|_| MalformedSpend::Magic)? == MAGIC {
-            Ok(())
+    /// Read the magic and say WHICH era it names.
+    ///
+    /// The era is a wire fact (R54.1): it is read from the bytes, never inferred from a column or
+    /// passed in by a caller who might be wrong about it.
+    fn magic(&mut self) -> Result<SpendEra, MalformedSpend> {
+        let magic = self
+            .take(MAGIC_V2.len())
+            .map_err(|_| MalformedSpend::Magic)?;
+        if magic == MAGIC_V2 {
+            Ok(SpendEra::V2)
+        } else if magic == MAGIC_V1 {
+            Ok(SpendEra::V1)
         } else {
             Err(MalformedSpend::Magic)
         }
@@ -736,11 +870,71 @@ impl<'a> Decoder<'a> {
     }
 }
 
+/// A Route, provider or model name: the same token shape a unit carries, for the same reason —
+/// a stored identity is never folded, and a charset rule is what keeps two spellings from becoming
+/// one dimension.
+fn require_dimension_token(value: &str) -> Result<(), MalformedSpend> {
+    if value.is_empty() {
+        return Err(MalformedSpend::EmptyUnit);
+    }
+    if value.len() > MAX_UNIT_BYTES {
+        return Err(MalformedSpend::UnitTooLong);
+    }
+    if value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        Ok(())
+    } else {
+        Err(MalformedSpend::UnitCharset)
+    }
+}
+
+/// One dimension: its tag, then whatever that arm carries.
+fn encode_attribution<T>(
+    encoder: &mut Encoder,
+    attribution: &SpendAttribution<T>,
+    value: impl FnOnce(&mut Encoder, &T) -> Result<(), MalformedSpend>,
+) -> Result<(), MalformedSpend> {
+    encoder.tag(attribution.tag());
+    match attribution {
+        SpendAttribution::Attributed(inner) => value(encoder, inner),
+        SpendAttribution::Unattributed(reason) => {
+            require_text(reason)?;
+            encoder.string(reason, MAX_TEXT_BYTES)
+        }
+        // Carries nothing: "the question does not apply" has no value to give.
+        SpendAttribution::NotApplicable => Ok(()),
+    }
+}
+
+fn encode_line_attribution(
+    encoder: &mut Encoder,
+    attribution: &LineAttribution,
+) -> Result<(), MalformedSpend> {
+    encode_attribution(encoder, &attribution.agent, |encoder, id| {
+        encoder.uuid(id);
+        Ok(())
+    })?;
+    for token in [
+        &attribution.route,
+        &attribution.provider,
+        &attribution.model,
+    ] {
+        encode_attribution(encoder, token, |encoder, value| {
+            require_dimension_token(value)?;
+            encoder.string(value, MAX_UNIT_BYTES)
+        })?;
+    }
+    Ok(())
+}
+
 fn encode_totals(encoder: &mut Encoder, totals: &SpendTotals) -> Result<(), MalformedSpend> {
     require_totals(totals)?;
     encoder.u64(totals.counted_units);
     encoder.count(totals.lines.len(), MAX_LINES)?;
     for line in &totals.lines {
+        encode_line_attribution(encoder, &line.attribution)?;
         encoder.string(&line.unit, MAX_UNIT_BYTES)?;
         encoder.i64(line.amount_minor);
         encoder.tag(line.minor_units_exponent);
@@ -748,15 +942,57 @@ fn encode_totals(encoder: &mut Encoder, totals: &SpendTotals) -> Result<(), Malf
     Ok(())
 }
 
-fn decode_totals(decoder: &mut Decoder<'_>) -> Result<SpendTotals, MalformedSpend> {
+/// One dimension, read back. The tag decides what follows, and an unknown tag is refused rather
+/// than read as an absence.
+fn decode_attribution<T>(
+    decoder: &mut Decoder<'_>,
+    value: impl FnOnce(&mut Decoder<'_>) -> Result<T, MalformedSpend>,
+) -> Result<SpendAttribution<T>, MalformedSpend> {
+    match decoder.tag()? {
+        TAG_ATTRIBUTED => Ok(SpendAttribution::Attributed(value(decoder)?)),
+        TAG_UNATTRIBUTED => {
+            let reason = decoder.string(MAX_TEXT_BYTES)?;
+            require_text(&reason)?;
+            Ok(SpendAttribution::Unattributed(reason))
+        }
+        TAG_NOT_APPLICABLE => Ok(SpendAttribution::NotApplicable),
+        _ => Err(MalformedSpend::UnknownTag),
+    }
+}
+
+fn decode_line_attribution(decoder: &mut Decoder<'_>) -> Result<LineAttribution, MalformedSpend> {
+    let agent = decode_attribution(decoder, |decoder| decoder.uuid())?;
+    let mut token = || {
+        decode_attribution(decoder, |decoder| {
+            let value = decoder.string(MAX_UNIT_BYTES)?;
+            require_dimension_token(&value)?;
+            Ok(value)
+        })
+    };
+    Ok(LineAttribution {
+        agent,
+        route: token()?,
+        provider: token()?,
+        model: token()?,
+    })
+}
+
+fn decode_totals(decoder: &mut Decoder<'_>, era: SpendEra) -> Result<SpendTotals, MalformedSpend> {
     let counted_units = decoder.u64()?;
-    let count = decoder.count(MAX_LINES, MIN_LINE_BYTES)?;
+    let count = decoder.count(MAX_LINES, min_line_bytes(era))?;
     let mut lines = Vec::new();
     for _ in 0..count {
+        // R46.7.1's era rule: a v1 line carries no dimensions, so it READS as unattributed. Never
+        // refused (its era was honest), never `NotApplicable` (that would invent a fact).
+        let attribution = match era {
+            SpendEra::V1 => LineAttribution::unattributed(V1_ERA_REASON),
+            SpendEra::V2 => decode_line_attribution(decoder)?,
+        };
         let unit = decoder.string(MAX_UNIT_BYTES)?;
         let amount_minor = decoder.i64()?;
         let minor_units_exponent = decoder.tag()?;
         lines.push(SpendLine {
+            attribution,
             unit,
             amount_minor,
             minor_units_exponent,
@@ -830,7 +1066,7 @@ fn decode(input: &[u8]) -> Result<MeasuredSpendV1, MalformedSpend> {
         return Err(MalformedSpend::RecordTooLarge);
     }
     let mut decoder = Decoder::new(input);
-    decoder.magic()?;
+    let era = decoder.magic()?;
 
     let workspace_id = decoder.uuid()?;
     let mission_id = decoder.uuid()?;
@@ -845,9 +1081,9 @@ fn decode(input: &[u8]) -> Result<MeasuredSpendV1, MalformedSpend> {
     }
 
     let measurement = match decoder.tag()? {
-        TAG_MEASURED => SpendMeasurement::Measured(decode_totals(&mut decoder)?),
+        TAG_MEASURED => SpendMeasurement::Measured(decode_totals(&mut decoder, era)?),
         TAG_PARTIALLY_MEASURED => {
-            let totals = decode_totals(&mut decoder)?;
+            let totals = decode_totals(&mut decoder, era)?;
             let count = decoder.count(MAX_UNCOUNTED, MIN_UNCOUNTED_BYTES)?;
             let mut uncounted = Vec::new();
             for _ in 0..count {

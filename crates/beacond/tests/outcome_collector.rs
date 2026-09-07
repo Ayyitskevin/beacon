@@ -27,19 +27,19 @@ use beacond::{
     CollectorRefusal, CompletionActor, CompletionDisposition, ConditionOutcome,
     ConditionResultRecord, Conflicts, DeclaredCheck, EvaluationDraft, EvaluationService,
     EvaluationSubjectDraft, EvaluationSupersedes, Evaluator, Finding, FindingSeverity, ImpactLevel,
-    LocalModelActivationService, LocalModelEndpoint, MeasuredSpendService, MeasuredSpendV1,
-    MissionCompletionV1, MissionDraft, MissionImpactClassificationV1, MissionImpactService,
-    MissionMemberDraft, MissionService, MissionView, OUTCOME_RECEIPT_CHECKSUM_LABEL,
-    OperatorAccountService, OperatorSessionPhase, OutcomeState, PolicyRevisionRef,
-    ProjectCharterDraft, ProjectDraft, ProjectRepositoryService, ProjectService, ProjectView,
-    ProposalService, ProviderFeature, RepositoryDraft, RepositorySourceKind, ResidentConfiguration,
-    ResidentConfigurationService, ResidentLifecycleService, RubricDeclaration, RulingDecision,
-    RulingService, RulingSupersedes, SecretString, SourceKind, SpendCompleteness, SpendLine,
-    SpendMeasurement, SpendOrigin, SpendReference, SpendSupersedes, SpendTotals,
-    StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig, Supervisor,
-    SupportRef, TeamDraft, TeamMemberDraft, TeamService, TeamView, UncertaintyKind, UncountedEntry,
-    UncountedKind, UnfinishedKind, Verdict, declared_conditions_digest, positionable_sources,
-    record_completion,
+    LineAttribution, LocalModelActivationService, LocalModelEndpoint, MeasuredSpendService,
+    MeasuredSpendV1, MissionCompletionV1, MissionDraft, MissionImpactClassificationV1,
+    MissionImpactService, MissionMemberDraft, MissionService, MissionView,
+    OUTCOME_RECEIPT_CHECKSUM_LABEL, OperatorAccountService, OperatorSessionPhase, OutcomeState,
+    PolicyRevisionRef, ProjectCharterDraft, ProjectDraft, ProjectRepositoryService, ProjectService,
+    ProjectView, ProposalService, ProviderFeature, RepositoryDraft, RepositorySourceKind,
+    ResidentConfiguration, ResidentConfigurationService, ResidentLifecycleService,
+    RubricDeclaration, RulingDecision, RulingService, RulingSupersedes, SecretString, SourceKind,
+    SpendCompleteness, SpendLine, SpendMeasurement, SpendOrigin, SpendReference, SpendSupersedes,
+    SpendTotals, StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig,
+    Supervisor, SupportRef, TeamDraft, TeamMemberDraft, TeamService, TeamView, UncertaintyKind,
+    UncountedEntry, UncountedKind, UnfinishedKind, Verdict, declared_conditions_digest,
+    positionable_sources, record_completion,
 };
 use data_encoding::HEXLOWER;
 use rusqlite::{Connection, params};
@@ -1119,6 +1119,7 @@ fn collector_reads_each_source_through_its_owning_verified_reader() {
     let spend = fixture.measure_spend(SpendMeasurement::Measured(SpendTotals {
         counted_units: 412,
         lines: vec![SpendLine {
+            attribution: LineAttribution::unattributed("fixture"),
             unit: "USD".to_owned(),
             amount_minor: 123_456,
             minor_units_exponent: 2,
@@ -1886,6 +1887,7 @@ fn a_counted_measurement_with_no_priced_lines_cannot_be_built_at_all() {
     record.measurement = SpendMeasurement::Measured(SpendTotals {
         counted_units: 1,
         lines: vec![SpendLine {
+            attribution: LineAttribution::unattributed("fixture"),
             unit: "USD".to_owned(),
             amount_minor: 1,
             minor_units_exponent: 2,
@@ -2233,6 +2235,7 @@ fn collector_freezes_all_sources_at_completion_event_boundary() {
     let spend = fixture.measure_spend(SpendMeasurement::Measured(SpendTotals {
         counted_units: 12,
         lines: vec![SpendLine {
+            attribution: LineAttribution::unattributed("fixture"),
             unit: "USD".to_owned(),
             amount_minor: 4_200,
             minor_units_exponent: 2,
@@ -2342,6 +2345,7 @@ fn collector_freezes_all_sources_at_completion_event_boundary() {
     let later_spend = later.measure_spend(SpendMeasurement::Measured(SpendTotals {
         counted_units: 12,
         lines: vec![SpendLine {
+            attribution: LineAttribution::unattributed("fixture"),
             unit: "USD".to_owned(),
             amount_minor: 4_200,
             minor_units_exponent: 2,
@@ -2383,6 +2387,7 @@ fn late_append_only_record_does_not_mutate_existing_manifest_or_markdown() {
     let spend = fixture.measure_spend(SpendMeasurement::Measured(SpendTotals {
         counted_units: 3,
         lines: vec![SpendLine {
+            attribution: LineAttribution::unattributed("fixture"),
             unit: "USD".to_owned(),
             amount_minor: 999,
             minor_units_exponent: 2,
@@ -2459,6 +2464,7 @@ fn every_positionable_source_has_a_locator() {
     let spend = fixture.measure_spend(SpendMeasurement::Measured(SpendTotals {
         counted_units: 1,
         lines: vec![SpendLine {
+            attribution: LineAttribution::unattributed("fixture"),
             unit: "USD".to_owned(),
             amount_minor: 1,
             minor_units_exponent: 2,
@@ -2879,6 +2885,7 @@ fn collector_refuses_a_spend_record_for_a_different_mission_than_the_completion(
         measurement: SpendMeasurement::Measured(SpendTotals {
             counted_units: 1,
             lines: vec![SpendLine {
+                attribution: LineAttribution::unattributed("fixture"),
                 unit: "USD".to_owned(),
                 amount_minor: 100,
                 minor_units_exponent: 2,
@@ -3003,6 +3010,7 @@ fn collector_refuses_measured_spend_whose_coverage_starts_after_mission_admissio
         measurement: SpendMeasurement::Measured(SpendTotals {
             counted_units: 1,
             lines: vec![SpendLine {
+                attribution: LineAttribution::unattributed("fixture"),
                 unit: "USD".to_owned(),
                 amount_minor: 100,
                 minor_units_exponent: 2,
@@ -3064,6 +3072,7 @@ fn a_spend_window_that_starts_at_admission_spans_the_mission() {
         measurement: SpendMeasurement::Measured(SpendTotals {
             counted_units: 1,
             lines: vec![SpendLine {
+                attribution: LineAttribution::unattributed("fixture"),
                 unit: "USD".to_owned(),
                 amount_minor: 100,
                 minor_units_exponent: 2,
@@ -3107,6 +3116,7 @@ fn collector_preserves_where_a_partial_spend_measurement_is_incomplete() {
         SpendTotals {
             counted_units: 11,
             lines: vec![SpendLine {
+                attribution: LineAttribution::unattributed("fixture"),
                 unit: "USD".to_owned(),
                 amount_minor: 4_200,
                 minor_units_exponent: 2,
@@ -3154,6 +3164,7 @@ fn a_whole_count_a_partial_count_and_no_count_are_three_distinct_states() {
     let totals = || SpendTotals {
         counted_units: 3,
         lines: vec![SpendLine {
+            attribution: LineAttribution::unattributed("fixture"),
             unit: "USD".to_owned(),
             amount_minor: 900,
             minor_units_exponent: 2,

@@ -2,6 +2,15 @@
 status: accepted
 ---
 
+> **Amended 2026-09-07 (alpha bullet 39, spend dimensions).** The record now carries four
+> attribution dimensions per line, and its canonicalizer is `beacon.spend.v2`. The decision this ADR
+> records is unchanged -- the amount still lives inside the measurement, and "we did not measure"
+> is still a first-class statement. What changed is the grammar: the byte table below gained rows
+> 13a-13d, the published identity vector moved from 182 bytes / `9461d5de...` to the numbers under
+> **Published identity vector**, and `beacon.spend.v1` records are still read -- as unattributed,
+> never refused and never upgraded. The superseded v1 numbers are recorded under **Superseded
+> vector (v1)** so a reader who meets an old digest can still identify it.
+
 # Measured spend v1: the amount lives inside the measurement
 
 BLUEPRINT requires every Outcome Document to summarise "actual spend" (`docs/BLUEPRINT.md:180-181`),
@@ -140,7 +149,7 @@ non-canonical unit order. Decode, re-encode, and the bytes must be equal.
 
 | # | field | encoding | bound |
 |---|---|---|---|
-| 1 | magic | 16 literal bytes `beacon.spend.v1\0` | fixed; not length-framed |
+| 1 | magic | 16 literal bytes `beacon.spend.v2\0` | fixed; not length-framed; `beacon.spend.v1\0` is still accepted and read as the v1 era |
 | 2 | `workspace_id` | uuid, 16 raw bytes | — |
 | 3 | `mission_id` | uuid, 16 raw bytes | — |
 | 4 | `spend_id` | uuid, 16 raw bytes | — |
@@ -152,6 +161,10 @@ non-canonical unit order. Decode, re-encode, and the bytes must be equal.
 | 10 | `measurement` | tag | `0x01` measured, `0x02` partially, `0x03` unmeasured, `0x04` broken |
 | 11 | └ `counted_units` (arms `0x01`,`0x02`) | `u64` big-endian | — |
 | 12 | └ line count | `u32` big-endian | 1..=32 |
+| 13a | └ `line.agent` | state tag, then a uuid's 16 raw bytes for `0x01` | `attributed` `0x01`, `unattributed` `0x02`, `not_applicable` `0x03`; v2 only |
+| 13b | └ `line.route` | state tag, then `u64` length + UTF-8 for `0x01` | 1..=16 bytes, `[A-Za-z0-9._-]`; v2 only |
+| 13c | └ `line.provider` | state tag, then `u64` length + UTF-8 for `0x01` | as 13b |
+| 13d | └ `line.model` | state tag, then `u64` length + UTF-8 for `0x01` | as 13b |
 | 13 | └ `line.unit` | `u64` length + UTF-8 | 1..=16 bytes, `[A-Za-z0-9._-]`, ascending, unique |
 | 14 | └ `line.amount_minor` | `i64` big-endian | — |
 | 15 | └ `line.minor_units_exponent` | one byte | ≤ 9 |
@@ -192,31 +205,74 @@ consequence is a seam:** a valid spend reason spanning lines cannot render in th
 spend section. Either that section moves reasons out of table cells, or spend reasons are single-line
 by convention. Named here rather than discovered at slice 2.
 
+### Three states, not a nullable field
+
+Each dimension answers one question, and there are three honest answers to it: **attributed** (this
+line was produced by that agent, route, provider or model), **unattributed** (nobody recorded which),
+and **not applicable** (this line has none to record). They are not degrees of one another. A
+nullable column would spell the last two the same way, and a reader would then report a fact the
+record does not carry. `unattributed` carries its reason for exactly that purpose: it says why the
+answer is missing rather than leaving the reader to guess.
+
+`0x02` carries a reason and `0x03` carries nothing, so the three are three lengths on the wire as
+well as three names -- a decoder cannot silently read one as another.
+
+### The v1 era reads, it does not upgrade
+
+R46.7.1: a record's magic licenses a reading. A `beacon.spend.v1` record was written before the
+grammar had dimensions, so its lines carry none. It is read with every dimension `unattributed` and
+the reason `recorded before spend carried dimensions`, which names the era rather than claiming
+someone looked and found nothing. It is never refused -- its era was honest -- and never read as
+`not_applicable`, which would invent a fact, and never rewritten into v2 bytes, which would forge one.
+Its digest therefore stays valid against its own canonicalizer, which is why both names are recorded
+and why the store admits both.
+
 ## Published identity vector
 
-- canonical byte count: **182**
-- SHA-256: `9461d5deeba593e027dae523f3040515feea0ab5cb7b35cbf120a119ff7e774b`
+- canonical byte count: **301**
+- SHA-256: `d44d780898dc2b91e33fffbacf546c6e5c10d99936696e120de8c41f44c20f8f`
 
 ```text
-626561636f6e2e7370656e642e7631000000000000004000800000000000000100000000000040008000
-00000000000200000000000040008000000000000003000000020100000
-1a0635229200000000000000001000000000000107201000000000000019c000000020000000000000003
-555344000000000001e240020000000000000006746f6b656e73000000000000000000
-01aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+626561636f6e2e7370656e642e7632000000000000004000800000000000000100000000000040008000
+000000000002000000000000400080000000000000030000000201000001a06352292000000000000000
+01000000000000107201000000000000019c000000020100000000000040008000000000000004010000
+000000000004636861740100000000000000056c6f63616c01000000000000000b7177656e332e382d32
+37620000000000000003555344000000000001e2400202000000000000001e746865206c656467657220
+726f77206e616d6564206e6f206167656e742e030100000000000000056c6f63616c0300000000000000
+06746f6b656e7300000000000000000001aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+aaaaaaaaaaaaaa
 ```
 
 (Concatenate the lines, decode as hexadecimal.)
 
 **Provenance, stated honestly.** `crates/beacond/tests/spend.rs` assembles these bytes a second time
 from the table above without calling the encoder, and asserts the two agree — so a layout change
-fails a named test. But that assembler and this encoder have the **same author**, which ADR 0038's
-vector did not: gpt2 built that one from the field table before the encoder existed. A non-author
-vector is the strongest thing this record is missing, and it is the right thing to ask of the review.
+fails a named test. The v2 numbers above were reproduced a third time, in a different language, from
+the table alone. That is implementation independence, not author independence: all three
+implementations have the **same author**, which ADR 0038's vector did not — gpt2 built that one from
+the field table before the encoder existed. A non-author vector is the strongest thing this record is
+missing, and the amendment makes the ask sharper rather than weaker: the numbers moved, so a reviewer
+who reproduces them is checking the new grammar, not re-checking an old agreement.
+
+### Superseded vector (v1)
+
+The v1 record's published identity, kept so a reader who meets an old digest can still name it. These
+bytes are still valid — they are what a `beacon.spend.v1` record hashes to — and nothing rewrites
+them:
+
+- canonical byte count: **182**
+- SHA-256: `9461d5deeba593e027dae523f3040515feea0ab5cb7b35cbf120a119ff7e774b`
+
+The v1 fixture and the v2 fixture describe the same two spend lines. They differ by exactly the
+dimensions: the v2 record's first line answers all four, and its second answers one, declines two and
+records that nobody named the agent for the fourth — which is why the published vector is worth its
+119 extra bytes. It exercises all three states rather than repeating one of them eight times.
 
 ## What slice 1 deliberately does not do
 
 No store, no service, no `spend.measured` event, no migration, no verified reader, and no Outcome
-collector integration. Migration numbers are taken at rebase, never reserved: `main` is at 0020 and
+collector integration. (Slice 1's scope, as decided. The amendment above changes the grammar, not
+this list.) Migration numbers are taken at rebase, never reserved: `main` is at 0020 and
 several lanes are queued behind it.
 
 ## Slice 2-A adds the store
