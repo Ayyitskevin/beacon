@@ -342,6 +342,7 @@ describe("Beacon desktop shell", () => {
       expect(projects).toHaveAttribute("aria-current", "page");
       await user.tab();
       expect(screen.getByRole("button", { name: "Create Project" })).toHaveFocus();
+      await expectNoWcagViolations(document.body);
     },
   );
 
@@ -413,6 +414,7 @@ describe("Beacon desktop shell", () => {
     await user.click(screen.getByRole("button", { name: "Open Beacon link" }));
 
     expect(screen.getByRole("status")).toHaveTextContent(message);
+    await expectNoWcagViolations(document.body);
   });
 
   it("opens a retained link after the operator unlocks", async () => {
