@@ -1217,6 +1217,41 @@ impl MeasuredSpendV1 {
 // The store and its verified reader (slice 2)
 // ---------------------------------------------------------------------------------------------
 
+/// Which projection disagreed with the canonical bytes, and how.
+///
+/// Every arm names a different repair. A record column that drifted is one fault; a line projection
+/// with the wrong number of rows is another; a single dimension flipped from one SQL-valid state to
+/// another is a third, and it is the one an immutability trigger cannot prevent -- a trigger can be
+/// dropped, edited around and recreated, leaving a schema that is again complete and a store that
+/// holds two answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ColumnDisagreement {
+    /// A column on the record's own row.
+    Record { column: &'static str },
+    /// The line projection holds a different number of rows than the record has lines.
+    LineCount { stored: usize, in_bytes: usize },
+    /// One field of one projected line, named by both.
+    Line {
+        line_index: usize,
+        field: &'static str,
+    },
+    /// A v1 record with line rows at all. Its era recorded no dimensions, so it projects none.
+    LinesInV1Era { stored: usize },
+}
+
+impl fmt::Display for ColumnDisagreement {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Record { column } => write!(formatter, "record column {column}"),
+            Self::LineCount { stored, in_bytes } => {
+                write!(formatter, "{stored} line rows for {in_bytes} lines")
+            }
+            Self::Line { line_index, field } => write!(formatter, "line {line_index} {field}"),
+            Self::LinesInV1Era { stored } => write!(formatter, "{stored} line rows on a v1 record"),
+        }
+    }
+}
+
 /// Why a stored measured-spend record could not be returned.
 ///
 /// Every arm is an integrity failure, not an honest domain state. A digest mismatch, a projection
@@ -1229,9 +1264,10 @@ pub enum SpendStoreError {
     DigestMismatch,
     /// The stored bytes are not a v1 record.
     Malformed(MalformedSpend),
-    /// A projection column disagrees with the canonical bytes. The bytes win, and the read refuses:
-    /// a column is for querying and never for claiming.
-    ColumnsDisagree,
+    /// A projection disagrees with the canonical bytes. The bytes win, and the read refuses: a
+    /// column is for querying and never for claiming. The payload says WHICH projection and how --
+    /// "a column is wrong" and "line 2's model state is wrong" are two different repairs.
+    ColumnsDisagree(ColumnDisagreement),
     /// A citation named this digest with a different `spend_id` or `version` (R15).
     CitedIdentityMismatch,
     /// The row belongs to another Workspace.
@@ -1250,7 +1286,7 @@ impl fmt::Display for SpendStoreError {
         match self {
             Self::DigestMismatch => formatter.write_str("digest_mismatch"),
             Self::Malformed(reason) => write!(formatter, "malformed: {reason}"),
-            Self::ColumnsDisagree => formatter.write_str("columns_disagree"),
+            Self::ColumnsDisagree(detail) => write!(formatter, "columns_disagree: {detail}"),
             Self::CitedIdentityMismatch => formatter.write_str("cited_identity_mismatch"),
             Self::CrossWorkspace => formatter.write_str("cross_workspace"),
             Self::Predecessor { digest, fault } => {
@@ -1293,19 +1329,150 @@ impl MeasuredSpend {
 /// Each column is re-derived rather than compared to a remembered value, so adding a column without
 /// adding a line here is a compile-time hole rather than a silent one -- the shape `ruling.rs`
 /// established.
-fn spend_columns_match(row: &StoredSpendRow, payload: &MeasuredSpendV1) -> bool {
+/// Every column on the record's own row, against the bytes. Returns the FIRST that disagrees, by
+/// name: a caller told only that "columns disagree" has to diff the row by hand to find out which.
+fn spend_record_disagreement(
+    row: &StoredSpendRow,
+    payload: &MeasuredSpendV1,
+) -> Option<ColumnDisagreement> {
     // The canonicalizer column is a projection like any other, and now that two are admitted it is
     // one a row can be wrong about. A row claiming v1 over v2 bytes would otherwise be handed back
     // with a digest envelope naming a function that did not produce it.
-    row.digest_canonicalizer == payload.era.canonicalizer()
-        && row.spend_id == payload.spend_id
-        && row.mission_id == payload.mission_id
-        && row.version == payload.version
-        && row.origin == payload.origin.as_str()
-        && row.measurement == payload.measurement.literal()
-        && row.coverage_from_event_seq == payload.coverage_from_event_seq
-        && row.coverage_to_event_seq == payload.coverage_to_event_seq
-        && row.measured_at_ms == payload.measured_at_ms
+    let column = if row.digest_canonicalizer != payload.era.canonicalizer() {
+        "digest_canonicalizer"
+    } else if row.spend_id != payload.spend_id {
+        "spend_id"
+    } else if row.mission_id != payload.mission_id {
+        "mission_id"
+    } else if row.version != payload.version {
+        "version"
+    } else if row.origin != payload.origin.as_str() {
+        "origin"
+    } else if row.measurement != payload.measurement.literal() {
+        "measurement"
+    } else if row.coverage_from_event_seq != payload.coverage_from_event_seq {
+        "coverage_from_event_seq"
+    } else if row.coverage_to_event_seq != payload.coverage_to_event_seq {
+        "coverage_to_event_seq"
+    } else if row.measured_at_ms != payload.measured_at_ms {
+        "measured_at_ms"
+    } else {
+        return None;
+    };
+    Some(ColumnDisagreement::Record { column })
+}
+
+/// One row of the line projection, as stored.
+struct StoredSpendLineRow {
+    unit: String,
+    amount_minor: i64,
+    minor_units_exponent: u8,
+    states: [(String, Option<String>); 4],
+}
+
+/// The complete line projection for one record, in `line_index` order.
+///
+/// Complete and ordered on purpose: a comparison that stopped at the rows it happened to find could
+/// not tell a missing row from a reordered one, and both are ways for the projection to say
+/// something the bytes do not.
+fn load_spend_line_rows(
+    connection: &Connection,
+    digest_value: &str,
+) -> Result<Vec<StoredSpendLineRow>, SpendStoreError> {
+    let store = |error: rusqlite::Error| SpendStoreError::Store(error.to_string());
+    let mut statement = connection
+        .prepare(
+            "SELECT unit, amount_minor, minor_units_exponent,
+                agent_state, agent_value, route_state, route_value,
+                provider_state, provider_value, model_state, model_value
+         FROM measured_spend_lines WHERE digest_value = ?1 ORDER BY line_index",
+        )
+        .map_err(store)?;
+    let rows = statement
+        .query_map(rusqlite::params![digest_value], |row| {
+            Ok(StoredSpendLineRow {
+                unit: row.get(0)?,
+                amount_minor: row.get(1)?,
+                minor_units_exponent: row.get::<_, i64>(2)? as u8,
+                states: [
+                    (row.get(3)?, row.get(4)?),
+                    (row.get(5)?, row.get(6)?),
+                    (row.get(7)?, row.get(8)?),
+                    (row.get(9)?, row.get(10)?),
+                ],
+            })
+        })
+        .map_err(store)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(store)?;
+    Ok(rows)
+}
+
+/// The line projection, against the bytes it was derived from.
+///
+/// This is the check an immutability trigger cannot stand in for. A trigger refuses an UPDATE; it
+/// does not survive being dropped, edited around and recreated, and a store in that state is again
+/// schema-complete while holding two different answers about who spent what. R46: a verified reader
+/// refuses a SQL-valid corrupt store rather than returning one of its two answers.
+fn spend_line_disagreement(
+    connection: &Connection,
+    digest_value: &str,
+    payload: &MeasuredSpendV1,
+) -> Result<Option<ColumnDisagreement>, SpendStoreError> {
+    let stored = load_spend_line_rows(connection, digest_value)?;
+
+    // A v1 record recorded no dimensions, so it projects no rows -- in either direction. Rows on a
+    // v1 record are not "extra data", they are dimensions its era could not have known.
+    if payload.era == SpendEra::V1 {
+        return Ok(
+            (!stored.is_empty()).then_some(ColumnDisagreement::LinesInV1Era {
+                stored: stored.len(),
+            }),
+        );
+    }
+
+    let empty = Vec::new();
+    let lines = payload
+        .measurement
+        .totals()
+        .map_or(&empty, |totals| &totals.lines);
+    if stored.len() != lines.len() {
+        return Ok(Some(ColumnDisagreement::LineCount {
+            stored: stored.len(),
+            in_bytes: lines.len(),
+        }));
+    }
+
+    for (line_index, (row, line)) in stored.iter().zip(lines).enumerate() {
+        let named = |field| Some(ColumnDisagreement::Line { line_index, field });
+        if row.unit != line.unit {
+            return Ok(named("unit"));
+        }
+        if row.amount_minor != line.amount_minor {
+            return Ok(named("amount_minor"));
+        }
+        if row.minor_units_exponent != line.minor_units_exponent {
+            return Ok(named("minor_units_exponent"));
+        }
+        // Both halves of every dimension: a state that agrees with a value that does not is still
+        // two answers, and the pairing CHECK inside the row cannot see the bytes.
+        let (agent_state, agent_value) = line.attribution.agent.projection();
+        let (route_state, route_value) = line.attribution.route.projection();
+        let (provider_state, provider_value) = line.attribution.provider.projection();
+        let (model_state, model_value) = line.attribution.model.projection();
+        let expected = [
+            ("agent", agent_state, agent_value),
+            ("route", route_state, route_value),
+            ("provider", provider_state, provider_value),
+            ("model", model_state, model_value),
+        ];
+        for (stored_pair, (field, state, value)) in row.states.iter().zip(expected) {
+            if stored_pair.0 != state || stored_pair.1 != value {
+                return Ok(named(field));
+            }
+        }
+    }
+    Ok(None)
 }
 
 struct StoredSpendRow {
@@ -1432,8 +1599,13 @@ pub fn verified_spend_within(
     if payload.spend_id.is_nil() || payload.mission_id.is_nil() {
         return Err(SpendStoreError::CitedIdentityMismatch);
     }
-    if !spend_columns_match(&row, &payload) {
-        return Err(SpendStoreError::ColumnsDisagree);
+    if let Some(detail) = spend_record_disagreement(&row, &payload) {
+        return Err(SpendStoreError::ColumnsDisagree(detail));
+    }
+    // ...and the line projection, which is derived from these same bytes and is just as capable of
+    // drifting from them (sol1's cold read of B39).
+    if let Some(detail) = spend_line_disagreement(connection, &row.digest_value, &payload)? {
+        return Err(SpendStoreError::ColumnsDisagree(detail));
     }
     // 4. And the record's own Workspace is the one that was asked for -- keyed on the field in the
     //    bytes, not on the column the query matched.
@@ -1867,10 +2039,16 @@ fn insert_spend(
                 .unwrap_or_else(|| SpendRecordError::from(error))
         })?;
 
-    // The projection. Only the two arms that HAVE lines write rows here, and a record whose
-    // measurement carries none writes none -- which the `measurement` column already says, so an
-    // empty child set is never ambiguous.
-    if let Some(totals) = payload.measurement.totals() {
+    // The projection. Only the two arms that HAVE lines write rows here, and only in the v2 era: a
+    // v1 line carries no dimensions, so projecting it would file four rows whose every state is the
+    // record's era rather than a fact about spend. A record whose measurement carries no lines
+    // writes none either -- and both absences are explained by columns already on the parent row
+    // (`digest_canonicalizer`, `measurement`), so an empty child set is never ambiguous.
+    if let Some(totals) = payload
+        .measurement
+        .totals()
+        .filter(|_| payload.era == SpendEra::V2)
+    {
         for (index, line) in totals.lines.iter().enumerate() {
             let (agent_state, agent_value) = line.attribution.agent.projection();
             let (route_state, route_value) = line.attribution.route.projection();

@@ -263,6 +263,18 @@ them:
 - canonical byte count: **182**
 - SHA-256: `9461d5deeba593e027dae523f3040515feea0ab5cb7b35cbf120a119ff7e774b`
 
+```text
+626561636f6e2e7370656e642e7631000000000000004000800000000000000100000000000040008000
+00000000000200000000000040008000000000000003000000020100000
+1a0635229200000000000000001000000000000107201000000000000019c000000020000000000000003
+555344000000000001e240020000000000000006746f6b656e73000000000000000000
+01aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+```
+
+(Concatenate the lines, decode as hexadecimal. Copied byte-for-byte from this ADR before the
+amendment, so the wrapping is the published one rather than a re-flow; the lines concatenate to 364
+hexadecimal characters, 182 bytes, hashing to the SHA-256 above.)
+
 The v1 fixture and the v2 fixture describe the same two spend lines. They differ by exactly the
 dimensions: the v2 record's first line answers all four, and its second answers one, declines two and
 records that nobody named the agent for the fourth — which is why the published vector is worth its
