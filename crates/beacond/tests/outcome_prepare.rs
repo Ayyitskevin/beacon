@@ -26,8 +26,8 @@ use beacond::{
     ConditionResultRecord, Conflicts, DeclaredCheck, DiagnosticStatus, Evaluation,
     EvaluationDigest, EvaluationDraft, EvaluationError, EvaluationService, EvaluationSubjectDraft,
     EvaluationSupersedes, Evaluator, Finding, FindingSeverity, ImpactLevel, InconsistentEvaluation,
-    LocalErrorCode, LocalModelActivationService, LocalModelEndpoint, LocalServerConfig,
-    LocalSupervisorClient, LocalSupervisorServer, LocalTransportError,
+    LineAttribution, LocalErrorCode, LocalModelActivationService, LocalModelEndpoint,
+    LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer, LocalTransportError,
     MISSION_IMPACT_CANONICALIZER, ManifestStoreRefusal, MissionCompletionV1, MissionDraft,
     MissionError, MissionImpactClassificationV1, MissionImpactService, MissionMemberDraft,
     MissionService, NarrativeItem, OperatorAccountError, OperatorAccountService,
@@ -6500,6 +6500,7 @@ fn c11d_short_spend_window_is_partial_in_document() {
         measurement: SpendMeasurement::Measured(SpendTotals {
             counted_units: 1,
             lines: vec![SpendLine {
+                attribution: LineAttribution::unattributed("fixture"),
                 unit: "USD".into(),
                 amount_minor: 1234,
                 minor_units_exponent: 2,
@@ -6575,6 +6576,7 @@ fn a_spend_measured_after_the_last_run_reaches_the_manifest_as_measured() {
         measurement: SpendMeasurement::Measured(SpendTotals {
             counted_units: 1,
             lines: vec![SpendLine {
+                attribution: LineAttribution::unattributed("fixture"),
                 unit: "USD".to_owned(),
                 amount_minor: 1234,
                 minor_units_exponent: 2,
@@ -6669,6 +6671,7 @@ fn every_spend_bearing_kind_makes_a_window_partial() {
             measurement: SpendMeasurement::Measured(SpendTotals {
                 counted_units: 1,
                 lines: vec![SpendLine {
+                    attribution: LineAttribution::unattributed("fixture"),
                     unit: "USD".to_owned(),
                     amount_minor: 1234,
                     minor_units_exponent: 2,
