@@ -7,12 +7,17 @@
 //!
 //! # Scope, in words, because the names alone cannot carry it
 //!
-//! **Every workspace member.** The surface is EVERY member listed in the
+//! **Every workspace member, production code only.** The surface is EVERY member listed in the
 //! workspace manifest — read from it, never typed here — so a crate added to the workspace is
 //! inside the witness the day it is added. A41.1 widened this after grok's read of #131: the first
 //! version walked `crates/beacond/src` alone, so a sender in the desktop crate stayed green while
 //! bullet 41 speaks about the product.
 //!
+//! "Production code only" applies to the pause-timer witness, and only there: a `thread::sleep` in
+//! a `#[cfg(test)] mod` is a legitimate timing test, not a scheduler, and flagging it would make
+//! the witness fail the first time someone wrote one. The sending witnesses do NOT skip test
+//! modules — a test that reaches the network is exactly as interesting as production code that
+//! does.
 
 use std::fs;
 use std::path::PathBuf;
@@ -356,6 +361,137 @@ const TIMING_PRIMITIVES: &[&str] = &[
     "SystemTime::now",
 ];
 
+/// The file with every `#[cfg(test)] mod …` block removed — production code only.
+///
+/// grok's second finding on #131: a `thread::sleep` inside a test module in the file that owns the
+/// pause writer would have tripped the timer witness. That is a legitimate timing test, not a
+/// scheduler, and a witness that fails on one would be deleted the first time someone wrote it.
+///
+/// Brace-matched rather than cut to end-of-file, because `#[cfg(test)]` also sits on individual
+/// items (`lib.rs` carries five, one of them a `pub(crate) fn` two thirds of the way up) and
+/// cutting from the first would delete most of a production file. Braces inside line comments,
+/// block comments, strings, raw strings and char literals do not count — this crate's sources are
+/// full of all five.
+fn without_test_modules(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut kept_from = 0_usize;
+    for (offset, _) in text.match_indices("#[cfg(test)]") {
+        if offset < kept_from {
+            // Inside a module already removed.
+            continue;
+        }
+        // Look ahead for the `mod` item this attribute decorates. Anything else -- a function, a
+        // use -- is left in place; only whole modules are removed.
+        let head = &text[offset..text.len().min(offset + 200)];
+        let decorates_a_module = head
+            .lines()
+            .skip(1)
+            .find(|line| !line.trim().is_empty())
+            .is_some_and(|line| {
+                let line = line.trim();
+                line.starts_with("mod ") || line.starts_with("pub mod ")
+            });
+        if !decorates_a_module {
+            continue;
+        }
+        let Some(close) = end_of_block(text, offset) else {
+            continue;
+        };
+        out.push_str(&text[kept_from..offset]);
+        kept_from = close;
+    }
+    out.push_str(&text[kept_from..]);
+    out
+}
+
+/// The byte offset one past the `}` closing the block that opens after `from`.
+///
+/// Braces inside line comments, block comments, strings, raw strings and char literals do not
+/// count — this crate's sources are full of all five, and a `{` in a doc comment would otherwise
+/// end the scan in the wrong place.
+fn end_of_block(text: &str, from: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut index = from;
+    let mut depth = 0_usize;
+    let mut opened = false;
+    while index < bytes.len() {
+        let here = bytes[index];
+        let next = bytes.get(index + 1).copied();
+        match here {
+            b'/' if next == Some(b'/') => {
+                index += text[index..]
+                    .find('\n')
+                    .map_or(text.len() - index, |at| at + 1);
+                continue;
+            }
+            b'/' if next == Some(b'*') => {
+                index += text[index + 2..]
+                    .find("*/")
+                    .map_or(text.len() - index, |at| at + 4);
+                continue;
+            }
+            b'r' if next == Some(b'"') || next == Some(b'#') => {
+                let mut hashes = 0;
+                let mut cursor = index + 1;
+                while bytes.get(cursor) == Some(&b'#') {
+                    hashes += 1;
+                    cursor += 1;
+                }
+                if bytes.get(cursor) != Some(&b'"') {
+                    index += 1;
+                    continue;
+                }
+                let closing: String = std::iter::once('"')
+                    .chain(std::iter::repeat_n('#', hashes))
+                    .collect();
+                cursor += 1;
+                let at = text[cursor..].find(&closing)?;
+                index = cursor + at + closing.len();
+                continue;
+            }
+            b'"' => {
+                index += 1;
+                while index < bytes.len() && bytes[index] != b'"' {
+                    index += if bytes[index] == b'\\' { 2 } else { 1 };
+                }
+                index += 1;
+                continue;
+            }
+            b'\'' => {
+                // A char literal is short; a lifetime has no closing quote. Scan a bounded window
+                // and give up if none is found, which leaves lifetimes alone.
+                let limit = (index + 12).min(bytes.len());
+                let mut cursor = index + 1;
+                while cursor < limit {
+                    if bytes[cursor] == b'\'' {
+                        break;
+                    }
+                    cursor += if bytes[cursor] == b'\\' { 2 } else { 1 };
+                }
+                index = if cursor < limit {
+                    cursor + 1
+                } else {
+                    index + 1
+                };
+                continue;
+            }
+            b'{' => {
+                depth += 1;
+                opened = true;
+            }
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if opened && depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
 /// Every file that writes the pause state.
 fn pause_writers(inventory: &[(String, String)]) -> Vec<String> {
     inventory
@@ -366,7 +502,7 @@ fn pause_writers(inventory: &[(String, String)]) -> Vec<String> {
 }
 
 #[test]
-fn only_an_operator_command_can_change_the_pause_state() {
+fn in_production_code_only_an_operator_command_can_change_the_pause_state() {
     let inventory = workspace_sources();
 
     // One writer. A scheduler that paused work on its own would be a second.
@@ -396,12 +532,35 @@ fn only_an_operator_command_can_change_the_pause_state() {
         );
     }
 
-    // No timing primitive in the file that owns the writer: a timer that reached the private pause
-    // service would have to live here, and this is what would notice it arriving.
+    // No timing primitive in the PRODUCTION half of the file that owns the writer: a timer that
+    // reached the private pause service would have to live here, and this is what would notice it
+    // arriving. Test modules are stripped first (A41.1, grok): a `thread::sleep` in one is a
+    // timing test, not a scheduler.
+    let production = without_test_modules(dispatch);
+
+    // THE STRIPPER'S OWN SELF-CHECK, because a stripper that quietly removed everything would make
+    // this witness pass forever. It must remove the test module and keep the production code.
+    assert!(
+        dispatch.contains("fn specimen("),
+        "A30.STRIPPER_IS_HONEST -- `specimen` is no longer dispatch.rs's test helper; pick another"
+    );
+    assert!(
+        !production.contains("fn specimen("),
+        "A30.STRIPPER_IS_HONEST -- the test module survived stripping"
+    );
+    assert!(
+        production.contains("fn verify_outcome_invariants"),
+        "A30.STRIPPER_IS_HONEST -- stripping removed production code"
+    );
+    assert!(
+        production.len() * 3 > dispatch.len(),
+        "A30.STRIPPER_IS_HONEST -- stripping removed more than two thirds of the file"
+    );
+
     let timers: Vec<&str> = TIMING_PRIMITIVES
         .iter()
         .copied()
-        .filter(|primitive| dispatch.contains(primitive))
+        .filter(|primitive| production.contains(primitive))
         .collect();
     assert!(
         timers.is_empty(),
@@ -428,15 +587,29 @@ fn the_pause_inventory_would_notice_a_scheduler() {
         "the predicate did not notice a second writer"
     );
 
+    // A timer in PRODUCTION code beside the writer is caught...
     let timed = "fn tick() { std::thread::sleep(d); } UPDATE installation_pause SET paused";
     let timers: Vec<&str> = TIMING_PRIMITIVES
         .iter()
         .copied()
-        .filter(|primitive| timed.contains(primitive))
+        .filter(|primitive| without_test_modules(timed).contains(primitive))
         .collect();
     assert_eq!(
         timers,
         vec!["thread::sleep"],
         "the predicate did not notice a timer beside the writer"
+    );
+
+    // ...and the same sleep inside a test module is NOT, which is the false positive A41.1 removed.
+    let in_a_test =
+        "fn live() {}\n#[cfg(test)]\nmod tests {\n    fn t() { std::thread::sleep(d); }\n}\n";
+    let stripped = without_test_modules(in_a_test);
+    assert!(
+        stripped.contains("fn live()"),
+        "the stripper removed production code around the test module"
+    );
+    assert!(
+        !stripped.contains("thread::sleep"),
+        "A30.TEST_MODULES_ARE_NOT_SCHEDULERS -- a sleep in a test module still trips the witness"
     );
 }
