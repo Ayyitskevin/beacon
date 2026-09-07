@@ -279,6 +279,7 @@ fn downgrade_execution_schema_to_v15(store_path: &Path) {
              DROP TRIGGER mission_impact_classifications_no_update;
              DROP TRIGGER mission_impact_classifications_no_delete;
              DROP TABLE mission_impact_classifications;
+             DROP TABLE measured_spend_lines;
              DROP TRIGGER measured_spend_no_update;
              DROP TRIGGER measured_spend_no_delete;
              DROP TABLE measured_spend;
@@ -2148,7 +2149,7 @@ fn migration_preserves_real_v1_bytes_through_rollback_and_forward_startup() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 34);
+    assert_eq!(report.diagnostics.schema_version, 35);
     let connection = Connection::open(&store.path).unwrap();
     assert_v1_bytes(&connection, run_id, &v1_payload);
 }

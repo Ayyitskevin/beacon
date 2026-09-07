@@ -32,13 +32,13 @@ use beacond::{
     ProjectService, ProposalService, Provenance, ProviderFeature, PublicationSeamRefusal,
     PublishRefusal, RepositoryDraft, RepositorySourceKind, ResidentConfigurationService,
     ResidentLifecycleService, RubricDeclaration, RulingDecision, RulingService, RulingSupersedes,
-    SecretString, SourceKind, SpendCompleteness, SpendLine, SpendMeasurement, SpendMeasurementKind,
-    SpendOrigin, SpendReference, SpendSupersedes, SpendTotals, StarterOrganizationService,
-    StarterResidentDraft, StarterRole, StartupConfig, Supervisor, SupportRef, TeamDraft,
-    TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy,
-    TeamMemberDraft, TeamService, TrackRecordEvidenceKind, TrackRecordRequirement, UncertaintyKind,
-    UnfinishedKind, Verdict, declared_conditions_digest, initialize_local_auth_token,
-    record_completion, verified_completion_within,
+    SecretString, SourceKind, SpendCompleteness, SpendEra, SpendLine, SpendMeasurement,
+    SpendMeasurementKind, SpendOrigin, SpendReference, SpendSupersedes, SpendTotals,
+    StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig, Supervisor,
+    SupportRef, TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule,
+    TeamLeadSelectionPolicy, TeamMemberDraft, TeamService, TrackRecordEvidenceKind,
+    TrackRecordRequirement, UncertaintyKind, UnfinishedKind, Verdict, declared_conditions_digest,
+    initialize_local_auth_token, record_completion, verified_completion_within,
 };
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
@@ -619,6 +619,7 @@ fn record_spend(
     measurement: SpendMeasurement,
 ) -> (MeasuredSpendV1, MeasuredSpend) {
     let payload = MeasuredSpendV1 {
+        era: SpendEra::V2,
         workspace_id: fixture.workspace_id,
         mission_id,
         spend_id: Uuid::new_v4(),

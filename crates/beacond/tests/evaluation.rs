@@ -751,7 +751,7 @@ fn a_recorded_evaluation_is_immutable_and_survives_startup_verification() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .expect("startup verifies the Evaluation");
-    assert_eq!(report.diagnostics.schema_version, 34);
+    assert_eq!(report.diagnostics.schema_version, 35);
     assert_eq!(
         evaluations.get(&evaluation.digest().value).unwrap(),
         evaluation
@@ -3317,6 +3317,7 @@ fn migration_0028_preserves_preexisting_proposal_evaluation_bytes_and_chain() {
              DROP TABLE receipts_r46;",
         )
         .unwrap();
+    restore_pre_0035_spend(&connection);
 
     let migration_0023 = include_str!("../migrations/0023_evaluations.sql");
     let evaluation_objects =
@@ -3364,7 +3365,7 @@ fn migration_0028_preserves_preexisting_proposal_evaluation_bytes_and_chain() {
              SELECT workspace_id, subject_digest, evaluation_digest,
                     supersedes_evaluation_digest
              FROM supersessions_snapshot;
-             UPDATE schema_meta SET version = 27 WHERE singleton = 1 AND version = 34;
+             UPDATE schema_meta SET version = 27 WHERE singleton = 1 AND version = 35;
              COMMIT;",
         )
         .unwrap();
@@ -4424,4 +4425,36 @@ fn astra_s1_canonical_cross_mission_successor_is_not_a_verified_subject_tail() {
         read.is_err() && seam.is_err(),
         "the Evaluation reader blessed a cross-Mission subject chain after a byte-consistent restore"
     );
+}
+
+/// The pre-0035 spend shapes, for a test that stamps a version below 35.
+///
+/// 0035 widened `measured_spend`'s canonicalizer CHECK and added `measured_spend_lines`. A store
+/// rolled back below 35 must carry the shapes that version actually had, or its schema signature
+/// will not match one built from the ladder. Taken from 0025's own text: a rollback that retyped
+/// the DDL would be testing the test.
+fn restore_pre_0035_spend(connection: &Connection) {
+    let source = include_str!("../migrations/0025_spend_and_impact.sql");
+    let block = &source[source
+        .find("CREATE TABLE measured_spend (")
+        .expect("0025 defines the spend table")
+        ..source
+            .find("-- One Mission impact classification.")
+            .expect("0025 defines the table after it")];
+    connection
+        .execute_batch(
+            "CREATE TEMP TABLE spend_pre_0035 AS SELECT * FROM measured_spend;
+             DROP TABLE measured_spend_lines;
+             DROP TRIGGER measured_spend_no_update;
+             DROP TRIGGER measured_spend_no_delete;
+             DROP TABLE measured_spend;",
+        )
+        .expect("the 0035 shapes come off");
+    connection.execute_batch(block).expect("0025's spend table");
+    connection
+        .execute_batch(
+            "INSERT INTO measured_spend SELECT * FROM spend_pre_0035;
+             DROP TABLE spend_pre_0035;",
+        )
+        .expect("the rows come back");
 }

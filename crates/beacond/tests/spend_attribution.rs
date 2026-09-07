@@ -16,7 +16,7 @@
 
 use beacond::{
     LineAttribution, MalformedSpend, MeasuredSpendV1, SPEND_V1_ERA_REASON, SpendAttribution,
-    SpendLine, SpendMeasurement, SpendOrigin, SpendSupersedes, SpendTotals,
+    SpendEra, SpendLine, SpendMeasurement, SpendOrigin, SpendSupersedes, SpendTotals,
 };
 use uuid::Uuid;
 
@@ -155,6 +155,7 @@ fn cell(dimension: Dimension, state: State) -> LineAttribution {
 
 fn record(attribution: LineAttribution) -> MeasuredSpendV1 {
     MeasuredSpendV1 {
+        era: SpendEra::V2,
         workspace_id: uuid(WORKSPACE),
         mission_id: uuid(MISSION),
         spend_id: uuid(SPEND),
@@ -473,4 +474,94 @@ fn the_smallest_a_spend_line_can_be_is_measured_and_v2_costs_exactly_one_tag_per
         MalformedSpend::Truncated,
         "a declared count was trusted before it was measured against the input"
     );
+}
+
+/// The cell the era rule actually turns on: a v1 record must re-encode to the bytes it was decoded
+/// from.
+///
+/// Every verified read performs that round trip and refuses a record whose bytes do not reproduce
+/// themselves. An encoder that always wrote the newest magic would therefore refuse every v1 row --
+/// calling an honest older record malformed, which is the one thing R46.7.1 forbids. The era is a
+/// field on the record for exactly this reason.
+#[test]
+fn a_v1_record_re_encodes_to_its_own_bytes_and_keeps_its_own_digest_envelope() {
+    let bytes = v1_record_bytes();
+    let record = MeasuredSpendV1::from_canonical_bytes(&bytes).expect("a v1 record decodes");
+
+    assert_eq!(
+        record.era,
+        SpendEra::V1,
+        "the era did not survive the decode"
+    );
+    assert_eq!(
+        record.canonical_bytes().expect("a v1 record re-encodes"),
+        bytes,
+        "a v1 record did not reproduce its own bytes"
+    );
+    assert_eq!(
+        record.digest().expect("digest").canonicalizer,
+        beacond::SPEND_CANONICALIZER_V1,
+        "the digest envelope named a function that did not produce these bytes"
+    );
+
+    // And the v2 record's envelope names v2, so the two eras are two identities rather than one
+    // name applied to whichever bytes turn up.
+    let v2 = record_of_era(SpendEra::V2, cell(Dimension::Agent, State::Attributed));
+    assert_eq!(
+        v2.digest().expect("digest").canonicalizer,
+        beacond::SPEND_CANONICALIZER_V2
+    );
+}
+
+/// A v1 record cannot be handed a dimension. Refused by name, never dropped: a caller who wrote
+/// four answered dimensions and got back bytes that say nothing would never learn.
+#[test]
+fn a_v1_record_carrying_a_dimension_is_refused_by_name_rather_than_silently_flattened() {
+    for dimension in Dimension::ALL {
+        for state in [State::Attributed, State::NotApplicable] {
+            let record = record_of_era(SpendEra::V1, cell(dimension, state));
+            assert_eq!(
+                record
+                    .canonical_bytes()
+                    .expect_err("the v1 era cannot say this"),
+                MalformedSpend::EraCannotCarryDimensions,
+                "a v1 record accepted {} as {}",
+                dimension.name(),
+                state.name()
+            );
+        }
+    }
+
+    // The one attribution a v1 record CAN carry is the one its era means, and it round trips.
+    let readable = record_of_era(
+        SpendEra::V1,
+        LineAttribution::unattributed(SPEND_V1_ERA_REASON),
+    );
+    let bytes = readable
+        .canonical_bytes()
+        .expect("the era's own reason encodes");
+    assert_eq!(
+        MeasuredSpendV1::from_canonical_bytes(&bytes).expect("decodes"),
+        readable
+    );
+
+    // Including the near miss: the right state with the wrong reason is still a claim the era
+    // cannot make, because that reason would be read back as the era's own.
+    let wrong_reason = record_of_era(
+        SpendEra::V1,
+        LineAttribution::unattributed("nobody looked at this one."),
+    );
+    assert_eq!(
+        wrong_reason
+            .canonical_bytes()
+            .expect_err("a reason the era did not write"),
+        MalformedSpend::EraCannotCarryDimensions
+    );
+}
+
+fn record_of_era(era: SpendEra, attribution: LineAttribution) -> MeasuredSpendV1 {
+    MeasuredSpendV1 {
+        era,
+        ..record(attribution)
+    }
 }
