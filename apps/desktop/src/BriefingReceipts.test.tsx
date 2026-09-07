@@ -1,7 +1,7 @@
-import axe from "axe-core";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
+import { expectNoWcagViolations } from "./test/axe";
 
 import { BriefingReceipts } from "./BriefingReceipts";
 import type { RecentReceipt, RecentReceiptPage } from "./session";
@@ -212,8 +212,7 @@ it("keeps loading, empty and failed apart, and stays accessible", async () => {
   await user.click(screen.getByRole("button", { name: "Refresh Receipts" }));
   expect(onRefresh).toHaveBeenCalledTimes(1);
 
-  const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
-  expect(results.violations).toEqual([]);
+  await expectNoWcagViolations(container);
 });
 
 it("does not take the panel down on an instant it cannot render", async () => {

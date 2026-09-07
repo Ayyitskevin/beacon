@@ -1,8 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
-import axe from "axe-core";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { expectNoWcagViolations } from "./test/axe";
 
 import { App } from "./App";
 
@@ -761,8 +761,7 @@ describe("Beacon desktop shell", () => {
     // Receipts.
     expect(invokeMock).toHaveBeenCalledWith("recent_receipts", { window: 50 });
 
-    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
-    expect(results.violations).toEqual([]);
+    await expectNoWcagViolations(container);
   });
 
   it("warns persistently while live-data encryption is disabled and rechecks on demand", async () => {
@@ -802,8 +801,7 @@ describe("Beacon desktop shell", () => {
     ).toBeNull();
     expect(invokeMock).toHaveBeenCalledWith("live_data_encryption_status");
 
-    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
-    expect(results.violations).toEqual([]);
+    await expectNoWcagViolations(container);
   });
 
   it("presents the ruled v1 reading as not evaluated rather than guessing", async () => {
@@ -1002,8 +1000,7 @@ describe("Beacon desktop shell", () => {
       await screen.findByText(/Live data is not fully protected by disk encryption\./),
     ).toBeVisible();
 
-    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
-    expect(results.violations).toEqual([]);
+    await expectNoWcagViolations(container);
   });
 
   it("does not present a stale reading when a recheck fails", async () => {
@@ -1126,8 +1123,7 @@ describe("Beacon desktop shell", () => {
     expect(screen.getByText("Inactive")).toBeVisible();
     expect(screen.getByText(/does not activate or run them/i)).toBeVisible();
     expect(invokeMock).toHaveBeenCalledWith("discover_local_models");
-    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
-    expect(results.violations).toEqual([]);
+    await expectNoWcagViolations(container);
   });
 
   it("reviews advertised features before activation and deactivates without running a model", async () => {
@@ -1164,8 +1160,7 @@ describe("Beacon desktop shell", () => {
     expect(await screen.findByRole("heading", { name: "Review qwen3.8:27b" })).toBeVisible();
     expect(screen.getByText(/advertised by Ollama, not Beacon permissions/i)).toBeVisible();
     expect(screen.getByText(/future_audio.*cannot be approved/i)).toBeVisible();
-    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
-    expect(results.violations).toEqual([]);
+    await expectNoWcagViolations(container);
     await user.click(screen.getByRole("checkbox", { name: "Approve tools" }));
     await user.click(screen.getByRole("button", { name: "Activate for this Workspace" }));
 
@@ -1500,8 +1495,7 @@ describe("Beacon desktop shell", () => {
     await user.clear(evaluationCount);
     await user.type(evaluationCount, "2");
     expect(screen.getByText("This does not select a Lead or grant authority.")).toBeVisible();
-    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
-    expect(results.violations).toEqual([]);
+    await expectNoWcagViolations(container);
     await user.click(screen.getByRole("button", { name: "Publish Policy revision 1" }));
 
     expect(invokeMock).toHaveBeenCalledWith("publish_project_policy", {
@@ -1613,8 +1607,7 @@ describe("Beacon desktop shell", () => {
     expect(
       screen.getAllByText("Declared, not verified — Beacon has not opened this repository.").length,
     ).toBeGreaterThan(0);
-    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
-    expect(results.violations).toEqual([]);
+    await expectNoWcagViolations(container);
     await user.click(screen.getByRole("button", { name: "Bind Repository revision 1" }));
 
     expect(invokeMock).toHaveBeenCalledWith("bind_project_repository", {
@@ -1824,8 +1817,7 @@ describe("Beacon desktop shell", () => {
     expect(screen.getByText(/starts no Mission, Run, spending, model invocation/i)).toBeVisible();
     await user.type(screen.getByLabelText("Team name"), "Alpha Team");
     await user.click(screen.getByRole("checkbox", { name: "Northstar — lead" }));
-    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
-    expect(results.violations).toEqual([]);
+    await expectNoWcagViolations(container);
     await user.click(screen.getByRole("button", { name: "Form Team" }));
 
     expect(invokeMock).toHaveBeenCalledWith("form_team", {
@@ -1963,8 +1955,7 @@ describe("Beacon desktop shell", () => {
     await user.type(screen.getByLabelText("Success conditions"), admitted.successConditions[0]);
     await user.type(screen.getByLabelText("Mission constraints"), admitted.constraints[0]);
     await user.type(screen.getByLabelText("Mission prohibitions"), admitted.prohibitions[0]);
-    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
-    expect(results.violations).toEqual([]);
+    await expectNoWcagViolations(container);
     await user.click(screen.getByRole("button", { name: "Admit Mission" }));
 
     expect(invokeMock).toHaveBeenCalledWith("admit_mission", {
@@ -2250,8 +2241,7 @@ describe("Beacon desktop shell", () => {
     });
     expect(await screen.findByText("Cleared; not eligible for Team formation")).toBeVisible();
 
-    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
-    expect(results.violations).toEqual([]);
+    await expectNoWcagViolations(container);
   });
 
   it("requires confirmation before discarding the one-time Starter Organization", async () => {
@@ -2554,8 +2544,7 @@ describe("Beacon desktop shell", () => {
     const { container } = render(<App />);
     await screen.findByRole("heading", { name: "Set up your operator account" });
 
-    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
-    expect(results.violations).toEqual([]);
+    await expectNoWcagViolations(container);
   });
 
   it("has no automated accessibility violations in the Starter Organization view", async () => {
@@ -2572,8 +2561,7 @@ describe("Beacon desktop shell", () => {
     const { container } = render(<App />);
     await screen.findByRole("heading", { name: "Build your starter organization" });
 
-    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
-    expect(results.violations).toEqual([]);
+    await expectNoWcagViolations(container);
   });
 
   it("has no automated accessibility violations in the Project Charter composer", async () => {
@@ -2595,8 +2583,7 @@ describe("Beacon desktop shell", () => {
     await screen.findByText("No Projects yet");
     await user.click(screen.getByRole("button", { name: "Create Project" }));
 
-    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
-    expect(results.violations).toEqual([]);
+    await expectNoWcagViolations(container);
   });
 
   it("has no automated accessibility violations in the Charter revision composer", async () => {
@@ -2654,7 +2641,6 @@ describe("Beacon desktop shell", () => {
     await user.click(await screen.findByRole("button", { name: /Beacon Alpha/i }));
     await user.click(await screen.findByRole("button", { name: "Revise Charter" }));
 
-    const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
-    expect(results.violations).toEqual([]);
+    await expectNoWcagViolations(container);
   });
 });
