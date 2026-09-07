@@ -931,8 +931,19 @@ fn a_spend_record_naming_a_mission_that_does_not_exist_says_so() {
         }
         other => panic!("the refusal did not name the unknown Mission: {other:?}"),
     }
-    // The outward name a caller reads, and it is not the identity one.
-    assert_eq!(refusal.to_string(), "mission_unknown");
+    // The outward name a caller reads, and it is not the identity one -- followed by the two ids,
+    // because a caller told a Mission is unknown needs to know WHICH one before it can act
+    // (grok, on the first cut of this variant, whose text stopped at the name).
+    let rendered = refusal.to_string();
+    assert!(
+        rendered.starts_with("mission_unknown:"),
+        "the outward name changed: {rendered}"
+    );
+    assert!(
+        rendered.contains(&stored.store.workspace_id.to_string())
+            && rendered.contains(&absent.to_string()),
+        "the message does not name both ids: {rendered}"
+    );
     // Nothing was written: a refusal that stored the row would be worse than the wrong name.
     assert_eq!(
         Connection::open(&stored.store.path)
@@ -942,6 +953,91 @@ fn a_spend_record_naming_a_mission_that_does_not_exist_says_so() {
             .unwrap(),
         0,
         "the refused spend record was stored anyway"
+    );
+}
+
+/// A19.1, third row: a constraint that is neither UNIQUE nor a foreign key is a store fault
+/// carrying SQLite's words, and never `IdentityTaken`.
+///
+/// Fable's mutant found this row unwitnessed: replacing `constraint_refusal`'s `_ => None` with
+/// `_ => Some(IdentityTaken)` restored the original defect for every remaining constraint, and both
+/// spend suites stayed green. A mapping with no default arm needs a bar proving the default is
+/// absent, or the absence is only a claim.
+///
+/// The reachable one is `CHECK (version >= 1)`
+/// (`crates/beacond/migrations/0025_spend_and_impact.sql:112`). A record at version 0 decodes,
+/// re-encodes byte-identically, names this Workspace, and declares a coverage window inside the
+/// store -- so it passes every check the owner makes and reaches the INSERT, where SQLite refuses
+/// it. The table's other CHECKs are unreachable from here by construction, which is the codec doing
+/// its job: canonical bytes are bounded at exactly `MAX_CANONICAL_BYTES` = the CHECK's 65536, the
+/// coverage ordering is validated at `spend.rs` before the insert, and the enum columns come from
+/// Rust enums. Version is the one the codec does not police.
+///
+/// The NOT NULL columns are the same story one step further (grok named `origin`): every one of
+/// them is a non-optional Rust field, so no payload this owner can be handed produces a NULL. They
+/// are unreachable from the service by construction rather than untested, and a bar that reached
+/// one would have to write the row itself -- which would be testing the SQL, not the mapping.
+///
+/// **`Store`, deliberately, not a typed variant.** A typed variant would claim the owner
+/// anticipated this constraint, and it did not: nothing in the product produces a version-0 record.
+/// Worse, one variant per CHECK invites the next CHECK to arrive without one -- and the moment a
+/// constraint has no variant, something has to be the default, which is exactly the collapse this
+/// lane removed. `Store` carrying SQLite's own sentence says what happened without inventing a
+/// category for it.
+#[test]
+fn a_constraint_that_is_neither_unique_nor_a_foreign_key_is_a_store_fault() {
+    let stored = stored("spend-check-constraint");
+    // Version 0: legal in the type, refused by the table.
+    let record = stored.spend_record(Uuid::new_v4(), 0);
+
+    let refusal = stored
+        .spend_service()
+        .record(&record.canonical_bytes().unwrap())
+        .expect_err("a version the table refuses must be refused");
+
+    assert!(
+        !matches!(refusal, SpendRecordError::IdentityTaken),
+        "a CHECK violation was reported as a taken identity: {refusal:?}"
+    );
+    assert!(
+        !matches!(refusal, SpendRecordError::MissionUnknown { .. }),
+        "a CHECK violation was reported as an unknown Mission: {refusal:?}"
+    );
+    let SpendRecordError::Store(message) = &refusal else {
+        panic!("a constraint this owner does not recognise must be a store fault: {refusal:?}");
+    };
+    // SQLite's words, kept: the kind of constraint AND which one, so a reader does not have to
+    // guess which column the store objected to.
+    assert!(
+        message.contains("CHECK constraint failed"),
+        "the refusal does not name the constraint kind: {message}"
+    );
+    assert!(
+        message.contains("version >= 1"),
+        "the refusal does not name which constraint: {message}"
+    );
+
+    // Nothing was written, and the Workspace's own Events are untouched: a refused record must not
+    // leave a spend row or a `spend.measured` Event behind.
+    let connection = Connection::open(&stored.store.path).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM measured_spend", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0,
+        "the refused record was stored anyway"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM events WHERE kind = 'spend.measured'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0,
+        "the refused record recorded its Event anyway"
     );
 }
 
