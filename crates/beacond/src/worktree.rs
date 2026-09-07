@@ -1528,6 +1528,26 @@ mod r46_read_classification {
     /// Every R46 case is a `cat-file` read, whose absence witness is git naming the path.
     const CAT_FILE: AbsenceWitness = AbsenceWitness::Message(PATH_ABSENT_FROM_TREE);
 
+    /// One representative of every `AbsenceWitness` variant, for the rules that hold at all of
+    /// them. Kept in step with the enum by [`witness_kind`]: the `match` there refuses to compile
+    /// until a new variant is named, and the count in `output_defeats_every_witness` refuses a
+    /// variant dropped from this list.
+    const EVERY_WITNESS: [AbsenceWitness; 3] =
+        [AbsenceWitness::Silence, AbsenceWitness::ExitCode, CAT_FILE];
+
+    /// The witness's kind, as an exhaustive `match` over the enum.
+    ///
+    /// The point is the absence of a wildcard arm: a fourth witness kind stops the test module
+    /// compiling here, where someone has to decide what the all-witness rules mean at it, rather
+    /// than passing silently through a loop that never visits it.
+    fn witness_kind(witness: AbsenceWitness) -> &'static str {
+        match witness {
+            AbsenceWitness::Silence => "silence",
+            AbsenceWitness::ExitCode => "exit_code",
+            AbsenceWitness::Message(_) => "message",
+        }
+    }
+
     /// R46: each subcase is DRIVEN, one per constructed fault, and asserted BY NAME.
     ///
     /// The fault is constructed at the boundary the product itself classifies: a child that could
@@ -1946,10 +1966,29 @@ mod r46_read_classification {
         );
     }
 
-    /// Output plus a non-zero exit is never an absence at EITHER site.
+    /// Output plus a non-zero exit is never an absence at ANY witness (R56).
+    ///
+    /// It looped over two of the three kinds and was named for two, which stopped being the whole
+    /// enum when R55.1 added `ExitCode` -- a loop is only exhaustive over what it walks, and
+    /// nothing made it walk the enum. `EVERY_WITNESS` is now the list, and `witness_kind` is the
+    /// `match` that keeps it honest in both directions: a new variant does not compile until it is
+    /// named there, and a variant dropped from the list fails the count below.
     #[test]
-    fn output_defeats_both_witnesses() {
-        for witness in [AbsenceWitness::Silence, CAT_FILE] {
+    fn output_defeats_every_witness() {
+        let kinds: std::collections::BTreeSet<&str> =
+            EVERY_WITNESS.iter().copied().map(witness_kind).collect();
+        assert_eq!(
+            kinds.len(),
+            EVERY_WITNESS.len(),
+            "two entries of EVERY_WITNESS are the same kind: {kinds:?}"
+        );
+        assert_eq!(
+            EVERY_WITNESS.len(),
+            3,
+            "a witness kind was added to the enum or dropped from the loop: {kinds:?}"
+        );
+
+        for witness in EVERY_WITNESS {
             assert!(
                 matches!(
                     classify_pinned_read(
