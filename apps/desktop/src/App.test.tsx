@@ -2443,13 +2443,15 @@ describe("Beacon desktop shell", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Beacon could not verify the local session.",
     );
+    // A12 (grok, round 2): the session-ERROR view, measured WHILE the error is on screen. It sat
+    // below the click before, where "Check again" has already navigated to setup -- so it measured
+    // the setup surface and the comment claimed otherwise. The same mistake as the concealed view,
+    // in the one place I did not check for it.
+    await expectNoWcagViolations(document.body);
     await user.click(screen.getByRole("button", { name: "Check again" }));
     expect(
       await screen.findByRole("heading", { name: "Set up your operator account" }),
     ).toBeVisible();
-
-    // A12 (grok): the session-ERROR view was mounted here and never measured.
-    await expectNoWcagViolations(document.body);
   });
 
   it("persists the session timeout and renews only on explicit operator activity", async () => {
