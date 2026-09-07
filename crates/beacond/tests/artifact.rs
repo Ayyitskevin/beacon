@@ -881,8 +881,14 @@ fn missing_duplicate_orphaned_or_differently_encoded_event_evidence_refuses_star
         .store
         .connect()
         .execute(
-            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-             SELECT workspace_id, kind, payload_json, occurred_at_ms
+            // R58: a DELIBERATE duplicate, planted around the append path on purpose, and saying
+            // so -- `unchained` is what a row outside the chain honestly is. The refusal this test
+            // asserts still comes from the Artifact passes, which run before the chain pass.
+            "INSERT INTO events (
+                 workspace_id, kind, payload_json, occurred_at_ms,
+                 predecessor_kind, predecessor_digest, link_digest
+             )
+             SELECT workspace_id, kind, payload_json, occurred_at_ms, 'unchained', NULL, NULL
              FROM events WHERE kind = 'artifact.recorded'",
             [],
         )
@@ -933,8 +939,11 @@ fn missing_duplicate_orphaned_or_differently_encoded_event_evidence_refuses_star
     let orphan = payload.replace(&artifact.digest().value, &"0".repeat(64));
     connection
         .execute(
-            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-             VALUES (?1, 'artifact.recorded', ?2, 1)",
+            "INSERT INTO events (
+                 workspace_id, kind, payload_json, occurred_at_ms,
+                 predecessor_kind, predecessor_digest, link_digest
+             )
+             VALUES (?1, 'artifact.recorded', ?2, 1, 'unchained', NULL, NULL)",
             rusqlite::params![fixture.workspace_id.to_string(), orphan],
         )
         .unwrap();

@@ -586,16 +586,13 @@ fn insert_decision(
     let payload = serde_json::to_string(&ResidentConfigurationDecisionPayload {
         decision: decision.clone(),
     })?;
-    connection.execute(
-        "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-         VALUES (?1, ?2, ?3, ?4)",
-        params![
-            decision.workspace_id.to_string(),
-            event_kind(decision.state),
-            payload,
-            i64::try_from(decision.decided_at_ms)
-                .map_err(|_| ResidentConfigurationError::InvalidStore)?,
-        ],
+    crate::event_chain::append_event(
+        &connection,
+        &decision.workspace_id.to_string(),
+        event_kind(decision.state),
+        &payload,
+        i64::try_from(decision.decided_at_ms)
+            .map_err(|_| ResidentConfigurationError::InvalidStore)?,
     )?;
     Ok(())
 }

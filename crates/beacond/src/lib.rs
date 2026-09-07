@@ -313,7 +313,7 @@ const MIGRATION_V32: &str =
     include_str!("../migrations/0032_classification_mission_project_key.sql");
 const MIGRATION_V33: &str = include_str!("../migrations/0033_receipt_pre_image_unreadable.sql");
 const MIGRATION_V34: &str = include_str!("../migrations/0034_receipt_outcome_typed_owner.sql");
-const MIGRATION_V35: &str = include_str!("../migrations/0035_spend_attribution_dimensions.sql");
+const MIGRATION_V35: &str = include_str!("../migrations/0035_event_chain.sql");
 
 #[derive(Debug, Clone)]
 pub struct StartupConfig {
@@ -1690,15 +1690,12 @@ impl Supervisor {
                     workspace_id: id,
                     name: workspace_name.to_owned(),
                 })?;
-                transaction.execute(
-                    "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    params![
-                        id.to_string(),
-                        PersistedEventKind::WorkspaceCreated.as_str(),
-                        payload,
-                        occurred_at_ms
-                    ],
+                crate::event_chain::append_event(
+                    &transaction,
+                    &id.to_string(),
+                    PersistedEventKind::WorkspaceCreated.as_str(),
+                    &payload,
+                    occurred_at_ms,
                 )?;
                 (
                     id,
@@ -6676,18 +6673,22 @@ mod tests {
             .unwrap();
 
         for (offset, kind) in EVERY_KIND.iter().enumerate() {
-            connection
-                .execute(
-                    "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-                     VALUES (?1, ?2, json_object('workspace_id', ?1), ?3)",
-                    rusqlite::params![workspace, kind.as_str(), offset as i64],
+            // R58: through the DOOR, not around it. The witness is stronger for it -- it now says
+            // every kind is one the single append path accepts, which is the property the chain
+            // depends on, rather than only that the schema's CHECK admits the token.
+            crate::event_chain::append_event(
+                &connection,
+                &workspace.to_string(),
+                kind.as_str(),
+                &format!(r#"{{"workspace_id":"{workspace}"}}"#),
+                offset as i64,
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "schema {SCHEMA_VERSION} refuses the Event kind `{}`: {error}",
+                    kind.as_str()
                 )
-                .unwrap_or_else(|error| {
-                    panic!(
-                        "schema {SCHEMA_VERSION} refuses the Event kind `{}`: {error}",
-                        kind.as_str()
-                    )
-                });
+            });
             // ...and it reads back as the variant it was written as, so a kind the CHECK admits but
             // `parse` does not is a failure here rather than at replay.
             assert_eq!(
@@ -6902,8 +6903,11 @@ mod tests {
         connection
             .execute(
                 "
-                INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-                VALUES (?1, 'workspace.created', ?2, 0)
+                INSERT INTO events (
+                    workspace_id, kind, payload_json, occurred_at_ms,
+                    predecessor_kind, predecessor_digest, link_digest
+                )
+                VALUES (?1, 'workspace.created', ?2, 0, 'unchained', NULL, NULL)
                 ",
                 rusqlite::params![
                     Uuid::new_v4().to_string(),
@@ -7050,8 +7054,11 @@ mod tests {
         connection
             .execute(
                 "
-                INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-                VALUES (?1, 'workspace.created', ?2, 0)
+                INSERT INTO events (
+                    workspace_id, kind, payload_json, occurred_at_ms,
+                    predecessor_kind, predecessor_digest, link_digest
+                )
+                VALUES (?1, 'workspace.created', ?2, 0, 'unchained', NULL, NULL)
                 ",
                 rusqlite::params![
                     report.workspace.id.to_string(),

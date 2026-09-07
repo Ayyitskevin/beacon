@@ -539,16 +539,13 @@ fn insert_decision(
     let payload = serde_json::to_string(&LocalModelActivationDecisionPayload {
         activation: activation.clone(),
     })?;
-    connection.execute(
-        "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-         VALUES (?1, ?2, ?3, ?4)",
-        params![
-            activation.workspace_id.to_string(),
-            kind,
-            payload,
-            i64::try_from(activation.decided_at_ms)
-                .map_err(|_| LocalModelActivationError::InvalidStore)?,
-        ],
+    crate::event_chain::append_event(
+        &connection,
+        &activation.workspace_id.to_string(),
+        kind,
+        &payload,
+        i64::try_from(activation.decided_at_ms)
+            .map_err(|_| LocalModelActivationError::InvalidStore)?,
     )?;
     Ok(())
 }

@@ -1323,14 +1323,12 @@ fn insert_artifact(
             recorded_at_ms: stored.recorded_at_ms,
         },
     })?;
-    connection.execute(
-        "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-         VALUES (?1, 'artifact.recorded', ?2, ?3)",
-        params![
-            stored.workspace_id.to_string(),
-            payload,
-            i64::try_from(stored.recorded_at_ms).map_err(|_| ArtifactError::InvalidStore)?
-        ],
+    crate::event_chain::append_event(
+        &connection,
+        &stored.workspace_id.to_string(),
+        "artifact.recorded",
+        &payload,
+        i64::try_from(stored.recorded_at_ms).map_err(|_| ArtifactError::InvalidStore)?,
     )?;
     let sequence = connection.last_insert_rowid();
     connection.execute(

@@ -990,14 +990,12 @@ fn insert_sample_project(
         charter,
         created_at_ms: installation.installed_at_ms,
     };
-    connection.execute(
-        "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-         VALUES (?1, 'project.created', ?2, ?3)",
-        params![
-            workspace_id,
-            serde_json::to_string(&ProjectCreatedPayload { project })?,
-            now
-        ],
+    crate::event_chain::append_event(
+        &connection,
+        &workspace_id,
+        "project.created",
+        &serde_json::to_string(&ProjectCreatedPayload { project })?,
+        now,
     )?;
 
     let repository = StoredRepository {
@@ -1024,19 +1022,17 @@ fn insert_sample_project(
             now,
         ],
     )?;
-    connection.execute(
-        "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-         VALUES (?1, 'project.repository_bound', ?2, ?3)",
-        params![
-            workspace_id,
-            serde_json::to_string(&ProjectRepositoryBoundPayload {
-                project: BoundProjectReference {
-                    id: installation.project_id,
-                },
-                repository,
-            })?,
-            now
-        ],
+    crate::event_chain::append_event(
+        &connection,
+        &workspace_id,
+        "project.repository_bound",
+        &serde_json::to_string(&ProjectRepositoryBoundPayload {
+            project: BoundProjectReference {
+                id: installation.project_id,
+            },
+            repository,
+        })?,
+        now,
     )?;
     connection.execute(
         "INSERT INTO sample_project_installations (
@@ -1057,16 +1053,14 @@ fn insert_sample_project(
             now,
         ],
     )?;
-    connection.execute(
-        "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-         VALUES (?1, 'sample_project.installed', ?2, ?3)",
-        params![
-            workspace_id,
-            serde_json::to_string(&SampleProjectInstalledPayload {
-                installation: installation.clone(),
-            })?,
-            now
-        ],
+    crate::event_chain::append_event(
+        &connection,
+        &workspace_id,
+        "sample_project.installed",
+        &serde_json::to_string(&SampleProjectInstalledPayload {
+            installation: installation.clone(),
+        })?,
+        now,
     )?;
     Ok(())
 }
@@ -3170,16 +3164,16 @@ mod tests {
                     rusqlite::params![second_workspace],
                 )
                 .expect("the second Workspace inserts");
-            connection
-                .execute(
-                    "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-                 VALUES (?1, 'workspace.created', ?2, 7)",
-                    rusqlite::params![
-                        second_workspace,
-                        format!("{{\"workspace_id\":\"{second_workspace}\",\"name\":\"Second\"}}")
-                    ],
-                )
-                .expect("the second Workspace's Event inserts");
+            // R58: a real second Workspace's history goes through the one append path, like every
+            // other history this product writes. Only a DELIBERATE plant stays on raw SQL.
+            crate::event_chain::append_event(
+                &connection,
+                second_workspace,
+                "workspace.created",
+                &format!("{{\"workspace_id\":\"{second_workspace}\",\"name\":\"Second\"}}"),
+                7,
+            )
+            .expect("the second Workspace's Event inserts");
             drop(connection);
 
             let second_id = Uuid::parse_str(second_workspace).unwrap();

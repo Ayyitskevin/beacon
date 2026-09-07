@@ -1379,15 +1379,12 @@ fn insert_evaluation(
         },
     })
     .map_err(|_| EvaluationError::InvalidStore)?;
-    connection.execute(
-        "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-         VALUES (?1, 'evaluation.recorded', ?2, ?3)",
-        params![
-            stored.workspace_id.to_string(),
-            event,
-            i64::try_from(stored.payload.evaluated_at_ms)
-                .map_err(|_| EvaluationError::InvalidStore)?,
-        ],
+    crate::event_chain::append_event(
+        &connection,
+        &stored.workspace_id.to_string(),
+        "evaluation.recorded",
+        &event,
+        i64::try_from(stored.payload.evaluated_at_ms).map_err(|_| EvaluationError::InvalidStore)?,
     )?;
     Ok(())
 }

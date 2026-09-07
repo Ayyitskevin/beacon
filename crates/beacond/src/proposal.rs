@@ -2137,10 +2137,12 @@ fn insert_proposal(connection: &Connection, stored: &StoredProposal) -> Result<(
             submitted_at_ms: stored.submitted_at_ms,
         },
     })?;
-    connection.execute(
-        "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-         VALUES (?1, 'proposal.submitted', ?2, ?3)",
-        params![stored.workspace_id.to_string(), payload, submitted_at_ms],
+    crate::event_chain::append_event(
+        &connection,
+        &stored.workspace_id.to_string(),
+        "proposal.submitted",
+        &payload,
+        submitted_at_ms,
     )?;
     Ok(())
 }

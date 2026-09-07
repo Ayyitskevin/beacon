@@ -391,10 +391,12 @@ impl ProjectService {
             let payload = serde_json::to_string(&ProjectCreatedPayload {
                 project: project.clone(),
             })?;
-            transaction.execute(
-                "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-                 VALUES (?1, 'project.created', ?2, ?3)",
-                params![self.workspace_id.to_string(), payload, now],
+            crate::event_chain::append_event(
+                &transaction,
+                &self.workspace_id.to_string(),
+                "project.created",
+                &payload,
+                now,
             )?;
             transaction.commit()?;
             Ok(project)
@@ -470,10 +472,12 @@ impl ProjectService {
                 previous_revision: expected_current_revision,
                 charter: project.charter.clone(),
             })?;
-            transaction.execute(
-                "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-                 VALUES (?1, 'project.charter_revised', ?2, ?3)",
-                params![self.workspace_id.to_string(), payload, authored_at_ms],
+            crate::event_chain::append_event(
+                &transaction,
+                &self.workspace_id.to_string(),
+                "project.charter_revised",
+                &payload,
+                authored_at_ms,
             )?;
             transaction.commit()?;
             Ok(project)
