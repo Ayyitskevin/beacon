@@ -286,8 +286,11 @@ from 18.
 - ruling on a digest that names no stored Proposal writes neither row nor Event;
 - the copied revisions equal the bound Proposal's at ruling time, and a Ruling
   whose copies disagree with its Proposal refuses startup;
-- moving any one of the four bound revisions puts the Ruling out of force naming
-  that revision and only that one;
+- each bound revision that can move independently — Charter, Project Policy and
+  Repository — puts the Ruling out of force naming that revision and only that
+  one; the pinned base cannot move alone, because it is a field of a Repository
+  revision and Bindings are append-only, so moving it publishes a new Repository
+  revision and both facts are named;
 - a drifted Ruling stays readable and attributable, and startup still succeeds;
 - a second Ruling supersedes the first, both stay readable, and the effective
   Ruling is the last in the chain;
@@ -303,19 +306,24 @@ from 18.
 - identical re-ruling is refused rather than duplicated;
 - missing, duplicate, orphaned, altered, or differently encoded Ruling state or
   Event evidence refuses startup;
-- a reordered field or a trailing byte is refused rather than tolerated;
+- a trailing byte is refused rather than tolerated; a structurally visible
+  reordering is refused; and a same-width reordering changes the identity rather
+  than being detected (see *Exact canonical bytes*, "What 'reordering is
+  refused' can and cannot mean here");
 - `reason` is mandatory: empty, whitespace-only, or over-long is refused;
 - `decision` and `decider` are closed: any tag this ADR does not assign is
   refused;
-- a Ruling row with no Event, a duplicate Event, an orphan Event, an altered
-  row, and a differently encoded Event payload each refuse startup;
-- no accessor reports force as a boolean; and
+- no accessor reports force as a boolean — enforced by review of the public
+  surface, not by a test; and
 - recording a Ruling leaves Run, Receipt, worktree, process, model Invocation,
   network, capability, and external-effect counts unchanged.
 
-Each bullet above maps to one named test. The mapping is recorded in
+Each bullet above maps to one or more named tests, **except where the bullet
+itself says otherwise** — one does, and says so in its own words rather than
+leaving a reader to discover it. The mapping is recorded in
 `docs/implementation/phase-3-ruling-v1.md` so that "maps to a test" is a fact a
-reviewer can check rather than a claim the author makes.
+reviewer can check rather than a claim the author makes, and so that a bullet
+guarded by review instead of by a test is visible as such.
 
 The full repository gate and a non-author exact-head review are required after
 implementation. Applying migration 0019 to live data remains a separate RED
