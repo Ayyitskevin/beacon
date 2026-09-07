@@ -315,12 +315,15 @@ from 18.
   refused;
 - no accessor reports force as a boolean — enforced by review of the public
   surface, not by a test; and
-- recording a Ruling leaves Run, Receipt, worktree, process, model Invocation,
-  network, capability, and external-effect counts unchanged.
+- recording a Ruling adds exactly one Ruling row and one Event and leaves every
+  other **stored** count unchanged — no Run, no Receipt, no security event, and
+  no Invocation or capability state. Process, network and filesystem inertness
+  rest on this module having no such call sites: that is a review property, and
+  the test for this bullet does not observe it.
 
 Each bullet above maps to one or more named tests, **except where the bullet
-itself says otherwise** — one does, and says so in its own words rather than
-leaving a reader to discover it. The mapping is recorded in
+itself says otherwise** — two now do, in whole or in part, and each says so in
+its own words rather than leaving a reader to discover it. The mapping is recorded in
 `docs/implementation/phase-3-ruling-v1.md` so that "maps to a test" is a fact a
 reviewer can check rather than a claim the author makes, and so that a bullet
 guarded by review instead of by a test is visible as such.
