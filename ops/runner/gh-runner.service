@@ -3,9 +3,15 @@ Description=Ephemeral GitHub Actions runner for Ayyitskevin/beacon
 Documentation=https://docs.github.com/en/actions/reference/runners/self-hosted-runners
 Wants=network-online.target docker.service
 After=network-online.target docker.service
-# --ephemeral removes this file after one completed job. The condition keeps
-# Restart=always useful for crashes without turning a consumed runner into a
-# restart loop; re-registration creates the file for the next manual start.
+# An ephemeral runner un-configures itself after its one job: Runner.cs:877-880
+# calls DeleteLocalRunnerConfig, which removes .credentials and its RSA key FIRST
+# and .runner second (ConfigurationManager.cs:496-524, v2.337.0). Both are
+# required here and systemd ANDs them, so a cleanup interrupted between the two
+# deletions still fails the condition -- which is the only state that can leave
+# .runner behind, and is the state that was observed on mickey.
+#
+# The condition is a belt, not the guarantee. See Restart= below.
+ConditionPathExists=/var/lib/gh-runner/actions-runner/.credentials
 ConditionPathExists=/var/lib/gh-runner/actions-runner/.runner
 StartLimitIntervalSec=300
 StartLimitBurst=5
@@ -25,7 +31,27 @@ ExecStart=/usr/bin/bash /var/lib/gh-runner/actions-runner/run.sh
 # actions/cache is the sole cross-job cache. Remove the job container's local
 # workspace after its post-job cache save and before another registration.
 ExecStopPost=+/usr/bin/find /__w -xdev -mindepth 1 -delete
-Restart=always
+# THE GUARANTEE, and the fix for the six-restart loop to start-limit-hit.
+#
+# run.sh never lets the listener's exit code reach systemd. When the runner is
+# un-configured it exits 1 (TerminatedError; "Runner is not configured.",
+# Runner.cs:279-283), and run-helper.sh.template:44-46 turns that into
+# `echo "stop the service, no retry needed"; exit 0`. run.sh:14-29 then maps
+# every code except 2 to `exit 0` as well. So the runner's own request to STOP
+# arrives as a SUCCESSFUL exit, and Restart=always restarted it -- six times,
+# to the start limit.
+#
+# on-failure honours that request. A genuine crash still restarts, because a
+# signal death or a run.sh failure is not a clean exit, and StartLimitBurst
+# above stops a crash loop after five attempts in five minutes.
+#
+# No SuccessExitStatus= is set, deliberately: the source names no non-zero code
+# that reaches systemd as success. Retryable (2) and the two update codes (3, 4)
+# are handled inside run.sh's own loop, and 7 escapes only when
+# ACTIONS_RUNNER_RETURN_VERSION_DEPRECATED_EXIT_CODE=1, which this unit does not
+# set. A SuccessExitStatus= list here would name codes this configuration cannot
+# produce.
+Restart=on-failure
 RestartSec=10s
 TimeoutStopSec=5min
 KillSignal=SIGINT
