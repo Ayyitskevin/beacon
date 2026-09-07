@@ -21,6 +21,7 @@ mod declared_checks;
 mod disk_encryption;
 mod dispatch;
 mod evaluation;
+mod event_chain;
 mod git_object_store;
 mod local_model_activation;
 mod mission;
