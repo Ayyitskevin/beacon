@@ -2711,6 +2711,55 @@ fn a_candidate_describing_a_tree_that_is_not_there_is_refused_before_any_object_
 /// The lockout R46.7 named, in the other direction: item 6's owner rule refuses a mismatch with no
 /// observation, and every historical mismatch has none. Keying the rule on the Receipt's VERSION
 /// rather than on the field's presence is what keeps an upgraded store readable.
+/// R54 (sol1's cold read): the era rule was ONE-SIDED. A version-3 Receipt is read as
+/// "unrecorded" (R46.7.1), and nothing checked that it actually WAS unrecorded -- so a hand-written
+/// hybrid carrying the version-4-only observed field was accepted as a legacy record. An era marker
+/// that only licenses absence is not a marker; it is a hole shaped like one.
+#[test]
+fn sol1_a_version_three_receipt_cannot_carry_version_four_observed_evidence() {
+    let fixture = admitted_mission("v3-carries-v4-observation");
+    let repository = CopyRepository::create(&fixture.copies_root, "v3-carries-v4-observation");
+    let (proposal_digest, _) = fixture.candidate_for_with_pre_image(
+        &repository,
+        "Modify the library root from bytes it no longer holds.",
+        b"what the file held some time ago\n",
+    );
+    let ruling = fixture
+        .rulings
+        .rule_on_candidate(
+            &fixture.candidates.present(&proposal_digest).unwrap(),
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap();
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling.digest().value, &content_for(NEW_BYTES))
+        .unwrap();
+    assert_eq!(receipt.version, 4);
+    assert!(receipt.per_mutation[0].observed_pre_image.is_some());
+
+    // Hand-write the Event/Receipt projection as a v3 wire record but retain the field that v3
+    // could not have emitted. The typed owner, not serde's permissive struct decoder, must decide
+    // whether this hybrid has a meaning.
+    fixture.without_run_triggers(
+        "UPDATE receipts
+            SET version = 3,
+                receipt_json = json_set(receipt_json, '$.version', 3);
+         UPDATE events
+            SET payload_json = json_set(payload_json, '$.version', 3)
+          WHERE kind = 'proposal.dispatched';",
+    );
+    assert!(
+        matches!(
+            fixture.restart(),
+            Err(SupervisorError::DispatchEventMismatch(_))
+        ),
+        "R46.LEGACY.OBSERVATION_DOMAIN: a v3 Receipt carrying v4-only observedPreImage opened Ready"
+    );
+}
+
 #[test]
 fn an_older_schema_34_reader_accepts_legacy_receipts_but_refuses_a_future_outcome() {
     let fixture = admitted_mission("legacy-mismatch");
