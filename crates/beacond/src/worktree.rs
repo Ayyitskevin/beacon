@@ -1422,6 +1422,9 @@ fn run_git_bounded_raw(
     // a second budget's worth of waiting to every call.
     let started = Instant::now();
     let mut child = loop {
+        if reached_deadline(started.elapsed(), budget) {
+            return BoundedRaw::TimedOut;
+        }
         match command.spawn() {
             Ok(child) => break child,
             // `ETXTBSY` is not an answer about this worktree. The kernel refuses to exec a file
@@ -1431,9 +1434,6 @@ fn run_git_bounded_raw(
             // exec (rust-lang/rust#114554). Wait it out inside the budget rather than record a
             // failure. Every other spawn error is the answer.
             Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) => {
-                if reached_deadline(started.elapsed(), budget) {
-                    return BoundedRaw::TimedOut;
-                }
                 thread::sleep(POLL_INTERVAL);
             }
             Err(_) => return BoundedRaw::Failed,
