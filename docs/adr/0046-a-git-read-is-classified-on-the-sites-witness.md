@@ -1,0 +1,258 @@
+---
+status: proposed
+---
+
+# A git read is classified on the site's witness
+
+Beacon reads a repository it does not own. Every one of those reads runs as a bounded child of a
+pinned repository, and every one of them can end three ways that look alike from outside: the thing
+is there, the thing is not there, or the read did not happen. Git reports all three through an exit
+code, and an exit code cannot tell them apart — `cat-file` exits 128 both for "that path is not in
+this tree" and for "this repository is broken", and `merge-base --is-ancestor` exits 1 to say "no".
+
+Reading a non-zero exit as an absence is therefore not a shortcut; it is a wrong answer that looks
+like a right one. A dispatch that took it reported `PreImageMismatch` — compared and differed — for
+a comparison that never happened, and a declared file creation would have Applied against a
+repository whose object store was corrupt. That defect was found by instrumentation, not by a test,
+because nothing in the type system distinguished the two.
+
+Six lanes closed it: R46.1 typed the read, R46.3 keyed absence on what git said about the subject,
+R47 and R47.1 generalised that to every read site, R49 found that the pin itself could be lost
+silently, R53 held the read bound at its edge, and R55/R55.1 divided the sites whose absence is
+silence from the sites whose answer is the exit code. The contract they built is in the code and in
+the rulings; it has never been in one document. This ADR is that document, so that the next reader
+audits against rows rather than re-deriving the rule from tests.
+
+Kevin decides this ADR. Every normative sentence below cites the ruling that decided it and a test
+that fails when it is broken; a sentence with no such test is marked **UNTESTED** and listed under
+Open.
+
+## Decision
+
+A pinned git read is classified on the **witness its site can show**, never on the exit code.
+
+1. A pinned byte read has three answers and never two: `Bytes`, `NotFound`, or
+   `Unreadable(subcase)`. `NotFound` is a fact about the tree — git ran, under the hardening, in the
+   still-pinned repository, and reported no such object. `Unreadable` is the *absence of a fact* and
+   says nothing about the tree. (R46.1 ·
+   `worktree::r46_read_classification::bytes_is_none_for_both_no_bytes_answers`)
+2. Each read site declares an **absence witness**: what that git command does when the subject is
+   genuinely absent. A non-zero exit is `NotFound` only when the child shows that witness; anything
+   else non-zero is `Unreadable`, carrying what git said. Nothing is classified on the exit code, at
+   any site. (R46.3, R47 ·
+   `worktree::r46_read_classification::an_absence_is_what_the_site_can_show_and_the_sites_show_it_differently`)
+3. One classifier serves every site. There is no per-site exit-code arithmetic, and a site
+   participates by naming its witness, not by writing its own rule. (R47, R47.1 ·
+   `worktree::r46_read_classification::output_defeats_both_witnesses`)
+4. The rule fails closed. An unrecognised diagnostic is `Unreadable`, never assumed to be an
+   absence. (R46.3 ·
+   `worktree::r46_read_classification::an_unrecognised_diagnostic_is_unreadable_rather_than_assumed_absent`)
+5. Bytes on stdout defeat every witness: a child that produced output produced *output*, and calling
+   that an absence discards the very bytes it read. (R47 ·
+   `worktree::r46_read_classification::a_non_zero_exit_that_produced_output_is_never_an_absence`)
+6. The pin is re-checked before the exit code is read. Bytes from a repository that is no longer the
+   pinned one are not evidence about it, whatever the child's status said. (R46.1 ·
+   `worktree::r46_read_classification::a_pin_broken_after_the_read_is_unreadable_even_when_the_child_succeeded`)
+7. `Unreadable` carries a **closed vocabulary** of subcases, each with its own outward name, so a
+   Receipt says *which* read failed rather than *that* one did. (R46, R46.3 ·
+   `dispatch::tests::pre_image_unreadable_is_its_own_outcome_and_not_a_mismatch`, whose
+   `subcases.len()` assertion is the closed-count witness)
+8. The pin is a **capability**, not a declaration: a descriptor verified to still name the pinned
+   repository and kept across `exec`, never a pathname re-resolved by the child. (R49 ·
+   `worktree::tests::a_git_directory_that_opens_on_the_placement_descriptor_still_reaches_the_child`)
+9. The read bound is a bound. A child that has not finished by the deadline is `TimedOut`, measured
+   against the clock the budget was set from, with no grace. (R53 ·
+   `worktree::tests::sol1_a_child_finishing_one_millisecond_past_the_bound_is_timed_out`)
+
+## The state table: witness kind × child result → read state
+
+This table is the contract. It is `classify_pinned_read` (`crates/beacond/src/worktree.rs:1058`)
+read as rows. "Diagnostic" means stderr carrying any non-empty line that is not prefixed `hint:`,
+git's documented advice channel (R47.1 ·
+`worktree::r46_read_classification::git_advice_is_not_a_diagnostic_but_everything_else_is`).
+
+Rows that hold at every witness:
+
+| child result | stdout | stderr | read state | ruling · test |
+|---|---|---|---|---|
+| could not start or be waited on | — | — | `Unreadable(ChildFailed)` | R46.1 · `worktree::r46_read_classification::a_child_that_could_not_start_is_unreadable_and_says_so` |
+| outlived the read budget | — | — | `Unreadable(TimedOut)` | R46.1, R53 · `worktree::r46_read_classification::a_child_that_outlived_its_budget_is_unreadable_and_says_so`, `worktree::tests::sol1_a_child_finishing_one_millisecond_past_the_bound_is_timed_out` |
+| finished, pin no longer holds | any | any | `Unreadable(PinBrokenAfterRead)` — decided **before** the code is read | R46.1 · `worktree::r46_read_classification::a_pin_broken_after_the_read_is_unreadable_even_when_the_child_succeeded` |
+| terminated by a signal (no code) | — | — | `Unreadable(Signalled)` | R46.1 · `worktree::r46_read_classification::a_child_killed_by_a_signal_is_unreadable_and_says_so` |
+| exit 0, still pinned | any | any | `Bytes(stdout)` | R46.1 · `worktree::r46_read_classification::a_non_zero_exit_in_a_pinned_repository_is_not_found_and_never_unreadable` |
+| non-zero, still pinned, **stdout non-empty** | bytes | any | `Unreadable(ReadRefused { message })` | R47 · `worktree::r46_read_classification::a_non_zero_exit_that_produced_output_is_never_an_absence` |
+
+Rows where the witness decides — non-zero exit, still pinned, empty stdout:
+
+| witness kind | stderr | read state | ruling · test |
+|---|---|---|---|
+| `Message(m)` | contains `m` | `NotFound` | R46.3 · `worktree::r46_read_classification::an_absence_is_what_the_site_can_show_and_the_sites_show_it_differently` |
+| `Message(m)` | anything else, including empty | `Unreadable(ReadRefused { message })` | R46.3 · `worktree::r46_read_classification::a_broken_repository_is_unreadable_and_never_not_found` |
+| `Silence` | no diagnostic | `NotFound` **today**; `Unreadable(SilentExit { code })` **pending R55** | R47 (today) · `...::an_absence_is_what_the_site_can_show_and_the_sites_show_it_differently`; R55 (pending) · `sol1_exit_128_with_empty_stderr_is_not_an_absence_at_every_silent_site` |
+| `Silence` | diagnostic | `Unreadable(ReadRefused { message })` | R47 · `...::an_absence_is_what_the_site_can_show_and_the_sites_show_it_differently` |
+| `ExitCode` — **pending R55.1** | no diagnostic | the exit code IS the answer: returned as the code, never `SilentExit` | R55.1 · `worktree::tests::a_read_whose_answer_is_its_exit_code_tells_no_apart_from_could_not_tell` |
+| `ExitCode` — **pending R55.1** | diagnostic | `Unreadable(ReadRefused { message })` — broken speaks at these sites (grok's measured table) | R55.1 · **UNTESTED at this head**, see Open |
+
+The `SilentExit` and `ExitCode` rows are not on main at `e2cbe03a`. They exist in astra2's R55 lane at
+`e69d2e92` (`AbsenceWitness::ExitCode`, `PinnedReadFailure::SilentExit { code }`), which has no PR
+number yet.
+
+## Every read site, and the witness it declares
+
+| site | entry point | witness | why | ruling |
+|---|---|---|---|---|
+| `cat-file blob` — the pre-image gate and the effect post-condition | `read_pinned_bytes`, `worktree.rs:1047` | `Message("does not exist in")` | git *names* the path as absent; silence from `cat-file` is not an absence | R46.3 |
+| text reads (`symbolic-ref --quiet`, and its neighbours) | `read_pinned`, `worktree.rs:806` | `Silence` | these answer negatively in silence and speak when they fail | R47 |
+| reads whose answer is the exit code (`merge-base --is-ancestor`) | `read_pinned_exit`, `worktree.rs:838` | `Silence` **today**, `ExitCode` **pending R55.1** | the legitimate negative *is* a silent exit 1 | R55.1 |
+| the filter-driver inventory (`config --includes --name-only --null --list`) | `pinned_filter_drivers`, `worktree.rs:1174` | `Silence` | "no entries" is exit 0 here; a non-zero silent exit means git listed nothing and said nothing | R47.1 |
+
+The filter inventory is a **precondition of every pinned read**, not one of its answers: it decides
+which filter drivers the hardening suppresses, so a read that proceeds with an empty inventory
+proceeds with the hardening switched off. R50 moved it off the `PinnedRead` type and onto the error
+channel — `read_pinned_bytes` returns `Result<PinnedRead, FilterInventoryFailure>` — so the type
+says which read failed. (R47, R50 · `worktree::tests::an_inventory_git_refused_is_never_an_empty_filter_set`,
+`worktree::tests::every_configuration_git_cannot_read_is_a_refusal_that_carries_why`,
+`dispatch::tests::r50_the_two_read_failures_are_not_interchangeable`)
+
+## The closed read-failure vocabulary
+
+Seven subcases at `e2cbe03a`, each with a fixed outward name, counted by an assertion that fails
+when a row is added or deleted (`dispatch.rs:4112-4133`, inside
+`dispatch::tests::pre_image_unreadable_is_its_own_outcome_and_not_a_mismatch`).
+
+| subcase | outward name | meaning | status |
+|---|---|---|---|
+| `ChildFailed` | `child_failed` | the child could not be started or waited on | live |
+| `Signalled` | `signalled` | terminated by a signal; there is no exit code | live |
+| `TimedOut` | `timed_out` | outlived the read budget (R53) | live |
+| `PinBrokenAfterRead` | `pin_broken_after_read` | the repository is no longer the pinned one | live |
+| `ReadRefused { message }` | `read_refused` | git refused and did not name the subject as absent; carries git's message, bounded to 120 characters (R28.4) | live |
+| `FilterInventoryUnreadable` | `filter_inventory_unreadable` | RETIRED by R50; retained so already-written Receipts stay decodable | retired, decodable |
+| `FilterInventoryRefused { message }` | `filter_inventory_refused` | RETIRED by R50, same terms | retired, decodable |
+| `SilentExit { code }` | `silent_exit` | a `Silence` site exited non-zero saying nothing | **pending R55** |
+
+A retired variant is retained, never deleted: deleting it would make Receipts already in a store
+undecodable, which is the same reason `DispatchOutcome::Admissible` is retained. Retirement means no
+new dispatch produces it, not that the vocabulary forgot it.
+
+## What each dispatch outcome does with each read state
+
+The pre-image gate (`dispatch::pre_images_hold`) is where a read state becomes a decision. The
+declared × observed table itself is not duplicated here: it belongs to
+[ADR 0040](0040-outcome-document-renders-records-it-never-makes-them.md)'s family and is owned by
+R46.8.
+
+| read result | recorded observation | dispatch outcome | ruling · test |
+|---|---|---|---|
+| `Err(FilterInventoryFailure)` | none — no child ran | `FilterInventoryUnreadable`, carrying the inventory failure | R50 · `dispatch::tests::r50_inventory_receipt_requires_its_failure`, `dispatch::tests::r50_other_outcome_rejects_an_inventory_failure` |
+| `Unreadable(subcase)` | **none** — a read that failed is not evidence about the tree | `PreImageUnreadable`, carrying the subcase | R46, R46.6 · `dispatch::tests::pre_image_unreadable_is_its_own_outcome_and_not_a_mismatch`, `dispatch::tests::astra_unreadable_receipt_requires_its_failure`, `dispatch::tests::astra_other_outcome_rejects_a_pre_image_failure` |
+| `NotFound` | `ObservedPreImage::Absent` — an observed absence is a **value**, not a missing field | holds against a declared absence; `PreImageMismatch` against declared bytes | R46.7 · `dispatch::tests::a_mismatch_receipt_owes_the_digest_it_read` (the value is coherent) and `a_holding_cell_declared_absent_and_absent_applies_and_reopens` in `crates/beacond/tests/dispatch.rs` (it holds) |
+| `Bytes` | `ObservedPreImage::Bytes { digest }` | holds if the digest equals the declared one, else `PreImageMismatch` carrying the observed digest | R46.5 · `dispatch::tests::a_mismatch_receipt_owes_the_digest_it_read` |
+
+`PreImageMismatch` means **compared and differed**, and nothing else. The two failure fields are not
+interchangeable: a Receipt carries a pre-image read failure exactly when its outcome is
+`PreImageUnreadable`, and an inventory failure exactly when its outcome is
+`FilterInventoryUnreadable`. (R46.6, R50 · `dispatch::tests::r50_the_two_read_failures_are_not_interchangeable`)
+
+## The pin is a capability
+
+`GIT_DIR` is baked into the child's environment before the fork and names
+`/proc/self/fd/100`, so the pinned Git directory must *arrive* on descriptor 100 and must *survive*
+the exec. `dup2(git_fd, 100)` normally does both, because `dup2` clears close-on-exec on the copy it
+makes — except when there is no copy to make. POSIX defines `dup2(n, n)` on an open descriptor as a
+successful no-op, so when the pin has itself opened on descriptor 100 — which happens once the
+process's descriptor table has grown, as it does under a parallel test run — close-on-exec survives
+the placement, the exec closes the descriptor `GIT_DIR` names, and git reports
+`fatal: not a git repository`. The placement "succeeded" and the capability was gone.
+
+`enter` therefore clears the flag directly with `fcntl(F_SETFD, 0)` in that case, rather than
+detouring through a scratch descriptor: the detour allocates inside the pre-exec window and can fail
+with `EMFILE` in exactly the exhausted descriptor table that produces the case, so the fallback
+would be least available when it is most needed. (R49 ·
+`worktree::tests::a_git_directory_that_opens_on_the_placement_descriptor_still_reaches_the_child`;
+at dispatch level, R51 ·
+`a_dispatch_whose_git_directory_lands_on_the_placement_descriptor_still_applies` in
+`crates/beacond/tests/dispatch.rs`)
+
+The pin is checked by device and inode, not by name, because the name is exactly what a rename can
+move; both the working directory and the Git directory are pinned, because swapping either one alone
+voids every measurement taken through the value. (R46.1 ·
+`worktree::tests::a_pinned_repository_notices_a_rename_and_a_decoy_at_its_pathname`,
+`worktree::tests::a_pinned_repository_is_entered_by_descriptor_and_not_by_its_pathname`)
+
+## Invariants
+
+- **Absent, broken, not-evaluated and elapsed never collapse.** Each is its own state with its own
+  name at every layer that can tell them apart, and a layer that cannot tell them apart says so
+  rather than choosing one.
+- **A guard is keyed on the property, not on something next to it.** Absence is keyed on the
+  witness of absence, never on the exit code that accompanies it; the pin is keyed on device and
+  inode, never on the pathname beside them.
+- **Closed vocabularies stay closed.** A vocabulary with a counted witness gains a row only by a
+  decision that updates the count, and loses one never — retired variants stay decodable.
+
+## Consequences
+
+A new git read site inside a pinned repository **must declare its witness kind**, and the type
+system makes that unavoidable: `classify_pinned_read` takes an `AbsenceWitness` argument, so a site
+cannot be added without answering "what does this command do when the subject is genuinely absent?".
+Declaring it wrongly is the failure this ADR cannot prevent by construction — R47.1 corrected three
+premises about the sites by *measuring the real git*, and a new site owes the same measurement
+rather than an assumption.
+
+A new `Unreadable` subcase costs three edits, by design: the variant, its `name()` arm, and the row
+plus count in the closed-vocabulary witness. Forgetting the third fails
+`dispatch::tests::pre_image_unreadable_is_its_own_outcome_and_not_a_mismatch` on its `subcases.len()`
+assertion with "a read-failure subcase was added or a row was deleted: the vocabulary is closed" —
+the count is a separate list from the `match`, so an added variant that the author also added to the
+match is still caught.
+
+A caller that folds `PinnedRead` back into an `Option` re-creates the collapse this ADR exists to
+prevent, and the type will not stop it. `read_pinned` does exactly that today
+(`worktree.rs:803-810`), which is the open R52 lane below.
+
+Operators gain a Receipt that names which read failed, rather than one asserting a comparison that
+never happened. That is the point of the whole contract: an unreadable pre-image refuses as
+`PreImageUnreadable` with its subcase, and a dispatch that could not establish the hardening refuses
+as `FilterInventoryUnreadable` with its own.
+
+## Open
+
+1. **"Four states" and "three answers" are both in use, for different things.** The brief for this
+   ADR describes a pinned read as having four states; `PinnedRead`'s own doc comment says "THREE
+   answers, never two (R46/R46.1)" and R46.1's ruling text says `Bytes | NotFound |
+   Unreadable(subcase)` — three. Both are right about different objects: the *type* has three
+   variants, and the byte-read *entry point* has four results since R50 moved the inventory
+   precondition to the error channel (`Result<PinnedRead, FilterInventoryFailure>`). This ADR
+   writes three-plus-a-precondition because that is what the code says. If Kevin prefers the
+   four-state framing, `PinnedRead`'s doc comment is the thing to change, not this table — a
+   document that says four where the type says three sends the next reader to the wrong place.
+   (brief vs. `worktree.rs:1000`, R46.1)
+2. **The closed-vocabulary count is seven here and eight in the brief.** Main at `e2cbe03a` counts
+   seven and asserts seven; the eighth (`SilentExit`) exists only in astra2's unpushed R55 lane at
+   `e69d2e92`. The rows above are marked pending rather than written as current. (brief vs. `dispatch.rs:4129-4133`)
+3. **`ExitCode` + stderr is UNTESTED as a named row.** R55.1 rules that at an exit-code site any
+   stderr is `Unreadable(ReadRefused)` because broken speaks there. In the R55 lane at `e69d2e92`
+   that behaviour falls out of the general `ReadRefused` arm; no test names the exit-code site's
+   version of it. R14's bar
+   (`worktree::tests::a_read_whose_answer_is_its_exit_code_tells_no_apart_from_could_not_tell`)
+   covers the *negative*, not the speaking-failure row.
+4. **A dead arm sits in the R55 lane's `read_pinned_exit`.** At `e69d2e92:worktree.rs:834` the match
+   reads `PinnedRead::Unreadable(PinnedReadFailure::SilentExit { .. }) if false => code,` — guarded
+   by a literal `false`, so it can never be taken, while the arm below returns `None` for every
+   `Unreadable`. This is astra2's lane in flight, read only for this ADR and not touched; it is
+   recorded because an arm that cannot execute is either a decision half-made or a leftover, and
+   whichever it is, it should not reach main unexplained.
+5. **`read_pinned` still discards the typed failure — and it is not the only entry point that
+   does.** `worktree.rs:793` does `pinned_filter_drivers(repository).ok()?`, so an inventory failure
+   at the provenance gate becomes `SourceNotBeaconMade` — a read failure reported as a claim about
+   the source. R52 (PR #116) is the open lane for it. Two sibling entry points make the same fold at
+   `worktree.rs:827` (`read_pinned_exit`) and `worktree.rs:1112` (`write_pinned`), both returning
+   `Option`, so an inventory that could not be established arrives at their callers as an ordinary
+   negative. R52's text scopes itself to "the last untyped read path **in dispatch.rs**", which
+   these two are not, so this is a note about R52's reach rather than a claim that it missed them —
+   but a reader should not take R52 landing as "every site now keeps the typed failure".
+6. **This ADR adds two sections the house template does not use.** No accepted ADR in `docs/adr/`
+   carries `## Invariants` or `## Open`; both were required by the brief. Kevin may want them folded
+   into `## Consequences` and a review note respectively, in which case the content is unchanged and
+   only the headings move.
