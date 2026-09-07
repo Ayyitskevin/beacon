@@ -35,11 +35,11 @@ use beacond::{
     ProjectView, ProposalService, ProviderFeature, RepositoryDraft, RepositorySourceKind,
     ResidentConfiguration, ResidentConfigurationService, ResidentLifecycleService,
     RubricDeclaration, RulingDecision, RulingService, RulingSupersedes, SecretString, SourceKind,
-    SpendCompleteness, SpendLine, SpendMeasurement, SpendOrigin, SpendReference, SpendSupersedes,
-    SpendTotals, StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig,
-    Supervisor, SupportRef, TeamDraft, TeamMemberDraft, TeamService, TeamView, UncertaintyKind,
-    UncountedEntry, UncountedKind, UnfinishedKind, Verdict, declared_conditions_digest,
-    positionable_sources, record_completion,
+    SpendCompleteness, SpendEra, SpendLine, SpendMeasurement, SpendOrigin, SpendReference,
+    SpendSupersedes, SpendTotals, StarterOrganizationService, StarterResidentDraft, StarterRole,
+    StartupConfig, Supervisor, SupportRef, TeamDraft, TeamMemberDraft, TeamService, TeamView,
+    UncertaintyKind, UncountedEntry, UncountedKind, UnfinishedKind, Verdict,
+    declared_conditions_digest, positionable_sources, record_completion,
 };
 use data_encoding::HEXLOWER;
 use rusqlite::{Connection, params};
@@ -634,6 +634,7 @@ impl Admitted {
     /// One measured spend record, through its own write path so the Event that positions it exists.
     fn measure_spend(&self, measurement: SpendMeasurement) -> MeasuredSpendV1 {
         let record = MeasuredSpendV1 {
+            era: SpendEra::V2,
             workspace_id: self.store.workspace_id,
             mission_id: self.mission.id,
             spend_id: Uuid::new_v4(),
@@ -1864,6 +1865,7 @@ fn a_delivery_naming_another_missions_artifact_aborts_collection_by_name() {
 fn a_counted_measurement_with_no_priced_lines_cannot_be_built_at_all() {
     let fixture = admitted("no-priced-lines", vec!["Gates pass".to_owned()]);
     let mut record = MeasuredSpendV1 {
+        era: SpendEra::V2,
         workspace_id: fixture.store.workspace_id,
         mission_id: fixture.mission.id,
         spend_id: Uuid::new_v4(),
@@ -2874,6 +2876,7 @@ fn collector_refuses_a_spend_record_for_a_different_mission_than_the_completion(
     drop(connection);
 
     let spend = MeasuredSpendV1 {
+        era: SpendEra::V2,
         workspace_id: fixture.store.workspace_id,
         mission_id: other_mission,
         spend_id: Uuid::new_v4(),
@@ -2999,6 +3002,7 @@ fn collector_refuses_measured_spend_whose_coverage_starts_after_mission_admissio
     );
 
     let spend = MeasuredSpendV1 {
+        era: SpendEra::V2,
         workspace_id: fixture.store.workspace_id,
         mission_id: fixture.mission.id,
         spend_id: Uuid::new_v4(),
@@ -3061,6 +3065,7 @@ fn a_spend_window_that_starts_at_admission_spans_the_mission() {
     let fixture = admitted("spend-coverage-at-admission", vec!["Gates pass".to_owned()]);
     let admission = admitted_sequence(&fixture.store, fixture.mission.id);
     let spend = MeasuredSpendV1 {
+        era: SpendEra::V2,
         workspace_id: fixture.store.workspace_id,
         mission_id: fixture.mission.id,
         spend_id: Uuid::new_v4(),

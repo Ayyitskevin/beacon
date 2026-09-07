@@ -230,6 +230,22 @@ impl<T> SpendAttribution<T> {
         }
     }
 
+    /// The state and the one value it carries, for the store's projection.
+    ///
+    /// `not_applicable` is the only state with nothing to carry, so a `None` here means exactly
+    /// that -- an `unattributed` row always carries the reason it is unattributed, which is the
+    /// difference the wire format spends a length prefix on.
+    pub fn projection(&self) -> (&'static str, Option<String>)
+    where
+        T: fmt::Display,
+    {
+        match self {
+            Self::Attributed(value) => ("attributed", Some(value.to_string())),
+            Self::Unattributed(reason) => ("unattributed", Some(reason.clone())),
+            Self::NotApplicable => ("not_applicable", None),
+        }
+    }
+
     /// The state's NAME, for a reader that reports which of the three a line carried.
     pub fn name(&self) -> &'static str {
         match self {
@@ -456,6 +472,14 @@ impl fmt::Display for PredecessorFault {
 /// The immutable v1 payload, exactly as its canonical bytes decode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MeasuredSpendV1 {
+    /// Which grammar these bytes are written in, and therefore what the record is allowed to say.
+    ///
+    /// It is a FIELD rather than a decode-time detail because the encoder needs it: a record
+    /// decoded from `beacon.spend.v1` bytes has to re-encode to those same bytes, and the era is
+    /// the only thing that distinguishes them from a v2 record whose dimensions all happen to be
+    /// unattributed. Without it the round trip that every verified read performs would refuse
+    /// every v1 row -- calling an honest older record malformed (R46.7.1).
+    pub era: SpendEra,
     pub workspace_id: Uuid,
     pub mission_id: Uuid,
     /// The record's **reference** identity: which record a citation names (R15). The digest is its
@@ -523,6 +547,10 @@ pub enum MalformedSpend {
     CoverageRange,
     /// A superseded digest that is not lowercase 64-character hexadecimal.
     SupersedesDigest,
+    /// A record in the v1 era carrying a dimension its grammar has nowhere to put. Refused rather
+    /// than dropped: a caller who wrote four answered dimensions and got bytes back that say
+    /// nothing would never learn that the record cannot hold them.
+    EraCannotCarryDimensions,
 }
 
 impl MalformedSpend {
@@ -554,6 +582,7 @@ impl MalformedSpend {
             Self::ControlCharacter => "control_character",
             Self::CoverageRange => "coverage_range",
             Self::SupersedesDigest => "supersedes_digest",
+            Self::EraCannotCarryDimensions => "era_cannot_carry_dimensions",
         }
     }
 }
@@ -703,12 +732,19 @@ fn require_uncounted(entries: &[UncountedEntry]) -> Result<(), MalformedSpend> {
 /// encoder and the decoder cannot disagree about what fits.
 struct Encoder {
     out: Vec<u8>,
+    /// The grammar being written. Carried here so `encode_totals` can ask, rather than being
+    /// threaded through every helper that does not care.
+    era: SpendEra,
 }
 
 impl Encoder {
-    fn new() -> Self {
+    fn new(era: SpendEra) -> Self {
         Self {
-            out: MAGIC_V2.to_vec(),
+            out: match era {
+                SpendEra::V1 => MAGIC_V1.to_vec(),
+                SpendEra::V2 => MAGIC_V2.to_vec(),
+            },
+            era,
         }
     }
 
@@ -890,6 +926,24 @@ fn require_dimension_token(value: &str) -> Result<(), MalformedSpend> {
     }
 }
 
+/// A v1 line can only say one thing about its dimensions: that its era did not record them.
+fn require_v1_attribution(attribution: &LineAttribution) -> Result<(), MalformedSpend> {
+    let era_reason = |state: &SpendAttribution<String>| matches!(state, SpendAttribution::Unattributed(reason) if reason == V1_ERA_REASON);
+    let agent_is_era_reason = matches!(
+        &attribution.agent,
+        SpendAttribution::Unattributed(reason) if reason == V1_ERA_REASON
+    );
+    if agent_is_era_reason
+        && era_reason(&attribution.route)
+        && era_reason(&attribution.provider)
+        && era_reason(&attribution.model)
+    {
+        Ok(())
+    } else {
+        Err(MalformedSpend::EraCannotCarryDimensions)
+    }
+}
+
 /// One dimension: its tag, then whatever that arm carries.
 fn encode_attribution<T>(
     encoder: &mut Encoder,
@@ -933,8 +987,16 @@ fn encode_totals(encoder: &mut Encoder, totals: &SpendTotals) -> Result<(), Malf
     require_totals(totals)?;
     encoder.u64(totals.counted_units);
     encoder.count(totals.lines.len(), MAX_LINES)?;
+    let era = encoder.era;
     for line in &totals.lines {
-        encode_line_attribution(encoder, &line.attribution)?;
+        match era {
+            // The v1 grammar has nowhere to put a dimension. A v1 record therefore carries the one
+            // attribution its era can mean -- unattributed, for that reason -- and anything else is
+            // refused BY NAME rather than dropped. Dropping it would let a caller write four
+            // answered dimensions, get bytes back that say nothing, and never learn.
+            SpendEra::V1 => require_v1_attribution(&line.attribution)?,
+            SpendEra::V2 => encode_line_attribution(encoder, &line.attribution)?,
+        }
         encoder.string(&line.unit, MAX_UNIT_BYTES)?;
         encoder.i64(line.amount_minor);
         encoder.tag(line.minor_units_exponent);
@@ -1017,7 +1079,7 @@ fn encode(payload: &MeasuredSpendV1) -> Result<Vec<u8>, MalformedSpend> {
         return Err(MalformedSpend::CoverageRange);
     }
 
-    let mut encoder = Encoder::new();
+    let mut encoder = Encoder::new(payload.era);
     encoder.uuid(&payload.workspace_id);
     encoder.uuid(&payload.mission_id);
     encoder.uuid(&payload.spend_id);
@@ -1114,6 +1176,7 @@ fn decode(input: &[u8]) -> Result<MeasuredSpendV1, MalformedSpend> {
     decoder.finish()?;
 
     Ok(MeasuredSpendV1 {
+        era,
         workspace_id,
         mission_id,
         spend_id,
@@ -1137,7 +1200,7 @@ impl MeasuredSpendV1 {
     pub fn digest(&self) -> Result<SpendDigest, MalformedSpend> {
         Ok(SpendDigest {
             algorithm: DIGEST_ALGORITHM.to_owned(),
-            canonicalizer: CANONICALIZER.to_owned(),
+            canonicalizer: self.era.canonicalizer().to_owned(),
             value: HEXLOWER.encode(&sha256(&self.canonical_bytes()?)),
         })
     }
@@ -1231,7 +1294,11 @@ impl MeasuredSpend {
 /// adding a line here is a compile-time hole rather than a silent one -- the shape `ruling.rs`
 /// established.
 fn spend_columns_match(row: &StoredSpendRow, payload: &MeasuredSpendV1) -> bool {
-    row.spend_id == payload.spend_id
+    // The canonicalizer column is a projection like any other, and now that two are admitted it is
+    // one a row can be wrong about. A row claiming v1 over v2 bytes would otherwise be handed back
+    // with a digest envelope naming a function that did not produce it.
+    row.digest_canonicalizer == payload.era.canonicalizer()
+        && row.spend_id == payload.spend_id
         && row.mission_id == payload.mission_id
         && row.version == payload.version
         && row.origin == payload.origin.as_str()
@@ -1243,6 +1310,7 @@ fn spend_columns_match(row: &StoredSpendRow, payload: &MeasuredSpendV1) -> bool 
 
 struct StoredSpendRow {
     digest_value: String,
+    digest_canonicalizer: String,
     canonical_bytes: Vec<u8>,
     spend_id: Uuid,
     mission_id: Uuid,
@@ -1262,7 +1330,8 @@ fn load_spend_row(
     connection
         .query_row(
             "SELECT digest_value, canonical_bytes, spend_id, mission_id, version, origin,
-                    measurement, coverage_from_event_seq, coverage_to_event_seq, measured_at_ms
+                    measurement, coverage_from_event_seq, coverage_to_event_seq, measured_at_ms,
+                    digest_canonicalizer
              FROM measured_spend WHERE workspace_id = ?1 AND digest_value = ?2",
             rusqlite::params![workspace_id.to_string(), digest_value],
             |row| {
@@ -1277,6 +1346,7 @@ fn load_spend_row(
                     coverage_from_event_seq: row.get::<_, i64>(7)? as u64,
                     coverage_to_event_seq: row.get::<_, i64>(8)? as u64,
                     measured_at_ms: row.get::<_, i64>(9)? as u64,
+                    digest_canonicalizer: row.get(10)?,
                 })
             },
         )
@@ -1379,7 +1449,9 @@ pub fn verified_spend_within(
     Ok(MeasuredSpend {
         digest: SpendDigest {
             algorithm: DIGEST_ALGORITHM.to_owned(),
-            canonicalizer: CANONICALIZER.to_owned(),
+            // The era in the BYTES, not the build's newest name: a digest reported under a
+            // canonicalizer that did not produce it names nothing (ADR 0034/0037).
+            canonicalizer: payload.era.canonicalizer().to_owned(),
             value: row.digest_value,
         },
         canonical_bytes: row.canonical_bytes,
@@ -1771,7 +1843,7 @@ fn insert_spend(
             rusqlite::params![
                 payload.workspace_id.to_string(),
                 DIGEST_ALGORITHM,
-                CANONICALIZER,
+                payload.era.canonicalizer(),
                 digest_value,
                 canonical_bytes,
                 payload.spend_id.to_string(),
@@ -1794,6 +1866,42 @@ fn insert_spend(
             constraint_refusal(&error, payload.workspace_id, payload.mission_id)
                 .unwrap_or_else(|| SpendRecordError::from(error))
         })?;
+
+    // The projection. Only the two arms that HAVE lines write rows here, and a record whose
+    // measurement carries none writes none -- which the `measurement` column already says, so an
+    // empty child set is never ambiguous.
+    if let Some(totals) = payload.measurement.totals() {
+        for (index, line) in totals.lines.iter().enumerate() {
+            let (agent_state, agent_value) = line.attribution.agent.projection();
+            let (route_state, route_value) = line.attribution.route.projection();
+            let (provider_state, provider_value) = line.attribution.provider.projection();
+            let (model_state, model_value) = line.attribution.model.projection();
+            connection
+                .execute(
+                    "INSERT INTO measured_spend_lines (
+                     digest_value, line_index, unit, amount_minor, minor_units_exponent,
+                     agent_state, agent_value, route_state, route_value,
+                     provider_state, provider_value, model_state, model_value
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    rusqlite::params![
+                        digest_value,
+                        i64::try_from(index).unwrap_or(i64::MAX),
+                        line.unit,
+                        line.amount_minor,
+                        i64::from(line.minor_units_exponent),
+                        agent_state,
+                        agent_value,
+                        route_state,
+                        route_value,
+                        provider_state,
+                        provider_value,
+                        model_state,
+                        model_value,
+                    ],
+                )
+                .map_err(|error| SpendRecordError::Store(error.to_string()))?;
+        }
+    }
     let event = serde_json::to_string(&SpendMeasuredPayload {
         workspace_id: payload.workspace_id.to_string(),
         spend_id: payload.spend_id.to_string(),
@@ -1803,7 +1911,7 @@ fn insert_spend(
         measurement: payload.measurement.literal().to_owned(),
         digest: SpendDigestPayload {
             algorithm: DIGEST_ALGORITHM.to_owned(),
-            canonicalizer: CANONICALIZER.to_owned(),
+            canonicalizer: payload.era.canonicalizer().to_owned(),
             value: digest_value.to_owned(),
         },
         canonical_bytes_base64: BASE64.encode(canonical_bytes),

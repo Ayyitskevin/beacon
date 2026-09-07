@@ -18,9 +18,10 @@ use beacond::{
     MissionImpactClassificationV1, MissionMemberDraft, MissionService, OperatorAccountService,
     OperatorSessionPhase, PredecessorFault, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft,
     ProjectPolicyService, ProjectService, ProjectView, ProviderFeature, ResidentConfiguration,
-    ResidentConfigurationService, ResidentLifecycleService, SecretString, SpendStoreError,
-    StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig, Supervisor,
-    TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule,
+    ResidentConfigurationService, ResidentLifecycleService, SPEND_CANONICALIZER_V1,
+    SPEND_CANONICALIZER_V2, SPEND_V1_ERA_REASON, SecretString, SpendAttribution, SpendEra,
+    SpendStoreError, StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig,
+    Supervisor, TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule,
     TeamLeadSelectionPolicy, TeamMemberDraft, TeamService, TeamView, TrackRecordEvidenceKind,
     TrackRecordRequirement, open_store_connection, verified_classification_for_citation,
     verified_classification_within, verified_spend_for_citation, verified_spend_within,
@@ -341,6 +342,7 @@ impl Stored {
 
     fn spend_record(&self, spend_id: Uuid, version: u32) -> MeasuredSpendV1 {
         MeasuredSpendV1 {
+            era: SpendEra::V2,
             workspace_id: self.store.workspace_id,
             mission_id: self.mission_id,
             spend_id,
@@ -372,7 +374,7 @@ impl Stored {
                      workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
                      canonical_bytes, spend_id, mission_id, version, origin, measurement,
                      coverage_from_event_seq, coverage_to_event_seq, measured_at_ms
-                 ) VALUES (?1, 'sha256', 'beacon.spend.v1', ?2, ?3, ?4, ?5, ?6, ?7, 'measured',
+                 ) VALUES (?1, 'sha256', ?9, ?2, ?3, ?4, ?5, ?6, ?7, 'measured',
                            1, ?8, 1788400000000)",
                 params![
                     self.store.workspace_id.to_string(),
@@ -383,6 +385,14 @@ impl Stored {
                     version,
                     origin,
                     i64::try_from(self.coverage_to).unwrap(),
+                    // The era the BYTES are in. These decoy rows exist to make columns and bytes
+                    // disagree in one chosen way; a canonicalizer column that disagreed as well
+                    // would refuse them for the wrong reason.
+                    if bytes.starts_with(b"beacon.spend.v1\0") {
+                        SPEND_CANONICALIZER_V1
+                    } else {
+                        SPEND_CANONICALIZER_V2
+                    },
                 ],
             )
             .unwrap();
@@ -468,7 +478,7 @@ fn the_verified_reader_requires_an_exact_byte_round_trip_of_the_stored_slice() {
         .expect("stored");
     assert_eq!(found.payload(), &record);
     assert_eq!(found.canonical_bytes(), bytes.as_slice());
-    assert_eq!(found.digest().canonicalizer, "beacon.spend.v1");
+    assert_eq!(found.digest().canonicalizer, SPEND_CANONICALIZER_V2);
 
     // A row whose bytes do not hash to its key is refused, not returned.
     let mut tampered = bytes.clone();
@@ -2025,6 +2035,7 @@ fn a_store_with_classifications_crosses_0032_and_keeps_them() {
     // `evaluation_cited_runs` with it), and a store rolled back below 33 must carry their
     // pre-0033 shapes or the version-31 signature will not match.
     restore_pre_0033_receipts(&connection);
+    restore_pre_0035_spend(&connection);
     connection
         .execute_batch(
             "CREATE TEMP TABLE classifications_snapshot AS
@@ -2050,7 +2061,7 @@ fn a_store_with_classifications_crosses_0032_and_keeps_them() {
     })
     .expect("a store written before 0032 migrates forward");
     assert_eq!(report.diagnostics.status, DiagnosticStatus::Ready);
-    assert_eq!(report.diagnostics.schema_version, 34);
+    assert_eq!(report.diagnostics.schema_version, 35);
 
     let connection = stored.connection();
     let carried: Vec<u8> = connection
@@ -2089,5 +2100,342 @@ fn a_store_with_classifications_crosses_0032_and_keeps_them() {
     assert!(
         error.to_string().contains("FOREIGN KEY constraint failed"),
         "{error}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Migration 0035: the canonicalizer CHECK follows the codec, and lines get a projection
+// ---------------------------------------------------------------------------------------------
+
+/// R22's promise, made executable: 0035 is 0025's `measured_spend` with the canonicalizer CHECK
+/// widened and nothing else.
+///
+/// A rebuild that quietly dropped a column CHECK, a foreign key or a uniqueness constraint would
+/// pass every behavioural test that does not happen to exercise it. The comparison is on collapsed
+/// whitespace rather than lines, because the widened CHECK does not fit on one line and a
+/// line-for-line diff would be measuring the formatter.
+#[test]
+fn migration_0035_rebuilds_measured_spend_from_0025s_ddl_with_exactly_one_check_widened() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    let m25 = fs::read_to_string(dir.join("0025_spend_and_impact.sql")).unwrap();
+    let m35 = fs::read_to_string(dir.join("0035_spend_attribution_dimensions.sql")).unwrap();
+    let table = |source: &str, name: &str| -> String {
+        let start = source
+            .find(&format!("CREATE TABLE {name} ("))
+            .unwrap_or_else(|| panic!("no CREATE TABLE {name}"));
+        let end = source[start..].find(") STRICT;").expect("table end") + start;
+        source[start..end]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .replacen(&format!("CREATE TABLE {name} ("), "", 1)
+    };
+    let old = table(&m25, "measured_spend");
+    let new = table(&m35, "measured_spend_v35");
+    assert_eq!(
+        old.replace(
+            "CHECK (digest_canonicalizer = 'beacon.spend.v1')",
+            "CHECK ( digest_canonicalizer IN ('beacon.spend.v1', 'beacon.spend.v2'))",
+        ),
+        new,
+        "0035 changed something other than the canonicalizer CHECK"
+    );
+
+    // And the objects come back under their 0025 names, so every reader and rollback helper keeps
+    // working unchanged.
+    for name in [
+        "CREATE TRIGGER measured_spend_no_update",
+        "CREATE TRIGGER measured_spend_no_delete",
+        "ALTER TABLE measured_spend_v35 RENAME TO measured_spend;",
+        "UPDATE schema_meta SET version = 35 WHERE singleton = 1 AND version = 34;",
+    ] {
+        assert!(m35.contains(name), "0035 is missing: {name}");
+    }
+}
+
+/// The projection is written with the record and says exactly what the bytes say.
+#[test]
+fn a_recorded_v2_record_projects_one_row_per_line_with_each_dimensions_state_and_value() {
+    let stored = stored("spend-line-projection");
+    let agent = Uuid::new_v4();
+    let mut record = stored.spend_record(Uuid::new_v4(), 1);
+    record.measurement = SpendMeasurement::Measured(SpendTotals {
+        counted_units: 412,
+        lines: vec![SpendLine {
+            attribution: LineAttribution {
+                agent: SpendAttribution::Attributed(agent),
+                route: SpendAttribution::Unattributed("the ledger row named no route.".to_owned()),
+                provider: SpendAttribution::Attributed("local".to_owned()),
+                model: SpendAttribution::NotApplicable,
+            },
+            unit: "USD".to_owned(),
+            amount_minor: 123_456,
+            minor_units_exponent: 2,
+        }],
+    });
+    let recorded = stored
+        .spend_service()
+        .record(&record.canonical_bytes().unwrap())
+        .expect("the record is stored");
+    let digest = recorded.digest().value.clone();
+
+    let connection = stored.connection();
+    let row: (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+    ) = connection
+        .query_row(
+            "SELECT unit, agent_state, agent_value, route_state, route_value,
+                    provider_state, model_state, model_value
+             FROM measured_spend_lines WHERE digest_value = ?1 AND line_index = 0",
+            [&digest],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            },
+        )
+        .expect("the line was projected");
+    assert_eq!(row.0, "USD");
+    assert_eq!(row.1, "attributed");
+    assert_eq!(row.2, agent.to_string());
+    assert_eq!(row.3, "unattributed");
+    assert_eq!(
+        row.4, "the ledger row named no route.",
+        "the reason a dimension is unattributed is the thing worth keeping"
+    );
+    assert_eq!(row.5, "attributed");
+    assert_eq!(row.6, "not_applicable");
+    assert_eq!(
+        row.7, None,
+        "`not_applicable` is the only state with nothing to carry"
+    );
+
+    // The pairing rule is the database's, not the writer's: no hand-written row can spell
+    // `unattributed` with nothing in it, which is the collapse the wire format refuses by giving
+    // `0x02` a length and `0x03` none.
+    let error = connection
+        .execute(
+            "INSERT INTO measured_spend_lines (
+                 digest_value, line_index, unit, amount_minor, minor_units_exponent,
+                 agent_state, agent_value, route_state, route_value,
+                 provider_state, provider_value, model_state, model_value
+             ) VALUES (?1, 1, 'EUR', 1, 2,
+                       'unattributed', NULL, 'not_applicable', NULL,
+                       'not_applicable', NULL, 'not_applicable', NULL)",
+            [&digest],
+        )
+        .expect_err("an unattributed row with no reason is refused");
+    assert!(
+        error.to_string().contains("CHECK constraint failed"),
+        "{error}"
+    );
+}
+
+/// A store holding a `beacon.spend.v1` row crosses 0035 and still reads it -- as unattributed,
+/// never refused, never rewritten.
+///
+/// This is R46.7.1 tested through the whole stack rather than at the decoder. The v1 row is written
+/// before the migration, the schema is rolled back to 34 from 0025's own text (a rollback that
+/// retyped the DDL would be testing the test), and startup migrates it forward.
+#[test]
+fn a_store_with_a_v1_spend_row_crosses_0035_and_still_reads_it_as_unattributed() {
+    let stored = stored("v1-spend-across-0035");
+
+    // A genuine v1 record: its era is a field, so the encoder writes v1 magic and the digest names
+    // the function that produced those bytes. Nothing here fabricates a digest.
+    let mut v1 = stored.spend_record(Uuid::new_v4(), 1);
+    v1.era = SpendEra::V1;
+    v1.measurement = SpendMeasurement::Measured(SpendTotals {
+        counted_units: 412,
+        lines: vec![SpendLine {
+            attribution: LineAttribution::unattributed(SPEND_V1_ERA_REASON),
+            unit: "USD".to_owned(),
+            amount_minor: 123_456,
+            minor_units_exponent: 2,
+        }],
+    });
+    let bytes = v1.canonical_bytes().expect("a v1 record encodes");
+    let digest = v1.digest().expect("digest");
+    assert_eq!(digest.canonicalizer, SPEND_CANONICALIZER_V1);
+    stored.insert_spend(
+        &bytes,
+        &digest.value,
+        v1.spend_id,
+        v1.version,
+        "daemon_ledger",
+    );
+
+    // Back to the pre-0035 shape, from 0025's own text. Stamped 34, the version a store arrives at
+    // from the migration below this one.
+    let migration_0025 = include_str!("../migrations/0025_spend_and_impact.sql");
+    let spend_objects = &migration_0025[migration_0025
+        .find("CREATE TABLE measured_spend (")
+        .unwrap()
+        ..migration_0025
+            .find("-- One Mission impact classification.")
+            .unwrap()];
+    let connection = stored.connection();
+    connection
+        .execute_batch(
+            "CREATE TEMP TABLE spend_snapshot AS SELECT * FROM measured_spend;
+             DROP TRIGGER measured_spend_lines_no_update;
+             DROP TRIGGER measured_spend_lines_no_delete;
+             DROP TABLE measured_spend_lines;
+             DROP TRIGGER measured_spend_no_update;
+             DROP TRIGGER measured_spend_no_delete;
+             DROP TABLE measured_spend;",
+        )
+        .unwrap();
+    connection.execute_batch(spend_objects).unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO measured_spend SELECT * FROM spend_snapshot;
+             UPDATE schema_meta SET version = 34 WHERE singleton = 1;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let report = Supervisor::bootstrap(StartupConfig {
+        store_path: stored.store.path.clone(),
+        initial_workspace_name: "Ignored".to_owned(),
+    })
+    .expect("a store written before 0035 migrates forward");
+    assert_eq!(report.diagnostics.status, DiagnosticStatus::Ready);
+    assert_eq!(report.diagnostics.schema_version, 35);
+
+    let connection = stored.connection();
+    let carried: Vec<u8> = connection
+        .query_row(
+            "SELECT canonical_bytes FROM measured_spend WHERE digest_value = ?1",
+            [&digest.value],
+            |row| row.get(0),
+        )
+        .expect("the row crossed the rebuild");
+    assert_eq!(carried, bytes, "the rebuild changed the stored bytes");
+
+    // Read through the verified reader, which round-trips the bytes: this is the check that would
+    // refuse every v1 row if the encoder always wrote the newest magic.
+    let reread = verified_spend_within(&connection, stored.store.workspace_id, &digest.value)
+        .expect("the carried row still verifies")
+        .expect("the carried row is still there");
+    assert_eq!(reread.canonical_bytes(), bytes.as_slice());
+    assert_eq!(
+        reread.digest().canonicalizer,
+        SPEND_CANONICALIZER_V1,
+        "a v1 row was handed back under a canonicalizer that did not produce it"
+    );
+
+    let totals = reread
+        .payload()
+        .measurement
+        .totals()
+        .expect("the measured arm");
+    let attribution = &totals.lines[0].attribution;
+    for (name, state) in attribution.states() {
+        assert_eq!(
+            state, "unattributed",
+            "a v1 row read {name} as something its era could not record"
+        );
+    }
+
+    // And the projection is empty for it, which the canonicalizer column explains rather than
+    // leaving a reader to guess whether the lines were lost.
+    let projected: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM measured_spend_lines WHERE digest_value = ?1",
+            [&digest.value],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(projected, 0, "a v1 row has no dimensions to project");
+}
+
+/// The pre-0035 spend shapes, for a test that stamps a version below 35.
+///
+/// 0035 widened `measured_spend`'s canonicalizer CHECK and added `measured_spend_lines`. A store
+/// rolled back below 35 must carry the shapes that version actually had, or its schema signature
+/// will not match one built from the ladder. Taken from 0025's own text: a rollback that retyped
+/// the DDL would be testing the test.
+fn restore_pre_0035_spend(connection: &Connection) {
+    let source = include_str!("../migrations/0025_spend_and_impact.sql");
+    let block = &source[source
+        .find("CREATE TABLE measured_spend (")
+        .expect("0025 defines the spend table")
+        ..source
+            .find("-- One Mission impact classification.")
+            .expect("0025 defines the table after it")];
+    connection
+        .execute_batch(
+            "CREATE TEMP TABLE spend_pre_0035 AS SELECT * FROM measured_spend;
+             DROP TABLE measured_spend_lines;
+             DROP TRIGGER measured_spend_no_update;
+             DROP TRIGGER measured_spend_no_delete;
+             DROP TABLE measured_spend;",
+        )
+        .expect("the 0035 shapes come off");
+    connection.execute_batch(block).expect("0025's spend table");
+    connection
+        .execute_batch(
+            "INSERT INTO measured_spend SELECT * FROM spend_pre_0035;
+             DROP TABLE spend_pre_0035;",
+        )
+        .expect("the rows come back");
+}
+
+/// The canonicalizer column is a projection like any other, and now that the store admits two it is
+/// one a row can be wrong about.
+///
+/// A row claiming v1 over v2 bytes would otherwise be handed back with a digest envelope naming a
+/// function that did not produce it -- which is the one thing a digest envelope exists to prevent.
+#[test]
+fn the_verified_reader_refuses_a_row_whose_canonicalizer_disagrees_with_its_bytes() {
+    let stored = stored("decoy-canonicalizer");
+    let spend_id = Uuid::new_v4();
+    let record = stored.spend_record(spend_id, 1);
+    let bytes = record.canonical_bytes().unwrap();
+    let digest = record.digest().unwrap().value;
+
+    // v2 bytes, filed under the v1 name. Both are admitted by the CHECK, so only the reader can
+    // catch this.
+    stored
+        .connection()
+        .execute(
+            "INSERT INTO measured_spend (
+                 workspace_id, digest_algorithm, digest_canonicalizer, digest_value,
+                 canonical_bytes, spend_id, mission_id, version, origin, measurement,
+                 coverage_from_event_seq, coverage_to_event_seq, measured_at_ms
+             ) VALUES (?1, 'sha256', ?2, ?3, ?4, ?5, ?6, 1, 'daemon_ledger', 'measured',
+                       1, ?7, 1788400000000)",
+            params![
+                stored.store.workspace_id.to_string(),
+                SPEND_CANONICALIZER_V1,
+                &digest,
+                &bytes,
+                spend_id.to_string(),
+                stored.mission_id.to_string(),
+                i64::try_from(stored.coverage_to).unwrap(),
+            ],
+        )
+        .unwrap();
+
+    let connection = stored.connection();
+    assert_eq!(
+        verified_spend_within(&connection, stored.store.workspace_id, &digest)
+            .expect_err("a row whose canonicalizer disagrees with its bytes is refused"),
+        SpendStoreError::ColumnsDisagree
     );
 }
