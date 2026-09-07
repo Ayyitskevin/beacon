@@ -35,8 +35,11 @@ jobs:
         id: package_bindings
         if: >-
           success() && (
+          !cancelled() &&
+          (
           (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-          github.event_name == 'workflow_dispatch'
+            github.event_name == 'workflow_dispatch'
+          )
           )
         env:
           PACKAGE_RUNNER_LABELS: ${{ vars.BEACON_PACKAGE_RUNNER_LABELS }}
@@ -220,8 +223,11 @@ jobs:
     # Source: https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idif
     if: >-
       needs.product.result == 'success' && (
+      !cancelled() &&
+      (
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-      github.event_name == 'workflow_dispatch'
+        github.event_name == 'workflow_dispatch'
+      )
       )
     runs-on: ${{ fromJSON(needs.product.outputs.package_runner_labels) }}
     # node-a is Ubuntu 24.04/glibc 2.39. Keep the accepted 2.35 AppImage floor
