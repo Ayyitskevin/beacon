@@ -4240,7 +4240,7 @@ mod tests {
         ];
         assert_eq!(
             subcases.len(),
-            7,
+            8,
             "a read-failure subcase was added or a row was deleted: the vocabulary is closed"
         );
         let names: std::collections::BTreeSet<&str> = subcases
