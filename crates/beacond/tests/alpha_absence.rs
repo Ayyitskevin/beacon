@@ -11,7 +11,7 @@
 //! reason these criteria were unguarded in the first place.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Every Rust source file under the crate's `src`, as `(relative path, text)`.
 ///
@@ -196,5 +196,115 @@ fn the_network_inventory_would_notice_a_stray_client() {
         strays,
         vec![("telemetry.rs".to_owned(), "TcpStream::connect")],
         "the predicate did not notice a client outside the allow-list"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Bullet 30 — "Elapsed time alone cannot pause work unless the Project Charter or Policy names a
+// time gate."
+//
+// No time gate exists yet (census bullet 30), so the whole criterion rests on the safe half: work
+// is paused by an Operator Command and by nothing else. That half is guarded here.
+//
+// Two assertions, because a scheduler could arrive two ways. It could write the pause state
+// itself -- caught by the writer count -- or it could call the existing writer from a timer, which
+// no textual inventory can see directly; what it CAN see is a timing primitive appearing in the
+// file that owns the writer, which is where such a caller would have to live to reach a private
+// service. Neither is a proof; together they are the tripwire the criterion had none of.
+// ---------------------------------------------------------------------------------------------
+
+/// The table that says whether work is paused. One writer, by design.
+const PAUSE_STATE_TABLE: &str = "UPDATE installation_pause";
+
+/// Primitives that could turn elapsed time into an action.
+const TIMING_PRIMITIVES: &[&str] = &[
+    "thread::sleep",
+    "thread::spawn",
+    "Instant::now",
+    "SystemTime::now",
+];
+
+/// Every file that writes the pause state.
+fn pause_writers(inventory: &[(String, String)]) -> Vec<String> {
+    inventory
+        .iter()
+        .filter(|(_, text)| text.contains(PAUSE_STATE_TABLE))
+        .map(|(path, _)| path.clone())
+        .collect()
+}
+
+#[test]
+fn only_an_operator_command_can_change_the_pause_state() {
+    let inventory = source_inventory();
+
+    // One writer. A scheduler that paused work on its own would be a second.
+    let writers = pause_writers(&inventory);
+    assert_eq!(
+        writers,
+        vec!["dispatch.rs".to_owned()],
+        "A30.ONE_PAUSE_WRITER -- the pause state is written from somewhere new"
+    );
+
+    // ...and that writer's three entry points are the Operator's, named here so a fourth is a
+    // failure rather than a surprise. `is_paused` reads and is not one of them.
+    let dispatch = &inventory
+        .iter()
+        .find(|(path, _)| path == "dispatch.rs")
+        .expect("dispatch.rs is in the inventory")
+        .1;
+    let entry_points = [
+        "pub fn pause(",
+        "pub fn resume(",
+        "pub fn resume_accepting_unresolved(",
+    ];
+    for entry in entry_points {
+        assert!(
+            dispatch.contains(entry),
+            "A30.PAUSE_ENTRY_POINTS -- `{entry}` is gone; this witness no longer describes the              Operator's surface"
+        );
+    }
+
+    // No timing primitive in the file that owns the writer: a timer that reached the private pause
+    // service would have to live here, and this is what would notice it arriving.
+    let timers: Vec<&str> = TIMING_PRIMITIVES
+        .iter()
+        .copied()
+        .filter(|primitive| dispatch.contains(primitive))
+        .collect();
+    assert!(
+        timers.is_empty(),
+        "A30.NO_TIMER_BESIDE_THE_WRITER -- elapsed time gained a way to reach the pause state:          {timers:?}"
+    );
+}
+
+/// The control, against a synthetic inventory: both halves of the predicate notice.
+#[test]
+fn the_pause_inventory_would_notice_a_scheduler() {
+    let synthetic = vec![
+        (
+            "dispatch.rs".to_owned(),
+            "UPDATE installation_pause SET paused".to_owned(),
+        ),
+        (
+            "scheduler.rs".to_owned(),
+            "UPDATE installation_pause SET paused = 1".to_owned(),
+        ),
+    ];
+    assert_eq!(
+        pause_writers(&synthetic),
+        vec!["dispatch.rs".to_owned(), "scheduler.rs".to_owned()],
+        "the predicate did not notice a second writer"
+    );
+
+    let timed = "fn tick() { std::thread::sleep(d); } UPDATE installation_pause SET paused";
+    let timers: Vec<&str> = TIMING_PRIMITIVES
+        .iter()
+        .copied()
+        .filter(|primitive| timed.contains(primitive))
+        .collect();
+    assert_eq!(
+        timers,
+        vec!["thread::sleep"],
+        "the predicate did not notice a timer beside the writer"
     );
 }
