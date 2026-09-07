@@ -2810,6 +2810,23 @@ fn is_mismatch_cell(record: &MutationRecord) -> bool {
 fn verify_outcome_invariants(receipt: &DispatchReceipt) -> Result<(), DispatchError> {
     let names = |token: NotVerified| receipt.not_verified.contains(&token);
     let reconstructed = names(NotVerified::ReconstructedAfterInterruption);
+    // R54 (sol1's cold read): THE ERA RULE IS TWO-SIDED. R46.7.1 reads a version-3 Receipt's
+    // missing observation as "unrecorded" and accepts it -- but nothing checked that a version-3
+    // Receipt was actually unrecorded, so a hand-written hybrid carrying the version-4-only
+    // `observedPreImage` was accepted as legacy. An era marker that only licenses absence is not a
+    // marker; it is a hole shaped like one.
+    //
+    // Outcome-independent, because the field belongs to the R46 ERA rather than to one arm: a
+    // version-3 `Applied` carrying it is the same forgery as a version-3 mismatch carrying it.
+    if receipt.version < RECEIPT_VERSION
+        && receipt
+            .per_mutation
+            .iter()
+            .any(|record| record.observed_pre_image.is_some())
+    {
+        return Err(DispatchError::InvalidStore);
+    }
+
     // R46.6(b), astra's HOLD: the field's doc comment says `pre_image_read_failure` belongs to
     // `PreImageUnreadable` and to nothing else, and the owner did not hold it to that. A promise
     // only a comment makes is one a stored Receipt can break -- an unreadable refusal carrying no
@@ -3583,6 +3600,99 @@ mod tests {
             ),
             "a version-4 mismatch carrying an unrecorded mutation was accepted"
         );
+    }
+
+    /// R54 (sol1's cold read): the era rule is TWO-SIDED -- a version-3 Receipt carries NO
+    /// observation at all, not merely "no observation required".
+    ///
+    /// R46.7.1 reads a version-3 Receipt's missing observation as UNRECORDED and accepts it, and
+    /// nothing checked that such a Receipt was actually unrecorded: a hand-written hybrid carrying
+    /// the version-4-only field was read as a legacy record and believed. An era marker that only
+    /// licenses absence is not a marker; it is a hole shaped like one.
+    ///
+    /// The field belongs to the ERA rather than to one arm, so the rule is outcome-independent: an
+    /// `Applied` at version 3 carrying it is the same forgery as a mismatch at version 3 carrying
+    /// it, and ONE row carrying it is enough -- a Receipt does not become half a version.
+    #[test]
+    fn a_version_three_receipt_carries_no_observation_at_all() {
+        let row = |observed: Option<ObservedPreImage>| MutationRecord {
+            kind: MutationKind::ModifyFile,
+            path: "src/lib.rs".to_owned(),
+            pre_image: Some("7".repeat(64)),
+            post_image: Some("8".repeat(64)),
+            observed_pre_image: observed,
+            effect: MutationEffect::NotAttempted,
+        };
+        let legacy = |rows: Vec<MutationRecord>| {
+            let mut receipt = specimen(DispatchOutcome::PreImageMismatch);
+            receipt.version = 3;
+            receipt.per_mutation = rows;
+            receipt
+        };
+
+        // R46.7.1 unchanged: the shape a real pre-R46 store holds.
+        verify_outcome_invariants(&legacy(vec![row(None), row(None)]))
+            .expect("a version-3 mismatch recording nothing is unrecorded, not incoherent");
+
+        // Either observed value is version-4-only vocabulary. A version-3 record cannot have
+        // emitted either one, so neither is evidence -- it is a claim about an era that had no
+        // such field.
+        for forged in [
+            ObservedPreImage::Bytes {
+                digest: "9".repeat(64),
+            },
+            ObservedPreImage::Absent,
+        ] {
+            assert!(
+                matches!(
+                    verify_outcome_invariants(&legacy(vec![row(Some(forged.clone()))])),
+                    Err(DispatchError::InvalidStore)
+                ),
+                "a version-3 Receipt carrying a version-4 observation was accepted"
+            );
+        }
+
+        // ANY row, not every row: a hybrid that leaves the first row bare is the shape that slips
+        // past a rule quantified the other way.
+        assert!(
+            matches!(
+                verify_outcome_invariants(&legacy(vec![
+                    row(None),
+                    row(Some(ObservedPreImage::Absent))
+                ])),
+                Err(DispatchError::InvalidStore)
+            ),
+            "a version-3 Receipt whose second row carried an observation was accepted"
+        );
+
+        // Outcome-independent: nothing about this is particular to the mismatch arm.
+        let mut applied = specimen(DispatchOutcome::Applied);
+        applied.version = 3;
+        applied.per_mutation = vec![row(Some(ObservedPreImage::Bytes {
+            digest: "7".repeat(64),
+        }))];
+        assert!(
+            matches!(
+                verify_outcome_invariants(&applied),
+                Err(DispatchError::InvalidStore)
+            ),
+            "a version-3 applied Receipt carrying a version-4 observation was accepted"
+        );
+
+        // And it does not reach forward. A CURRENT-era Receipt carrying the field is the ordinary
+        // case -- the whole point of R46 -- so a rule one version too wide would refuse every
+        // Receipt this binary writes.
+        let mut current = specimen(DispatchOutcome::PreImageMismatch);
+        current.per_mutation = vec![row(Some(ObservedPreImage::Bytes {
+            digest: "9".repeat(64),
+        }))];
+        verify_outcome_invariants(&current)
+            .expect("a version-4 mismatch carrying what it read is the current era, not a forgery");
+
+        // Outside the mismatch arm the current era owes no observation, which is what an
+        // unreadable pre-image leaves behind (R46.8) -- absence is not the marker, version is.
+        verify_outcome_invariants(&specimen(DispatchOutcome::Applied))
+            .expect("a version-4 Receipt without an observation is the current era, not a forgery");
     }
 
     /// R46.5: a `PreImageMismatch` Receipt owes its own record the digest it compared against.
