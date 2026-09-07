@@ -974,6 +974,12 @@ impl DispatchService {
                 decided.pre_image_read_failure = Some(failure);
                 return Ok(decided.refused(DispatchOutcome::PreImageUnreadable));
             }
+            // R50: no read happened either. The refusal names the inventory, which is the thing
+            // that actually failed, and carries what git said about it.
+            PreImageVerdict::InventoryUnestablished(failure) => {
+                decided.filter_inventory_failure = Some(failure);
+                return Ok(decided.refused(DispatchOutcome::FilterInventoryUnreadable));
+            }
         }
 
         // G11: the live repository, read through the pinned directory with a read-only Git shape.
@@ -1465,11 +1471,15 @@ impl DispatchService {
             let path = format!("{commit}:{declared_path}");
             let cat_file = ["cat-file", "blob", path.as_str()];
             let read = read_pinned_bytes(repository, &cat_file, READ_BUDGET);
-            decided.record_step(GitStepName::CatFile, &cat_file, read.bytes().is_some());
-            // Unchanged behaviour: this post-condition answers "did the effect match", and both
-            // no-bytes answers mean it did not. The pre-image gate below is the one that must
-            // distinguish them, because it REFUSES and its refusal names a comparison.
-            let Some(blob) = read.bytes() else {
+            let bytes = read.as_ref().ok().and_then(PinnedRead::bytes);
+            decided.record_step(GitStepName::CatFile, &cat_file, bytes.is_some());
+            // Unchanged behaviour: this post-condition answers "did the effect match", and every
+            // answer that is not bytes means it did not -- an inventory that could not be read
+            // included. It runs AFTER the objects exist, so its refusal is
+            // `EffectDoesNotMatchDeclaration` with the residue that outcome already accounts for;
+            // the pre-image gate is the one that must distinguish the reasons, because its refusal
+            // names a comparison and nothing has been written yet.
+            let Some(blob) = bytes else {
                 return Ok(false);
             };
             if hex(&crate::proposal::sha256(blob)) != post {
@@ -2107,6 +2117,9 @@ enum PreImageVerdict {
     /// At least one declared pre-image could not be read. Carries the FIRST such failure, which is
     /// the one that stopped this gate from being able to answer.
     Unreadable(PinnedReadFailure),
+    /// R50: the filter-driver inventory could not be established, so no `cat-file` was run at all.
+    /// Not a verdict about any pre-image -- it is why this gate never got to ask.
+    InventoryUnestablished(FilterInventoryFailure),
 }
 
 fn pre_images_hold(
@@ -2127,7 +2140,16 @@ fn pre_images_hold(
         let path = format!("{base}:{declared_path}");
         let cat_file = ["cat-file", "blob", path.as_str()];
         before_read();
-        let read = read_pinned_bytes(repository, &cat_file, READ_BUDGET);
+        let read = match read_pinned_bytes(repository, &cat_file, READ_BUDGET) {
+            Ok(read) => read,
+            // R50: no child ran, because the hardening it would have run under could not be
+            // established. That is not a fact about this pre-image, and it is not this gate's
+            // refusal to name -- it stops the dispatch with the inventory's own outcome.
+            Err(failure) => {
+                decided.record_step(GitStepName::CatFile, &cat_file, false);
+                return PreImageVerdict::InventoryUnestablished(failure);
+            }
+        };
         decided.record_step(GitStepName::CatFile, &cat_file, read.bytes().is_some());
         // R46.8: THE OBSERVATION IS RECORDED FIRST, for every read that produced one, and the
         // verdict is then read off the table. Four rounds of this lane fixed the contract one cell

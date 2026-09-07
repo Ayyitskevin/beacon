@@ -26,17 +26,17 @@ use std::thread::{self, JoinHandle};
 use beacond::{
     AccessOrigin, AutonomyProfile, BeaconCapability, CandidateImages, CandidateService,
     CopyFailpoints, DeclaredCheck, DispatchFailpoints, DispatchOutcome, DispatchService,
-    LocalModelActivationService, LocalModelEndpoint, MissionDraft, MissionMemberDraft,
-    MissionService, MutationEffect, NotVerified, ObservedPreImage, OperatorAccountService,
-    OperatorSessionPhase, PauseService, PinnedReadFailure, ProjectCharterDraft, ProjectDraft,
-    ProjectPolicyDraft, ProjectPolicyService, ProjectRepositoryService, ProjectService,
-    ProposalService, ProviderFeature, RepositoryDraft, RepositoryEffect, RepositorySourceKind,
-    ResidentConfigurationService, ResidentLifecycleService, RulingDecision, RulingService,
-    RulingSupersedes, SampleProjectError, SampleProjectService, SecretString,
-    StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig, Supervisor,
-    SupervisorError, SuppliedContent, TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
-    TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft, TeamService,
-    TrackRecordEvidenceKind, TrackRecordRequirement,
+    FilterInventoryFailure, LocalModelActivationService, LocalModelEndpoint, MissionDraft,
+    MissionMemberDraft, MissionService, MutationEffect, NotVerified, ObservedPreImage,
+    OperatorAccountService, OperatorSessionPhase, PauseService, PinnedReadFailure,
+    ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService,
+    ProjectRepositoryService, ProjectService, ProposalService, ProviderFeature, RepositoryDraft,
+    RepositoryEffect, RepositorySourceKind, ResidentConfigurationService, ResidentLifecycleService,
+    RulingDecision, RulingService, RulingSupersedes, SampleProjectError, SampleProjectService,
+    SecretString, StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig,
+    Supervisor, SupervisorError, SuppliedContent, TeamDraft, TeamLeadAmbiguityRule,
+    TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
+    TeamService, TrackRecordEvidenceKind, TrackRecordRequirement,
 };
 use data_encoding::HEXLOWER;
 use rusqlite::{Connection, OptionalExtension};
@@ -3832,18 +3832,33 @@ fn a_pre_image_the_product_could_not_read_is_refused_as_unreadable_not_as_a_mism
         .dispatch(&ruling.digest().value, &content_for(NEW_BYTES))
         .unwrap();
 
-    // THE NAMED ASSERTION. Not `PreImageMismatch`: no bytes were read, so nothing was compared.
-    assert_eq!(
+    // THE NAMED ASSERTION, and R46's property is the one that has not moved: NOT a mismatch. No
+    // bytes were read, so nothing was compared, and this is the Receipt blue reproduced with
+    // `observed=READ_NONE`.
+    assert_ne!(
         receipt.outcome,
-        DispatchOutcome::PreImageUnreadable,
+        DispatchOutcome::PreImageMismatch,
         "a read that failed was reported as a comparison that differed"
     );
-    // ...and WHICH read failed, by name, so the evidence is not erased.
+    // R50 moved the NAME of this refusal one gate earlier, and the failpoint measured why: the
+    // replacement `.git` breaks the pin, the filter-driver INVENTORY is the first read to touch
+    // it, and it fails there before `cat-file` is ever spawned. R47 could only say
+    // `PreImageUnreadable` with an inventory subcase -- a refusal naming the pre-image read when
+    // the read that failed was a precondition of every gate. `PreImageUnreadable` keeps its own
+    // producer and its own test: see
+    // `a_declared_create_against_a_broken_repository_is_refused_as_unreadable_not_applied`.
     assert_eq!(
-        receipt.pre_image_read_failure,
-        Some(PinnedReadFailure::FilterInventoryUnreadable),
-        "the Receipt does not say which read failed"
+        receipt.outcome,
+        DispatchOutcome::FilterInventoryUnreadable,
+        "the refusal does not name the read that actually failed"
     );
+    assert_eq!(
+        receipt.filter_inventory_failure,
+        Some(FilterInventoryFailure::Unreadable),
+        "the Receipt does not say why the inventory could not be read"
+    );
+    // ...and the retired field is absent, because there is only one path now.
+    assert_eq!(receipt.pre_image_read_failure, None);
     // Nothing was prepared, and the repository is untouched: this is a gate refusal like any other.
     assert_eq!(receipt.prepared_commit, None);
     assert_eq!(receipt.repository_effect(), RepositoryEffect::ByteIdentical);
@@ -3991,23 +4006,33 @@ fn an_inventory_git_refused_refuses_the_dispatch_and_never_runs_with_the_hardeni
         .unwrap();
     fs::set_permissions(&configuration, restore).unwrap();
 
-    // THE NAMED ASSERTION. Not a mismatch -- nothing was compared -- and not `Applied`.
+    // THE NAMED ASSERTION. R50: the refusal is the INVENTORY's own outcome, not a pre-image one.
+    // R47 got the behaviour right and the name wrong -- it refused, but as `PreImageUnreadable`,
+    // which says the byte read failed when no byte read was ever attempted.
     assert_eq!(
         receipt.outcome,
-        DispatchOutcome::PreImageUnreadable,
-        "a dispatch proceeded past a filter inventory git refused"
+        DispatchOutcome::FilterInventoryUnreadable,
+        "a dispatch proceeded past a filter inventory git refused, or misnamed the refusal"
     );
-    // ...and WHICH read failed is the INVENTORY, not the byte read. Before R47 the inventory
-    // returned an empty set and the refusal that eventually arrived described `cat-file` instead --
-    // the right outcome for the wrong reason, with the hardening silently skipped on the way.
-    let Some(PinnedReadFailure::FilterInventoryRefused { message }) =
-        receipt.pre_image_read_failure.as_ref()
+    assert_ne!(
+        receipt.outcome,
+        DispatchOutcome::PreImageMismatch,
+        "nothing was compared, so the refusal must not claim a comparison"
+    );
+    // ...carrying WHY, so the evidence is not erased. Before R47 the inventory returned an empty
+    // set and the read proceeded with the hardening switched off.
+    let Some(FilterInventoryFailure::Refused { message }) =
+        receipt.filter_inventory_failure.as_ref()
     else {
         panic!(
-            "the Receipt does not name the inventory as the read that failed: {:?}",
-            receipt.pre_image_read_failure
+            "the Receipt does not say why the inventory could not be read: {:?}",
+            receipt.filter_inventory_failure
         );
     };
+    assert_eq!(
+        receipt.pre_image_read_failure, None,
+        "the retired subcase path is still producing Receipts"
+    );
     assert!(
         message.contains("Permission denied"),
         "the refusal does not carry what git said: {message}"
