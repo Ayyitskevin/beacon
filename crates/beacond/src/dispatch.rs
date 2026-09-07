@@ -2938,6 +2938,48 @@ fn is_mismatch_cell(record: &MutationRecord) -> bool {
     }
 }
 
+/// Which outcomes a writer can legitimately record with NO mutation rows (R54.3).
+///
+/// `decided.per_mutation` is copied from the Candidate's entries at one site, and a Candidate
+/// cannot be empty, so an outcome decided after that copy always carries at least one row. The
+/// exceptions are the refusals decided before it, `RulingDrifted` (written on both sides), and a
+/// landing reconstructed by `interrupted_receipt`, which carries none by construction.
+///
+/// Exhaustive on purpose: a new outcome does not compile until it says which shape it is written
+/// in, which is the same discipline the outcome table and the caller-line table already carry.
+fn zero_mutation_rows_have_a_writer(outcome: &DispatchOutcome, reconstructed: bool) -> bool {
+    match outcome {
+        DispatchOutcome::RulingUnreadable
+        | DispatchOutcome::RulingRefused
+        | DispatchOutcome::RulingSuperseded
+        | DispatchOutcome::ProposalDigestMismatch
+        | DispatchOutcome::ProposalNotReady
+        | DispatchOutcome::CandidateAbsent
+        | DispatchOutcome::CandidateMismatch
+        | DispatchOutcome::RulingDrifted => true,
+        DispatchOutcome::Applied
+        | DispatchOutcome::LandingRefused
+        | DispatchOutcome::LandingUnobserved => reconstructed,
+        DispatchOutcome::Admissible
+        | DispatchOutcome::AutonomyProfileRefuses
+        | DispatchOutcome::InstallationPaused
+        | DispatchOutcome::ContentOverBounds
+        | DispatchOutcome::ContentDigestMismatch
+        | DispatchOutcome::SourceNotLocal
+        | DispatchOutcome::SourceNotBeaconMade
+        | DispatchOutcome::PreImageMismatch
+        | DispatchOutcome::PreImageUnreadable
+        | DispatchOutcome::FilterInventoryUnreadable
+        | DispatchOutcome::SourceDetached
+        | DispatchOutcome::RepositoryHeadMoved
+        | DispatchOutcome::SourceDirty
+        | DispatchOutcome::AlreadyDispatched
+        | DispatchOutcome::WallClockExceeded
+        | DispatchOutcome::ObjectWriteFailed
+        | DispatchOutcome::EffectDoesNotMatchDeclaration => false,
+    }
+}
+
 fn verify_outcome_invariants(receipt: &DispatchReceipt) -> Result<(), DispatchError> {
     let names = |token: NotVerified| receipt.not_verified.contains(&token);
     let reconstructed = names(NotVerified::ReconstructedAfterInterruption);
@@ -2954,6 +2996,30 @@ fn verify_outcome_invariants(receipt: &DispatchReceipt) -> Result<(), DispatchEr
             .per_mutation
             .iter()
             .any(|record| record.observed_pre_image.is_some())
+    {
+        return Err(DispatchError::InvalidStore);
+    }
+
+    // R54.3 (grok's cold read): AN EMPTY `per_mutation` PASSES THE ERA CHECK ABOVE VACUOUSLY --
+    // "every mutation carries its observation" is true of zero mutations, and R46.9's other bar
+    // catches only the mismatch arm. So the row count needs its own rule, and it is a rule about
+    // WRITERS: `per_mutation` is copied from the Candidate at one site, a Candidate cannot be
+    // empty, and therefore any outcome decided after that copy has at least one row.
+    //
+    // Two exceptions, both real writers rather than concessions:
+    //
+    //   * the refusals decided BEFORE the Candidate is resolved, for which no rows is the only
+    //     shape there is -- and `RulingDrifted`, the one outcome written on both sides of it;
+    //   * a landing reconstructed at startup, which `interrupted_receipt` writes with no rows at
+    //     all. Startup must be able to record that a branch moved even though it never held the
+    //     Candidate, so this keys on the marker that Receipt carries rather than on the outcome.
+    //
+    // Scoped to version 4 for R46.7.1's reason: the era marker is what licenses the check. A
+    // version-3 Receipt was written by a build this rule does not describe, and refusing one on a
+    // promise its era never made is the lockout R46.7 named, in the other direction.
+    if receipt.version >= RECEIPT_VERSION
+        && receipt.per_mutation.is_empty()
+        && !zero_mutation_rows_have_a_writer(&receipt.outcome, reconstructed)
     {
         return Err(DispatchError::InvalidStore);
     }
@@ -3594,6 +3660,18 @@ mod tests {
         // ...and the coherent pair is accepted, so the rule refuses the wrong shape rather than
         // every shape.
         let mut coherent = specimen(DispatchOutcome::FilterInventoryUnreadable);
+        // R54.3: a post-Candidate outcome's writer always carries the Candidate's rows, so a
+        // specimen with none is a shape this product cannot write. Giving it one makes the
+        // specimen faithful; without it this test would now be measuring the row count instead of
+        // what it is about.
+        coherent.per_mutation = vec![MutationRecord {
+            kind: MutationKind::ModifyFile,
+            path: "src/lib.rs".to_owned(),
+            pre_image: Some("7".repeat(64)),
+            post_image: Some("8".repeat(64)),
+            observed_pre_image: None,
+            effect: MutationEffect::NotAttempted,
+        }];
         coherent.filter_inventory_failure = Some(FilterInventoryFailure::Refused {
             message: "fatal: unable to access '/proc/self/fd/100/config': Permission denied"
                 .to_owned(),
@@ -3618,6 +3696,18 @@ mod tests {
             },
         ] {
             let mut receipt = specimen(DispatchOutcome::PreImageUnreadable);
+            // R54.3: a post-Candidate outcome's writer always carries the Candidate's rows, so a
+            // specimen with none is a shape this product cannot write. Giving it one makes the
+            // specimen faithful; without it this test would now be measuring the row count instead of
+            // what it is about.
+            receipt.per_mutation = vec![MutationRecord {
+                kind: MutationKind::ModifyFile,
+                path: "src/lib.rs".to_owned(),
+                pre_image: Some("7".repeat(64)),
+                post_image: Some("8".repeat(64)),
+                observed_pre_image: None,
+                effect: MutationEffect::NotAttempted,
+            }];
             receipt.pre_image_read_failure = Some(retired.clone());
             let encoded = serde_json::to_string(&receipt).unwrap();
             let decoded: DispatchReceipt = serde_json::from_str(&encoded).unwrap();
