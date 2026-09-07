@@ -5724,3 +5724,170 @@ fn astra_a_create_conflict_remains_readable_after_restart() {
         .restart()
         .expect("R46.MISMATCH.OBSERVED_PRESENT_REOPENS");
 }
+
+// R54.1/R54.2: Astra’s committed cold-read regressions and their byte/era controls.
+fn astra_r55_mismatch(label: &str) -> (Fixture, beacond::DispatchReceipt) {
+    let fixture = admitted_mission(label);
+    let repository = CopyRepository::create(&fixture.copies_root, label);
+    let (proposal, _) = fixture.candidate_for_with_pre_image(
+        &repository,
+        "Measure the pre-image.",
+        b"different declared bytes\n",
+    );
+    let ruling = fixture
+        .rulings
+        .rule_on_candidate(
+            &fixture.candidates.present(&proposal).unwrap(),
+            RulingDecision::Approve,
+            APPROVE_REASON,
+            RulingSupersedes::None,
+        )
+        .unwrap();
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling.digest().value, &content_for(NEW_BYTES))
+        .unwrap();
+    assert_eq!(
+        receipt.outcome,
+        DispatchOutcome::PreImageMismatch,
+        "ASTRA.R54.FIXTURE_MISMATCH"
+    );
+    fixture.restart().expect("ASTRA.R54.FIXTURE_REOPENS");
+    (fixture, receipt)
+}
+
+fn astra_r55_replace(fixture: &Fixture, value: &serde_json::Value, column_version: i64) {
+    let encoded = serde_json::to_string(value).unwrap().replace('\'', "''");
+    fixture.without_run_triggers(&format!(
+        "PRAGMA ignore_check_constraints=ON; UPDATE receipts SET version={column_version}, receipt_json='{encoded}'; UPDATE events SET payload_json='{encoded}' WHERE kind='proposal.dispatched'; PRAGMA ignore_check_constraints=OFF;"
+    ));
+}
+
+#[test]
+fn astra_r54_v3_null_observation_is_presence_not_legacy_absence() {
+    let (fixture, receipt) = astra_r55_mismatch("astra-era-null");
+    let mut legacy = serde_json::to_value(&receipt).unwrap();
+    legacy["version"] = 3.into();
+    legacy["perMutation"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("observedPreImage");
+    astra_r55_replace(&fixture, &legacy, 3);
+    fixture
+        .restart()
+        .expect("ASTRA.R54.ABSENT_KEY_IS_LEGACY_CONTROL");
+    legacy["perMutation"][0]["observedPreImage"] = serde_json::Value::Null;
+    assert!(
+        legacy["perMutation"][0]
+            .as_object()
+            .unwrap()
+            .contains_key("observedPreImage")
+    );
+    astra_r55_replace(&fixture, &legacy, 3);
+    let result = fixture.restart();
+    assert!(
+        matches!(result, Err(SupervisorError::DispatchEventMismatch(_))),
+        "ASTRA.R54.V3_NULL_IS_PRESENT: key present with null reopened as {result:?}"
+    );
+}
+
+#[test]
+fn astra_r54_v4_observed_digest_is_not_an_empty_string() {
+    let (fixture, receipt) = astra_r55_mismatch("astra-empty-digest");
+    let mut value = serde_json::to_value(&receipt).unwrap();
+    value["perMutation"][0]["observedPreImage"] = serde_json::json!({"bytes":{"digest":""}});
+    astra_r55_replace(&fixture, &value, 4);
+    let result = fixture.restart();
+    assert!(
+        matches!(result, Err(SupervisorError::DispatchEventMismatch(_))),
+        "ASTRA.R54.EMPTY_OBSERVED_DIGEST: an empty string was accepted as a measured digest: {result:?}"
+    );
+}
+
+#[test]
+fn astra_r54_binary_empty_and_absent_preimages_keep_their_era() {
+    for (label, bytes) in [
+        ("astra-binary", Some(&b"\xff\x00\x80"[..])),
+        ("astra-empty", Some(&b""[..])),
+        ("astra-absent", None),
+    ] {
+        let fixture = admitted_mission(label);
+        let mut repository = CopyRepository::create(&fixture.copies_root, label);
+        if let Some(bytes) = bytes {
+            fs::write(repository.path.join(TARGET), bytes).unwrap();
+        } else {
+            fs::remove_file(repository.path.join(TARGET)).unwrap();
+        }
+        CopyRepository::git(&repository.path, &["add", "-A"]);
+        CopyRepository::git(&repository.path, &["commit", "--quiet", "-m", "held bytes"]);
+        repository.revision = CopyRepository::git(&repository.path, &["rev-parse", "HEAD"]);
+        fixture.beacon_made(&repository);
+        let revision = fixture.rebind_repository_at(&repository, 1);
+        let mut record = fixture.proposal("Compare the bytes held.");
+        record.repository_revision = revision;
+        record.base_revision = repository.revision.clone();
+        // The proposal's context is a separate, unchanged file: reach the pre-image gate.
+        record.context_path = "src/old.rs".to_owned();
+        record.context_digest = sha256(b"fn old() {}\n");
+        record.mutations = vec![(MUTATION_MODIFY, TARGET.to_owned())];
+        let proposal = fixture
+            .proposals
+            .submit(&record.bytes())
+            .unwrap()
+            .digest()
+            .value
+            .clone();
+        fixture
+            .candidates
+            .record(
+                &proposal,
+                &images_for(b"different declared bytes\n", NEW_BYTES),
+            )
+            .unwrap();
+        let ruling = fixture
+            .rulings
+            .rule_on_candidate(
+                &fixture.candidates.present(&proposal).unwrap(),
+                RulingDecision::Approve,
+                APPROVE_REASON,
+                RulingSupersedes::None,
+            )
+            .unwrap();
+        let receipt = fixture
+            .dispatches
+            .dispatch(&ruling.digest().value, &content_for(NEW_BYTES))
+            .unwrap();
+        assert_eq!(
+            receipt.outcome,
+            DispatchOutcome::PreImageMismatch,
+            "ASTRA.R54.BYTES_OUTCOME {label}"
+        );
+        let expected = bytes
+            .map(|b| ObservedPreImage::Bytes {
+                digest: HEXLOWER.encode(&sha256(b)),
+            })
+            .unwrap_or(ObservedPreImage::Absent);
+        assert_eq!(
+            receipt.per_mutation[0].observed_pre_image,
+            Some(expected),
+            "ASTRA.R54.BYTES_ARE_NOT_ABSENCE {label}"
+        );
+        fixture.restart().expect("ASTRA.R54.BYTES_V4_RESTART");
+        let mut value = serde_json::to_value(&receipt).unwrap();
+        value["version"] = 3.into();
+        astra_r55_replace(&fixture, &value, 3);
+        assert!(
+            matches!(
+                fixture.restart(),
+                Err(SupervisorError::DispatchEventMismatch(_))
+            ),
+            "ASTRA.R54.BYTES_V3_PRESENT_REFUSED {label}"
+        );
+        value["perMutation"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("observedPreImage");
+        astra_r55_replace(&fixture, &value, 3);
+        fixture.restart().expect("ASTRA.R54.BYTES_V3_UNRECORDED");
+    }
+}
