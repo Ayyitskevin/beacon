@@ -217,7 +217,7 @@ Test locations: **[u]** = `crates/beacond/src/ruling.rs` unit tests, **[i]** =
 | 2 | every identity-bearing field changes the digest; a changed byte, a reordered field, or a trailing byte is refused or produces a different identity | `each_identity_bearing_field_changes_the_digest` [u] · `every_single_byte_of_the_fixture_is_load_bearing` [u] · `a_trailing_byte_is_refused` [u] · `a_truncated_record_is_refused` [u] · `a_reordering_the_grammar_can_see_is_refused` [u] · `two_same_width_values_swapped_are_a_different_record_rather_than_a_refusal` [u] |
 | 3 | ruling on a digest that names no stored Proposal writes neither row nor Event | `ruling_on_a_digest_that_names_no_proposal_writes_neither_row_nor_event` [i] · `a_proposal_outside_this_services_workspace_is_not_found` [i] · `a_ruling_for_an_unknown_proposal_is_refused_by_the_store` [m] |
 | 4 | the copied revisions equal the bound Proposal's at ruling time; copies that disagree refuse startup | `the_copied_revisions_are_the_proposals_not_the_current_ones` [i] · `the_bound_proposal_envelope_is_copied_from_the_proposal_not_rebuilt_from_constants` [i] · `startup_refuses_copies_that_disagree_with_the_bound_proposal` [i] |
-| 5 | moving any one of the four bound revisions names that revision and only that one | three of four: `a_moved_charter_is_named_alone_and_the_record_does_not_change` [i] · `a_moved_policy_revision_is_named_alone` [i] · `a_new_repository_revision_with_the_same_base_reports_only_the_revision_as_moved` [i] · control: `a_fresh_ruling_reports_neither_drift_nor_supersession` [i] · **the base cannot move alone: `a_rebind_that_moves_the_pinned_commit_names_both_facts` [i] asserts both facts — Residual 3 below** |
+| 5 | each bound revision that can move independently names that revision and only that one; a moved pinned base moves its Repository revision too and both are named | `a_moved_charter_is_named_alone_and_the_record_does_not_change` [i] · `a_moved_policy_revision_is_named_alone` [i] · `a_new_repository_revision_with_the_same_base_reports_only_the_revision_as_moved` [i] · both-facts case: `a_rebind_that_moves_the_pinned_commit_names_both_facts` [i] · control: `a_fresh_ruling_reports_neither_drift_nor_supersession` [i] |
 | 6 | a drifted Ruling stays readable and attributable, and startup still succeeds | `a_moved_charter_is_named_alone_and_the_record_does_not_change` [i] · `a_drifted_chain_still_starts_and_stays_readable` [i] |
 | 7 | a second Ruling supersedes the first, both stay readable, the effective Ruling is the last link | `a_second_ruling_supersedes_the_first_and_both_remain_readable` [i] · `any_decision_may_follow_any_decision_and_every_link_carries_its_own_reason` [i] |
 | 8 | a `supersedes` naming no Ruling, or one bound to a different Proposal, is refused | `a_first_ruling_that_cites_an_unrecorded_digest_is_refused_as_unrecorded` [i] · `citing_another_proposals_ruling_is_refused_as_that_and_not_as_unrecorded` [i] · `citing_a_link_that_is_no_longer_the_tail_is_refused` [i] · `a_later_ruling_that_cites_nothing_is_refused_as_not_the_tail` [i] |
@@ -227,16 +227,16 @@ Test locations: **[u]** = `crates/beacond/src/ruling.rs` unit tests, **[i]** =
 | 12 | an unauthenticated caller receives only the authentication refusal | `unauthenticated_recording_returns_only_the_account_refusal` [i] |
 | 13 | identical re-ruling is refused rather than duplicated | `a_later_ruling_that_cites_nothing_is_refused_as_not_the_tail` [i] — the same call twice, refused the second time with nothing written. The digest primary key is the deeper guard and is unreachable while the chain rule holds. |
 | 14 | missing, duplicate, orphaned, altered, or differently encoded Ruling state or Event evidence refuses startup | `startup_refuses_a_ruling_without_its_event` [i] · `startup_refuses_a_duplicate_ruling_event` [i] · `startup_refuses_two_events_for_one_ruling_and_none_for_another` [i] · `startup_refuses_an_orphan_ruling_event` [i] · `startup_refuses_altered_ruling_bytes` [i] · `startup_refuses_an_indexed_column_that_disagrees_with_the_bytes` [i] · `startup_refuses_a_differently_encoded_event_payload` [i] · `startup_refuses_a_supersession_relation_that_disagrees_with_the_bytes` [i] · `startup_refuses_an_event_naming_an_actor_this_version_has_no_arm_for` [i] · `startup_refuses_an_event_whose_time_disagrees_with_its_row` [i] · `startup_refuses_an_event_recorded_under_another_workspace` [i] · `a_ruling_event_that_does_not_match_its_row_refuses_startup` [i] · control: `a_truthful_store_starts_and_reconciles` [i] |
-| 15 | a reordered field or a trailing byte is refused rather than tolerated | trailing byte: `a_trailing_byte_is_refused` [u] · **reordered field: false as written — Residual 1 below** |
+| 15 | a trailing byte is refused; a structurally visible reordering is refused; a same-width reordering changes the identity | trailing byte: `a_trailing_byte_is_refused` [u] · visible reordering: `a_reordering_the_grammar_can_see_is_refused` [u] · same-width: `two_same_width_values_swapped_are_a_different_record_rather_than_a_refusal` [u] |
 | 16 | `reason` is mandatory: empty, whitespace-only, or over-long is refused | `the_reason_must_be_trimmed_bounded_and_free_of_control_characters` [u] · `a_malformed_reason_or_digest_writes_neither_row_nor_event` [i] |
 | 17 | `decision` and `decider` are closed: any unassigned tag is refused | `an_unassigned_tag_is_refused_in_every_closed_position` [u] · `the_store_refuses_a_ruling_row_whose_digest_envelopes_are_not_this_versions` [i] · `startup_refuses_an_event_naming_an_actor_this_version_has_no_arm_for` [i] |
-| 18 | a Ruling row with no Event, a duplicate Event, an orphan Event, an altered row, and a differently encoded Event payload each refuse startup | **duplicates bullet 14 — Residual 2 below.** Same tests. |
-| 19 | no accessor reports force as a boolean | **no test guards this — Residual 4 below.** Nearest behavioural evidence, which does *not* guard it: `a_ruling_can_be_both_superseded_and_drifted_and_says_so` [i] |
-| 20 | recording leaves Run, Receipt, worktree, process, Invocation, network, capability, and external-effect counts unchanged | `recording_a_ruling_creates_no_run_receipt_worktree_or_external_effect` [i] proves the *stored* half — Run, Receipt and security-event rows unchanged, exactly one new Event and exactly one new Ruling row, and the absent `invocations`/`capabilities` tables. **Worktree, process, network, and general external effect are not observed — Residual 5 below.** |
+| 18 | no accessor reports force as a boolean — enforced by review of the public surface, not by a test | **none, and the bullet now says so.** The public surface is `superseded_by`, `drift`, `digest`, `canonical_bytes`, `payload`, `force`. `a_ruling_can_be_both_superseded_and_drifted_and_says_so` [i] is behavioural evidence about compound state and is NOT a guard on this: adding `is_in_force() -> bool` leaves it passing (gpt2) |
+| 19 | recording leaves Run, Receipt, worktree, process, Invocation, network, capability, and external-effect counts unchanged | `recording_a_ruling_creates_no_run_receipt_worktree_or_external_effect` [i] proves the *stored* half — Run, Receipt and security-event rows unchanged, exactly one new Event and exactly one new Ruling row, and the absent `invocations`/`capabilities` tables. **Worktree, process, network, and general external effect are not observed — Residual 5 below.** |
 
-Bullet 19 is an **absence**, and the note previously called it "structural, not
-test-mappable" while still citing a test beside it. That was an overclaim; Residual 4 below says what
-is actually true.
+Bullet 18 (bullet 19 before Residual 2 removed the duplicate) is an **absence**, and the note
+previously called it "structural, not test-mappable" while still citing a test beside it. That was
+an overclaim; Residual 4 below says what is actually true, and the bullet now says it in ADR 0037
+itself.
 
 Also verified but not required by any bullet: the codec's own round trip
 (`decode_then_encode_is_the_identity`, `the_record_starts_with_the_seventeen_byte_canonicalizer_magic`,
@@ -277,11 +277,21 @@ from an earlier amendment and is false as written. Proposed wording: *"a trailin
 rather than tolerated; a structurally visible reordering is refused, and a same-width reordering
 changes the identity."*
 
+**Applied in ADR 0037** in the commit that carries this line (a commit cannot cite its own
+hash; the report for this change gives it). Applied as written, and the reworded bullet turned out to be
+fully mappable at main, which the residual did not expect: `a_reordering_the_grammar_can_see_is_refused`
+asserts the visible half and `two_same_width_values_swapped_are_a_different_record_rather_than_a_refusal`
+asserts the same-width half. Row 15 of the table above now cites all three.
+
 ### Residual 2 — bullets 14 and 18 are the same bullet
 
 Bullet 18 restates bullet 14 in longer form; both arrived from separate amendments. A list that must
 map one-to-one onto tests cannot carry two spellings of one claim. Proposed change: delete bullet
 18, whose specifics bullet 14 already covers.
+
+**Applied in ADR 0037** in the commit that carries this line (a commit cannot cite its own
+hash; the report for this change gives it). Deleting a bullet renumbers the list: old 19 and 20 are now 18 and 19,
+and the table above follows them.
 
 ### Residual 3 — bullet 5 asks for something the revision model cannot produce
 
@@ -297,6 +307,11 @@ So the bullet is unachievable as written for one of its four cases, and the note
 it clean. Found by gpt2's slice-4 review. Proposed wording: *"each bound revision that can move
 independently — Charter, Project Policy, and Repository — names that revision and only that one; a
 moved pinned base necessarily moves its Repository revision too, and both are named."*
+
+**Applied in ADR 0037** in the commit that carries this line (a commit cannot cite its own
+hash; the report for this change gives it). The reason the base cannot move alone is carried into the bullet itself
+rather than left in this note, so a reader of the ADR does not have to find this file to learn why
+one of its four cases reads differently.
 
 ### Residual 4 — bullet 19 has no guard, and the cited test is not one
 
@@ -319,8 +334,16 @@ review obligation and ADR 0037 says so, rather than a required-evidence bullet p
 cannot exist. Proposed wording: *"no accessor reports force as a boolean — enforced by review of the
 public surface, not by a test."*
 
-All four residuals are edits to ADR 0037, which is under non-author review at the time of writing.
-They are recorded here rather than applied, so the reviewer is not reading a moving document.
+**Applied in ADR 0037** in the commit that carries this line (a commit cannot cite its own
+hash; the report for this change gives it). A **fifth** wrongness surfaced while applying this one, and is fixed in
+the same commit: the sentence closing the evidence list read "Each bullet above maps to one named
+test", which was already false for the many-test bullets and became self-contradicting beside a
+bullet that says it has none. It now says each bullet maps to one or more named tests *except where
+the bullet itself says otherwise*, and why that exception is visible.
+
+All four residuals were edits to ADR 0037, which was under non-author review when they were written.
+They were recorded here rather than applied, so the reviewer was not reading a moving document; ADR
+0037 is accepted and they are applied now.
 Residuals 1 and 2 were found by writing this mapping; residuals 3 and 4 were found by gpt2 reviewing
 it, which is the argument for having written it down at all.
 
