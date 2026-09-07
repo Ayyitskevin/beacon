@@ -1861,6 +1861,49 @@ mod r46_read_classification {
         );
     }
 
+    /// R56 (ADR 0046, Open 2): at an `ExitCode` site a DIAGNOSTIC is a refusal, never the answer.
+    ///
+    /// R55.1 divided these sites from the silent ones by measurement: at `merge-base --is-ancestor`
+    /// the legitimate negative is a silent exit 1, and a broken store SPEAKS. So the code is the
+    /// answer only while git says nothing about it; once git explains itself, the exit status is a
+    /// symptom of the failure it described, not a "no". Nothing named this row until now -- it fell
+    /// out of the general refusal arm, and the adapter's bar would still pass if it became a
+    /// `NotFound` carrier with code 128 (sol1's cold read of ADR 0046).
+    #[test]
+    fn an_exit_code_site_that_says_why_is_refused_and_never_its_answer() {
+        let PinnedRead::Unreadable(PinnedReadFailure::ReadRefused { message }) =
+            classify_pinned_read(
+                BoundedRaw::Finished {
+                    code: Some(128),
+                    stdout: Vec::new(),
+                    stderr: b"fatal: not a git repository: '/proc/self/fd/100'\n".to_vec(),
+                },
+                true,
+                AbsenceWitness::ExitCode,
+            )
+        else {
+            panic!("an exit-code site's diagnostic was taken as its answer");
+        };
+        assert_eq!(message, "fatal: not a git repository: '/proc/self/fd/100'");
+
+        // The distinction this row exists for: the SAME site, the same non-zero code, silent --
+        // that one is the answer. A rule that cannot tell these two apart is the collapse R55.1
+        // was written to prevent, arriving from the refusal side.
+        assert_eq!(
+            classify_pinned_read(
+                BoundedRaw::Finished {
+                    code: Some(128),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                },
+                true,
+                AbsenceWitness::ExitCode,
+            ),
+            PinnedRead::NotFound,
+            "a silent non-zero at an exit-code site is its answer, carried as NotFound"
+        );
+    }
+
     /// Output plus a non-zero exit is never an absence at EITHER site.
     #[test]
     fn output_defeats_both_witnesses() {
