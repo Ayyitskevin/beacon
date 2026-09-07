@@ -1242,7 +1242,26 @@ pub enum SpendRecordError {
     CrossWorkspace,
     /// `(workspace, mission, origin, version)` is already taken, or `spend_id` is. A correction is
     /// a new record at the next version, never an edit.
+    ///
+    /// A19.1: this means a TAKEN IDENTITY and nothing else. It used to mean any constraint the
+    /// store refused, which made it the answer for a Mission that does not exist -- and a caller
+    /// that believed it recorded correction after correction against a Mission that was never
+    /// there.
     IdentityTaken,
+    /// The record names a Mission this Workspace does not have.
+    ///
+    /// The store refused the insert on its `(workspace_id, mission_id)` foreign key. That is the
+    /// only foreign key this insert can fail: the record's own Workspace is compared against the
+    /// service's before any statement runs (`CrossWorkspace` above), and a service exists only
+    /// inside a Workspace the store holds. So an unknown Mission is what SQLite reported, and it is
+    /// what this says.
+    ///
+    /// It is not a correctable state. A spend record measures a Mission; naming one that does not
+    /// exist is a different record, never a later version of this one.
+    MissionUnknown {
+        workspace_id: Uuid,
+        mission_id: Uuid,
+    },
     /// The declared coverage window ends past the last Event this Workspace has. A window is a
     /// claim about a stretch of the store's own history, and the store is the only thing that can
     /// confirm it -- at record time, where `max(sequence)` is a fact. At read time the same question
@@ -1269,10 +1288,52 @@ impl From<OperatorAccountError> for SpendRecordError {
     }
 }
 
+/// A19.1: which constraint the store refused, from SQLite's EXTENDED code.
+///
+/// `ConstraintViolation` is every constraint -- UNIQUE, PRIMARY KEY, CHECK, NOT NULL and FOREIGN
+/// KEY alike -- so mapping the base code to one variant made the owner answer a question it had not
+/// asked. The extended code is the one that distinguishes them, and there is no default arm to
+/// `IdentityTaken`: a constraint this owner does not recognise is a store fault carrying what
+/// SQLite said, never a claim about an identity nobody checked.
+///
+/// The shape is the crate's own, from the classification owner (`mission_impact.rs`), which drew
+/// this distinction when it was written.
+fn constraint_refusal(
+    error: &rusqlite::Error,
+    workspace_id: Uuid,
+    mission_id: Uuid,
+) -> Option<SpendRecordError> {
+    let rusqlite::Error::SqliteFailure(inner, _) = error else {
+        return None;
+    };
+    if inner.code != rusqlite::ErrorCode::ConstraintViolation {
+        return None;
+    }
+    match inner.extended_code {
+        rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE | rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY => {
+            Some(SpendRecordError::IdentityTaken)
+        }
+        rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY => Some(SpendRecordError::MissionUnknown {
+            workspace_id,
+            mission_id,
+        }),
+        _ => None,
+    }
+}
+
 impl From<rusqlite::Error> for SpendRecordError {
+    /// Without the record in hand this cannot name the Mission, so it never guesses one: the
+    /// identity refusals still map here, and everything else is a store fault. The insert path
+    /// calls [`constraint_refusal`] with the record it is inserting, which is where the foreign-key
+    /// arm becomes reachable.
     fn from(error: rusqlite::Error) -> Self {
         if let rusqlite::Error::SqliteFailure(inner, _) = &error
             && inner.code == rusqlite::ErrorCode::ConstraintViolation
+            && matches!(
+                inner.extended_code,
+                rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+                    | rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY
+            )
         {
             return Self::IdentityTaken;
         }
@@ -1298,6 +1359,7 @@ impl fmt::Display for SpendRecordError {
             Self::NotCanonical => formatter.write_str("not_canonical"),
             Self::CrossWorkspace => formatter.write_str("cross_workspace"),
             Self::IdentityTaken => formatter.write_str("identity_taken"),
+            Self::MissionUnknown { .. } => formatter.write_str("mission_unknown"),
             Self::CoverageBeyondStore {
                 claimed_to_event_seq,
                 last_event_seq,
@@ -1457,31 +1519,39 @@ fn insert_spend(
             last_event_seq,
         });
     }
-    connection.execute(
-        "INSERT INTO measured_spend (
+    connection
+        .execute(
+            "INSERT INTO measured_spend (
              workspace_id, digest_algorithm, digest_canonicalizer, digest_value, canonical_bytes,
              spend_id, mission_id, version, origin, measurement,
              coverage_from_event_seq, coverage_to_event_seq, measured_at_ms
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-        rusqlite::params![
-            payload.workspace_id.to_string(),
-            DIGEST_ALGORITHM,
-            CANONICALIZER,
-            digest_value,
-            canonical_bytes,
-            payload.spend_id.to_string(),
-            payload.mission_id.to_string(),
-            i64::from(payload.version),
-            payload.origin.as_str(),
-            payload.measurement.literal(),
-            i64::try_from(payload.coverage_from_event_seq)
-                .map_err(|_| SpendRecordError::Store("coverage out of range".to_owned()))?,
-            i64::try_from(payload.coverage_to_event_seq)
-                .map_err(|_| SpendRecordError::Store("coverage out of range".to_owned()))?,
-            i64::try_from(payload.measured_at_ms)
-                .map_err(|_| SpendRecordError::Store("timestamp out of range".to_owned()))?,
-        ],
-    )?;
+            rusqlite::params![
+                payload.workspace_id.to_string(),
+                DIGEST_ALGORITHM,
+                CANONICALIZER,
+                digest_value,
+                canonical_bytes,
+                payload.spend_id.to_string(),
+                payload.mission_id.to_string(),
+                i64::from(payload.version),
+                payload.origin.as_str(),
+                payload.measurement.literal(),
+                i64::try_from(payload.coverage_from_event_seq)
+                    .map_err(|_| SpendRecordError::Store("coverage out of range".to_owned()))?,
+                i64::try_from(payload.coverage_to_event_seq)
+                    .map_err(|_| SpendRecordError::Store("coverage out of range".to_owned()))?,
+                i64::try_from(payload.measured_at_ms)
+                    .map_err(|_| SpendRecordError::Store("timestamp out of range".to_owned()))?,
+            ],
+        )
+        // A19.1: this is the one statement whose constraint refusal can name a Mission, because the
+        // payload is here. A bare `?` would take the `From` impl, which has no record to name and
+        // would report an unknown Mission as a store fault.
+        .map_err(|error| {
+            constraint_refusal(&error, payload.workspace_id, payload.mission_id)
+                .unwrap_or_else(|| SpendRecordError::from(error))
+        })?;
     let event = serde_json::to_string(&SpendMeasuredPayload {
         workspace_id: payload.workspace_id.to_string(),
         spend_id: payload.spend_id.to_string(),
