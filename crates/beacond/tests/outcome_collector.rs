@@ -27,19 +27,20 @@ use beacond::{
     CollectorRefusal, CompletionActor, CompletionDisposition, ConditionOutcome,
     ConditionResultRecord, Conflicts, DeclaredCheck, EvaluationDraft, EvaluationService,
     EvaluationSubjectDraft, EvaluationSupersedes, Evaluator, Finding, FindingSeverity, ImpactLevel,
-    LineAttribution, LocalModelActivationService, LocalModelEndpoint, MeasuredSpendService,
-    MeasuredSpendV1, MissionCompletionV1, MissionDraft, MissionImpactClassificationV1,
-    MissionImpactService, MissionMemberDraft, MissionService, MissionView,
-    OUTCOME_RECEIPT_CHECKSUM_LABEL, OperatorAccountService, OperatorSessionPhase, OutcomeState,
-    PolicyRevisionRef, ProjectCharterDraft, ProjectDraft, ProjectRepositoryService, ProjectService,
-    ProjectView, ProposalService, ProviderFeature, RepositoryDraft, RepositorySourceKind,
-    ResidentConfiguration, ResidentConfigurationService, ResidentLifecycleService,
-    RubricDeclaration, RulingDecision, RulingService, RulingSupersedes, SecretString, SourceKind,
-    SpendCompleteness, SpendEra, SpendLine, SpendMeasurement, SpendOrigin, SpendReference,
-    SpendSupersedes, SpendTotals, StarterOrganizationService, StarterResidentDraft, StarterRole,
-    StartupConfig, Supervisor, SupportRef, TeamDraft, TeamMemberDraft, TeamService, TeamView,
-    UncertaintyKind, UncountedEntry, UncountedKind, UnfinishedKind, Verdict,
-    declared_conditions_digest, positionable_sources, record_completion,
+    LineAttribution, LocalModelActivationService, LocalModelEndpoint, MalformedSpend,
+    MeasuredSpendService, MeasuredSpendV1, MissionCompletionV1, MissionDraft,
+    MissionImpactClassificationV1, MissionImpactService, MissionMemberDraft, MissionService,
+    MissionView, OUTCOME_RECEIPT_CHECKSUM_LABEL, OperatorAccountService, OperatorSessionPhase,
+    OutcomeState, PolicyRevisionRef, ProjectCharterDraft, ProjectDraft, ProjectRepositoryService,
+    ProjectService, ProjectView, ProposalService, ProviderFeature, RepositoryDraft,
+    RepositorySourceKind, ResidentConfiguration, ResidentConfigurationService,
+    ResidentLifecycleService, RubricDeclaration, RulingDecision, RulingService, RulingSupersedes,
+    SecretString, SourceKind, SpendAttribution, SpendCompleteness, SpendEra, SpendLine,
+    SpendMeasurement, SpendOrigin, SpendReference, SpendSupersedes, SpendTotals,
+    StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig, Supervisor,
+    SupportRef, TeamDraft, TeamMemberDraft, TeamService, TeamView, UncertaintyKind, UncountedEntry,
+    UncountedKind, UnfinishedKind, Verdict, declared_conditions_digest, positionable_sources,
+    record_completion,
 };
 use data_encoding::HEXLOWER;
 use rusqlite::{Connection, params};
@@ -4263,5 +4264,95 @@ fn astra_r48_unbounded_collection_requires_a_receipt_owner_event() {
             })
         ),
         "R48.COLLECTOR.EVENT_REQUIRED: {result:?}"
+    );
+}
+
+/// What per-line attribution cannot yet be used FOR, pinned so the limit is a test rather than a
+/// reading of the code.
+///
+/// Bullet 39 exists so that spend reconciles by agent, route, provider and model. The record now
+/// carries those dimensions per line -- but the Outcome collector accepts exactly ONE line, so two
+/// agents sharing a Mission cannot be rendered: the second line is refused before attribution
+/// matters. Two things would have to move together for that to work, and both are caller-visible:
+/// line uniqueness from `unit` to `(dimensions, unit)`, and this refusal to a spend section that
+/// can print more than one row. Named here so the day that changes, this test goes red on purpose
+/// rather than a limit being discovered by someone wondering why the feature does nothing.
+#[test]
+fn the_collector_still_accepts_exactly_one_spend_line_so_dimensions_cannot_reconcile_yet() {
+    let fixture = admitted("two-line-spend", vec!["Gates pass".to_owned()]);
+    let admission = admitted_sequence(&fixture.store, fixture.mission.id);
+    fixture.classify(ImpactLevel::Ordinary);
+
+    let two_lines = |unit: &str, amount: i64| SpendLine {
+        attribution: LineAttribution {
+            agent: SpendAttribution::Attributed(Uuid::new_v4()),
+            route: SpendAttribution::Attributed("chat".to_owned()),
+            provider: SpendAttribution::Attributed("local".to_owned()),
+            model: SpendAttribution::Attributed("qwen3.8-27b".to_owned()),
+        },
+        unit: unit.to_owned(),
+        amount_minor: amount,
+        minor_units_exponent: 2,
+    };
+    let spend = MeasuredSpendV1 {
+        era: SpendEra::V2,
+        workspace_id: fixture.store.workspace_id,
+        mission_id: fixture.mission.id,
+        spend_id: Uuid::new_v4(),
+        version: 1,
+        origin: SpendOrigin::DaemonLedger,
+        measured_at_ms: 1_788_400_000_000,
+        coverage_from_event_seq: admission,
+        coverage_to_event_seq: newest_event(&fixture.store),
+        measurement: SpendMeasurement::Measured(SpendTotals {
+            counted_units: 2,
+            // Two units, because two lines of ONE unit is `unit_not_unique` today -- which is the
+            // other half of the same limit.
+            lines: vec![two_lines("EUR", 100), two_lines("USD", 200)],
+        }),
+        supersedes: SpendSupersedes::None,
+    };
+    let bytes = spend
+        .canonical_bytes()
+        .expect("the RECORD holds two attributed lines happily");
+    MeasuredSpendService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+        .record(&bytes)
+        .expect("and so does the store");
+
+    let completion = fixture.completion(
+        newest_event(&fixture.store),
+        vec![ConditionOutcome::Met],
+        SpendReference::Recorded {
+            spend_id: spend.spend_id,
+            spend_version: spend.version,
+            spend_sha256: sha256_bytes(&bytes),
+        },
+    );
+    let digest = fixture.record(&completion);
+    let connection = fixture.connection();
+    let refusal = Collector::new(&connection, fixture.store.workspace_id)
+        .collect(&CollectionRequest {
+            completion_digest: Some(digest),
+            ..CollectionRequest::default()
+        })
+        .expect_err("the Outcome cannot yet carry a second spend line");
+    assert_eq!(
+        refusal,
+        CollectorRefusal::SpendUnitsNotSingular { units: 2 }
+    );
+
+    // And two lines of ONE unit -- the shape a per-agent breakdown actually needs -- does not even
+    // encode, so the limit is in two places at once.
+    assert_eq!(
+        MeasuredSpendV1 {
+            measurement: SpendMeasurement::Measured(SpendTotals {
+                counted_units: 2,
+                lines: vec![two_lines("USD", 100), two_lines("USD", 200)],
+            }),
+            ..spend
+        }
+        .canonical_bytes()
+        .expect_err("one unit, two agents, is not expressible today"),
+        MalformedSpend::UnitNotUnique
     );
 }
