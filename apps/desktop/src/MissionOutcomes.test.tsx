@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 
 import { MissionOutcomes } from "./MissionOutcomes";
+import { expectNoWcagViolations } from "./test/axe";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
@@ -57,6 +58,15 @@ beforeEach(() => {
     }
     return Promise.reject(new Error(`unexpected command: ${String(command)}`));
   });
+});
+
+it("passes WCAG 2.1 AA with a document on screen", async () => {
+  // A12: this surface had a test file and no accessibility bar. It renders a published Outcome as
+  // preformatted text, a version list and a selection control -- the three things most likely to
+  // reach a screen reader wrong -- and nothing checked it.
+  const { container } = render(<MissionOutcomes missionId={missionId} />);
+  expect(await screen.findByRole("heading", { name: "Outcome Documents" })).toBeVisible();
+  await expectNoWcagViolations(container);
 });
 
 it("lists every version newest first and marks the current one", async () => {
