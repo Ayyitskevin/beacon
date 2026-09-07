@@ -5956,3 +5956,40 @@ fn r541_v3_out_of_domain_value_is_refused() {
         "R54.CELL.V3.BAD_VALUE_IS_PRESENT",
     );
 }
+
+#[test]
+fn r542_v4_absent_key_is_refused() {
+    astra_observation_cell(4, None, false, "R54.CELL.V4.ABSENT_IS_UNRECORDED");
+}
+
+#[test]
+fn r542_v4_null_key_is_refused() {
+    astra_observation_cell(
+        4,
+        Some(serde_json::Value::Null),
+        false,
+        "R54.CELL.V4.NULL_IS_NOT_AN_OBSERVATION",
+    );
+}
+
+#[test]
+fn r542_v4_sha256_of_empty_is_recorded_evidence() {
+    astra_observation_cell(
+        4,
+        Some(
+            serde_json::json!({"bytes":{"digest":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}}),
+        ),
+        true,
+        "R54.CELL.V4.EMPTY_BLOB_DIGEST_IS_EVIDENCE",
+    );
+}
+
+#[test]
+fn r542_v4_out_of_domain_value_is_refused() {
+    astra_observation_cell(
+        4,
+        Some(serde_json::json!({"bytes":{"digest":""}})),
+        false,
+        "R54.CELL.V4.BAD_DIGEST_IS_NOT_EVIDENCE",
+    );
+}
