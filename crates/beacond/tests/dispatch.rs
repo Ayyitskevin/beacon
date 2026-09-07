@@ -5891,3 +5891,68 @@ fn astra_r54_binary_empty_and_absent_preimages_keep_their_era() {
         fixture.restart().expect("ASTRA.R54.BYTES_V3_UNRECORDED");
     }
 }
+
+/// The table holds the outcome fixed as a mismatch, with an in-domain observed
+/// digest different from the declaration. Domain membership alone is not a verdict.
+fn astra_observation_cell(
+    version: u32,
+    observation: Option<serde_json::Value>,
+    accepted: bool,
+    name: &str,
+) {
+    let (fixture, receipt) = astra_r55_mismatch("era-cell");
+    let mut wire = serde_json::to_value(&receipt).unwrap();
+    wire["version"] = version.into();
+    let mutation = wire["perMutation"][0].as_object_mut().unwrap();
+    mutation.remove("observedPreImage");
+    if let Some(observation) = observation {
+        mutation.insert("observedPreImage".into(), observation);
+    }
+    astra_r55_replace(&fixture, &wire, i64::from(version));
+    let result = fixture.restart();
+    if accepted {
+        assert!(result.is_ok(), "{name}: {result:?}");
+    } else {
+        assert!(
+            matches!(result, Err(SupervisorError::DispatchEventMismatch(_))),
+            "{name}: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn r541_v3_absent_key_is_unrecorded() {
+    astra_observation_cell(3, None, true, "R54.CELL.V3.ABSENT_IS_UNRECORDED");
+}
+
+#[test]
+fn r541_v3_null_key_is_refused() {
+    astra_observation_cell(
+        3,
+        Some(serde_json::Value::Null),
+        false,
+        "R54.CELL.V3.NULL_IS_PRESENT",
+    );
+}
+
+#[test]
+fn r541_v3_in_domain_value_is_refused() {
+    astra_observation_cell(
+        3,
+        Some(
+            serde_json::json!({"bytes":{"digest":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}}),
+        ),
+        false,
+        "R54.CELL.V3.VALUE_IS_PRESENT",
+    );
+}
+
+#[test]
+fn r541_v3_out_of_domain_value_is_refused() {
+    astra_observation_cell(
+        3,
+        Some(serde_json::json!({"bytes":{"digest":""}})),
+        false,
+        "R54.CELL.V3.BAD_VALUE_IS_PRESENT",
+    );
+}
