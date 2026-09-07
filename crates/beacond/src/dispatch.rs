@@ -3629,6 +3629,136 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------------------------------
+    // R54.3: a version-4 Receipt with ZERO mutation rows.
+    //
+    // `decided.per_mutation` has one live writer (`:955`) which copies the Candidate's entries, and
+    // a Candidate cannot be empty (`candidate.rs:655`). So the row count is decided by whether the
+    // outcome was reached before or after that line -- EXCEPT that `interrupted_receipt` (`:2712`)
+    // is a second writer that emits zero rows for a reconstructed landing, which is why the landing
+    // outcomes key on `ReconstructedAfterInterruption` rather than on the outcome alone.
+    //
+    // The `match` is exhaustive, so a new outcome does not compile until this table says which
+    // shape it can legitimately be written in.
+    // -----------------------------------------------------------------------------------------
+    fn zero_rows_is_writable(outcome: &DispatchOutcome, reconstructed: bool) -> bool {
+        match outcome {
+            // Refused before the Candidate is resolved, so zero rows is the ONLY shape.
+            DispatchOutcome::RulingUnreadable
+            | DispatchOutcome::RulingRefused
+            | DispatchOutcome::RulingSuperseded
+            | DispatchOutcome::ProposalDigestMismatch
+            | DispatchOutcome::ProposalNotReady
+            | DispatchOutcome::CandidateAbsent
+            | DispatchOutcome::CandidateMismatch => true,
+            // The one outcome with a writer on BOTH sides of `:955` -- `verified_authority` at
+            // `:914` and the post-Candidate re-check at `:1016` -- so neither shape can be refused.
+            DispatchOutcome::RulingDrifted => true,
+            // Two writers: the live path always carries the Candidate's rows, and
+            // `interrupted_receipt` carries none. The reconstruction marker is what tells them
+            // apart, and startup must be able to write it -- that Receipt is the record of a branch
+            // that actually moved.
+            DispatchOutcome::Applied
+            | DispatchOutcome::LandingRefused
+            | DispatchOutcome::LandingUnobserved => reconstructed,
+            // Retired: "new dispatches do not emit it", and it predates version 4 entirely.
+            DispatchOutcome::Admissible => false,
+            // Everything else is decided after `:955`, so its writer always carries at least one
+            // row and a stored Receipt with none did not come from this product.
+            DispatchOutcome::AutonomyProfileRefuses
+            | DispatchOutcome::InstallationPaused
+            | DispatchOutcome::ContentOverBounds
+            | DispatchOutcome::ContentDigestMismatch
+            | DispatchOutcome::SourceNotLocal
+            | DispatchOutcome::SourceNotBeaconMade
+            | DispatchOutcome::PreImageMismatch
+            | DispatchOutcome::PreImageUnreadable
+            | DispatchOutcome::FilterInventoryUnreadable
+            | DispatchOutcome::SourceDetached
+            | DispatchOutcome::RepositoryHeadMoved
+            | DispatchOutcome::SourceDirty
+            | DispatchOutcome::AlreadyDispatched
+            | DispatchOutcome::WallClockExceeded
+            | DispatchOutcome::ObjectWriteFailed
+            | DispatchOutcome::EffectDoesNotMatchDeclaration => false,
+        }
+    }
+
+    /// A v4 specimen of `outcome` with exactly `rows` mutation rows, coherent in every OTHER way.
+    ///
+    /// Every companion field each arm's own rule demands is filled in here, so that what the test
+    /// below measures is the row count and nothing else. The control assertion is what proves that
+    /// actually happened.
+    fn zero_row_specimen(
+        outcome: &DispatchOutcome,
+        rows: usize,
+        reconstructed: bool,
+    ) -> DispatchReceipt {
+        let mut receipt = specimen(outcome.clone());
+        assert_eq!(
+            receipt.version, RECEIPT_VERSION,
+            "the table is about version 4"
+        );
+        let mismatch = *outcome == DispatchOutcome::PreImageMismatch;
+        receipt.per_mutation = (0..rows)
+            .map(|index| MutationRecord {
+                kind: MutationKind::ModifyFile,
+                path: format!("src/lib{index}.rs"),
+                pre_image: Some("7".repeat(64)),
+                post_image: Some("8".repeat(64)),
+                // A mismatch Receipt needs a row that occupies a mismatch cell (R46.9); every other
+                // arm is indifferent to the observation and carries none.
+                observed_pre_image: mismatch.then(|| ObservedPreImage::Bytes {
+                    digest: "0".repeat(64),
+                }),
+                effect: MutationEffect::NotAttempted,
+            })
+            .collect();
+        // Companion fields the other owner rules demand, so a refusal here can only be about rows.
+        receipt.pre_image_read_failure = (*outcome == DispatchOutcome::PreImageUnreadable)
+            .then_some(PinnedReadFailure::TimedOut);
+        receipt.filter_inventory_failure = (*outcome == DispatchOutcome::FilterInventoryUnreadable)
+            .then_some(FilterInventoryFailure::Unreadable);
+        if *outcome == DispatchOutcome::LandingUnobserved {
+            receipt.not_verified.push(NotVerified::LandingResultUnknown);
+        }
+        if reconstructed {
+            receipt
+                .not_verified
+                .push(NotVerified::ReconstructedAfterInterruption);
+        }
+        receipt
+    }
+
+    /// R54.3: every outcome, both row counts, both reconstruction states.
+    #[test]
+    fn r543_zero_mutation_rows_is_valid_exactly_where_a_writer_produces_it() {
+        for (case, outcome) in outcome_rows() {
+            for reconstructed in [false, true] {
+                // THE CONTROL, first: the same specimen with one row must be accepted. If it is
+                // not, this specimen is incoherent for some OTHER reason and the zero-row assertion
+                // below would pass for the wrong reason -- the false green this test would
+                // otherwise be.
+                let with_a_row = zero_row_specimen(&outcome, 1, reconstructed);
+                assert!(
+                    verify_outcome_invariants(&with_a_row).is_ok(),
+                    "{case} (reconstructed={reconstructed}): CONTROL FAILED -- the one-row \
+                     specimen is refused, so this row's zero-row result proves nothing"
+                );
+
+                let empty = zero_row_specimen(&outcome, 0, reconstructed);
+                let accepted = verify_outcome_invariants(&empty).is_ok();
+                assert_eq!(
+                    accepted,
+                    zero_rows_is_writable(&outcome, reconstructed),
+                    "{case} (reconstructed={reconstructed}): a version-4 Receipt with no mutation \
+                     rows was {} -- the table says otherwise",
+                    if accepted { "accepted" } else { "refused" }
+                );
+            }
+        }
+    }
+
     /// The members a Receipt of this outcome leaves absent, in declaration order.
     ///
     /// The same list is asserted against a real Receipt of the same outcome in
