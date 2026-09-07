@@ -1904,6 +1904,48 @@ mod r46_read_classification {
         );
     }
 
+    /// R56 (ADR 0046, Open 2): at an `ExitCode` site, OUTPUT beside a non-zero exit is a refusal.
+    ///
+    /// The exit code is the answer at these sites because the command answers ONLY with its status.
+    /// A child that also wrote to stdout did something other than answer, and reading its status as
+    /// a "no" would discard the bytes that say so -- the same reason output defeats the other two
+    /// witnesses, arriving at the site where the code is meaningful.
+    #[test]
+    fn an_exit_code_site_that_produced_output_is_refused_and_never_its_answer() {
+        assert!(
+            matches!(
+                classify_pinned_read(
+                    BoundedRaw::Finished {
+                        code: Some(1),
+                        stdout: b"6f1a3f0e2b\n".to_vec(),
+                        stderr: Vec::new(),
+                    },
+                    true,
+                    AbsenceWitness::ExitCode,
+                ),
+                PinnedRead::Unreadable(PinnedReadFailure::ReadRefused { .. })
+            ),
+            "bytes were read at an exit-code site and then discarded as its answer"
+        );
+
+        // The neighbouring cell, pinned as it BEHAVES rather than as it might be argued: a
+        // SUCCESSFUL child's output is its output, and the adapter reads the success as the answer
+        // 0. Whether an exit-code site should also refuse output at exit 0 is a question about the
+        // sites, not about this classifier, and changing it here would be an outcome change.
+        assert_eq!(
+            classify_pinned_read(
+                BoundedRaw::Finished {
+                    code: Some(0),
+                    stdout: b"6f1a3f0e2b\n".to_vec(),
+                    stderr: Vec::new(),
+                },
+                true,
+                AbsenceWitness::ExitCode,
+            ),
+            PinnedRead::Bytes(b"6f1a3f0e2b\n".to_vec()),
+        );
+    }
+
     /// Output plus a non-zero exit is never an absence at EITHER site.
     #[test]
     fn output_defeats_both_witnesses() {
