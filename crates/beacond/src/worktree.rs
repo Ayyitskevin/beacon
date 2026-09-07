@@ -1082,10 +1082,20 @@ fn classify_pinned_read(
                 Some(0) => PinnedRead::Bytes(stdout),
                 // R46.3, generalised by R47: an absence is what the site can SHOW, never what the
                 // exit code was. Anything else non-zero is a failure carrying what git said.
-                Some(_code) if matches!(absence, AbsenceWitness::ExitCode) && stdout.is_empty() && !said_anything_diagnostic(&stderr) =>
-                    PinnedRead::NotFound,
-                Some(code) if matches!(absence, AbsenceWitness::Silence) && !said_anything_diagnostic(&stderr) && stdout.is_empty() =>
-                    PinnedRead::Unreadable(PinnedReadFailure::SilentExit { code }),
+                Some(_code)
+                    if matches!(absence, AbsenceWitness::ExitCode)
+                        && stdout.is_empty()
+                        && !said_anything_diagnostic(&stderr) =>
+                {
+                    PinnedRead::NotFound
+                }
+                Some(code)
+                    if matches!(absence, AbsenceWitness::Silence)
+                        && !said_anything_diagnostic(&stderr)
+                        && stdout.is_empty() =>
+                {
+                    PinnedRead::Unreadable(PinnedReadFailure::SilentExit { code })
+                }
                 Some(_) if shows_absence(absence, &stdout, &stderr) => PinnedRead::NotFound,
                 Some(_) => PinnedRead::Unreadable(PinnedReadFailure::ReadRefused {
                     message: quoted_git_message(&stderr),
@@ -1726,7 +1736,15 @@ mod r46_read_classification {
     #[test]
     fn sol1_exit_128_with_empty_stderr_is_not_an_absence_at_every_silent_site() {
         assert_eq!(
-            classify_pinned_read(BoundedRaw::Finished { code: Some(128), stdout: Vec::new(), stderr: Vec::new() }, true, AbsenceWitness::Silence),
+            classify_pinned_read(
+                BoundedRaw::Finished {
+                    code: Some(128),
+                    stdout: Vec::new(),
+                    stderr: Vec::new()
+                },
+                true,
+                AbsenceWitness::Silence
+            ),
             PinnedRead::Unreadable(PinnedReadFailure::SilentExit { code: 128 })
         );
     }
