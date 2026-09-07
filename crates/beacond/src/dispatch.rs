@@ -2721,6 +2721,39 @@ fn ruling_of_preparation(
         .map_err(DispatchError::Store)
 }
 
+/// Decode a stored Receipt without losing the era's wire-key presence rule.
+///
+/// R54.1: serde's `Option` maps both an absent member and a present `null` to `None`.
+/// The legacy era forbids the MEMBER, whatever its value, so keep that one wire fact
+/// before decoding the public Receipt shape. `IgnoredAny` consumes even a null or an
+/// ill-shaped observation without mistaking it for absence; the normal decoder still
+/// checks the complete record, including unknown and duplicate members.
+fn decode_dispatch_receipt(payload_json: &str) -> Result<DispatchReceipt, DispatchError> {
+    fn present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+        serde::de::IgnoredAny::deserialize(deserializer)?;
+        Ok(true)
+    }
+
+    #[derive(Deserialize)]
+    struct MutationPresence {
+        #[serde(rename = "observedPreImage", default, deserialize_with = "present")]
+        observed: bool,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ReceiptPresence {
+        version: u32,
+        per_mutation: Vec<MutationPresence>,
+    }
+
+    let presence: ReceiptPresence = serde_json::from_str(payload_json)?;
+    if presence.version < RECEIPT_VERSION && presence.per_mutation.iter().any(|row| row.observed) {
+        return Err(DispatchError::InvalidStore);
+    }
+    serde_json::from_str(payload_json).map_err(DispatchError::from)
+}
+
 /// Replay one `proposal.dispatched` Event against its stored Receipt.
 ///
 /// The same shape as the preflight replay: the Event payload and the stored `receipt_json` must be
@@ -2733,7 +2766,7 @@ pub(crate) fn verify_dispatch_event(
     occurred_at_ms: u64,
     payload_json: &str,
 ) -> Result<(), DispatchError> {
-    let receipt: DispatchReceipt = serde_json::from_str(payload_json)?;
+    let receipt = decode_dispatch_receipt(payload_json)?;
     if !(3..=RECEIPT_VERSION).contains(&receipt.version)
         || receipt.workspace_id != workspace_id
         || receipt.started_at_ms > receipt.ended_at_ms
@@ -2764,7 +2797,7 @@ pub(crate) fn verify_dispatch_event(
     let Some((version, outcome, receipt_json, kind, state)) = stored else {
         return Err(DispatchError::InvalidStore);
     };
-    let stored_receipt: DispatchReceipt = serde_json::from_str(&receipt_json)?;
+    let stored_receipt = decode_dispatch_receipt(&receipt_json)?;
     if i64::from(receipt.version) != version
         || kind != "proposal_dispatch"
         || outcome != receipt.outcome.as_str()
@@ -3613,6 +3646,31 @@ mod tests {
     /// The field belongs to the ERA rather than to one arm, so the rule is outcome-independent: an
     /// `Applied` at version 3 carrying it is the same forgery as a mismatch at version 3 carrying
     /// it, and ONE row carrying it is enough -- a Receipt does not become half a version.
+    #[test]
+    fn a_legacy_observation_key_is_refused_before_decoding_its_value() {
+        let mut wire = serde_json::to_value(specimen(DispatchOutcome::Applied)).unwrap();
+        wire["version"] = 3.into();
+        for observation in [
+            serde_json::Value::Null,
+            serde_json::json!(""),
+            serde_json::json!(42),
+            serde_json::json!([]),
+            serde_json::json!({}),
+            serde_json::json!({"bytes": {"digest": ""}}),
+            serde_json::json!("absent"),
+        ] {
+            wire["perMutation"][0]["observedPreImage"] = observation;
+            assert!(
+                matches!(
+                    decode_dispatch_receipt(&serde_json::to_string(&wire).unwrap()),
+                    Err(DispatchError::InvalidStore)
+                ),
+                "R54.PRESENCE.REFUSAL_IS_INVALID_STORE: {}",
+                wire["perMutation"][0]["observedPreImage"]
+            );
+        }
+    }
+
     #[test]
     fn a_version_three_receipt_carries_no_observation_at_all() {
         let row = |observed: Option<ObservedPreImage>| MutationRecord {
