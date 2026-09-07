@@ -2110,15 +2110,13 @@ fn insert_spend(
         measured_at_ms: payload.measured_at_ms,
     })
     .map_err(|error| SpendRecordError::Store(error.to_string()))?;
-    connection.execute(
-        "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-         VALUES (?1, 'spend.measured', ?2, ?3)",
-        rusqlite::params![
-            payload.workspace_id.to_string(),
-            event,
-            i64::try_from(payload.measured_at_ms)
-                .map_err(|_| SpendRecordError::Store("timestamp out of range".to_owned()))?,
-        ],
+    crate::event_chain::append_event(
+        &connection,
+        &payload.workspace_id.to_string(),
+        "spend.measured",
+        &event,
+        i64::try_from(payload.measured_at_ms)
+            .map_err(|_| SpendRecordError::Store("timestamp out of range".to_owned()))?,
     )?;
     Ok(())
 }

@@ -688,15 +688,13 @@ fn insert_repository(
         project: BoundProjectReference { id: project_id },
         repository: repository.clone(),
     })?;
-    connection.execute(
-        "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-         VALUES (?1, 'project.repository_bound', ?2, ?3)",
-        params![
-            workspace_id.to_string(),
-            payload,
-            i64::try_from(repository.authored_at_ms)
-                .map_err(|_| ProjectRepositoryError::InvalidStore)?,
-        ],
+    crate::event_chain::append_event(
+        &connection,
+        &workspace_id.to_string(),
+        "project.repository_bound",
+        &payload,
+        i64::try_from(repository.authored_at_ms)
+            .map_err(|_| ProjectRepositoryError::InvalidStore)?,
     )?;
     Ok(())
 }

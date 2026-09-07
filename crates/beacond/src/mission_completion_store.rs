@@ -885,17 +885,14 @@ pub fn record_completion(
         canonical_bytes_base64: data_encoding::BASE64.encode(&bytes),
     })
     .map_err(|_| CompletionReadRefusal::BytesDisagree)?;
-    transaction
-        .execute(
-            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-             VALUES (?1, 'mission.completed', ?2, ?3)",
-            params![
-                record.workspace_id.to_string(),
-                payload,
-                i64::try_from(record.completed_at_ms).unwrap_or(i64::MAX),
-            ],
-        )
-        .map_err(store)?;
+    crate::event_chain::append_event(
+        &transaction,
+        &record.workspace_id.to_string(),
+        "mission.completed",
+        &payload,
+        i64::try_from(record.completed_at_ms).unwrap_or(i64::MAX),
+    )
+    .map_err(store)?;
 
     // Read the record back through the verified reader, inside the transaction, before committing.
     //

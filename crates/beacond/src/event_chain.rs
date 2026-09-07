@@ -10,7 +10,7 @@
 //! of a link, and the three states a row's predecessor can be in. The columns, the head and the
 //! startup pass are built on top of it.
 
-use uuid::Uuid;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::proposal::sha256;
 
@@ -86,7 +86,10 @@ const TAG_UNCHAINED: u8 = 0x03;
 pub struct Link<'a> {
     pub predecessor: Predecessor,
     pub sequence: i64,
-    pub workspace_id: &'a Uuid,
+    /// The Workspace **as the column stores it**, not as a parsed value. The digest commits to the
+    /// row as it exists: a chain that hashed a re-parsed form would verify a value the table does
+    /// not hold, and a text column that drifted from its parse would still pass.
+    pub workspace_id: &'a str,
     pub kind: &'a str,
     pub payload_json: &'a str,
     pub occurred_at_ms: i64,
@@ -104,7 +107,7 @@ impl Link<'_> {
         bytes.push(self.predecessor.tag());
         bytes.extend_from_slice(&self.predecessor.digest_bytes());
         bytes.extend_from_slice(&self.sequence.to_be_bytes());
-        bytes.extend_from_slice(self.workspace_id.as_bytes());
+        push_framed(&mut bytes, self.workspace_id.as_bytes());
         push_framed(&mut bytes, self.kind.as_bytes());
         push_framed(&mut bytes, self.payload_json.as_bytes());
         bytes.extend_from_slice(&self.occurred_at_ms.to_be_bytes());
@@ -117,17 +120,172 @@ fn push_framed(out: &mut Vec<u8>, value: &[u8]) {
     out.extend_from_slice(value);
 }
 
+/// Append one Event, linked to the chain, inside the caller's transaction.
+///
+/// **The one door.** Every Event this product writes goes through here, and the witness test in
+/// `lib.rs` enumerates the writers mechanically rather than trusting that. The reason is R58's own:
+/// a chain is only as good as the guarantee that nothing appends around it, and 56 insert sites
+/// each spelling the link themselves is 56 chances to spell it differently.
+///
+/// **The head is READ here, never passed in.** A caller that supplied its own predecessor would be
+/// supplying the value that constrains it -- the dodgeable-guard shape this fleet has been bitten
+/// by. The read and the write are in the caller's transaction, which the services already open as
+/// `IMMEDIATE`, so no second writer can interleave between them.
+pub(crate) fn append_event(
+    connection: &Connection,
+    workspace_id: &str,
+    kind: &str,
+    payload_json: &str,
+    occurred_at_ms: i64,
+) -> rusqlite::Result<i64> {
+    let head: Option<(Vec<u8>, i64)> = connection
+        .query_row(
+            "SELECT head_digest, head_sequence FROM event_chain_state WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+
+    let predecessor = match &head {
+        // A store that has chained before: this Event follows the head.
+        Some((digest, _)) => Predecessor::Linked(as_digest(digest)?),
+        // No state row at all: this is the first Event of a store created with the chain.
+        None => Predecessor::Genesis,
+    };
+
+    // The sequence is chosen before the digest, because the digest commits to it. AUTOINCREMENT
+    // would assign it during the insert, and a digest computed afterwards would need an UPDATE to
+    // an Event -- a second write to a row whose whole value is that it is written once.
+    let next: i64 = connection.query_row(
+        "SELECT coalesce(max(seq), 0) + 1 FROM
+           (SELECT coalesce(max(sequence), 0) AS seq FROM events
+            UNION ALL
+            SELECT coalesce(seq, 0) FROM sqlite_sequence WHERE name = 'events')",
+        [],
+        |row| row.get(0),
+    )?;
+
+    let link = Link {
+        predecessor,
+        sequence: next,
+        workspace_id,
+        kind,
+        payload_json,
+        occurred_at_ms,
+    };
+    let digest = link.digest();
+
+    connection.execute(
+        "INSERT INTO events (
+             sequence, workspace_id, kind, payload_json, occurred_at_ms,
+             predecessor_kind, predecessor_digest, link_digest
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![
+            next,
+            workspace_id,
+            kind,
+            payload_json,
+            occurred_at_ms,
+            match predecessor {
+                Predecessor::Genesis => "genesis",
+                Predecessor::Linked(_) => "linked",
+                Predecessor::Unchained => "unchained",
+            },
+            match predecessor {
+                Predecessor::Linked(digest) => Some(digest.to_vec()),
+                Predecessor::Genesis | Predecessor::Unchained => None,
+            },
+            digest.to_vec(),
+        ],
+    )?;
+
+    // The head moves in the same transaction as the Event it names. A head that lagged its chain
+    // would make every later append link to an Event that is no longer last.
+    match head {
+        Some(_) => connection.execute(
+            "UPDATE event_chain_state SET head_digest = ?1, head_sequence = ?2 WHERE id = 1",
+            rusqlite::params![digest.to_vec(), next],
+        )?,
+        None => connection.execute(
+            "INSERT INTO event_chain_state (
+                 id, genesis_kind, migrated_through_sequence, pre_migration_digest,
+                 head_digest, head_sequence
+             ) VALUES (1, 'created', NULL, NULL, ?1, ?2)",
+            rusqlite::params![digest.to_vec(), next],
+        )?,
+    };
+
+    Ok(next)
+}
+
+fn as_digest(bytes: &[u8]) -> rusqlite::Result<[u8; 32]> {
+    <[u8; 32]>::try_from(bytes).map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Blob,
+            "a chain digest is thirty-two bytes".into(),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const WS: Uuid = Uuid::from_u128(0x0000_0000_0000_4000_8000_0000_0000_0001);
+    /// R58: **no product code writes an Event around the door.**
+    ///
+    /// The single append path is only a guarantee while it is the only path, and 27 call sites
+    /// spread over 22 modules is 27 chances for the 28th to be written by hand. This reads the
+    /// crate's own sources and refuses any raw `INSERT INTO events` outside a `#[cfg(test)]`
+    /// module.
+    ///
+    /// Test modules are deliberately exempt and that exemption is the point: a probe that plants a
+    /// tampered, duplicated or orphaned row MUST be able to write around the chain, or the tamper
+    /// cells could not be built at all. Those rows say `unchained`, which is what a row outside the
+    /// chain honestly is.
+    #[test]
+    fn no_product_code_writes_an_event_around_the_door() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders = Vec::new();
+        let mut files = 0_usize;
+        for entry in std::fs::read_dir(&src).expect("the crate's source directory reads") {
+            let path = entry.expect("a directory entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            files += 1;
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let text = std::fs::read_to_string(&path).expect("a source file reads");
+            // Everything from the file's own test module onward is exempt.
+            let cut = text.find("#[cfg(test)]\nmod tests").unwrap_or(text.len());
+            let product = &text[..cut];
+            if name == "event_chain.rs" {
+                continue; // the door itself
+            }
+            for (number, line) in product.lines().enumerate() {
+                if line.contains("INSERT INTO events") {
+                    offenders.push(format!("{name}:{}", number + 1));
+                }
+            }
+        }
+        // The census has to have READ something, or an empty result passes for a clean one.
+        assert!(
+            files >= 20,
+            "the source census found only {files} files: it has stopped matching"
+        );
+        assert!(
+            offenders.is_empty(),
+            "product code writes Events around `append_event`: {offenders:?}"
+        );
+    }
+
+    const WS: &str = "00000000-0000-4000-8000-000000000001";
 
     fn link(predecessor: Predecessor) -> Link<'static> {
         Link {
             predecessor,
             sequence: 7,
-            workspace_id: &WS,
+            workspace_id: WS,
             kind: "workspace.created",
             payload_json: r#"{"workspaceId":"x","name":"Beacon"}"#,
             occurred_at_ms: 1_788_400_000_000,
@@ -150,7 +308,7 @@ mod tests {
     #[test]
     fn every_stored_column_changes_the_link() {
         let base = link(Predecessor::Genesis);
-        let other = Uuid::from_u128(0x0000_0000_0000_4000_8000_0000_0000_0002);
+        let other = "00000000-0000-4000-8000-000000000002";
         let mutations: Vec<(&str, Link<'_>)> = vec![
             (
                 "sequence",

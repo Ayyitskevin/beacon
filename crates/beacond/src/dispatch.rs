@@ -1965,10 +1965,12 @@ fn write_receipt(
             receipt.version,
         ],
     )?;
-    connection.execute(
-        "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-         VALUES (?1, 'proposal.dispatched', ?2, ?3)",
-        params![workspace_id.to_string(), payload.as_str(), ended_at_ms],
+    crate::event_chain::append_event(
+        &connection,
+        &workspace_id.to_string(),
+        "proposal.dispatched",
+        &payload.as_str(),
+        ended_at_ms,
     )?;
     Ok(())
 }
@@ -3337,19 +3339,16 @@ impl PauseService {
             "UPDATE installation_pause SET paused = ?1, changed_at_ms = ?2 WHERE singleton = 1",
             params![i64::from(paused), now],
         )?;
-        transaction.execute(
-            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                workspace,
-                if paused {
-                    "installation.paused"
-                } else {
-                    "installation.resumed"
-                },
-                payload,
-                now
-            ],
+        crate::event_chain::append_event(
+            &transaction,
+            &workspace,
+            if paused {
+                "installation.paused"
+            } else {
+                "installation.resumed"
+            },
+            &payload,
+            now,
         )?;
         transaction.commit()?;
         Ok(())

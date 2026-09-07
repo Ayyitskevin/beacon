@@ -1072,10 +1072,12 @@ fn insert_candidate(
             recorded_at_ms: stored.recorded_at_ms,
         },
     })?;
-    connection.execute(
-        "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-         VALUES (?1, 'proposal.candidate_recorded', ?2, ?3)",
-        params![stored.workspace_id.to_string(), payload, recorded_at_ms],
+    crate::event_chain::append_event(
+        &connection,
+        &stored.workspace_id.to_string(),
+        "proposal.candidate_recorded",
+        &payload,
+        recorded_at_ms,
     )?;
     Ok(())
 }
