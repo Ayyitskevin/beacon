@@ -198,6 +198,83 @@ impl DispatchOutcome {
         }
     }
 
+    /// The fixed line an in-process caller is shown for this outcome (R42, audience 2).
+    ///
+    /// R42's three audiences, for a dispatch outcome, are not three surfaces here — measured,
+    /// not assumed:
+    ///
+    /// * **Startup / the owning reader** is [`Self::as_str`]: the stored token IS the row key, and
+    ///   R48's owners refuse a token they cannot decode.
+    /// * **The in-process API** is this. `DispatchReceipt` is returned in process to the one named
+    ///   Operator surface, and this is the wording that surface may show.
+    /// * **The wire and the desktop do not exist for this type, deliberately.** ADR 0039 admits
+    ///   dispatch from one named Operator surface only, `LocalCommand` has no arm that reaches it
+    ///   (`no_transport_command_can_reach_dispatch_or_pause`), and `RecentReceiptOutcome` carries
+    ///   two Receipt kinds, neither of them dispatch. The witness for that audience is therefore a
+    ///   witness that it stays absent, not a mapping.
+    ///
+    /// Selected by the closed outcome NAME and never interpolated. Nothing a repository, a
+    /// Candidate or git supplied reaches this line: git's own message for an unreadable inventory
+    /// stays in `filter_inventory_failure`, where it is bounded evidence a reader can inspect
+    /// rather than a sentence assembled from someone else's text (R28.4, R42).
+    pub fn caller_line(&self) -> &'static str {
+        match self {
+            Self::RulingUnreadable => "the Ruling record does not agree with itself",
+            Self::RulingRefused => "the Ruling refused this Proposal",
+            Self::RulingSuperseded => "a later Ruling reverses this one",
+            Self::RulingDrifted => "a revision the Ruling recorded has moved",
+            Self::ProposalDigestMismatch => {
+                "the stored Proposal does not hash to the digest the Ruling names"
+            }
+            Self::ProposalNotReady => "a live precondition of the Proposal does not hold",
+            Self::CandidateAbsent => "no Candidate authorizes any bytes for this Proposal",
+            Self::CandidateMismatch => {
+                "the Candidate the Ruling names is not the Candidate the Proposal has"
+            }
+            Self::ContentDigestMismatch => {
+                "the supplied content does not hash to what the Candidate declares"
+            }
+            Self::ContentOverBounds => "the supplied content exceeds a bound the Proposal declared",
+            Self::SourceNotLocal => "the Repository Binding does not name a local path",
+            Self::SourceNotBeaconMade => {
+                "the bound repository is not a disposable copy Beacon made"
+            }
+            Self::RepositoryHeadMoved => {
+                "the repository's head is not the base revision this Ruling pinned"
+            }
+            Self::SourceDetached => {
+                "the repository's head is not on a branch, so there is no ref to move"
+            }
+            Self::SourceDirty => "the repository holds uncommitted or untracked content",
+            Self::AutonomyProfileRefuses => {
+                "the Project's autonomy profile does not admit dispatch"
+            }
+            Self::InstallationPaused => "the Installation is paused",
+            Self::PreImageMismatch => "a declared pre-image is not what the base revision holds",
+            Self::PreImageUnreadable => {
+                "a declared pre-image could not be read, so nothing was compared"
+            }
+            // R50. The line says what could not be read and what that prevented, because an
+            // Operator's next step is to look at the repository's own configuration -- and it
+            // names neither the file nor what git said about it.
+            Self::FilterInventoryUnreadable => {
+                "the repository's filter configuration could not be read, so no Git command could be run safely"
+            }
+            Self::WallClockExceeded => "the attempt exceeded the time bound the Proposal declared",
+            Self::AlreadyDispatched => "this Ruling has already been dispatched",
+            Self::Admissible => "every gate held and the act was not attempted",
+            Self::ObjectWriteFailed => "an object, tree or commit could not be written",
+            Self::EffectDoesNotMatchDeclaration => {
+                "the prepared commit does not match what the Candidate declares"
+            }
+            Self::LandingRefused => {
+                "the branch no longer held the pinned base at the moment of the swap"
+            }
+            Self::LandingUnobserved => "the result of the swap could not be established",
+            Self::Applied => "the branch names the prepared commit",
+        }
+    }
+
     /// The Run state this outcome terminates in. One owner for the mapping, as
     /// `PreflightOutcome::run_state` and `ExecutionSummary::run_state` are.
     ///
@@ -3718,6 +3795,287 @@ mod tests {
             );
         }
         assert_eq!(tokens.len(), 28);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // R50 item 3: caller-facing text, in the audiences a dispatch outcome actually has.
+    //
+    // The expected lines are written HERE, independently, and never derived from the outcome's own
+    // name or from `caller_line`'s source (R42). A wording change is a deliberate edit of both
+    // halves; a wording change in one half alone is a failure.
+    // -----------------------------------------------------------------------------------------
+    const CALLER_LINES: &[(&str, DispatchOutcome, &str)] = &[
+        (
+            "R50.LINE.RulingUnreadable",
+            DispatchOutcome::RulingUnreadable,
+            "the Ruling record does not agree with itself",
+        ),
+        (
+            "R50.LINE.RulingRefused",
+            DispatchOutcome::RulingRefused,
+            "the Ruling refused this Proposal",
+        ),
+        (
+            "R50.LINE.RulingSuperseded",
+            DispatchOutcome::RulingSuperseded,
+            "a later Ruling reverses this one",
+        ),
+        (
+            "R50.LINE.RulingDrifted",
+            DispatchOutcome::RulingDrifted,
+            "a revision the Ruling recorded has moved",
+        ),
+        (
+            "R50.LINE.ProposalDigestMismatch",
+            DispatchOutcome::ProposalDigestMismatch,
+            "the stored Proposal does not hash to the digest the Ruling names",
+        ),
+        (
+            "R50.LINE.ProposalNotReady",
+            DispatchOutcome::ProposalNotReady,
+            "a live precondition of the Proposal does not hold",
+        ),
+        (
+            "R50.LINE.CandidateAbsent",
+            DispatchOutcome::CandidateAbsent,
+            "no Candidate authorizes any bytes for this Proposal",
+        ),
+        (
+            "R50.LINE.CandidateMismatch",
+            DispatchOutcome::CandidateMismatch,
+            "the Candidate the Ruling names is not the Candidate the Proposal has",
+        ),
+        (
+            "R50.LINE.ContentDigestMismatch",
+            DispatchOutcome::ContentDigestMismatch,
+            "the supplied content does not hash to what the Candidate declares",
+        ),
+        (
+            "R50.LINE.ContentOverBounds",
+            DispatchOutcome::ContentOverBounds,
+            "the supplied content exceeds a bound the Proposal declared",
+        ),
+        (
+            "R50.LINE.SourceNotLocal",
+            DispatchOutcome::SourceNotLocal,
+            "the Repository Binding does not name a local path",
+        ),
+        (
+            "R50.LINE.SourceNotBeaconMade",
+            DispatchOutcome::SourceNotBeaconMade,
+            "the bound repository is not a disposable copy Beacon made",
+        ),
+        (
+            "R50.LINE.RepositoryHeadMoved",
+            DispatchOutcome::RepositoryHeadMoved,
+            "the repository's head is not the base revision this Ruling pinned",
+        ),
+        (
+            "R50.LINE.SourceDetached",
+            DispatchOutcome::SourceDetached,
+            "the repository's head is not on a branch, so there is no ref to move",
+        ),
+        (
+            "R50.LINE.SourceDirty",
+            DispatchOutcome::SourceDirty,
+            "the repository holds uncommitted or untracked content",
+        ),
+        (
+            "R50.LINE.AutonomyProfileRefuses",
+            DispatchOutcome::AutonomyProfileRefuses,
+            "the Project's autonomy profile does not admit dispatch",
+        ),
+        (
+            "R50.LINE.InstallationPaused",
+            DispatchOutcome::InstallationPaused,
+            "the Installation is paused",
+        ),
+        (
+            "R50.LINE.PreImageMismatch",
+            DispatchOutcome::PreImageMismatch,
+            "a declared pre-image is not what the base revision holds",
+        ),
+        (
+            "R50.LINE.PreImageUnreadable",
+            DispatchOutcome::PreImageUnreadable,
+            "a declared pre-image could not be read, so nothing was compared",
+        ),
+        (
+            "R50.LINE.FilterInventoryUnreadable",
+            DispatchOutcome::FilterInventoryUnreadable,
+            "the repository's filter configuration could not be read, so no Git command could be run safely",
+        ),
+        (
+            "R50.LINE.WallClockExceeded",
+            DispatchOutcome::WallClockExceeded,
+            "the attempt exceeded the time bound the Proposal declared",
+        ),
+        (
+            "R50.LINE.AlreadyDispatched",
+            DispatchOutcome::AlreadyDispatched,
+            "this Ruling has already been dispatched",
+        ),
+        (
+            "R50.LINE.Admissible",
+            DispatchOutcome::Admissible,
+            "every gate held and the act was not attempted",
+        ),
+        (
+            "R50.LINE.ObjectWriteFailed",
+            DispatchOutcome::ObjectWriteFailed,
+            "an object, tree or commit could not be written",
+        ),
+        (
+            "R50.LINE.EffectDoesNotMatchDeclaration",
+            DispatchOutcome::EffectDoesNotMatchDeclaration,
+            "the prepared commit does not match what the Candidate declares",
+        ),
+        (
+            "R50.LINE.LandingRefused",
+            DispatchOutcome::LandingRefused,
+            "the branch no longer held the pinned base at the moment of the swap",
+        ),
+        (
+            "R50.LINE.LandingUnobserved",
+            DispatchOutcome::LandingUnobserved,
+            "the result of the swap could not be established",
+        ),
+        (
+            "R50.LINE.Applied",
+            DispatchOutcome::Applied,
+            "the branch names the prepared commit",
+        ),
+    ];
+
+    /// Audience 2 (the in-process API): every outcome has one fixed line, and it is that line.
+    #[test]
+    fn r50_every_dispatch_outcome_has_its_own_fixed_caller_line() {
+        assert_eq!(
+            CALLER_LINES.len(),
+            outcome_rows().len(),
+            "the caller-line table and the outcome vocabulary disagree about how many there are"
+        );
+        let mut seen = std::collections::BTreeSet::new();
+        for (case, outcome, expected) in CALLER_LINES {
+            assert_eq!(
+                outcome.caller_line(),
+                *expected,
+                "{case}: the line shown to a caller is not the line this table pins"
+            );
+            assert!(
+                seen.insert(*expected),
+                "{case}: two outcomes share a line, so a caller cannot tell them apart"
+            );
+        }
+        // ...and the table covers the vocabulary, not a subset of it: an outcome added without a
+        // line would compile (the match is exhaustive, so it could not), but a line DELETED here
+        // would leave a row uncovered, which the length check above and this set catch together.
+        let lined: std::collections::BTreeSet<&str> = CALLER_LINES
+            .iter()
+            .map(|(_, outcome, _)| outcome.as_str())
+            .collect();
+        for (case, outcome) in outcome_rows() {
+            assert!(
+                lined.contains(outcome.as_str()),
+                "{case}: this outcome has no row in the caller-line table"
+            );
+        }
+    }
+
+    /// R42's exclusions, asserted over the WHOLE output rather than trusted to review.
+    #[test]
+    fn r50_no_caller_line_carries_anything_the_product_did_not_write() {
+        for (case, _, line) in CALLER_LINES {
+            assert!(!line.is_empty(), "{case}: an empty line is not a refusal");
+            // No interpolation of any kind reaches these: they are `&'static str` by type, and
+            // these assertions are what keeps a later edit from smuggling one in through `format!`
+            // and a `const` that no longer is one.
+            for forbidden in ['{', '}', '/', '\\', '"', '`'] {
+                assert!(
+                    !line.contains(forbidden),
+                    "{case}: the line carries {forbidden:?}, which is how a path, a quoted \
+                     identifier or a format placeholder gets in"
+                );
+            }
+            // A possessive apostrophe is English; a PAIR of them is a quoted identifier, which is
+            // the shape git uses for the path and revision it names. So the rule is the pair, not
+            // the character -- stated this way because the first form of this assertion failed on
+            // "the repository's head" and softening it to allow quoting would have been the wrong
+            // repair.
+            assert!(
+                line.matches('\'').count() <= 1,
+                "{case}: the line quotes something, and a quoted token is an identifier"
+            );
+            // git's own diagnostics, the R50 case's own hazard: the message is EVIDENCE in
+            // `filter_inventory_failure`, never a sentence a caller is shown.
+            for forbidden in ["fatal:", "warning:", "hint:", "error:", "/proc/", ".git"] {
+                assert!(
+                    !line.contains(forbidden),
+                    "{case}: the line carries {forbidden:?} -- git's text is evidence, not wording"
+                );
+            }
+            assert!(
+                !line
+                    .chars()
+                    .any(|character| character.is_ascii_hexdigit() && character.is_ascii_digit()),
+                "{case}: the line carries a digit, which is how a digest or an identity gets in"
+            );
+        }
+    }
+
+    /// Audience 1 (startup / the owning reader): the token IS the row key, and it is stable.
+    #[test]
+    fn r50_the_inventory_outcome_token_is_its_own_row_key() {
+        assert_eq!(
+            DispatchOutcome::FilterInventoryUnreadable.as_str(),
+            "filter_inventory_unreadable"
+        );
+        assert_ne!(
+            DispatchOutcome::FilterInventoryUnreadable.as_str(),
+            DispatchOutcome::PreImageUnreadable.as_str(),
+            "the inventory refusal is not the pre-image one and must not share its key"
+        );
+        assert_eq!(
+            DispatchOutcome::FilterInventoryUnreadable.run_state(),
+            "refused"
+        );
+    }
+
+    /// Audience 3 (the wire and the desktop): ABSENT, and this is the witness that it stays absent.
+    ///
+    /// R42's third audience does not exist for a dispatch outcome, by design rather than by
+    /// omission: ADR 0039 admits dispatch from one named Operator surface only,
+    /// `no_transport_command_can_reach_dispatch_or_pause` is the committed inventory of that, and
+    /// the Briefing wire carries two Receipt kinds, neither of them dispatch. So the thing to
+    /// witness is the absence -- a dispatch-shaped projection must not decode -- with the two real
+    /// kinds as the control, so the assertion cannot pass because the parser refuses everything.
+    #[test]
+    fn r50_no_dispatch_outcome_can_reach_the_briefing_wire() {
+        use crate::recent_receipts::RecentReceiptOutcome;
+        for control in [
+            r#"{"kind":"check_preflight","outcome":"verified"}"#,
+            r#"{"kind":"declared_checks","summary":"completed"}"#,
+        ] {
+            serde_json::from_str::<RecentReceiptOutcome>(control)
+                .expect("the control kinds must decode, or this witness proves nothing");
+        }
+        for (case, outcome, _) in CALLER_LINES {
+            for shape in [
+                format!(
+                    r#"{{"kind":"proposal_dispatch","outcome":"{}"}}"#,
+                    outcome.as_str()
+                ),
+                format!(
+                    r#"{{"kind":"check_preflight","outcome":"{}"}}"#,
+                    outcome.as_str()
+                ),
+            ] {
+                assert!(
+                    serde_json::from_str::<RecentReceiptOutcome>(&shape).is_err(),
+                    "{case}: a dispatch outcome decoded into the Briefing wire vocabulary"
+                );
+            }
+        }
     }
 
     /// R46: the new outcome is its own row, and it is NOT the mismatch it used to be reported as.
