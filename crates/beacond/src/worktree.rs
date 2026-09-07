@@ -2026,6 +2026,7 @@ mod tests {
     use std::os::unix::process::CommandExt;
     use std::path::{Path, PathBuf};
     use std::process::Stdio;
+    use std::sync::{Mutex, MutexGuard};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -2039,6 +2040,16 @@ mod tests {
         read_pinned_exit, run_git_bounded, status_holds,
     };
     use std::process::Command;
+
+    /// Serialize tests that retain a pinned repository with the fd-100 placement fixture.
+    /// `D-sol1-fd100-flake.md` measured a sibling pin taking fd 100 between filling and placement.
+    static FD_TABLE: Mutex<()> = Mutex::new(());
+
+    fn lock_fd_table() -> MutexGuard<'static, ()> {
+        FD_TABLE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     /// A temporary directory removed on drop.
     struct TempDir {
@@ -2123,6 +2134,7 @@ mod tests {
 
     #[test]
     fn a_read_whose_answer_is_its_exit_code_tells_no_apart_from_could_not_tell() {
+        let _fd_table = lock_fd_table();
         // `merge-base --is-ancestor` answers with the exit code: 0 yes, 1 no, anything else an
         // error. `read_pinned` reports every unsuccessful child as one absent value, which would
         // make "no" and "could not tell" the same answer -- and those are the two the residue token
@@ -2478,6 +2490,7 @@ mod tests {
 
     #[test]
     fn a_pinned_repository_is_entered_by_descriptor_and_not_by_its_pathname() {
+        let _fd_table = lock_fd_table();
         // gpt1: replacing `enter` with `current_dir(path)` left both claimed guards green, because
         // neither distinguished the two. This one does, without a race: the directory is renamed
         // away AFTER the pin, so a child entering by pathname cannot start at all while a child
@@ -2526,6 +2539,7 @@ mod tests {
 
     #[test]
     fn a_pinned_repository_notices_a_rename_and_a_decoy_at_its_pathname() {
+        let _fd_table = lock_fd_table();
         // gpt1's path-swap probe, as a deterministic unit test rather than a race. `git -C <path>`
         // re-resolves the name on every invocation, so a directory renamed away and replaced by an
         // equivalent one redirects everything that follows. The pin is device and inode, which is
@@ -2588,6 +2602,7 @@ mod tests {
 
     #[test]
     fn a_git_directory_that_opens_on_the_placement_descriptor_still_reaches_the_child() {
+        let _fd_table = lock_fd_table();
         // grok's R41 root cause (R49). `PINNED_GIT_DIR_FD` is a fixed destination because
         // `GIT_DIR` is baked before the fork, and `PinnedRepository::open` takes `.git` with
         // `O_CLOEXEC`. When the descriptor table has grown that far, `openat(.git)` returns that
@@ -2677,6 +2692,7 @@ mod tests {
     /// hardening off and then runs the child, which is the security half of this lane.
     #[test]
     fn an_inventory_git_refused_is_never_an_empty_filter_set() {
+        let _fd_table = lock_fd_table();
         let (root, pinned) = pinned_one_commit("inventory-refused");
         let configuration = root.path.join(".git").join("config");
         let restore = fs::metadata(&configuration).unwrap().permissions();
@@ -2706,6 +2722,7 @@ mod tests {
     /// malformed exit 128 with a `fatal:` line; mode 000 adds a `warning:` before it.
     #[test]
     fn every_configuration_git_cannot_read_is_a_refusal_that_carries_why() {
+        let _fd_table = lock_fd_table();
         for (label, break_it) in [
             (
                 "missing",
@@ -2753,6 +2770,7 @@ mod tests {
     /// from collapsing the two sites onto one witness.
     #[test]
     fn a_corrupt_object_store_leaves_the_inventory_readable_and_fails_at_the_byte_read() {
+        let _fd_table = lock_fd_table();
         let (root, pinned) = pinned_one_commit("inventory-vs-objects");
         let head = read_pinned(&pinned, &["rev-parse", "--verify", "HEAD"], READ_BUDGET)
             .expect("the inventory reads before the store is broken")
