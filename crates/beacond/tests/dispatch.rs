@@ -2996,7 +2996,7 @@ fn sol1_a_version_three_receipt_cannot_carry_version_four_observed_evidence() {
 }
 
 #[test]
-fn an_older_schema_34_reader_accepts_legacy_receipts_but_refuses_a_future_outcome() {
+fn an_older_schema_reader_accepts_legacy_receipts_but_refuses_a_future_outcome() {
     let fixture = admitted_mission("legacy-mismatch");
     let repository = CopyRepository::create(&fixture.copies_root, "legacy-mismatch");
     let (proposal_digest, _) = fixture.candidate_for_with_pre_image(
@@ -3086,7 +3086,7 @@ END;",
                 row.get::<_, i64>(0)
             })
             .unwrap(),
-        34
+        35
     );
     future.without_run_triggers(
         "UPDATE receipts

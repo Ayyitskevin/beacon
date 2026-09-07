@@ -36,7 +36,7 @@ use beacond::{
     ProjectError, ProjectPolicyDraft, ProjectPolicyService, ProjectRepositoryService,
     ProjectService, Provenance, ProviderFeature, PublicationSeamRefusal, PublishRefusal,
     RepositoryDraft, RepositorySourceKind, ResidentConfigurationService, ResidentLifecycleService,
-    RubricDeclaration, SecretString, SourceDigest, SourceKind, SourceRef, SourcesRefusal,
+    RubricDeclaration, SecretString, SourceDigest, SourceKind, SourceRef, SourcesRefusal, SpendEra,
     SpendReference, StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig,
     SuccessCondition, Supervisor, SupervisorError, SupportRef, TeamDraft, TeamLeadAmbiguityRule,
     TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
@@ -6489,6 +6489,7 @@ fn c11d_short_spend_window_is_partial_in_document() {
     let f = admitted_mission("c11d-spend-window");
     f.classify(ImpactLevel::High);
     let spend = MeasuredSpendV1 {
+        era: SpendEra::V2,
         workspace_id: f.workspace_id,
         mission_id: f.mission_id,
         spend_id: Uuid::new_v4(),
@@ -6565,6 +6566,7 @@ fn a_spend_measured_after_the_last_run_reaches_the_manifest_as_measured() {
     // The Run comes FIRST: this is the ordering an honest ledger has -- measure what has happened.
     spend_bearing_run(&f);
     let spend = MeasuredSpendV1 {
+        era: SpendEra::V2,
         workspace_id: f.workspace_id,
         mission_id: f.mission_id,
         spend_id: Uuid::new_v4(),
@@ -6660,6 +6662,7 @@ fn every_spend_bearing_kind_makes_a_window_partial() {
         let f = admitted_mission(&format!("r34-kind-{}", kind.replace('.', "-")));
         f.classify(ImpactLevel::High);
         let spend = MeasuredSpendV1 {
+            era: SpendEra::V2,
             workspace_id: f.workspace_id,
             mission_id: f.mission_id,
             spend_id: Uuid::new_v4(),

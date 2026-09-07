@@ -305,7 +305,7 @@ fn operator_admits_a_finite_mission_from_exact_current_team_evidence() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 34);
+    assert_eq!(report.diagnostics.schema_version, 35);
 }
 
 #[test]
@@ -656,7 +656,7 @@ fn schema_ten_migrates_without_rewriting_events_or_the_team_roster_guard() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 34);
+    assert_eq!(report.diagnostics.schema_version, 35);
     let connection = Connection::open(&path).unwrap();
     let after = connection
         .query_row(
@@ -1152,6 +1152,7 @@ fn a_store_at_the_previous_schema_version_migrates_and_keeps_its_condition_rows(
     // R46 first, while the schema is still whole: renaming a table validates every trigger,
     // and the teardown below drops `artifacts`, which an `evaluations` trigger names.
     restore_pre_0033_receipts(&connection);
+    restore_pre_0035_spend(&connection);
     connection
         .execute_batch(
             // Newest migration first. 0029's Outcome manifest store is newest: it keys into
@@ -1201,7 +1202,7 @@ fn a_store_at_the_previous_schema_version_migrates_and_keeps_its_condition_rows(
         initial_workspace_name: "Ignored".to_owned(),
     })
     .expect("a store at the previous schema version must migrate");
-    assert_eq!(report.diagnostics.schema_version, 34);
+    assert_eq!(report.diagnostics.schema_version, 35);
 
     assert_eq!(
         condition_rows(&store.path, mission.id),
@@ -1886,4 +1887,36 @@ fn a_row_whose_bytes_no_longer_hash_to_its_digest_is_refused() {
         Err(beacond::CompletionReadRefusal::BytesDisagree),
         "identity is a computation over the bytes, not the column beside them"
     );
+}
+
+/// The pre-0035 spend shapes, for a test that stamps a version below 35.
+///
+/// 0035 widened `measured_spend`'s canonicalizer CHECK and added `measured_spend_lines`. A store
+/// rolled back below 35 must carry the shapes that version actually had, or its schema signature
+/// will not match one built from the ladder. Taken from 0025's own text: a rollback that retyped
+/// the DDL would be testing the test.
+fn restore_pre_0035_spend(connection: &Connection) {
+    let source = include_str!("../migrations/0025_spend_and_impact.sql");
+    let block = &source[source
+        .find("CREATE TABLE measured_spend (")
+        .expect("0025 defines the spend table")
+        ..source
+            .find("-- One Mission impact classification.")
+            .expect("0025 defines the table after it")];
+    connection
+        .execute_batch(
+            "CREATE TEMP TABLE spend_pre_0035 AS SELECT * FROM measured_spend;
+             DROP TABLE measured_spend_lines;
+             DROP TRIGGER measured_spend_no_update;
+             DROP TRIGGER measured_spend_no_delete;
+             DROP TABLE measured_spend;",
+        )
+        .expect("the 0035 shapes come off");
+    connection.execute_batch(block).expect("0025's spend table");
+    connection
+        .execute_batch(
+            "INSERT INTO measured_spend SELECT * FROM spend_pre_0035;
+             DROP TABLE spend_pre_0035;",
+        )
+        .expect("the rows come back");
 }

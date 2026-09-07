@@ -11,7 +11,7 @@
 use std::cmp::Ordering;
 
 use beacond::{
-    LineAttribution, MalformedSpend, MeasuredSpendV1, SpendAttribution, SpendLine,
+    LineAttribution, MalformedSpend, MeasuredSpendV1, SpendAttribution, SpendEra, SpendLine,
     SpendMeasurement, SpendOrigin, SpendSupersedes, SpendTotals, UncountedEntry, UncountedKind,
     compare_units,
 };
@@ -83,6 +83,7 @@ fn totals(lines: Vec<SpendLine>, counted_units: u64) -> SpendTotals {
 /// One measured record: two units, one of them zero, with a superseded predecessor.
 fn fixture() -> MeasuredSpendV1 {
     MeasuredSpendV1 {
+        era: SpendEra::V2,
         workspace_id: uuid(WORKSPACE),
         mission_id: uuid(MISSION),
         spend_id: uuid(SPEND),
