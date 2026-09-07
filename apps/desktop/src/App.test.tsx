@@ -307,6 +307,7 @@ describe("Beacon desktop shell", () => {
 
     await user.keyboard("{Enter}");
     expect(screen.getByRole("main")).toHaveFocus();
+    await expectNoWcagViolations(document.body);
   });
 
   it.each(["{Enter}", " "])(
@@ -371,6 +372,7 @@ describe("Beacon desktop shell", () => {
 
     expect(await screen.findByText("Optional local proving project")).toBeVisible();
     expect(screen.getByRole("button", { name: "Install Sample Project" })).toBeVisible();
+    await expectNoWcagViolations(document.body);
   });
 
   it("keeps Workspace material and Operator Commands closed before setup", async () => {
@@ -390,6 +392,7 @@ describe("Beacon desktop shell", () => {
     }
     expect(screen.queryByText("Personal")).not.toBeInTheDocument();
     expect(document.body).not.toHaveTextContent(/workspace[_ -]id/i);
+    await expectNoWcagViolations(document.body);
   });
 
   it.each([
@@ -436,6 +439,7 @@ describe("Beacon desktop shell", () => {
 
     expect(await screen.findByRole("heading", { name: "Briefing" })).toBeVisible();
     expect(await screen.findByText("Opened Briefing from the Beacon link.")).toBeVisible();
+    await expectNoWcagViolations(document.body);
   });
 
   it("shows a saved Project link as not evaluated while Projects load, then opens it", async () => {
@@ -497,6 +501,7 @@ describe("Beacon desktop shell", () => {
 
     await act(async () => resolveProjects([summary]));
     expect(await screen.findByRole("heading", { name: "Linked Project" })).toBeVisible();
+    await expectNoWcagViolations(document.body);
   });
 
   it("visibly refuses a valid link from another Workspace", async () => {
@@ -515,6 +520,7 @@ describe("Beacon desktop shell", () => {
       screen.getByText("Refused: this Beacon link belongs to another Workspace."),
     ).toBeVisible();
     expect(screen.getByRole("heading", { name: "Briefing" })).toBeVisible();
+    await expectNoWcagViolations(document.body);
   });
 
   it("keeps an absent Project distinct from an unevaluated Project", async () => {
@@ -533,6 +539,7 @@ describe("Beacon desktop shell", () => {
       await screen.findByText("No Project with that identity exists in this Workspace."),
     ).toBeVisible();
     expect(screen.queryByText(/has not evaluated projects yet/i)).not.toBeInTheDocument();
+    await expectNoWcagViolations(document.body);
   });
 
   it("copies canonical links from the Project and Mission that are shown", async () => {
@@ -618,6 +625,7 @@ describe("Beacon desktop shell", () => {
     expect(writeText).toHaveBeenLastCalledWith(missionLink);
     expect(screen.getByLabelText("Beacon link")).toHaveValue(missionLink);
     expect(screen.getByText("Copied Mission link.")).toBeVisible();
+    await expectNoWcagViolations(document.body);
   });
 
   it("opens a pasted Mission link after loading its Project and Mission roster", async () => {
@@ -693,6 +701,7 @@ describe("Beacon desktop shell", () => {
     await screen.findByText("Opened the named Mission from the Beacon link.");
     const outcome = screen.getByText(mission.desiredOutcome);
     expect(outcome.closest("article")).toHaveAttribute("aria-current", "true");
+    await expectNoWcagViolations(document.body);
   });
 
   it("enrolls the Owner only after the one-time Recovery Key is confirmed saved", async () => {
@@ -731,6 +740,7 @@ describe("Beacon desktop shell", () => {
     expect(within(suiteNavigation).getByRole("button", { name: "Conversations" })).toBeDisabled();
     expect(within(suiteNavigation).getByRole("button", { name: "Knowledge" })).toBeDisabled();
     expect(within(suiteNavigation).getByRole("button", { name: "Software" })).toBeDisabled();
+    await expectNoWcagViolations(document.body);
   });
 
   it("shows Briefing's recent Receipts of every kind, in the order the daemon sent", async () => {
@@ -827,6 +837,7 @@ describe("Beacon desktop shell", () => {
     expect(
       screen.getByText(/records bounded Linux observations but does not evaluate LUKS coverage/),
     ).toBeVisible();
+    await expectNoWcagViolations(document.body);
   });
 
   it("states the window, the receiptless Runs and the overflow the daemon reported", async () => {
@@ -858,6 +869,7 @@ describe("Beacon desktop shell", () => {
     expect(reading.textContent).toMatch(/older Runs exist/);
     // Runs, not Receipts: an older Run that recorded none sets the same flag.
     expect(reading.textContent).not.toMatch(/more Receipts/);
+    await expectNoWcagViolations(document.body);
   });
 
   it("does not call a window with no Receipts an empty Workspace", async () => {
@@ -885,6 +897,7 @@ describe("Beacon desktop shell", () => {
     const reading = screen.getByText(/this reading covered the 50 most recent Runs/);
     expect(reading.textContent).toMatch(/found 0 Receipts/);
     expect(reading.textContent).toMatch(/4 ended without one/);
+    await expectNoWcagViolations(document.body);
   });
 
   it("says the Workspace has no Receipts only when the reading saw every Run", async () => {
@@ -900,6 +913,7 @@ describe("Beacon desktop shell", () => {
 
     expect(await screen.findByText("No Receipts yet.")).toBeVisible();
     expect(screen.queryByText("No Receipts among the Runs in this reading.")).toBeNull();
+    await expectNoWcagViolations(document.body);
   });
 
   it("never presents a Receipt as work that succeeded", async () => {
@@ -930,6 +944,7 @@ describe("Beacon desktop shell", () => {
         expect(row.textContent).toMatch(/not a passing check|does not say they passed/);
       }
     }
+    await expectNoWcagViolations(document.body);
   });
 
   it("keeps a failed Receipt read apart from a Workspace with no Receipts", async () => {
@@ -961,6 +976,7 @@ describe("Beacon desktop shell", () => {
     await user.click(screen.getByRole("button", { name: "Refresh Receipts" }));
     expect(await screen.findByText("No Receipts yet.")).toBeVisible();
     expect(screen.queryByText(/could not be read/)).toBeNull();
+    await expectNoWcagViolations(document.body);
   });
 
   it("keeps an initial live-data diagnostic failure visible and retryable", async () => {
@@ -1037,6 +1053,7 @@ describe("Beacon desktop shell", () => {
     ).toBeNull();
     // And it is still retryable.
     expect(screen.getByRole("button", { name: "Recheck" })).toBeVisible();
+    await expectNoWcagViolations(document.body);
   });
 
   it("does not deny encryption the reading itself observed", async () => {
@@ -1064,6 +1081,7 @@ describe("Beacon desktop shell", () => {
     expect(container.textContent).not.toContain("found no operating-system disk encryption");
     expect(screen.getByText(/pv0 is encrypted; 8:17 is not/)).toBeVisible();
     expect(screen.getByRole("button", { name: "How to turn this on" })).toBeVisible();
+    await expectNoWcagViolations(document.body);
   });
 
   it("never describes the open live store as Beacon-encrypted", async () => {
@@ -1089,6 +1107,7 @@ describe("Beacon desktop shell", () => {
       expect(container.textContent).not.toMatch(/Beacon (encrypts|has encrypted) (your|the) live/);
       unmount();
     }
+    await expectNoWcagViolations(document.body);
   });
 
   it("discovers installed local models as inactive resources from Briefing", async () => {
@@ -1220,6 +1239,7 @@ describe("Beacon desktop shell", () => {
       expectedActivationId: activeLocalModel.id,
     });
     expect(await screen.findByText("Inactive")).toBeVisible();
+    await expectNoWcagViolations(document.body);
   });
 
   it("creates a Project from an explicit Charter without granting effects or spend", async () => {
@@ -1332,6 +1352,7 @@ describe("Beacon desktop shell", () => {
     expect(await screen.findByText("Charter revision 2")).toBeVisible();
     expect(screen.getByText("2 preserved revisions")).toBeVisible();
     expect(screen.getAllByText("Build a trustworthy local software factory.")).toHaveLength(2);
+    await expectNoWcagViolations(document.body);
   });
 
   it("opens an existing Project with its complete preserved Charter history", async () => {
@@ -1723,6 +1744,7 @@ describe("Beacon desktop shell", () => {
       screen.getByText("Declared, not verified — Beacon has not opened this repository."),
     ).toBeVisible();
     expect(screen.getByRole("button", { name: "Revise Repository Binding" })).toBeVisible();
+    await expectNoWcagViolations(document.body);
   });
 
   it("forms a Project Team from exact eligible Resident configurations without implying authority", async () => {
@@ -2053,6 +2075,7 @@ describe("Beacon desktop shell", () => {
     expect(await screen.findByRole("heading", { name: "Briefing" })).toBeVisible();
     expect(screen.getByText("2 Residents in this Workspace")).toBeVisible();
     expect(screen.getByText(/No Resident has execution authority yet/)).toBeVisible();
+    await expectNoWcagViolations(document.body);
   });
 
   it("controls Resident availability and confirms terminal retirement", async () => {
@@ -2155,6 +2178,7 @@ describe("Beacon desktop shell", () => {
     expect(await within(roster).findByText("retired")).toBeVisible();
     expect(within(roster).queryByRole("button")).not.toBeInTheDocument();
     expect(screen.getByText(/Lifecycle controls availability only/)).toBeVisible();
+    await expectNoWcagViolations(document.body);
   });
 
   it("configures and clears a Resident without granting execution authority", async () => {
@@ -2292,6 +2316,7 @@ describe("Beacon desktop shell", () => {
     });
     expect(await screen.findByRole("heading", { name: "Briefing" })).toBeVisible();
     expect(screen.getByText("Starter organization skipped")).toBeVisible();
+    await expectNoWcagViolations(document.body);
   });
 
   it("signs into an existing local account and can lock it again", async () => {
@@ -2354,6 +2379,7 @@ describe("Beacon desktop shell", () => {
 
     expect(screen.getByRole("heading", { name: "Welcome back" })).toBeVisible();
     expect(screen.getByText("Workspace access locked")).toBeVisible();
+    await expectNoWcagViolations(document.body);
   });
 
   it("conceals Workspace material on focus loss until the supervisor is reverified", async () => {
@@ -2422,6 +2448,7 @@ describe("Beacon desktop shell", () => {
 
     expect(screen.getByRole("heading", { name: "Beacon is concealed" })).toBeVisible();
     expect(screen.queryByRole("heading", { name: "Briefing" })).not.toBeInTheDocument();
+    await expectNoWcagViolations(document.body);
   });
 
   it("explains a session check failure and can retry without reloading", async () => {
@@ -2476,6 +2503,7 @@ describe("Beacon desktop shell", () => {
     expect(invokeMock).toHaveBeenCalledWith("set_session_timeout", {
       inactivityTimeoutMinutes: 60,
     });
+    await expectNoWcagViolations(document.body);
   });
 
   it("warns without claiming protection when an OS lock monitor is unavailable", async () => {
@@ -2498,6 +2526,7 @@ describe("Beacon desktop shell", () => {
       await screen.findByText(/Automatic OS lock monitoring is unavailable/i),
     ).toBeVisible();
     expect(screen.queryByText("OS lock monitoring active")).not.toBeInTheDocument();
+    await expectNoWcagViolations(document.body);
   });
 
   it("fails closed when the command returns an undeclared field", async () => {
@@ -2514,6 +2543,7 @@ describe("Beacon desktop shell", () => {
       "Beacon could not verify the local session.",
     );
     expect(screen.queryByText("Personal")).not.toBeInTheDocument();
+    await expectNoWcagViolations(document.body);
   });
 
   it("starts in light mode and lets the Operator choose dark mode", async () => {
@@ -2529,6 +2559,7 @@ describe("Beacon desktop shell", () => {
     );
     await user.click(screen.getByRole("button", { name: "Use dark theme" }));
     expect(document.documentElement).toHaveAttribute("data-theme", "dark");
+    await expectNoWcagViolations(document.body);
   });
 
   it("tracks operating-system theme changes while following system", async () => {
@@ -2561,6 +2592,7 @@ describe("Beacon desktop shell", () => {
       for (const listener of listeners) listener({ matches: true } as MediaQueryListEvent);
     });
     expect(document.documentElement).toHaveAttribute("data-theme", "dark");
+    await expectNoWcagViolations(document.body);
   });
 
   it("has no automated accessibility violations in the setup view", async () => {
