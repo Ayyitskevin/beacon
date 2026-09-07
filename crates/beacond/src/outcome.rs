@@ -3103,6 +3103,137 @@ fn appendix_rule(manifest: &OutcomeManifestV1) -> &'static str {
 mod tests {
     use super::*;
 
+    // ---------------------------------------------------------------------------------------
+    // The four `MIN_*_BYTES` decoder guards, MEASURED (DP-od-slice2-readiness §4 row 1).
+    //
+    // `Decoder::count(entry_bytes)` refuses when `count * entry_bytes > remaining`, so each
+    // constant must be the number of bytes ONE element of that collection occupies at its
+    // smallest legal shape. Too high rejects valid input; too low admits a count the element
+    // decoders then have to reject one at a time.
+    //
+    // The figures were hand-computed, and a comment beside them derives the source-reference
+    // minimum from "two zero-length token prefixes". No token in these records may be empty:
+    // `require_digest` pins `algorithm` to `DIGEST_ALGORITHM` and `require_token` refuses an
+    // empty `canonicalizer`. So the constants are measured here instead, through the real
+    // encoders, and the assertion is equality rather than a bound.
+    // ---------------------------------------------------------------------------------------
+
+    /// The bytes ONE element costs, through the real encoder rather than by hand.
+    fn element_bytes(encode: impl FnOnce(&mut Encoder) -> Result<(), MalformedOutcome>) -> usize {
+        let mut encoder = Encoder::new();
+        let before = encoder.out.len();
+        encode(&mut encoder).expect("the minimal element must encode");
+        encoder.out.len() - before
+    }
+
+    /// A digest at its smallest legal shape: the algorithm is pinned, the canonicalizer is the
+    /// shortest legal token, and the value is 64 hex characters.
+    fn smallest_digest() -> SourceDigest {
+        SourceDigest {
+            algorithm: DIGEST_ALGORITHM.to_owned(),
+            canonicalizer: "a".to_owned(),
+            value: "0".repeat(DIGEST_HEX_CHARS),
+        }
+    }
+
+    /// The smallest legal `SourceRef`: a kind that carries no identity, and the cheapest arm of
+    /// the pinned-revision state -- an absence whose reason is one character, since
+    /// `require_narrative_text` refuses an empty one.
+    fn smallest_source_ref() -> SourceRef {
+        SourceRef {
+            workspace_id: Uuid::nil(),
+            kind: SourceKind::Proposal,
+            identity: None,
+            digest: smallest_digest(),
+            pinned_revision: OutcomeState::Absent("x".to_owned()),
+        }
+    }
+
+    /// `count` accepts exactly `minimum` bytes per element and refuses one fewer.
+    ///
+    /// Asserted at the guard itself rather than through a whole record: this IS the predicate the
+    /// constant feeds, and testing it here means the boundary is checked without a fixture that
+    /// could drift for unrelated reasons.
+    fn count_guard_boundary(minimum: usize) {
+        let mut exact = 1_u32.to_be_bytes().to_vec();
+        exact.extend(std::iter::repeat_n(0_u8, minimum));
+        assert!(
+            Decoder::new(&exact).count(minimum).is_ok(),
+            "a count of one with exactly {minimum} bytes left was refused"
+        );
+
+        let mut short = 1_u32.to_be_bytes().to_vec();
+        short.extend(std::iter::repeat_n(0_u8, minimum - 1));
+        assert_eq!(
+            Decoder::new(&short).count(minimum),
+            Err(MalformedOutcome::Truncated),
+            "a count of one with {} bytes left was admitted",
+            minimum - 1
+        );
+    }
+
+    #[test]
+    fn min_source_ref_bytes_is_the_measured_minimum() {
+        let measured = element_bytes(|encoder| encode_source_ref(encoder, &smallest_source_ref()));
+        assert_eq!(
+            MIN_SOURCE_REF_BYTES, measured,
+            "MIN_SOURCE_REF_BYTES is {MIN_SOURCE_REF_BYTES}; the encoder's minimum is {measured}"
+        );
+        count_guard_boundary(MIN_SOURCE_REF_BYTES);
+    }
+
+    #[test]
+    fn min_receipt_ref_bytes_is_the_measured_minimum() {
+        // Every field is fixed width or a pinned literal, so this element has exactly one size.
+        let smallest = ReceiptRef {
+            workspace_id: Uuid::nil(),
+            run_uuid: Uuid::nil(),
+            receipt_version: 0,
+            outcome_checksum: "0".repeat(DIGEST_HEX_CHARS),
+        };
+        let measured = element_bytes(|encoder| encode_receipt_ref(encoder, &smallest));
+        assert_eq!(
+            MIN_RECEIPT_REF_BYTES, measured,
+            "MIN_RECEIPT_REF_BYTES is {MIN_RECEIPT_REF_BYTES}; the encoder's minimum is {measured}"
+        );
+        count_guard_boundary(MIN_RECEIPT_REF_BYTES);
+    }
+
+    #[test]
+    fn min_narrative_ref_bytes_is_the_measured_minimum() {
+        // The narrative item has no encoder of its own; the collection encoder writes an ordinal
+        // and a token inline, so the element is measured the same way it is written.
+        let measured = element_bytes(|encoder| {
+            encoder.u32(0);
+            encoder.string("a", MAX_TOKEN_BYTES)
+        });
+        assert_eq!(
+            MIN_NARRATIVE_REF_BYTES, measured,
+            "MIN_NARRATIVE_REF_BYTES is {MIN_NARRATIVE_REF_BYTES}; the encoder's minimum is \
+             {measured}"
+        );
+        count_guard_boundary(MIN_NARRATIVE_REF_BYTES);
+    }
+
+    #[test]
+    fn min_condition_bytes_is_the_measured_minimum() {
+        // The cheapest arms throughout: a verified result is a bare tag, and a verified empty
+        // citation list is a tag and a zero count -- both smaller than any absence, which must
+        // carry a reason.
+        let smallest = SuccessCondition {
+            ordinal: 0,
+            condition_id: "a".to_owned(),
+            outcome: OutcomeState::Verified(ConditionResult::Met),
+            citations: OutcomeState::Verified(Vec::new()),
+        };
+        let measured = element_bytes(|encoder| encode_condition(encoder, &smallest));
+        assert_eq!(
+            MIN_CONDITION_BYTES, measured,
+            "MIN_CONDITION_BYTES is {MIN_CONDITION_BYTES}; the encoder's minimum is {measured}"
+        );
+        count_guard_boundary(MIN_CONDITION_BYTES);
+    }
+
     /// The emitted-Markdown cap is checked before the append, and this is the only place that can
     /// be measured: `render` drops the buffer on refusal, so no caller can observe how large it
     /// grew. Moving the check after `push_str` leaves the buffer over the cap and turns this red.
