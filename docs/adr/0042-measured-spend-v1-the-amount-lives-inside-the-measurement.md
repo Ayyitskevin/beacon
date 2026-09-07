@@ -2,15 +2,6 @@
 status: accepted
 ---
 
-> **Amended 2026-09-07 (alpha bullet 39, spend dimensions).** The record now carries four
-> attribution dimensions per line, and its canonicalizer is `beacon.spend.v2`. The decision this ADR
-> records is unchanged -- the amount still lives inside the measurement, and "we did not measure"
-> is still a first-class statement. What changed is the grammar: the byte table below gained rows
-> 13a-13d, the published identity vector moved from 182 bytes / `9461d5de...` to the numbers under
-> **Published identity vector**, and `beacon.spend.v1` records are still read -- as unattributed,
-> never refused and never upgraded. The superseded v1 numbers are recorded under **Superseded
-> vector (v1)** so a reader who meets an old digest can still identify it.
-
 # Measured spend v1: the amount lives inside the measurement
 
 BLUEPRINT requires every Outcome Document to summarise "actual spend" (`docs/BLUEPRINT.md:180-181`),
@@ -26,6 +17,15 @@ So this record has no producer, and building it anyway is the point. **Its job i
 of what a spend record usually does: it makes "we did not measure" a first-class, attributable,
 digest-identified statement rather than an absence.** Without it, an Outcome Document has to render
 a Mission's cost as a blank, and a blank in a money column reads as zero.
+
+**Amended 2026-09-07** (status unchanged: accepted; alpha bullet 39, spend dimensions). The record
+now carries four attribution dimensions per line, and its canonicalizer is `beacon.spend.v2`. The
+decision this ADR records is unchanged -- the amount still lives inside the measurement, and "we did
+not measure" is still a first-class statement. What changed is the grammar: the byte table below
+gained rows 13a-13d, the published identity vector moved from 182 bytes / `9461d5de...` to the
+numbers under **Published identity vector**, and `beacon.spend.v1` records are still read -- as
+unattributed, never refused and never upgraded. The superseded v1 numbers are recorded under
+**Superseded vector (v1)** so a reader who meets an old digest can still identify it.
 
 ## Decision
 
