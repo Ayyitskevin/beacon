@@ -137,12 +137,55 @@ mount protection. The unit repeats the same assertion in `ExecStartPre`.
 
 ## Ephemeral lifecycle and cache choice
 
-After one job, GitHub deregisters the runner and `actions/runner` removes its
-local `.runner` file. `Restart=always` restarts unexpected failures while that
-file exists; `ConditionPathExists` prevents a consumed ephemeral runner from
-looping. `ExecStopPost` clears `/__w` after all action post-job hooks finish.
-Register again with a new token and run `sudo systemctl start gh-runner` for the
-next package job.
+**One job per registration.** A registration is consumed by the first job it
+runs. There is no second job without a new token and a new `config.sh`, and this
+is the whole shape of the lifecycle rather than a detail of it.
+
+After that job, GitHub deregisters the runner and `actions/runner` un-configures
+itself locally: `DeleteLocalRunnerConfig` removes `.credentials` and its RSA key,
+then `.runner` (v2.337.0, `Runner.Listener/Runner.cs:877-880` and
+`Configuration/ConfigurationManager.cs:496-524`). The unit requires both files,
+so a cleanup interrupted between the two deletions still refuses to start.
+
+`Restart=on-failure` is what stops a consumed runner from looping, and the
+condition is a second belt. It has to be `on-failure`, because `run.sh` does not
+let the listener's exit code reach systemd: an un-configured runner exits 1, and
+`run-helper.sh.template` turns that into "stop the service, no retry needed"
+followed by `exit 0`. Under `Restart=always` that request to stop was read as a
+success worth repeating, and the unit restarted six times into
+`start-limit-hit`. A real crash — a signal death, or `run.sh` itself failing —
+is still a failure, still restarts, and is still stopped by
+`StartLimitBurst=5` within `StartLimitIntervalSec=300`.
+
+`ExecStopPost` clears `/__w` after all action post-job hooks finish.
+
+### Register again for the next job
+
+```sh
+# 1. A fresh registration token from the repository's runner settings.
+# 2. As gh-runner, from /var/lib/gh-runner/actions-runner:
+sudo -u gh-runner ./config.sh --url https://github.com/Ayyitskevin/beacon \
+  --token "$FRESH_REGISTRATION_TOKEN" --ephemeral --unattended
+# 3. Clear the previous run's failure state, if the unit reached its start limit:
+sudo systemctl reset-failed gh-runner.service
+# 4. Start it for the one job:
+sudo systemctl start gh-runner.service
+```
+
+Step 3 is not optional after a `start-limit-hit`: until the failure state is
+cleared, `systemctl start` refuses.
+
+### The persistent alternative — Kevin's call, not made here
+
+Dropping `--ephemeral` at `config.sh` gives a runner that stays registered and
+takes job after job, which removes steps 1-4 above entirely.
+
+It also removes the property this setup was built for: with one job per
+registration, no state and no credential outlives a single job, so a workflow
+that compromises the runner cannot reach the next one. A persistent runner
+carries its filesystem, its Docker state and its registration credential across
+every job that follows, and on this host that is the same machine as the
+fleet's own work.
 
 Keep the existing SHA-pinned `actions/cache` step as the sole cross-job cache.
 It stores Cargo registry and `target` data in GitHub's cache service. Retaining a
