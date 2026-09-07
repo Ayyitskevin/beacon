@@ -874,6 +874,8 @@ pub enum PinnedReadFailure {
     /// the exit code alone cannot separate them. Anything git says that is not the absence
     /// message is this -- FAIL CLOSED -- and it carries what git said so the evidence survives.
     ReadRefused { message: String },
+    /// A silent non-zero exit is not evidence that the subject is absent.
+    SilentExit { code: i32 },
 }
 
 /// Why the filter-driver inventory could not be established (R50).
@@ -986,6 +988,7 @@ impl PinnedReadFailure {
             Self::TimedOut => "timed_out",
             Self::PinBrokenAfterRead => "pin_broken_after_read",
             Self::ReadRefused { .. } => "read_refused",
+            Self::SilentExit { .. } => "silent_exit",
         }
     }
 }
@@ -1068,6 +1071,8 @@ fn classify_pinned_read(
                 Some(0) => PinnedRead::Bytes(stdout),
                 // R46.3, generalised by R47: an absence is what the site can SHOW, never what the
                 // exit code was. Anything else non-zero is a failure carrying what git said.
+                Some(code) if matches!(absence, AbsenceWitness::Silence) && !said_anything_diagnostic(&stderr) && stdout.is_empty() =>
+                    PinnedRead::Unreadable(PinnedReadFailure::SilentExit { code }),
                 Some(_) if shows_absence(absence, &stdout, &stderr) => PinnedRead::NotFound,
                 Some(_) => PinnedRead::Unreadable(PinnedReadFailure::ReadRefused {
                     message: quoted_git_message(&stderr),
@@ -1696,6 +1701,14 @@ mod r46_read_classification {
         );
     }
 
+    #[test]
+    fn sol1_exit_128_with_empty_stderr_is_not_an_absence_at_every_silent_site() {
+        assert_eq!(
+            classify_pinned_read(BoundedRaw::Finished { code: Some(128), stdout: Vec::new(), stderr: Vec::new() }, true, AbsenceWitness::Silence),
+            PinnedRead::Unreadable(PinnedReadFailure::SilentExit { code: 128 })
+        );
+    }
+
     /// R47: the two witnesses are not interchangeable, and neither is the exit code.
     ///
     /// `config --list` and `merge-base --is-ancestor` answer negatively in SILENCE; `cat-file`
@@ -1710,8 +1723,8 @@ mod r46_read_classification {
         };
         assert_eq!(
             classify_pinned_read(silent(), true, AbsenceWitness::Silence),
-            PinnedRead::NotFound,
-            "a silent non-zero exit is the negative answer at a site whose witness is silence"
+            PinnedRead::Unreadable(PinnedReadFailure::SilentExit { code: 1 }),
+            "a silent non-zero exit is not evidence of absence"
         );
         assert_eq!(
             classify_pinned_read(silent(), true, CAT_FILE),
@@ -1766,8 +1779,8 @@ mod r46_read_classification {
                 true,
                 AbsenceWitness::Silence,
             ),
-            PinnedRead::NotFound,
-            "advice about a deprecated feature was read as a failure of the read"
+            PinnedRead::Unreadable(PinnedReadFailure::SilentExit { code: 1 }),
+            "advice-only stderr remains a silent exit"
         );
 
         let mut warned =
