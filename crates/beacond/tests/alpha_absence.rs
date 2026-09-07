@@ -1,47 +1,101 @@
 //! Executable absence witnesses for two Alpha acceptance criteria.
 //!
-//! Both criteria are satisfied today BY CONSTRUCTION and, until this file, by nothing else: no test
-//! turned red if the absence stopped being true (DP-alpha-criteria-census-opus2.md, bullets 41 and
-//! 30). The shape is `local_transport`'s own witness — compute the surface, assert the forbidden
-//! thing is not in it, and keep a control proving the predicate would notice if it were.
+//! Both criteria are satisfied today BY CONSTRUCTION and, until these witnesses, by nothing else:
+//! no test turned red if the absence stopped being true (DP-alpha-criteria-census-opus2.md,
+//! bullets 41 and 30). The shape is `local_transport`'s own witness — compute the surface, assert
+//! the forbidden thing is not in it, and keep a control proving the predicate would notice.
 //!
-//! The surface is COMPUTED, never typed: `source_inventory` walks the crate's `src` tree at test
-//! time, anchored to `CARGO_MANIFEST_DIR`, so a module added tomorrow is inside the witness without
-//! anyone remembering to add it. That is the property a hand-written list cannot have, and the
-//! reason these criteria were unguarded in the first place.
+//! # Scope, in words, because the names alone cannot carry it
+//!
+//! **Every workspace member.** The surface is EVERY member listed in the
+//! workspace manifest — read from it, never typed here — so a crate added to the workspace is
+//! inside the witness the day it is added. A41.1 widened this after grok's read of #131: the first
+//! version walked `crates/beacond/src` alone, so a sender in the desktop crate stayed green while
+//! bullet 41 speaks about the product.
+//!
 
 use std::fs;
 use std::path::PathBuf;
 
-/// Every Rust source file under the crate's `src`, as `(relative path, text)`.
+/// The workspace root: this crate's manifest directory, two levels up (`crates/beacond`).
+fn workspace_root() -> PathBuf {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|path| path.parent())
+        .expect("the crate sits two levels under the workspace root")
+        .to_path_buf();
+    assert!(
+        root.join("Cargo.toml").is_file(),
+        "no workspace manifest at {}",
+        root.display()
+    );
+    root
+}
+
+/// Every workspace member, read from the workspace manifest rather than named here.
 ///
-/// Shared by both witnesses: they ask different questions of the same surface, so there is one
-/// enumeration and two assertions rather than two enumerations that could drift apart.
-fn source_inventory() -> Vec<(String, String)> {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+/// A crate added to the workspace joins these witnesses without anyone remembering to add it —
+/// which is the property a hand-typed list cannot have, and the reason the first version of this
+/// file had a hole.
+fn workspace_members() -> Vec<String> {
+    let manifest = fs::read_to_string(workspace_root().join("Cargo.toml"))
+        .expect("the workspace manifest is readable");
+    let members = manifest
+        .split("members = [")
+        .nth(1)
+        .expect("the workspace manifest lists its members")
+        .split(']')
+        .next()
+        .expect("the members list closes");
+    let members: Vec<String> = members
+        .split(',')
+        .map(|entry| entry.trim().trim_matches('"').to_owned())
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    assert!(
+        members.len() >= 2,
+        "the workspace lists {} members; this is not reading the manifest",
+        members.len()
+    );
+    members
+}
+
+/// Every Rust source file under every workspace member's `src`, as `(member/relative path, text)`.
+///
+/// Shared by both criteria: they ask different questions of one enumeration, so the two cannot
+/// drift apart. `tests/` trees are deliberately outside it — this file is one of them.
+fn workspace_sources() -> Vec<(String, String)> {
+    let root = workspace_root();
     let mut files = Vec::new();
-    let mut pending = vec![root.clone()];
-    while let Some(directory) = pending.pop() {
-        for entry in fs::read_dir(&directory).expect("the crate's src directory is readable") {
-            let path = entry.expect("a readable directory entry").path();
-            if path.is_dir() {
-                pending.push(path);
-            } else if path.extension().is_some_and(|extension| extension == "rs") {
-                let relative = path
-                    .strip_prefix(&root)
-                    .expect("every file is under src")
-                    .to_string_lossy()
-                    .into_owned();
-                files.push((
-                    relative,
-                    fs::read_to_string(&path).expect("readable source"),
-                ));
+    for member in workspace_members() {
+        let source_root = root.join(&member).join("src");
+        assert!(
+            source_root.is_dir(),
+            "workspace member {member} has no src directory"
+        );
+        let mut pending = vec![source_root.clone()];
+        while let Some(directory) = pending.pop() {
+            for entry in fs::read_dir(&directory).expect("a readable member src directory") {
+                let path = entry.expect("a readable directory entry").path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    let relative = path
+                        .strip_prefix(&source_root)
+                        .expect("every file is under the member's src")
+                        .to_string_lossy()
+                        .into_owned();
+                    files.push((
+                        format!("{member}/{relative}"),
+                        fs::read_to_string(&path).expect("readable source"),
+                    ));
+                }
             }
         }
     }
     assert!(
         files.len() > 30,
-        "the inventory found {} files; it is not reading the crate",
+        "the inventory found {} files; it is not reading the workspace",
         files.len()
     );
     files.sort();
@@ -65,7 +119,13 @@ fn source_inventory() -> Vec<(String, String)> {
 // ---------------------------------------------------------------------------------------------
 
 /// The modules allowed to reach the network, and the only ones.
-const NETWORK_CAPABLE_MODULES: &[&str] = &["resource_discovery.rs", "local_model_activation.rs"];
+const NETWORK_CAPABLE_MODULES: &[&str] = &[
+    "crates/beacond/resource_discovery.rs",
+    "crates/beacond/local_model_activation.rs",
+];
+
+/// Client crates whose name in a file means that file can send.
+const CLIENT_CRATES: &[&str] = &["ureq", "reqwest", "hyper", "curl", "isahc", "attohttpc"];
 
 /// Symbols that give a module the ability to SEND — to open an outbound connection or use the
 /// client that does.
@@ -102,18 +162,71 @@ const FORBIDDEN_DEPENDENCIES: &[&str] = &[
     "prometheus",
 ];
 
-fn manifest() -> String {
-    fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
-        .expect("the crate manifest is readable")
+/// Every manifest that can add a dependency: the workspace root and each member.
+fn manifests() -> Vec<(String, String)> {
+    let root = workspace_root();
+    let mut all = vec![(
+        "Cargo.toml".to_owned(),
+        fs::read_to_string(root.join("Cargo.toml")).expect("the workspace manifest is readable"),
+    )];
+    for member in workspace_members() {
+        all.push((
+            format!("{member}/Cargo.toml"),
+            fs::read_to_string(root.join(&member).join("Cargo.toml"))
+                .expect("a member manifest is readable"),
+        ));
+    }
+    all
 }
 
-/// Which files use an outbound symbol, and which symbol.
-fn network_users(inventory: &[(String, String)]) -> Vec<(String, &'static str)> {
+/// Names a client crate has been RE-EXPORTED or ALIASED under, anywhere in the workspace.
+///
+/// grok's finding on #131: `pub use ureq as client;` in an allowed module, then `client::get(..)`
+/// in any other, and the second file never mentions a marker. Resolving the alias closes it — the
+/// declaration is found in one pass and its name becomes a marker for the next.
+fn client_aliases(inventory: &[(String, String)]) -> Vec<String> {
+    let mut aliases = Vec::new();
+    for (_, text) in inventory {
+        for line in text.lines().map(str::trim) {
+            let Some(rest) = line
+                .strip_prefix("pub use ")
+                .or_else(|| line.strip_prefix("use "))
+            else {
+                continue;
+            };
+            let Some(crate_name) = CLIENT_CRATES.iter().find(|name| rest.starts_with(**name))
+            else {
+                continue;
+            };
+            // `use ureq as client;` and `pub use ureq::Agent as Client;` both rename it.
+            if let Some((_, alias)) = rest.rsplit_once(" as ") {
+                let alias = alias.trim_end_matches(&[';', ','][..]).trim();
+                if !alias.is_empty() && alias != *crate_name {
+                    aliases.push(alias.to_owned());
+                }
+            }
+        }
+    }
+    aliases.sort();
+    aliases.dedup();
+    aliases
+}
+
+/// Which files can send, and by which name — markers plus any resolved alias.
+fn network_users(inventory: &[(String, String)]) -> Vec<(String, String)> {
+    let aliases = client_aliases(inventory);
     let mut found = Vec::new();
     for (path, text) in inventory {
         for symbol in OUTBOUND_SYMBOLS {
             if text.contains(symbol) {
-                found.push((path.clone(), *symbol));
+                found.push((path.clone(), (*symbol).to_owned()));
+            }
+        }
+        for alias in &aliases {
+            // The declaration site already matched on the crate's own name; this catches the USE
+            // sites, which mention only the alias.
+            if text.contains(&format!("{alias}::")) {
+                found.push((path.clone(), alias.clone()));
             }
         }
     }
@@ -121,9 +234,9 @@ fn network_users(inventory: &[(String, String)]) -> Vec<(String, &'static str)> 
 }
 
 #[test]
-fn only_the_local_model_modules_can_reach_the_network() {
-    let inventory = source_inventory();
-    let strays: Vec<(String, &str)> = network_users(&inventory)
+fn across_every_workspace_member_only_the_local_model_modules_can_reach_the_network() {
+    let inventory = workspace_sources();
+    let strays: Vec<(String, String)> = network_users(&inventory)
         .into_iter()
         .filter(|(path, _)| !NETWORK_CAPABLE_MODULES.contains(&path.as_str()))
         .collect();
@@ -150,27 +263,26 @@ fn only_the_local_model_modules_can_reach_the_network() {
 }
 
 #[test]
-fn the_manifest_admits_one_outbound_client_and_no_reporter() {
-    let manifest = manifest();
-    let present: Vec<&str> = FORBIDDEN_DEPENDENCIES
-        .iter()
-        .copied()
-        .filter(|name| {
-            manifest
-                .lines()
-                .any(|line| line.trim_start().starts_with(name))
-        })
-        .collect();
+fn across_every_workspace_member_no_manifest_admits_a_second_client_or_a_reporter() {
+    let manifests = manifests();
+    let mut present: Vec<(String, &str)> = Vec::new();
+    for (path, text) in &manifests {
+        for name in FORBIDDEN_DEPENDENCIES {
+            if text.lines().any(|line| line.trim_start().starts_with(name)) {
+                present.push((path.clone(), *name));
+            }
+        }
+    }
     assert!(
         present.is_empty(),
-        "A41.ONE_CLIENT_NO_REPORTER -- the manifest carries a second client or a reporter: \
+        "A41.ONE_CLIENT_NO_REPORTER -- a manifest carries a second client or a reporter: \
          {present:?}"
     );
     assert!(
-        manifest
+        manifests.iter().any(|(_, text)| text
             .lines()
-            .any(|line| line.trim_start().starts_with("ureq")),
-        "A41.ONE_CLIENT_NO_REPORTER -- `ureq` left the manifest; this witness now guards nothing"
+            .any(|line| line.trim_start().starts_with("ureq"))),
+        "A41.ONE_CLIENT_NO_REPORTER -- `ureq` left every manifest; this witness now guards nothing"
     );
 }
 
@@ -180,22 +292,42 @@ fn the_manifest_admits_one_outbound_client_and_no_reporter() {
 /// against a file listing that is not the crate's — the same device `local_transport`'s witness
 /// uses for its own vocabulary.
 #[test]
-fn the_network_inventory_would_notice_a_stray_client() {
+fn the_network_inventory_would_notice_a_stray_client_or_an_alias() {
+    // Two shapes in one synthetic listing: a client named outright in a module outside the
+    // allow-list, and grok's finding -- a client RE-EXPORTED under another name in an allowed
+    // module and then used, by that name only, somewhere else.
     let synthetic = vec![
-        ("resource_discovery.rs".to_owned(), "ureq::Agent".to_owned()),
         (
-            "telemetry.rs".to_owned(),
+            "crates/beacond/resource_discovery.rs".to_owned(),
+            "pub use ureq as client;".to_owned(),
+        ),
+        (
+            "crates/beacond/telemetry.rs".to_owned(),
             "let stream = TcpStream::connect(host)?;".to_owned(),
         ),
+        (
+            "apps/desktop/src-tauri/lib.rs".to_owned(),
+            "let response = client::get(url).call()?;".to_owned(),
+        ),
     ];
-    let strays: Vec<(String, &str)> = network_users(&synthetic)
+    assert_eq!(
+        client_aliases(&synthetic),
+        vec!["client".to_owned()],
+        "the re-export was not resolved to an alias"
+    );
+    let mut strays: Vec<String> = network_users(&synthetic)
         .into_iter()
         .filter(|(path, _)| !NETWORK_CAPABLE_MODULES.contains(&path.as_str()))
+        .map(|(path, symbol)| format!("{path}:{symbol}"))
         .collect();
+    strays.sort();
     assert_eq!(
         strays,
-        vec![("telemetry.rs".to_owned(), "TcpStream::connect")],
-        "the predicate did not notice a client outside the allow-list"
+        vec![
+            "apps/desktop/src-tauri/lib.rs:client".to_owned(),
+            "crates/beacond/telemetry.rs:TcpStream::connect".to_owned(),
+        ],
+        "the predicate missed a stray client, an aliased use, or a sender in another member"
     );
 }
 
@@ -235,13 +367,13 @@ fn pause_writers(inventory: &[(String, String)]) -> Vec<String> {
 
 #[test]
 fn only_an_operator_command_can_change_the_pause_state() {
-    let inventory = source_inventory();
+    let inventory = workspace_sources();
 
     // One writer. A scheduler that paused work on its own would be a second.
     let writers = pause_writers(&inventory);
     assert_eq!(
         writers,
-        vec!["dispatch.rs".to_owned()],
+        vec!["crates/beacond/dispatch.rs".to_owned()],
         "A30.ONE_PAUSE_WRITER -- the pause state is written from somewhere new"
     );
 
@@ -249,7 +381,7 @@ fn only_an_operator_command_can_change_the_pause_state() {
     // failure rather than a surprise. `is_paused` reads and is not one of them.
     let dispatch = &inventory
         .iter()
-        .find(|(path, _)| path == "dispatch.rs")
+        .find(|(path, _)| path == "crates/beacond/dispatch.rs")
         .expect("dispatch.rs is in the inventory")
         .1;
     let entry_points = [
