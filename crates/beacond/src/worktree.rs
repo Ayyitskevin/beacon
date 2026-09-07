@@ -1020,26 +1020,25 @@ pub(crate) fn read_pinned_bytes(
     repository: &PinnedRepository,
     arguments: &[&str],
     budget: Duration,
-) -> PinnedRead {
-    let filter_drivers = match pinned_filter_drivers(repository) {
-        Ok(drivers) => drivers,
-        // R47: the inventory names its OWN failure, carrying git's message where there is one.
-        // Before, this read proceeded with an empty filter set and the refusal that eventually
-        // arrived described the byte read instead of the hardening that was never established.
-        Err(failure) => return PinnedRead::Unreadable(failure),
-    };
+) -> Result<PinnedRead, FilterInventoryFailure> {
+    // R50: the inventory leaves by the ERROR channel, not as a `PinnedRead` variant. It is a
+    // PRECONDITION of this read rather than one of its three answers, and folding it in was what
+    // let R47's refusal name the byte read when the read that failed was the inventory. The type
+    // now says which: `Err` is "the hardening could not be established, so no child ran"; `Ok` is
+    // "a child ran, and here is what it established".
+    let filter_drivers = pinned_filter_drivers(repository)?;
     let mut command = read_only_git_command(Path::new(GIT), &filter_drivers);
     repository.enter(&mut command);
     // `--literal-pathspecs` is not needed here: `cat-file` takes an object name, not a pathspec.
     for argument in arguments {
         command.arg(argument);
     }
-    classify_pinned_read(
+    Ok(classify_pinned_read(
         run_git_bounded_raw(command, None, budget),
         repository.still_pinned(),
         // `cat-file` says so when the path is not in the tree; silence from it is not an absence.
         AbsenceWitness::Message(PATH_ABSENT_FROM_TREE),
-    )
+    ))
 }
 
 /// Which of the three answers a finished (or unfinished) child amounts to.
@@ -1138,7 +1137,9 @@ pub(crate) fn write_pinned(
 /// The same data-only `config --file` read `repository_filter_drivers` performs, entered by
 /// descriptor rather than by `-C <path>`: a rename between the pin and this read would otherwise
 /// let a different repository decide what the hardening suppresses.
-fn pinned_filter_drivers(repository: &PinnedRepository) -> Result<Vec<String>, PinnedReadFailure> {
+fn pinned_filter_drivers(
+    repository: &PinnedRepository,
+) -> Result<Vec<String>, FilterInventoryFailure> {
     let mut command = closed_git_command(Path::new(GIT));
     repository.enter(&mut command);
     command
@@ -1172,17 +1173,17 @@ fn pinned_filter_drivers(repository: &PinnedRepository) -> Result<Vec<String>, P
         PinnedRead::Bytes(stdout) => match String::from_utf8(stdout) {
             Ok(stdout) => Ok(filter_drivers_from_config_output(&stdout)),
             // Unchanged: an inventory that is not text is not an inventory.
-            Err(_) => Err(PinnedReadFailure::FilterInventoryUnreadable),
+            Err(_) => Err(FilterInventoryFailure::Unreadable),
         },
         // Silence with a non-zero exit: git found nothing to list and said nothing about it.
         PinnedRead::NotFound => Ok(Vec::new()),
         // git said WHY, so the Receipt can too.
         PinnedRead::Unreadable(PinnedReadFailure::ReadRefused { message }) => {
-            Err(PinnedReadFailure::FilterInventoryRefused { message })
+            Err(FilterInventoryFailure::Refused { message })
         }
         // A pin broken under the read, a child that could not start, a signal, a timeout: the
         // inventory was not established and there is no message to carry.
-        PinnedRead::Unreadable(_) => Err(PinnedReadFailure::FilterInventoryUnreadable),
+        PinnedRead::Unreadable(_) => Err(FilterInventoryFailure::Unreadable),
     }
 }
 
@@ -1826,10 +1827,11 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        Bounded, CLOSED_GIT_ENVIRONMENT_KEYS, CleanupOutcome, GIT, KeepReason, PINNED_GIT_DIR_FD,
-        PinnedRead, PinnedReadFailure, PinnedRepository, READ_BUDGET, Worktree, closed_git_command,
-        configure_closed_git_environment, pinned_filter_drivers, read_only_git_command,
-        read_pinned, read_pinned_bytes, read_pinned_exit, run_git_bounded, status_holds,
+        Bounded, CLOSED_GIT_ENVIRONMENT_KEYS, CleanupOutcome, FilterInventoryFailure, GIT,
+        KeepReason, PINNED_GIT_DIR_FD, PinnedRead, PinnedReadFailure, PinnedRepository,
+        READ_BUDGET, Worktree, closed_git_command, configure_closed_git_environment,
+        pinned_filter_drivers, read_only_git_command, read_pinned, read_pinned_bytes,
+        read_pinned_exit, run_git_bounded, status_holds,
     };
     use std::process::Command;
 
@@ -2403,7 +2405,7 @@ mod tests {
         // future in which the read answers for the wrong reason.
         assert_eq!(
             read_pinned_bytes(&pinned, &["cat-file", "blob", object.as_str()], READ_BUDGET),
-            PinnedRead::Bytes(b"three\n".to_vec()),
+            Ok(PinnedRead::Bytes(b"three\n".to_vec())),
             "the pre-image read through a pin placed on its own descriptor did not answer"
         );
     }
@@ -2436,7 +2438,7 @@ mod tests {
             Ok(Vec::new()),
             "git refused the inventory and the read proceeded with the hardening switched off"
         );
-        let Err(PinnedReadFailure::FilterInventoryRefused { message }) = answer else {
+        let Err(FilterInventoryFailure::Refused { message }) = answer else {
             panic!("the inventory failure does not name itself: {answer:?}");
         };
         assert!(
@@ -2478,7 +2480,7 @@ mod tests {
             let answer = pinned_filter_drivers(&pinned);
             // Restored before the assertion, so a failure does not leave an undeletable tree.
             let _ = fs::set_permissions(git_dir.join("config"), fs::Permissions::from_mode(0o644));
-            let Err(PinnedReadFailure::FilterInventoryRefused { message }) = answer else {
+            let Err(FilterInventoryFailure::Refused { message }) = answer else {
                 panic!("{label}: the inventory did not refuse: {answer:?}");
             };
             assert!(
@@ -2512,7 +2514,9 @@ mod tests {
         assert!(
             matches!(
                 read_pinned_bytes(&pinned, &["cat-file", "blob", object.as_str()], READ_BUDGET),
-                PinnedRead::Unreadable(PinnedReadFailure::ReadRefused { .. })
+                Ok(PinnedRead::Unreadable(
+                    PinnedReadFailure::ReadRefused { .. }
+                ))
             ),
             "a broken object store was read as a path that is simply not there"
         );
