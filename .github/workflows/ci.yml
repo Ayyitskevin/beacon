@@ -174,8 +174,11 @@ jobs:
     needs: product
     # Source: https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idif
     if: >-
+      !cancelled() &&
+      (
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-      github.event_name == 'workflow_dispatch'
+        github.event_name == 'workflow_dispatch'
+      )
     runs-on: [self-hosted, linux, x64, mickey]
     # Mickey is Ubuntu 24.04/glibc 2.39. Keep the accepted 2.35 AppImage floor
     # by running the package job in a digest-pinned Ubuntu 22.04 container.
