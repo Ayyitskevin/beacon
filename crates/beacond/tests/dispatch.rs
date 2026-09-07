@@ -1706,6 +1706,58 @@ fn a_dirty_or_detached_source_is_refused() {
     assert_eq!(repository.snapshot(), before);
 }
 
+/// R55.2 CONTROL: a detached HEAD is `SourceDetached` through the TYPED `read_pinned`.
+///
+/// This was briefed as a RED probe -- "after the R52 rebase, detached HEAD would read as an
+/// unreadable inventory" -- and it is GREEN on the bare rebase, which is why it is committed as a
+/// control rather than as a fix's bar. The reason it is green is the one R52 wrote down: R52 typed
+/// only the INVENTORY onto the `Err` channel. The child's own answers, including R55's new
+/// `Unreadable(SilentExit { code })` for a silent non-zero at a `Silence` site, still fold to
+/// `Ok(None)` inside `read_pinned`. So `symbolic-ref --quiet HEAD` exiting 1 in silence arrives at
+/// the gate as `Ok(None)` and refuses `SourceDetached`, exactly as before R52 and before R55.
+///
+/// The hazard the ruling is about is REAL but not yet reachable: R55 classifies that documented
+/// "detached" answer as a FAILURE (`SilentExit`), which is only harmless because the fold erases
+/// the difference. The lane that types the child's answers -- the residual R52 named, and
+/// DP-r52.1's subject -- is the one where detached HEAD would start refusing as a read failure.
+/// THIS TEST IS THAT TRIPWIRE: it fails the moment someone types the child's answers without
+/// giving `symbolic-ref` its own witness.
+///
+/// It also asserts the negative, because asserting only `SourceDetached` would pass if the gate
+/// stopped being reached at all.
+#[test]
+fn a_detached_head_is_detached_and_never_an_unreadable_read() {
+    let fixture = admitted_mission("detached-not-unreadable");
+    let (repository, ruling_digest) = fixture.approved("detached-not-unreadable");
+    CopyRepository::git(
+        &repository.path,
+        &["checkout", "--quiet", "--detach", &repository.revision],
+    );
+    let before = repository.snapshot();
+
+    let receipt = fixture
+        .dispatches
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .unwrap();
+
+    assert_eq!(
+        receipt.outcome,
+        DispatchOutcome::SourceDetached,
+        "R55.2.DETACHED_STAYS_DETACHED"
+    );
+    assert_ne!(
+        receipt.outcome,
+        DispatchOutcome::FilterInventoryUnreadable,
+        "R55.2.DETACHED_IS_NOT_AN_UNREADABLE_INVENTORY -- a documented negative answer was \
+         reported as a read that could not be made"
+    );
+    assert_eq!(
+        receipt.filter_inventory_failure, None,
+        "R55.2.DETACHED_CARRIES_NO_READ_FAILURE"
+    );
+    assert_eq!(repository.snapshot(), before);
+}
+
 #[test]
 fn a_gate_read_does_not_write_to_the_repository_it_measures() {
     // gpt1's probe, as a committed control: `git status --porcelain` refreshes and rewrites
