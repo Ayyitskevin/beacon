@@ -231,7 +231,7 @@ Test locations: **[u]** = `crates/beacond/src/ruling.rs` unit tests, **[i]** =
 | 16 | `reason` is mandatory: empty, whitespace-only, or over-long is refused | `the_reason_must_be_trimmed_bounded_and_free_of_control_characters` [u] · `a_malformed_reason_or_digest_writes_neither_row_nor_event` [i] |
 | 17 | `decision` and `decider` are closed: any unassigned tag is refused | `an_unassigned_tag_is_refused_in_every_closed_position` [u] · `the_store_refuses_a_ruling_row_whose_digest_envelopes_are_not_this_versions` [i] · `startup_refuses_an_event_naming_an_actor_this_version_has_no_arm_for` [i] |
 | 18 | no accessor reports force as a boolean — enforced by review of the public surface, not by a test | **none, and the bullet now says so.** The public surface is `superseded_by`, `drift`, `digest`, `canonical_bytes`, `payload`, `force`. `a_ruling_can_be_both_superseded_and_drifted_and_says_so` [i] is behavioural evidence about compound state and is NOT a guard on this: adding `is_in_force() -> bool` leaves it passing (gpt2) |
-| 19 | recording leaves Run, Receipt, worktree, process, Invocation, network, capability, and external-effect counts unchanged | `recording_a_ruling_creates_no_run_receipt_worktree_or_external_effect` [i] proves the *stored* half — Run, Receipt and security-event rows unchanged, exactly one new Event and exactly one new Ruling row, and the absent `invocations`/`capabilities` tables. **Worktree, process, network, and general external effect are not observed — Residual 5 below.** |
+| 19 | recording adds exactly one Ruling row and one Event and leaves every other **stored** count unchanged; process, network and filesystem inertness is a review property | `recording_a_ruling_creates_no_run_receipt_worktree_or_external_effect` [i] — Run, Receipt and security-event rows unchanged, exactly one new Event and one new Ruling row, and the absent `invocations`/`capabilities` tables. That is now the whole of what the bullet claims. Process/network/filesystem: reviewed, not tested — Residual 5, **option (a) applied**, Kevin may swap it for (b) |
 
 Bullet 18 (bullet 19 before Residual 2 removed the duplicate) is an **absence**, and the note
 previously called it "structural, not test-mappable" while still citing a test beside it. That was
@@ -366,6 +366,16 @@ out, and this is a decision rather than a defect to patch quietly:
 - **Widen the test**: assert the worktree root is unchanged before and after, and observe process
   and network inertness the way `sandbox` and `check_preflight` already do for Runs. That is real
   work and belongs with dispatch, when there is something that could plausibly spawn.
+
+**Status: Kevin's decision, not taken here.** Option (a) is APPLIED in ADR 0037 in the commit that
+carries this line, so the accepted document does not keep claiming what it does not measure while
+the decision is open. That is a starting point, not the choice: if Kevin prefers (b), the bullet
+returns to its wider wording and the test is widened to match. Applying (a) costs nothing that (b)
+would have to undo beyond one bullet's wording.
+
+The same overclaim exists one module over — `submission_creates_no_run_receipt_worktree_or_external_effect`
+in the Proposal suite has the identical shape — so whichever way this goes, it is a convention to
+settle rather than one bullet to patch.
 
 Until one is chosen, the mapping should not claim the bullet whole. Proposed wording for the narrow
 option: *"recording a Ruling adds no Run, Receipt, Invocation, or capability state and exactly one
