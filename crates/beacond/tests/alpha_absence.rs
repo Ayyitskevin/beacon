@@ -7,7 +7,8 @@
 //!
 //! # Scope, in words, because the names alone cannot carry it
 //!
-//! **Every workspace member, production code only.** The surface is EVERY member listed in the
+//! **Every workspace member, production code only, re-exports and type aliases resolved.** The
+//! surface is EVERY member listed in the
 //! workspace manifest — read from it, never typed here — so a crate added to the workspace is
 //! inside the witness the day it is added. A41.1 widened this after grok's read of #131: the first
 //! version walked `crates/beacond/src` alone, so a sender in the desktop crate stayed green while
@@ -184,37 +185,69 @@ fn manifests() -> Vec<(String, String)> {
     all
 }
 
-/// Names a client crate has been RE-EXPORTED or ALIASED under, anywhere in the workspace.
+/// Every name a client crate has been given anywhere in the workspace: RE-EXPORTS and TYPE ALIASES.
 ///
 /// grok's finding on #131: `pub use ureq as client;` in an allowed module, then `client::get(..)`
-/// in any other, and the second file never mentions a marker. Resolving the alias closes it — the
-/// declaration is found in one pass and its name becomes a marker for the next.
+/// in any other, and the second file never mentions a marker. Its finding on #134 is the same
+/// evasion by another keyword: `type Net = ureq::Agent;` declared in an allowed module and used as
+/// `Net` elsewhere. Both are resolved by ONE mechanism rather than two — the declaration is found
+/// in one pass over the inventory and its name becomes a marker for the next.
 fn client_aliases(inventory: &[(String, String)]) -> Vec<String> {
     let mut aliases = Vec::new();
     for (_, text) in inventory {
         for line in text.lines().map(str::trim) {
-            let Some(rest) = line
-                .strip_prefix("pub use ")
-                .or_else(|| line.strip_prefix("use "))
-            else {
+            // Any visibility: `pub`, `pub(crate)`, `pub(super)`, or none.
+            let line = line
+                .split_once(' ')
+                .filter(|(first, _)| first.starts_with("pub"))
+                .map_or(line, |(_, rest)| rest.trim_start());
+
+            // `use ureq as client;` and `pub use ureq::Agent as Client;`.
+            if let Some(rest) = line.strip_prefix("use ")
+                && CLIENT_CRATES.iter().any(|name| rest.starts_with(name))
+                && let Some((_, alias)) = rest.rsplit_once(" as ")
+            {
+                push_alias(&mut aliases, alias);
                 continue;
-            };
-            let Some(crate_name) = CLIENT_CRATES.iter().find(|name| rest.starts_with(**name))
-            else {
-                continue;
-            };
-            // `use ureq as client;` and `pub use ureq::Agent as Client;` both rename it.
-            if let Some((_, alias)) = rest.rsplit_once(" as ") {
-                let alias = alias.trim_end_matches(&[';', ','][..]).trim();
-                if !alias.is_empty() && alias != *crate_name {
-                    aliases.push(alias.to_owned());
-                }
+            }
+
+            // `type Net = ureq::Agent;` -- the name is on the left, the client on the right.
+            if let Some(rest) = line.strip_prefix("type ")
+                && let Some((name, target)) = rest.split_once('=')
+                && CLIENT_CRATES
+                    .iter()
+                    .any(|client| target.trim_start().starts_with(client))
+            {
+                // Strip any generic parameters: `type Net<T> = ureq::Agent;` is still `Net`.
+                push_alias(&mut aliases, name.split('<').next().unwrap_or(name));
             }
         }
     }
     aliases.sort();
     aliases.dedup();
     aliases
+}
+
+/// Record one resolved name, if it is a name at all and not the client's own.
+fn push_alias(aliases: &mut Vec<String>, candidate: &str) {
+    let alias = candidate.trim().trim_end_matches([';', ',']).trim();
+    if !alias.is_empty()
+        && !CLIENT_CRATES.contains(&alias)
+        && alias.chars().all(|c| c.is_alphanumeric() || c == '_')
+    {
+        aliases.push(alias.to_owned());
+    }
+}
+
+/// Does `text` use `identifier` as a Rust identifier, rather than merely contain those letters?
+///
+/// A `type` alias is used in positions a `crate::` prefix never appears in — `fn f(agent: Net)`,
+/// `let a: Net = …` — so the re-export test (`contains("client::")`) would miss exactly the shape
+/// this resolver exists to catch. Word boundaries catch both, and refuse to match `Network` when
+/// the alias is `Net`.
+fn uses_identifier(text: &str, identifier: &str) -> bool {
+    text.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .any(|word| word == identifier)
 }
 
 /// Which files can send, and by which name — markers plus any resolved alias.
@@ -229,8 +262,9 @@ fn network_users(inventory: &[(String, String)]) -> Vec<(String, String)> {
         }
         for alias in &aliases {
             // The declaration site already matched on the crate's own name; this catches the USE
-            // sites, which mention only the alias.
-            if text.contains(&format!("{alias}::")) {
+            // sites, which mention only the alias -- `client::get(..)` for a re-export, and a bare
+            // `Net` in type position for a type alias.
+            if uses_identifier(text, alias) {
                 found.push((path.clone(), alias.clone()));
             }
         }
@@ -297,14 +331,16 @@ fn across_every_workspace_member_no_manifest_admits_a_second_client_or_a_reporte
 /// against a file listing that is not the crate's — the same device `local_transport`'s witness
 /// uses for its own vocabulary.
 #[test]
-fn the_network_inventory_would_notice_a_stray_client_or_an_alias() {
-    // Two shapes in one synthetic listing: a client named outright in a module outside the
-    // allow-list, and grok's finding -- a client RE-EXPORTED under another name in an allowed
-    // module and then used, by that name only, somewhere else.
+fn the_network_inventory_would_notice_a_stray_client_a_reexport_or_a_type_alias() {
+    // Three shapes in one synthetic listing: a client named outright in a module outside the
+    // allow-list; grok's #131 finding, a client RE-EXPORTED under another name in an allowed module
+    // and used by that name only elsewhere; and its #134 finding, the same evasion as a TYPE ALIAS
+    // used in type position, where no `::` ever appears.
     let synthetic = vec![
         (
             "crates/beacond/resource_discovery.rs".to_owned(),
-            "pub use ureq as client;".to_owned(),
+            "pub use ureq as client;\npub type Net = ureq::Agent;\ntype Rows = Vec<String>;"
+                .to_owned(),
         ),
         (
             "crates/beacond/telemetry.rs".to_owned(),
@@ -314,12 +350,19 @@ fn the_network_inventory_would_notice_a_stray_client_or_an_alias() {
             "apps/desktop/src-tauri/lib.rs".to_owned(),
             "let response = client::get(url).call()?;".to_owned(),
         ),
+        (
+            "crates/beacond/mission.rs".to_owned(),
+            "fn send(agent: Net) -> Rows { agent.get(url) }".to_owned(),
+        ),
     ];
+
+    // Both declarations resolve; the alias of a NON-client type does not.
     assert_eq!(
         client_aliases(&synthetic),
-        vec!["client".to_owned()],
-        "the re-export was not resolved to an alias"
+        vec!["Net".to_owned(), "client".to_owned()],
+        "a re-export or a type alias was not resolved, or `Rows` was resolved and should not be"
     );
+
     let mut strays: Vec<String> = network_users(&synthetic)
         .into_iter()
         .filter(|(path, _)| !NETWORK_CAPABLE_MODULES.contains(&path.as_str()))
@@ -330,9 +373,24 @@ fn the_network_inventory_would_notice_a_stray_client_or_an_alias() {
         strays,
         vec![
             "apps/desktop/src-tauri/lib.rs:client".to_owned(),
+            "crates/beacond/mission.rs:Net".to_owned(),
             "crates/beacond/telemetry.rs:TcpStream::connect".to_owned(),
         ],
-        "the predicate missed a stray client, an aliased use, or a sender in another member"
+        "the predicate missed a stray client, a re-export, a type alias, or a sender in another \
+         member"
+    );
+
+    // The alias used ONLY inside the module that declares it is not a stray -- the allow-list is
+    // what decides, and `Rows` never becomes a marker at all.
+    assert!(
+        !strays.iter().any(|stray| stray.contains("Rows")),
+        "an alias of a non-client type was treated as a sender"
+    );
+
+    // ...and `Net` must not match `Network`: word boundaries, not substrings.
+    assert!(
+        !uses_identifier("let n: Network = build();", "Net"),
+        "the identifier match is a substring match, which would flag unrelated names"
     );
 }
 
