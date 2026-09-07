@@ -502,14 +502,12 @@ fn insert_policy(
     let payload = serde_json::to_string(&ProjectPolicyPublishedPayload {
         policy: policy.clone(),
     })?;
-    connection.execute(
-        "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-         VALUES (?1, 'project.policy_published', ?2, ?3)",
-        params![
-            policy.workspace_id.to_string(),
-            payload,
-            i64::try_from(policy.authored_at_ms).map_err(|_| ProjectPolicyError::InvalidStore)?,
-        ],
+    crate::event_chain::append_event(
+        &connection,
+        &policy.workspace_id.to_string(),
+        "project.policy_published",
+        &payload,
+        i64::try_from(policy.authored_at_ms).map_err(|_| ProjectPolicyError::InvalidStore)?,
     )?;
     Ok(())
 }

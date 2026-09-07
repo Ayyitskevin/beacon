@@ -591,14 +591,12 @@ fn insert_admission(
     let payload = serde_json::to_string(&MissionAdmittedPayload {
         mission: mission.clone(),
     })?;
-    connection.execute(
-        "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-         VALUES (?1, 'mission.admitted', ?2, ?3)",
-        params![
-            mission.workspace_id.to_string(),
-            payload,
-            i64::try_from(mission.admitted_at_ms).map_err(|_| MissionError::InvalidStore)?,
-        ],
+    crate::event_chain::append_event(
+        &connection,
+        &mission.workspace_id.to_string(),
+        "mission.admitted",
+        &payload,
+        i64::try_from(mission.admitted_at_ms).map_err(|_| MissionError::InvalidStore)?,
     )?;
     Ok(())
 }

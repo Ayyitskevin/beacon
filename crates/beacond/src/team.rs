@@ -451,14 +451,12 @@ fn insert_formation(
     let payload = serde_json::to_string(&TeamFormedPayload {
         team: formation.clone(),
     })?;
-    connection.execute(
-        "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-         VALUES (?1, 'team.formed', ?2, ?3)",
-        params![
-            formation.workspace_id.to_string(),
-            payload,
-            i64::try_from(formation.formed_at_ms).map_err(|_| TeamError::InvalidStore)?,
-        ],
+    crate::event_chain::append_event(
+        &connection,
+        &formation.workspace_id.to_string(),
+        "team.formed",
+        &payload,
+        i64::try_from(formation.formed_at_ms).map_err(|_| TeamError::InvalidStore)?,
     )?;
     Ok(())
 }

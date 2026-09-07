@@ -339,14 +339,12 @@ impl DeclaredCheckService {
                     i64::try_from(ended_at_ms).map_err(|_| DeclaredCheckError::InvalidStore)?,
                 ],
             )?;
-            transaction.execute(
-                "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-                 VALUES (?1, 'run.executed', ?2, ?3)",
-                params![
-                    self.workspace_id.to_string(),
-                    payload,
-                    i64::try_from(ended_at_ms).map_err(|_| DeclaredCheckError::InvalidStore)?,
-                ],
+            crate::event_chain::append_event(
+                &transaction,
+                &self.workspace_id.to_string(),
+                "run.executed",
+                &payload,
+                i64::try_from(ended_at_ms).map_err(|_| DeclaredCheckError::InvalidStore)?,
             )?;
             transaction.commit()?;
             Ok(receipt)

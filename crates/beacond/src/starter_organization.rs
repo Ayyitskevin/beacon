@@ -359,10 +359,12 @@ impl StarterOrganizationService {
                 proposal_version: PROPOSAL_VERSION,
                 residents: accepted,
             })?;
-            transaction.execute(
-                "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-                 VALUES (?1, 'starter_organization.accepted', ?2, ?3)",
-                params![self.workspace_id.to_string(), payload, now],
+            crate::event_chain::append_event(
+                &transaction,
+                &self.workspace_id.to_string(),
+                "starter_organization.accepted",
+                &payload,
+                now,
             )?;
             transaction.commit()?;
             load_view(connection, self.workspace_id)
@@ -396,10 +398,12 @@ impl StarterOrganizationService {
                 workspace_id: self.workspace_id,
                 proposal_version: PROPOSAL_VERSION,
             })?;
-            transaction.execute(
-                "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-                 VALUES (?1, 'starter_organization.discarded', ?2, ?3)",
-                params![self.workspace_id.to_string(), payload, now],
+            crate::event_chain::append_event(
+                &transaction,
+                &self.workspace_id.to_string(),
+                "starter_organization.discarded",
+                &payload,
+                now,
             )?;
             transaction.commit()?;
             load_view(connection, self.workspace_id)

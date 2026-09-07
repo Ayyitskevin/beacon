@@ -1550,10 +1550,12 @@ fn insert_ruling(connection: &Connection, stored: &StoredRuling) -> Result<(), R
             ruled_at_ms: stored.ruled_at_ms,
         },
     })?;
-    connection.execute(
-        "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-         VALUES (?1, 'ruling.recorded', ?2, ?3)",
-        params![stored.workspace_id.to_string(), payload, ruled_at_ms],
+    crate::event_chain::append_event(
+        &connection,
+        &stored.workspace_id.to_string(),
+        "ruling.recorded",
+        &payload,
+        ruled_at_ms,
     )?;
     Ok(())
 }

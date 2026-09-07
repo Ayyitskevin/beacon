@@ -1271,16 +1271,13 @@ fn insert_classification(
         classified_at_ms: payload.classified_at_ms,
     })
     .map_err(|error| ClassificationRecordError::Store(error.to_string()))?;
-    connection.execute(
-        "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-         VALUES (?1, 'mission.impact_classified', ?2, ?3)",
-        rusqlite::params![
-            payload.workspace_id.to_string(),
-            event,
-            i64::try_from(payload.classified_at_ms).map_err(|_| {
-                ClassificationRecordError::Store("timestamp out of range".to_owned())
-            })?,
-        ],
+    crate::event_chain::append_event(
+        &connection,
+        &payload.workspace_id.to_string(),
+        "mission.impact_classified",
+        &event,
+        i64::try_from(payload.classified_at_ms)
+            .map_err(|_| ClassificationRecordError::Store("timestamp out of range".to_owned()))?,
     )?;
     Ok(())
 }
