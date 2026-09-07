@@ -269,8 +269,8 @@ fn mission_draft(prepared: &PreparedTeam) -> MissionDraft {
 
 use beacond::{
     ClassificationActor, ClassificationBasis, ClassificationRecordError, ClassificationSupersedes,
-    ImpactLevel, MeasuredSpendService, MissionImpactService, PolicyRevisionRef, SpendLine,
-    SpendMeasurement, SpendOrigin, SpendRecordError, SpendSupersedes, SpendTotals,
+    ImpactLevel, LineAttribution, MeasuredSpendService, MissionImpactService, PolicyRevisionRef,
+    SpendLine, SpendMeasurement, SpendOrigin, SpendRecordError, SpendSupersedes, SpendTotals,
 };
 
 struct Stored {
@@ -352,6 +352,7 @@ impl Stored {
             measurement: SpendMeasurement::Measured(SpendTotals {
                 counted_units: 412,
                 lines: vec![SpendLine {
+                    attribution: LineAttribution::unattributed("fixture"),
                     unit: "USD".to_owned(),
                     amount_minor: 123_456,
                     minor_units_exponent: 2,
@@ -869,6 +870,7 @@ fn daemon_and_operator_records_coexist_and_never_merge() {
     daemon.measurement = SpendMeasurement::Measured(SpendTotals {
         counted_units: 1,
         lines: vec![SpendLine {
+            attribution: LineAttribution::unattributed("fixture"),
             unit: "USD".to_owned(),
             amount_minor: 100,
             minor_units_exponent: 2,

@@ -11,16 +11,18 @@
 use std::cmp::Ordering;
 
 use beacond::{
-    MalformedSpend, MeasuredSpendV1, SpendLine, SpendMeasurement, SpendOrigin, SpendSupersedes,
-    SpendTotals, UncountedEntry, UncountedKind, compare_units,
+    LineAttribution, MalformedSpend, MeasuredSpendV1, SpendAttribution, SpendLine,
+    SpendMeasurement, SpendOrigin, SpendSupersedes, SpendTotals, UncountedEntry, UncountedKind,
+    compare_units,
 };
 use uuid::Uuid;
 
-const MAGIC: &[u8] = b"beacon.spend.v1\0";
+const MAGIC: &[u8] = b"beacon.spend.v2\0";
 
 const WORKSPACE: &str = "00000000-0000-4000-8000-000000000001";
 const MISSION: &str = "00000000-0000-4000-8000-000000000002";
 const SPEND: &str = "00000000-0000-4000-8000-000000000003";
+const AGENT: &str = "00000000-0000-4000-8000-000000000004";
 
 const MEASURED_AT_MS: u64 = 1_788_372_724_000;
 const COVERAGE_FROM: u64 = 1;
@@ -32,9 +34,42 @@ fn uuid(value: &str) -> Uuid {
 
 fn line(unit: &str, amount_minor: i64, minor_units_exponent: u8) -> SpendLine {
     SpendLine {
+        attribution: LineAttribution::unattributed("fixture"),
         unit: unit.to_owned(),
         amount_minor,
         minor_units_exponent,
+    }
+}
+
+/// The published record's first line: every dimension answered.
+fn attributed_usd_line() -> SpendLine {
+    SpendLine {
+        attribution: LineAttribution {
+            agent: SpendAttribution::Attributed(uuid(AGENT)),
+            route: SpendAttribution::Attributed("chat".to_owned()),
+            provider: SpendAttribution::Attributed("local".to_owned()),
+            model: SpendAttribution::Attributed("qwen3.8-27b".to_owned()),
+        },
+        unit: "USD".to_owned(),
+        amount_minor: 123_456,
+        minor_units_exponent: 2,
+    }
+}
+
+/// The published record's second line: one dimension unknown, two that do not apply. The identity
+/// vector carries all three states so a decoder that collapsed any pair would fail against the
+/// published bytes rather than against a fixture nobody publishes.
+fn partly_attributed_tokens_line() -> SpendLine {
+    SpendLine {
+        attribution: LineAttribution {
+            agent: SpendAttribution::Unattributed("the ledger row named no agent.".to_owned()),
+            route: SpendAttribution::NotApplicable,
+            provider: SpendAttribution::Attributed("local".to_owned()),
+            model: SpendAttribution::NotApplicable,
+        },
+        unit: "tokens".to_owned(),
+        amount_minor: 0,
+        minor_units_exponent: 0,
     }
 }
 
@@ -57,7 +92,7 @@ fn fixture() -> MeasuredSpendV1 {
         coverage_from_event_seq: COVERAGE_FROM,
         coverage_to_event_seq: COVERAGE_TO,
         measurement: SpendMeasurement::Measured(totals(
-            vec![line("USD", 123_456, 2), line("tokens", 0, 0)],
+            vec![attributed_usd_line(), partly_attributed_tokens_line()],
             412,
         )),
         supersedes: SpendSupersedes::Record("aa".repeat(32)),
@@ -95,9 +130,27 @@ fn fixture_bytes_by_hand() -> Vec<u8> {
     out.push(0x01); // measurement = measured
     out.extend_from_slice(&412_u64.to_be_bytes());
     out.extend_from_slice(&2_u32.to_be_bytes());
+    // Line one: four answered dimensions, each `0x01` then its value.
+    out.push(0x01);
+    out.extend_from_slice(uuid(AGENT).as_bytes());
+    out.push(0x01);
+    push_string(&mut out, "chat");
+    out.push(0x01);
+    push_string(&mut out, "local");
+    out.push(0x01);
+    push_string(&mut out, "qwen3.8-27b");
     push_string(&mut out, "USD");
     out.extend_from_slice(&123_456_i64.to_be_bytes());
     out.push(2);
+
+    // Line two: unknown agent (`0x02` then its reason), a route and a model that do not apply
+    // (`0x03` and nothing), one answered provider.
+    out.push(0x02);
+    push_string(&mut out, "the ledger row named no agent.");
+    out.push(0x03);
+    out.push(0x01);
+    push_string(&mut out, "local");
+    out.push(0x03);
     push_string(&mut out, "tokens");
     out.extend_from_slice(&0_i64.to_be_bytes());
     out.push(0);
@@ -440,11 +493,14 @@ fn spend_canonical_bytes_follow_adr_0034_0037_strict_round_trip_rules() {
     // encoder is the thing under test.
     let mut swapped = MAGIC.to_vec();
     swapped.extend_from_slice(&bytes[MAGIC.len()..measurement_tag + 1 + 8 + 4]);
-    let mut tokens_line = Vec::new();
+    // Four `0x03` states -- "does not apply" on every dimension -- is the shortest well-formed
+    // attribution, so the spliced lines differ from the fixture only in the order of their units.
+    let attribution = [0x03_u8; 4];
+    let mut tokens_line = attribution.to_vec();
     push_string(&mut tokens_line, "tokens");
     tokens_line.extend_from_slice(&0_i64.to_be_bytes());
     tokens_line.push(0);
-    let mut usd_line = Vec::new();
+    let mut usd_line = attribution.to_vec();
     push_string(&mut usd_line, "USD");
     usd_line.extend_from_slice(&123_456_i64.to_be_bytes());
     usd_line.push(2);
@@ -814,15 +870,15 @@ fn spend_has_no_cross_unit_total_and_no_within_budget_predicate() {
 #[test]
 fn a_known_spend_fixture_reproduces_its_published_digest() {
     let bytes = fixture().canonical_bytes().expect("encodes");
-    assert_eq!(bytes.len(), 182, "ADR 0042 publishes 182 canonical bytes");
+    assert_eq!(bytes.len(), 301, "ADR 0042 publishes 301 canonical bytes");
     assert_eq!(
         fixture().digest().expect("digest").value,
-        "9461d5deeba593e027dae523f3040515feea0ab5cb7b35cbf120a119ff7e774b"
+        "d44d780898dc2b91e33fffbacf546c6e5c10d99936696e120de8c41f44c20f8f"
     );
 
     // The envelope travels with the value: a digest without the function that produced it names
     // nothing.
     let digest = fixture().digest().expect("digest");
     assert_eq!(digest.algorithm, "sha256");
-    assert_eq!(digest.canonicalizer, "beacon.spend.v1");
+    assert_eq!(digest.canonicalizer, "beacon.spend.v2");
 }
