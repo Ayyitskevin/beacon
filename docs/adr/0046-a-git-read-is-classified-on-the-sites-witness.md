@@ -54,16 +54,16 @@ Silence sites a code alone never proves absence; at an ExitCode site the code is
    site, not only at the classifier.
 3. One classifier serves every site. There is no per-site exit-code arithmetic, and a site
    participates by naming its witness, not by writing its own rule. (R47, R47.1 ·
-   `worktree::r46_read_classification::output_defeats_both_witnesses`, which loops over two of the
-   three witness kinds — see Open 2)
+   `worktree::r46_read_classification::output_defeats_every_witness`, which walks every variant of
+   the enum — R56)
 4. The rule fails closed. An unrecognised diagnostic is `Unreadable`, never assumed to be an
    absence. (R46.3 ·
    `worktree::r46_read_classification::an_unrecognised_diagnostic_is_unreadable_rather_than_assumed_absent`)
-5. Bytes on stdout defeat the witness: a child that produced output produced *output*, and calling
-   that an absence discards the very bytes it read. Tested at the Message and Silence witnesses; the
-   ExitCode witness is held by the same code path but has no bar of its own — **UNTESTED**, Open 2.
-   (R47 · `worktree::r46_read_classification::a_non_zero_exit_that_produced_output_is_never_an_absence`,
-   `worktree::r46_read_classification::output_defeats_both_witnesses`)
+5. Bytes on stdout defeat the witness, at every witness: a child that produced output produced
+   *output*, and calling that an absence discards the very bytes it read. (R47, R56 ·
+   `worktree::r46_read_classification::a_non_zero_exit_that_produced_output_is_never_an_absence`,
+   `worktree::r46_read_classification::output_defeats_every_witness`,
+   `worktree::r46_read_classification::an_exit_code_site_that_produced_output_is_refused_and_never_its_answer`)
 6. The pin is re-checked before the exit code is read. Bytes from a repository that is no longer the
    pinned one are not evidence about it, whatever the child's status said. (R46.1 ·
    `worktree::r46_read_classification::a_pin_broken_after_the_read_is_unreadable_even_when_the_child_succeeded`)
@@ -82,8 +82,9 @@ Silence sites a code alone never proves absence; at an ExitCode site the code is
 
 ## The state table: witness kind × child result → read state
 
-This table is the contract. It is `classify_pinned_read` (`crates/beacond/src/worktree.rs:1065`,
-main `2b550b8c`) read as rows. "Diagnostic" means stderr carrying any non-empty line that is not prefixed `hint:`,
+This table is the contract. It is `classify_pinned_read` in `crates/beacond/src/worktree.rs` read
+as rows. Symbols, not line numbers: this document has already outlived two rounds of drift in them,
+and a citation a reader has to correct is one they stop trusting (sol1). "Diagnostic" means stderr carrying any non-empty line that is not prefixed `hint:`,
 git's documented advice channel (R47.1 ·
 `worktree::r46_read_classification::git_advice_is_not_a_diagnostic_but_everything_else_is`).
 
@@ -107,22 +108,21 @@ Rows where the witness decides — non-zero exit, still pinned, empty stdout:
 | `Silence` | no diagnostic | `Unreadable(SilentExit { code })` — live (R55) | R55 · `worktree::r46_read_classification::sol1_exit_128_with_empty_stderr_is_not_an_absence_at_every_silent_site` |
 | `Silence` | diagnostic | `Unreadable(ReadRefused { message })` | R47 · `worktree::r46_read_classification::an_absence_is_what_the_site_can_show_and_the_sites_show_it_differently` |
 | `ExitCode` | no diagnostic | classifier: `NotFound` carrier; `read_pinned_exit`: the original code | R55.1 · `worktree::tests::a_read_whose_answer_is_its_exit_code_tells_no_apart_from_could_not_tell` |
-| `ExitCode` | diagnostic | `Unreadable(ReadRefused { message })` — broken speaks at these sites (grok's measured table); the adapter then returns `None` | R55.1 · **UNTESTED as a named classifier row**, see Open 2 |
+| `ExitCode` | diagnostic | `Unreadable(ReadRefused { message })` — broken speaks at these sites (grok's measured table); the adapter then returns `None` | R55.1, R56 · `worktree::r46_read_classification::an_exit_code_site_that_says_why_is_refused_and_never_its_answer` |
 
 The `ExitCode` row's two halves are deliberately separate. `classify_pinned_read` has no way to
 return "the code" — it returns a `PinnedRead` — so it answers `NotFound` as a **carrier**, and
-`read_pinned_exit` (`worktree.rs:822-843`) turns that carrier back into the code it saved before
-classifying. Reading the classifier alone would suggest an ExitCode site reports an absence, and it
+`read_pinned_exit` turns that carrier back into the code it saved before classifying. Reading the classifier alone would suggest an ExitCode site reports an absence, and it
 does not: the absence never leaves the function.
 
 ## Every read site, and the witness it declares
 
 | site | entry point | witness | why | ruling |
 |---|---|---|---|---|
-| `cat-file blob` — the pre-image gate and the effect post-condition | `read_pinned_bytes`, `worktree.rs:1033` | `Message("does not exist in")` | git *names* the path as absent; silence from `cat-file` is not an absence | R46.3 |
-| text reads (`symbolic-ref --quiet`, and its neighbours) | `read_pinned`, `worktree.rs:785` | `Silence` | these answer negatively in silence and speak when they fail | R47 |
-| reads whose answer is the exit code (`merge-base --is-ancestor`) | `read_pinned_exit`, `worktree.rs:822` | `ExitCode` | the legitimate negative *is* a silent exit 1, so discarding the code makes "no" and "could not tell" one value | R55.1 |
-| the filter-driver inventory (`config --includes --name-only --null --list`) | `pinned_filter_drivers`, `worktree.rs:1168` | `Silence` | an empty inventory is exit 0 with empty bytes; a silent non-zero is `SilentExit`, and therefore an unreadable inventory — it does not mean "git listed nothing" | R47.1, R55 |
+| `cat-file blob` — the pre-image gate and the effect post-condition | `read_pinned_bytes` | `Message("does not exist in")` | git *names* the path as absent; silence from `cat-file` is not an absence | R46.3 |
+| text reads (`symbolic-ref --quiet`, and its neighbours) | `read_pinned` | `Silence` | these answer negatively in silence and speak when they fail | R47 |
+| reads whose answer is the exit code (`merge-base --is-ancestor`) | `read_pinned_exit` | `ExitCode` | the legitimate negative *is* a silent exit 1, so discarding the code makes "no" and "could not tell" one value | R55.1 |
+| the filter-driver inventory (`config --includes --name-only --null --list`) | `pinned_filter_drivers` | `Silence` | an empty inventory is exit 0 with empty bytes; a silent non-zero is `SilentExit`, and therefore an unreadable inventory — it does not mean "git listed nothing" | R47.1, R55 |
 
 The filter inventory is a **precondition of every pinned read**, not one of its answers: it decides
 which filter drivers the hardening suppresses, so a read that proceeds with an empty inventory
@@ -228,7 +228,7 @@ match is still caught.
 
 A caller that folds `PinnedRead` back into an `Option` re-creates the collapse this ADR exists to
 prevent, and the type will not stop it. `read_pinned` does exactly that today
-(`worktree.rs:803-810`), which is Open 4 below.
+(the `match` at the end of `read_pinned`), which is Open 2 below.
 
 Operators gain a Receipt that names which read failed, rather than one asserting a comparison that
 never happened. That is the point of the whole contract: an unreadable pre-image refuses as
@@ -236,6 +236,15 @@ never happened. That is the point of the whole contract: an unreadable pre-image
 as `FilterInventoryUnreadable` with its own.
 
 ## Open
+
+Two rows closed by R56 and are now in the body rather than here: the two `ExitCode` classifier rows
+have named bars
+(`worktree::r46_read_classification::an_exit_code_site_that_says_why_is_refused_and_never_its_answer`,
+`worktree::r46_read_classification::an_exit_code_site_that_produced_output_is_refused_and_never_its_answer`),
+the all-witness rule walks the whole enum
+(`worktree::r46_read_classification::output_defeats_every_witness`, with a `match` that stops
+compiling when a variant is added), and both unreachable arms are gone from `worktree.rs`. The
+closed read-failure vocabulary still counts eight.
 
 1. **"Four states" and "three answers" are both in use, for different things.** The brief for this
    ADR describes a pinned read as having four states; `PinnedRead`'s own doc comment says "THREE
@@ -246,56 +255,40 @@ as `FilterInventoryUnreadable` with its own.
    writes three-plus-a-precondition because that is what the code says. If Kevin prefers the
    four-state framing, `PinnedRead`'s doc comment is the thing to change, not this table — a
    document that says four where the type says three sends the next reader to the wrong place.
-   (brief vs. `worktree.rs:1007`, R46.1)
+   (brief vs. `PinnedRead`'s own doc comment, R46.1)
 
-2. **Two `ExitCode` classifier rows are UNTESTED as named rows.** R55.1 rules that at an exit-code
-   site any stderr is `Unreadable(ReadRefused)`, because broken speaks there. Neither
-   `ExitCode` + diagnostic nor `ExitCode` + non-empty stdout has a bar of its own: both fall out of
-   the general arms, and the current adapter test would still pass if either became a `NotFound`
-   carrier with code 128 (sol1). `worktree::tests::a_read_whose_answer_is_its_exit_code_tells_no_apart_from_could_not_tell`
-   covers the legitimate *negative*, not the speaking failure, and
-   `worktree::r46_read_classification::output_defeats_both_witnesses` loops over Silence and Message
-   only — its name is now one witness short of the enum. Decision 5 is marked UNTESTED for the
-   ExitCode witness for the same reason.
-
-3. **Two unreachable arms sit on main, one of them newly dead.**
-   `worktree.rs:841` reads
-   `PinnedRead::Unreadable(PinnedReadFailure::SilentExit { .. }) if false => code,` — guarded by a
-   literal `false`, so it can never be taken, while the arm below returns `None` for every
-   `Unreadable`. It arrived with R55 and is on main, not in a lane.
-   `worktree.rs:1207` reads `PinnedRead::NotFound => Ok(Vec::new()),` in `pinned_filter_drivers`,
-   under the comment "Silence with a non-zero exit: git found nothing to list and said nothing about
-   it" — which R55 made false. At a `Silence` site the `SilentExit` guard
-   (`worktree.rs:1092-1098`) is textually the same condition as `shows_absence(Silence, …)` and is
-   evaluated first, so `NotFound` can no longer reach that site at all. Measured as well as argued:
-   replacing that arm with `unreachable!()` leaves 31 `worktree::` lib tests, 24 `dispatch::` lib
-   tests and all 94 `dispatch` integration tests GREEN (probe reverted, `git status` clean). Both
-   arms are code cleanups, not behaviour changes, and neither can carry a behavioural probe —
-   which is precisely why they should not stay.
-
-4. **`read_pinned` still discards the typed failure — and it is not the only entry point that
-   does.** `worktree.rs:793` does `pinned_filter_drivers(repository).ok()?`, so an inventory failure
+2. **`read_pinned` still discards the typed failure — and it is not the only entry point that
+   does.** `read_pinned` does `pinned_filter_drivers(repository).ok()?`, so an inventory failure
    at the provenance gate becomes `SourceNotBeaconMade` — a read failure reported as a claim about
    the source. R52 is the proposed lane for it and is **not in this main**. Two sibling entry points
-   make the same fold at `worktree.rs:827` (`read_pinned_exit`) and `worktree.rs:1133`
-   (`write_pinned`), both returning `Option`, so an inventory that could not be established arrives
+   make the same fold in `read_pinned_exit` and `write_pinned`, both returning `Option`, so an
+   inventory that could not be established arrives
    at their callers as an ordinary negative. R52's text scopes itself to "the last untyped read path
    **in dispatch.rs**", which those two are not — so this is a note about R52's reach, not a claim
    it missed them.
 
-5. **Source commentary still states the retired absolute.** `worktree.rs:919-924` ("Nothing is
-   classified on the exit code, anywhere") and `worktree.rs:1083-1084` ("an absence is what the site
-   can SHOW, never what the exit code was") describe the pre-R55.1 rule, immediately above the
-   `ExitCode` arm that contradicts them. A code-documentation follow-up, not a product defect
-   (sol1's P1-1).
+3. **Source commentary still states the retired absolute.** `AbsenceWitness`'s doc comment
+   ("Nothing is classified on the exit code, anywhere") and the comment directly above
+   `classify_pinned_read`'s `ExitCode` arm ("an absence is what the site can SHOW, never what the
+   exit code was") describe the pre-R55.1 rule, the second of them immediately above the arm that
+   contradicts it. A code-documentation follow-up, not a product defect (sol1's P1-1); R56 left it
+   alone because prose was not in its brief and it is one edit either way.
 
-6. **This ADR adds two sections the house template does not use.** No ADR in `docs/adr/` on main
+4. **This ADR adds two sections the house template does not use.** No ADR in `docs/adr/` on main
    carries `## Invariants` or `## Open`; both were required by the brief. Kevin may want them folded
    into `## Consequences` and a review note respectively, in which case the content is unchanged and
    only the headings move. (Precision from sol1: 0045 is the previously allocated ADR and its
    checked-in status is Proposed, not Accepted.)
 
-7. **R54.1 and R54.2 fold into nothing here.** Both are Receipt-wire owner rules — the observed-key
+5. **Output at an `ExitCode` site is refused only when the exit is non-zero.** R56's brief asked
+   for output to be refused there at *any* exit; measured, a successful child's output is
+   `Bytes(stdout)` and the adapter reads the success as the answer 0. Refusing at exit 0 would be an
+   outcome change rather than a new bar, so R56 pinned the behaviour as it is
+   (`worktree::r46_read_classification::an_exit_code_site_that_produced_output_is_refused_and_never_its_answer`
+   asserts both cells) and left the question here. Whether a status-only command that prints on
+   success should still be believed is a question about the sites, not the classifier.
+
+6. **R54.1 and R54.2 fold into nothing here.** Both are Receipt-wire owner rules — the observed-key
    presence check and the observed-digest validation — with GREEN controls at main
    (`r541_*`, `r542_*`, four tests each, in `crates/beacond/tests/dispatch.rs`). They do not change
    any of the four read-state-to-outcome mappings and close none of these rows, and this ADR has no
