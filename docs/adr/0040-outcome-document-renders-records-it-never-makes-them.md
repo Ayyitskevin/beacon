@@ -20,6 +20,14 @@ This ADR records the architecture Kevin ruled on 2026-09-02 (§6 items 1-9) and
 2026-09-03 (items 10-12) from the Outcome Document v1 design, and the exact shape slice 1
 implements.
 
+**Amended 2026-09-07** (status unchanged: accepted). Four statements described `main` as it
+stood on 2026-09-05 and had since become false: the six prerequisite records now exist, the
+collector and candidate Artifact and publication relation are built, the front-matter
+candidate key is decided rather than pending, and the scope paragraph named as absent things
+that had landed. Nothing about the architecture changed; the decision text is untouched. What
+changed is the description of what `main` holds, re-measured at `4baca12`, with a test named
+for each claim. The one genuinely open item moved to a new `## Open` section.
+
 ## Decision
 
 An Outcome Document is an immutable, content-addressed Artifact containing deterministic
@@ -387,16 +395,45 @@ they are recorded here in their own words.
    decoder.
 10. **The Policy bit is copied and re-checked** — the section above.
 
-## What slice 1 deliberately does not do
+## What slice 1 did not do, and what has since been built
 
-No database, no migration, no Activity, no PDF, no UI, no collector, no candidate
-Artifact, no publication relation. Migrations take their final sequence numbers only
-after rebasing on current main, and arrive with slice 2.
+Slice 1 shipped the pure model and the Markdown renderer only: no database, no migration, no
+Activity, no PDF, no UI, no collector, no candidate Artifact, no publication relation.
+
+Every one of those except Activity and UI has since landed, and this section is kept rather
+than deleted because the boundary it drew is the reason each piece could be built separately.
+
+| slice-1 exclusion | state at `4baca12` | evidence |
+|---|---|---|
+| database + migrations | built | `0029_outcome_manifests.sql`, `0030_outcome_manifest_canonicalizer_v2.sql`, `0031_outcome_publications.sql` |
+| collector | built | `crates/beacond/src/outcome_collector.rs`; every value read through its owning verified reader — `outcome_collector :: a_lie_in_the_completions_support_is_refused_while_the_owned_record_is_correct` |
+| candidate Artifact | built | `outcome_prepare :: a_completed_mission_becomes_a_candidate_outcome`, `:: candidate_artifact_digest_covers_exact_markdown_bytes`, `:: a_manifest_cannot_exist_without_its_candidate` |
+| publication relation | built | `outcome_prepare :: a_published_outcome_is_never_edited_or_deleted_in_place`, `:: a_mission_with_no_publication_exports_as_absent` |
+| PDF | built | `crates/beacond/src/outcome_typst.rs`, `outcome_pdf.rs` |
+| Activity, UI | **still out of scope** | no module; unchanged by this amendment |
+
+The canonicalizer has also been through one full version transition since slice 1 —
+`beacon.outcome.manifest.v1` retired and refused by name, its frozen vector slot emptied, and
+`v2` frozen in its place. That is the versioning discipline this ADR describes, exercised
+once, and it is why a later renderer or canonicalizer change is a cost rather than a barrier.
 
 ## Consequences
 
-- A Mission cannot get an Outcome Document until six records exist that `main` does not
-  have. That is the cost of not inferring them, and it is the point.
+- A Mission cannot get an Outcome Document until six records exist. That is the cost of not
+  inferring them, and it is the point. **All six now exist**, each read through its owning
+  verified reader rather than joined into the document:
+  `MissionCompletionV1` (`mission_completion.rs`, migration `0026`, `mission_completion ::
+  the_canonical_vector_is_exactly_these_bytes_and_a_second_encoder_reproduces_them`);
+  the Artifact entity (ADR 0043, `artifact.rs`, migration `0027`, `artifact ::
+  a_known_artifact_fixture_reproduces_its_published_digest`);
+  the Artifact-digest Evaluation subject arm (migration `0028`, `evaluation ::
+  a_valid_artifact_subject_evaluation_survives_restart`);
+  structured per-condition results (ADR 0041, and **four** arms rather than slice 1's two —
+  `outcome :: owner_condition_outcomes_map_without_collapsing_inconclusive_into_not_evaluated`);
+  the measured spend record (ADR 0042, `spend.rs`, migration `0025`, `outcome_prepare ::
+  a_spend_measured_after_the_last_run_reaches_the_manifest_as_measured`);
+  and the durable Policy classification (ADR 0044, `mission_impact.rs`, migrations `0025` and
+  `0032`, `outcome_prepare :: prepare_for_mission_cites_the_newest_classification_at_or_before_the_boundary`).
 - Every array in a manifest is sorted and strictly ordered on the wire, so a store that
   paginates by a different collation cannot produce a second spelling of one document.
 - Prose is escaped conservatively enough to be safe and loosely enough to stay readable;
@@ -409,7 +446,39 @@ after rebasing on current main, and arrive with slice 2.
   Mission that is the largest part of the document, and it is what makes the document
   self-verifying.
 - The front matter does **not** name the candidate Artifact, because a candidate's
-  identity is its content digest and a document cannot contain its own digest. Naming it
-  needs the Artifact entity and an idempotent identity rule; adding the key later changes
-  every byte of every document, so it is a renderer version change and is called out here
-  rather than discovered in slice 3.
+  identity is its content digest and a document cannot contain its own digest (R13.1, and
+  the field list above says the same). **Adding the key later changes every byte of every
+  document, so it is a renderer version change** — that constraint is unchanged and is why
+  this was decided rather than deferred.
+
+  It is decided. The Artifact entity landed with a content identity and no surrogate UUID
+  (ADR 0043), so the horn where a candidate gets a non-digest identity is closed. The binding
+  runs the other way instead: the store holds the candidate's digest and proves it by
+  requiring **that Artifact to embed the manifest's exact canonical bytes**, re-checked on
+  every read and not only at startup (`outcome_prepare ::
+  candidate_artifact_digest_covers_exact_markdown_bytes`, `:: astra_candidate_projection_must_be_verified_on_read_and_retry`).
+  The manifest's reference identity is derived from its own content digest rather than minted,
+  so the two cannot disagree (R18.2). And the key would carry no information a reader does not
+  already have: `manifest_digest` and `renderer_version` determine the candidate uniquely,
+  because `prepare` is idempotent over exactly that pair (`outcome_prepare ::
+  prepare_is_idempotent_for_same_manifest_and_renderer_version`).
+
+## Open
+
+One item, and it is a shape call rather than a defect. Everything else this ADR once listed as
+pending has been built or decided; see the amendment note above.
+
+**Does a state reason carry line breaks?** The consequence above splits narrative text (line
+breaks allowed) from label text (refused as `line_break_in_label`), and every honesty-state
+reason currently renders inside a table cell, so a reason containing a line break is refused
+rather than flattened. R13.5 said narrative text carries line breaks; whether it meant reasons
+too was never settled. The two options:
+
+- **Keep reasons as labels** — a completion whose state reason spans lines is refused; the
+  refusal is named and the document shape is unchanged. No version change, and some real
+  completion records will be unrenderable.
+- **Move reasons out of their table cells** — reasons become narrative and carry line breaks;
+  the fixed Markdown shape changes, which is a new `renderer_version`, and every document
+  rendered under v1 stays at v1.
+
+Kevin's call. Nothing in this amendment presumes either.
