@@ -400,17 +400,25 @@ they are recorded here in their own words.
 Slice 1 shipped the pure model and the Markdown renderer only: no database, no migration, no
 Activity, no PDF, no UI, no collector, no candidate Artifact, no publication relation.
 
-Every one of those except Activity and UI has since landed, and this section is kept rather
-than deleted because the boundary it drew is the reason each piece could be built separately.
+Every one of those except Activity has since landed, and this section is kept rather than deleted
+because the boundary it drew is the reason each piece could be built separately.
 
 | slice-1 exclusion | state at `4baca12` | evidence |
 |---|---|---|
 | database + migrations | built | `0029_outcome_manifests.sql`, `0030_outcome_manifest_canonicalizer_v2.sql`, `0031_outcome_publications.sql` |
-| collector | built | `crates/beacond/src/outcome_collector.rs`; every value read through its owning verified reader — `outcome_collector :: a_lie_in_the_completions_support_is_refused_while_the_owned_record_is_correct` |
+| collector | built | `crates/beacond/src/outcome_collector.rs`. Each source it collects is read through the module that owns it rather than joined: proved for Proposals, Rulings and Evaluations on the negative side and for completion, classification and spend on the positive side by `outcome_collector :: collector_reads_each_source_through_its_owning_verified_reader`; for a delivered Artifact by `outcome_collector :: a_delivered_artifact_scoped_to_another_mission_is_refused`; and against a completion whose own word disagrees with the owned record by `outcome_collector :: a_lie_in_the_completions_support_is_refused_while_the_owned_record_is_correct`, which covers a Receipt checksum disagreement, a Receipt version disagreement and an absent Evaluation |
 | candidate Artifact | built | `outcome_prepare :: a_completed_mission_becomes_a_candidate_outcome`, `:: candidate_artifact_digest_covers_exact_markdown_bytes`, `:: a_manifest_cannot_exist_without_its_candidate` |
 | publication relation | built | `outcome_prepare :: a_published_outcome_is_never_edited_or_deleted_in_place`, `:: a_mission_with_no_publication_exports_as_absent` |
 | PDF | built | `crates/beacond/src/outcome_typst.rs`, `outcome_pdf.rs` |
-| Activity, UI | **still out of scope** | no module; unchanged by this amendment |
+| desktop Outcome surface | built, read-only | `apps/desktop/src/MissionOutcomes.tsx`, mounted at `apps/desktop/src/ProjectMissions.tsx:169`: it lists every published version of a Mission's Outcome and shows the selected one's **exact stored bytes**, decoded and never rendered to HTML, "because doing it here would put a renderer between an operator and bytes whose whole point is that they are the exact ones that were published and evaluated" (`MissionOutcomes.tsx:40-44`) |
+| Activity | **still out of scope** | no module; unchanged by this amendment |
+
+The desktop surface reads and nothing else: `loadMissionPublications` and `loadOutcomeDocument` are
+its only two calls, and it asks for the **selected version** every time rather than "the newest",
+because a superseded version stays readable at its own number and a view that quietly showed the
+current document for every row would show bytes no Evaluation of that version was ever about
+(R12.11, `MissionOutcomes.tsx:76-78`). What is still out of scope on that surface: publishing,
+withdrawing, and PDF export are service operations with no control in this view.
 
 The canonicalizer has also been through one full version transition since slice 1 —
 `beacon.outcome.manifest.v1` retired and refused by name, its frozen vector slot emptied, and
@@ -458,10 +466,18 @@ once, and it is why a later renderer or canonicalizer change is a cost rather th
   every read and not only at startup (`outcome_prepare ::
   candidate_artifact_digest_covers_exact_markdown_bytes`, `:: astra_candidate_projection_must_be_verified_on_read_and_retry`).
   The manifest's reference identity is derived from its own content digest rather than minted,
-  so the two cannot disagree (R18.2). And the key would carry no information a reader does not
-  already have: `manifest_digest` and `renderer_version` determine the candidate uniquely,
-  because `prepare` is idempotent over exactly that pair (`outcome_prepare ::
-  prepare_is_idempotent_for_same_manifest_and_renderer_version`).
+  so the two cannot disagree (R18.2).
+
+  How a reader gets from the document to its Artifact is therefore the store, not the front matter,
+  and that is the honest statement of it. The candidate's record identity is **not** derivable from
+  the document: an `ArtifactV1` hashes its `recorded_at_ms`, which `prepare` takes from the service
+  clock (`outcome_store.rs`, `service_clock` at prepare; `artifact.rs`, `recorded_at_ms` inside the
+  encoding), and changing that field alone changes the identity (`artifact ::
+  each_identity_bearing_field_changes_the_digest`). What is idempotent is **retrieval within one
+  store**: repeating `prepare` for the same manifest and renderer version returns the candidate
+  already prepared instead of recording a second one (`outcome_prepare ::
+  prepare_is_idempotent_for_same_manifest_and_renderer_version`). So the key is not merely
+  redundant — it is impossible, for the reason above, and the reverse binding is what replaces it.
 
 ## Open
 
