@@ -2860,6 +2860,26 @@ fn verify_outcome_invariants(receipt: &DispatchReceipt) -> Result<(), DispatchEr
         return Err(DispatchError::InvalidStore);
     }
 
+    // R54.2: a measured SHA-256 is exactly 64 lowercase hex characters. Validate
+    // every present digest before comparing it, regardless of the Receipt outcome:
+    // a later gate's refusal does not turn malformed evidence into a measurement.
+    let observations_valid =
+        receipt
+            .per_mutation
+            .iter()
+            .all(|record| match &record.observed_pre_image {
+                Some(ObservedPreImage::Bytes { digest }) => {
+                    digest.len() == 64
+                        && digest
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+                }
+                Some(ObservedPreImage::Absent) | None => true,
+            });
+    if !observations_valid {
+        return Err(DispatchError::InvalidStore);
+    }
+
     // R46.6(b), astra's HOLD: the field's doc comment says `pre_image_read_failure` belongs to
     // `PreImageUnreadable` and to nothing else, and the owner did not hold it to that. A promise
     // only a comment makes is one a stored Receipt can break -- an unreadable refusal carrying no
@@ -3646,6 +3666,95 @@ mod tests {
     /// The field belongs to the ERA rather than to one arm, so the rule is outcome-independent: an
     /// `Applied` at version 3 carrying it is the same forgery as a mismatch at version 3 carrying
     /// it, and ONE row carrying it is enough -- a Receipt does not become half a version.
+    #[test]
+    fn observation_guards_read_the_bad_mutation_in_either_position() {
+        for position in [0, 1] {
+            let mut wire = serde_json::to_value(specimen(DispatchOutcome::Applied)).unwrap();
+            wire["version"] = 3.into();
+            let row = wire["perMutation"][0].clone();
+            wire["perMutation"] = serde_json::json!([row.clone(), row]);
+            wire["perMutation"][1]["path"] = "src/other.rs".into();
+            wire["perMutation"][position]["observedPreImage"] = serde_json::Value::Null;
+            assert!(
+                matches!(
+                    decode_dispatch_receipt(&serde_json::to_string(&wire).unwrap()),
+                    Err(DispatchError::InvalidStore)
+                ),
+                "R54.PRESENCE.EVERY_MUTATION: position {position}"
+            );
+
+            let mut receipt = specimen(DispatchOutcome::SourceDirty);
+            receipt.per_mutation = ["src/lib.rs", "src/other.rs"]
+                .map(|path| MutationRecord {
+                    kind: MutationKind::ModifyFile,
+                    path: path.to_owned(),
+                    pre_image: Some("7".repeat(64)),
+                    post_image: Some("8".repeat(64)),
+                    observed_pre_image: Some(ObservedPreImage::Bytes {
+                        digest: "9".repeat(64),
+                    }),
+                    effect: MutationEffect::NotAttempted,
+                })
+                .to_vec();
+            verify_outcome_invariants(&receipt).expect("R54.DIGEST.TWO_VALID_ROWS");
+            receipt.per_mutation[position].observed_pre_image = Some(ObservedPreImage::Bytes {
+                digest: String::new(),
+            });
+            assert!(
+                matches!(
+                    verify_outcome_invariants(&receipt),
+                    Err(DispatchError::InvalidStore)
+                ),
+                "R54.DIGEST.EVERY_MUTATION: position {position}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_observed_digest_has_the_domain_even_outside_a_mismatch() {
+        for outcome in [
+            DispatchOutcome::PreImageMismatch,
+            DispatchOutcome::SourceDirty,
+        ] {
+            let mut receipt = specimen(outcome);
+            let row = |digest: String| MutationRecord {
+                kind: MutationKind::ModifyFile,
+                path: "src/lib.rs".to_owned(),
+                pre_image: Some("7".repeat(64)),
+                post_image: Some("8".repeat(64)),
+                observed_pre_image: Some(ObservedPreImage::Bytes { digest }),
+                effect: MutationEffect::NotAttempted,
+            };
+            for valid in [
+                "0123456789abcdef".repeat(4),
+                "0".repeat(64),
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_owned(),
+            ] {
+                receipt.per_mutation = vec![row(valid)];
+                verify_outcome_invariants(&receipt).expect("R54.DIGEST.VALID_CONTROL");
+            }
+            for (name, invalid) in [
+                ("empty", String::new()),
+                ("short", "a".repeat(63)),
+                ("long", "a".repeat(65)),
+                ("uppercase", "A".repeat(64)),
+                ("nonhex", "g".repeat(64)),
+                ("whitespace", format!("{} ", "a".repeat(63))),
+                ("unicode-64-bytes", "é".repeat(32)),
+            ] {
+                receipt.per_mutation = vec![row(invalid)];
+                assert!(
+                    matches!(
+                        verify_outcome_invariants(&receipt),
+                        Err(DispatchError::InvalidStore)
+                    ),
+                    "R54.DIGEST.INVALID_STORE: {name} {:?}",
+                    receipt.outcome
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_legacy_observation_key_is_refused_before_decoding_its_value() {
         let mut wire = serde_json::to_value(specimen(DispatchOutcome::Applied)).unwrap();
