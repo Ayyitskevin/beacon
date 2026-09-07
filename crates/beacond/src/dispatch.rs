@@ -1026,8 +1026,18 @@ impl DispatchService {
         let Ok(repository) = PinnedRepository::open(Path::new(&binding.source)) else {
             return Ok(decided.refused(DispatchOutcome::SourceNotBeaconMade));
         };
-        if !is_beacon_made(connection, self.workspace_id, &repository, &mut decided)? {
-            return Ok(decided.refused(DispatchOutcome::SourceNotBeaconMade));
+        match provenance_of(connection, self.workspace_id, &repository, &mut decided)? {
+            ProvenanceVerdict::BeaconMade => {}
+            ProvenanceVerdict::NotBeaconMade => {
+                return Ok(decided.refused(DispatchOutcome::SourceNotBeaconMade));
+            }
+            // R52: the inventory could not be read, so the provenance token was never asked for.
+            // Reporting that as "not Beacon-made" is a claim about the SOURCE derived from a read
+            // that never happened -- the absent/broken collapse, at the earliest gate that has a
+            // repository to be wrong about, and it discards git's message on the way (opus, R51).
+            ProvenanceVerdict::InventoryUnestablished(failure) => {
+                return Ok(decided.inventory_unestablished(failure));
+            }
         }
 
         // The declared pre-images, against the pinned base tree itself. Nothing before this read
@@ -1062,8 +1072,20 @@ impl DispatchService {
         // G11: the live repository, read through the pinned directory with a read-only Git shape.
         // Nothing here may write: `git status` rewrites `.git/index` without GIT_OPTIONAL_LOCKS=0,
         // and a gate that mutates what it measures cannot support a zero-mutation claim.
+        // R52: each of these three refuses on `None` -- detached, moved, dirty -- and each of
+        // those is a claim about the repository. An inventory that could not be read supports
+        // none of them, so it leaves by its own arm here as it does at the provenance gate.
+        // Reachable only when the inventory breaks BETWEEN this read and the provenance read that
+        // just succeeded, which is a narrow window; the alternative is to type the read and then
+        // discard the type three lines later, which is what R52 exists to stop.
         let symbolic_ref = ["symbolic-ref", "--quiet", "HEAD"];
-        let branch = read_pinned(&repository, &symbolic_ref, READ_BUDGET);
+        let branch = match read_pinned(&repository, &symbolic_ref, READ_BUDGET) {
+            Ok(branch) => branch,
+            Err(failure) => {
+                decided.record_step(GitStepName::SymbolicRef, &symbolic_ref, false);
+                return Ok(decided.inventory_unestablished(failure));
+            }
+        };
         decided.record_step(GitStepName::SymbolicRef, &symbolic_ref, branch.is_some());
         let Some(branch) = branch else {
             return Ok(decided.refused(DispatchOutcome::SourceDetached));
@@ -1072,7 +1094,13 @@ impl DispatchService {
             return Ok(decided.refused(DispatchOutcome::SourceDetached));
         }
         let rev_parse = ["rev-parse", "--verify", "HEAD"];
-        let head = read_pinned(&repository, &rev_parse, READ_BUDGET);
+        let head = match read_pinned(&repository, &rev_parse, READ_BUDGET) {
+            Ok(head) => head,
+            Err(failure) => {
+                decided.record_step(GitStepName::RevParse, &rev_parse, false);
+                return Ok(decided.inventory_unestablished(failure));
+            }
+        };
         decided.record_step(GitStepName::RevParse, &rev_parse, head.is_some());
         let Some(head) = head else {
             return Ok(decided.refused(DispatchOutcome::RepositoryHeadMoved));
@@ -1086,7 +1114,13 @@ impl DispatchService {
             return Ok(decided.refused(DispatchOutcome::RepositoryHeadMoved));
         }
         let status_arguments = ["status", "--porcelain", "--untracked-files=all"];
-        let status = read_pinned(&repository, &status_arguments, READ_BUDGET);
+        let status = match read_pinned(&repository, &status_arguments, READ_BUDGET) {
+            Ok(status) => status,
+            Err(failure) => {
+                decided.record_step(GitStepName::Status, &status_arguments, false);
+                return Ok(decided.inventory_unestablished(failure));
+            }
+        };
         decided.record_step(GitStepName::Status, &status_arguments, status.is_some());
         let Some(status) = status else {
             return Ok(decided.refused(DispatchOutcome::SourceDirty));
@@ -1422,7 +1456,10 @@ impl DispatchService {
             }
             decided.record_step(GitStepName::UpdateRef, &swap, swapped.is_some());
             let observe = ["rev-parse", "--verify", branch];
-            let observed = read_pinned(&repository, &observe, READ_BUDGET);
+            // R52: after the swap, an unestablished inventory is not a refusal -- the act has
+            // already happened, and `LandingUnobserved` is exactly "the result could not be
+            // established". Folding `Err` in here says that and nothing stronger.
+            let observed = read_pinned(&repository, &observe, READ_BUDGET).unwrap_or(None);
             decided.record_step(GitStepName::RevParse, &observe, observed.is_some());
             // `Applied` is a claim about THIS attempt's swap, so the swap having succeeded is part
             // of it. The commit is a deterministic function of its inputs, so a branch that already
@@ -1506,7 +1543,9 @@ impl DispatchService {
         decided: &mut Decided,
     ) -> Result<bool, DispatchError> {
         let diff_arguments = ["diff", "--name-status", "-z", base, commit];
-        let diff = read_pinned(repository, &diff_arguments, READ_BUDGET);
+        // R52: as above -- this runs on a commit that already exists, and every answer that is
+        // not the diff means the effect could not be shown to match.
+        let diff = read_pinned(repository, &diff_arguments, READ_BUDGET).unwrap_or(None);
         decided.record_step(GitStepName::DiffNameStatus, &diff_arguments, diff.is_some());
         let Some(diff) = diff else {
             return Ok(false);
@@ -1762,6 +1801,20 @@ struct Decided {
 }
 
 impl Decided {
+    /// R52: the refusal an unestablished filter inventory earns, at whichever gate meets it first.
+    ///
+    /// ONE owner, because four gates can meet it and a copy at each is four places to drift. The
+    /// inventory decides which filter drivers the hardening suppresses, so a gate that cannot read
+    /// it has not learned that its own question is false -- it has learned that it could not ask.
+    ///
+    /// R50 landed before this did, so the outcome is the inventory's own rather than a
+    /// `PreImageUnreadable` subcase -- which was the misnomer R50 exists to fix, and at the
+    /// provenance gate a sharp one: no pre-image read has been attempted there at all.
+    fn inventory_unestablished(mut self, failure: FilterInventoryFailure) -> Self {
+        self.filter_inventory_failure = Some(failure);
+        self.refused(DispatchOutcome::FilterInventoryUnreadable)
+    }
+
     fn refused(mut self, outcome: DispatchOutcome) -> Self {
         self.outcome = Some(outcome);
         self
@@ -2292,12 +2345,27 @@ fn pre_images_hold(
 /// and inode**, not on the pathname it was created at: a path is what a rename moves, and a
 /// containment check against a caller-chosen directory proves only where a repository sits, never
 /// where it came from (gpt1). v1 dispatch reaches nothing Beacon did not make.
-fn is_beacon_made(
+/// What the provenance gate established -- THREE answers, because it can also establish nothing.
+///
+/// R52: this used to be a `bool`, and the third answer arrived as `false`. A repository whose
+/// filter inventory could not be read has not been shown to be someone else's; it has not been
+/// asked. Reporting that as `SourceNotBeaconMade` is a claim about the source drawn from a read
+/// that never ran, and it is the earliest gate with a repository to be wrong about.
+enum ProvenanceVerdict {
+    /// The token was read and matches the row Beacon wrote when it made this copy.
+    BeaconMade,
+    /// The token was read, or its absence established, and it does not match.
+    NotBeaconMade,
+    /// The filter inventory could not be established, so no Git child ran and nothing was asked.
+    InventoryUnestablished(FilterInventoryFailure),
+}
+
+fn provenance_of(
     connection: &Connection,
     workspace_id: Uuid,
     repository: &PinnedRepository,
     decided: &mut Decided,
-) -> Result<bool, DispatchError> {
+) -> Result<ProvenanceVerdict, DispatchError> {
     let (device, inode) = repository.identity();
     let recorded: Option<String> = connection
         .query_row(
@@ -2312,26 +2380,45 @@ fn is_beacon_made(
         )
         .optional()?;
     let Some(recorded) = recorded else {
-        return Ok(false);
+        return Ok(ProvenanceVerdict::NotBeaconMade);
     };
     // The token, read from the repository itself through the pinned descriptor. Device and inode
     // are reusable after a deletion, so the row alone proves "a directory Beacon once made had
     // these numbers" rather than "this is that directory" (gpt1). The read is a gate's own Git
     // invocation, so it is recorded like every other one.
-    let token = read_provenance_token(repository);
+    let token = match read_provenance_token(repository) {
+        Ok(token) => token,
+        // The step is recorded as a failure, because it is one: the invocation was built and
+        // never spawned. What it is NOT is an answer about this repository's provenance.
+        Err(failure) => {
+            decided.record_step(GitStepName::Config, &provenance_token_arguments(), false);
+            return Ok(ProvenanceVerdict::InventoryUnestablished(failure));
+        }
+    };
     decided.record_step(
         GitStepName::Config,
         &provenance_token_arguments(),
         token.is_some(),
     );
-    Ok(token.as_deref() == Some(recorded.as_str()))
+    if token.as_deref() == Some(recorded.as_str()) {
+        Ok(ProvenanceVerdict::BeaconMade)
+    } else {
+        Ok(ProvenanceVerdict::NotBeaconMade)
+    }
 }
 
 /// The provenance token this repository carries, read through the descriptor it was pinned by.
-pub(crate) fn read_provenance_token(repository: &PinnedRepository) -> Option<String> {
-    read_pinned(repository, &provenance_token_arguments(), READ_BUDGET)
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
+///
+/// R52: `Err` means the filter inventory could not be established, so the token was never asked
+/// for. `Ok(None)` means it WAS asked for and the repository did not produce one.
+pub(crate) fn read_provenance_token(
+    repository: &PinnedRepository,
+) -> Result<Option<String>, FilterInventoryFailure> {
+    Ok(
+        read_pinned(repository, &provenance_token_arguments(), READ_BUDGET)?
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty()),
+    )
 }
 
 /// One owner for the invocation, so what the Receipt records cannot drift from what ran.
@@ -2361,7 +2448,13 @@ pub(crate) fn record_beacon_repository(
     now: i64,
 ) -> Result<(), DispatchError> {
     let (device, inode) = repository.identity();
-    let token = read_provenance_token(repository).ok_or(DispatchError::InvalidStore)?;
+    // A repository Beacon has just created, read back through the descriptor it was created
+    // through. Both "the inventory could not be read" and "no token" mean the same thing on this
+    // path -- the record cannot be written truthfully -- so they share `InvalidStore`, which is
+    // not a collapse of two answers a caller could act on differently (R52).
+    let token = read_provenance_token(repository)
+        .map_err(|_| DispatchError::InvalidStore)?
+        .ok_or(DispatchError::InvalidStore)?;
     connection.execute(
         "INSERT INTO beacon_repositories (
              workspace_id, path, device, inode, origin, provenance_token, created_at_ms
@@ -2656,11 +2749,16 @@ fn observe_landing(prepared: &PreparedDispatch) -> (DispatchOutcome, LandingObse
     {
         return unobserved;
     }
+    // R52: startup reconstruction. An unestablished inventory here is not a refusal either --
+    // there is no gate left to refuse, only a Receipt to write -- and `unobserved` is precisely
+    // "this attempt's result could not be established", which is what it is.
     match read_pinned(
         &repository,
         &["rev-parse", "--verify", &prepared.branch],
         READ_BUDGET,
-    ) {
+    )
+    .unwrap_or(None)
+    {
         Some(head) if head.trim() == prepared.prepared_commit => (
             DispatchOutcome::Applied,
             LandingObservation::BranchReachesPreparedCommit,

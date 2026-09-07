@@ -1268,17 +1268,27 @@ fn row_34_superseded_ruling_leaves_every_repository_byte_identical() {
 ///
 /// WHICH GATE IT REFUSES AT, measured rather than predicted. A pin lost from the FIRST exec is not
 /// met at the pre-image gate: the earliest pinned read is the filter-driver inventory, inside
-/// `read_pinned`, and it fails with git's `fatal: not a git repository: '/proc/self/fd/100'`. That
-/// read serves the provenance gate (`is_beacon_made`, `dispatch.rs:926`), which runs well before
-/// the pre-image gate (`:941`), so the dispatch refuses `SourceNotBeaconMade`.
+/// `read_pinned`, and that read serves the provenance gate (`provenance_of`), which runs well
+/// before the pre-image gate.
 ///
 /// blue's flake reached the pre-image gate instead because its loss was TRANSIENT -- it arrived
 /// after the early gates had already read successfully. A deterministic loss cannot get that far.
 ///
-/// The message is real but does not reach the Receipt: `pinned_filter_drivers` returns
-/// `FilterInventoryRefused { message }` (R47) and `read_pinned` discards it with `.ok()?`. That is
-/// the last untyped read path, and it is named in the R51 report rather than changed here -- this
-/// lane is test-only.
+/// R52 UPDATED THIS EXPECTATION, and measured it rather than predicting it
+/// (`tools/r52/logs/measure-r51-mutant.log`). R51 recorded that the mutant refuses
+/// `SourceNotBeaconMade` and that git's message was thrown away by `read_pinned`'s `.ok()?`. Both
+/// halves have moved: the mutant now refuses `FilterInventoryUnreadable` carrying
+/// `FilterInventoryFailure::Refused { message }`, and the message REACHES the Receipt --
+///
+///   fatal: unable to read config file '/proc/self/fd/100/config': No such file or directory
+///
+/// which is also the correction to R51's own quotation of it. The first child through the lost pin
+/// is `config --file /proc/self/fd/100/config` -- the inventory read -- so git complains about the
+/// config FILE, not about the repository. `fatal: not a git repository: '/proc/self/fd/100'` is
+/// what a later child would have said, and no later child runs.
+///
+/// (R50 merged first, so the outcome above is the inventory's own from the start; the measured
+/// log predates that fold and names the `PreImageUnreadable` it carried then.)
 #[test]
 fn a_dispatch_whose_git_directory_lands_on_the_placement_descriptor_still_applies() {
     // `PINNED_GIT_DIR_FD` is crate-internal, so the number is stated once here with the reason it
