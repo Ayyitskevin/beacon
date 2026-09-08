@@ -178,3 +178,135 @@ it("labels each Mission's Outcome section with its own heading", async () => {
     expect(section, "B9.OUTCOME.HEADING_BELONGS_TO_ITS_SECTION").toContainElement(heading);
   }
 });
+
+// ---------------------------------------------------------------------------------------------
+// B11 -- copying the selected stored Markdown.
+//
+// The expectation is typed as an INDEPENDENT literal, in a DIFFERENT spelling from the fixture:
+// the fixture writes CRLF as \r\n and the accented characters literally, the expectation writes
+// the same string with \x0d\x0a and \u escapes. A shared decoder generating both sides would agree
+// with itself no matter what the component did.
+// ---------------------------------------------------------------------------------------------
+
+const copyOldSource = "# Outcome, version one\r\n\r\nCafé — naïve ✅\ttrailing  \r\n";
+const copyOldExpected =
+  "# Outcome, version one\x0d\x0a\x0d\x0aCaf\u00e9 \u2014 na\u00efve \u2705\x09trailing  \x0d\x0a";
+const copyCurrentSource = "# Outcome, version two\r\n\r\nThe CURRENT document.\r\n";
+
+function mockCopyFixtures() {
+  invokeMock.mockImplementation((command, payload) => {
+    if (command === "mission_publications") return Promise.resolve(publications);
+    if (command === "outcome_document") {
+      const version = (payload as { version: number | null }).version ?? 2;
+      return Promise.resolve({
+        ...documentFor(version),
+        bytes: bytesOf(version === 1 ? copyOldSource : copyCurrentSource),
+      });
+    }
+    return Promise.reject(new Error(`unexpected command: ${String(command)}`));
+  });
+}
+
+function stubClipboard(writeText: unknown): void {
+  // MUST be called AFTER `userEvent.setup()`: user-event installs its own `navigator.clipboard`
+  // during setup, so a stub installed first is silently replaced and the bar would then be
+  // measuring user-event rather than the component.
+  Object.defineProperty(globalThis.navigator, "clipboard", {
+    configurable: true,
+    value: writeText === undefined ? {} : { writeText },
+  });
+}
+
+const CLIPBOARD_FALLBACK =
+  "Beacon could not reach the clipboard. The document above is the exact text; select and copy it.";
+
+it("copies the exact stored bytes of the selected version, not the current one", async () => {
+  mockCopyFixtures();
+  const written: string[] = [];
+  const user = userEvent.setup();
+  stubClipboard((text: string) => {
+    written.push(text);
+    return Promise.resolve();
+  });
+  render(<MissionOutcomes missionId={missionId} />);
+
+  await user.click(await screen.findByRole("button", { name: "Show version 1" }));
+  expect(await screen.findByLabelText("Outcome Document")).toHaveTextContent("version one");
+  await user.click(screen.getByRole("button", { name: "Copy Markdown" }));
+
+  expect(await screen.findByText("Copied version 1's stored Markdown.")).toBeVisible();
+  expect(written, "B11.COPY.EXACT_SELECTED_BYTES").toEqual([copyOldExpected]);
+  expect(written[0], "B11.COPY.NOT_THE_CURRENT_VERSION").not.toContain("CURRENT");
+});
+
+it("keeps the visible document usable when the clipboard is unavailable", async () => {
+  mockCopyFixtures();
+  const user = userEvent.setup();
+  stubClipboard(undefined);
+  render(<MissionOutcomes missionId={missionId} />);
+
+  await user.click(await screen.findByRole("button", { name: "Show version 1" }));
+  await screen.findByLabelText("Outcome Document");
+  await user.click(screen.getByRole("button", { name: "Copy Markdown" }));
+
+  expect(await screen.findByText(CLIPBOARD_FALLBACK), "B11.COPY.FALLBACK_IS_USABLE").toBeVisible();
+  // The bytes stay on screen, so the fallback the copy names is a real one.
+  expect(screen.getByLabelText("Outcome Document")).toHaveTextContent("version one");
+});
+
+it("says so with fixed copy when the clipboard rejects", async () => {
+  mockCopyFixtures();
+  const user = userEvent.setup();
+  stubClipboard(() => Promise.reject(new Error("DOMException: write denied by policy")));
+  render(<MissionOutcomes missionId={missionId} />);
+
+  await user.click(await screen.findByRole("button", { name: "Show version 1" }));
+  await screen.findByLabelText("Outcome Document");
+  await user.click(screen.getByRole("button", { name: "Copy Markdown" }));
+
+  expect(await screen.findByText(CLIPBOARD_FALLBACK), "B11.COPY.NO_RAW_EXCEPTION").toBeVisible();
+  expect(
+    screen.queryByText(/DOMException|denied by policy/),
+    "B11.COPY.NO_RAW_EXCEPTION",
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByText(/Copied/),
+    "B11.COPY.SUCCESS_ONLY_AFTER_RESOLVE",
+  ).not.toBeInTheDocument();
+});
+
+it("does not leave a copy result beside a different version after a late clipboard settlement", async () => {
+  mockCopyFixtures();
+  // No initialiser: `= null` narrows the declared type to `null`, because TypeScript cannot order
+  // an assignment made inside the Promise executor, and the later call then fails to type-check.
+  let settle: (() => void) | undefined;
+  let writeStarted = false;
+  const user = userEvent.setup();
+  stubClipboard(
+    () =>
+      new Promise<void>((resolve) => {
+        writeStarted = true;
+        settle = resolve;
+      }),
+  );
+  render(<MissionOutcomes missionId={missionId} />);
+
+  await user.click(await screen.findByRole("button", { name: "Show version 1" }));
+  await screen.findByLabelText("Outcome Document");
+  await user.click(screen.getByRole("button", { name: "Copy Markdown" }));
+
+  // The operator moves to another version while the clipboard write is still pending.
+  await user.click(screen.getByRole("button", { name: "Show version 2" }));
+  expect(await screen.findByLabelText("Outcome Document")).toHaveTextContent("CURRENT");
+
+  // Harness check: the component really did start a clipboard write that is still pending, so the
+  // bar below is about a late settlement rather than about a write that never happened.
+  expect(writeStarted, "B11.COPY.LATE_SETTLEMENT_HARNESS").toBe(true);
+  settle?.();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(
+    screen.queryByText(/Copied version/),
+    "B11.COPY.LATE_SETTLEMENT_IS_DISCARDED",
+  ).not.toBeInTheDocument();
+});
