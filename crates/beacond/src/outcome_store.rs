@@ -2767,10 +2767,17 @@ mod b24_render_lock_witness {
                 entered_tx
                     .send(())
                     .expect("B24.HARNESS: the bar stopped listening");
+                // BLOCKING, deliberately. A `recv_timeout` here would let the hold release
+                // ITSELF, which makes the bar's meaning depend on scheduling: a locker delayed
+                // past the timeout would then be observed completing after the guard had already
+                // been dropped for an unrelated reason. `recv` returns on the explicit release or
+                // on the sender being dropped -- and the sender lives in the test frame, so an
+                // unwinding assertion drops it and the render is never stranded. Every timeout in
+                // this bar belongs to the controller below, not to the thing being observed.
                 let _ = release_rx
                     .lock()
                     .expect("B24.HARNESS: the handshake mutex is poisoned")
-                    .recv_timeout(std::time::Duration::from_secs(30));
+                    .recv();
             }));
 
         let mission_id = fixture.mission_id;
