@@ -1324,7 +1324,7 @@ fn insert_artifact(
         },
     })?;
     crate::event_chain::append_event(
-        &connection,
+        connection,
         &stored.workspace_id.to_string(),
         "artifact.recorded",
         &payload,

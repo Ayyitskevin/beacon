@@ -44,6 +44,28 @@ This ADR remains **Proposed**. Under R45.6 and R45.7, Kevin's sign-off at merge 
 persistent store-format decision and this operating text together; this record does not accept
 its own decision.
 
+## Amended 2026-09-07 (R58): the startup snapshot now carries the Event chain
+
+Status unchanged. This ADR established that one deferred, read-only transaction owns every startup
+verification, so all passes judge one SQLite snapshot. R58 adds a pass to that transaction rather
+than beside it: the Event chain is verified from its genesis to its head inside the same snapshot,
+for the same reason every other pass is — a chain read in its own transaction could disagree with
+the passes around it and refuse a store no single reader ever saw broken.
+
+Its position in the order is deliberate and load-bearing. The chain pass runs **after every
+per-record pass**. Measured before it existed, five of seven single-row tampers were already refused
+by name — `MissionEventMismatch`, `ProjectStateMismatch`, and their kin — and those names say which
+record disagreed, which sends an operator to one record rather than to the chain. The chain's own
+job is the two nobody else caught: a deleted genesis and a renumbered sequence. Running it earlier
+replaced good refusals with a vaguer one, which is how the ordering came to be tested rather than
+merely intended.
+
+The chain does not weaken this ADR's other statement: a refused startup may already have changed
+the store. The chain pass is read-only and runs after the reconciliation transaction has committed,
+so it can refuse a store that reconciliation has already written to — unchanged from every pass
+beside it, and stated here because the chain is the pass most likely to be read as a guarantee that
+nothing happened.
+
 ## Operating consequences
 
 The following is proposed operating text, not evidence that Beacon has executed or passed a

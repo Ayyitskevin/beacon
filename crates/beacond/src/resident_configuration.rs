@@ -587,7 +587,7 @@ fn insert_decision(
         decision: decision.clone(),
     })?;
     crate::event_chain::append_event(
-        &connection,
+        connection,
         &decision.workspace_id.to_string(),
         event_kind(decision.state),
         &payload,

@@ -19,9 +19,17 @@ use crate::proposal::sha256;
 /// compares against bytes it did not make).
 pub const CANONICALIZER: &str = "beacon.event_chain.v1";
 
-/// The prefix every link commits to. A digest over bare fields would collide with any other
-/// structure that happened to serialise the same bytes; the magic makes the domain explicit.
-const MAGIC: &[u8] = b"beacon.event_chain.v1\0";
+/// The prefix every link commits to: the canonicalizer's own name and a NUL.
+///
+/// Written from [`CANONICALIZER`] rather than repeated as a literal, so the name a digest claims
+/// and the bytes it actually commits to cannot drift apart -- ADR 0034's rule, applied to itself.
+/// A digest over bare fields would collide with any other structure that serialised the same bytes;
+/// the prefix makes the domain explicit.
+fn magic() -> Vec<u8> {
+    let mut prefix = CANONICALIZER.as_bytes().to_vec();
+    prefix.push(0);
+    prefix
+}
 
 /// The chain's first predecessor: a NAMED constant, deliberately not thirty-two zero bytes.
 ///
@@ -103,7 +111,7 @@ impl Link<'_> {
     /// concatenate to the same run of bytes as some other pair must not produce the same digest,
     /// and a separator would only move the problem to inputs containing the separator.
     pub fn digest(&self) -> [u8; 32] {
-        let mut bytes = MAGIC.to_vec();
+        let mut bytes = magic();
         bytes.push(self.predecessor.tag());
         bytes.extend_from_slice(&self.predecessor.digest_bytes());
         bytes.extend_from_slice(&self.sequence.to_be_bytes());
@@ -309,9 +317,12 @@ pub(crate) fn verify_chain(connection: &Connection) -> Result<Option<ChainFault>
             "unchained" => {
                 // Pre-migration rows are outside the chain by construction, and the boundary says
                 // how far back that goes. One after the boundary was written around the door.
+                debug_assert_eq!(Predecessor::Unchained.tag(), TAG_UNCHAINED);
                 if sequence > boundary {
                     return Ok(Some(ChainFault::UnchainedAfterBoundary { sequence }));
                 }
+                // Nothing to recompute: an unchained row carries no link digest to check, which is
+                // the whole of what `Predecessor::Unchained` means.
                 continue;
             }
             "genesis" => {
@@ -392,6 +403,46 @@ pub(crate) fn verify_chain(connection: &Connection) -> Result<Option<ChainFault>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The chain's cost, measured rather than asserted: 100k links, the same shape
+    /// DP-b42-event-chain.md measured before the build.
+    ///
+    /// The packet's number was a Python/OpenSSL proxy (58 ms marginal per 100k). This runs the
+    /// real `Link::digest` and prints the figure the report quotes, so the claim in the report is
+    /// this code's, not an estimate about it. It asserts only an upper bound wide enough not to be
+    /// a flake on a loaded box -- the point is the measurement, and a bound that fails on a busy
+    /// machine would be a worse test than none.
+    #[test]
+    fn one_hundred_thousand_links_cost_what_the_packet_said() {
+        let payload = format!(
+            r#"{{"workspaceId":"{WS}","missionId":"{WS}","digestValue":"{}","version":4}}"#,
+            "a".repeat(64)
+        );
+        let start = std::time::Instant::now();
+        let mut previous = Predecessor::Genesis;
+        for sequence in 1..=100_000_i64 {
+            let digest = Link {
+                predecessor: previous,
+                sequence,
+                workspace_id: WS,
+                kind: "proposal.dispatched",
+                payload_json: &payload,
+                occurred_at_ms: 1_788_400_000_000 + sequence,
+            }
+            .digest();
+            previous = Predecessor::Linked(digest);
+        }
+        let elapsed = start.elapsed();
+        println!(
+            "R58.COST: 100k links in {:?} ({:.2} us/link)",
+            elapsed,
+            elapsed.as_secs_f64() * 1e6 / 100_000.0
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "100k links took {elapsed:?}, which is not a chain cost but a defect"
+        );
+    }
 
     /// R58: **no product code writes an Event around the door.**
     ///
@@ -481,7 +532,7 @@ mod tests {
             (
                 "workspace_id",
                 Link {
-                    workspace_id: &other,
+                    workspace_id: other,
                     ..base
                 },
             ),

@@ -1551,7 +1551,7 @@ fn insert_ruling(connection: &Connection, stored: &StoredRuling) -> Result<(), R
         },
     })?;
     crate::event_chain::append_event(
-        &connection,
+        connection,
         &stored.workspace_id.to_string(),
         "ruling.recorded",
         &payload,

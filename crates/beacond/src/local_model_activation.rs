@@ -540,7 +540,7 @@ fn insert_decision(
         activation: activation.clone(),
     })?;
     crate::event_chain::append_event(
-        &connection,
+        connection,
         &activation.workspace_id.to_string(),
         kind,
         &payload,
