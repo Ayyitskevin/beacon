@@ -1854,7 +1854,7 @@ mod display_tests {
         }
     }
 
-    /// Every named fault reaches the message -- all ten arms, not the five that had a fixture.
+    /// Every named fault reaches the message -- all twelve arms, not the five that had a fixture.
     ///
     /// Closing the store's text did not close the vocabulary, and this is where that is checked.
     /// Both directions are covered: `expected_name` fails to COMPILE if an arm is added, and the
@@ -1879,12 +1879,19 @@ mod display_tests {
                 fault: PredecessorFault::NotStored,
             },
             ClassificationStoreError::Store("anything at all".to_owned()),
+            // B6/R58.3: the two row-side faults the relation added. `expected_name` grew arms for
+            // them when they landed; this array did not, so the cardinality below went on
+            // asserting ten while the vocabulary was twelve -- a second supposedly exhaustive
+            // table left stale (Sol1's final read at `ae395663`). The count is held here, not
+            // derived from the array's own length.
+            ClassificationStoreError::EventAbsent,
+            ClassificationStoreError::EventDuplicated { count: 2 },
         ];
 
         let names: std::collections::BTreeSet<&str> = every_arm.iter().map(expected_name).collect();
         assert_eq!(
             names.len(),
-            10,
+            12,
             "an arm was added to `ClassificationStoreError` without a fixture here, so this bar \
              would have gone on claiming to cover the whole vocabulary: {names:?}"
         );
