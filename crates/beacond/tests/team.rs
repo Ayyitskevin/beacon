@@ -283,7 +283,7 @@ fn operator_forms_a_project_team_from_exact_eligible_configurations() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 35);
+    assert_eq!(report.diagnostics.schema_version, 36);
 }
 
 #[test]
