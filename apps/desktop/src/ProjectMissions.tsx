@@ -48,6 +48,14 @@ const useStyles = makeStyles({
     textTransform: "uppercase",
     letterSpacing: "0.08em",
   },
+  briefHeading: {
+    fontSize: tokens.fontSizeBase300,
+    marginTop: tokens.spacingVerticalM,
+    marginBottom: tokens.spacingVerticalXS,
+  },
+  briefList: { marginTop: 0, marginBottom: 0, paddingLeft: tokens.spacingHorizontalXXL },
+  details: { marginTop: tokens.spacingVerticalM, color: tokens.colorNeutralForeground2 },
+  identity: { fontFamily: tokens.fontFamilyMonospace, fontSize: tokens.fontSizeBase200 },
   form: {
     display: "grid",
     rowGap: tokens.spacingVerticalM,
@@ -166,12 +174,97 @@ export function ProjectMissions({
                 {mission.successConditions.length === 1 ? "success condition" : "success conditions"}
                 {" · "}{mission.members.length} {mission.members.length === 1 ? "member" : "members"}
               </p>
+              <MissionBrief mission={mission} teams={teams} />
               <MissionOutcomes missionId={mission.id} />
             </article>
           ))}
         </div>
       )}
     </section>
+  );
+}
+
+/// The saved brief, exactly as it was admitted.
+///
+/// Every value here comes from this Mission's own record. The Project charter carries its own
+/// constraints and prohibitions and they are deliberately NOT shown here: a card that substituted
+/// them would be describing a different set of boundaries under the Mission's name.
+///
+/// An empty optional list says so rather than disappearing, because a section that vanishes reads
+/// as "not applicable" when the truth is "the Operator recorded none". `successConditions` cannot
+/// be empty under the current validator, so nothing here manufactures a default for it.
+function MissionBrief({ mission, teams }: { mission: MissionView; teams: TeamView[] | null }) {
+  const classes = useStyles();
+  // A name is shown ONLY on an exact id match. The recorded binding is the id; a lookup that finds
+  // nothing in the currently loaded list says nothing about whether the admission still holds, so
+  // the id is retained and never described as lost.
+  const recordedTeam = (teams ?? []).find((team) => team.id === mission.teamId) ?? null;
+
+  return (
+    <div>
+      <h4 className={classes.briefHeading}>Success conditions</h4>
+      <ol className={classes.briefList} aria-label="Success conditions">
+        {mission.successConditions.map((condition, index) => (
+          <li key={`${condition}-${index}`} className={classes.body}>
+            {condition}
+          </li>
+        ))}
+      </ol>
+
+      <h4 className={classes.briefHeading}>Mission constraints</h4>
+      {mission.constraints.length === 0 ? (
+        <p className={classes.body}>None recorded.</p>
+      ) : (
+        <ol className={classes.briefList} aria-label="Mission constraints">
+          {mission.constraints.map((constraint, index) => (
+            <li key={`${constraint}-${index}`} className={classes.body}>
+              {constraint}
+            </li>
+          ))}
+        </ol>
+      )}
+
+      <h4 className={classes.briefHeading}>Mission prohibitions</h4>
+      {mission.prohibitions.length === 0 ? (
+        <p className={classes.body}>None recorded.</p>
+      ) : (
+        <ol className={classes.briefList} aria-label="Mission prohibitions">
+          {mission.prohibitions.map((prohibition, index) => (
+            <li key={`${prohibition}-${index}`} className={classes.body}>
+              {prohibition}
+            </li>
+          ))}
+        </ol>
+      )}
+
+      <details className={classes.details}>
+        <summary>Recorded identities</summary>
+        <p className={classes.body}>
+          Lifecycle: Admitted. Beacon has recorded this Mission and started no work on it.
+        </p>
+        <p className={classes.body}>
+          Team:{" "}
+          {recordedTeam === null ? (
+            <>
+              <span className={classes.identity}>{mission.teamId}</span> — the recorded Team id. No
+              Team in the loaded list matches it here.
+            </>
+          ) : (
+            <>
+              {recordedTeam.name} <span className={classes.identity}>{mission.teamId}</span>
+            </>
+          )}
+        </p>
+        <ol className={classes.briefList} aria-label="Admitted members">
+          {mission.members.map((member) => (
+            <li key={member.residentId} className={classes.body}>
+              Resident <span className={classes.identity}>{member.residentId}</span> under admission
+              configuration <span className={classes.identity}>{member.admissionConfigurationId}</span>
+            </li>
+          ))}
+        </ol>
+      </details>
+    </div>
   );
 }
 
