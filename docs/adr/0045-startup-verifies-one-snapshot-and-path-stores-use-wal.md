@@ -92,9 +92,16 @@ pause owner and only the pause owner. **Every other owner whose current state li
 Event rows has the same exposure and no such pass**; this ADR says so rather than letting the
 chain's existence imply otherwise.
 
-Three ways forward, and choosing between them is not this ADR's to make: reconcile every owner at
-startup; anchor the head where an Event-row edit cannot reach it; or accept the limit for alpha with
-the boundary written down. That decision is Kevin's and sits on the board.
+**Decided 2026-09-07 (Kevin): the limit is accepted for alpha, stated rather than closed.** The
+chain proves that every surviving link is authentic and in order and that the head matches the rows.
+It does not prove that no tail was removed. Completeness comes from owner reconciliation: done in
+this slice for the pause owner, and owed for the other owners as follow-on slices — `replay-reconcile`
+is the next lane. Beacon does not, for alpha, anchor the head outside the rewritable rows.
+
+That is a boundary on what a Beacon store may be said to guarantee, so it belongs in any text that
+describes the chain to an operator: an unmodified store verifies from genesis to head, and a store
+whose tail was removed **and** whose head was rewritten to match verifies too, unless an owner's
+own reconciliation catches it.
 
 ## Operating consequences
 
