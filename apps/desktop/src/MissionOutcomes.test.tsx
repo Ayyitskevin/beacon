@@ -134,3 +134,27 @@ it("says so when a Mission has no published Outcome", async () => {
   render(<MissionOutcomes missionId={missionId} />);
   expect(await screen.findByText("This Mission has no published Outcome.")).toBeTruthy();
 });
+
+it("clears a failed version's error when another selected version loads", async () => {
+  invokeMock.mockImplementation((command, payload) => {
+    if (command === "mission_publications") return Promise.resolve(publications);
+    if (command === "outcome_document") {
+      const version = (payload as { version: number }).version;
+      if (version === 2) return Promise.reject({ code: "outcome_unverified" });
+      return Promise.resolve(documentFor(version));
+    }
+    return Promise.reject(new Error(`unexpected command: ${String(command)}`));
+  });
+  const user = userEvent.setup();
+  render(<MissionOutcomes missionId={missionId} />);
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Beacon could not verify this Mission's Outcome Document.",
+  );
+  expect(screen.queryByLabelText("Outcome Document")).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Show version 1" }));
+  expect(await screen.findByLabelText("Outcome Document")).toHaveTextContent("version one");
+  expect(screen.queryByRole("alert"), "B8.OUTCOME.SELECTION_ERROR_IS_CURRENT").not.toBeInTheDocument();
+  expect(invokeMock).toHaveBeenCalledWith("outcome_document", { missionId, version: 1 });
+});
