@@ -17,31 +17,32 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
 use beacond::{
-    ClassificationStoreError, SupervisorError,
     AccessOrigin, AppendixMode, AppendixRequest, ArtifactContext, ArtifactKind, ArtifactService,
     AutonomyProfile, BeaconCapability, CheckPreflightService, ClassificationActor,
-    ClassificationBasis, ClassificationSupersedes, CollectionRequest, Collector, CompletionActor,
-    CompletionDisposition, CompletionSupersedes, ConditionOutcome, ConditionResult,
-    ConditionResultRecord, Conflicts, DeclaredCheck, Evaluation, EvaluationDigest, EvaluationDraft,
-    EvaluationService, EvaluationSubject, EvaluationSubjectDraft, EvaluationSupersedes, Evaluator,
-    Finding, FindingSeverity, ImpactLevel, LineAttribution, LocalErrorCode,
-    LocalModelActivationService, LocalModelEndpoint, LocalServerConfig, LocalSupervisorClient,
-    LocalSupervisorServer, LocalTransportError, MeasuredSpend, MeasuredSpendService,
-    MeasuredSpendV1, MissionCompletionV1, MissionDraft, MissionImpactClassification,
-    MissionImpactClassificationV1, MissionImpactService, MissionMemberDraft, MissionService,
-    NarrativeItem, OperatorAccountError, OperatorAccountService, OperatorSessionPhase,
-    OutcomeService, OutcomeState, PolicyRevisionRef, PrepareRefusal, ProjectCharterDraft,
-    ProjectDraft, ProjectPolicyDraft, ProjectPolicyService, ProjectRepositoryService,
-    ProjectService, ProposalService, Provenance, ProviderFeature, PublicationSeamRefusal,
-    PublishRefusal, RepositoryDraft, RepositorySourceKind, ResidentConfigurationService,
-    ResidentLifecycleService, RubricDeclaration, RulingDecision, RulingService, RulingSupersedes,
-    SecretString, SourceKind, SpendCompleteness, SpendEra, SpendLine, SpendMeasurement,
-    SpendMeasurementKind, SpendOrigin, SpendReference, SpendSupersedes, SpendTotals,
-    StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig, Supervisor,
-    SupportRef, TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule,
-    TeamLeadSelectionPolicy, TeamMemberDraft, TeamService, TrackRecordEvidenceKind,
-    TrackRecordRequirement, UncertaintyKind, UnfinishedKind, Verdict, declared_conditions_digest,
-    initialize_local_auth_token, record_completion, verified_completion_within,
+    ClassificationBasis, ClassificationEventError, ClassificationEventField,
+    ClassificationStoreError, ClassificationSupersedes, CollectionRequest, Collector,
+    CompletionActor, CompletionDisposition, CompletionSupersedes, ConditionOutcome,
+    ConditionResult, ConditionResultRecord, Conflicts, DeclaredCheck, Evaluation, EvaluationDigest,
+    EvaluationDraft, EvaluationService, EvaluationSubject, EvaluationSubjectDraft,
+    EvaluationSupersedes, Evaluator, Finding, FindingSeverity, ImpactLevel, LineAttribution,
+    LocalErrorCode, LocalModelActivationService, LocalModelEndpoint, LocalServerConfig,
+    LocalSupervisorClient, LocalSupervisorServer, LocalTransportError, MeasuredSpend,
+    MeasuredSpendService, MeasuredSpendV1, MissionCompletionV1, MissionDraft,
+    MissionImpactClassification, MissionImpactClassificationV1, MissionImpactService,
+    MissionMemberDraft, MissionService, NarrativeItem, OperatorAccountError,
+    OperatorAccountService, OperatorSessionPhase, OutcomeService, OutcomeState, PolicyRevisionRef,
+    PrepareRefusal, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService,
+    ProjectRepositoryService, ProjectService, ProposalService, Provenance, ProviderFeature,
+    PublicationSeamRefusal, PublishRefusal, RepositoryDraft, RepositorySourceKind,
+    ResidentConfigurationService, ResidentLifecycleService, RubricDeclaration, RulingDecision,
+    RulingService, RulingSupersedes, SecretString, SourceKind, SpendCompleteness, SpendEra,
+    SpendLine, SpendMeasurement, SpendMeasurementKind, SpendOrigin, SpendReference,
+    SpendSupersedes, SpendTotals, StarterOrganizationService, StarterResidentDraft, StarterRole,
+    StartupConfig, Supervisor, SupervisorError, SupportRef, TeamDraft, TeamLeadAmbiguityRule,
+    TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
+    TeamService, TrackRecordEvidenceKind, TrackRecordRequirement, UncertaintyKind, UnfinishedKind,
+    Verdict, declared_conditions_digest, initialize_local_auth_token, record_completion,
+    verified_completion_within,
 };
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
@@ -1045,7 +1046,8 @@ fn a_classified_store_with_its_event_intact_opens_ready() {
 fn a_classification_whose_event_was_deleted_is_refused_as_event_absent() {
     let (fixture, classification) = classified("b6-absent");
     delete_the_classification_event(&fixture);
-    let refusal = reopen(&fixture).expect_err("B6.R.ABSENT: a classification with no Event refuses");
+    let refusal =
+        reopen(&fixture).expect_err("B6.R.ABSENT: a classification with no Event refuses");
     assert!(
         matches!(
             &refusal,
@@ -1055,5 +1057,295 @@ fn a_classification_whose_event_was_deleted_is_refused_as_event_absent() {
                     && matches!(cause, ClassificationStoreError::EventAbsent)
         ),
         "B6.R.ABSENT: expected EventAbsent keyed by the verified row, got {refusal:?}"
+    );
+}
+
+/// PLANT BOUNDARY: rewrite the stored Event's payload. No public call can edit an Event.
+fn rewrite_event_payload(fixture: &Fixture, sql_expr: &str) {
+    fixture
+        .store
+        .connect()
+        .execute_batch(&format!(
+            "UPDATE events SET payload_json = {sql_expr}
+              WHERE kind = 'mission.impact_classified'"
+        ))
+        .expect("B6.PLANT.PAYLOAD_REWRITTEN");
+}
+
+fn refusal(fixture: &Fixture) -> SupervisorError {
+    reopen(fixture).expect_err("B6: the plant must refuse startup")
+}
+
+/// B6.R.DUPLICATED — two Events claim one classification; the fault names the count.
+#[test]
+fn a_second_event_for_one_classification_is_refused_as_duplicated() {
+    let (fixture, classification) = classified("b6-duplicate");
+    fixture
+        .store
+        .connect()
+        .execute_batch(
+            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms,
+                                 predecessor_kind, predecessor_digest, link_digest)
+             SELECT workspace_id, kind, payload_json, occurred_at_ms, 'unchained', NULL, NULL
+               FROM events WHERE kind = 'mission.impact_classified' ORDER BY sequence LIMIT 1;",
+        )
+        .expect("B6.PLANT.EVENT_DUPLICATED");
+    let refusal = refusal(&fixture);
+    assert!(
+        matches!(
+            &refusal,
+            SupervisorError::MissionImpactClassificationStateMismatch { workspace_id, digest, cause }
+                if *workspace_id == fixture.workspace_id
+                    && digest == &classification.digest().value
+                    && matches!(cause, ClassificationStoreError::EventDuplicated { count: 2 })
+        ),
+        "B6.R.DUPLICATED: {refusal:?}"
+    );
+}
+
+/// B6.U.ORPHAN — an Event for a classification this store does not hold.
+#[test]
+fn an_event_for_a_classification_this_store_never_held_is_unaccounted() {
+    let (fixture, _) = classified("b6-orphan");
+    // PLANT BOUNDARY: a SECOND Event naming a classification this store never recorded. The rows
+    // are immutable by trigger, so the orphan is made by adding an Event rather than removing a
+    // row -- which is the truer shape anyway.
+    fixture
+        .store
+        .connect()
+        .execute_batch(&format!(
+            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms,
+                                 predecessor_kind, predecessor_digest, link_digest)
+             SELECT workspace_id, kind,
+                    json_set(payload_json, '$.digest.value', '{}'),
+                    occurred_at_ms, 'unchained', NULL, NULL
+               FROM events WHERE kind = 'mission.impact_classified' ORDER BY sequence LIMIT 1;",
+            "c".repeat(64)
+        ))
+        .expect("B6.PLANT.ORPHAN_EVENT");
+    let refusal = refusal(&fixture);
+    assert!(
+        matches!(
+            &refusal,
+            SupervisorError::MissionImpactClassificationEventMismatch { cause, .. }
+                if matches!(cause, ClassificationEventError::Unaccounted)
+        ),
+        "B6.U.ORPHAN: {refusal:?}"
+    );
+}
+
+/// B6.U.ASSOCIATION_KEY and B6.X.EVENT_BEFORE_ROW in one cell, which is what a precedence cell is
+/// for: the altered key raises BOTH conditions and the Event-side one must win.
+#[test]
+fn an_event_whose_digest_value_locates_no_row_is_unaccounted_not_absent() {
+    let (fixture, _) = classified("b6-association");
+    rewrite_event_payload(
+        &fixture,
+        &format!(
+            "json_set(payload_json, '$.digest.value', '{}')",
+            "b".repeat(64)
+        ),
+    );
+    let refusal = refusal(&fixture);
+    assert!(
+        matches!(
+            &refusal,
+            SupervisorError::MissionImpactClassificationEventMismatch { cause, .. }
+                if matches!(cause, ClassificationEventError::Unaccounted)
+        ),
+        "B6.X.EVENT_BEFORE_ROW: the row-side EventAbsent must not win here: {refusal:?}"
+    );
+}
+
+/// The Malformed armings, one invalid thing per vector.
+#[test]
+fn an_event_that_fails_one_decode_check_is_refused_as_malformed() {
+    let vectors: [(&str, &str); 6] = [
+        ("B6.M.UNKNOWN_TOP", "json_set(payload_json, '$.forged', 1)"),
+        (
+            "B6.M.UNKNOWN_DIGEST",
+            "json_set(payload_json, '$.digest.forged', 1)",
+        ),
+        (
+            "B6.M.VERSION_ZERO",
+            "json_set(payload_json, '$.version', 0)",
+        ),
+        (
+            "B6.M.POLICY_ZERO",
+            "json_set(payload_json, '$.policy_revision', 0)",
+        ),
+        (
+            "B6.M.CHARTER_ZERO",
+            "json_set(payload_json, '$.charter_revision', 0)",
+        ),
+        (
+            "B6.M.DIGEST_LEN",
+            "json_set(payload_json, '$.digest.value', 'abc')",
+        ),
+    ];
+    for (case, expr) in vectors {
+        let (fixture, _) = classified(&format!("b6-malformed-{}", case.to_lowercase()));
+        rewrite_event_payload(&fixture, expr);
+        let refusal = refusal(&fixture);
+        assert!(
+            matches!(
+                &refusal,
+                SupervisorError::MissionImpactClassificationEventMismatch { cause, .. }
+                    if matches!(cause, ClassificationEventError::Malformed)
+            ),
+            "{case}: {refusal:?}"
+        );
+    }
+}
+
+/// B6.M.SEQUENCE_ZERO / _NEGATIVE / _MIN — B6.11's signed-domain adjudication, armed separately.
+#[test]
+fn an_event_whose_sequence_is_outside_its_domain_is_refused_as_malformed() {
+    for (case, sequence) in [
+        ("B6.M.SEQUENCE_ZERO", 0_i64),
+        ("B6.M.SEQUENCE_NEGATIVE", -1),
+        ("B6.M.SEQUENCE_MIN", i64::MIN),
+    ] {
+        let (fixture, _) = classified(&format!("b6-seq-{}", case.to_lowercase()));
+        fixture
+            .store
+            .connect()
+            .execute_batch(&format!(
+                "UPDATE events SET sequence = {sequence}
+                  WHERE kind = 'mission.impact_classified';"
+            ))
+            .expect("B6.PLANT.SEQUENCE");
+        let refusal = refusal(&fixture);
+        assert!(
+            matches!(
+                &refusal,
+                SupervisorError::MissionImpactClassificationEventMismatch { sequence: named, cause }
+                    if *named == sequence && matches!(cause, ClassificationEventError::Malformed)
+            ),
+            "{case}: the real signed value must be named: {refusal:?}"
+        );
+    }
+}
+
+/// Every reachable disagreement label, one vector each.
+#[test]
+fn an_event_that_disagrees_on_one_field_is_refused_and_names_that_field() {
+    let vectors: [(ClassificationEventField, &str); 12] = [
+        (ClassificationEventField::OuterOccurredAtMs, "OUTER_TIME"),
+        (
+            ClassificationEventField::PayloadWorkspaceId,
+            "json_set(payload_json, '$.workspace_id', '11111111-1111-4111-8111-111111111111')",
+        ),
+        (
+            ClassificationEventField::ClassificationId,
+            "json_set(payload_json, '$.classification_id', '11111111-1111-4111-8111-111111111111')",
+        ),
+        (
+            ClassificationEventField::MissionId,
+            "json_set(payload_json, '$.mission_id', '11111111-1111-4111-8111-111111111111')",
+        ),
+        (
+            ClassificationEventField::ProjectId,
+            "json_set(payload_json, '$.project_id', '11111111-1111-4111-8111-111111111111')",
+        ),
+        (
+            ClassificationEventField::Version,
+            "json_set(payload_json, '$.version', 7)",
+        ),
+        (
+            ClassificationEventField::Impact,
+            "json_set(payload_json, '$.impact', 'high')",
+        ),
+        (
+            ClassificationEventField::Basis,
+            "json_set(payload_json, '$.basis', 'policy_rule')",
+        ),
+        (
+            ClassificationEventField::PolicyRevision,
+            "json_set(payload_json, '$.policy_revision', 9)",
+        ),
+        (
+            ClassificationEventField::CharterRevision,
+            "json_set(payload_json, '$.charter_revision', 9)",
+        ),
+        // NOT base+1: `classify_mission` stamps `1_788_400_000_000 + version`, so the obvious
+        // "+1" vector equals the row it is meant to differ from and the cell proves nothing. It
+        // passed as a no-op until the loop named which label failed.
+        (
+            ClassificationEventField::ClassifiedAtMs,
+            "json_set(payload_json, '$.classified_at_ms', 1788499999999)",
+        ),
+        (
+            ClassificationEventField::CanonicalBytesBase64,
+            "json_set(payload_json, '$.canonical_bytes_base64', 'AA==')",
+        ),
+    ];
+    assert_eq!(
+        vectors.len(),
+        ClassificationEventField::ALL.len(),
+        "B6.D: one vector per reachable label, no label unarmed"
+    );
+    for (field, expr) in vectors {
+        let (fixture, _) = classified(&format!("b6-d-{}", field.as_str()));
+        if expr == "OUTER_TIME" {
+            // A valid nonnegative value (B6.11), so the earlier global check cannot mask this.
+            fixture
+                .store
+                .connect()
+                .execute_batch(
+                    "UPDATE events SET occurred_at_ms = occurred_at_ms + 1
+                      WHERE kind = 'mission.impact_classified';",
+                )
+                .expect("B6.PLANT.OUTER_TIME");
+        } else {
+            rewrite_event_payload(&fixture, expr);
+        }
+        let refusal = reopen(&fixture).expect_err(&format!(
+            "B6.D.{}: the plant must refuse startup",
+            field.as_str()
+        ));
+        assert!(
+            matches!(
+                &refusal,
+                SupervisorError::MissionImpactClassificationEventMismatch { cause, .. }
+                    if matches!(cause, ClassificationEventError::Disagrees { field: named } if *named == field)
+            ),
+            "B6.D.{}: {refusal:?}",
+            field.as_str()
+        );
+    }
+}
+
+/// B6.S.SUPERSEDED_MIDDLE — a superseded row still needs its own Event, and the classification
+/// fault must win over any chain refusal the same deletion causes.
+#[test]
+fn a_superseded_middle_row_still_needs_its_own_event() {
+    let (fixture, older) = classified("b6-superseded");
+    let _newer = classify_mission(
+        &fixture,
+        fixture.mission_id,
+        2,
+        ImpactLevel::High,
+        ClassificationSupersedes::Record(older.digest().value.clone()),
+    );
+    fixture
+        .store
+        .connect()
+        .execute_batch(&format!(
+            "DELETE FROM events WHERE kind = 'mission.impact_classified'
+               AND json_extract(payload_json, '$.digest.value') = '{}';",
+            older.digest().value
+        ))
+        .expect("B6.PLANT.MIDDLE_EVENT_DELETED");
+    recohere_chain_head(&fixture.store.connect());
+    let refusal = refusal(&fixture);
+    assert!(
+        matches!(
+            &refusal,
+            SupervisorError::MissionImpactClassificationStateMismatch { digest, cause, .. }
+                if digest == &older.digest().value
+                    && matches!(cause, ClassificationStoreError::EventAbsent)
+        ),
+        "B6.S.SUPERSEDED_MIDDLE: a chain refusal here would mask a removed owner guard: {refusal:?}"
     );
 }

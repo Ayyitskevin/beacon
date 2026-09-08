@@ -174,8 +174,8 @@ pub use mission_impact::{
 };
 pub use mission_impact::{
     ClassificationEventError, ClassificationEventField, ClassificationRecordError,
-    ClassificationStoreError, MissionImpactClassification,
-    MissionImpactService, verified_classification_for_citation, verified_classification_within,
+    ClassificationStoreError, MissionImpactClassification, MissionImpactService,
+    verified_classification_for_citation, verified_classification_within,
 };
 pub use mission_impact_command::{
     ClassificationCommandError, ClassificationCommandUnavailable, ClassificationDigestDto,
