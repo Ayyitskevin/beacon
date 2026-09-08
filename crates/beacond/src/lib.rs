@@ -1087,35 +1087,10 @@ impl fmt::Display for SupervisorError {
                 formatter,
                 "Event sequence {sequence} payload does not match its Workspace scope"
             ),
-            Self::EventChainBroken(fault) => match fault {
-                event_chain::ChainFault::LinkDigestMismatch { sequence } => write!(
-                    formatter,
-                    "Event sequence {sequence} was edited after it was recorded"
-                ),
-                event_chain::ChainFault::PredecessorMismatch { sequence, previous } => write!(
-                    formatter,
-                    "the Event chain is broken between sequence {previous} and sequence {sequence}"
-                ),
-                event_chain::ChainFault::GenesisNotFirst { sequence } => write!(
-                    formatter,
-                    "Event sequence {sequence} claims to begin a chain that had already begun"
-                ),
-                event_chain::ChainFault::UnchainedAfterBoundary { sequence } => write!(
-                    formatter,
-                    "Event sequence {sequence} was recorded outside the Event chain"
-                ),
-                event_chain::ChainFault::HeadMismatch {
-                    expected_sequence,
-                    found_sequence,
-                } => write!(
-                    formatter,
-                    "the Event chain ends at sequence {found_sequence}, and this store records its \
-                     head at sequence {expected_sequence}"
-                ),
-                event_chain::ChainFault::StateMissing => formatter.write_str(
-                    "this store holds Events and no record of where its Event chain begins",
-                ),
-            },
+            // R58.2: the six operator sentences are the signed table in `event_chain`, and this
+            // writes a row of it and nothing else -- so signing or rewriting one is ONE edit in
+            // ONE place, and the witness that pins it reads the same bytes.
+            Self::EventChainBroken(fault) => formatter.write_str(&fault.sentence()),
             Self::StarterOrganizationEventMismatch(sequence) => write!(
                 formatter,
                 "Event sequence {sequence} does not match Starter Organization state"
