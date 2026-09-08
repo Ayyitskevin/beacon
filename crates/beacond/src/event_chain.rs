@@ -498,11 +498,22 @@ mod tests {
     ///   * and a supervisor arm that writes anything but this table goes RED for all six.
     #[test]
     fn every_chain_fault_speaks_its_own_signed_sentence() {
-        let rows: [(ChainFault, &str, String, &[i64]); 6] = [
+        // TRANSCRIBED BY HAND, and that is the whole point (sol1's P1, R58.4).
+        //
+        // The first version of this table built each expected sentence out of `OPERATOR_SENTENCES`
+        // itself, so product prose and expected prose moved together and no rewrite could ever
+        // disagree with it. sol1 changed "claims to begin" to "purports to begin" in row 2 and both
+        // this test and R42's startup table stayed green. A witness that reads its subject for the
+        // answer is not a witness.
+        //
+        // So these are Kevin's eight lines, written out again, with the numbers already substituted.
+        // Rewriting a sentence in the product table now turns this RED and names the fault, which is
+        // what "sign or rewrite" has to mean.
+        let rows: [(ChainFault, &str, &str, &[i64]); 6] = [
             (
                 ChainFault::LinkDigestMismatch { sequence: 4211 },
                 "LinkDigestMismatch",
-                OPERATOR_SENTENCES[0].1.replace("{sequence}", "4211"),
+                "Event sequence 4211 was edited after it was recorded",
                 &[4211],
             ),
             (
@@ -511,22 +522,19 @@ mod tests {
                     previous: 4212,
                 },
                 "PredecessorMismatch",
-                OPERATOR_SENTENCES[1]
-                    .1
-                    .replace("{previous}", "4212")
-                    .replace("{sequence}", "4213"),
+                "the Event chain is broken between sequence 4212 and sequence 4213",
                 &[4212, 4213],
             ),
             (
                 ChainFault::GenesisNotFirst { sequence: 4214 },
                 "GenesisNotFirst",
-                OPERATOR_SENTENCES[2].1.replace("{sequence}", "4214"),
+                "Event sequence 4214 claims to begin a chain that had already begun",
                 &[4214],
             ),
             (
                 ChainFault::UnchainedAfterBoundary { sequence: 4215 },
                 "UnchainedAfterBoundary",
-                OPERATOR_SENTENCES[3].1.replace("{sequence}", "4215"),
+                "Event sequence 4215 was recorded outside the Event chain",
                 &[4215],
             ),
             (
@@ -535,16 +543,14 @@ mod tests {
                     found_sequence: 4217,
                 },
                 "HeadMismatch",
-                OPERATOR_SENTENCES[4]
-                    .1
-                    .replace("{expected_sequence}", "4216")
-                    .replace("{found_sequence}", "4217"),
+                "the Event chain ends at sequence 4217, and this store records its head at \
+                 sequence 4216",
                 &[4216, 4217],
             ),
             (
                 ChainFault::StateMissing,
                 "StateMissing",
-                OPERATOR_SENTENCES[5].1.to_owned(),
+                "this store holds Events and no record of where its Event chain begins",
                 &[],
             ),
         ];
@@ -563,7 +569,10 @@ mod tests {
             );
 
             let rendered = crate::SupervisorError::EventChainBroken(fault).to_string();
-            assert_eq!(rendered, expected, "{name} does not render its signed row");
+            assert_eq!(
+                rendered, expected,
+                "{name}'s signed sentence changed and this witness was not updated with it"
+            );
             assert!(
                 !rendered.contains('{') && !rendered.contains('}'),
                 "{name} left a placeholder unfilled: {rendered}"
@@ -603,6 +612,31 @@ mod tests {
                 );
             }
         }
+
+        // The pause owner's two lines are signed by the same hand and pinned by the same rule
+        // (R58.3, R58.4). They are here rather than in a test of their own because a reader looking
+        // for "which sentences does Kevin sign" should find all eight in one place -- and because
+        // R42's closed table holds a row per VARIANT, so it pins the truncation shape and nothing
+        // pins the disagreement shape. My own report named that gap; this closes it.
+        assert_eq!(
+            crate::SupervisorError::PauseStateUnsupported {
+                changed_at_ms: 4218,
+                terminal_sequence: None,
+            }
+            .to_string(),
+            "the installation records a pause change at 4218 and holds no Event that accounts for it",
+            "the pause owner's truncation sentence changed and this witness was not updated with it"
+        );
+        assert_eq!(
+            crate::SupervisorError::PauseStateUnsupported {
+                changed_at_ms: 4219,
+                terminal_sequence: Some(4220),
+            }
+            .to_string(),
+            "the installation's pause state disagrees with Event sequence 4220, the last pause or \
+             resume it holds",
+            "the pause owner's disagreement sentence changed and this witness was not updated with it"
+        );
     }
 
     /// The chain's cost, measured rather than asserted: 100k links, the same shape
