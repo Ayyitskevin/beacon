@@ -10893,13 +10893,29 @@ fn a_mint_with_no_output_named_refuses_by_name() {
 /// Mints the private fixture into a directory you name. Not part of the suite: it writes files
 /// outside the repository and is run deliberately, for one packaged read check, then deleted.
 ///
-///     BEACON_B18_FIXTURE_DIR="$(mktemp -u "${TMPDIR:-/tmp}/beacon-b18-XXXXXX")" \
+/// **Two steps, and the first one is not optional.** The prefix this mints inside is
+/// `std::env::temp_dir()`, and a bare `/tmp` is refused: `/tmp` is `1777` and shared with every
+/// process on the machine, so a fixture in it is not private in any sense the name claims. Make a
+/// task-owned one first.
+///
+///     export TMPDIR="$(mktemp -d)"    # 0700, yours, under /tmp -- the prefix the guard requires
+///     BEACON_B18_FIXTURE_DIR="$(mktemp -u "$TMPDIR/beacon-b18-XXXXXX")" \
 ///         cargo test -p beacond --test outcome_prepare -- --ignored --exact \
 ///         mint_private_outcome_fixture_into_the_named_directory --nocapture
 ///
-/// `mktemp -u` names a path without creating it, which is what the mint requires: an output that
-/// already exists is refused rather than written into. With `BEACON_B18_FIXTURE_DIR` unset the run
-/// FAILS by name (`B18.FIXTURE.OUTPUT_UNSET`) instead of passing having produced nothing.
+/// `mktemp -d` creates the prefix; `mktemp -u` names the output WITHOUT creating it, which is what
+/// the mint requires -- an output that already exists is refused rather than written into. The two
+/// ways this run fails rather than passing quietly: `BEACON_B18_FIXTURE_DIR` unset gives
+/// `B18.FIXTURE.OUTPUT_UNSET`, and a `TMPDIR` that is not a task-owned private directory gives
+/// `B18.FIXTURE.PREFIX_NOT_PRIVATE` with the specific fault.
+///
+/// **What the recorded `source_head` proves.** It is `git rev-parse HEAD` in the tree the test was
+/// compiled from, so it names the commit whose generator produced these bytes -- provided the tree
+/// was CLEAN when it ran. It is not a build fingerprint: it cannot tell a reader whether the
+/// working tree had uncommitted edits, and a fixture minted before its own generator was committed
+/// records the earlier commit and is a development sample, not provenance for a packaged check.
+/// Mint the retained sample from a clean tree, after the commit, and check
+/// `git status --porcelain` is empty when you do.
 ///
 /// The fixture is private and disposable: three files under your own temp prefix, `0700`/`0600`,
 /// none of them committed. Delete the directory when the check that used it is done.
