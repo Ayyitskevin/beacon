@@ -7,42 +7,37 @@
 //! product. Only corruption and legacy-boundary setup uses explicit SQL, and every such plant names
 //! its boundary.
 
+#![allow(dead_code)]
+
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
 use beacond::{
-    AccessOrigin, AppendixMode, AppendixRequest, ArtifactContext, ArtifactKind, ArtifactService,
-    AutonomyProfile, BeaconCapability, CheckPreflightService, ClassificationActor,
-    ClassificationBasis, ClassificationEventError, ClassificationEventField,
-    ClassificationStoreError, ClassificationSupersedes, CollectionRequest, Collector,
-    CompletionActor, CompletionDisposition, CompletionSupersedes, ConditionOutcome,
-    ConditionResult, ConditionResultRecord, Conflicts, DeclaredCheck, Evaluation, EvaluationDigest,
-    EvaluationDraft, EvaluationService, EvaluationSubject, EvaluationSubjectDraft,
-    EvaluationSupersedes, Evaluator, Finding, FindingSeverity, ImpactLevel, LineAttribution,
-    LocalErrorCode, LocalModelActivationService, LocalModelEndpoint, LocalServerConfig,
-    LocalSupervisorClient, LocalSupervisorServer, LocalTransportError, MeasuredSpend,
+    ArtifactContext, ArtifactKind, ArtifactService, AutonomyProfile, BeaconCapability,
+    CheckPreflightService, ClassificationActor, ClassificationBasis, ClassificationEventError,
+    ClassificationEventField, ClassificationStoreError, ClassificationSupersedes, CompletionActor,
+    CompletionDisposition, CompletionSupersedes, ConditionOutcome, ConditionResultRecord,
+    Conflicts, DeclaredCheck, Evaluation, EvaluationDraft, EvaluationService,
+    EvaluationSubjectDraft, EvaluationSupersedes, Evaluator, Finding, FindingSeverity, ImpactLevel,
+    LineAttribution, LocalModelActivationService, LocalModelEndpoint, MeasuredSpend,
     MeasuredSpendService, MeasuredSpendV1, MissionCompletionV1, MissionDraft,
     MissionImpactClassification, MissionImpactClassificationV1, MissionImpactService,
-    MissionMemberDraft, MissionService, NarrativeItem, OperatorAccountError,
-    OperatorAccountService, OperatorSessionPhase, OutcomeService, OutcomeState, PolicyRevisionRef,
-    PrepareRefusal, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService,
-    ProjectRepositoryService, ProjectService, ProposalService, Provenance, ProviderFeature,
-    PublicationSeamRefusal, PublishRefusal, RepositoryDraft, RepositorySourceKind,
+    MissionMemberDraft, MissionService, NarrativeItem, OperatorAccountService,
+    OperatorSessionPhase, OutcomeService, PolicyRevisionRef, ProjectCharterDraft, ProjectDraft,
+    ProjectPolicyDraft, ProjectPolicyService, ProjectRepositoryService, ProjectService,
+    ProposalService, ProviderFeature, RepositoryDraft, RepositorySourceKind,
     ResidentConfigurationService, ResidentLifecycleService, RubricDeclaration, RulingDecision,
-    RulingService, RulingSupersedes, SecretString, SourceKind, SpendCompleteness, SpendEra,
-    SpendLine, SpendMeasurement, SpendMeasurementKind, SpendOrigin, SpendReference,
-    SpendSupersedes, SpendTotals, StarterOrganizationService, StarterResidentDraft, StarterRole,
-    StartupConfig, Supervisor, SupervisorError, SupportRef, TeamDraft, TeamLeadAmbiguityRule,
-    TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
-    TeamService, TrackRecordEvidenceKind, TrackRecordRequirement, UncertaintyKind, UnfinishedKind,
-    Verdict, declared_conditions_digest, initialize_local_auth_token, record_completion,
-    verified_completion_within,
+    RulingService, RulingSupersedes, SecretString, SpendEra, SpendLine, SpendMeasurement,
+    SpendOrigin, SpendReference, SpendSupersedes, SpendTotals, StarterOrganizationService,
+    StarterResidentDraft, StarterRole, StartupConfig, Supervisor, SupervisorError, SupportRef,
+    TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule,
+    TeamLeadSelectionPolicy, TeamMemberDraft, TeamService, TrackRecordEvidenceKind,
+    TrackRecordRequirement, UncertaintyKind, UnfinishedKind, Verdict, declared_conditions_digest,
+    record_completion, verified_completion_within,
 };
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
@@ -88,6 +83,10 @@ impl Drop for TestStore {
     }
 }
 
+/// Carried verbatim from `tests/outcome_closure.rs` (see the header): the fields this file does not
+/// read are the ones that make it the SAME fixture the Outcome path uses, and re-deriving a
+/// narrower one would prove something about the test rather than the product.
+#[allow(dead_code)]
 struct Fixture {
     store: TestStore,
     accounts: Arc<OperatorAccountService>,
