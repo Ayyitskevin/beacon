@@ -158,3 +158,23 @@ it("clears a failed version's error when another selected version loads", async 
   expect(screen.queryByRole("alert"), "B8.OUTCOME.SELECTION_ERROR_IS_CURRENT").not.toBeInTheDocument();
   expect(invokeMock).toHaveBeenCalledWith("outcome_document", { missionId, version: 1 });
 });
+
+it("labels each Mission's Outcome section with its own heading", async () => {
+  invokeMock.mockImplementation((command) => {
+    if (command === "mission_publications") return Promise.resolve([]);
+    return Promise.reject(new Error(`unexpected command: ${String(command)}`));
+  });
+  render(<>
+    <MissionOutcomes missionId={missionId} />
+    <MissionOutcomes missionId="33333333-3333-4333-8333-333333333333" />
+  </>);
+  expect(await screen.findAllByText("This Mission has no published Outcome.")).toHaveLength(2);
+  const sections = screen.getAllByRole("region", { name: "Outcome Documents" });
+  expect(sections).toHaveLength(2);
+  for (const section of sections) {
+    const labelId = section.getAttribute("aria-labelledby");
+    expect(labelId).toBeTruthy();
+    const heading = document.getElementById(labelId!);
+    expect(section, "B9.OUTCOME.HEADING_BELONGS_TO_ITS_SECTION").toContainElement(heading);
+  }
+});
