@@ -6341,3 +6341,151 @@ fn r542_v4_out_of_domain_value_is_refused() {
         "R54.CELL.V4.BAD_DIGEST_IS_NOT_EVIDENCE",
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// B7 — the phase boundary a human session lock lands on.
+//
+// FOUR named cells across the two tests below. They measure only what the existing public services
+// already do; they add no authority, change no production code, and claim nothing about Agent
+// continuity or about the durability of an interrupted dispatch's Receipt. The canonical reading is
+// the measured addendum in beacon-team/DP-B7-lock-continuity-opus.md; the older whole-dispatch-lock
+// and bootstrap-digest expectations it supersedes were falsified and are not reproduced here.
+// ---------------------------------------------------------------------------------------------
+
+/// B7.CONTROL.APPLIED — the ordinary unlocked dispatch really is `Applied`.
+///
+/// Without it the locked bars below could pass because the dispatch never worked at all.
+#[test]
+fn b7_control_an_unlocked_session_completes_the_dispatch() {
+    let fixture = admitted_mission("b7-unlocked-control");
+    let (_repository, ruling_digest) = fixture.approved("b7-unlocked-control");
+    let receipt = DispatchService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES))
+        .expect("B7.CONTROL.APPLIED: an unlocked session completes the dispatch");
+    assert_eq!(
+        receipt.outcome,
+        DispatchOutcome::Applied,
+        "B7.CONTROL.APPLIED"
+    );
+}
+
+/// Three cells on the locked path, sharing one expensive fixture rather than duplicating it:
+///
+/// * **B7.PHASE.LOCK_COMPLETED_THEN_REFUSED** — a lock that COMPLETES at `before_landing` is
+///   observed by the next phase, which refuses with exactly `DispatchError::Account(NotAuthenticated)`.
+/// * **B7.LOCK.STATUS_UNAVAILABLE** — the public status then reports `workspace_access == false`
+///   AND `operator_commands == false`, both asserted, because `status_for` derives them from one
+///   boolean and a single-field check would not notice if that ever changed.
+/// * **B7.LOCK.NEW_COMMAND_REFUSED** — a subsequent dispatch through the public service is that
+///   same exact error, not a catch-all.
+///
+/// `before_landing` fires after `reserve` returned and before the landing closure opens
+/// (`dispatch.rs:1220`), which is where the `AccountState` guard is free and a lock can complete.
+/// The rendezvous is two-phase and carries the locker's RESULT, so the hook cannot return until the
+/// lock has actually returned, and a locker that failed releases the hook with its error instead of
+/// parking it. `recv_timeout` is a teardown guard against a hung run: it is never an asserted
+/// outcome, and nothing here sleeps for a desired result or asserts elapsed time.
+#[test]
+fn b7_a_lock_completed_between_dispatch_phases_refuses_the_next_phase_and_new_commands() {
+    use std::sync::Mutex;
+    use std::sync::mpsc::{RecvTimeoutError, channel};
+    use std::time::Duration;
+
+    let fixture = admitted_mission("b7-lock-mid-dispatch");
+    let (_repository, ruling_digest) = fixture.approved("b7-lock-mid-dispatch");
+
+    let (arrived_tx, arrived_rx) = channel::<()>();
+    let (locked_tx, locked_rx) = channel::<Result<OperatorSessionPhase, String>>();
+    let locked_rx = Arc::new(Mutex::new(locked_rx));
+
+    // ONE shared account service: the session lives in that instance, so locking a second one would
+    // lock a different session and prove nothing.
+    let locker_accounts = Arc::clone(&fixture.accounts);
+    let locker = thread::spawn(move || {
+        arrived_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("B7.HARNESS: the hook never signalled arrival");
+        let outcome = locker_accounts
+            .lock()
+            .map(|status| status.phase)
+            .map_err(|error| format!("{error:?}"));
+        locked_tx
+            .send(outcome.clone())
+            .expect("B7.HARNESS: the hook stopped listening");
+        outcome
+    });
+
+    let hook_locked_rx = Arc::clone(&locked_rx);
+    let dispatches = DispatchService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .with_failpoints(DispatchFailpoints {
+            before_landing: Some(Arc::new(move || {
+                arrived_tx
+                    .send(())
+                    .expect("B7.HARNESS: the locker stopped listening");
+                match hook_locked_rx
+                    .lock()
+                    .expect("B7.HARNESS: the handshake mutex is poisoned")
+                    .recv_timeout(Duration::from_secs(30))
+                {
+                    Ok(Ok(_phase)) => {}
+                    Ok(Err(error)) => panic!("B7.HARNESS: the locker failed to lock: {error}"),
+                    Err(RecvTimeoutError::Timeout) => {
+                        panic!("B7.HARNESS: the lock never completed within the guard")
+                    }
+                    Err(RecvTimeoutError::Disconnected) => {
+                        panic!("B7.HARNESS: the locker thread vanished")
+                    }
+                }
+            })),
+            ..DispatchFailpoints::default()
+        });
+
+    let observed = dispatches.dispatch(&ruling_digest, &content_for(NEW_BYTES));
+    let locked_phase = locker
+        .join()
+        .expect("B7.HARNESS: the locker thread panicked");
+
+    // The lock really landed, on the same service the dispatch is using, before the hook returned.
+    assert_eq!(
+        locked_phase,
+        Ok(OperatorSessionPhase::Locked),
+        "B7.PHASE.LOCK_COMPLETED_THEN_REFUSED: the lock must complete before the hook returns"
+    );
+    assert!(
+        matches!(
+            observed,
+            Err(DispatchError::Account(
+                beacond::OperatorAccountError::NotAuthenticated
+            ))
+        ),
+        "B7.PHASE.LOCK_COMPLETED_THEN_REFUSED: the next phase must refuse as Account(NotAuthenticated), got {observed:?}"
+    );
+
+    let status = fixture
+        .accounts
+        .status()
+        .expect("B7.LOCK.STATUS_UNAVAILABLE: status is readable while locked");
+    assert!(
+        !status.workspace_access,
+        "B7.LOCK.STATUS_UNAVAILABLE: workspace_access must be false, got {status:?}"
+    );
+    assert!(
+        !status.operator_commands,
+        "B7.LOCK.STATUS_UNAVAILABLE: operator_commands must be false, got {status:?}"
+    );
+
+    // A NEW Command through the public service, with no failpoints, is the same exact error and not
+    // a catch-all. Nothing is asserted about the store's rows: an unobservable absence is not a
+    // claim this test can make.
+    let after_lock = DispatchService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+        .dispatch(&ruling_digest, &content_for(NEW_BYTES));
+    assert!(
+        matches!(
+            after_lock,
+            Err(DispatchError::Account(
+                beacond::OperatorAccountError::NotAuthenticated
+            ))
+        ),
+        "B7.LOCK.NEW_COMMAND_REFUSED: a new Command must be Account(NotAuthenticated), got {after_lock:?}"
+    );
+}
