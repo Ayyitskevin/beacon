@@ -217,8 +217,9 @@ function stubClipboard(writeText: unknown): void {
   });
 }
 
+// Independently typed: the escapes and spacing are written here, not imported from the component.
 const CLIPBOARD_FALLBACK =
-  "Beacon could not reach the clipboard. The document above is the exact text; select and copy it.";
+  "Beacon could not copy the Markdown.\u0020You can select and copy the displayed document.";
 
 it("copies the exact stored bytes of the selected version, not the current one", async () => {
   mockCopyFixtures();
