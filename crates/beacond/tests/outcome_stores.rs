@@ -1313,12 +1313,29 @@ fn a_store_holding_spend_or_classification_events_restarts() {
     ] {
         connection
             .execute(
-                "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-                 VALUES (?1, ?2, ?3, 1)",
+                "INSERT INTO events (
+                 workspace_id, kind, payload_json, occurred_at_ms,
+                 predecessor_kind, predecessor_digest, link_digest
+             )
+                 VALUES (?1, ?2, ?3, 1, 'unchained', NULL, NULL)",
                 params![store.workspace_id.to_string(), kind, marker],
             )
             .unwrap();
     }
+    // R58: these are plants, and this test expects the store to RESTART. A store carrying rows
+    // written around the append path is not a chained store, so it says so.
+    connection
+        .execute_batch(
+            "UPDATE events
+                SET predecessor_kind = 'unchained', predecessor_digest = NULL, link_digest = NULL;
+             UPDATE event_chain_state
+                SET genesis_kind = 'migrated',
+                    migrated_through_sequence = (SELECT max(sequence) FROM events),
+                    head_digest = NULL,
+                    head_sequence = (SELECT max(sequence) FROM events)
+              WHERE id = 1;",
+        )
+        .unwrap();
     drop(connection);
     Supervisor::bootstrap(StartupConfig {
         store_path: store.path.clone(),
@@ -2108,9 +2125,59 @@ fn a_store_with_classifications_crosses_0032_and_keeps_them() {
                  SELECT * FROM mission_impact_classifications;
              DROP TRIGGER mission_impact_classifications_no_update;
              DROP TRIGGER mission_impact_classifications_no_delete;
-             DROP TABLE mission_impact_classifications;",
+             DROP TABLE mission_impact_classifications;
+             -- R58: a rollback past 0035 undoes the chain too, or the store carries objects the
+             -- version it claims never had. The roster triggers come off first because the rename
+             -- below rewrites every trigger that names `events`.
+             DROP TRIGGER event_chain_state_no_delete;
+             DROP TABLE event_chain_state;
+             DROP TRIGGER team_formation_members_no_insert_after_formation;
+             DROP TRIGGER mission_admission_members_no_insert_after_admission;
+             ALTER TABLE events RENAME TO events_r58;",
         )
         .unwrap();
+    {
+        let migration_0027 = include_str!("../migrations/0027_artifacts.sql");
+        let from = migration_0027.find("CREATE TABLE events (").unwrap();
+        let to = migration_0027[from..].find(") STRICT;").unwrap() + from + 9;
+        connection.execute_batch(&migration_0027[from..to]).unwrap();
+        // No leading indentation: SQLite stores a trigger's literal text, so one indented to match
+        // its Rust string is a different object to the schema signature.
+        connection
+            .execute_batch(
+                "INSERT INTO events (sequence, workspace_id, kind, payload_json, occurred_at_ms)
+                 SELECT sequence, workspace_id, kind, payload_json, occurred_at_ms
+                 FROM events_r58 ORDER BY sequence;
+                 DROP TABLE events_r58;",
+            )
+            .unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER team_formation_members_no_insert_after_formation
+BEFORE INSERT ON team_formation_members
+WHEN EXISTS (
+    SELECT 1 FROM events
+    WHERE workspace_id = NEW.workspace_id
+      AND kind = 'team.formed'
+      AND json_extract(payload_json, '$.team.id') = NEW.team_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'Team formation roster is closed');
+END;
+CREATE TRIGGER mission_admission_members_no_insert_after_admission
+BEFORE INSERT ON mission_admission_members
+WHEN EXISTS (
+    SELECT 1 FROM events
+    WHERE workspace_id = NEW.workspace_id
+      AND kind = 'mission.admitted'
+      AND json_extract(payload_json, '$.mission.id') = NEW.mission_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'Mission admission roster is closed');
+END;",
+            )
+            .unwrap();
+    }
     connection.execute_batch(classification_objects).unwrap();
     connection
         .execute_batch(

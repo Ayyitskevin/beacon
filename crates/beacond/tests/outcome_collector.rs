@@ -2568,8 +2568,11 @@ fn store_completion_with_delivery(
         .unwrap();
     connection
         .execute(
-            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-             VALUES (?1, 'mission.completed', ?2, 9000)",
+            "INSERT INTO events (
+                 workspace_id, kind, payload_json, occurred_at_ms,
+                 predecessor_kind, predecessor_digest, link_digest
+             )
+             VALUES (?1, 'mission.completed', ?2, 9000, 'unchained', NULL, NULL)",
             params![
                 fixture.store.workspace_id.to_string(),
                 serde_json::json!({
@@ -2953,8 +2956,11 @@ fn a_forged_early_event_cannot_pull_a_post_boundary_classification_into_the_outc
     fixture
         .connection()
         .execute(
-            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-             VALUES (?1, 'mission.impact_classified', ?2, 0)",
+            "INSERT INTO events (
+                 workspace_id, kind, payload_json, occurred_at_ms,
+                 predecessor_kind, predecessor_digest, link_digest
+             )
+             VALUES (?1, 'mission.impact_classified', ?2, 0, 'unchained', NULL, NULL)",
             params![
                 fixture.store.workspace_id.to_string(),
                 json!({"digest": {"value": classification_digest}}).to_string(),
@@ -3554,8 +3560,11 @@ fn receipt_for_support(fixture: &Admitted, bound: bool) -> (Uuid, String) {
         .unwrap();
     connection
         .execute(
-            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-             VALUES (?1, 'run.executed', ?2, 11)",
+            "INSERT INTO events (
+                 workspace_id, kind, payload_json, occurred_at_ms,
+                 predecessor_kind, predecessor_digest, link_digest
+             )
+             VALUES (?1, 'run.executed', ?2, 11, 'unchained', NULL, NULL)",
             params![
                 fixture.store.workspace_id.to_string(),
                 json!({ "runId": run_id.to_string() }).to_string(),
@@ -4073,8 +4082,11 @@ fn sol1_a_byte_less_early_event_cannot_pull_late_support_inside_the_cut() {
     fixture
         .connection()
         .execute(
-            "INSERT INTO events (sequence, workspace_id, kind, payload_json, occurred_at_ms)
-             VALUES (0, ?1, 'evaluation.recorded', ?2, 0)",
+            "INSERT INTO events (
+                 sequence, workspace_id, kind, payload_json, occurred_at_ms,
+                 predecessor_kind, predecessor_digest, link_digest
+             )
+             VALUES (0, ?1, 'evaluation.recorded', ?2, 0, 'unchained', NULL, NULL)",
             params![
                 fixture.store.workspace_id.to_string(),
                 json!({"evaluation": {"digest": {"value": evaluation.digest().value}}}).to_string(),

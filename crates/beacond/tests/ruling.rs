@@ -1742,13 +1742,33 @@ fn plant_on(connection: &Connection, workspace_id: Uuid, record: &RulingRecord) 
         .unwrap();
     connection
         .execute(
-            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-                 VALUES (?1, 'ruling.recorded', ?2, ?3)",
+            "INSERT INTO events (
+                 workspace_id, kind, payload_json, occurred_at_ms,
+                 predecessor_kind, predecessor_digest, link_digest
+             )
+                 VALUES (?1, 'ruling.recorded', ?2, ?3, 'unchained', NULL, NULL)",
             rusqlite::params![
                 workspace_id.to_string(),
                 event_payload(record),
                 i64::try_from(record.ruled_at_ms).unwrap(),
             ],
+        )
+        .unwrap();
+    // R58: `plant_on` writes a Ruling and its Event around the service, which is the whole point of
+    // a plant -- and around `append_event` with it. The store says what that makes it: chained from
+    // here, not from its genesis. Tests that then expect the store to START get a store whose chain
+    // is consistent with its own history; tests that expect a refusal still get it from the Ruling
+    // passes, which run first.
+    connection
+        .execute_batch(
+            "UPDATE events
+                SET predecessor_kind = 'unchained', predecessor_digest = NULL, link_digest = NULL;
+             UPDATE event_chain_state
+                SET genesis_kind = 'migrated',
+                    migrated_through_sequence = (SELECT max(sequence) FROM events),
+                    head_digest = NULL,
+                    head_sequence = (SELECT max(sequence) FROM events)
+              WHERE id = 1;",
         )
         .unwrap();
 }
@@ -1883,8 +1903,11 @@ fn startup_refuses_two_events_for_one_ruling_and_none_for_another() {
         .unwrap();
     connection
         .execute(
-            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-             SELECT workspace_id, kind, payload_json, occurred_at_ms FROM events
+            "INSERT INTO events (
+                 workspace_id, kind, payload_json, occurred_at_ms,
+                 predecessor_kind, predecessor_digest, link_digest
+             )
+             SELECT workspace_id, kind, payload_json, occurred_at_ms, 'unchained', NULL, NULL FROM events
              WHERE kind = 'ruling.recorded'
                AND json_extract(payload_json, '$.ruling.digest.value') = ?1",
             [first],
@@ -1921,8 +1944,11 @@ fn startup_refuses_a_duplicate_ruling_event() {
         .store
         .connect()
         .execute(
-            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-             SELECT workspace_id, kind, payload_json, occurred_at_ms
+            "INSERT INTO events (
+                 workspace_id, kind, payload_json, occurred_at_ms,
+                 predecessor_kind, predecessor_digest, link_digest
+             )
+             SELECT workspace_id, kind, payload_json, occurred_at_ms, 'unchained', NULL, NULL
              FROM events WHERE kind = 'ruling.recorded' LIMIT 1",
             [],
         )
@@ -1941,8 +1967,11 @@ fn startup_refuses_an_orphan_ruling_event() {
         .store
         .connect()
         .execute(
-            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-             VALUES (?1, 'ruling.recorded', ?2, 1)",
+            "INSERT INTO events (
+                 workspace_id, kind, payload_json, occurred_at_ms,
+                 predecessor_kind, predecessor_digest, link_digest
+             )
+             VALUES (?1, 'ruling.recorded', ?2, 1, 'unchained', NULL, NULL)",
             rusqlite::params![
                 fixture.workspace_id.to_string(),
                 fixture.event_payload(&orphan)
