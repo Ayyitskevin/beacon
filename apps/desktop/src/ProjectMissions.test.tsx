@@ -215,10 +215,10 @@ it("keeps every Mission's sections inside its own card and adds no duplicate ele
   ).toEqual(["Only condition"]);
 
   // This slice adds NO element ids, which is how it guarantees it introduces no duplicates across
-  // repeated Mission cards. `MissionOutcomes` already renders a static `mission-outcomes-heading`
-  // id once per card (`MissionOutcomes.tsx:97`); it is a SIBLING of the brief, so scoping to the
-  // brief roots excludes that pre-existing duplicate without a filter. It is out of this fence and
-  // recorded separately rather than absorbed here.
+  // repeated Mission cards. At the base of this slice, `MissionOutcomes` used a static heading id
+  // once per card; the companion Outcome change now gives each section its own heading id. The
+  // Outcome section is a SIBLING of the brief, so this witness scopes only the newly rendered brief.
+  // The Outcome component's own witness verifies its heading association.
   //
   // The first assertion is the harness check. An earlier version filtered on
   // `closest("section[aria-labelledby]") === null`, which rejected every node -- the enclosing
