@@ -146,7 +146,7 @@ pub(crate) fn append_event(
     payload_json: &str,
     occurred_at_ms: i64,
 ) -> rusqlite::Result<i64> {
-    // NOT optional, and that is the point (R58.3, sol1's P2). Every schema from 0035 forward
+    // NOT optional, and that is the point (R58.3, sol1's P2). Every schema from 0036 forward
     // creates this row and a trigger refuses its deletion, so a store without it is broken, not
     // empty. The arm that used to recover from its absence inserted a `pre_migration_digest` column
     // that has never existed -- it could only ever have failed -- and had it worked it would have

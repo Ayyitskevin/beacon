@@ -508,7 +508,7 @@ fn a_store_created_with_the_chain_says_its_genesis_is_a_creation() {
 #[test]
 fn a_migrated_store_chains_from_its_migration_and_says_so() {
     let store = store("migrated");
-    // Roll the chain state back to what 0035 writes for a store that had Events before it: the
+    // Roll the chain state back to what 0036 writes for a store that had Events before it: the
     // rows this store already holds become pre-migration rows.
     let boundary: i64 = store
         .connect()

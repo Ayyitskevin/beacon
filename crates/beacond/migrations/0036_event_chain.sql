@@ -22,7 +22,7 @@
 
 -- Two triggers READ `FROM events`, and `ALTER TABLE ... RENAME` rewrites every trigger and view
 -- that names the table so it follows the new name. Left alone, both would end up reading
--- `events_v34` -- a table this migration then drops -- and the rosters they close would stop being
+-- `events_v35` -- a table this migration then drops -- and the rosters they close would stop being
 -- closed. Found by three version-N rollback fixtures asserting the trigger text, which is the third
 -- time this repository has been bitten by a rename rewriting something that was not the subject of
 -- the migration (0033's foreign key, 0034's child table, these triggers).
@@ -32,7 +32,7 @@
 DROP TRIGGER team_formation_members_no_insert_after_formation;
 DROP TRIGGER mission_admission_members_no_insert_after_admission;
 
-ALTER TABLE events RENAME TO events_v34;
+ALTER TABLE events RENAME TO events_v35;
 
 CREATE TABLE events (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,10 +101,10 @@ INSERT INTO events (
 )
 SELECT sequence, workspace_id, kind, payload_json, occurred_at_ms,
        'unchained', NULL, NULL
-FROM events_v34
+FROM events_v35
 ORDER BY sequence;
 
-DROP TABLE events_v34;
+DROP TABLE events_v35;
 
 CREATE TRIGGER team_formation_members_no_insert_after_formation
 BEFORE INSERT ON team_formation_members
@@ -178,8 +178,8 @@ END;
 -- The foreign-key guard 0033 established: a rebuild that orphaned a reference would otherwise be
 -- found by a later reader rather than by the migration that caused it. `RAISE` is trigger-only, so
 -- the CHECK on a temporary table is the shape that fails the transaction here.
-CREATE TEMP TABLE migration_0035_foreign_key_guard (dangling INTEGER NOT NULL CHECK (dangling = 0));
-INSERT INTO migration_0035_foreign_key_guard SELECT count(*) FROM pragma_foreign_key_check;
-DROP TABLE migration_0035_foreign_key_guard;
+CREATE TEMP TABLE migration_0036_foreign_key_guard (dangling INTEGER NOT NULL CHECK (dangling = 0));
+INSERT INTO migration_0036_foreign_key_guard SELECT count(*) FROM pragma_foreign_key_check;
+DROP TABLE migration_0036_foreign_key_guard;
 
-UPDATE schema_meta SET version = 35 WHERE singleton = 1 AND version = 34;
+UPDATE schema_meta SET version = 36 WHERE singleton = 1 AND version = 35;
