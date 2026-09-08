@@ -2,10 +2,13 @@
 //!
 //! Every product record here is created through the public services. The fixture helpers below the
 //! header are lifted verbatim from `tests/outcome_closure.rs` -- same Workspace, Project, Policy,
-//! Residents, Team and admitted Mission, built by the same public calls -- because a reconciliation
-//! test that invented its own store shape would prove something about the fixture rather than the
-//! product. Only corruption and legacy-boundary setup uses explicit SQL, and every such plant names
-//! its boundary.
+//! Residents, Team, admitted Mission, artifacts, evaluation, spend and completion, built by the
+//! same public calls -- because a reconciliation test that invented its own store shape would prove
+//! something about the fixture rather than the product. Only corruption and legacy-boundary setup
+//! uses explicit SQL, and every such plant names its boundary.
+//!
+//! The unread helpers are kept, not trimmed: they are what make this the SAME fixture the Outcome
+//! path uses, and the manifest bar below needs most of the chain they form.
 
 #![allow(dead_code)]
 
@@ -17,14 +20,14 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use beacond::{
-    ArtifactContext, ArtifactKind, ArtifactService, AutonomyProfile, BeaconCapability,
-    CheckPreflightService, ClassificationActor, ClassificationBasis, ClassificationEventError,
-    ClassificationEventField, ClassificationStoreError, ClassificationSupersedes, CompletionActor,
-    CompletionDisposition, CompletionSupersedes, ConditionOutcome, ConditionResultRecord,
-    Conflicts, DeclaredCheck, Evaluation, EvaluationDraft, EvaluationService,
-    EvaluationSubjectDraft, EvaluationSupersedes, Evaluator, Finding, FindingSeverity, ImpactLevel,
-    LineAttribution, LocalModelActivationService, LocalModelEndpoint, MeasuredSpend,
-    MeasuredSpendService, MeasuredSpendV1, MissionCompletionV1, MissionDraft,
+    AppendixRequest, ArtifactContext, ArtifactKind, ArtifactService, AutonomyProfile,
+    BeaconCapability, CheckPreflightService, ClassificationActor, ClassificationBasis,
+    ClassificationEventError, ClassificationEventField, ClassificationStoreError,
+    ClassificationSupersedes, CompletionActor, CompletionDisposition, CompletionSupersedes,
+    ConditionOutcome, ConditionResultRecord, Conflicts, DeclaredCheck, Evaluation, EvaluationDraft,
+    EvaluationService, EvaluationSubjectDraft, EvaluationSupersedes, Evaluator, Finding,
+    FindingSeverity, ImpactLevel, LineAttribution, LocalModelActivationService, LocalModelEndpoint,
+    MeasuredSpend, MeasuredSpendService, MeasuredSpendV1, MissionCompletionV1, MissionDraft,
     MissionImpactClassification, MissionImpactClassificationV1, MissionImpactService,
     MissionMemberDraft, MissionService, NarrativeItem, OperatorAccountService,
     OperatorSessionPhase, OutcomeService, PolicyRevisionRef, ProjectCharterDraft, ProjectDraft,
@@ -83,10 +86,6 @@ impl Drop for TestStore {
     }
 }
 
-/// Carried verbatim from `tests/outcome_closure.rs` (see the header): the fields this file does not
-/// read are the ones that make it the SAME fixture the Outcome path uses, and re-deriving a
-/// narrower one would prove something about the test rather than the product.
-#[allow(dead_code)]
 struct Fixture {
     store: TestStore,
     accounts: Arc<OperatorAccountService>,
@@ -1548,5 +1547,145 @@ fn the_classification_fault_is_reached_before_the_chain_fault() {
         ),
         "B6.O.BEFORE_CHAIN: the chain spoke first, so every owner bar above could be a chain bar: \
          {refusal:?}"
+    );
+}
+
+/// A store carried all the way to a prepared Outcome manifest, entirely through the public path:
+/// repository, three Artifacts, two evaluations, a Ruling, three classifications, a Run preflight,
+/// measured spend, an owner-written completion, then `prepare_for_mission`.
+///
+/// Lifted from `tests/outcome_closure.rs`'s own sequence. Returns the fixture, the OLDEST
+/// classification (version 1, superseded twice and therefore still owed an Event), and the manifest
+/// digest.
+fn prepared_manifest(label: &str) -> (Fixture, MissionImpactClassification, String) {
+    let fixture = admitted_mission(label);
+    bind_repository(&fixture);
+    let delivered = record_artifact(&fixture, b"# Delivered Artifact D\n");
+    let supporting = record_artifact(&fixture, b"# Support-only Artifact S\n");
+    let decoy = record_artifact(&fixture, b"# Uncited decoy Artifact\n");
+    let support_evaluation = evaluate_artifact(&fixture, &supporting.digest().value);
+    let _decoy_evaluation = evaluate_artifact(&fixture, &decoy.digest().value);
+    let (_proposal, ruling) = proposal_and_ruling(&fixture);
+    let older = classify_mission(
+        &fixture,
+        fixture.mission_id,
+        1,
+        ImpactLevel::Ordinary,
+        ClassificationSupersedes::None,
+    );
+    let high = classify_mission(
+        &fixture,
+        fixture.mission_id,
+        2,
+        ImpactLevel::High,
+        ClassificationSupersedes::Record(older.digest().value.clone()),
+    );
+    let (_run_id, _run_seq) = run_preflight(&fixture);
+    let coverage_to = latest_event_seq(&fixture.store, fixture.workspace_id);
+    let (spend, spend_record) =
+        record_spend(&fixture, fixture.mission_id, coverage_to, measured_totals());
+    let boundary = latest_event_seq(&fixture.store, fixture.workspace_id);
+    let support = support_in_canonical_order(&delivered, &supporting, &support_evaluation, &ruling);
+    let delivered_ref = digest_bytes(&delivered.digest().value);
+    let completion = completion_record(
+        &fixture,
+        fixture.mission_id,
+        boundary,
+        support,
+        vec![SupportRef::Artifact(delivered_ref)],
+        vec![delivered_ref],
+        SpendReference::Recorded {
+            spend_id: spend.spend_id,
+            spend_version: spend.version,
+            spend_sha256: digest_bytes(&spend_record.digest().value),
+        },
+        true,
+    );
+    let _completion_digest = record_completion_for(&fixture, &completion);
+    let _later = classify_mission(
+        &fixture,
+        fixture.mission_id,
+        3,
+        ImpactLevel::Ordinary,
+        ClassificationSupersedes::Record(high.digest().value.clone()),
+    );
+    let candidate = fixture
+        .outcomes
+        .prepare_for_mission(fixture.mission_id, AppendixRequest::PolicyDefault)
+        .expect("B6.MANIFEST.PREPARED");
+    (fixture, older, candidate.manifest_digest)
+}
+
+/// PLANT BOUNDARY: corruption only. Manifests are immutable by trigger, so the guard is dropped and
+/// recreated from `sqlite_master`'s own stored text -- byte-identical by construction, so the schema
+/// signature is untouched and the manifest pass, not the schema check, is what objects.
+fn corrupt_the_manifest(fixture: &Fixture) {
+    let connection = fixture.store.connect();
+    let trigger: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master
+              WHERE type = 'trigger' AND name = 'outcome_manifests_no_update'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("B6.PLANT.MANIFEST_GUARD_PRESENT");
+    connection
+        .execute_batch(
+            "DROP TRIGGER outcome_manifests_no_update;
+             UPDATE outcome_manifests SET renderer_version = 'forged.renderer.v0';",
+        )
+        .expect("B6.PLANT.MANIFEST_CORRUPTED");
+    connection
+        .execute_batch(&trigger)
+        .expect("B6.PLANT.MANIFEST_GUARD_RESTORED");
+}
+
+/// The control for the ordering bar: the manifest corruption REALLY refuses on its own.
+///
+/// Without this, the joint-corrupt store below could name the classification fault simply because
+/// the manifest was never broken, and the ordering claim would be vacuous.
+#[test]
+fn a_corrupted_manifest_alone_is_refused_by_the_manifest_pass() {
+    let (fixture, _older, _digest) = prepared_manifest("b6-manifest-alone");
+    corrupt_the_manifest(&fixture);
+    let refusal = refusal(&fixture);
+    assert!(
+        matches!(
+            &refusal,
+            SupervisorError::OutcomeManifestStateMismatch { .. }
+        ),
+        "B6.O.MANIFEST_ALONE: the manifest corruption must refuse on its own: {refusal:?}"
+    );
+}
+
+/// B6.O.BEFORE_MANIFEST — both broken, and the EARLIER pass speaks.
+///
+/// The Outcome manifest cites a classification and re-checks the high-impact bit against it, so a
+/// classification that no Event accounts for must be refused before anything relies on it. This is
+/// the ordering `verify_classification_state` before `verify_manifest_state` exists to give, and
+/// the control above is what makes the result mean something.
+#[test]
+fn the_classification_fault_is_reached_before_the_manifest_fault() {
+    let (fixture, older, _digest) = prepared_manifest("b6-before-manifest");
+    corrupt_the_manifest(&fixture);
+    fixture
+        .store
+        .connect()
+        .execute_batch(&format!(
+            "DELETE FROM events WHERE kind = 'mission.impact_classified'
+               AND json_extract(payload_json, '$.digest.value') = '{}';",
+            older.digest().value
+        ))
+        .expect("B6.PLANT.CLASSIFICATION_EVENT_DELETED");
+    recohere_chain_head(&fixture.store.connect());
+    let refusal = refusal(&fixture);
+    assert!(
+        matches!(
+            &refusal,
+            SupervisorError::MissionImpactClassificationStateMismatch { digest, cause, .. }
+                if digest == &older.digest().value
+                    && matches!(cause, ClassificationStoreError::EventAbsent)
+        ),
+        "B6.O.BEFORE_MANIFEST: the manifest pass spoke first: {refusal:?}"
     );
 }
