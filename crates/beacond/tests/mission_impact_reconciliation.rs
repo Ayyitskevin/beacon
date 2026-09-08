@@ -1159,7 +1159,7 @@ fn an_event_whose_digest_value_locates_no_row_is_unaccounted_not_absent() {
 /// The Malformed armings, one invalid thing per vector.
 #[test]
 fn an_event_that_fails_one_decode_check_is_refused_as_malformed() {
-    let vectors: [(&str, &str); 6] = [
+    let vectors: [(&str, &str); 12] = [
         ("B6.M.UNKNOWN_TOP", "json_set(payload_json, '$.forged', 1)"),
         (
             "B6.M.UNKNOWN_DIGEST",
@@ -1180,6 +1180,35 @@ fn an_event_that_fails_one_decode_check_is_refused_as_malformed() {
         (
             "B6.M.DIGEST_LEN",
             "json_set(payload_json, '$.digest.value', 'abc')",
+        ),
+        (
+            "B6.M.TIME_NEGATIVE",
+            "json_set(payload_json, '$.classified_at_ms', -1)",
+        ),
+        // A u64 that does not fit i64: it decodes, and the `i64::try_from` domain check refuses it.
+        // Written as a text substitution because SQLite's own integers stop at i64, so `json_set`
+        // cannot produce this value.
+        (
+            "B6.M.TIME_OVERFLOW",
+            "replace(payload_json, '\"classified_at_ms\":1788400000001', \
+             '\"classified_at_ms\":18446744073709551615')",
+        ),
+        (
+            "B6.M.DIGEST_HEX",
+            "json_set(payload_json, '$.digest.value', \
+             'g000000000000000000000000000000000000000000000000000000000000000')",
+        ),
+        (
+            "B6.M.DIGEST_ALGORITHM",
+            "json_set(payload_json, '$.digest.algorithm', 'sha512')",
+        ),
+        (
+            "B6.M.DIGEST_CANONICALIZER",
+            "json_set(payload_json, '$.digest.canonicalizer', 'beacon.mission-impact.v2')",
+        ),
+        (
+            "B6.M.BASE64",
+            "json_set(payload_json, '$.canonical_bytes_base64', 'not base64!!')",
         ),
     ];
     for (case, expr) in vectors {
@@ -1346,5 +1375,178 @@ fn a_superseded_middle_row_still_needs_its_own_event() {
                     && matches!(cause, ClassificationStoreError::EventAbsent)
         ),
         "B6.S.SUPERSEDED_MIDDLE: a chain refusal here would mask a removed owner guard: {refusal:?}"
+    );
+}
+
+/// B6.X.MALFORMED_BEFORE_DISAGREES — an Event that is BOTH unreadable and disagreeing is refused as
+/// malformed. Nothing can be compared until it decodes, so the later check must not be reached.
+///
+/// A precedence cell, and it stands for nothing else: both its armings are covered independently by
+/// `B6.M.UNKNOWN_TOP` and `B6.D.version`.
+#[test]
+fn an_event_that_is_both_unreadable_and_disagreeing_is_refused_as_malformed() {
+    let (fixture, _) = classified("b6-precedence-malformed");
+    rewrite_event_payload(
+        &fixture,
+        "json_set(json_set(payload_json, '$.forged', 1), '$.version', 7)",
+    );
+    let refusal = refusal(&fixture);
+    assert!(
+        matches!(
+            &refusal,
+            SupervisorError::MissionImpactClassificationEventMismatch { cause, .. }
+                if matches!(cause, ClassificationEventError::Malformed)
+        ),
+        "B6.X.MALFORMED_BEFORE_DISAGREES: {refusal:?}"
+    );
+}
+
+/// B6.K.BOTH_ENDS_HELD — the pass reaches the FIRST and the LAST row of its own ordering.
+///
+/// The build report claimed this was covered because two different bars each asserted a literal
+/// key. That is not the claim: one row asserted twice says nothing about whether the walk stops
+/// early. This tampers each end in turn, selecting the ends by the pass's own
+/// `ORDER BY workspace_id, digest_value` rather than by insertion order, and requires the refusal to
+/// name that end.
+#[test]
+fn the_relation_reaches_both_ends_of_its_own_ordering() {
+    for end in ["first", "last"] {
+        let (fixture, older) = classified(&format!("b6-both-ends-{end}"));
+        let newer = classify_mission(
+            &fixture,
+            fixture.mission_id,
+            2,
+            ImpactLevel::High,
+            ClassificationSupersedes::Record(older.digest().value.clone()),
+        );
+        // The owner's own order, read back from the store rather than assumed.
+        let ordered: Vec<String> = {
+            let connection = fixture.store.connect();
+            let mut statement = connection
+                .prepare(
+                    "SELECT digest_value FROM mission_impact_classifications
+                      ORDER BY workspace_id, digest_value",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(ordered.len(), 2, "B6.K: two rows to have two ends");
+        assert!(
+            ordered.contains(&older.digest().value) && ordered.contains(&newer.digest().value),
+            "B6.K: the ordering must hold both classifications"
+        );
+        let target = if end == "first" {
+            ordered.first().unwrap().clone()
+        } else {
+            ordered.last().unwrap().clone()
+        };
+        fixture
+            .store
+            .connect()
+            .execute_batch(&format!(
+                "DELETE FROM events WHERE kind = 'mission.impact_classified'
+                   AND json_extract(payload_json, '$.digest.value') = '{target}';"
+            ))
+            .expect("B6.PLANT.END_EVENT_DELETED");
+        recohere_chain_head(&fixture.store.connect());
+        let refusal = refusal(&fixture);
+        assert!(
+            matches!(
+                &refusal,
+                SupervisorError::MissionImpactClassificationStateMismatch { digest, cause, .. }
+                    if digest == &target
+                        && matches!(cause, ClassificationStoreError::EventAbsent)
+            ),
+            "B6.K.BOTH_ENDS_HELD[{end}]: the walk did not reach {target}: {refusal:?}"
+        );
+    }
+}
+
+/// PLANT BOUNDARY: legacy setup. Turn the store into the shape migration 0036 leaves behind for a
+/// store that held Events before the chain existed -- every Event `unchained`, no link digests, and
+/// a chain that begins at the migration boundary.
+fn make_pre_boundary(fixture: &Fixture) {
+    fixture
+        .store
+        .connect()
+        .execute_batch(
+            "UPDATE events SET predecessor_kind = 'unchained', predecessor_digest = NULL,
+                               link_digest = NULL;
+             UPDATE event_chain_state
+                SET genesis_kind = 'migrated',
+                    migrated_through_sequence = (SELECT max(sequence) FROM events),
+                    head_digest = NULL,
+                    head_sequence = (SELECT max(sequence) FROM events)
+              WHERE id = 1;",
+        )
+        .expect("B6.PLANT.PRE_BOUNDARY");
+}
+
+/// B6.P.PRE_BOUNDARY_VALID — a migrated store whose Events the chain makes no byte claim about
+/// still opens Ready when they are coherent.
+#[test]
+fn a_pre_boundary_unchained_classification_event_is_accepted_when_coherent() {
+    let (fixture, _) = classified("b6-preboundary-valid");
+    make_pre_boundary(&fixture);
+    reopen(&fixture).expect("B6.P.PRE_BOUNDARY_VALID: a coherent migrated store reopens Ready");
+}
+
+/// B6.P.PRE_BOUNDARY_INVALID — and an incoherent one is refused by name.
+///
+/// This is the state the chain structurally cannot judge: the Event is `unchained`, so no link
+/// digest attests to its bytes. If the owner relation did not run, nothing would.
+#[test]
+fn a_pre_boundary_unchained_classification_event_is_refused_when_incoherent() {
+    let (fixture, _) = classified("b6-preboundary-invalid");
+    make_pre_boundary(&fixture);
+    rewrite_event_payload(&fixture, "json_set(payload_json, '$.version', 7)");
+    let refusal = refusal(&fixture);
+    assert!(
+        matches!(
+            &refusal,
+            SupervisorError::MissionImpactClassificationEventMismatch { cause, .. }
+                if matches!(cause, ClassificationEventError::Disagrees {
+                    field: ClassificationEventField::Version
+                })
+        ),
+        "B6.P.PRE_BOUNDARY_INVALID: {refusal:?}"
+    );
+}
+
+/// B6.O.BEFORE_CHAIN — the classification fault wins over a chain fault the same tamper causes.
+///
+/// **This is not B6.O.BEFORE_MANIFEST**, which is still unbuilt; see the report. It witnesses the
+/// half of the ordering claim reachable without a completed Mission, and it is the half that has
+/// actually bitten this lane: `a_superseded_middle_row_still_needs_its_own_event` deliberately
+/// recoheres the head so the chain stays quiet, and if the owner pass ran after the chain instead,
+/// that bar would pass for the wrong reason and the owner mutant would survive it.
+///
+/// Here the head is left UNCOHERED, so the store holds a classification with no Event *and* a chain
+/// whose walk no longer ends where its head says. The owner must be the one that speaks.
+#[test]
+fn the_classification_fault_is_reached_before_the_chain_fault() {
+    let (fixture, classification) = classified("b6-before-chain");
+    fixture
+        .store
+        .connect()
+        .execute(
+            "DELETE FROM events WHERE kind = 'mission.impact_classified'",
+            [],
+        )
+        .expect("B6.PLANT.EVENT_DELETED_NO_RECOHERE");
+    let refusal = refusal(&fixture);
+    assert!(
+        matches!(
+            &refusal,
+            SupervisorError::MissionImpactClassificationStateMismatch { digest, cause, .. }
+                if digest == &classification.digest().value
+                    && matches!(cause, ClassificationStoreError::EventAbsent)
+        ),
+        "B6.O.BEFORE_CHAIN: the chain spoke first, so every owner bar above could be a chain bar: \
+         {refusal:?}"
     );
 }
