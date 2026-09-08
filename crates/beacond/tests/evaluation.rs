@@ -751,7 +751,7 @@ fn a_recorded_evaluation_is_immutable_and_survives_startup_verification() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .expect("startup verifies the Evaluation");
-    assert_eq!(report.diagnostics.schema_version, 35);
+    assert_eq!(report.diagnostics.schema_version, 36);
     assert_eq!(
         evaluations.get(&evaluation.digest().value).unwrap(),
         evaluation
@@ -3314,7 +3314,7 @@ fn migration_0028_preserves_preexisting_proposal_evaluation_bytes_and_chain() {
              DROP TRIGGER outcome_manifests_no_delete;
              DROP INDEX outcome_manifests_by_mission;
              DROP TABLE outcome_manifests;
-             -- R58's 0035 adds the chain columns, its state table and its trigger; a rollback to
+             -- R58's 0036 adds the chain columns, its state table and its trigger; a rollback to
              -- 27 undoes all three. The two roster triggers come off first because the rename
              -- rewrites every trigger that names `events`.
              DROP TRIGGER event_chain_state_no_delete;
@@ -3364,7 +3364,7 @@ fn migration_0028_preserves_preexisting_proposal_evaluation_bytes_and_chain() {
     restore_pre_0035_spend(&connection);
 
     // R58: `events` back at its pre-chain shape, sliced from the migration that last defined it,
-    // then the rows without the columns 0035 added.
+    // then the rows without the columns 0036 added.
     let migration_0027 = include_str!("../migrations/0027_artifacts.sql");
     let events_start = migration_0027.find("CREATE TABLE events (").unwrap();
     let events_end = migration_0027[events_start..].find(") STRICT;").unwrap() + events_start + 9;
@@ -3455,7 +3455,7 @@ END;",
              SELECT workspace_id, subject_digest, evaluation_digest,
                     supersedes_evaluation_digest
              FROM supersessions_snapshot;
-             UPDATE schema_meta SET version = 27 WHERE singleton = 1 AND version = 35;
+             UPDATE schema_meta SET version = 27 WHERE singleton = 1 AND version = 36;
              COMMIT;",
         )
         .unwrap();
@@ -4517,9 +4517,9 @@ fn astra_s1_canonical_cross_mission_successor_is_not_a_verified_subject_tail() {
     );
 }
 
-/// The pre-0035 spend shapes, for a test that stamps a version below 35.
+/// The pre-0036 spend shapes, for a test that stamps a version below 35.
 ///
-/// 0035 widened `measured_spend`'s canonicalizer CHECK and added `measured_spend_lines`. A store
+/// 0036 widened `measured_spend`'s canonicalizer CHECK and added `measured_spend_lines`. A store
 /// rolled back below 35 must carry the shapes that version actually had, or its schema signature
 /// will not match one built from the ladder. Taken from 0025's own text: a rollback that retyped
 /// the DDL would be testing the test.
@@ -4539,7 +4539,7 @@ fn restore_pre_0035_spend(connection: &Connection) {
              DROP TRIGGER measured_spend_no_delete;
              DROP TABLE measured_spend;",
         )
-        .expect("the 0035 shapes come off");
+        .expect("the 0036 shapes come off");
     connection.execute_batch(block).expect("0025's spend table");
     connection
         .execute_batch(

@@ -294,7 +294,7 @@ fn downgrade_execution_schema_to_v15(store_path: &Path) {
              DROP TRIGGER beacon_repositories_no_update;
              DROP TABLE beacon_repositories;
              DROP TRIGGER dispatch_preparations_no_update;
-             -- R58: the chain's own state and trigger, which 0035 added. A rollback fixture that
+             -- R58: the chain's own state and trigger, which 0036 added. A rollback fixture that
              -- does not undo the newest migration leaves objects behind and compares a v17 store
              -- against a signature that has them -- which is how this fixture caught the omission.
              DROP TRIGGER event_chain_state_no_delete;
@@ -2164,7 +2164,7 @@ fn migration_preserves_real_v1_bytes_through_rollback_and_forward_startup() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 35);
+    assert_eq!(report.diagnostics.schema_version, 36);
     let connection = Connection::open(&store.path).unwrap();
     assert_v1_bytes(&connection, run_id, &v1_payload);
 }

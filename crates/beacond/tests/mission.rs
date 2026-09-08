@@ -305,7 +305,7 @@ fn operator_admits_a_finite_mission_from_exact_current_team_evidence() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 35);
+    assert_eq!(report.diagnostics.schema_version, 36);
 }
 
 #[test]
@@ -658,7 +658,7 @@ fn schema_ten_migrates_without_rewriting_events_or_the_team_roster_guard() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 35);
+    assert_eq!(report.diagnostics.schema_version, 36);
     let connection = Connection::open(&path).unwrap();
     let after = connection
         .query_row(
@@ -1165,7 +1165,7 @@ fn a_store_at_the_previous_schema_version_migrates_and_keeps_its_condition_rows(
             // is not enough: the rebuilt definition has to come off too or the store no longer
             // matches schema 23. 0027 rebuilt `events` too; `restore_pre_0025_events` below
             // unwinds every rebuild at once, back to 0023's definition.
-            // R58: 0035's chain objects come off first, newest migration first.
+            // R58: 0036's chain objects come off first, newest migration first.
             "DROP TRIGGER event_chain_state_no_delete;
              DROP TABLE event_chain_state;
              DROP TRIGGER outcome_publications_no_update;
@@ -1207,7 +1207,7 @@ fn a_store_at_the_previous_schema_version_migrates_and_keeps_its_condition_rows(
         initial_workspace_name: "Ignored".to_owned(),
     })
     .expect("a store at the previous schema version must migrate");
-    assert_eq!(report.diagnostics.schema_version, 35);
+    assert_eq!(report.diagnostics.schema_version, 36);
 
     assert_eq!(
         condition_rows(&store.path, mission.id),
@@ -1897,9 +1897,9 @@ fn a_row_whose_bytes_no_longer_hash_to_its_digest_is_refused() {
     );
 }
 
-/// The pre-0035 spend shapes, for a test that stamps a version below 35.
+/// The pre-0036 spend shapes, for a test that stamps a version below 35.
 ///
-/// 0035 widened `measured_spend`'s canonicalizer CHECK and added `measured_spend_lines`. A store
+/// 0036 widened `measured_spend`'s canonicalizer CHECK and added `measured_spend_lines`. A store
 /// rolled back below 35 must carry the shapes that version actually had, or its schema signature
 /// will not match one built from the ladder. Taken from 0025's own text: a rollback that retyped
 /// the DDL would be testing the test.
@@ -1919,7 +1919,7 @@ fn restore_pre_0035_spend(connection: &Connection) {
              DROP TRIGGER measured_spend_no_delete;
              DROP TABLE measured_spend;",
         )
-        .expect("the 0035 shapes come off");
+        .expect("the 0036 shapes come off");
     connection.execute_batch(block).expect("0025's spend table");
     connection
         .execute_batch(
