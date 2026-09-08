@@ -375,6 +375,24 @@ pub enum SupervisorError {
     /// The stored Event chain does not verify from its genesis to its head (R58). The fault names
     /// the sequence it failed at.
     EventChainBroken(event_chain::ChainFault),
+    /// The installation's current pause state is not supported by the Events that should have
+    /// caused it.
+    ///
+    /// **R58.3, sol1's P0.** `EventChainBroken` proves that every link the store still holds is
+    /// authentic and in order. It cannot prove that no tail was REMOVED -- delete the newest Event
+    /// and rewrite the head co-stored with the rows to the previous link, and every remaining check
+    /// agrees. `installation_pause` is not an Event row, so it survives that edit and still says a
+    /// transition happened.
+    ///
+    /// Names the transition time the state records, because that is the surviving fact which proves
+    /// the Event existed, and the terminal pause/resume Event the store still holds -- `None` when
+    /// it holds none, which is the truncation itself. It does NOT name the missing Event's
+    /// sequence: the store cannot compute it, and a refusal that states a number nobody measured is
+    /// the exact failure this lane keeps finding.
+    PauseStateUnsupported {
+        changed_at_ms: i64,
+        terminal_sequence: Option<i64>,
+    },
     StarterOrganizationEventMismatch(i64),
     /// A Workspace's starter organization does not re-prove.
     ///
@@ -804,6 +822,7 @@ pub(crate) fn supervisor_caller_tag(error: &SupervisorError) -> String {
         SupervisorError::InvalidEventKind(..) => "InvalidEventKind".to_owned(),
         SupervisorError::EventPayloadScopeMismatch(..) => "EventPayloadScopeMismatch".to_owned(),
         SupervisorError::EventChainBroken(..) => "EventChainBroken".to_owned(),
+        SupervisorError::PauseStateUnsupported { .. } => "PauseStateUnsupported".to_owned(),
         SupervisorError::StarterOrganizationEventMismatch(..) => {
             "StarterOrganizationEventMismatch".to_owned()
         }
@@ -1091,6 +1110,25 @@ impl fmt::Display for SupervisorError {
             // writes a row of it and nothing else -- so signing or rewriting one is ONE edit in
             // ONE place, and the witness that pins it reads the same bytes.
             Self::EventChainBroken(fault) => formatter.write_str(&fault.sentence()),
+            // R58.3, PROPOSED text -- Kevin signs or rewrites these two lines before the bar. Two
+            // shapes because the fault has two: a state with no Event behind it at all, and a state
+            // that disagrees with the Event it does have.
+            Self::PauseStateUnsupported {
+                changed_at_ms,
+                terminal_sequence: None,
+            } => write!(
+                formatter,
+                "the installation records a pause change at {changed_at_ms} and holds no Event that \
+                 accounts for it"
+            ),
+            Self::PauseStateUnsupported {
+                terminal_sequence: Some(sequence),
+                ..
+            } => write!(
+                formatter,
+                "the installation's pause state disagrees with Event sequence {sequence}, the last \
+                 pause or resume it holds"
+            ),
             Self::StarterOrganizationEventMismatch(sequence) => write!(
                 formatter,
                 "Event sequence {sequence} does not match Starter Organization state"
@@ -2889,6 +2927,18 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     // have run before this one can rely on it (R18.7).
     outcome_publication::verify_publication_state(connection)
         .map_err(map_publication_state_fault)?;
+
+    // R58.3 (sol1's P0), BEFORE the chain, because it is an owner pass and owners run first.
+    // The chain cannot see a removed tail: delete the newest Event, rewrite the head stored beside
+    // the rows, and every remaining link agrees with every other. `installation_pause` is not an
+    // Event row, so it survives that edit -- and a current state with no Event behind it is the
+    // completeness the chain structurally cannot prove.
+    if let Some(fault) = dispatch::reconcile_pause_state(connection)? {
+        return Err(SupervisorError::PauseStateUnsupported {
+            changed_at_ms: fault.changed_at_ms,
+            terminal_sequence: fault.terminal_sequence,
+        });
+    }
 
     // R58: the chain, AFTER every per-record pass -- and this is load-bearing rather than tidy.
     // Five of the seven tampers this closes are already refused BY NAME by the passes above, and
@@ -7886,7 +7936,7 @@ mod tests {
     }
 
     /// The 72 startup lines, transcribed from the spec with this table's own fixture keys.
-    const STARTUP_LINES: [(&str, &str); 74] = [
+    const STARTUP_LINES: [(&str, &str); 75] = [
         ("EmptyWorkspaceName", "workspace name cannot be empty"),
         (
             "WorkspaceNameTooLong",
@@ -7922,6 +7972,13 @@ mod tests {
         (
             "EventChainBroken",
             "Event sequence 4242 was edited after it was recorded",
+        ),
+        // R58.3, PROPOSED text -- Kevin signs or rewrites this line before the bar. One row per
+        // `SupervisorError` variant, so this pins the truncation shape (no Event behind the state);
+        // the disagreement shape is the same variant's other Display arm and the report names it.
+        (
+            "PauseStateUnsupported",
+            "the installation records a pause change at 4242 and holds no Event that accounts for it",
         ),
         (
             "StarterOrganizationEventMismatch",
@@ -8240,6 +8297,12 @@ mod tests {
             SupervisorError::EventChainBroken(
                 crate::event_chain::ChainFault::LinkDigestMismatch { sequence: 4242 },
             ), &[];
+        "PauseStateUnsupported" | SupervisorError::PauseStateUnsupported { .. }
+            => startup_line("PauseStateUnsupported"),
+            SupervisorError::PauseStateUnsupported {
+                changed_at_ms: R42S2_SEQUENCE_I64,
+                terminal_sequence: None,
+            }, &[];
         "StarterOrganizationEventMismatch" | SupervisorError::StarterOrganizationEventMismatch(..)
             => startup_line("StarterOrganizationEventMismatch"),
             SupervisorError::StarterOrganizationEventMismatch(R42S2_SEQUENCE_I64), &[];
@@ -8445,11 +8508,11 @@ mod tests {
     /// R42 slice 2, fold: every one of the 72 startup lines is what the spec says.
     #[test]
     fn r42_startup_templates_are_all_pinned() {
-        assert_eq!(STARTUP_LINES.len(), 74, "R42S2.STARTUP.CARDINALITY.LINES");
-        assert_eq!(startup_rows().len(), 74, "R42S2.STARTUP.CARDINALITY.ROWS");
+        assert_eq!(STARTUP_LINES.len(), 75, "R42S2.STARTUP.CARDINALITY.LINES");
+        assert_eq!(startup_rows().len(), 75, "R42S2.STARTUP.CARDINALITY.ROWS");
         let ids: std::collections::BTreeSet<&str> =
             startup_rows().iter().map(|(case, _, _)| *case).collect();
-        assert_eq!(ids.len(), 74, "R42S2.STARTUP.CASE_IDS_UNIQUE");
+        assert_eq!(ids.len(), 75, "R42S2.STARTUP.CASE_IDS_UNIQUE");
 
         for (case, value, markers) in startup_rows() {
             let (matched, expected) = expected_startup(&value);

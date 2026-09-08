@@ -15,9 +15,10 @@
 -- what preceded its rows: nothing recorded the order, and computing links now would attest to an
 -- order this process INFERS rather than remembers. So pre-migration Events are written
 -- `unchained` -- a state, not a null -- and `event_chain_state` records that this chain's genesis
--- is a MIGRATION rather than a creation, through which sequence, and the digest of the
--- pre-migration table as it stood. The chain then reads "from the moment Beacon began chaining,
--- nothing has changed", which is what this migration can prove and no more.
+-- is a MIGRATION rather than a creation, and through which sequence. It records NO digest of the
+-- pre-migration table: see `event_chain_state.migrated_through_sequence` below for why one would
+-- be a lie. The chain then reads "from the moment Beacon began chaining, nothing has changed",
+-- which is what this migration can prove and no more.
 
 -- Two triggers READ `FROM events`, and `ALTER TABLE ... RENAME` rewrites every trigger and view
 -- that names the table so it follows the new name. Left alone, both would end up reading

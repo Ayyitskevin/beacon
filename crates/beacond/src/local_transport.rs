@@ -4237,6 +4237,12 @@ mod tests {
             SupervisorError::EventChainBroken(
                 crate::event_chain::ChainFault::LinkDigestMismatch { sequence: STORED_VERSION },
             ), &[];
+        "PauseStateUnsupported" | SupervisorError::PauseStateUnsupported { .. }
+            => "PauseStateUnsupported",
+            SupervisorError::PauseStateUnsupported {
+                changed_at_ms: STORED_VERSION,
+                terminal_sequence: None,
+            }, &[];
         "StarterOrganizationEventMismatch" | SupervisorError::StarterOrganizationEventMismatch(..)
             => "StarterOrganizationEventMismatch",
             SupervisorError::StarterOrganizationEventMismatch(STORED_VERSION), &[];
@@ -5104,10 +5110,10 @@ mod tests {
         // cause-bearing Supervisor parents (including the two nested classification
         // vocabularies), 18 account faults at each of 14 wrappers, the three draft reasons, both
         // charter-revision pairs, and slice 1's 83-case Outcome tree.
-        assert_eq!(cases.len(), 875, "R42S2.TRANSPORT.CARDINALITY.CASES");
+        assert_eq!(cases.len(), 876, "R42S2.TRANSPORT.CARDINALITY.CASES");
         assert_eq!(
             supervisor_rows().len(),
-            74,
+            75,
             "R42S2.TRANSPORT.CARDINALITY.Supervisor"
         );
         let ids: std::collections::BTreeSet<&str> =

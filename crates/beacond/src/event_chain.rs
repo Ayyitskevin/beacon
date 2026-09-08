@@ -146,20 +146,24 @@ pub(crate) fn append_event(
     payload_json: &str,
     occurred_at_ms: i64,
 ) -> rusqlite::Result<i64> {
-    let head: Option<(Option<Vec<u8>>, i64)> = connection
-        .query_row(
-            "SELECT head_digest, head_sequence FROM event_chain_state WHERE id = 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
+    // NOT optional, and that is the point (R58.3, sol1's P2). Every schema from 0035 forward
+    // creates this row and a trigger refuses its deletion, so a store without it is broken, not
+    // empty. The arm that used to recover from its absence inserted a `pre_migration_digest` column
+    // that has never existed -- it could only ever have failed -- and had it worked it would have
+    // been worse: writing `genesis_kind = 'created'` for a store whose state row someone removed
+    // claims this chain has covered every Event since the first one. A missing row now surfaces as
+    // the store failure it is.
+    let head: (Option<Vec<u8>>, i64) = connection.query_row(
+        "SELECT head_digest, head_sequence FROM event_chain_state WHERE id = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
 
-    let predecessor = match &head {
+    let predecessor = match &head.0 {
         // A store that has chained before: this Event follows the head.
-        Some((Some(digest), _)) => Predecessor::Linked(as_digest(digest)?),
-        // A migrated store whose chain has not started yet, or a store with no state row at all
-        // (created fresh): either way this Event begins the chain.
-        Some((None, _)) | None => Predecessor::Genesis,
+        Some(digest) => Predecessor::Linked(as_digest(digest)?),
+        // A fresh store, or a migrated one whose chain has not started: this Event begins it.
+        None => Predecessor::Genesis,
     };
 
     // The sequence is chosen before the digest, because the digest commits to it. AUTOINCREMENT
@@ -210,19 +214,10 @@ pub(crate) fn append_event(
 
     // The head moves in the same transaction as the Event it names. A head that lagged its chain
     // would make every later append link to an Event that is no longer last.
-    match head {
-        Some(_) => connection.execute(
-            "UPDATE event_chain_state SET head_digest = ?1, head_sequence = ?2 WHERE id = 1",
-            rusqlite::params![digest.to_vec(), next],
-        )?,
-        None => connection.execute(
-            "INSERT INTO event_chain_state (
-                 id, genesis_kind, migrated_through_sequence, pre_migration_digest,
-                 head_digest, head_sequence
-             ) VALUES (1, 'created', NULL, NULL, ?1, ?2)",
-            rusqlite::params![digest.to_vec(), next],
-        )?,
-    };
+    connection.execute(
+        "UPDATE event_chain_state SET head_digest = ?1, head_sequence = ?2 WHERE id = 1",
+        rusqlite::params![digest.to_vec(), next],
+    )?;
 
     Ok(next)
 }
