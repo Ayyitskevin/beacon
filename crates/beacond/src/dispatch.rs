@@ -3355,6 +3355,82 @@ impl PauseService {
     }
 }
 
+/// The installation's current pause state, and the terminal pause/resume Event that should account
+/// for it.
+///
+/// `terminal_sequence` is `None` when the store holds no pause or resume Event at all -- which is
+/// the truncation case, and a different fact from "holds one that disagrees". Two states, two
+/// shapes; a single sentinel sequence would spell them the same way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PauseStateFault {
+    pub changed_at_ms: i64,
+    pub terminal_sequence: Option<i64>,
+}
+
+/// Reconcile the installation's CURRENT pause state against the terminal pause/resume Event.
+///
+/// **R58.3, sol1's P0.** The Event chain proves that every link the store still holds is authentic
+/// and in order, and that those rows agree with the head stored beside them. It cannot prove that
+/// no TAIL WAS REMOVED: delete the newest Event and rewrite `event_chain_state` to the previous
+/// link, and every remaining check agrees with every other. Hashing plus a head co-stored with the
+/// rows it describes distinguishes a tampered history from an authentic one, not a truncated
+/// history from an honestly shorter one.
+///
+/// Completeness has to come from a fact the same edit cannot rewrite. The pause owner has one:
+/// `installation_pause` holds the CURRENT state and is not an Event row, so it survives the
+/// truncation and still says a transition happened. This pass makes that disagreement a refusal.
+///
+/// It closes the pause owner and only the pause owner. Every other owner whose current state is
+/// held outside the Event rows has the same exposure and no such pass yet -- stated as a limit in
+/// ADR 0045 rather than implied to be closed.
+pub(crate) fn reconcile_pause_state(
+    connection: &Connection,
+) -> Result<Option<PauseStateFault>, rusqlite::Error> {
+    let (paused, changed_at_ms) = connection.query_row(
+        "SELECT paused, changed_at_ms FROM installation_pause WHERE singleton = 1",
+        [],
+        |row| Ok((row.get::<_, i64>(0)? != 0, row.get::<_, i64>(1)?)),
+    )?;
+
+    let terminal = connection
+        .query_row(
+            "SELECT sequence, kind, occurred_at_ms FROM events
+              WHERE kind IN ('installation.paused', 'installation.resumed')
+              ORDER BY sequence DESC LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    match terminal {
+        // No transition Event at all. Migration 0022 seeds the row as (0, 0), so that -- and only
+        // that -- is the state an installation nothing has ever paused is allowed to be in.
+        None => {
+            if paused || changed_at_ms != 0 {
+                return Ok(Some(PauseStateFault {
+                    changed_at_ms,
+                    terminal_sequence: None,
+                }));
+            }
+        }
+        Some((sequence, kind, occurred_at_ms)) => {
+            if (kind == "installation.paused") != paused || occurred_at_ms != changed_at_ms {
+                return Ok(Some(PauseStateFault {
+                    changed_at_ms,
+                    terminal_sequence: Some(sequence),
+                }));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// Replay one Pause or Resume Event: it must decode, and its recorded state and time must agree
 /// with the kind it was stored under and when it happened.
 ///
