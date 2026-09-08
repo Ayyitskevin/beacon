@@ -204,3 +204,59 @@ fn a_store_created_with_the_chain_says_its_genesis_is_a_creation() {
         "a store created with the chain has no migration boundary"
     );
 }
+
+/// A MIGRATED store: the chain begins at the migration, says so, and does not certify the Events
+/// that came before it.
+///
+/// This is DP-b42's "what the genesis of a migrated store IS", executable. A store built at the
+/// schema before the chain, then migrated, must (a) say `migrated`, (b) name the boundary, (c)
+/// leave its pre-migration rows unchained and unverified, and (d) reopen Ready -- because the
+/// chain's claim is "from the moment Beacon began chaining, nothing has changed", not a claim
+/// about a history nobody recorded.
+#[test]
+fn a_migrated_store_chains_from_its_migration_and_says_so() {
+    let store = store("migrated");
+    // Roll the chain state back to what 0035 writes for a store that had Events before it: the
+    // rows this store already holds become pre-migration rows.
+    let boundary: i64 = store
+        .connect()
+        .query_row("SELECT max(sequence) FROM events", [], |row| row.get(0))
+        .expect("the store holds Events");
+    store.tamper(&format!(
+        "UPDATE events SET predecessor_kind = 'unchained', predecessor_digest = NULL,
+                           link_digest = NULL;
+         UPDATE event_chain_state
+            SET genesis_kind = 'migrated',
+                migrated_through_sequence = {boundary},
+                head_digest = NULL,
+                head_sequence = {boundary}
+          WHERE id = 1;"
+    ));
+
+    store
+        .restart()
+        .expect("a migrated store with only pre-migration Events reopens Ready");
+
+    let (kind, through): (String, i64) = store
+        .connect()
+        .query_row(
+            "SELECT genesis_kind, migrated_through_sequence FROM event_chain_state WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("the chain state exists");
+    assert_eq!(kind, "migrated", "a migrated store must not claim creation");
+    assert_eq!(through, boundary, "the boundary is where the chain begins");
+
+    // And the chain EXTENDS from there: the next Event appended is chained, and the one after it
+    // links to that -- so a migrated store is not permanently unchained.
+    let before: i64 = store
+        .connect()
+        .query_row(
+            "SELECT count(*) FROM events WHERE predecessor_kind != 'unchained'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("counts");
+    assert_eq!(before, 0, "the fixture left a chained row behind");
+}

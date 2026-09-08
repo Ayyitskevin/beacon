@@ -2138,7 +2138,7 @@ fn insert_proposal(connection: &Connection, stored: &StoredProposal) -> Result<(
         },
     })?;
     crate::event_chain::append_event(
-        &connection,
+        connection,
         &stored.workspace_id.to_string(),
         "proposal.submitted",
         &payload,

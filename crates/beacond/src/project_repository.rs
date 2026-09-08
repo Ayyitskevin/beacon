@@ -689,7 +689,7 @@ fn insert_repository(
         repository: repository.clone(),
     })?;
     crate::event_chain::append_event(
-        &connection,
+        connection,
         &workspace_id.to_string(),
         "project.repository_bound",
         &payload,

@@ -594,6 +594,26 @@ impl Fixture {
         for trigger in triggers {
             connection.execute_batch(&trigger).unwrap();
         }
+
+        // R58: these batches rewrite stored Events in place -- a v3 Receipt's payload, a forged
+        // era -- which is precisely what the Event chain refuses as `LinkDigestMismatch`. It is
+        // the chain working, not a defect, and it is why the tamper says so afterwards: a store
+        // whose history a fixture rewrote is no longer a chained store, and it declares that
+        // rather than forging links to hide it. The Receipt-era question each of these tests asks
+        // is then reachable again, which is the only reason to do it.
+        connection
+            .execute_batch(
+                "UPDATE events
+                    SET predecessor_kind = 'unchained', predecessor_digest = NULL,
+                        link_digest = NULL;
+                 UPDATE event_chain_state
+                    SET genesis_kind = 'migrated',
+                        migrated_through_sequence = (SELECT max(sequence) FROM events),
+                        head_digest = NULL,
+                        head_sequence = (SELECT max(sequence) FROM events)
+                  WHERE id = 1;",
+            )
+            .unwrap();
     }
 
     /// Run one dispatch in a CHILD PROCESS that dies at `boundary`, without unwinding.
@@ -3061,6 +3081,22 @@ END;",
         .execute(
             "UPDATE events SET payload_json = ?1 WHERE kind = 'proposal.dispatched'",
             [legacy.as_str()],
+        )
+        .unwrap();
+    // R58: rewriting a stored Event's payload is what the chain refuses as `LinkDigestMismatch`,
+    // so this store says what it now is -- one whose history a fixture rewrote, chained from here
+    // rather than from its genesis. Without it the chain answers before the Receipt-era question
+    // this test asks.
+    connection
+        .execute_batch(
+            "UPDATE events
+                SET predecessor_kind = 'unchained', predecessor_digest = NULL, link_digest = NULL;
+             UPDATE event_chain_state
+                SET genesis_kind = 'migrated',
+                    migrated_through_sequence = (SELECT max(sequence) FROM events),
+                    head_digest = NULL,
+                    head_sequence = (SELECT max(sequence) FROM events)
+              WHERE id = 1;",
         )
         .unwrap();
     drop(connection);

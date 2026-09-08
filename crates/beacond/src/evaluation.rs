@@ -1380,7 +1380,7 @@ fn insert_evaluation(
     })
     .map_err(|_| EvaluationError::InvalidStore)?;
     crate::event_chain::append_event(
-        &connection,
+        connection,
         &stored.workspace_id.to_string(),
         "evaluation.recorded",
         &event,

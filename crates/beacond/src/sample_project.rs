@@ -991,7 +991,7 @@ fn insert_sample_project(
         created_at_ms: installation.installed_at_ms,
     };
     crate::event_chain::append_event(
-        &connection,
+        connection,
         &workspace_id,
         "project.created",
         &serde_json::to_string(&ProjectCreatedPayload { project })?,
@@ -1023,7 +1023,7 @@ fn insert_sample_project(
         ],
     )?;
     crate::event_chain::append_event(
-        &connection,
+        connection,
         &workspace_id,
         "project.repository_bound",
         &serde_json::to_string(&ProjectRepositoryBoundPayload {
@@ -1054,7 +1054,7 @@ fn insert_sample_project(
         ],
     )?;
     crate::event_chain::append_event(
-        &connection,
+        connection,
         &workspace_id,
         "sample_project.installed",
         &serde_json::to_string(&SampleProjectInstalledPayload {
