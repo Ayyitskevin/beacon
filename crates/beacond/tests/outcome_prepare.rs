@@ -9767,6 +9767,19 @@ fn b16_a_large_owner_minted_outcome_crosses_byte_identically() {
 // stubbed anywhere in this file.
 // ---------------------------------------------------------------------------------------------
 
+struct B16Scratch(std::path::PathBuf);
+
+impl Drop for B16Scratch {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.0) {
+            if !std::thread::panicking() {
+                panic!("B16.STUB.SCRATCH_REMOVED: {error}");
+            }
+            eprintln!("B16.STUB.SCRATCH_REMOVED during unwind: {error}");
+        }
+    }
+}
+
 /// A raw listener that answers one request with exactly the bytes given, then closes.
 ///
 /// Returns the stub's own write result separately, because an intentionally over-limit response
@@ -9778,11 +9791,13 @@ fn b16_serve_once(
     std::path::PathBuf,
     std::path::PathBuf,
     std::thread::JoinHandle<std::io::Result<()>>,
+    B16Scratch,
 ) {
     use std::io::{Read, Write};
     use std::os::unix::fs::PermissionsExt;
     let dir = std::env::temp_dir().join(format!("b16-{}", Uuid::new_v4().simple()));
     std::fs::create_dir(&dir).unwrap();
+    let scratch = B16Scratch(dir.clone());
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     let socket = dir.join("s.sock");
     let token = dir.join("t");
@@ -9795,7 +9810,7 @@ fn b16_serve_once(
         stream.write_all(&response)?;
         stream.flush()
     });
-    (socket, token, handle)
+    (socket, token, handle, scratch)
 }
 
 /// The maximum-domain success response, built with real `serde_json` over the DECLARED shape.
@@ -9830,8 +9845,8 @@ fn b16_max_domain_response(body_len: usize) -> Vec<u8> {
 
 #[test]
 fn b16_the_maximum_domain_outcome_response_fits_and_one_byte_more_does_not() {
-    // The owner's Markdown bound is 1 MiB (`outcome.rs:68`, repeated at `artifact.rs:67`); it is a
-    // private const, so this test states the number rather than importing it -- see the report.
+    // Keep an independent literal for the owner's Markdown bound, so a contract change requires
+    // an explicit update to this witness rather than silently changing both sides.
     let at_bound = b16_max_domain_response(1_048_576);
     // Independent literal. B15's derivation is correct: 342 fixed bytes over the owner's closed
     // value domain. This file's first version used generic token maxima and got 482, which was
@@ -9842,7 +9857,7 @@ fn b16_the_maximum_domain_outcome_response_fits_and_one_byte_more_does_not() {
         "B16.OUTCOME.MAX_DOMAIN_FITS: closed-domain size"
     );
 
-    let (socket, token, stub) = b16_serve_once(at_bound.clone());
+    let (socket, token, stub, _scratch) = b16_serve_once(at_bound.clone());
     let client = beacond::LocalSupervisorClient::connect(&socket, &token).unwrap();
     let read = client.outcome_document(Uuid::new_v4(), Some(1));
     let stub_write = stub.join().unwrap();
@@ -9856,7 +9871,24 @@ fn b16_the_maximum_domain_outcome_response_fits_and_one_byte_more_does_not() {
         "B16.OUTCOME.MAX_DOMAIN_FITS: whole body"
     );
     println!("B16.MAX_DOMAIN.stub_write = {stub_write:?}");
-    let _ = std::fs::remove_dir_all(socket.parent().unwrap());
+
+    // Exercise the client, not just a comparison against the declared constant. JSON permits
+    // trailing whitespace, so this exact +1 response would decode successfully without the bound.
+    let mut over = at_bound;
+    over.push(b' ');
+    assert_eq!(over.len(), 4_194_648, "B16.OUTCOME.OVER_FIXTURE_IS_EXACT");
+    assert!(
+        serde_json::from_slice::<serde_json::Value>(&over).is_ok(),
+        "B16.OUTCOME.OVER_FIXTURE_IS_VALID_JSON"
+    );
+    let (socket, token, stub, _over_scratch) = b16_serve_once(over);
+    let client = beacond::LocalSupervisorClient::connect(&socket, &token).unwrap();
+    let refused = client.outcome_document(Uuid::new_v4(), Some(1));
+    println!("B16.OVER_LIMIT.stub_write = {:?}", stub.join().unwrap());
+    assert!(
+        matches!(refused, Err(beacond::LocalTransportError::Protocol)),
+        "B16.OUTCOME.RESPONSE_REMAINS_BOUNDED"
+    );
 }
 
 #[test]
@@ -9884,7 +9916,7 @@ fn b16_an_oversized_ordinary_response_is_still_refused() {
         "the fixture must exceed the ordinary bound"
     );
 
-    let (socket, token, stub) = b16_serve_once(response);
+    let (socket, token, stub, _scratch) = b16_serve_once(response);
     let client = beacond::LocalSupervisorClient::connect(&socket, &token).unwrap();
     let refused = client.mission_publications(Uuid::new_v4());
     println!("B16.ORDINARY.stub_write = {:?}", stub.join().unwrap());
@@ -9892,7 +9924,6 @@ fn b16_an_oversized_ordinary_response_is_still_refused() {
         matches!(refused, Err(beacond::LocalTransportError::Protocol)),
         "B16.ORDINARY.RESPONSE_BOUND_UNCHANGED: got {refused:?}"
     );
-    let _ = std::fs::remove_dir_all(socket.parent().unwrap());
 }
 
 #[test]
