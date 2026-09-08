@@ -2914,8 +2914,33 @@ fn astra_control_a_candidate_event_in_another_workspace_refuses_startup() {
             params![elsewhere.to_string()],
         )
         .unwrap();
-    connection.execute("INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms) VALUES (?1, 'workspace.created', ?2, 1)",
-        params![elsewhere.to_string(), serde_json::json!({"workspace_id": elsewhere, "name": "Elsewhere"}).to_string()]).unwrap();
+    connection
+        .execute(
+            "INSERT INTO events (
+                 workspace_id, kind, payload_json, occurred_at_ms,
+                 predecessor_kind, predecessor_digest, link_digest
+             ) VALUES (?1, 'workspace.created', ?2, 1, 'unchained', NULL, NULL)",
+            params![
+                elsewhere.to_string(),
+                serde_json::json!({"workspace_id": elsewhere, "name": "Elsewhere"}).to_string()
+            ],
+        )
+        .unwrap();
+    // R58: a second Workspace planted around the append path, in a test whose CONTROL half must
+    // reopen Ready. The store says what a fixture made it -- chained from here on -- rather than
+    // carrying a row the chain would refuse.
+    connection
+        .execute_batch(
+            "UPDATE events
+                SET predecessor_kind = 'unchained', predecessor_digest = NULL, link_digest = NULL;
+             UPDATE event_chain_state
+                SET genesis_kind = 'migrated',
+                    migrated_through_sequence = (SELECT max(sequence) FROM events),
+                    head_digest = NULL,
+                    head_sequence = (SELECT max(sequence) FROM events)
+              WHERE id = 1;",
+        )
+        .unwrap();
     astra_boot(&fixture).expect("the two-Workspace control is a legitimate store");
     assert_eq!(connection.execute("UPDATE events SET workspace_id = ?1 WHERE kind = 'artifact.recorded' AND json_extract(payload_json, '$.artifact.digest.value') = ?2",
         params![elsewhere.to_string(), prepared.candidate_artifact_digest]).unwrap(), 1);
@@ -3098,8 +3123,12 @@ fn kimi_startup_refuses_a_candidate_with_two_recording_events() {
         .store
         .connect()
         .execute(
-            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-             SELECT workspace_id, kind, payload_json, occurred_at_ms + 1 FROM events
+            "INSERT INTO events (
+                 workspace_id, kind, payload_json, occurred_at_ms,
+                 predecessor_kind, predecessor_digest, link_digest
+             )
+             SELECT workspace_id, kind, payload_json, occurred_at_ms + 1, 'unchained', NULL, NULL
+             FROM events
              WHERE kind = 'artifact.recorded'
                AND json_extract(payload_json, '$.artifact.digest.value') = ?1",
             params![prepared.candidate_artifact_digest],
@@ -6690,8 +6719,11 @@ fn every_spend_bearing_kind_makes_a_window_partial() {
         f.store
             .connect()
             .execute(
-                "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-                 VALUES (?1, ?2, '{}', 9000)",
+                "INSERT INTO events (
+                 workspace_id, kind, payload_json, occurred_at_ms,
+                 predecessor_kind, predecessor_digest, link_digest
+             )
+                 VALUES (?1, ?2, '{}', 9000, 'unchained', NULL, NULL)",
                 params![f.workspace_id.to_string(), kind],
             )
             .expect("the Event plants");

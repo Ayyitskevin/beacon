@@ -2120,8 +2120,11 @@ fn startup_refuses_a_duplicate_proposal_event() {
         .store
         .connect()
         .execute(
-            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-             SELECT workspace_id, kind, payload_json, occurred_at_ms
+            "INSERT INTO events (
+                 workspace_id, kind, payload_json, occurred_at_ms,
+                 predecessor_kind, predecessor_digest, link_digest
+             )
+             SELECT workspace_id, kind, payload_json, occurred_at_ms, 'unchained', NULL, NULL
              FROM events WHERE kind = 'proposal.submitted'",
             [],
         )
@@ -2324,8 +2327,11 @@ fn startup_refuses_a_missing_event_on_one_proposal_balanced_by_a_duplicate_on_an
     fixture.tamper(&format!(
         "DELETE FROM events WHERE kind = 'proposal.submitted'
            AND json_extract(payload_json, '$.proposal.digest.value') = '{}';
-         INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-         SELECT workspace_id, kind, payload_json, occurred_at_ms
+         INSERT INTO events (
+                 workspace_id, kind, payload_json, occurred_at_ms,
+                 predecessor_kind, predecessor_digest, link_digest
+             )
+         SELECT workspace_id, kind, payload_json, occurred_at_ms, 'unchained', NULL, NULL
          FROM events
          WHERE kind = 'proposal.submitted'
            AND json_extract(payload_json, '$.proposal.digest.value') = '{}';",

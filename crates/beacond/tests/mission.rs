@@ -630,6 +630,8 @@ fn schema_ten_migrates_without_rewriting_events_or_the_team_roster_guard() {
     let payload = json!({ "workspace_id": workspace_id, "name": "Personal" }).to_string();
     connection
         .execute(
+            // R58: this fixture builds a v10-shaped `events`, which has no chain columns. The
+            // chain's vocabulary belongs only where the chain's schema is.
             "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
              VALUES (?1, 'workspace.created', ?2, 7)",
             rusqlite::params![workspace_id.to_string(), payload],
@@ -1163,7 +1165,10 @@ fn a_store_at_the_previous_schema_version_migrates_and_keeps_its_condition_rows(
             // is not enough: the rebuilt definition has to come off too or the store no longer
             // matches schema 23. 0027 rebuilt `events` too; `restore_pre_0025_events` below
             // unwinds every rebuild at once, back to 0023's definition.
-            "DROP TRIGGER outcome_publications_no_update;
+            // R58: 0035's chain objects come off first, newest migration first.
+            "DROP TRIGGER event_chain_state_no_delete;
+             DROP TABLE event_chain_state;
+             DROP TRIGGER outcome_publications_no_update;
              DROP TRIGGER outcome_publications_no_delete;
              DROP INDEX outcome_publications_by_mission;
              DROP TABLE outcome_publications;
@@ -1817,8 +1822,11 @@ fn an_orphan_completion_event_fails_startup() {
     .to_string();
     connection
         .execute(
-            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-             VALUES (?1, 'mission.completed', ?2, 9001)",
+            "INSERT INTO events (
+                 workspace_id, kind, payload_json, occurred_at_ms,
+                 predecessor_kind, predecessor_digest, link_digest
+             )
+             VALUES (?1, 'mission.completed', ?2, 9001, 'unchained', NULL, NULL)",
             rusqlite::params![store.workspace_id.to_string(), payload],
         )
         .unwrap();
