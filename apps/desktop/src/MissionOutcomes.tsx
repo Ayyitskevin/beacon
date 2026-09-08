@@ -1,5 +1,5 @@
 import { makeStyles, shorthands, tokens } from "@fluentui/react-components";
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 import {
   type ExportedOutcome,
@@ -25,6 +25,13 @@ const useStyles = makeStyles({
     verticalAlign: "top",
   },
   digest: { fontFamily: tokens.fontFamilyMonospace, fontSize: tokens.fontSizeBase200 },
+  actions: {
+    display: "flex",
+    alignItems: "center",
+    columnGap: tokens.spacingHorizontalM,
+    marginTop: tokens.spacingVerticalM,
+    flexWrap: "wrap",
+  },
   document: {
     marginTop: tokens.spacingVerticalL,
     ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalM),
@@ -46,6 +53,15 @@ function decode(bytes: number[]): string {
   return new TextDecoder().decode(Uint8Array.from(bytes));
 }
 
+/// What the operator is told when the clipboard cannot be reached.
+///
+/// Fixed copy, never the thrown value: a `DOMException` string is about a browser API, not about
+/// what the operator can now do. The sentence names the fallback that is actually on screen -- the
+/// exact bytes are rendered above it -- which is the same shape the object-link copy already uses
+/// (`App.tsx:386-397`), where the text is placed in a visible field before the attempt.
+const CLIPBOARD_UNREACHABLE =
+  "Beacon could not reach the clipboard. The document above is the exact text; select and copy it.";
+
 export function MissionOutcomes({ missionId }: { missionId: string }): React.JSX.Element {
   const styles = useStyles();
   const headingId = useId();
@@ -53,6 +69,38 @@ export function MissionOutcomes({ missionId }: { missionId: string }): React.JSX
   const [selected, setSelected] = useState<number | null>(null);
   const [document, setDocument] = useState<ExportedOutcome | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [copyStatus, setCopyStatus] = useState<string | null>(null);
+  const [copying, setCopying] = useState(false);
+  // Which document any in-flight copy was started for. A clipboard promise that settles after the
+  // operator moved on must not drop a result beside bytes it was never about.
+  const selectionRef = useRef<string>("");
+
+  useEffect(() => {
+    selectionRef.current = `${missionId}#${selected ?? "none"}`;
+    setCopyStatus(null);
+    setCopying(false);
+  }, [missionId, selected]);
+
+  async function copyMarkdown(shown: ExportedOutcome): Promise<void> {
+    if (copying) return;
+    const startedFor = selectionRef.current;
+    // Decoded from the bytes ALREADY on screen: the same array the document renders, so the copy
+    // cannot be a different version, a re-render, or a fresh fetch of the newest.
+    const text = decode(shown.bytes);
+    setCopying(true);
+    setCopyStatus(null);
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
+      await navigator.clipboard.writeText(text);
+      if (selectionRef.current !== startedFor) return;
+      setCopyStatus(`Copied version ${shown.publicationVersion}'s stored Markdown.`);
+    } catch {
+      if (selectionRef.current !== startedFor) return;
+      setCopyStatus(CLIPBOARD_UNREACHABLE);
+    } finally {
+      if (selectionRef.current === startedFor) setCopying(false);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -159,6 +207,12 @@ export function MissionOutcomes({ missionId }: { missionId: string }): React.JSX
             Version {document.publicationVersion} of {document.publicationVersionCount} ·{" "}
             <span className={styles.digest}>{document.digest.value}</span> · {document.mediaType}
           </p>
+          <div className={styles.actions}>
+            <button type="button" onClick={() => void copyMarkdown(document)} disabled={copying}>
+              Copy Markdown
+            </button>
+            {copyStatus !== null && <span role="status">{copyStatus}</span>}
+          </div>
           <pre className={styles.document} aria-label="Outcome Document">
             {decode(document.bytes)}
           </pre>
