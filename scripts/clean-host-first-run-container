@@ -203,7 +203,7 @@ path, needle = sys.argv[1:]
 matches = []
 with open(path, encoding="utf-8") as handle:
     for row in csv.DictReader(handle, delimiter="\t"):
-        if row.get("text", "").strip().casefold() == needle.casefold():
+        if needle.casefold() in row.get("text", "").strip().casefold():
             matches.append(row)
 if len(matches) != 1:
     raise SystemExit(f"expected one OCR word {needle!r}, found {len(matches)}")
