@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 
@@ -309,4 +309,39 @@ it("does not leave a copy result beside a different version after a late clipboa
     screen.queryByText(/Copied version/),
     "B11.COPY.LATE_SETTLEMENT_IS_DISCARDED",
   ).not.toBeInTheDocument();
+});
+
+
+it("keeps a new copy pending when an older copy settles after returning to the same version", async () => {
+  mockCopyFixtures();
+  const settlements: Array<() => void> = [];
+  const user = userEvent.setup();
+  stubClipboard(() => new Promise<void>((resolve) => settlements.push(resolve)));
+  render(<MissionOutcomes missionId={missionId} />);
+
+  await user.click(await screen.findByRole("button", { name: "Show version 1" }));
+  await screen.findByLabelText("Outcome Document");
+  await user.click(screen.getByRole("button", { name: "Copy Markdown" }));
+  expect(settlements, "B11.COPY.FIRST_REQUEST_STARTED").toHaveLength(1);
+
+  await user.click(screen.getByRole("button", { name: "Show version 2" }));
+  expect(await screen.findByLabelText("Outcome Document")).toHaveTextContent("CURRENT");
+  await user.click(screen.getByRole("button", { name: "Show version 1" }));
+  expect(await screen.findByLabelText("Outcome Document")).toHaveTextContent("version one");
+  await user.click(screen.getByRole("button", { name: "Copy Markdown" }));
+  expect(settlements, "B11.COPY.SECOND_REQUEST_STARTED").toHaveLength(2);
+  expect(screen.getByRole("button", { name: "Copy Markdown" })).toBeDisabled();
+
+  try {
+    await act(async () => settlements[0]());
+    expect(
+      screen.getByRole("button", { name: "Copy Markdown" }),
+      "B11.COPY.OLDER_REQUEST_CANNOT_RELEASE_NEW_REQUEST",
+    ).toBeDisabled();
+    expect(screen.queryByText(/Copied version/), "B11.COPY.NEW_REQUEST_HAS_NOT_RESOLVED")
+      .not.toBeInTheDocument();
+  } finally {
+    await act(async () => settlements[1]());
+  }
+  expect(await screen.findByText("Copied version 1's stored Markdown.")).toBeVisible();
 });
