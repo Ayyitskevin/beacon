@@ -408,15 +408,74 @@ fn a_truncated_tail_is_refused_against_the_stored_head() {
         .expect_err("a truncated chain must refuse startup");
 }
 
-/// CELL: the record of where the chain begins, deleted. Without it nothing can say which rows were
-/// supposed to be chained.
+/// CELL: the record of where the chain begins, deleted, **with the schema left intact**.
+///
+/// My own six-arm sweep found this one. The first version dropped the trigger and left it dropped,
+/// so the store refused on its SCHEMA SIGNATURE and `StateMissing` was never reached -- silencing
+/// that fault survived this cell. The same shape as the two faults Fable measured, found by turning
+/// the same question on the arms nobody had asked about.
+///
+/// So the trigger is recreated from `sqlite_master`'s own stored text, which is byte-identical by
+/// construction. That is also the realistic tamper: anyone with SQL access who wanted the state row
+/// gone would put the trigger back.
 #[test]
 fn a_store_with_events_and_no_chain_state_is_refused() {
     let store = store("no-state");
+    let trigger: String = store
+        .connect()
+        .query_row(
+            "SELECT sql FROM sqlite_master
+              WHERE type = 'trigger' AND name = 'event_chain_state_no_delete'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the chain state's delete guard exists");
     store.tamper("DROP TRIGGER event_chain_state_no_delete; DELETE FROM event_chain_state;");
-    store
+    store.tamper(&trigger);
+    let refusal = store
         .restart()
         .expect_err("a store with no chain state must refuse startup");
+    assert!(
+        matches!(refusal, SupervisorError::EventChainBroken(_)),
+        "something other than the chain refused, so this cell measures that instead: {refusal:?}"
+    );
+    assert!(
+        refusal
+            .to_string()
+            .contains("no record of where its Event chain begins"),
+        "a chain fault refused, but not the one this cell is about: {refusal}"
+    );
+}
+
+/// CELL: one row's stored predecessor digest replaced, so the chain forks at a named seam.
+///
+/// The last arm with no witness of its own. `a_store_whose_genesis_is_gone_is_refused` reaches
+/// `HeadMismatch` on a fresh store rather than this fault, because a fresh store holds ONE chained
+/// Event and deleting it leaves nothing chained at all. This needs two, and it names both ends of
+/// the seam -- which is the whole argument for `PredecessorMismatch` carrying two sequences.
+#[test]
+fn a_row_that_names_the_wrong_predecessor_is_refused_between_two_sequences() {
+    let store = store_with_two_chained_events("wrong-predecessor");
+    let (sequence, _) = newest_chained(&store);
+    store.tamper(&format!(
+        "UPDATE events SET predecessor_digest = zeroblob(32) WHERE sequence = {sequence}"
+    ));
+    let refusal = store
+        .restart()
+        .expect_err("a row naming the wrong predecessor must refuse startup");
+    assert!(
+        matches!(refusal, SupervisorError::EventChainBroken(_)),
+        "something other than the chain refused, so this cell measures that instead: {refusal:?}"
+    );
+    let rendered = refusal.to_string();
+    assert!(
+        rendered.contains("is broken between sequence"),
+        "a chain fault refused, but not the one this cell is about: {rendered}"
+    );
+    assert!(
+        rendered.contains(&sequence.to_string()) && rendered.contains(&(sequence - 1).to_string()),
+        "the refusal must name both ends of the seam: {rendered}"
+    );
 }
 
 /// The five tampers that were ALREADY refused keep their own names.
