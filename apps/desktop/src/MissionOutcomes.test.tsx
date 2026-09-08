@@ -398,10 +398,16 @@ it("retries the selected version's failed document read without restarting", asy
   expect(payloads[1], "B14.RETRY.EXACT_TUPLE").toMatchObject({ missionId, version: 1 });
 
   // While that second read is still in flight, the operator can see that it is.
+  // Two deliberate choices, both so the NAME reaches the failure message. `queryByText`, not
+  // `getByText`: `get*` throws its own TestingLibraryElementError before `expect` runs. And
+  // `not.toBeNull`, not `toBeInTheDocument`: jest-dom rejects a null received inside the matcher
+  // ("received value must be an HTMLElement") before Vitest attaches the label, so the named
+  // witness never reaches the actual message either. A non-null `screen` query result is in the
+  // document by construction, so this asserts the same thing and says its own name when it fails.
   expect(
-    screen.getByText(/loading version 1/i),
+    screen.queryByText(/loading version 1/i),
     "B14.RETRY.PENDING_IS_VISIBLE",
-  ).toBeInTheDocument();
+  ).not.toBeNull();
   expect(screen.queryByRole("alert"), "B14.RETRY.ERROR_CLEARS").not.toBeInTheDocument();
 
   await act(async () => {
