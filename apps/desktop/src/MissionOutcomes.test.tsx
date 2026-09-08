@@ -362,34 +362,57 @@ const soleReadPublication = [
 /// Before this, the document effect keyed on [missionId, selected]; with one publication already
 /// selected, clicking its own button changed nothing and there was no way back short of restarting
 /// the desktop.
+///
+/// The second read is held UNRESOLVED on purpose. Resolving it immediately -- which this bar did
+/// first -- never lets the pending state exist, so suppressing the loading line on retry alone kept
+/// every Outcome bar green. The payload is captured and asserted in the test body, never inside the
+/// mock: an assertion that throws in there rejects the promise, and the component catches it as a
+/// read failure, so the bar would report the wrong thing.
 it("retries the selected version's failed document read without restarting", async () => {
   const user = userEvent.setup();
   let documentCalls = 0;
+  const payloads: unknown[] = [];
+  let resolveSecond: ((value: unknown) => void) | null = null;
   invokeMock.mockImplementation((command, payload) => {
     if (command === "mission_publications") return Promise.resolve(soleReadPublication);
     if (command === "outcome_document") {
       documentCalls += 1;
-      expect(payload, "B14.RETRY.EXACT_TUPLE").toMatchObject({ missionId, version: 1 });
-      return documentCalls === 1
-        ? Promise.reject(new Error("the read failed"))
-        : Promise.resolve(documentFor(1));
+      payloads.push(payload);
+      if (documentCalls === 1) return Promise.reject(new Error("the read failed"));
+      return new Promise((resolve) => {
+        resolveSecond = resolve;
+      });
     }
     return Promise.reject(new Error(`unexpected command: ${String(command)}`));
   });
 
   render(<MissionOutcomes missionId={missionId} />);
-  const alert = await screen.findByRole("alert");
-  expect(alert, "B14.RETRY.FAILURE_IS_SHOWN").toBeInTheDocument();
+  expect(await screen.findByRole("alert"), "B14.RETRY.FAILURE_IS_SHOWN").toBeInTheDocument();
   // The harness must have made a real call, or a retry could "pass" against nothing.
   expect(documentCalls, "B14.RETRY.FIRST_READ_HAPPENED").toBe(1);
 
   await user.click(screen.getByRole("button", { name: /retry/i }));
 
+  // The retry really asked, and asked for the retained Mission and version.
+  expect(documentCalls, "B14.RETRY.SECOND_READ_HAPPENED").toBe(2);
+  expect(payloads[1], "B14.RETRY.EXACT_TUPLE").toMatchObject({ missionId, version: 1 });
+
+  // While that second read is still in flight, the operator can see that it is.
+  expect(
+    screen.getByText(/loading version 1/i),
+    "B14.RETRY.PENDING_IS_VISIBLE",
+  ).toBeInTheDocument();
+  expect(screen.queryByRole("alert"), "B14.RETRY.ERROR_CLEARS").not.toBeInTheDocument();
+
+  await act(async () => {
+    resolveSecond?.(documentFor(1));
+    await Promise.resolve();
+  });
+
   expect(await screen.findByLabelText("Outcome Document")).toHaveTextContent(
     "Outcome, version one",
   );
-  expect(documentCalls, "B14.RETRY.SECOND_READ_HAPPENED").toBe(2);
-  expect(screen.queryByRole("alert"), "B14.RETRY.ERROR_CLEARS").not.toBeInTheDocument();
+  expect(screen.queryByRole("alert"), "B14.RETRY.ERROR_STAYS_CLEARED").not.toBeInTheDocument();
   expect(
     screen.queryByText(/loading version/i),
     "B14.RETRY.LOADING_DISAPPEARS",
