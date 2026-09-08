@@ -744,6 +744,16 @@ impl RenderedPdf {
 pub struct OutcomeService {
     accounts: Arc<OperatorAccountService>,
     workspace_id: Uuid,
+    /// Called once, immediately before the pure render, so a bar can HOLD the renderer boundary
+    /// and observe what the rest of the process can do while a render is in flight.
+    ///
+    /// **Compiled-out scope.** `#[cfg(test)]` is active only when this crate is built as its own
+    /// test harness. Any ordinary `cargo build`, the packaged desktop app and every downstream
+    /// consumer see an `OutcomeService` without this field: struct layout, public constructor and
+    /// every method signature are unchanged, and no release surface moves. Only this crate's own
+    /// unit tests can install one.
+    #[cfg(test)]
+    render_hold: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl OutcomeService {
@@ -751,7 +761,16 @@ impl OutcomeService {
         Self {
             accounts,
             workspace_id,
+            #[cfg(test)]
+            render_hold: None,
         }
+    }
+
+    /// Install the renderer-boundary hold. Test-only; see the field's compiled-out note.
+    #[cfg(test)]
+    fn holding_the_renderer(mut self, hold: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.render_hold = Some(hold);
+        self
     }
 
     /// Store one manifest and record the Markdown it renders to as a candidate Artifact, in one
@@ -996,29 +1015,35 @@ impl OutcomeService {
         mission_id: Uuid,
         publication_version: u32,
     ) -> Result<RenderedPdf, PublishRefusal> {
-        self.accounts.with_authenticated_store(|connection, _now| {
-            let published = get_version_within(
-                connection,
-                self.workspace_id,
-                mission_id,
-                publication_version,
-            )?;
-            let renderer_version = published.manifest().manifest().renderer_version.clone();
-            let exported = ExportedOutcome::from(published);
-            let bytes = crate::outcome_pdf::render_pdf(
-                exported.bytes(),
-                &renderer_version,
-                &exported.digest().value,
-                &crate::outcome_pdf::BEACON_OUTCOME_1,
-            )
-            .map_err(PublishRefusal::Pdf)?;
-            Ok(RenderedPdf {
-                bytes,
-                candidate_digest: exported.digest().clone(),
-                publication_version: exported.publication_version(),
-                publication_version_count: exported.publication_version_count(),
-                profile: crate::outcome_pdf::BEACON_OUTCOME_1.name,
-            })
+        // The authenticated read and the pure render are two phases, and only the first needs the
+        // store. `get_version` runs the same `get_version_within` under the same guard and hands
+        // back an OWNED `PublishedOutcome`, so the guard is released before Typst runs -- which
+        // matters because `with_authenticated_store` holds the account mutex that
+        // `OperatorAccountService::lock` also takes: a render inside it blocks the Operator's own
+        // session lock for the length of a document render.
+        //
+        // Nothing about the read moves. Same function, same refusals, same manifest-sourced
+        // renderer version, same fields; a locked session still refuses here, before any render.
+        let published = self.get_version(mission_id, publication_version)?;
+        let renderer_version = published.manifest().manifest().renderer_version.clone();
+        let exported = ExportedOutcome::from(published);
+        #[cfg(test)]
+        if let Some(hold) = self.render_hold.clone() {
+            hold();
+        }
+        let bytes = crate::outcome_pdf::render_pdf(
+            exported.bytes(),
+            &renderer_version,
+            &exported.digest().value,
+            &crate::outcome_pdf::BEACON_OUTCOME_1,
+        )
+        .map_err(PublishRefusal::Pdf)?;
+        Ok(RenderedPdf {
+            bytes,
+            candidate_digest: exported.digest().clone(),
+            publication_version: exported.publication_version(),
+            publication_version_count: exported.publication_version_count(),
+            profile: crate::outcome_pdf::BEACON_OUTCOME_1.name,
         })
     }
 
@@ -2236,5 +2261,593 @@ mod name_witness {
                 "R42S3.MANIFEST.ManifestTooLarge.CONTEXT"
             );
         }
+    }
+}
+
+/// B24 -- the PDF render must not hold the account guard.
+///
+/// **Where this recipe comes from.** The fixture below is the existing public-owner recipe from
+/// `crates/beacond/tests/outcome_prepare.rs` (`:48-94`, `:157-343`, and the `impl Fixture` members
+/// `latest_event_seq`, `complete*`, `classify*`, `evaluations`/`evaluate*`, `artifacts`,
+/// `publishable`), copied here and re-pointed from `beacond::` to `crate::`. It lives here rather
+/// than being reused from there because `#[cfg(test)]` items are invisible to integration tests:
+/// the renderer hold this bar needs cannot exist without changing the release surface unless the
+/// bar is a unit test. Conductor ruling B24-A authorised exactly this copy, narrowly, for the two
+/// bars at the end. It is NOT a general fixture framework and nothing else should grow into it.
+#[cfg(test)]
+mod b24_render_lock_witness {
+    use super::*;
+    use crate::*;
+    use std::fs;
+    use std::io::{Read, Write};
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+    use std::path::PathBuf;
+    use std::sync::mpsc;
+    use std::thread::{self, JoinHandle};
+
+    use rusqlite::{Connection, params};
+    use uuid::Uuid;
+
+    const CONDITION_TEXT: &str = "Relevant gates pass";
+
+    struct TestStore {
+        path: PathBuf,
+    }
+
+    impl TestStore {
+        fn new(label: &str) -> Self {
+            Self {
+                path: std::env::temp_dir().join(format!(
+                    "beacond-outcome-prepare-{label}-{}.sqlite3",
+                    Uuid::new_v4()
+                )),
+            }
+        }
+
+        fn connect(&self) -> Connection {
+            Connection::open(&self.path).unwrap()
+        }
+    }
+
+    impl Drop for TestStore {
+        fn drop(&mut self) {
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = fs::remove_file(format!("{}{suffix}", self.path.display()));
+            }
+        }
+    }
+
+    struct Fixture {
+        store: TestStore,
+        accounts: Arc<OperatorAccountService>,
+        workspace_id: Uuid,
+        project_id: Uuid,
+        mission_id: Uuid,
+        resident_id: Uuid,
+        configuration_id: Uuid,
+        other_resident_id: Uuid,
+        other_configuration_id: Uuid,
+        policy_revision: u32,
+        charter_revision: u32,
+        outcomes: OutcomeService,
+    }
+
+    /// A Workspace with one Project, one published Policy revision, and one admitted Mission whose
+    /// roster holds two Residents at their exact admission Configurations.
+    fn admitted_mission(label: &str) -> Fixture {
+        let store = TestStore::new(label);
+        let report = Supervisor::bootstrap(StartupConfig {
+            store_path: store.path.clone(),
+            initial_workspace_name: "Personal".to_owned(),
+        })
+        .unwrap();
+        let workspace_id = report.workspace.id;
+        let accounts = Arc::new(OperatorAccountService::open(&store.path).unwrap());
+        accounts
+            .begin_password_setup(
+                SecretString::new("a long local passphrase".to_owned()),
+                SecretString::new("a long local passphrase".to_owned()),
+            )
+            .unwrap();
+        assert_eq!(
+            accounts.complete_operator_setup(true).unwrap().phase,
+            OperatorSessionPhase::Unlocked
+        );
+
+        let admitted = admit_mission_in(&accounts, workspace_id);
+        Fixture {
+            outcomes: OutcomeService::new(Arc::clone(&accounts), workspace_id),
+            store,
+            accounts,
+            workspace_id,
+            project_id: admitted.project_id,
+            mission_id: admitted.mission_id,
+            resident_id: admitted.resident_id,
+            configuration_id: admitted.configuration_id,
+            other_resident_id: admitted.other_resident_id,
+            other_configuration_id: admitted.other_configuration_id,
+            policy_revision: admitted.policy_revision,
+            charter_revision: admitted.charter_revision,
+        }
+    }
+
+    /// One Workspace's Project, Policy, Residents, Team and admitted Mission.
+    ///
+    /// Split out of `admitted_mission` so a test can build a SECOND Workspace in the SAME store: the
+    /// block needs nothing but an authenticated account service and a Workspace id, and the startup
+    /// pass is about what happens across Workspaces.
+    struct AdmittedMission {
+        project_id: Uuid,
+        mission_id: Uuid,
+        resident_id: Uuid,
+        configuration_id: Uuid,
+        other_resident_id: Uuid,
+        other_configuration_id: Uuid,
+        policy_revision: u32,
+        charter_revision: u32,
+    }
+
+    fn admit_mission_in(
+        accounts: &Arc<OperatorAccountService>,
+        workspace_id: Uuid,
+    ) -> AdmittedMission {
+        let accounts = Arc::clone(accounts);
+        let project = ProjectService::new(Arc::clone(&accounts), workspace_id)
+            .create(ProjectDraft {
+                name: "Beacon Alpha".to_owned(),
+                charter: ProjectCharterDraft {
+                    purpose: "Prove the local agent office.".to_owned(),
+                    desired_outcomes: vec!["Complete one attributable Mission".to_owned()],
+                    constraints: vec!["Keep authority explicit".to_owned()],
+                    prohibitions: vec!["Do not deploy".to_owned()],
+                    autonomy_profile: AutonomyProfile::Supervised,
+                },
+            })
+            .unwrap();
+        let policy = ProjectPolicyService::new(Arc::clone(&accounts), workspace_id)
+            .publish(
+                project.id,
+                project.charter.revision,
+                None,
+                ProjectPolicyDraft {
+                    team_lead_selection: TeamLeadSelectionPolicy {
+                        required_capabilities: vec![BeaconCapability::WorkCoordinateMission],
+                        availability_rule: TeamLeadAvailabilityRule::CurrentTeamEligibility,
+                        track_record_requirements: vec![TrackRecordRequirement {
+                            evidence_kind: TrackRecordEvidenceKind::MissionOutcome,
+                            minimum_count: 1,
+                        }],
+                        conflict_rule: TeamLeadConflictRule::RequireNoDeclaredConflict,
+                        ambiguity_rule: TeamLeadAmbiguityRule::RequireOperatorDecision,
+                    },
+                },
+            )
+            .unwrap();
+
+        let residents = StarterOrganizationService::new(Arc::clone(&accounts), workspace_id)
+            .accept(
+                1,
+                vec![
+                    StarterResidentDraft {
+                        role: StarterRole::Lead,
+                        display_name: None,
+                    },
+                    StarterResidentDraft {
+                        role: StarterRole::Builder,
+                        display_name: None,
+                    },
+                ],
+            )
+            .unwrap()
+            .residents;
+        let lifecycle = ResidentLifecycleService::new(Arc::clone(&accounts), workspace_id);
+        for resident in &residents {
+            lifecycle.activate(resident.id, None).unwrap();
+        }
+
+        let (address, ollama) = serve_ollama_inspections(2);
+        let models = LocalModelActivationService::new(
+            Arc::clone(&accounts),
+            workspace_id,
+            LocalModelEndpoint::new(address).unwrap(),
+        );
+        let review = models
+            .inspect(
+                "qwen3.8:27b",
+                "22130167c4c20e20c7b71454612966ca8e8171e9b3cc8ab6ce8aa6cbfec79643",
+            )
+            .unwrap();
+        let activation = models
+            .activate(review, vec![ProviderFeature::Completion])
+            .unwrap();
+        ollama.join().unwrap();
+
+        let configurations = residents
+            .iter()
+            .map(|resident| {
+                ResidentConfigurationService::new(Arc::clone(&accounts), workspace_id)
+                    .configure(
+                        resident.id,
+                        None,
+                        activation.id,
+                        vec![
+                            BeaconCapability::WorkCreateMission,
+                            BeaconCapability::WorkCoordinateMission,
+                        ],
+                    )
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let team = TeamService::new(Arc::clone(&accounts), workspace_id)
+            .form(TeamDraft {
+                project_id: project.id,
+                name: "Mission Team".to_owned(),
+                members: configurations
+                    .iter()
+                    .map(|configuration| TeamMemberDraft {
+                        resident_id: configuration.resident_id,
+                        expected_configuration_id: configuration.id,
+                    })
+                    .collect(),
+            })
+            .unwrap();
+        let mission = MissionService::new(Arc::clone(&accounts), workspace_id)
+            .admit(MissionDraft {
+                project_id: project.id,
+                expected_charter_revision: project.charter.revision,
+                team_id: team.id,
+                desired_outcome: "Ship one reviewed Beacon feature.".to_owned(),
+                success_conditions: vec![CONDITION_TEXT.to_owned()],
+                constraints: vec!["Keep the change reversible".to_owned()],
+                prohibitions: vec!["Do not deploy".to_owned()],
+                members: configurations
+                    .iter()
+                    .map(|configuration| MissionMemberDraft {
+                        resident_id: configuration.resident_id,
+                        expected_configuration_id: configuration.id,
+                    })
+                    .collect(),
+            })
+            .unwrap();
+
+        AdmittedMission {
+            project_id: project.id,
+            mission_id: mission.id,
+            resident_id: configurations[0].resident_id,
+            configuration_id: configurations[0].id,
+            other_resident_id: configurations[1].resident_id,
+            other_configuration_id: configurations[1].id,
+            policy_revision: policy.revision,
+            charter_revision: project.charter.revision,
+        }
+    }
+    impl Fixture {
+        fn latest_event_seq(&self) -> u64 {
+            self.store
+                .connect()
+                .query_row(
+                    "SELECT coalesce(max(sequence), 0) FROM events WHERE workspace_id = ?1",
+                    params![self.workspace_id.to_string()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map(|sequence| u64::try_from(sequence).unwrap())
+                .unwrap()
+        }
+        /// One recorded completion, accountable to `resident_id` at its admission Configuration.
+        fn complete(&self, accountable: (Uuid, Uuid)) -> (String, MissionCompletionV1) {
+            self.complete_with(accountable, Vec::new())
+        }
+
+        /// One recorded completion carrying the given unfinished-work items -- text the document must
+        /// read back through the completion's own record, never through a collected projection.
+        fn complete_with(
+            &self,
+            accountable: (Uuid, Uuid),
+            unfinished_work: Vec<NarrativeItem<UnfinishedKind>>,
+        ) -> (String, MissionCompletionV1) {
+            let boundary = self.latest_event_seq();
+            let record = MissionCompletionV1 {
+                workspace_id: self.workspace_id,
+                project_id: self.project_id,
+                mission_id: self.mission_id,
+                completion_id: Uuid::new_v4(),
+                actor: CompletionActor::Operator,
+                accountable_resident_id: accountable.0,
+                accountable_resident_configuration_id: accountable.1,
+                boundary_event_seq: boundary,
+                disposition: CompletionDisposition::Concluded,
+                declared_conditions_sha256: declared_conditions_digest(
+                    &[CONDITION_TEXT.to_owned()],
+                ),
+                condition_results: vec![ConditionResultRecord {
+                    ordinal: 0,
+                    outcome: ConditionOutcome::Met,
+                    support: vec![],
+                    note: None,
+                }],
+                delivered_artifacts: vec![],
+                unfinished_work,
+                uncertainty: vec![],
+                spend: SpendReference::NotMeasured(
+                    "No spend record exists for this Mission.".to_owned(),
+                ),
+                supersedes: CompletionSupersedes::None,
+                summary: "One reviewed feature shipped.".to_owned(),
+                completed_at_ms: 1_788_400_000_000,
+            };
+            let mut connection = self.store.connect();
+            let digest =
+                record_completion(&mut connection, &record).expect("the completion records");
+            (digest, record)
+        }
+
+        /// One recorded Mission impact classification at the requested impact level.
+        fn classify(&self, impact: ImpactLevel) -> (Uuid, u32, String) {
+            self.classify_version(impact, 1)
+        }
+
+        /// A classification at an explicit version -- a Mission classified twice has a version 2, and
+        /// which one an Outcome cites depends on where the completion's boundary falls (R23.4).
+        fn classify_version(&self, impact: ImpactLevel, version: u32) -> (Uuid, u32, String) {
+            let classification = MissionImpactClassificationV1 {
+                workspace_id: self.workspace_id,
+                mission_id: self.mission_id,
+                classification_id: Uuid::new_v4(),
+                version,
+                impact,
+                basis: ClassificationBasis::OperatorDeclared,
+                policy: PolicyRevisionRef {
+                    project_id: self.project_id,
+                    policy_revision: self.policy_revision,
+                    charter_revision: self.charter_revision,
+                },
+                rule_id: None,
+                reason: "The Mission writes to the Operator's own repository.".to_owned(),
+                classified_by: ClassificationActor::Operator,
+                classified_at_ms: 1_788_400_000_000,
+                supersedes: ClassificationSupersedes::None,
+            };
+            let bytes = classification.canonical_bytes().unwrap();
+            let recorded = MissionImpactService::new(Arc::clone(&self.accounts), self.workspace_id)
+                .classify(&bytes)
+                .expect("the classification records");
+            (
+                classification.classification_id,
+                classification.version,
+                recorded.digest().value.clone(),
+            )
+        }
+        fn evaluations(&self) -> EvaluationService {
+            EvaluationService::new(Arc::clone(&self.accounts), self.workspace_id)
+        }
+
+        /// One Evaluation of the given candidate, by the OTHER Resident -- the independent evaluator
+        /// `publish` requires. `verdict` is a parameter because "not `meets`" is several answers.
+        fn evaluate(&self, candidate_digest: &str, verdict: Verdict) -> Evaluation {
+            self.evaluate_as(
+                candidate_digest,
+                verdict,
+                (self.other_resident_id, self.other_configuration_id),
+            )
+        }
+
+        fn evaluate_as(
+            &self,
+            candidate_digest: &str,
+            verdict: Verdict,
+            evaluator: (Uuid, Uuid),
+        ) -> Evaluation {
+            self.evaluations()
+                .record(EvaluationDraft {
+                    subject: EvaluationSubjectDraft::Artifact(candidate_digest.to_owned()),
+                    evaluator: Evaluator {
+                        resident_id: evaluator.0,
+                        configuration_id: evaluator.1,
+                    },
+                    rubric: RubricDeclaration {
+                        id: "outcome-document-v1".to_owned(),
+                        version: 1,
+                        canonicalizer: "beacon.rubric.v1".to_owned(),
+                        sha256: data_encoding::HEXLOWER.encode(&[0x20_u8; 32]),
+                    },
+                    cited_runs: Vec::new(),
+                    verdict,
+                    findings: vec![Finding {
+                        severity: FindingSeverity::Note,
+                        summary: "Read the exact candidate bytes.".to_owned(),
+                    }],
+                    conflicts: Conflicts::None,
+                    rationale: "An independent Resident read the exact candidate bytes.".to_owned(),
+                    supersedes: EvaluationSupersedes::None,
+                })
+                .expect("the Evaluation records")
+        }
+        fn artifacts(&self) -> ArtifactService {
+            ArtifactService::new(Arc::clone(&self.accounts), self.workspace_id)
+        }
+        fn publishable(&self) -> (OutcomeCandidate, ArtifactDigest, EvaluationDigest) {
+            let candidate = self
+                .outcomes
+                .prepare_for_mission(self.mission_id, AppendixRequest::PolicyDefault)
+                .expect("the Mission prepares");
+            let record = self
+                .artifacts()
+                .get(&candidate.candidate_artifact_digest)
+                .expect("the candidate reads");
+            let evaluation = self.evaluate(&candidate.candidate_artifact_digest, Verdict::Meets);
+            let evaluation_digest = evaluation.digest().clone();
+            (candidate, record.digest().clone(), evaluation_digest)
+        }
+    }
+
+    fn tags_response() -> String {
+        "{\"models\":[{\"name\":\"qwen3.8:27b\",\"model\":\"qwen3.8:27b\",\
+         \"modified_at\":\"2026-08-14T14:38:20.13373148-04:00\",\"size\":17741872154,\
+         \"digest\":\"22130167c4c20e20c7b71454612966ca8e8171e9b3cc8ab6ce8aa6cbfec79643\",\
+         \"details\":{\"format\":\"gguf\",\"family\":\"qwen35\",\"families\":[\"qwen35\"],\
+         \"parameter_size\":\"27.3B\",\"quantization_level\":\"Q4_K_M\"}}]}"
+            .to_owned()
+    }
+
+    fn read_http_request(stream: &mut impl Read) -> String {
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let size = stream.read(&mut chunk).unwrap();
+            assert!(size > 0);
+            request.extend_from_slice(&chunk[..size]);
+            let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+            else {
+                continue;
+            };
+            let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            if request.len() >= header_end + 4 + content_length {
+                return String::from_utf8(request).unwrap();
+            }
+        }
+    }
+
+    fn serve_ollama_inspections(count: usize) -> (SocketAddr, JoinHandle<()>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            for _ in 0..count {
+                for expected in ["GET /api/tags", "POST /api/show", "GET /api/tags"] {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let request = read_http_request(&mut stream);
+                    assert!(request.starts_with(expected), "unexpected: {request}");
+                    let body = if expected.starts_with("POST") {
+                        "{\"capabilities\":[\"completion\",\"tools\"]}".to_owned()
+                    } else {
+                        tags_response()
+                    };
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                         Connection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .unwrap();
+                }
+            }
+        });
+        (address, handle)
+    }
+
+    /// The ordering property, through the ACTUAL public method.
+    ///
+    /// While the renderer boundary is held inside `render_pdf_version`, the operator's own
+    /// `lock()` must be able to COMPLETE. The hold is per-instance and released on every path,
+    /// including a failed assertion, so a red bar cannot wedge the suite.
+    #[test]
+    fn a_pdf_render_in_flight_does_not_block_the_operator_lock() {
+        let fixture = admitted_mission("b24-render-lock");
+        fixture.classify(ImpactLevel::Ordinary);
+        fixture.complete((fixture.resident_id, fixture.configuration_id));
+        let (_candidate, candidate_digest, evaluation_digest) = fixture.publishable();
+        fixture
+            .outcomes
+            .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
+            .expect("B24.SETUP.PUBLISHED");
+
+        let (entered_tx, entered_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+        let held = OutcomeService::new(Arc::clone(&fixture.accounts), fixture.workspace_id)
+            .holding_the_renderer(Arc::new(move || {
+                entered_tx
+                    .send(())
+                    .expect("B24.HARNESS: the bar stopped listening");
+                let _ = release_rx
+                    .lock()
+                    .expect("B24.HARNESS: the handshake mutex is poisoned")
+                    .recv_timeout(std::time::Duration::from_secs(30));
+            }));
+
+        let mission_id = fixture.mission_id;
+        let renderer = std::thread::spawn(move || held.render_pdf_version(mission_id, 1));
+
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("B24.HARNESS: the renderer boundary was never entered");
+
+        // The renderer is now held INSIDE `render_pdf_version`. The property is ORDERING: the
+        // lock must COMPLETE while the hold is still in place. `lock()` blocks rather than
+        // failing when the guard is taken, so "did it eventually succeed" is not the question --
+        // a render that holds the guard still answers yes, thirty seconds later.
+        let locker_accounts = Arc::clone(&fixture.accounts);
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let locker = std::thread::spawn(move || {
+            let outcome = locker_accounts.lock();
+            let _ = locked_tx.send(());
+            outcome
+        });
+
+        // A bounded observation, not a sleep that grants a pass: if the lock has not completed
+        // while the renderer is held, this window closes and the bar fails.
+        let completed_while_held = locked_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .is_ok();
+
+        // Release on every path, including the assertion below failing.
+        let _ = release_tx.send(());
+        let locked = locker
+            .join()
+            .expect("B24.HARNESS: the locker thread panicked");
+        let rendered = renderer
+            .join()
+            .expect("B24.HARNESS: the renderer thread panicked");
+
+        assert!(
+            completed_while_held,
+            "B24.PDF.RENDER_DOES_NOT_HOLD_THE_ACCOUNT_GUARD: lock() did not complete while the renderer was held"
+        );
+        assert_eq!(
+            locked.expect("B24.HARNESS: the lock itself failed").phase,
+            OperatorSessionPhase::Locked,
+            "B24.PDF.RENDER_DOES_NOT_HOLD_THE_ACCOUNT_GUARD"
+        );
+        assert!(
+            rendered.is_ok(),
+            "B24.PDF.OWNED_READ_COMPLETES: a render already past its read must still finish, got {rendered:?}"
+        );
+    }
+
+    /// Positive control: a read that STARTS while the session is locked still refuses through the
+    /// existing owner fault. Moving the render out of the guard must not move the read.
+    #[test]
+    fn a_locked_session_still_refuses_the_pdf_read_by_its_existing_fault() {
+        let fixture = admitted_mission("b24-locked-read");
+        fixture.classify(ImpactLevel::Ordinary);
+        fixture.complete((fixture.resident_id, fixture.configuration_id));
+        let (_candidate, candidate_digest, evaluation_digest) = fixture.publishable();
+        fixture
+            .outcomes
+            .publish(fixture.mission_id, &candidate_digest, &evaluation_digest)
+            .expect("B24.SETUP.PUBLISHED");
+
+        assert_eq!(
+            fixture.accounts.lock().expect("B24.SETUP.LOCKS").phase,
+            OperatorSessionPhase::Locked
+        );
+        let refused = fixture.outcomes.render_pdf_version(fixture.mission_id, 1);
+        assert!(
+            matches!(
+                refused,
+                Err(PublishRefusal::Account(
+                    OperatorAccountError::NotAuthenticated
+                ))
+            ),
+            "B24.PDF.LOCKED_READ_REFUSES_UNCHANGED: got {refused:?}"
+        );
     }
 }
