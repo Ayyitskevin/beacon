@@ -77,9 +77,9 @@ const _: () =
 ///
 /// Derived from the CLOSED value domain, not from generic token maxima:
 ///
-/// * `bytes: Vec<u8>` serialises as a JSON number array, so `N` body bytes cost at most
+/// * `bytes: Vec<u8>` serialises as a JSON number array, so a nonempty body of `N` bytes costs at most
 ///   `2` brackets + `3N` digits + `N - 1` commas = **`4N + 1`**.
-/// * the rest is a fixed **342** bytes. Every other field is a closed value, not a bounded one:
+/// * the remaining fields add at most **342** bytes at the maximum version widths:
 ///   `protocol` is the literal `1`, the tag is the fixed ASCII `outcome_document`, `error` is
 ///   `null`, both versions are `u32` (<= 10 digits), and the exported digest is built by
 ///   `digest_envelope` (`artifact.rs:250-256`) as `sha256` / `beacon.artifact.v1` / 64 lowercase
@@ -3929,14 +3929,14 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        CandidateDocumentFault, DigestEnvelopeDto, ExportedOutcome, LocalCommand, LocalErrorCode, LocalResult,
-        LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer, LocalTransportError,
-        MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES, MAX_COMPLETION_PREVIEW_RESPONSE_BYTES,
-        MAX_COMPLETION_REQUEST_BYTES, MAX_MESSAGE_BYTES, OUTCOME_DOCUMENT_RESPONSE_BYTES,
-        OutcomeCandidateDocumentDto, PROTOCOL_VERSION, PostPreparationFault, PreparedOutcomeCandidateDto,
-        RequestEnvelope, ResponseEnvelope, WireError, WireSecret,
-        accepts_completion_sized_request, initialize_local_auth_token, load_local_auth_token,
-        response_from_transport_error, response_max,
+        CandidateDocumentFault, DigestEnvelopeDto, ExportedOutcome, LocalCommand, LocalErrorCode,
+        LocalResult, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
+        LocalTransportError, MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES,
+        MAX_COMPLETION_PREVIEW_RESPONSE_BYTES, MAX_COMPLETION_REQUEST_BYTES, MAX_MESSAGE_BYTES,
+        OUTCOME_DOCUMENT_RESPONSE_BYTES, OutcomeCandidateDocumentDto, PROTOCOL_VERSION,
+        PostPreparationFault, PreparedOutcomeCandidateDto, RequestEnvelope, ResponseEnvelope,
+        WireError, WireSecret, accepts_completion_sized_request, initialize_local_auth_token,
+        load_local_auth_token, response_from_transport_error, response_max,
     };
     use crate::outcome::MalformedOutcome;
     use crate::outcome_assembler::{AssemblyRefusal, SourcesRefusal};
@@ -4017,7 +4017,7 @@ mod tests {
     }
 
     #[test]
-    fn b16_one_valid_byte_over_the_outcome_ceiling_is_refused() {
+    fn b16_one_byte_over_the_ceiling_remains_valid_json() {
         // Exactly one byte over, and still valid JSON: one trailing ASCII space, which serde
         // accepts. A malformed suffix would refuse for parsing, proving nothing about the bound.
         let mut over = b16_max_domain_response(1024 * 1024);
@@ -4031,10 +4031,8 @@ mod tests {
             serde_json::from_slice::<ResponseEnvelope>(&over).is_ok(),
             "B16.OUTCOME.RESPONSE_REMAINS_BOUNDED: the +1 body must be valid JSON"
         );
-        assert!(
-            over.len() as u64 > OUTCOME_DOCUMENT_RESPONSE_BYTES,
-            "B16.OUTCOME.RESPONSE_REMAINS_BOUNDED: one byte over the ceiling is over it"
-        );
+        // This proves fixture validity. The integration test sends this shape through the
+        // actual client and requires its Protocol refusal; arithmetic alone cannot prove that.
     }
 
     /// The decisive incoming-bound bar: the ACTUAL `read_request`, over a real socket.
@@ -4048,6 +4046,18 @@ mod tests {
 
         let root = std::env::temp_dir().join(format!("b16-req-{}", Uuid::new_v4().simple()));
         fs::create_dir(&root).unwrap();
+        struct Scratch(std::path::PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                if let Err(error) = fs::remove_dir_all(&self.0) {
+                    if !std::thread::panicking() {
+                        panic!("B16.REQUEST.SCRATCH_REMOVED: {error}");
+                    }
+                    eprintln!("B16.REQUEST.SCRATCH_REMOVED during unwind: {error}");
+                }
+            }
+        }
+        let _scratch = Scratch(root.clone());
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         let token_path = root.join("beacond.token");
         initialize_local_auth_token(&token_path).unwrap();
@@ -4121,8 +4131,6 @@ mod tests {
             matches!(refused, Err(LocalTransportError::Protocol)),
             "B16.REQUEST.BOUND_UNCHANGED: an oversized valid request must be refused as Protocol"
         );
-
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
