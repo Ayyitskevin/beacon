@@ -147,7 +147,13 @@ if [ ! -x "$driver" ]; then
     echo "clean-host-first-run: container driver is absent or not executable: $driver" >&2
     exit 1
 fi
+band_script="$(pwd)/scripts/clean-host-first-run-band.py"
 state_helper="$(pwd)/scripts/clean-host-first-run-state"
+if [ ! -r "$band_script" ]; then
+    set_matrix_field input status absent
+    echo "clean-host-first-run: band script is absent or unreadable: $band_script" >&2
+    exit 1
+fi
 if [ ! -r "$state_helper" ]; then
     set_matrix_field input status absent
     echo "clean-host-first-run: state helper is absent or unreadable: $state_helper" >&2
@@ -176,6 +182,7 @@ for index in "${!labels[@]}"; do
         --volume "$appimage:/opt/beacon/Beacon.AppImage:ro" \
         --volume "$driver:/opt/beacon/drive-first-run:ro" \
         --volume "$state_helper:/opt/beacon/first-run-state:ro" \
+        --volume "$band_script:/opt/beacon/first-run-band:ro" \
         --volume "$output:/evidence" \
         --env "BEACON_EVIDENCE_UID=$(id -u)" \
         --env "BEACON_EVIDENCE_GID=$(id -g)" \
