@@ -263,6 +263,89 @@ pub enum ChainFault {
     StateMissing,
 }
 
+/// The six operator sentences, in one place: **the table Kevin signs** (R58.2).
+///
+/// Each row is (variant name, sentence template). [`ChainFault::sentence`] renders a row by
+/// substituting the variant's own fields for `{sequence}`, `{previous}`, `{expected_sequence}` and
+/// `{found_sequence}`, and `SupervisorError`'s `Display` writes that string and nothing else. So
+/// signing or rewriting a sentence is ONE edit in ONE place, and the witness --
+/// `every_chain_fault_speaks_its_own_signed_sentence` below -- reads the same bytes it does.
+///
+/// A rewrite that misses half the job goes RED: editing the supervisor's arm instead of this table,
+/// dropping a row's `{sequence}` placeholder so a fault stops naming where it failed, swapping the
+/// two numbers of a two-number row, or giving two faults the same sentence.
+///
+/// One rendered line is duplicated on purpose. `LinkDigestMismatch`'s is also a literal row of
+/// R42's closed `expected_startup` table in `lib.rs`, which is an INDEPENDENT copy by design --
+/// that is the closed table's whole job. Rewriting this row without that one goes RED there, and
+/// the report says so.
+pub const OPERATOR_SENTENCES: [(&str, &str); 6] = [
+    (
+        "LinkDigestMismatch",
+        "Event sequence {sequence} was edited after it was recorded",
+    ),
+    (
+        "PredecessorMismatch",
+        "the Event chain is broken between sequence {previous} and sequence {sequence}",
+    ),
+    (
+        "GenesisNotFirst",
+        "Event sequence {sequence} claims to begin a chain that had already begun",
+    ),
+    (
+        "UnchainedAfterBoundary",
+        "Event sequence {sequence} was recorded outside the Event chain",
+    ),
+    (
+        "HeadMismatch",
+        "the Event chain ends at sequence {found_sequence}, and this store records its head at \
+         sequence {expected_sequence}",
+    ),
+    (
+        "StateMissing",
+        "this store holds Events and no record of where its Event chain begins",
+    ),
+];
+
+impl ChainFault {
+    /// The row of [`OPERATOR_SENTENCES`] this fault speaks with.
+    ///
+    /// Exhaustive on purpose: a seventh fault does not compile until someone has written it a
+    /// sentence for Kevin to sign.
+    fn row(&self) -> usize {
+        match self {
+            Self::LinkDigestMismatch { .. } => 0,
+            Self::PredecessorMismatch { .. } => 1,
+            Self::GenesisNotFirst { .. } => 2,
+            Self::UnchainedAfterBoundary { .. } => 3,
+            Self::HeadMismatch { .. } => 4,
+            Self::StateMissing => 5,
+        }
+    }
+
+    /// This fault's operator sentence, rendered from its signed row.
+    pub(crate) fn sentence(&self) -> String {
+        let template = OPERATOR_SENTENCES[self.row()].1;
+        match self {
+            Self::LinkDigestMismatch { sequence }
+            | Self::GenesisNotFirst { sequence }
+            | Self::UnchainedAfterBoundary { sequence } => {
+                template.replace("{sequence}", &sequence.to_string())
+            }
+            Self::PredecessorMismatch { sequence, previous } => template
+                .replace("{previous}", &previous.to_string())
+                .replace("{sequence}", &sequence.to_string()),
+            Self::HeadMismatch {
+                expected_sequence,
+                found_sequence,
+            } => template
+                .replace("{expected_sequence}", &expected_sequence.to_string())
+                .replace("{found_sequence}", &found_sequence.to_string()),
+            Self::StateMissing => template.to_owned(),
+        }
+    }
+}
+
 /// Verify the stored chain from its genesis to its head.
 ///
 /// **Runs AFTER the per-record passes, deliberately.** Five of the seven tampers measured in
@@ -403,6 +486,129 @@ pub(crate) fn verify_chain(connection: &Connection) -> Result<Option<ChainFault>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R58.2: every one of the six sentences Kevin signs, rendered through the supervisor an
+    /// operator actually reads, and compared back to the row it claims to speak with.
+    ///
+    /// The gap this closes, in my own report's words: five of the six faults had no witness, so a
+    /// rewrite of five of these sentences would have failed nothing. The rows below give each
+    /// fault its own sentinel numbers, so the pins are not tautologies on the table --
+    ///
+    ///   * a fault wired to another fault's row goes RED (`row` is checked against the name),
+    ///   * a dropped `{sequence}` goes RED (every number the variant carries must be named),
+    ///   * `PredecessorMismatch`'s two numbers swapped goes RED (the test substitutes them by its
+    ///     own mapping, not by `sentence`'s),
+    ///   * a leftover `{placeholder}` goes RED,
+    ///   * two faults given the same sentence goes RED,
+    ///   * and a supervisor arm that writes anything but this table goes RED for all six.
+    #[test]
+    fn every_chain_fault_speaks_its_own_signed_sentence() {
+        let rows: [(ChainFault, &str, String, &[i64]); 6] = [
+            (
+                ChainFault::LinkDigestMismatch { sequence: 4211 },
+                "LinkDigestMismatch",
+                OPERATOR_SENTENCES[0].1.replace("{sequence}", "4211"),
+                &[4211],
+            ),
+            (
+                ChainFault::PredecessorMismatch {
+                    sequence: 4213,
+                    previous: 4212,
+                },
+                "PredecessorMismatch",
+                OPERATOR_SENTENCES[1]
+                    .1
+                    .replace("{previous}", "4212")
+                    .replace("{sequence}", "4213"),
+                &[4212, 4213],
+            ),
+            (
+                ChainFault::GenesisNotFirst { sequence: 4214 },
+                "GenesisNotFirst",
+                OPERATOR_SENTENCES[2].1.replace("{sequence}", "4214"),
+                &[4214],
+            ),
+            (
+                ChainFault::UnchainedAfterBoundary { sequence: 4215 },
+                "UnchainedAfterBoundary",
+                OPERATOR_SENTENCES[3].1.replace("{sequence}", "4215"),
+                &[4215],
+            ),
+            (
+                ChainFault::HeadMismatch {
+                    expected_sequence: 4216,
+                    found_sequence: 4217,
+                },
+                "HeadMismatch",
+                OPERATOR_SENTENCES[4]
+                    .1
+                    .replace("{expected_sequence}", "4216")
+                    .replace("{found_sequence}", "4217"),
+                &[4216, 4217],
+            ),
+            (
+                ChainFault::StateMissing,
+                "StateMissing",
+                OPERATOR_SENTENCES[5].1.to_owned(),
+                &[],
+            ),
+        ];
+
+        let mut seen: Vec<String> = Vec::new();
+        for (index, (fault, name, expected, must_name)) in rows.into_iter().enumerate() {
+            assert_eq!(
+                OPERATOR_SENTENCES[index].0, name,
+                "row {index} of the signed table is not {name}'s row"
+            );
+            assert_eq!(
+                fault.row(),
+                index,
+                "{name} speaks with row {} of the signed table, not its own",
+                fault.row()
+            );
+
+            let rendered = crate::SupervisorError::EventChainBroken(fault).to_string();
+            assert_eq!(rendered, expected, "{name} does not render its signed row");
+            assert!(
+                !rendered.contains('{') && !rendered.contains('}'),
+                "{name} left a placeholder unfilled: {rendered}"
+            );
+            for number in must_name {
+                assert!(
+                    rendered.contains(&number.to_string()),
+                    "{name} does not name {number}, so it does not say where the chain failed: \
+                     {rendered}"
+                );
+            }
+            assert!(
+                !seen.contains(&rendered),
+                "{name} says exactly what another fault says, so the sentence cannot tell an \
+                 operator which fault it is: {rendered}"
+            );
+            seen.push(rendered);
+        }
+
+        assert_eq!(
+            seen.len(),
+            OPERATOR_SENTENCES.len(),
+            "the table and the faults are different sizes"
+        );
+
+        // On the TEMPLATES, not the rendered lines. My first version of this check compared the
+        // rendered sentences, and a mutant that signed two faults the same template SURVIVED it:
+        // the sentinel numbers differ, so the rendered strings differ however identical the
+        // sentences are. A guard has to read the thing it constrains.
+        for (left, (name, template)) in OPERATOR_SENTENCES.iter().enumerate() {
+            for (other_name, other_template) in OPERATOR_SENTENCES.iter().skip(left + 1) {
+                assert_ne!(name, other_name, "{name} appears twice in the signed table");
+                assert_ne!(
+                    template, other_template,
+                    "{name} and {other_name} are signed the same sentence, so the line an \
+                     operator reads cannot tell them apart"
+                );
+            }
+        }
+    }
 
     /// The chain's cost, measured rather than asserted: 100k links, the same shape
     /// DP-b42-event-chain.md measured before the build.
