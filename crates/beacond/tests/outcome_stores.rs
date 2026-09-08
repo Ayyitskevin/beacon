@@ -2237,10 +2237,10 @@ END;",
 }
 
 // ---------------------------------------------------------------------------------------------
-// Migration 0036: the canonicalizer CHECK follows the codec, and lines get a projection
+// Migration 0035: the canonicalizer CHECK follows the codec, and lines get a projection
 // ---------------------------------------------------------------------------------------------
 
-/// R22's promise, made executable: 0036 is 0025's `measured_spend` with the canonicalizer CHECK
+/// R22's promise, made executable: 0035 is 0025's `measured_spend` with the canonicalizer CHECK
 /// widened and nothing else.
 ///
 /// A rebuild that quietly dropped a column CHECK, a foreign key or a uniqueness constraint would
@@ -2271,7 +2271,7 @@ fn migration_0035_rebuilds_measured_spend_from_0025s_ddl_with_exactly_one_check_
             "CHECK ( digest_canonicalizer IN ('beacon.spend.v1', 'beacon.spend.v2'))",
         ),
         new,
-        "0036 changed something other than the canonicalizer CHECK"
+        "0035 changed something other than the canonicalizer CHECK"
     );
 
     // And the objects come back under their 0025 names, so every reader and rollback helper keeps
@@ -2282,7 +2282,7 @@ fn migration_0035_rebuilds_measured_spend_from_0025s_ddl_with_exactly_one_check_
         "ALTER TABLE measured_spend_v35 RENAME TO measured_spend;",
         "UPDATE schema_meta SET version = 35 WHERE singleton = 1 AND version = 34;",
     ] {
-        assert!(m35.contains(name), "0036 is missing: {name}");
+        assert!(m35.contains(name), "0035 is missing: {name}");
     }
 }
 
@@ -2425,7 +2425,7 @@ fn the_verified_reader_refuses_a_sql_valid_dimension_state_collapse_in_the_line_
     );
 }
 
-/// A store holding a `beacon.spend.v1` row crosses 0036 and still reads it -- as unattributed,
+/// A store holding a `beacon.spend.v1` row crosses 0035 and still reads it -- as unattributed,
 /// never refused, never rewritten.
 ///
 /// This is R46.7.1 tested through the whole stack rather than at the decoder. The v1 row is written
@@ -2433,7 +2433,7 @@ fn the_verified_reader_refuses_a_sql_valid_dimension_state_collapse_in_the_line_
 /// retyped the DDL would be testing the test), and startup migrates it forward.
 #[test]
 fn a_store_with_a_v1_spend_row_crosses_0035_and_still_reads_it_as_unattributed() {
-    let stored = stored("v1-spend-across-0036");
+    let stored = stored("v1-spend-across-0035");
 
     // A genuine v1 record: its era is a field, so the encoder writes v1 magic and the digest names
     // the function that produced those bytes. Nothing here fabricates a digest.
@@ -2459,7 +2459,7 @@ fn a_store_with_a_v1_spend_row_crosses_0035_and_still_reads_it_as_unattributed()
         "daemon_ledger",
     );
 
-    // Back to the pre-0036 shape, from 0025's own text. Stamped 34, the version a store arrives at
+    // Back to the pre-0035 shape, from 0025's own text. Stamped 34, the version a store arrives at
     // from the migration below this one.
     let migration_0025 = include_str!("../migrations/0025_spend_and_impact.sql");
     let spend_objects = &migration_0025[migration_0025
@@ -2481,6 +2481,7 @@ fn a_store_with_a_v1_spend_row_crosses_0035_and_still_reads_it_as_unattributed()
         )
         .unwrap();
     connection.execute_batch(spend_objects).unwrap();
+    undo_r58_chain(&connection);
     connection
         .execute_batch(
             "INSERT INTO measured_spend SELECT * FROM spend_snapshot;
@@ -2493,7 +2494,7 @@ fn a_store_with_a_v1_spend_row_crosses_0035_and_still_reads_it_as_unattributed()
         store_path: stored.store.path.clone(),
         initial_workspace_name: "Ignored".to_owned(),
     })
-    .expect("a store written before 0036 migrates forward");
+    .expect("a store written before 0035 migrates forward");
     assert_eq!(report.diagnostics.status, DiagnosticStatus::Ready);
     assert_eq!(report.diagnostics.schema_version, 36);
 
@@ -2544,9 +2545,70 @@ fn a_store_with_a_v1_spend_row_crosses_0035_and_still_reads_it_as_unattributed()
     assert_eq!(projected, 0, "a v1 row has no dimensions to project");
 }
 
-/// The pre-0036 spend shapes, for a test that stamps a version below 35.
+/// Undo migration 0036's chain objects, so a fixture may stamp a version below it.
 ///
-/// 0036 widened `measured_spend`'s canonicalizer CHECK and added `measured_spend_lines`. A store
+/// **R58, and it is B39's test that needs it.** `a_store_with_a_v1_spend_row_crosses_0035...`
+/// stamps 34 after rebuilding `measured_spend` at its pre-0035 shape, and until this lane existed
+/// that was the whole rollback. Now `events` carries the chain columns and `event_chain_state`
+/// exists, so migration 0036 re-ran against a store that already held its objects and startup
+/// refused with `SchemaMismatch`. The rollback has to undo the NEWEST migration too.
+///
+/// The roster triggers come off first because `ALTER TABLE ... RENAME` rewrites every trigger that
+/// names the table, and they are recreated from their exact stored one-line text -- SQLite stores a
+/// trigger's literal SQL, so one indented to match its Rust string is a different schema object.
+fn undo_r58_chain(connection: &Connection) {
+    connection
+        .execute_batch(
+            "DROP TRIGGER event_chain_state_no_delete;
+             DROP TABLE event_chain_state;
+             DROP TRIGGER team_formation_members_no_insert_after_formation;
+             DROP TRIGGER mission_admission_members_no_insert_after_admission;
+             ALTER TABLE events RENAME TO events_r58;",
+        )
+        .unwrap();
+    let migration_0027 = include_str!("../migrations/0027_artifacts.sql");
+    let from = migration_0027.find("CREATE TABLE events (").unwrap();
+    let to = migration_0027[from..].find(") STRICT;").unwrap() + from + 9;
+    connection.execute_batch(&migration_0027[from..to]).unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO events (sequence, workspace_id, kind, payload_json, occurred_at_ms)
+             SELECT sequence, workspace_id, kind, payload_json, occurred_at_ms
+             FROM events_r58 ORDER BY sequence;
+             DROP TABLE events_r58;",
+        )
+        .unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER team_formation_members_no_insert_after_formation
+BEFORE INSERT ON team_formation_members
+WHEN EXISTS (
+    SELECT 1 FROM events
+    WHERE workspace_id = NEW.workspace_id
+      AND kind = 'team.formed'
+      AND json_extract(payload_json, '$.team.id') = NEW.team_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'Team formation roster is closed');
+END;
+CREATE TRIGGER mission_admission_members_no_insert_after_admission
+BEFORE INSERT ON mission_admission_members
+WHEN EXISTS (
+    SELECT 1 FROM events
+    WHERE workspace_id = NEW.workspace_id
+      AND kind = 'mission.admitted'
+      AND json_extract(payload_json, '$.mission.id') = NEW.mission_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'Mission admission roster is closed');
+END;",
+        )
+        .unwrap();
+}
+
+/// The pre-0035 spend shapes, for a test that stamps a version below 35.
+///
+/// 0035 widened `measured_spend`'s canonicalizer CHECK and added `measured_spend_lines`. A store
 /// rolled back below 35 must carry the shapes that version actually had, or its schema signature
 /// will not match one built from the ladder. Taken from 0025's own text: a rollback that retyped
 /// the DDL would be testing the test.
@@ -2566,7 +2628,7 @@ fn restore_pre_0035_spend(connection: &Connection) {
              DROP TRIGGER measured_spend_no_delete;
              DROP TABLE measured_spend;",
         )
-        .expect("the 0036 shapes come off");
+        .expect("the 0035 shapes come off");
     connection.execute_batch(block).expect("0025's spend table");
     connection
         .execute_batch(
@@ -2792,7 +2854,7 @@ fn load_line_count(connection: &Connection, digest: &str) -> i64 {
 /// sol1's re-check of the fold: the comparison loaded every field the projection carries EXCEPT
 /// `line_index`, and derived the position with `.enumerate()` after `ORDER BY line_index`. A single
 /// honest line filed at index 1 sorts exactly as it would at index 0, satisfies the
-/// `(digest_value, line_index)` primary key and 0036's `0..32` CHECK, and read back clean. The same
+/// `(digest_value, line_index)` primary key and 0035's `0..32` CHECK, and read back clean. The same
 /// class as the P0 before it: everything the row carries was compared, and the column saying which
 /// line it is was used as a sort key rather than as data.
 #[test]
