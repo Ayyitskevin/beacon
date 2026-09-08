@@ -106,6 +106,7 @@ it("every surface test file runs the WCAG bar", () => {
     "App.test.tsx",
     "BriefingReceipts.test.tsx",
     "MissionOutcomes.test.tsx",
+    "ProjectMissions.test.tsx",
     "SampleProject.test.tsx",
   ]);
 
