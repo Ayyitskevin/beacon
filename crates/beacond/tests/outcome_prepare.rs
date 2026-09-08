@@ -10371,16 +10371,18 @@ fn mint_private_outcome_fixture_within(
 /// this proof must not be the thing that invalidates it -- and the caller asserts afterwards that
 /// the artifact is still exactly the bytes its manifest names.
 fn read_back_minted_fixture(minted: &MintedOutcomeFixture) -> MintedFixtureReadBack {
+    let snapshot_bytes = fs::read(&minted.snapshot_path).expect("B18.READBACK.SNAPSHOT_READS");
     assert_eq!(
-        sha256_hex_of(&fs::read(&minted.snapshot_path).expect("B18.READBACK.SNAPSHOT_READS")),
+        sha256_hex_of(&snapshot_bytes),
         minted.snapshot_sha256,
         "B18.READBACK.SNAPSHOT_IS_THE_MINTED_BYTES"
     );
-    let opened =
-        std::env::temp_dir().join(format!("beacond-b18-readback-{}.sqlite3", Uuid::new_v4()));
-    fs::copy(&minted.snapshot_path, &opened).expect("B18.READBACK.SNAPSHOT_COPIES");
-    fs::set_permissions(&opened, fs::Permissions::from_mode(0o600))
-        .expect("B18.READBACK.COPY_IS_0600");
+    // Opening can leave WAL siblings; keep the copy in a private directory whose guard also
+    // removes them if startup, authentication, or any later assertion unwinds.
+    let opened_prefix = PrivatePrefix::new("readback");
+    let opened = opened_prefix.path.join("store.sqlite3");
+    // Write exactly the bytes just verified, in a new 0600 file under the 0700 directory.
+    write_private_file(&opened, &snapshot_bytes);
 
     let report = Supervisor::bootstrap(StartupConfig {
         store_path: opened.clone(),
@@ -10410,7 +10412,7 @@ fn read_back_minted_fixture(minted: &MintedOutcomeFixture) -> MintedFixtureReadB
         .export_markdown_version(minted.mission_id, minted.publication_version)
         .expect("B18.READBACK.VERSION_EXPORTS");
 
-    let read_back = MintedFixtureReadBack {
+    MintedFixtureReadBack {
         workspace_id: report.workspace.id,
         workspace_created: report.workspace.created,
         schema_version: declared_schema_version_of(&opened),
@@ -10429,12 +10431,7 @@ fn read_back_minted_fixture(minted: &MintedOutcomeFixture) -> MintedFixtureReadB
         publication_version: exported.publication_version(),
         publication_version_count: exported.publication_version_count(),
         media_type: exported.media_type().to_owned(),
-    };
-
-    for suffix in ["", "-wal", "-shm"] {
-        let _ = fs::remove_file(format!("{}{suffix}", opened.display()));
     }
-    read_back
 }
 
 /// A task-owned private prefix the bar creates for itself: `0700` at creation, under the temp
@@ -10471,12 +10468,6 @@ struct PrivateOutput {
 }
 
 impl PrivateOutput {
-    fn new(label: &str) -> Self {
-        Self {
-            path: std::env::temp_dir().join(format!("b18-{label}-{}", Uuid::new_v4().simple())),
-        }
-    }
-
     fn under(prefix: &PrivatePrefix, label: &str) -> Self {
         Self {
             path: prefix
