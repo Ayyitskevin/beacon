@@ -2111,7 +2111,7 @@ fn insert_spend(
     })
     .map_err(|error| SpendRecordError::Store(error.to_string()))?;
     crate::event_chain::append_event(
-        &connection,
+        connection,
         &payload.workspace_id.to_string(),
         "spend.measured",
         &event,

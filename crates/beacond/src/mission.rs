@@ -592,7 +592,7 @@ fn insert_admission(
         mission: mission.clone(),
     })?;
     crate::event_chain::append_event(
-        &connection,
+        connection,
         &mission.workspace_id.to_string(),
         "mission.admitted",
         &payload,

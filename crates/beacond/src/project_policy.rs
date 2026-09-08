@@ -503,7 +503,7 @@ fn insert_policy(
         policy: policy.clone(),
     })?;
     crate::event_chain::append_event(
-        &connection,
+        connection,
         &policy.workspace_id.to_string(),
         "project.policy_published",
         &payload,

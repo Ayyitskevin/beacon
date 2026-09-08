@@ -1272,7 +1272,7 @@ fn insert_classification(
     })
     .map_err(|error| ClassificationRecordError::Store(error.to_string()))?;
     crate::event_chain::append_event(
-        &connection,
+        connection,
         &payload.workspace_id.to_string(),
         "mission.impact_classified",
         &event,

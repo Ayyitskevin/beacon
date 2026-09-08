@@ -1966,10 +1966,10 @@ fn write_receipt(
         ],
     )?;
     crate::event_chain::append_event(
-        &connection,
+        connection,
         &workspace_id.to_string(),
         "proposal.dispatched",
-        &payload.as_str(),
+        payload.as_str(),
         ended_at_ms,
     )?;
     Ok(())

@@ -452,7 +452,7 @@ fn insert_formation(
         team: formation.clone(),
     })?;
     crate::event_chain::append_event(
-        &connection,
+        connection,
         &formation.workspace_id.to_string(),
         "team.formed",
         &payload,
