@@ -4232,6 +4232,11 @@ mod tests {
         "EventPayloadScopeMismatch" | SupervisorError::EventPayloadScopeMismatch(..)
             => "EventPayloadScopeMismatch",
             SupervisorError::EventPayloadScopeMismatch(STORED_VERSION), &[];
+        "EventChainBroken" | SupervisorError::EventChainBroken(..)
+            => "EventChainBroken",
+            SupervisorError::EventChainBroken(
+                crate::event_chain::ChainFault::LinkDigestMismatch { sequence: STORED_VERSION },
+            ), &[];
         "StarterOrganizationEventMismatch" | SupervisorError::StarterOrganizationEventMismatch(..)
             => "StarterOrganizationEventMismatch",
             SupervisorError::StarterOrganizationEventMismatch(STORED_VERSION), &[];
@@ -5099,10 +5104,10 @@ mod tests {
         // cause-bearing Supervisor parents (including the two nested classification
         // vocabularies), 18 account faults at each of 14 wrappers, the three draft reasons, both
         // charter-revision pairs, and slice 1's 83-case Outcome tree.
-        assert_eq!(cases.len(), 874, "R42S2.TRANSPORT.CARDINALITY.CASES");
+        assert_eq!(cases.len(), 875, "R42S2.TRANSPORT.CARDINALITY.CASES");
         assert_eq!(
             supervisor_rows().len(),
-            73,
+            74,
             "R42S2.TRANSPORT.CARDINALITY.Supervisor"
         );
         let ids: std::collections::BTreeSet<&str> =
