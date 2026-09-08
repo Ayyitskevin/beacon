@@ -193,6 +193,11 @@ export function ProjectMissions({
 /// An empty optional list says so rather than disappearing, because a section that vanishes reads
 /// as "not applicable" when the truth is "the Operator recorded none". `successConditions` cannot
 /// be empty under the current validator, so nothing here manufactures a default for it.
+///
+/// The lifecycle line states the recorded value and stops. `MissionLifecycle` has one variant,
+/// `Admitted` (`crates/beacond/src/mission.rs:40-53`), and it is ADMISSION metadata: an admitted
+/// Mission can already carry published Outcome data, so "started no work on it" was an inference
+/// this record cannot support.
 function MissionBrief({ mission, teams }: { mission: MissionView; teams: TeamView[] | null }) {
   const classes = useStyles();
   // A name is shown ONLY on an exact id match. The recorded binding is the id; a lookup that finds
@@ -201,7 +206,7 @@ function MissionBrief({ mission, teams }: { mission: MissionView; teams: TeamVie
   const recordedTeam = (teams ?? []).find((team) => team.id === mission.teamId) ?? null;
 
   return (
-    <div>
+    <section aria-label="Mission brief">
       <h4 className={classes.briefHeading}>Success conditions</h4>
       <ol className={classes.briefList} aria-label="Success conditions">
         {mission.successConditions.map((condition, index) => (
@@ -239,9 +244,7 @@ function MissionBrief({ mission, teams }: { mission: MissionView; teams: TeamVie
 
       <details className={classes.details}>
         <summary>Recorded identities</summary>
-        <p className={classes.body}>
-          Lifecycle: Admitted. Beacon has recorded this Mission and started no work on it.
-        </p>
+        <p className={classes.body}>Lifecycle: Admitted.</p>
         <p className={classes.body}>
           Team:{" "}
           {recordedTeam === null ? (
@@ -264,7 +267,7 @@ function MissionBrief({ mission, teams }: { mission: MissionView; teams: TeamVie
           ))}
         </ol>
       </details>
-    </div>
+    </section>
   );
 }
 
