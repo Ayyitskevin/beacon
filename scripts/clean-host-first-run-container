@@ -338,11 +338,11 @@ first_run_begin_step starter_organization "Starter Organization acceptance"
 
 # This window is fixed at 1280x800 by tauri.conf.json and the proposal action
 # is visible at its lower-left. Tesseract 4 on Ubuntu 22.04 missed the rendered
-# word even though the control was present; click the stable UI coordinate and
+# word even though the control was present; click the measured label center and
 # require the accepted socket state plus Briefing below to prove the action.
 if ! click_word Admit; then
     echo "Admit not found by OCR; clicking the fixed coordinate" >&2
-    xdotool mousemove --sync 360 727 click 1
+    first_run_click_admit_fallback
 fi
 
 briefing_screen=/evidence/05-authenticated-briefing.png

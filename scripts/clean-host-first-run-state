@@ -2,6 +2,12 @@
 # Shared closed vocabulary for the container driver's observable step states.
 # This file is sourced; it performs no work on its own.
 
+first_run_click_admit_fallback() {
+    # Center of the measured Admit label in the fixed 1280x800 first-run window.
+    # The geometry fixture in test_clean_host_first_run_admit.py witnesses it.
+    xdotool mousemove --sync 289 772 click 1
+}
+
 first_run_wait_failure() {
     local wait_status="$1"
     local transition="$2"
