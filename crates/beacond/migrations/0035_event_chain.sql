@@ -137,15 +137,38 @@ CREATE TABLE event_chain_state (
     -- `created` means this store has chained since its first Event. `migrated` means it has chained
     -- since this migration and says so, which is the only honest claim a migrated store can make.
     genesis_kind TEXT NOT NULL CHECK (genesis_kind IN ('created', 'migrated')),
-    -- The last pre-migration sequence, and the digest of the table as it stood. Present exactly when
-    -- the genesis is a migration.
+    -- The last pre-migration sequence: where the chain begins. Present exactly when the genesis is
+    -- a migration.
+    --
+    -- There is deliberately NO digest of the pre-migration table here. The same argument that
+    -- leaves pre-migration rows without a link digest applies to the table as a whole: a digest
+    -- computed now attests to the bytes AS THEY STAND, so a store tampered before this migration
+    -- would be blessed by it. The boundary sequence is what this migration can honestly record.
     migrated_through_sequence INTEGER,
-    pre_migration_digest BLOB CHECK (pre_migration_digest IS NULL OR length(pre_migration_digest) = 32),
-    head_digest BLOB NOT NULL CHECK (length(head_digest) = 32),
+    -- NULL means the chain is EMPTY -- nothing has been appended through the door yet -- and the
+    -- next Event is the genesis link. A sentinel digest here would have to be compared against a
+    -- constant to mean the same thing, and a sentinel that must be recognised is a value that can
+    -- be forged.
+    head_digest BLOB CHECK (head_digest IS NULL OR length(head_digest) = 32),
     head_sequence INTEGER NOT NULL,
-    CHECK ((genesis_kind = 'migrated') = (migrated_through_sequence IS NOT NULL)),
-    CHECK ((genesis_kind = 'migrated') = (pre_migration_digest IS NOT NULL))
+    CHECK ((genesis_kind = 'migrated') = (migrated_through_sequence IS NOT NULL))
 ) STRICT;
+
+-- The migrated store's genesis, written here rather than inferred at startup: the chain begins
+-- AFTER the last pre-migration Event, it is empty, and this row says both.
+-- A store with NO pre-migration Events has nothing to be migrated over: its chain genuinely begins
+-- at its creation, and stamping it `migrated` would be a false claim about a history it does not
+-- have. Every fresh store runs this ladder from 1, so without the CASE every new store would say
+-- it had been migrated. Caught by this lane's own probe.
+INSERT INTO event_chain_state (
+    id, genesis_kind, migrated_through_sequence, head_digest, head_sequence
+)
+SELECT 1,
+       CASE WHEN count(*) = 0 THEN 'created' ELSE 'migrated' END,
+       CASE WHEN count(*) = 0 THEN NULL ELSE max(sequence) END,
+       NULL,
+       coalesce(max(sequence), 0)
+FROM events;
 
 CREATE TRIGGER event_chain_state_no_delete
 BEFORE DELETE ON event_chain_state

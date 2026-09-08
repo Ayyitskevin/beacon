@@ -1100,8 +1100,14 @@ fn an_event_naming_no_candidate_fails_startup() {
         )
         .unwrap();
     fixture.tamper(&format!(
-        "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-         VALUES ('{}', 'proposal.candidate_recorded', '{}', {})",
+        // R58: a deliberate plant, written around the append path on purpose and saying so.
+        // `unchained` is what a row outside the chain honestly is, and the refusal this test
+        // asserts still comes from the Candidate passes, which run before the chain pass.
+        "INSERT INTO events (
+             workspace_id, kind, payload_json, occurred_at_ms,
+             predecessor_kind, predecessor_digest, link_digest
+         )
+         VALUES ('{}', 'proposal.candidate_recorded', '{}', {}, 'unchained', NULL, NULL)",
         fixture.workspace_id,
         payload.replace('\'', "''"),
         candidate.payload().recorded_at_ms
@@ -1334,8 +1340,14 @@ fn an_event_whose_digest_names_no_candidate_is_refused_by_the_replay() {
     })
     .to_string();
     fixture.tamper(&format!(
-        "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-         VALUES ('{}', 'proposal.candidate_recorded', '{}', {})",
+        // R58: a deliberate plant, written around the append path on purpose and saying so.
+        // `unchained` is what a row outside the chain honestly is, and the refusal this test
+        // asserts still comes from the Candidate passes, which run before the chain pass.
+        "INSERT INTO events (
+             workspace_id, kind, payload_json, occurred_at_ms,
+             predecessor_kind, predecessor_digest, link_digest
+         )
+         VALUES ('{}', 'proposal.candidate_recorded', '{}', {}, 'unchained', NULL, NULL)",
         fixture.workspace_id,
         orphan.replace('\'', "''"),
         candidate.payload().recorded_at_ms

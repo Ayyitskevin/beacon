@@ -138,7 +138,7 @@ pub(crate) fn append_event(
     payload_json: &str,
     occurred_at_ms: i64,
 ) -> rusqlite::Result<i64> {
-    let head: Option<(Vec<u8>, i64)> = connection
+    let head: Option<(Option<Vec<u8>>, i64)> = connection
         .query_row(
             "SELECT head_digest, head_sequence FROM event_chain_state WHERE id = 1",
             [],
@@ -148,9 +148,10 @@ pub(crate) fn append_event(
 
     let predecessor = match &head {
         // A store that has chained before: this Event follows the head.
-        Some((digest, _)) => Predecessor::Linked(as_digest(digest)?),
-        // No state row at all: this is the first Event of a store created with the chain.
-        None => Predecessor::Genesis,
+        Some((Some(digest), _)) => Predecessor::Linked(as_digest(digest)?),
+        // A migrated store whose chain has not started yet, or a store with no state row at all
+        // (created fresh): either way this Event begins the chain.
+        Some((None, _)) | None => Predecessor::Genesis,
     };
 
     // The sequence is chosen before the digest, because the digest commits to it. AUTOINCREMENT
@@ -226,6 +227,166 @@ fn as_digest(bytes: &[u8]) -> rusqlite::Result<[u8; 32]> {
             "a chain digest is thirty-two bytes".into(),
         )
     })
+}
+
+/// Why a stored chain does not verify. Each names the sequence it failed AT, because "the chain is
+/// broken" sends an operator to read every Event and "the chain is broken at 4211" sends them to
+/// one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChainFault {
+    /// The row's own link digest is not the digest of its bytes: this Event was edited in place.
+    LinkDigestMismatch { sequence: i64 },
+    /// The row names a predecessor that is not the previous row's link: an Event was inserted,
+    /// removed or reordered between them.
+    PredecessorMismatch { sequence: i64, previous: i64 },
+    /// A row claims to start the chain, and something chained came before it.
+    GenesisNotFirst { sequence: i64 },
+    /// A row is outside the chain, and the chain had already begun at or before it. Every Event
+    /// written through the append path is chained, so an unchained row after the boundary was
+    /// written around it.
+    UnchainedAfterBoundary { sequence: i64 },
+    /// The chain ends somewhere other than the head the store records. The last Event was removed,
+    /// or one was added without moving the head.
+    HeadMismatch {
+        expected_sequence: i64,
+        found_sequence: i64,
+    },
+    /// There are Events and no chain state at all: the record of where the chain begins is gone.
+    StateMissing,
+}
+
+/// Verify the stored chain from its genesis to its head.
+///
+/// **Runs AFTER the per-record passes, deliberately.** Five of the seven tampers measured in
+/// DP-b42-event-chain.md are already refused by name -- `MissionEventMismatch(10)`,
+/// `ProjectStateMismatch`, and so on -- and those names are more useful than a generic chain fault,
+/// because they say which RECORD disagreed. The chain's job is the two nobody else catches: a
+/// deleted genesis and a renumbered sequence. Running it first would replace good refusals with a
+/// vaguer one.
+///
+/// Reads only. It runs inside the caller's transaction, which is ADR 0045's single startup
+/// snapshot, so it judges the same store every other pass judged.
+pub(crate) fn verify_chain(connection: &Connection) -> Result<Option<ChainFault>, rusqlite::Error> {
+    let state: Option<(Option<Vec<u8>>, i64, Option<i64>)> = connection
+        .query_row(
+            "SELECT head_digest, head_sequence, migrated_through_sequence
+             FROM event_chain_state WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+
+    let mut statement = connection.prepare(
+        "SELECT sequence, workspace_id, kind, payload_json, occurred_at_ms,
+                predecessor_kind, predecessor_digest, link_digest
+         FROM events ORDER BY sequence",
+    )?;
+    let mut rows = statement.query([])?;
+
+    let Some((head_digest, head_sequence, migrated_through)) = state else {
+        // No state and no Events is a store that has never appended: a valid empty chain.
+        return Ok(if rows.next()?.is_some() {
+            Some(ChainFault::StateMissing)
+        } else {
+            None
+        });
+    };
+
+    let boundary = migrated_through.unwrap_or(0);
+    let mut previous: Option<(i64, [u8; 32])> = None;
+
+    while let Some(row) = rows.next()? {
+        let sequence: i64 = row.get(0)?;
+        let workspace_id: String = row.get(1)?;
+        let kind: String = row.get(2)?;
+        let payload_json: String = row.get(3)?;
+        let occurred_at_ms: i64 = row.get(4)?;
+        let predecessor_kind: String = row.get(5)?;
+        let predecessor_digest: Option<Vec<u8>> = row.get(6)?;
+        let link_digest: Option<Vec<u8>> = row.get(7)?;
+
+        let predecessor = match predecessor_kind.as_str() {
+            "unchained" => {
+                // Pre-migration rows are outside the chain by construction, and the boundary says
+                // how far back that goes. One after the boundary was written around the door.
+                if sequence > boundary {
+                    return Ok(Some(ChainFault::UnchainedAfterBoundary { sequence }));
+                }
+                continue;
+            }
+            "genesis" => {
+                if previous.is_some() {
+                    return Ok(Some(ChainFault::GenesisNotFirst { sequence }));
+                }
+                Predecessor::Genesis
+            }
+            _ => {
+                let digest = as_digest(&predecessor_digest.unwrap_or_default())?;
+                match previous {
+                    Some((_, link)) if link == digest => Predecessor::Linked(digest),
+                    Some((earlier, _)) => {
+                        return Ok(Some(ChainFault::PredecessorMismatch {
+                            sequence,
+                            previous: earlier,
+                        }));
+                    }
+                    // A linked row with nothing chained before it: whatever it followed is gone.
+                    None => {
+                        return Ok(Some(ChainFault::PredecessorMismatch {
+                            sequence,
+                            previous: boundary,
+                        }));
+                    }
+                }
+            }
+        };
+
+        let recomputed = Link {
+            predecessor,
+            sequence,
+            workspace_id: &workspace_id,
+            kind: &kind,
+            payload_json: &payload_json,
+            occurred_at_ms,
+        }
+        .digest();
+        if as_digest(&link_digest.unwrap_or_default())? != recomputed {
+            return Ok(Some(ChainFault::LinkDigestMismatch { sequence }));
+        }
+        previous = Some((sequence, recomputed));
+    }
+
+    // The walk has to END where the head says it does. Without this, truncating the newest Events
+    // and leaving the head behind would verify link by link and still be a shorter history.
+    match (previous, &head_digest) {
+        // The walk ended where the head says, on the digest the head names.
+        (Some((sequence, digest)), Some(head)) => {
+            if sequence != head_sequence || digest.as_slice() != head.as_slice() {
+                return Ok(Some(ChainFault::HeadMismatch {
+                    expected_sequence: head_sequence,
+                    found_sequence: sequence,
+                }));
+            }
+        }
+        // An empty chain and nothing chained: a migrated store nobody has appended to yet, or a
+        // fresh one. Valid, and the commonest state a migrated store is in.
+        (None, None) => {}
+        // A head that names a digest with no chained rows behind it, or chained rows under a head
+        // that says the chain is empty. Either way the two disagree.
+        (None, Some(_)) => {
+            return Ok(Some(ChainFault::HeadMismatch {
+                expected_sequence: head_sequence,
+                found_sequence: boundary,
+            }));
+        }
+        (Some((sequence, _)), None) => {
+            return Ok(Some(ChainFault::HeadMismatch {
+                expected_sequence: head_sequence,
+                found_sequence: sequence,
+            }));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]

@@ -294,6 +294,11 @@ fn downgrade_execution_schema_to_v15(store_path: &Path) {
              DROP TRIGGER beacon_repositories_no_update;
              DROP TABLE beacon_repositories;
              DROP TRIGGER dispatch_preparations_no_update;
+             -- R58: the chain's own state and trigger, which 0035 added. A rollback fixture that
+             -- does not undo the newest migration leaves objects behind and compares a v17 store
+             -- against a signature that has them -- which is how this fixture caught the omission.
+             DROP TRIGGER event_chain_state_no_delete;
+             DROP TABLE event_chain_state;
              DROP TRIGGER dispatch_preparations_no_delete;
              DROP INDEX dispatch_preparations_one_per_ruling;
              DROP TABLE dispatch_preparations;
@@ -324,6 +329,9 @@ fn downgrade_execution_schema_to_v15(store_path: &Path) {
     connection.execute_batch(&events_table).unwrap();
     connection
         .execute_batch(
+            // R58: this fixture rolls the store back to v17, where `events` has no chain columns
+            // at all -- the table it copies INTO is the v17 shape it just created. Adding the
+            // columns here would be describing a schema this fixture exists to leave behind.
             "INSERT INTO events (sequence, workspace_id, kind, payload_json, occurred_at_ms)
              SELECT sequence, workspace_id, kind, payload_json, occurred_at_ms
              FROM events_v17 ORDER BY sequence;
@@ -1695,8 +1703,13 @@ fn startup_requires_exactly_one_execution_event_for_every_terminal_execution() {
         if tamper == "duplicate-event" {
             connection
                 .execute(
-                    "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-                     SELECT workspace_id, kind, payload_json, occurred_at_ms
+                    // R58: a deliberate duplicate, planted around the append path and saying so.
+                    "INSERT INTO events (
+                         workspace_id, kind, payload_json, occurred_at_ms,
+                         predecessor_kind, predecessor_digest, link_digest
+                     )
+                     SELECT workspace_id, kind, payload_json, occurred_at_ms,
+                            'unchained', NULL, NULL
                      FROM events WHERE kind = 'run.executed'",
                     [],
                 )
@@ -2123,6 +2136,8 @@ fn migration_preserves_real_v1_bytes_through_rollback_and_forward_startup() {
         .unwrap();
     connection
         .execute(
+            // R58: this plant runs against a store ROLLED BACK to v15, where `events` has no chain
+            // columns. The chain's vocabulary belongs only where the chain's schema is.
             "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
              VALUES (?1, 'run.executed', ?2, ?3)",
             rusqlite::params![
