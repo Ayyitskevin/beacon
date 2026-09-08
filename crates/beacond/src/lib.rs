@@ -372,6 +372,9 @@ pub enum SupervisorError {
     InvalidWorkspaceId(String),
     InvalidEventKind(String),
     EventPayloadScopeMismatch(i64),
+    /// The stored Event chain does not verify from its genesis to its head (R58). The fault names
+    /// the sequence it failed at.
+    EventChainBroken(event_chain::ChainFault),
     StarterOrganizationEventMismatch(i64),
     /// A Workspace's starter organization does not re-prove.
     ///
@@ -800,6 +803,7 @@ pub(crate) fn supervisor_caller_tag(error: &SupervisorError) -> String {
         SupervisorError::InvalidWorkspaceId(..) => "InvalidWorkspaceId".to_owned(),
         SupervisorError::InvalidEventKind(..) => "InvalidEventKind".to_owned(),
         SupervisorError::EventPayloadScopeMismatch(..) => "EventPayloadScopeMismatch".to_owned(),
+        SupervisorError::EventChainBroken(..) => "EventChainBroken".to_owned(),
         SupervisorError::StarterOrganizationEventMismatch(..) => {
             "StarterOrganizationEventMismatch".to_owned()
         }
@@ -1083,6 +1087,35 @@ impl fmt::Display for SupervisorError {
                 formatter,
                 "Event sequence {sequence} payload does not match its Workspace scope"
             ),
+            Self::EventChainBroken(fault) => match fault {
+                event_chain::ChainFault::LinkDigestMismatch { sequence } => write!(
+                    formatter,
+                    "Event sequence {sequence} was edited after it was recorded"
+                ),
+                event_chain::ChainFault::PredecessorMismatch { sequence, previous } => write!(
+                    formatter,
+                    "the Event chain is broken between sequence {previous} and sequence {sequence}"
+                ),
+                event_chain::ChainFault::GenesisNotFirst { sequence } => write!(
+                    formatter,
+                    "Event sequence {sequence} claims to begin a chain that had already begun"
+                ),
+                event_chain::ChainFault::UnchainedAfterBoundary { sequence } => write!(
+                    formatter,
+                    "Event sequence {sequence} was recorded outside the Event chain"
+                ),
+                event_chain::ChainFault::HeadMismatch {
+                    expected_sequence,
+                    found_sequence,
+                } => write!(
+                    formatter,
+                    "the Event chain ends at sequence {found_sequence}, and this store records its \
+                     head at sequence {expected_sequence}"
+                ),
+                event_chain::ChainFault::StateMissing => formatter.write_str(
+                    "this store holds Events and no record of where its Event chain begins",
+                ),
+            },
             Self::StarterOrganizationEventMismatch(sequence) => write!(
                 formatter,
                 "Event sequence {sequence} does not match Starter Organization state"
@@ -2881,6 +2914,17 @@ fn inspect_store(connection: &Connection) -> Result<StoreDiagnostics, Supervisor
     // have run before this one can rely on it (R18.7).
     outcome_publication::verify_publication_state(connection)
         .map_err(map_publication_state_fault)?;
+
+    // R58: the chain, AFTER every per-record pass -- and this is load-bearing rather than tidy.
+    // Five of the seven tampers this closes are already refused BY NAME by the passes above, and
+    // those names say WHICH RECORD disagreed, which is more useful to an operator than a chain
+    // fault. Running it earlier replaced good refusals with a vaguer one: a deleted sample-project
+    // installation Event came back as `HeadMismatch` instead of naming the Workspace it refused.
+    // The chain's own job is the two nobody else catches -- a deleted genesis and a renumbered
+    // sequence -- and it does that job last.
+    if let Some(fault) = event_chain::verify_chain(connection)? {
+        return Err(SupervisorError::EventChainBroken(fault));
+    }
 
     Ok(StoreDiagnostics {
         status: DiagnosticStatus::Ready,
@@ -7867,7 +7911,7 @@ mod tests {
     }
 
     /// The 72 startup lines, transcribed from the spec with this table's own fixture keys.
-    const STARTUP_LINES: [(&str, &str); 73] = [
+    const STARTUP_LINES: [(&str, &str); 74] = [
         ("EmptyWorkspaceName", "workspace name cannot be empty"),
         (
             "WorkspaceNameTooLong",
@@ -7895,6 +7939,14 @@ mod tests {
         (
             "EventPayloadScopeMismatch",
             "Event sequence 4242 payload does not match its Workspace scope",
+        ),
+        // R58, PROPOSED text -- Kevin signs or rewrites this line before the bar (R58.2). One row
+        // per `SupervisorError` variant, so this pins the rendered line for one representative
+        // `ChainFault`; the other five faults are Display text with no row of their own, which the
+        // report names.
+        (
+            "EventChainBroken",
+            "Event sequence 4242 was edited after it was recorded",
         ),
         (
             "StarterOrganizationEventMismatch",
@@ -8208,6 +8260,11 @@ mod tests {
         "EventPayloadScopeMismatch" | SupervisorError::EventPayloadScopeMismatch(..)
             => startup_line("EventPayloadScopeMismatch"),
             SupervisorError::EventPayloadScopeMismatch(R42S2_SEQUENCE_I64), &[];
+        "EventChainBroken" | SupervisorError::EventChainBroken(..)
+            => startup_line("EventChainBroken"),
+            SupervisorError::EventChainBroken(
+                crate::event_chain::ChainFault::LinkDigestMismatch { sequence: 4242 },
+            ), &[];
         "StarterOrganizationEventMismatch" | SupervisorError::StarterOrganizationEventMismatch(..)
             => startup_line("StarterOrganizationEventMismatch"),
             SupervisorError::StarterOrganizationEventMismatch(R42S2_SEQUENCE_I64), &[];
@@ -8413,11 +8470,11 @@ mod tests {
     /// R42 slice 2, fold: every one of the 72 startup lines is what the spec says.
     #[test]
     fn r42_startup_templates_are_all_pinned() {
-        assert_eq!(STARTUP_LINES.len(), 73, "R42S2.STARTUP.CARDINALITY.LINES");
-        assert_eq!(startup_rows().len(), 73, "R42S2.STARTUP.CARDINALITY.ROWS");
+        assert_eq!(STARTUP_LINES.len(), 74, "R42S2.STARTUP.CARDINALITY.LINES");
+        assert_eq!(startup_rows().len(), 74, "R42S2.STARTUP.CARDINALITY.ROWS");
         let ids: std::collections::BTreeSet<&str> =
             startup_rows().iter().map(|(case, _, _)| *case).collect();
-        assert_eq!(ids.len(), 73, "R42S2.STARTUP.CASE_IDS_UNIQUE");
+        assert_eq!(ids.len(), 74, "R42S2.STARTUP.CASE_IDS_UNIQUE");
 
         for (case, value, markers) in startup_rows() {
             let (matched, expected) = expected_startup(&value);
