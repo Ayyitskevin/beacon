@@ -2719,3 +2719,138 @@ fn load_line_count(connection: &Connection, digest: &str) -> i64 {
         )
         .unwrap()
 }
+
+/// Where a projected row sits is a fact it stores, not one the reader may infer from sort order.
+///
+/// sol1's re-check of the fold: the comparison loaded every field the projection carries EXCEPT
+/// `line_index`, and derived the position with `.enumerate()` after `ORDER BY line_index`. A single
+/// honest line filed at index 1 sorts exactly as it would at index 0, satisfies the
+/// `(digest_value, line_index)` primary key and 0035's `0..32` CHECK, and read back clean. The same
+/// class as the P0 before it: everything the row carries was compared, and the column saying which
+/// line it is was used as a sort key rather than as data.
+#[test]
+fn the_verified_reader_refuses_a_sql_valid_line_index_shift() {
+    let stored = stored("sol1-line-index-shift");
+    let record = stored.spend_record(Uuid::new_v4(), 1);
+    let recorded = stored
+        .spend_service()
+        .record(&record.canonical_bytes().unwrap())
+        .expect("the honest record is stored");
+    let digest = recorded.digest().value.clone();
+
+    let connection = stored.connection();
+    connection
+        .execute_batch("DROP TRIGGER measured_spend_lines_no_update;")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE measured_spend_lines SET line_index = line_index + 1
+             WHERE digest_value = ?1",
+            [&digest],
+        )
+        .unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER measured_spend_lines_no_update
+             BEFORE UPDATE ON measured_spend_lines
+             BEGIN SELECT RAISE(ABORT, 'Measured spend records are immutable'); END;",
+        )
+        .unwrap();
+
+    assert_eq!(
+        verified_spend_within(&connection, stored.store.workspace_id, &digest)
+            .expect_err("the typed owner must refuse a shifted line index"),
+        SpendStoreError::ColumnsDisagree(ColumnDisagreement::Line {
+            line_index: 0,
+            field: "line_index"
+        })
+    );
+}
+
+/// The two shapes a shifted index takes on a record with more than one line.
+///
+/// A gap (or a nonzero start) moves a row off its canonical position while the projection still
+/// holds the right number of rows in the right order -- so cardinality cannot catch it and neither
+/// can sort order. A complete swap of two distinguishable bodies leaves every index correct and
+/// every row well-formed; only the comparison against the bytes can see it, and it is caught at
+/// the first field that differs rather than at the index.
+#[test]
+fn a_gap_and_a_swap_in_the_line_projection_are_each_refused_at_the_field_that_differs() {
+    let stored = stored("line-index-gap-and-swap");
+    let two_lines = |version: u32| {
+        let mut record = stored.spend_record(Uuid::new_v4(), version);
+        let line = |unit: &str, amount: i64, model: &str| SpendLine {
+            attribution: LineAttribution {
+                agent: SpendAttribution::Attributed(Uuid::new_v4()),
+                route: SpendAttribution::Attributed("chat".to_owned()),
+                provider: SpendAttribution::Attributed("local".to_owned()),
+                model: SpendAttribution::Attributed(model.to_owned()),
+            },
+            unit: unit.to_owned(),
+            amount_minor: amount,
+            minor_units_exponent: 2,
+        };
+        record.measurement = SpendMeasurement::Measured(SpendTotals {
+            counted_units: 2,
+            // Two lines nothing about the projection could confuse: different unit, amount and
+            // model. A swap of identical bodies would be no swap at all.
+            lines: vec![line("EUR", 100, "qwen3.8-27b"), line("USD", 200, "muse")],
+        });
+        stored
+            .spend_service()
+            .record(&record.canonical_bytes().unwrap())
+            .expect("the honest record is stored")
+            .digest()
+            .value
+            .clone()
+    };
+    let connection = stored.connection();
+    let unlocked = |work: String| {
+        connection
+            .execute_batch(&format!(
+                "DROP TRIGGER measured_spend_lines_no_update;
+                 {work}
+                 CREATE TRIGGER measured_spend_lines_no_update
+                 BEFORE UPDATE ON measured_spend_lines
+                 BEGIN SELECT RAISE(ABORT, 'Measured spend records are immutable'); END;"
+            ))
+            .unwrap();
+    };
+
+    // 1. A gap: indices 0 and 2 for a record whose lines are 0 and 1. Two rows, right order, right
+    //    bodies -- and the second row answers for a line the record does not have there.
+    let digest = two_lines(1);
+    unlocked(format!(
+        "UPDATE measured_spend_lines SET line_index = 2
+          WHERE digest_value = '{digest}' AND line_index = 1;"
+    ));
+    assert_eq!(
+        verified_spend_within(&connection, stored.store.workspace_id, &digest)
+            .expect_err("refuses"),
+        SpendStoreError::ColumnsDisagree(ColumnDisagreement::Line {
+            line_index: 1,
+            field: "line_index"
+        }),
+        "the gap is named at the canonical position whose row is wrong, not at the stored one"
+    );
+
+    // 2. A complete swap of the two bodies, indices left correct. Every row is well-formed, every
+    //    index is right, and the first field that differs at position 0 is the unit -- so that is
+    //    what the refusal names. `line_index` is checked first and agrees here, which is the point:
+    //    the two faults are distinguishable rather than one catch-all.
+    let digest = two_lines(2);
+    unlocked(format!(
+        "UPDATE measured_spend_lines SET line_index = 9 WHERE digest_value = '{digest}' AND line_index = 0;
+         UPDATE measured_spend_lines SET line_index = 0 WHERE digest_value = '{digest}' AND line_index = 1;
+         UPDATE measured_spend_lines SET line_index = 1 WHERE digest_value = '{digest}' AND line_index = 9;"
+    ));
+    assert_eq!(
+        verified_spend_within(&connection, stored.store.workspace_id, &digest)
+            .expect_err("refuses"),
+        SpendStoreError::ColumnsDisagree(ColumnDisagreement::Line {
+            line_index: 0,
+            field: "unit"
+        }),
+        "a swap is caught at the first field that differs, which is the unit"
+    );
+}

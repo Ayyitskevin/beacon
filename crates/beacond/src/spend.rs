@@ -1364,6 +1364,11 @@ fn spend_record_disagreement(
 
 /// One row of the line projection, as stored.
 struct StoredSpendLineRow {
+    /// Where the row says it sits. Kept rather than inferred: `ORDER BY line_index` puts the rows
+    /// in their stored order, which is not the same as proving each one is at the position the
+    /// record gives it (sol1's re-check of the fold). A single line filed at index 1 sorts exactly
+    /// as it would at index 0.
+    line_index: i64,
     unit: String,
     amount_minor: i64,
     minor_units_exponent: u8,
@@ -1382,7 +1387,7 @@ fn load_spend_line_rows(
     let store = |error: rusqlite::Error| SpendStoreError::Store(error.to_string());
     let mut statement = connection
         .prepare(
-            "SELECT unit, amount_minor, minor_units_exponent,
+            "SELECT line_index, unit, amount_minor, minor_units_exponent,
                 agent_state, agent_value, route_state, route_value,
                 provider_state, provider_value, model_state, model_value
          FROM measured_spend_lines WHERE digest_value = ?1 ORDER BY line_index",
@@ -1391,14 +1396,15 @@ fn load_spend_line_rows(
     let rows = statement
         .query_map(rusqlite::params![digest_value], |row| {
             Ok(StoredSpendLineRow {
-                unit: row.get(0)?,
-                amount_minor: row.get(1)?,
-                minor_units_exponent: row.get::<_, i64>(2)? as u8,
+                line_index: row.get(0)?,
+                unit: row.get(1)?,
+                amount_minor: row.get(2)?,
+                minor_units_exponent: row.get::<_, i64>(3)? as u8,
                 states: [
-                    (row.get(3)?, row.get(4)?),
-                    (row.get(5)?, row.get(6)?),
-                    (row.get(7)?, row.get(8)?),
-                    (row.get(9)?, row.get(10)?),
+                    (row.get(4)?, row.get(5)?),
+                    (row.get(6)?, row.get(7)?),
+                    (row.get(8)?, row.get(9)?),
+                    (row.get(10)?, row.get(11)?),
                 ],
             })
         })
@@ -1445,6 +1451,14 @@ fn spend_line_disagreement(
 
     for (line_index, (row, line)) in stored.iter().zip(lines).enumerate() {
         let named = |field| Some(ColumnDisagreement::Line { line_index, field });
+        // WHERE the row sits, before WHAT it says. `ORDER BY line_index` returns the rows in
+        // stored order; it does not prove any of them is at the position the record gives it, and
+        // a row that answered for the wrong line would be compared against the wrong bytes. The
+        // index is named by the CANONICAL position -- the line the record has -- because that is
+        // the line whose projection is wrong.
+        if row.line_index != i64::try_from(line_index).unwrap_or(i64::MAX) {
+            return Ok(named("line_index"));
+        }
         if row.unit != line.unit {
             return Ok(named("unit"));
         }
