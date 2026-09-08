@@ -346,3 +346,99 @@ it("keeps a new copy pending when an older copy settles after returning to the s
   }
   expect(await screen.findByText("Copied version 1's stored Markdown.")).toBeVisible();
 });
+
+const soleReadPublication = [
+  {
+    publicationId: "66666666-6666-4666-8666-666666666666",
+    publicationVersion: 1,
+    candidateArtifactDigest: first,
+    evaluationDigest: firstEvaluation,
+    isCurrent: true,
+  },
+];
+
+/// B14: the sole published version's read fails, and the operator can ask for it again.
+///
+/// Before this, the document effect keyed on [missionId, selected]; with one publication already
+/// selected, clicking its own button changed nothing and there was no way back short of restarting
+/// the desktop.
+it("retries the selected version's failed document read without restarting", async () => {
+  const user = userEvent.setup();
+  let documentCalls = 0;
+  invokeMock.mockImplementation((command, payload) => {
+    if (command === "mission_publications") return Promise.resolve(soleReadPublication);
+    if (command === "outcome_document") {
+      documentCalls += 1;
+      expect(payload, "B14.RETRY.EXACT_TUPLE").toMatchObject({ missionId, version: 1 });
+      return documentCalls === 1
+        ? Promise.reject(new Error("the read failed"))
+        : Promise.resolve(documentFor(1));
+    }
+    return Promise.reject(new Error(`unexpected command: ${String(command)}`));
+  });
+
+  render(<MissionOutcomes missionId={missionId} />);
+  const alert = await screen.findByRole("alert");
+  expect(alert, "B14.RETRY.FAILURE_IS_SHOWN").toBeInTheDocument();
+  // The harness must have made a real call, or a retry could "pass" against nothing.
+  expect(documentCalls, "B14.RETRY.FIRST_READ_HAPPENED").toBe(1);
+
+  await user.click(screen.getByRole("button", { name: /retry/i }));
+
+  expect(await screen.findByLabelText("Outcome Document")).toHaveTextContent(
+    "Outcome, version one",
+  );
+  expect(documentCalls, "B14.RETRY.SECOND_READ_HAPPENED").toBe(2);
+  expect(screen.queryByRole("alert"), "B14.RETRY.ERROR_CLEARS").not.toBeInTheDocument();
+  expect(
+    screen.queryByText(/loading version/i),
+    "B14.RETRY.LOADING_DISAPPEARS",
+  ).not.toBeInTheDocument();
+});
+
+/// B14: a read that settles late cannot speak for the selection that replaced it.
+///
+/// Retry only appears once a read has FAILED, so an unsettled first attempt cannot coexist with a
+/// retry click for a sole publication -- my first version of this bar tried that and was wrong
+/// about the UI. The reachable deferral is a new selection while a read is still in flight, which
+/// is the same guard the retry path relies on.
+it("ignores a read that settles after the operator selected another version", async () => {
+  const user = userEvent.setup();
+  let rejectVersionTwo: ((cause: unknown) => void) | null = null;
+  let documentCalls = 0;
+  invokeMock.mockImplementation((command, payload) => {
+    if (command === "mission_publications") return Promise.resolve(publications);
+    if (command === "outcome_document") {
+      documentCalls += 1;
+      const version = (payload as { version: number | null }).version ?? 2;
+      if (version === 2) {
+        return new Promise((_resolve, reject) => {
+          rejectVersionTwo = reject;
+        });
+      }
+      return Promise.resolve(documentFor(version));
+    }
+    return Promise.reject(new Error(`unexpected command: ${String(command)}`));
+  });
+
+  render(<MissionOutcomes missionId={missionId} />);
+  // Version 2 is genuinely in flight before anything replaces it.
+  expect(await screen.findByText(/loading version 2/i)).toBeInTheDocument();
+  expect(documentCalls, "B14.DEFERRED.FIRST_READ_PENDING").toBe(1);
+
+  await user.click(screen.getByRole("button", { name: "Show version 1" }));
+  expect(await screen.findByLabelText("Outcome Document")).toHaveTextContent(
+    "Outcome, version one",
+  );
+
+  await act(async () => {
+    rejectVersionTwo?.(new Error("the older read failed"));
+    await Promise.resolve();
+  });
+
+  expect(
+    screen.queryByRole("alert"),
+    "B14.DEFERRED.OLDER_READ_CANNOT_REPLACE_NEWER",
+  ).not.toBeInTheDocument();
+  expect(screen.getByLabelText("Outcome Document")).toHaveTextContent("Outcome, version one");
+});

@@ -69,7 +69,17 @@ export function MissionOutcomes({ missionId }: { missionId: string }): React.JSX
   const [publications, setPublications] = useState<PublicationSummary[] | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
   const [document, setDocument] = useState<ExportedOutcome | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // WHICH read failed, not just that one did. A history failure and a document failure are
+  // different states: the first means the version list never arrived, the second means one selected
+  // version's bytes did not. Retry below is offered for the document one ONLY, so it can never
+  // silently re-ask for history or imply nothing is published.
+  const [failure, setFailure] = useState<{ text: string; source: "history" | "document" } | null>(
+    null,
+  );
+  // Bumped by the operator's explicit Retry, and nothing else. It is a dependency of the document
+  // effect, so a retry re-runs exactly that read -- same Mission, same selected version -- through
+  // the same `loadOutcomeDocument` the first attempt used. No generic retry and no poll.
+  const [documentAttempt, setDocumentAttempt] = useState(0);
   const [copyStatus, setCopyStatus] = useState<string | null>(null);
   const [copying, setCopying] = useState(false);
   // Attempt identity, NOT selection identity. A `missionId#version` token is stable across
@@ -116,7 +126,7 @@ export function MissionOutcomes({ missionId }: { missionId: string }): React.JSX
     setPublications(null);
     setSelected(null);
     setDocument(null);
-    setError(null);
+    setFailure(null);
     loadMissionPublications(missionId)
       .then((loaded) => {
         if (cancelled) return;
@@ -124,7 +134,7 @@ export function MissionOutcomes({ missionId }: { missionId: string }): React.JSX
         setSelected(loaded.length > 0 ? loaded[0].publicationVersion : null);
       })
       .catch((cause: unknown) => {
-        if (!cancelled) setError(describeLocalAccountError(cause));
+        if (!cancelled) setFailure({ text: describeLocalAccountError(cause), source: "history" });
       });
     return () => {
       cancelled = true;
@@ -138,18 +148,25 @@ export function MissionOutcomes({ missionId }: { missionId: string }): React.JSX
     if (selected === null) return undefined;
     let cancelled = false;
     setDocument(null);
-    setError(null);
+    // Only the stale DOCUMENT failure is cleared. A history failure is not this read's to answer,
+    // and wiping it here would leave the operator with no record that the list never arrived.
+    setFailure((current) => (current?.source === "document" ? null : current));
     loadOutcomeDocument(missionId, selected)
       .then((loaded) => {
         if (!cancelled) setDocument(loaded);
       })
       .catch((cause: unknown) => {
-        if (!cancelled) setError(describeLocalAccountError(cause));
+        if (!cancelled) {
+          setFailure({ text: describeLocalAccountError(cause), source: "document" });
+        }
       });
+    // The existing lifetime guard does the work a retry needs: the cleanup runs before the next
+    // attempt starts, so a promise from an earlier attempt -- or an earlier selection, or an
+    // earlier Mission -- finds `cancelled` true and writes nothing.
     return () => {
       cancelled = true;
     };
-  }, [missionId, selected]);
+  }, [missionId, selected, documentAttempt]);
 
   return (
     <section className={styles.section} aria-labelledby={headingId}>
@@ -160,7 +177,21 @@ export function MissionOutcomes({ missionId }: { missionId: string }): React.JSX
         Every published version of this Mission&apos;s Outcome Document. The document below is the
         exact stored Markdown for the version selected, byte for byte.
       </p>
-      {error !== null && <p role="alert">{error}</p>}
+      {failure !== null && <p role="alert">{failure.text}</p>}
+      {failure?.source === "document" && selected !== null && (
+        <button
+          type="button"
+          onClick={() => {
+            setFailure(null);
+            setDocumentAttempt((attempt) => attempt + 1);
+          }}
+        >
+          Retry version {selected}
+        </button>
+      )}
+      {selected !== null && document === null && failure === null && (
+        <p role="status">Loading version {selected}&apos;s stored Markdown…</p>
+      )}
       {publications !== null && publications.length === 0 && (
         <p className={styles.body}>This Mission has no published Outcome.</p>
       )}
