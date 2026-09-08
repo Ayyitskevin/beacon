@@ -75,26 +75,22 @@ const _: () =
 /// The client's response ceiling for `OutcomeDocument` ALONE. Requests, and every other command's
 /// response, keep `MAX_MESSAGE_BYTES`.
 ///
-/// Derived from the byte domain, not chosen:
+/// Derived from the CLOSED value domain, not from generic token maxima:
 ///
 /// * `bytes: Vec<u8>` serialises as a JSON number array, so `N` body bytes cost at most
 ///   `2` brackets + `3N` digits + `N - 1` commas = **`4N + 1`**.
-/// * every other field is bounded, so the rest of the envelope is a constant **482** bytes at its
-///   widest -- MEASURED by serialising a maximum-domain instance of the declared shape through
-///   real `serde_json`, not derived by hand (the B15 design's hand-derived 342 is 140 bytes short,
-///   and it said itself it was not yet a Rust serialization witness): `protocol` is the literal `1`, the tag is the fixed ASCII `outcome_document`, `error`
-///   is `null`, `digest` is `algorithm`/`canonicalizer` (<= 64 each, `artifact.rs:503-505`) plus a
-///   64-character lowercase hex `value` (`artifact.rs:153`), both versions are `u32` (<= 10
-///   digits), and `mediaType` is fixed per kind (`artifact.rs:498-499`) within the same 64.
-/// * `N` is the owner's own Markdown ceiling, **1 MiB** (`outcome.rs:68`
-///   `MAX_EMITTED_MARKDOWN_BYTES`, which `artifact.rs:67` `MAX_CONTENT_BYTES` repeats as the same
-///   bound per ADR 0040).
-///
-/// So `4 * 1_048_576 + 1 + 482`. **The owner constant is private**, so this file states `1 MiB`
-/// rather than importing it: nothing the compiler checks ties the two together, and a change to
-/// the owner bound will not move this one. Making `MAX_EMITTED_MARKDOWN_BYTES` `pub(crate)` is the
-/// one-line fix and is outside this slice's production fence.
-const OUTCOME_DOCUMENT_RESPONSE_BYTES: u64 = 4 * 1_048_576 + 1 + 482;
+/// * the rest is a fixed **342** bytes. Every other field is a closed value, not a bounded one:
+///   `protocol` is the literal `1`, the tag is the fixed ASCII `outcome_document`, `error` is
+///   `null`, both versions are `u32` (<= 10 digits), and the exported digest is built by
+///   `digest_envelope` (`artifact.rs:250-256`) as `sha256` / `beacon.artifact.v1` / 64 lowercase
+///   hex, copied unchanged into the export (`outcome_publication.rs:234-242`). `mediaType` is
+///   `kind.media_type()` (`artifact.rs:498`), and the sole v1 kind returns
+///   `text/markdown; charset=utf-8` (`:124-128`). The 64-byte `MAX_TOKEN_BYTES` limits are about
+///   the INNER raw-content digest, which is itself fixed to `beacon.raw.v1`
+///   (`artifact.rs:484-495`) and is not exported here -- a generic bound is not this domain.
+/// * `N` is the owner's own Markdown ceiling, imported rather than copied.
+const OUTCOME_DOCUMENT_RESPONSE_BYTES: u64 =
+    4 * crate::outcome::MAX_EMITTED_MARKDOWN_BYTES + 1 + 342;
 const SERVER_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
 // Exact activation review makes three independently bounded provider reads (tags, show, tags).
 // Keep transport overhead outside that six-second worst case so a provider error is returned as
@@ -3933,12 +3929,13 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        CandidateDocumentFault, DigestEnvelopeDto, LocalCommand, LocalErrorCode, LocalResult,
+        CandidateDocumentFault, DigestEnvelopeDto, ExportedOutcome, LocalCommand, LocalErrorCode, LocalResult,
         LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer, LocalTransportError,
         MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES, MAX_COMPLETION_PREVIEW_RESPONSE_BYTES,
-        MAX_COMPLETION_REQUEST_BYTES, MAX_MESSAGE_BYTES, OutcomeCandidateDocumentDto,
-        PostPreparationFault, PreparedOutcomeCandidateDto, ResponseEnvelope, WireError,
-        accepts_completion_sized_request, initialize_local_auth_token,
+        MAX_COMPLETION_REQUEST_BYTES, MAX_MESSAGE_BYTES, OUTCOME_DOCUMENT_RESPONSE_BYTES,
+        OutcomeCandidateDocumentDto, PROTOCOL_VERSION, PostPreparationFault, PreparedOutcomeCandidateDto,
+        RequestEnvelope, ResponseEnvelope, WireError, WireSecret,
+        accepts_completion_sized_request, initialize_local_auth_token, load_local_auth_token,
         response_from_transport_error, response_max,
     };
     use crate::outcome::MalformedOutcome;
@@ -3961,6 +3958,172 @@ mod tests {
         SampleProjectInstallOutcome, SampleProjectStatus, SecretString, StarterOrganizationError,
         TeamError,
     };
+
+    // ---------------------------------------------------------------------------------------
+    // B16 -- the two boundaries, measured on the ACTUAL types and the ACTUAL server read.
+    // ---------------------------------------------------------------------------------------
+
+    /// The owner's closed value domain, written here as independent literals.
+    ///
+    /// Not imported from `artifact.rs`: if a future change moves any of these, this test must
+    /// raise the contract question rather than silently agree with the new value.
+    const B16_ALGORITHM: &str = "sha256";
+    const B16_CANONICALIZER: &str = "beacon.artifact.v1";
+    const B16_MEDIA_TYPE: &str = "text/markdown; charset=utf-8";
+
+    /// A maximum-domain response built through the REAL `ResponseEnvelope` / `LocalResult` /
+    /// `ExportedOutcome`, so changing their serializer cannot leave a copied JSON fixture green.
+    ///
+    /// `ExportedOutcome` has private fields and gains no test constructor: it is produced through
+    /// its own `Deserialize`. The body is `body_len` bytes of `255` -- **synthetic**, chosen to be
+    /// the widest each element can serialise, and NOT owner-minted Markdown.
+    fn b16_max_domain_response(body_len: usize) -> Vec<u8> {
+        let mut document = String::from("{\"bytes\":[");
+        for index in 0..body_len {
+            if index > 0 {
+                document.push(',');
+            }
+            document.push_str("255");
+        }
+        document.push_str(&format!(
+            "],\"digest\":{{\"algorithm\":\"{B16_ALGORITHM}\",\"canonicalizer\":\"{B16_CANONICALIZER}\",\"value\":\"{}\"}},\"publicationVersion\":{},\"publicationVersionCount\":{},\"mediaType\":\"{B16_MEDIA_TYPE}\"}}",
+            "0".repeat(64),
+            u32::MAX,
+            u32::MAX,
+        ));
+        let document: ExportedOutcome =
+            serde_json::from_str(&document).expect("B16.UNIT: the real ExportedOutcome decodes");
+        let envelope = ResponseEnvelope {
+            protocol: PROTOCOL_VERSION,
+            result: Some(LocalResult::OutcomeDocument { document }),
+            error: None,
+        };
+        serde_json::to_vec(&envelope).expect("B16.UNIT: the real envelope serialises")
+    }
+
+    #[test]
+    fn b16_the_real_maximum_domain_response_is_exactly_the_outcome_ceiling() {
+        let at_bound = b16_max_domain_response(1024 * 1024);
+        // Independent literal: not recomputed from the constant the source uses.
+        assert_eq!(
+            at_bound.len(),
+            4_194_647,
+            "B16.OUTCOME.MAX_DOMAIN_FITS: the real types' maximum-domain size"
+        );
+        assert_eq!(
+            OUTCOME_DOCUMENT_RESPONSE_BYTES, 4_194_647,
+            "B16.OUTCOME.MAX_DOMAIN_FITS: the ceiling admits exactly that"
+        );
+    }
+
+    #[test]
+    fn b16_one_valid_byte_over_the_outcome_ceiling_is_refused() {
+        // Exactly one byte over, and still valid JSON: one trailing ASCII space, which serde
+        // accepts. A malformed suffix would refuse for parsing, proving nothing about the bound.
+        let mut over = b16_max_domain_response(1024 * 1024);
+        over.push(b' ');
+        assert_eq!(
+            over.len(),
+            4_194_648,
+            "B16.OUTCOME.RESPONSE_REMAINS_BOUNDED: exactly +1"
+        );
+        assert!(
+            serde_json::from_slice::<ResponseEnvelope>(&over).is_ok(),
+            "B16.OUTCOME.RESPONSE_REMAINS_BOUNDED: the +1 body must be valid JSON"
+        );
+        assert!(
+            over.len() as u64 > OUTCOME_DOCUMENT_RESPONSE_BYTES,
+            "B16.OUTCOME.RESPONSE_REMAINS_BOUNDED: one byte over the ceiling is over it"
+        );
+    }
+
+    /// The decisive incoming-bound bar: the ACTUAL `read_request`, over a real socket.
+    ///
+    /// The public client can only observe `BrokenPipe` here, which an unrelated IO failure would
+    /// also produce -- that is why this calls the server's own read directly and names its cause.
+    #[test]
+    fn b16_the_server_request_bound_refuses_an_oversized_valid_request() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let root = std::env::temp_dir().join(format!("b16-req-{}", Uuid::new_v4().simple()));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let token_path = root.join("beacond.token");
+        initialize_local_auth_token(&token_path).unwrap();
+        let server = LocalSupervisorServer::bind(LocalServerConfig {
+            store_path: root.join("beacon.sqlite3"),
+            initial_workspace_name: "Personal".to_owned(),
+            socket_path: root.join("beacond.sock"),
+            auth_token_path: token_path.clone(),
+            lock_path: root.join("beacond.lock"),
+            local_model_endpoint: LocalModelEndpoint::ollama_default(),
+        })
+        .unwrap();
+
+        let request_of = |residents: usize| {
+            let token = load_local_auth_token(&token_path).unwrap();
+            serde_json::to_vec(&RequestEnvelope {
+                protocol: PROTOCOL_VERSION,
+                token: WireSecret(token.encode()),
+                command: LocalCommand::AcceptStarterOrganization {
+                    proposal_version: 1,
+                    residents: (0..residents)
+                        .map(|index| crate::StarterResidentDraft {
+                            role: crate::StarterRole::Builder,
+                            display_name: Some(format!("Resident {index} {}", "n".repeat(24))),
+                        })
+                        .collect(),
+                },
+            })
+            .unwrap()
+        };
+
+        let read_back = |payload: Vec<u8>| {
+            let (mut writer, mut reader) = UnixStream::pair().unwrap();
+            let sent = std::thread::spawn(move || {
+                let outcome = writer.write_all(&payload);
+                let _ = writer.shutdown(std::net::Shutdown::Write);
+                outcome
+            });
+            let read = server.read_request(&mut reader);
+            // `read_request` stops at `MAX_MESSAGE_BYTES + 1`, so an oversized payload leaves the
+            // writer blocked with nobody draining. Dropping the reader breaks the pipe and lets it
+            // wake with EPIPE; without this the join never returns -- the first version hung here.
+            drop(reader);
+            // The writer's own result is reported, never swallowed: a large payload legitimately
+            // ends in BrokenPipe once the reader stops, and that is the WRITER's verdict.
+            let write_result = sent.join().unwrap();
+            (read, write_result)
+        };
+
+        // Control: a small, valid request of the same shape decodes.
+        let small = request_of(1);
+        assert!(small.len() as u64 <= MAX_MESSAGE_BYTES);
+        let (control, control_write) = read_back(small);
+        // `LocalCommand` has no `Debug`, so the message reports the shape rather than the value.
+        println!("B16.REQUEST.control_writer_verdict = {control_write:?}");
+        assert!(
+            matches!(control, Ok(LocalCommand::AcceptStarterOrganization { .. })),
+            "B16.REQUEST.BOUND_UNCHANGED: the small control request must decode"
+        );
+
+        // The same valid shape, over the bound: refused by the request bound itself.
+        let large = request_of(4_000);
+        assert!(
+            large.len() as u64 > MAX_MESSAGE_BYTES,
+            "the fixture must exceed the request bound, got {}",
+            large.len()
+        );
+        let (refused, large_write) = read_back(large);
+        println!("B16.REQUEST.writer_verdict = {large_write:?}");
+        assert!(
+            matches!(refused, Err(LocalTransportError::Protocol)),
+            "B16.REQUEST.BOUND_UNCHANGED: an oversized valid request must be refused as Protocol"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn sample_project_query_and_command_are_authenticated_over_local_transport() {

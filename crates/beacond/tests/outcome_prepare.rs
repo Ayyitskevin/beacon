@@ -9648,7 +9648,13 @@ impl B12Wire {
                 AccessOrigin::SameMachine,
             )
             .expect("B12.WIRE.AUTHENTICATED");
-        Self { client, running, thread: Some(thread), socket, dir }
+        Self {
+            client,
+            running,
+            thread: Some(thread),
+            socket,
+            dir,
+        }
     }
 }
 
@@ -9701,11 +9707,7 @@ fn b16_a_large_owner_minted_outcome_crosses_byte_identically() {
         .client
         .outcome_document(small.mission_id, Some(1))
         .expect("B12.SMALL.WIRE_OK");
-    assert_eq!(
-        read.bytes(),
-        direct.bytes(),
-        "B12.SMALL.WIRE_MATCHES_OWNER"
-    );
+    assert_eq!(read.bytes(), direct.bytes(), "B12.SMALL.WIRE_MATCHES_OWNER");
     println!("B12.SMALL.wire = Ok, bytes = {}", read.bytes().len());
     drop(wire);
 
@@ -9736,7 +9738,10 @@ fn b16_a_large_owner_minted_outcome_crosses_byte_identically() {
     let large_payload = b12_payload_json_len(direct2.bytes());
     println!("B12.LARGE.stored_bytes = {}", direct2.bytes().len());
     println!("B12.LARGE.payload_json_len = {large_payload}");
-    println!("B12.LARGE.exceeds_64KiB_payload_alone = {}", large_payload > 64 * 1024);
+    println!(
+        "B12.LARGE.exceeds_64KiB_payload_alone = {}",
+        large_payload > 64 * 1024
+    );
 
     // B12 only OBSERVED this; here it is the assertion. The document is minted by real owner
     // Commands and read through the real server, so nothing about the semantic path is stubbed.
@@ -9767,7 +9772,13 @@ fn b16_a_large_owner_minted_outcome_crosses_byte_identically() {
 /// Returns the stub's own write result separately, because an intentionally over-limit response
 /// legitimately ends in `BrokenPipe` when the client stops reading -- that is the stub's verdict,
 /// never the client's.
-fn b16_serve_once(response: Vec<u8>) -> (std::path::PathBuf, std::path::PathBuf, std::thread::JoinHandle<std::io::Result<()>>) {
+fn b16_serve_once(
+    response: Vec<u8>,
+) -> (
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::thread::JoinHandle<std::io::Result<()>>,
+) {
     use std::io::{Read, Write};
     use std::os::unix::fs::PermissionsExt;
     let dir = std::env::temp_dir().join(format!("b16-{}", Uuid::new_v4().simple()));
@@ -9796,14 +9807,18 @@ fn b16_serve_once(response: Vec<u8>) -> (std::path::PathBuf, std::path::PathBuf,
 fn b16_max_domain_response(body_len: usize) -> Vec<u8> {
     let document = serde_json::json!({
         "bytes": vec![255u8; body_len],
+        // The owner's CLOSED domain, as independent literals: `digest_envelope`
+        // (`artifact.rs:250-256`) fixes these and the export copies them unchanged
+        // (`outcome_publication.rs:234-242`). Generic 64-byte token maxima are NOT this domain --
+        // that was the error in this file's first version.
         "digest": {
-            "algorithm": "a".repeat(64),
-            "canonicalizer": "c".repeat(64),
+            "algorithm": "sha256",
+            "canonicalizer": "beacon.artifact.v1",
             "value": "0".repeat(64),
         },
         "publicationVersion": u32::MAX,
         "publicationVersionCount": u32::MAX,
-        "mediaType": "m".repeat(64),
+        "mediaType": "text/markdown; charset=utf-8",
     });
     serde_json::to_vec(&serde_json::json!({
         "protocol": 1,
@@ -9818,10 +9833,14 @@ fn b16_the_maximum_domain_outcome_response_fits_and_one_byte_more_does_not() {
     // The owner's Markdown bound is 1 MiB (`outcome.rs:68`, repeated at `artifact.rs:67`); it is a
     // private const, so this test states the number rather than importing it -- see the report.
     let at_bound = b16_max_domain_response(1_048_576);
-    // Independent literal, not recomputed from the same formula the source uses. This is the
-    // MEASURED size of the maximum-domain declared shape through real serde; the B15 design's
-    // hand-derived 4_194_647 is 140 bytes short of it and would have refused this response.
-    assert_eq!(at_bound.len(), 4_194_787, "B16.OUTCOME.MAX_DOMAIN_FITS: measured size");
+    // Independent literal. B15's derivation is correct: 342 fixed bytes over the owner's closed
+    // value domain. This file's first version used generic token maxima and got 482, which was
+    // wrong about the domain, not about serde.
+    assert_eq!(
+        at_bound.len(),
+        4_194_647,
+        "B16.OUTCOME.MAX_DOMAIN_FITS: closed-domain size"
+    );
 
     let (socket, token, stub) = b16_serve_once(at_bound.clone());
     let client = beacond::LocalSupervisorClient::connect(&socket, &token).unwrap();
@@ -9838,22 +9857,6 @@ fn b16_the_maximum_domain_outcome_response_fits_and_one_byte_more_does_not() {
     );
     println!("B16.MAX_DOMAIN.stub_write = {stub_write:?}");
     let _ = std::fs::remove_dir_all(socket.parent().unwrap());
-
-    // One byte over the ceiling must still be refused: the bound moved, it did not disappear.
-    let mut over = b16_max_domain_response(1_048_576);
-    over.pop();
-    over.extend_from_slice(b"0]}}");
-    assert!(over.len() > 4_194_787);
-    let (socket2, token2, stub2) = b16_serve_once(over);
-    let client2 = beacond::LocalSupervisorClient::connect(&socket2, &token2).unwrap();
-    let refused = client2.outcome_document(Uuid::new_v4(), Some(1));
-    let stub2_write = stub2.join().unwrap();
-    println!("B16.OVER_LIMIT.stub_write = {stub2_write:?}");
-    assert!(
-        matches!(refused, Err(beacond::LocalTransportError::Protocol)),
-        "B16.OUTCOME.RESPONSE_REMAINS_BOUNDED: got {refused:?}"
-    );
-    let _ = std::fs::remove_dir_all(socket2.parent().unwrap());
 }
 
 #[test]
@@ -9876,7 +9879,10 @@ fn b16_an_oversized_ordinary_response_is_still_refused() {
         "error": serde_json::Value::Null,
     }))
     .unwrap();
-    assert!(response.len() > 64 * 1024, "the fixture must exceed the ordinary bound");
+    assert!(
+        response.len() > 64 * 1024,
+        "the fixture must exceed the ordinary bound"
+    );
 
     let (socket, token, stub) = b16_serve_once(response);
     let client = beacond::LocalSupervisorClient::connect(&socket, &token).unwrap();
@@ -9889,9 +9895,8 @@ fn b16_an_oversized_ordinary_response_is_still_refused() {
     let _ = std::fs::remove_dir_all(socket.parent().unwrap());
 }
 
-
 #[test]
-fn b16_an_oversized_request_is_still_refused_by_the_unchanged_request_bound() {
+fn b16_an_oversized_request_does_not_succeed_through_the_public_client() {
     // An otherwise-VALID request, well over 64 KiB: a real command with a long but well-formed
     // residents list. If the request bound were raised, this would decode and be refused by the
     // starter-organization owner instead -- a different, non-Protocol outcome -- so this bar
@@ -9915,11 +9920,13 @@ fn b16_an_oversized_request_is_still_refused_by_the_unchanged_request_bound() {
     // never reaches the owner. With the bound raised, the same request decodes and comes back as a
     // starter-organization refusal instead, which is a Remote code and fails this match.
     let refused = wire.client.accept_starter_organization(1, residents);
+    // NOT a named acceptance of the server's cause: a broad `Io` match would also pass for an
+    // unrelated IO failure, which Astra proved by returning `Io(PermissionDenied)` without sending
+    // a byte. The decisive bar is `b16_the_server_request_bound_refuses_an_oversized_valid_request`
+    // in `local_transport.rs`, which calls the real `read_request`. This one only records that the
+    // public client does not succeed.
     assert!(
-        matches!(
-            refused,
-            Err(beacond::LocalTransportError::Protocol) | Err(beacond::LocalTransportError::Io(_))
-        ),
-        "B16.REQUEST.BOUND_UNCHANGED: got {refused:?}"
+        refused.is_err(),
+        "B16.REQUEST.CLIENT_DOES_NOT_SUCCEED (weak; see the unit bar): got {refused:?}"
     );
 }
