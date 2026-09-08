@@ -1397,7 +1397,7 @@ fn a_store_that_disagrees_with_itself_reaches_the_wire_as_preflight_unavailable(
 /// (`beacon-transport-{label}-{uuid}`) that directory basename is 174 bytes — comfortably inside
 /// `NAME_MAX` (255), so `create_dir` succeeds and the failure lands exactly where it matters: the
 /// server's `bind`, with `Io(InvalidInput, "path must be shorter than SUN_LEN")`. Under the current
-/// formula the basename is 15 bytes whatever the label says, so the server binds.
+/// formula the basename is 35 bytes whatever the label says, so the server binds.
 ///
 /// It binds a real `LocalSupervisorServer` rather than measuring a string, and drops it so the
 /// socket is cleaned up.
