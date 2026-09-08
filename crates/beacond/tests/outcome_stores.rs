@@ -572,31 +572,7 @@ fn the_verified_reader_refuses_a_row_whose_columns_disagree_with_its_bytes() {
 #[test]
 fn the_classification_reader_refuses_a_row_whose_impact_column_disagrees_with_its_bytes() {
     let stored = stored("decoy-impact");
-    // Published through its own service, not seeded. This test restarts the whole store, and
-    // startup re-verifies Project Policy against its Events -- a hand-written row fails that, which
-    // is the same lesson as the classification half below and is already written down at the
-    // `classification-across-0032` bar.
-    let revision =
-        ProjectPolicyService::new(Arc::clone(&stored.accounts), stored.store.workspace_id)
-            .publish(
-                stored.project_id,
-                stored.charter_revision,
-                None,
-                ProjectPolicyDraft {
-                    team_lead_selection: TeamLeadSelectionPolicy {
-                        required_capabilities: vec![BeaconCapability::WorkCoordinateMission],
-                        availability_rule: TeamLeadAvailabilityRule::CurrentTeamEligibility,
-                        track_record_requirements: vec![TrackRecordRequirement {
-                            evidence_kind: TrackRecordEvidenceKind::MissionOutcome,
-                            minimum_count: 1,
-                        }],
-                        conflict_rule: TeamLeadConflictRule::RequireNoDeclaredConflict,
-                        ambiguity_rule: TeamLeadAmbiguityRule::RequireOperatorDecision,
-                    },
-                },
-            )
-            .expect("the Project Policy publishes")
-            .revision;
+    let revision = stored.policy_revision();
     let id = Uuid::new_v4();
     let classification = stored.classification_record(id, revision);
     let bytes = classification.canonical_bytes().unwrap();
