@@ -108,8 +108,7 @@ DROP TABLE events_v34;
 CREATE TRIGGER team_formation_members_no_insert_after_formation
 BEFORE INSERT ON team_formation_members
 WHEN EXISTS (
-    SELECT 1
-    FROM events
+    SELECT 1 FROM events
     WHERE workspace_id = NEW.workspace_id
       AND kind = 'team.formed'
       AND json_extract(payload_json, '$.team.id') = NEW.team_id
@@ -121,8 +120,7 @@ END;
 CREATE TRIGGER mission_admission_members_no_insert_after_admission
 BEFORE INSERT ON mission_admission_members
 WHEN EXISTS (
-    SELECT 1
-    FROM events
+    SELECT 1 FROM events
     WHERE workspace_id = NEW.workspace_id
       AND kind = 'mission.admitted'
       AND json_extract(payload_json, '$.mission.id') = NEW.mission_id

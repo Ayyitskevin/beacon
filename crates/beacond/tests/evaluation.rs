@@ -839,9 +839,12 @@ fn the_audit_event_binds_the_exact_bytes_and_refuses_every_way_it_can_disagree()
         .store
         .connect()
         .execute(
-            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-             SELECT workspace_id, kind, payload_json, occurred_at_ms FROM events
-             WHERE kind = 'evaluation.recorded'",
+            "INSERT INTO events (
+                 workspace_id, kind, payload_json, occurred_at_ms,
+                 predecessor_kind, predecessor_digest, link_digest
+             )
+             SELECT workspace_id, kind, payload_json, occurred_at_ms, 'unchained', NULL, NULL
+             FROM events WHERE kind = 'evaluation.recorded'",
             [],
         )
         .unwrap();
@@ -880,8 +883,11 @@ fn an_event_naming_no_stored_evaluation_refuses_startup() {
     let orphan = payload.replace(&evaluation.digest().value, &HEXLOWER.encode(&[0x33_u8; 32]));
     connection
         .execute(
-            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-             VALUES (?1, 'evaluation.recorded', ?2, 7)",
+            "INSERT INTO events (
+                 workspace_id, kind, payload_json, occurred_at_ms,
+                 predecessor_kind, predecessor_digest, link_digest
+             )
+             VALUES (?1, 'evaluation.recorded', ?2, 7, 'unchained', NULL, NULL)",
             rusqlite::params![fixture.workspace_id.to_string(), orphan],
         )
         .unwrap();
@@ -1170,9 +1176,12 @@ fn a_self_evaluation_written_past_the_command_refuses_startup() {
         );
     connection
         .execute(
-            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-             SELECT workspace_id, kind, ?1, occurred_at_ms FROM events
-             WHERE kind = 'evaluation.recorded' LIMIT 1",
+            "INSERT INTO events (
+                 workspace_id, kind, payload_json, occurred_at_ms,
+                 predecessor_kind, predecessor_digest, link_digest
+             )
+             SELECT workspace_id, kind, ?1, occurred_at_ms, 'unchained', NULL, NULL
+             FROM events WHERE kind = 'evaluation.recorded' LIMIT 1",
             [event],
         )
         .unwrap();
@@ -1971,8 +1980,11 @@ fn an_evaluated_time_earlier_than_the_link_it_supersedes_is_refused() {
         );
     connection
         .execute(
-            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-             VALUES (?1, 'evaluation.recorded', ?2, ?3)",
+            "INSERT INTO events (
+                 workspace_id, kind, payload_json, occurred_at_ms,
+                 predecessor_kind, predecessor_digest, link_digest
+             )
+             VALUES (?1, 'evaluation.recorded', ?2, ?3, 'unchained', NULL, NULL)",
             rusqlite::params![
                 fixture.workspace_id.to_string(),
                 event,
@@ -2079,13 +2091,31 @@ fn two_links_recorded_in_the_same_millisecond_are_accepted() {
         );
     connection
         .execute(
-            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-             VALUES (?1, 'evaluation.recorded', ?2, ?3)",
+            "INSERT INTO events (
+                 workspace_id, kind, payload_json, occurred_at_ms,
+                 predecessor_kind, predecessor_digest, link_digest
+             )
+             VALUES (?1, 'evaluation.recorded', ?2, ?3, 'unchained', NULL, NULL)",
             rusqlite::params![
                 fixture.workspace_id.to_string(),
                 event,
                 i64::try_from(equal).unwrap()
             ],
+        )
+        .unwrap();
+    // R58: this fixture FABRICATES a second link -- bytes the service would never write -- and then
+    // expects startup to accept it. A store whose history was fabricated is not a chained store, so
+    // it says so rather than carrying a plant the chain would refuse.
+    connection
+        .execute_batch(
+            "UPDATE events
+                SET predecessor_kind = 'unchained', predecessor_digest = NULL, link_digest = NULL;
+             UPDATE event_chain_state
+                SET genesis_kind = 'migrated',
+                    migrated_through_sequence = (SELECT max(sequence) FROM events),
+                    head_digest = NULL,
+                    head_sequence = (SELECT max(sequence) FROM events)
+              WHERE id = 1;",
         )
         .unwrap();
     drop(connection);
@@ -2247,9 +2277,12 @@ fn an_evaluation_chain_that_forks_refuses_startup() {
         );
     connection
         .execute(
-            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-             SELECT workspace_id, kind, ?1, occurred_at_ms FROM events
-             WHERE kind = 'evaluation.recorded' ORDER BY sequence LIMIT 1",
+            "INSERT INTO events (
+                 workspace_id, kind, payload_json, occurred_at_ms,
+                 predecessor_kind, predecessor_digest, link_digest
+             )
+             SELECT workspace_id, kind, ?1, occurred_at_ms, 'unchained', NULL, NULL
+             FROM events WHERE kind = 'evaluation.recorded' ORDER BY sequence LIMIT 1",
             [event],
         )
         .unwrap();
@@ -2422,9 +2455,12 @@ fn store_with_a_relation_the_bytes_do_not_declare(
         );
     connection
         .execute(
-            "INSERT INTO events (workspace_id, kind, payload_json, occurred_at_ms)
-             SELECT workspace_id, kind, ?1, occurred_at_ms FROM events
-             WHERE kind = 'evaluation.recorded' LIMIT 1",
+            "INSERT INTO events (
+                 workspace_id, kind, payload_json, occurred_at_ms,
+                 predecessor_kind, predecessor_digest, link_digest
+             )
+             SELECT workspace_id, kind, ?1, occurred_at_ms, 'unchained', NULL, NULL
+             FROM events WHERE kind = 'evaluation.recorded' LIMIT 1",
             [event],
         )
         .unwrap();
@@ -3278,6 +3314,14 @@ fn migration_0028_preserves_preexisting_proposal_evaluation_bytes_and_chain() {
              DROP TRIGGER outcome_manifests_no_delete;
              DROP INDEX outcome_manifests_by_mission;
              DROP TABLE outcome_manifests;
+             -- R58's 0035 adds the chain columns, its state table and its trigger; a rollback to
+             -- 27 undoes all three. The two roster triggers come off first because the rename
+             -- rewrites every trigger that names `events`.
+             DROP TRIGGER event_chain_state_no_delete;
+             DROP TABLE event_chain_state;
+             DROP TRIGGER team_formation_members_no_insert_after_formation;
+             DROP TRIGGER mission_admission_members_no_insert_after_admission;
+             ALTER TABLE events RENAME TO events_r58;
              DROP TRIGGER mission_impact_classifications_no_update;
              DROP TRIGGER mission_impact_classifications_no_delete;
              DROP TABLE mission_impact_classifications;
@@ -3318,6 +3362,52 @@ fn migration_0028_preserves_preexisting_proposal_evaluation_bytes_and_chain() {
         )
         .unwrap();
     restore_pre_0035_spend(&connection);
+
+    // R58: `events` back at its pre-chain shape, sliced from the migration that last defined it,
+    // then the rows without the columns 0035 added.
+    let migration_0027 = include_str!("../migrations/0027_artifacts.sql");
+    let events_start = migration_0027.find("CREATE TABLE events (").unwrap();
+    let events_end = migration_0027[events_start..].find(") STRICT;").unwrap() + events_start + 9;
+    connection
+        .execute_batch(&migration_0027[events_start..events_end])
+        .unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO events (sequence, workspace_id, kind, payload_json, occurred_at_ms)
+             SELECT sequence, workspace_id, kind, payload_json, occurred_at_ms
+             FROM events_r58 ORDER BY sequence;
+             DROP TABLE events_r58;",
+        )
+        .unwrap();
+    // The roster triggers, with NO leading indentation: SQLite stores a trigger's literal text, so
+    // one indented to match its surrounding Rust string is a different object to the schema
+    // signature. That is how the first cut of this rollback failed.
+    connection
+        .execute_batch(
+            "CREATE TRIGGER team_formation_members_no_insert_after_formation
+BEFORE INSERT ON team_formation_members
+WHEN EXISTS (
+    SELECT 1 FROM events
+    WHERE workspace_id = NEW.workspace_id
+      AND kind = 'team.formed'
+      AND json_extract(payload_json, '$.team.id') = NEW.team_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'Team formation roster is closed');
+END;
+CREATE TRIGGER mission_admission_members_no_insert_after_admission
+BEFORE INSERT ON mission_admission_members
+WHEN EXISTS (
+    SELECT 1 FROM events
+    WHERE workspace_id = NEW.workspace_id
+      AND kind = 'mission.admitted'
+      AND json_extract(payload_json, '$.mission.id') = NEW.mission_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'Mission admission roster is closed');
+END;",
+        )
+        .unwrap();
 
     let migration_0023 = include_str!("../migrations/0023_evaluations.sql");
     let evaluation_objects =
