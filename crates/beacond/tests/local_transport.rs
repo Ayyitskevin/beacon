@@ -37,9 +37,29 @@ struct TestRuntime {
 }
 
 impl TestRuntime {
+    /// The unique directory is named by the UUID alone, and its length does NOT depend on `label`.
+    ///
+    /// A Unix socket path is bounded by `SUN_LEN` (108 bytes including the NUL, so 107 usable),
+    /// and this fixture's socket lives inside that directory. The old basename was
+    /// `beacon-transport-{label}-{uuid}`, so every descriptive character a test added to its label
+    /// came straight off the budget: at main `b8a5f83` a 13-byte TMPDIR produced 109/110-byte paths
+    /// and the server refused to bind with `Io(InvalidInput, "path must be shorter than SUN_LEN")`,
+    /// while the same bytes under a 9-byte TMPDIR produced 105/106 and passed. That is a fixture
+    /// defect, not a transport fault, and it is why `label` no longer reaches the path.
+    ///
+    /// **Remaining TMPDIR budget: 78 bytes.** The path is
+    /// `{TMPDIR}/bt-{12 hex}/beacond.sock` = `len(TMPDIR) + 1 + 15 + 1 + 12`, so
+    /// `len(TMPDIR) <= 78` fits and anything longer cannot be promised support — no fixture can
+    /// make an arbitrarily long TMPDIR work, because the kernel's limit is on the whole path.
+    ///
+    /// Collision resistance is unchanged in kind: a fresh v4 UUID per call, of which the first 12
+    /// hex digits (48 bits) name the directory. `label` remains the argument every caller passes
+    /// and still names the test in its own output; it simply no longer decides whether a socket can
+    /// be bound.
     fn new(label: &str) -> Self {
-        let root =
-            std::env::temp_dir().join(format!("beacon-transport-{label}-{}", Uuid::new_v4()));
+        let _ = label;
+        let unique = Uuid::new_v4().simple().to_string();
+        let root = std::env::temp_dir().join(format!("bt-{}", &unique[..12]));
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         Self {
@@ -1369,4 +1389,41 @@ fn a_store_that_disagrees_with_itself_reaches_the_wire_as_preflight_unavailable(
 
     running.store(false, Ordering::Release);
     thread.join().unwrap().unwrap();
+}
+
+/// B8 — a long diagnostic label must not decide whether the socket can be bound.
+///
+/// The label here is 120 characters. Under the OLD root formula
+/// (`beacon-transport-{label}-{uuid}`) that directory basename is 174 bytes — comfortably inside
+/// `NAME_MAX` (255), so `create_dir` succeeds and the failure lands exactly where it matters: the
+/// server's `bind`, with `Io(InvalidInput, "path must be shorter than SUN_LEN")`. Under the current
+/// formula the basename is 15 bytes whatever the label says, so the server binds.
+///
+/// It binds a real `LocalSupervisorServer` rather than measuring a string, and drops it so the
+/// socket is cleaned up.
+#[test]
+fn a_long_diagnostic_label_still_binds_the_local_socket() {
+    let label = "a".repeat(120);
+    let runtime = TestRuntime::new(&label);
+
+    // BIND FIRST, deliberately. The failure this bar exists to catch belongs at the socket bind --
+    // under the old formula `LocalSupervisorServer::bind` refuses with
+    // `Io(InvalidInput, "path must be shorter than SUN_LEN")` -- and a length check placed ahead of
+    // it would short-circuit that and pin arithmetic instead of the kernel's answer.
+    let server = runtime.server();
+    assert!(
+        runtime.socket.exists(),
+        "B8.SOCKET_BOUND: the server did not create {}",
+        runtime.socket.display()
+    );
+    drop(server);
+
+    // Recorded after the bind succeeded, as the budget this fixture keeps rather than as the thing
+    // being tested.
+    let socket_len = runtime.socket.as_os_str().len();
+    assert!(
+        socket_len <= 107,
+        "B8.SOCKET_PATH_FITS_SUN_LEN: {socket_len} bytes: {}",
+        runtime.socket.display()
+    );
 }
