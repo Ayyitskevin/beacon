@@ -4517,9 +4517,9 @@ fn astra_s1_canonical_cross_mission_successor_is_not_a_verified_subject_tail() {
     );
 }
 
-/// The pre-0036 spend shapes, for a test that stamps a version below 35.
+/// The pre-0035 spend shapes, for a test that stamps a version below 35.
 ///
-/// 0036 widened `measured_spend`'s canonicalizer CHECK and added `measured_spend_lines`. A store
+/// 0035 widened `measured_spend`'s canonicalizer CHECK and added `measured_spend_lines`. A store
 /// rolled back below 35 must carry the shapes that version actually had, or its schema signature
 /// will not match one built from the ladder. Taken from 0025's own text: a rollback that retyped
 /// the DDL would be testing the test.
@@ -4539,7 +4539,7 @@ fn restore_pre_0035_spend(connection: &Connection) {
              DROP TRIGGER measured_spend_no_delete;
              DROP TABLE measured_spend;",
         )
-        .expect("the 0036 shapes come off");
+        .expect("the 0035 shapes come off");
     connection.execute_batch(block).expect("0025's spend table");
     connection
         .execute_batch(
