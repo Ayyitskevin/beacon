@@ -228,3 +228,29 @@ it("passes WCAG 2.1 AA with the saved brief on screen", async () => {
   await user.click(within(cardFor(fullMission.desiredOutcome)).getByText("Recorded identities"));
   await expectNoWcagViolations(container);
 });
+
+it("does not infer unstarted work from a published Mission's admission lifecycle", async () => {
+  invokeMock.mockImplementation((command) => {
+    if (command === "mission_publications") return Promise.resolve([{
+      publicationId: "44444444-4444-4444-8444-444444444444",
+      publicationVersion: 1,
+      candidateArtifactDigest: "a".repeat(64),
+      evaluationDigest: "b".repeat(64),
+      isCurrent: true,
+    }]);
+    if (command === "outcome_document") return Promise.resolve({
+      bytes: Array.from(new TextEncoder().encode("# Recorded completed Mission\n")),
+      digest: { algorithm: "sha256", canonicalizer: "beacon.artifact.v1", value: "a".repeat(64) },
+      publicationVersion: 1,
+      publicationVersionCount: 1,
+      mediaType: "text/markdown; charset=utf-8",
+    });
+    return Promise.reject(new Error(`unexpected command: ${String(command)}`));
+  });
+  const user = userEvent.setup();
+  renderMissions([fullMission]);
+  expect(await screen.findByLabelText("Outcome Document")).toHaveTextContent("Recorded completed Mission");
+  await user.click(screen.getByText("Recorded identities"));
+  expect(screen.getByText(/Lifecycle: Admitted/)).toBeVisible();
+  expect(screen.queryByText(/started no work/i), "B9.MISSION.ADMISSION_IS_NOT_WORK_STATE").not.toBeInTheDocument();
+});
