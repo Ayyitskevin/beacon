@@ -173,7 +173,8 @@ pub use mission_impact::{
     MissionImpactClassificationV1, PolicyRevisionRef, enumerate_classifications,
 };
 pub use mission_impact::{
-    ClassificationRecordError, ClassificationStoreError, MissionImpactClassification,
+    ClassificationEventError, ClassificationEventField, ClassificationRecordError,
+    ClassificationStoreError, MissionImpactClassification,
     MissionImpactService, verified_classification_for_citation, verified_classification_within,
 };
 pub use mission_impact_command::{
@@ -686,6 +687,18 @@ pub enum SupervisorError {
     /// corrupt store from a forged link from a bug in the reader, and cannot say which row. This is
     /// the shape the others move to (R27.2), taken pass by pass; it is a surfaced break from the
     /// convention, not a silent fork (R11).
+    /// **B6/R58.3.** One stored `mission.impact_classified` Event does not account for a
+    /// classification.
+    ///
+    /// Keyed by the Event's own stored `sequence` and nothing else. An orphan or unreadable Event
+    /// has no classification row to borrow a digest from, and taking one out of the unverified
+    /// payload would be inventing the key. The value is the real signed `i64` the column holds:
+    /// `AUTOINCREMENT` does not constrain it to be positive, so a row at 0 or below is named as it
+    /// actually is rather than cast or replaced by a sentinel.
+    MissionImpactClassificationEventMismatch {
+        sequence: i64,
+        cause: mission_impact::ClassificationEventError,
+    },
     MissionImpactClassificationStateMismatch {
         workspace_id: Uuid,
         digest: String,
@@ -1007,6 +1020,20 @@ pub(crate) fn supervisor_caller_tag(error: &SupervisorError) -> String {
         SupervisorError::ArtifactRelationMismatch(cause) => {
             format!("ArtifactRelationMismatch.{}", cause.name())
         }
+        // The field label is part of the code, not free text: a caller can match on
+        // `…EventMismatch.disagrees.version` without parsing a sentence.
+        SupervisorError::MissionImpactClassificationEventMismatch { cause, .. } => match cause {
+            mission_impact::ClassificationEventError::Malformed => {
+                "MissionImpactClassificationEventMismatch.malformed".to_owned()
+            }
+            mission_impact::ClassificationEventError::Unaccounted => {
+                "MissionImpactClassificationEventMismatch.unaccounted".to_owned()
+            }
+            mission_impact::ClassificationEventError::Disagrees { field } => format!(
+                "MissionImpactClassificationEventMismatch.disagrees.{}",
+                field.as_str()
+            ),
+        },
         SupervisorError::MissionImpactClassificationStateMismatch { cause, .. } => {
             format!(
                 "MissionImpactClassificationStateMismatch.{}",
@@ -1058,6 +1085,10 @@ fn classification_tag(cause: &mission_impact::ClassificationStoreError) -> Strin
     use mission_impact::ClassificationStoreError as Fault;
     match cause {
         Fault::DigestMismatch => "digest_mismatch".to_owned(),
+        // The count is a diagnostic, not a wire code: the tag stays stable so a caller matching on
+        // it does not have to parse a number out of it (B6.11).
+        Fault::EventAbsent => "event_absent".to_owned(),
+        Fault::EventDuplicated { .. } => "event_duplicated".to_owned(),
         Fault::Malformed(reason) => format!("malformed.{reason}"),
         Fault::ColumnsDisagree => "columns_disagree".to_owned(),
         Fault::CitedIdentityMismatch => "cited_identity_mismatch".to_owned(),
@@ -1545,6 +1576,11 @@ impl fmt::Display for SupervisorError {
                 formatter,
                 "the Artifact supersession relation does not re-prove: {}",
                 cause.name()
+            ),
+            // R58.2/B6: PROPOSED words, Kevin signs or rewrites before the bar.
+            Self::MissionImpactClassificationEventMismatch { sequence, cause } => write!(
+                formatter,
+                "Event sequence {sequence} does not account for a classification: {cause}"
             ),
             Self::MissionImpactClassificationStateMismatch {
                 workspace_id,
@@ -2431,6 +2467,9 @@ fn map_classification_state_fault(
             digest,
             cause,
         },
+        mission_impact::ClassificationStateFault::Event { sequence, cause } => {
+            SupervisorError::MissionImpactClassificationEventMismatch { sequence, cause }
+        }
     }
 }
 
@@ -8120,7 +8159,7 @@ mod tests {
     }
 
     /// The 72 startup lines, transcribed from the spec with this table's own fixture keys.
-    const STARTUP_LINES: [(&str, &str); 79] = [
+    const STARTUP_LINES: [(&str, &str); 80] = [
         ("EmptyWorkspaceName", "workspace name cannot be empty"),
         (
             "WorkspaceNameTooLong",
@@ -8356,6 +8395,13 @@ mod tests {
         (
             "ArtifactRelationMismatch",
             "the Artifact supersession relation does not re-prove: NotFound",
+        ),
+        // R58.2/B6: PROPOSED text -- Kevin signs or rewrites before the bar. One row per root, so
+        // this pins `Unaccounted` as the representative (B6.11); the other thirteen labels are
+        // pinned label by label in the transport table.
+        (
+            "MissionImpactClassificationEventMismatch",
+            "Event sequence 4242 does not account for a classification: unaccounted",
         ),
         (
             "MissionImpactClassificationStateMismatch",
@@ -8650,6 +8696,12 @@ mod tests {
         "ArtifactRelationMismatch" | SupervisorError::ArtifactRelationMismatch(..)
             => startup_line("ArtifactRelationMismatch"),
             SupervisorError::ArtifactRelationMismatch(crate::ArtifactError::NotFound), &[];
+        "MissionImpactClassificationEventMismatch" | SupervisorError::MissionImpactClassificationEventMismatch { .. }
+            => startup_line("MissionImpactClassificationEventMismatch"),
+            SupervisorError::MissionImpactClassificationEventMismatch {
+                sequence: R42S2_SEQUENCE_I64,
+                cause: crate::ClassificationEventError::Unaccounted,
+            }, &[];
         "MissionImpactClassificationStateMismatch" | SupervisorError::MissionImpactClassificationStateMismatch { .. }
             => startup_line("MissionImpactClassificationStateMismatch"),
             SupervisorError::MissionImpactClassificationStateMismatch { workspace_id: r42s2_uuid(), digest: r42s2_digest(), cause: crate::ClassificationStoreError::ColumnsDisagree }, &[];
@@ -8720,11 +8772,11 @@ mod tests {
     /// R42 slice 2, fold: every one of the 72 startup lines is what the spec says.
     #[test]
     fn r42_startup_templates_are_all_pinned() {
-        assert_eq!(STARTUP_LINES.len(), 79, "R42S2.STARTUP.CARDINALITY.LINES");
-        assert_eq!(startup_rows().len(), 79, "R42S2.STARTUP.CARDINALITY.ROWS");
+        assert_eq!(STARTUP_LINES.len(), 80, "R42S2.STARTUP.CARDINALITY.LINES");
+        assert_eq!(startup_rows().len(), 80, "R42S2.STARTUP.CARDINALITY.ROWS");
         let ids: std::collections::BTreeSet<&str> =
             startup_rows().iter().map(|(case, _, _)| *case).collect();
-        assert_eq!(ids.len(), 79, "R42S2.STARTUP.CASE_IDS_UNIQUE");
+        assert_eq!(ids.len(), 80, "R42S2.STARTUP.CASE_IDS_UNIQUE");
 
         for (case, value, markers) in startup_rows() {
             let (matched, expected) = expected_startup(&value);

@@ -3925,7 +3925,8 @@ mod tests {
     use crate::outcome_typst::TypstRefusal;
     use crate::publication_seam::PublicationSeamRefusal;
     use crate::{
-        ArtifactError, CandidateError, ClassificationStoreError, CompletionReadRefusal,
+        ArtifactError, CandidateError, ClassificationEventError, ClassificationEventField,
+        ClassificationStoreError, CompletionReadRefusal,
         EvaluationError, LocalModelActivationError, MalformedClassification, PredecessorFault,
         ProposalError, RulingError, StartupPass, SupervisorError, TotalsMismatch,
     };
@@ -5642,10 +5643,61 @@ mod tests {
             PredecessorFault::ForAnotherMission, &[];
     }
 
+    // B6/R58.3: the Event-side vocabulary, walked LABEL BY LABEL rather than by enum arm. The enum
+    // has three arms and fourteen reachable cases, because `Disagrees` carries twelve field labels
+    // and a caller matches on the label, not on the arm (B6.11).
+    closed_table! {
+        expected_classification_event / classification_event_rows: ClassificationEventError,
+        "Malformed" | ClassificationEventError::Malformed
+            => "malformed", ClassificationEventError::Malformed, &[];
+        "Unaccounted" | ClassificationEventError::Unaccounted
+            => "unaccounted", ClassificationEventError::Unaccounted, &[];
+        "DisagreesOuterOccurredAtMs" | ClassificationEventError::Disagrees { field: ClassificationEventField::OuterOccurredAtMs }
+            => "disagrees.outer_occurred_at_ms",
+            ClassificationEventError::Disagrees { field: ClassificationEventField::OuterOccurredAtMs }, &[];
+        "DisagreesPayloadWorkspaceId" | ClassificationEventError::Disagrees { field: ClassificationEventField::PayloadWorkspaceId }
+            => "disagrees.payload_workspace_id",
+            ClassificationEventError::Disagrees { field: ClassificationEventField::PayloadWorkspaceId }, &[];
+        "DisagreesClassificationId" | ClassificationEventError::Disagrees { field: ClassificationEventField::ClassificationId }
+            => "disagrees.classification_id",
+            ClassificationEventError::Disagrees { field: ClassificationEventField::ClassificationId }, &[];
+        "DisagreesMissionId" | ClassificationEventError::Disagrees { field: ClassificationEventField::MissionId }
+            => "disagrees.mission_id",
+            ClassificationEventError::Disagrees { field: ClassificationEventField::MissionId }, &[];
+        "DisagreesProjectId" | ClassificationEventError::Disagrees { field: ClassificationEventField::ProjectId }
+            => "disagrees.project_id",
+            ClassificationEventError::Disagrees { field: ClassificationEventField::ProjectId }, &[];
+        "DisagreesVersion" | ClassificationEventError::Disagrees { field: ClassificationEventField::Version }
+            => "disagrees.version",
+            ClassificationEventError::Disagrees { field: ClassificationEventField::Version }, &[];
+        "DisagreesImpact" | ClassificationEventError::Disagrees { field: ClassificationEventField::Impact }
+            => "disagrees.impact",
+            ClassificationEventError::Disagrees { field: ClassificationEventField::Impact }, &[];
+        "DisagreesBasis" | ClassificationEventError::Disagrees { field: ClassificationEventField::Basis }
+            => "disagrees.basis",
+            ClassificationEventError::Disagrees { field: ClassificationEventField::Basis }, &[];
+        "DisagreesPolicyRevision" | ClassificationEventError::Disagrees { field: ClassificationEventField::PolicyRevision }
+            => "disagrees.policy_revision",
+            ClassificationEventError::Disagrees { field: ClassificationEventField::PolicyRevision }, &[];
+        "DisagreesCharterRevision" | ClassificationEventError::Disagrees { field: ClassificationEventField::CharterRevision }
+            => "disagrees.charter_revision",
+            ClassificationEventError::Disagrees { field: ClassificationEventField::CharterRevision }, &[];
+        "DisagreesClassifiedAtMs" | ClassificationEventError::Disagrees { field: ClassificationEventField::ClassifiedAtMs }
+            => "disagrees.classified_at_ms",
+            ClassificationEventError::Disagrees { field: ClassificationEventField::ClassifiedAtMs }, &[];
+        "DisagreesCanonicalBytesBase64" | ClassificationEventError::Disagrees { field: ClassificationEventField::CanonicalBytesBase64 }
+            => "disagrees.canonical_bytes_base64",
+            ClassificationEventError::Disagrees { field: ClassificationEventField::CanonicalBytesBase64 }, &[];
+    }
+
     closed_table! {
         expected_classification / classification_rows: ClassificationStoreError,
         "DigestMismatch" | ClassificationStoreError::DigestMismatch
             => "digest_mismatch", ClassificationStoreError::DigestMismatch, &[];
+        "EventAbsent" | ClassificationStoreError::EventAbsent
+            => "event_absent", ClassificationStoreError::EventAbsent, &[];
+        "EventDuplicated" | ClassificationStoreError::EventDuplicated { .. }
+            => "event_duplicated", ClassificationStoreError::EventDuplicated { count: 2 }, &[];
         "Malformed" | ClassificationStoreError::Malformed(reason)
             => format!("malformed.{}", expected_malformed_classification(reason).1),
             ClassificationStoreError::Malformed(MalformedClassification::Magic), &[];
@@ -5947,6 +5999,9 @@ mod tests {
         "ArtifactRelationMismatch" | SupervisorError::ArtifactRelationMismatch(cause)
             => format!("ArtifactRelationMismatch.{}", expected_artifact(cause).1),
             SupervisorError::ArtifactRelationMismatch(ArtifactError::NotFound), &[];
+        "MissionImpactClassificationEventMismatch" | SupervisorError::MissionImpactClassificationEventMismatch { cause, .. }
+            => format!("MissionImpactClassificationEventMismatch.{}", expected_classification_event(cause).1),
+            SupervisorError::MissionImpactClassificationEventMismatch { sequence: STORED_VERSION, cause: ClassificationEventError::Unaccounted }, &[];
         "MissionImpactClassificationStateMismatch" | SupervisorError::MissionImpactClassificationStateMismatch { cause, .. }
             => format!("MissionImpactClassificationStateMismatch.{}", expected_classification(cause).1),
             SupervisorError::MissionImpactClassificationStateMismatch { workspace_id: first_uuid(), digest: digest_a(), cause: ClassificationStoreError::ColumnsDisagree }, &[];
@@ -6456,6 +6511,15 @@ mod tests {
             SupervisorError::ArtifactRelationMismatch(child)
         });
         supervisor_child!(
+            "MissionImpactClassificationEventMismatch",
+            classification_event_rows,
+            expected_classification_event,
+            |child| SupervisorError::MissionImpactClassificationEventMismatch {
+                sequence: STORED_VERSION,
+                cause: child
+            }
+        );
+        supervisor_child!(
             "MissionImpactClassificationStateMismatch",
             classification_rows,
             expected_classification,
@@ -6754,8 +6818,8 @@ mod tests {
             28,
             "R42S2.TRANSPORT.CARDINALITY.ROOT"
         );
-        // 22 roots expanded: 62 Remote codes, 72 Supervisor roots PLUS every child of all 26
-        // cause-bearing Supervisor parents (including the two nested classification
+        // 22 roots expanded: 62 Remote codes, 73 Supervisor roots PLUS every child of all 27
+        // cause-bearing Supervisor parents (including the three nested classification
         // vocabularies), 18 account faults at each of 14 wrappers, the three draft reasons, both
         // charter-revision pairs, and slice 1's 83-case Outcome tree.
         // 878 before this slice, and my first arithmetic here was wrong by exactly the eight new
@@ -6773,10 +6837,16 @@ mod tests {
         // each over all eighteen account rows. 1006 + 2 + 5 + 36 = 1049. Counted on this head.
         // C2 adds four Supervisor cases and one StoredIdentityUnreadable startup-pass case.
         // Preserve every C3-C7 case: 1049 + 4 + 1 = 1054.
-        assert_eq!(cases.len(), 1056, "R42S2.TRANSPORT.CARDINALITY.CASES");
+        //
+        // 1056 -> 1073 for rebased B6/R58.3: one new root, two row-side children (`event_absent`,
+        // `event_duplicated`) and FOURTEEN Event-side cases -- `malformed`, `unaccounted` and one
+        // per disagreement label. Measured after the walk, not predicted: my design paper said 881
+        // by counting the enum's three arms, which is the count that hides the twelve labels a
+        // caller actually matches on (B6.11).
+        assert_eq!(cases.len(), 1073, "R42S2.TRANSPORT.CARDINALITY.CASES");
         assert_eq!(
             supervisor_rows().len(),
-            79,
+            80,
             "R42S2.TRANSPORT.CARDINALITY.Supervisor"
         );
         let ids: std::collections::BTreeSet<&str> =
