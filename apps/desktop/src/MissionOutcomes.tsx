@@ -24,7 +24,20 @@ const useStyles = makeStyles({
     ...shorthands.borderBottom(tokens.strokeWidthThin, "solid", tokens.colorNeutralStroke2),
     verticalAlign: "top",
   },
-  digest: { fontFamily: tokens.fontFamilyMonospace, fontSize: tokens.fontSizeBase200 },
+  // A digest cell holds 64 unbroken hex characters, and an unbreakable word is a table column's
+  // MIN-content width. Two of them put the Document column -- and the only control in the table --
+  // past the right edge of a 1280px window, so reaching the button needed horizontal page travel
+  // (measured in B22, screenshots 17-outcomes.png and 29-showversion.png).
+  //
+  // `anywhere` and NOT `break-word`: the two wrap identically once a line is being laid out, but
+  // only `anywhere` lets the browser count a broken line when it computes min-content. With
+  // `break-word` the column still reserves all 64 characters and the table still overflows. The
+  // digits are all still here -- they wrap onto more lines, nothing is abbreviated or hidden.
+  digest: {
+    fontFamily: tokens.fontFamilyMonospace,
+    fontSize: tokens.fontSizeBase200,
+    overflowWrap: "anywhere",
+  },
   actions: {
     display: "flex",
     alignItems: "center",
