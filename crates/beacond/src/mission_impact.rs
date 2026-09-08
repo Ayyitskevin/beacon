@@ -654,7 +654,9 @@ pub enum ClassificationStoreError {
     ///
     /// `count` is measured, never inferred. The fault NAME stays stable (B6.11); the count travels
     /// in the operator line.
-    EventDuplicated { count: u64 },
+    EventDuplicated {
+        count: u64,
+    },
 }
 
 impl fmt::Display for ClassificationStoreError {
@@ -1438,7 +1440,6 @@ pub fn enumerate_classifications(
     Ok(rows)
 }
 
-
 /// The finite vocabulary of fields an Event may disagree with its classification on (B6.11).
 ///
 /// **Twelve, and the three absentees are deliberate.** `DigestAlgorithm` and `DigestCanonicalizer`
@@ -1642,11 +1643,12 @@ fn reconcile_classification_events(
 
         // Association on the OUTER Workspace and the digest value (B6.11). A change to either means
         // no row is located, which is `Unaccounted` -- never a promised field comparison.
-        let located = verified_classification_within(connection, workspace_uuid, &event.digest.value)
-            .map_err(|_| ClassificationStateFault::Event {
-                sequence,
-                cause: ClassificationEventError::Unaccounted,
-            })?;
+        let located =
+            verified_classification_within(connection, workspace_uuid, &event.digest.value)
+                .map_err(|_| ClassificationStateFault::Event {
+                    sequence,
+                    cause: ClassificationEventError::Unaccounted,
+                })?;
         let Some(row) = located else {
             return Err(ClassificationStateFault::Event {
                 sequence,
@@ -1655,34 +1657,34 @@ fn reconcile_classification_events(
         };
 
         let payload = row.payload();
-        let disagreement = if occurred_at_ms != i64::try_from(payload.classified_at_ms).unwrap_or(-1)
-        {
-            Some(ClassificationEventField::OuterOccurredAtMs)
-        } else if event.workspace_id != payload.workspace_id.to_string() {
-            Some(ClassificationEventField::PayloadWorkspaceId)
-        } else if event.classification_id != payload.classification_id.to_string() {
-            Some(ClassificationEventField::ClassificationId)
-        } else if event.mission_id != payload.mission_id.to_string() {
-            Some(ClassificationEventField::MissionId)
-        } else if event.project_id != payload.policy.project_id.to_string() {
-            Some(ClassificationEventField::ProjectId)
-        } else if event.version != payload.version {
-            Some(ClassificationEventField::Version)
-        } else if event.impact != payload.impact.as_str() {
-            Some(ClassificationEventField::Impact)
-        } else if event.basis != payload.basis.as_str() {
-            Some(ClassificationEventField::Basis)
-        } else if event.policy_revision != payload.policy.policy_revision {
-            Some(ClassificationEventField::PolicyRevision)
-        } else if event.charter_revision != payload.policy.charter_revision {
-            Some(ClassificationEventField::CharterRevision)
-        } else if event.classified_at_ms != payload.classified_at_ms {
-            Some(ClassificationEventField::ClassifiedAtMs)
-        } else if decoded_bytes != row.canonical_bytes() {
-            Some(ClassificationEventField::CanonicalBytesBase64)
-        } else {
-            None
-        };
+        let disagreement =
+            if occurred_at_ms != i64::try_from(payload.classified_at_ms).unwrap_or(-1) {
+                Some(ClassificationEventField::OuterOccurredAtMs)
+            } else if event.workspace_id != payload.workspace_id.to_string() {
+                Some(ClassificationEventField::PayloadWorkspaceId)
+            } else if event.classification_id != payload.classification_id.to_string() {
+                Some(ClassificationEventField::ClassificationId)
+            } else if event.mission_id != payload.mission_id.to_string() {
+                Some(ClassificationEventField::MissionId)
+            } else if event.project_id != payload.policy.project_id.to_string() {
+                Some(ClassificationEventField::ProjectId)
+            } else if event.version != payload.version {
+                Some(ClassificationEventField::Version)
+            } else if event.impact != payload.impact.as_str() {
+                Some(ClassificationEventField::Impact)
+            } else if event.basis != payload.basis.as_str() {
+                Some(ClassificationEventField::Basis)
+            } else if event.policy_revision != payload.policy.policy_revision {
+                Some(ClassificationEventField::PolicyRevision)
+            } else if event.charter_revision != payload.policy.charter_revision {
+                Some(ClassificationEventField::CharterRevision)
+            } else if event.classified_at_ms != payload.classified_at_ms {
+                Some(ClassificationEventField::ClassifiedAtMs)
+            } else if decoded_bytes != row.canonical_bytes() {
+                Some(ClassificationEventField::CanonicalBytesBase64)
+            } else {
+                None
+            };
         if let Some(field) = disagreement {
             return Err(ClassificationStateFault::Event {
                 sequence,

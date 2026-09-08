@@ -3926,9 +3926,9 @@ mod tests {
     use crate::publication_seam::PublicationSeamRefusal;
     use crate::{
         ArtifactError, CandidateError, ClassificationEventError, ClassificationEventField,
-        ClassificationStoreError, CompletionReadRefusal,
-        EvaluationError, LocalModelActivationError, MalformedClassification, PredecessorFault,
-        ProposalError, RulingError, StartupPass, SupervisorError, TotalsMismatch,
+        ClassificationStoreError, CompletionReadRefusal, EvaluationError,
+        LocalModelActivationError, MalformedClassification, PredecessorFault, ProposalError,
+        RulingError, StartupPass, SupervisorError, TotalsMismatch,
     };
     use crate::{
         CheckPreflightError, LocalModelEndpoint, MissionError, OperatorAccountError, ProjectError,
