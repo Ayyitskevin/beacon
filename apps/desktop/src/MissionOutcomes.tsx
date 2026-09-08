@@ -80,6 +80,7 @@ export function MissionOutcomes({ missionId }: { missionId: string }): React.JSX
     if (selected === null) return undefined;
     let cancelled = false;
     setDocument(null);
+    setError(null);
     loadOutcomeDocument(missionId, selected)
       .then((loaded) => {
         if (!cancelled) setDocument(loaded);
