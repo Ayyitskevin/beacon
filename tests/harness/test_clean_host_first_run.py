@@ -86,6 +86,7 @@ def _isolated_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     for name in (
         "clean-host-first-run",
         "clean-host-first-run-container",
+        "clean-host-first-run-band.py",
         "clean-host-first-run-state",
     ):
         destination = scripts / name
