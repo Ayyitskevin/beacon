@@ -10950,22 +10950,18 @@ fn mint_private_outcome_fixture_into_the_named_directory() {
 
 #[test]
 fn astra_b18_parent_traversal_cannot_escape_the_private_prefix() {
-    let prefix = std::env::temp_dir();
-    let outside = PrivateOutput {
-        path: prefix
-            .parent()
-            .unwrap()
-            .join(format!("b18-outside-{}", Uuid::new_v4().simple())),
-    };
-    fs::create_dir(&outside.path).unwrap();
-    fs::set_permissions(&outside.path, fs::Permissions::from_mode(0o700)).unwrap();
+    // Own both peers: a bare /tmp must not make this probe try creating a directory under /.
+    // Pass the private prefix explicitly instead of changing the process-wide environment.
+    let inside = PrivatePrefix::new("astra-inside");
+    let prefix = &inside.path;
+    let outside = PrivatePrefix::new("astra-outside");
     let sentinel = outside.path.join("sentinel");
     fs::write(&sentinel, b"retained sibling").unwrap();
     let output = prefix
         .join("..")
         .join(outside.path.file_name().unwrap())
         .join("mint");
-    let result = mint_private_outcome_fixture(Some(&output));
+    let result = mint_private_outcome_fixture_within(prefix, Some(&output));
     let created = outside.path.join("mint").exists();
     assert_eq!(
         fs::read(&sentinel).unwrap(),
@@ -10982,23 +10978,23 @@ fn astra_b18_parent_traversal_cannot_escape_the_private_prefix() {
 
 #[test]
 fn astra_b18_parent_symlink_cannot_escape_the_private_prefix() {
-    let prefix = std::env::temp_dir();
-    let outside = PrivateOutput {
-        path: prefix
-            .parent()
-            .unwrap()
-            .join(format!("b18-outside-{}", Uuid::new_v4().simple())),
+    // Own both peers: a bare /tmp must not make this probe try creating a directory under /.
+    // Pass the private prefix explicitly instead of changing the process-wide environment.
+    let inside = PrivatePrefix::new("astra-inside");
+    let prefix = &inside.path;
+    let outside = PrivatePrefix::new("astra-outside");
+    let links = PrivateOutput {
+        path: prefix.join("parent-link"),
     };
-    fs::create_dir(&outside.path).unwrap();
-    fs::set_permissions(&outside.path, fs::Permissions::from_mode(0o700)).unwrap();
-    let links = PrivateOutput::new("parent-link");
-    fs::create_dir(&links.path).unwrap();
-    fs::set_permissions(&links.path, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&links.path)
+        .unwrap();
     std::os::unix::fs::symlink(&outside.path, links.path.join("alias")).unwrap();
     let sentinel = outside.path.join("sentinel");
     fs::write(&sentinel, b"retained sibling").unwrap();
     let output = links.path.join("alias").join("mint");
-    let result = mint_private_outcome_fixture(Some(&output));
+    let result = mint_private_outcome_fixture_within(prefix, Some(&output));
     let created = outside.path.join("mint").exists();
     assert_eq!(
         fs::read(&sentinel).unwrap(),
