@@ -1,5 +1,5 @@
 import { makeStyles, shorthands, tokens } from "@fluentui/react-components";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 
 import {
   type ExportedOutcome,
@@ -48,6 +48,7 @@ function decode(bytes: number[]): string {
 
 export function MissionOutcomes({ missionId }: { missionId: string }): React.JSX.Element {
   const styles = useStyles();
+  const headingId = useId();
   const [publications, setPublications] = useState<PublicationSummary[] | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
   const [document, setDocument] = useState<ExportedOutcome | null>(null);
@@ -94,8 +95,8 @@ export function MissionOutcomes({ missionId }: { missionId: string }): React.JSX
   }, [missionId, selected]);
 
   return (
-    <section className={styles.section} aria-labelledby="mission-outcomes-heading">
-      <h3 className={styles.heading} id="mission-outcomes-heading">
+    <section className={styles.section} aria-labelledby={headingId}>
+      <h3 className={styles.heading} id={headingId}>
         Outcome Documents
       </h3>
       <p className={styles.body}>
