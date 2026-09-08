@@ -47,19 +47,19 @@ impl TestRuntime {
     /// while the same bytes under a 9-byte TMPDIR produced 105/106 and passed. That is a fixture
     /// defect, not a transport fault, and it is why `label` no longer reaches the path.
     ///
-    /// **Remaining TMPDIR budget: 78 bytes.** The path is
-    /// `{TMPDIR}/bt-{12 hex}/beacond.sock` = `len(TMPDIR) + 1 + 15 + 1 + 12`, so
-    /// `len(TMPDIR) <= 78` fits and anything longer cannot be promised support — no fixture can
-    /// make an arbitrarily long TMPDIR work, because the kernel's limit is on the whole path.
+    /// **Remaining TMPDIR budget on Linux: 58 bytes.** The path is
+    /// `{TMPDIR}/bt-{32 hex}/beacond.sock` = `len(TMPDIR) + 1 + 35 + 1 + 12`, so
+    /// `len(TMPDIR) <= 58` fits — ample for both 13-byte reproduction roots — and anything longer
+    /// cannot be promised support, because the kernel's limit is on the whole path and no fixture
+    /// can shorten someone else's TMPDIR.
     ///
-    /// Collision resistance is unchanged in kind: a fresh v4 UUID per call, of which the first 12
-    /// hex digits (48 bits) name the directory. `label` remains the argument every caller passes
-    /// and still names the test in its own output; it simply no longer decides whether a socket can
-    /// be bound.
+    /// **The WHOLE v4 UUID is kept**, all 32 hex digits: shortening the basename is what this fix
+    /// is for, and spending collision resistance to do it would be paying with the wrong currency.
+    /// `label` remains the argument every caller passes and still names the test in its own output;
+    /// it simply no longer decides whether a socket can be bound.
     fn new(label: &str) -> Self {
         let _ = label;
-        let unique = Uuid::new_v4().simple().to_string();
-        let root = std::env::temp_dir().join(format!("bt-{}", &unique[..12]));
+        let root = std::env::temp_dir().join(format!("bt-{}", Uuid::new_v4().simple()));
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         Self {
