@@ -8811,7 +8811,9 @@ mod tests {
                 ClassificationEventField::PolicyRevision => "disagrees.policy_revision",
                 ClassificationEventField::CharterRevision => "disagrees.charter_revision",
                 ClassificationEventField::ClassifiedAtMs => "disagrees.classified_at_ms",
-                ClassificationEventField::CanonicalBytesBase64 => "disagrees.canonical_bytes_base64",
+                ClassificationEventField::CanonicalBytesBase64 => {
+                    "disagrees.canonical_bytes_base64"
+                }
             },
         }
     }
@@ -8959,7 +8961,8 @@ mod tests {
                 "row.event_absent",
                 SupervisorError::MissionImpactClassificationStateMismatch {
                     workspace_id: operator_uuid(),
-                    digest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
+                    digest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                        .to_owned(),
                     cause: ClassificationStoreError::EventAbsent,
                 },
                 "Mission impact classification cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc in Workspace 11111111-1111-4111-8111-111111111111 does not re-prove: event_absent",
@@ -8968,7 +8971,8 @@ mod tests {
                 "row.event_duplicated",
                 SupervisorError::MissionImpactClassificationStateMismatch {
                     workspace_id: operator_uuid(),
-                    digest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
+                    digest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                        .to_owned(),
                     cause: ClassificationStoreError::EventDuplicated { count: 2 },
                 },
                 "Mission impact classification cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc in Workspace 11111111-1111-4111-8111-111111111111 does not re-prove: event_duplicated: 2",
@@ -8981,23 +8985,22 @@ mod tests {
         assert_eq!(ids.len(), 16, "B6.OP.CASE_IDS_UNIQUE");
 
         for (case, value, expected) in &table {
-            assert_eq!(
-                &value.to_string(),
-                expected,
-                "B6.OP.LINE.{case}"
-            );
+            assert_eq!(&value.to_string(), expected, "B6.OP.LINE.{case}");
         }
 
         // The fourteen Event-side rows are the whole closed child vocabulary, checked against a
         // match the compiler will not let go stale.
         let mut covered: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
         for (_, value, _) in &table {
-            if let SupervisorError::MissionImpactClassificationEventMismatch { cause, .. } = value
-            {
+            if let SupervisorError::MissionImpactClassificationEventMismatch { cause, .. } = value {
                 covered.insert(operator_child_is_covered(cause));
             }
         }
-        assert_eq!(covered.len(), 14, "B6.OP.EVENT_CHILDREN_COVERED: {covered:?}");
+        assert_eq!(
+            covered.len(),
+            14,
+            "B6.OP.EVENT_CHILDREN_COVERED: {covered:?}"
+        );
 
         // And the key is really carried: the line for a child names the extreme signed value, so a
         // narrowing cast would have to reproduce `i64::MIN` to pass.
