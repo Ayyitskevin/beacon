@@ -10,7 +10,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -10009,11 +10009,32 @@ enum FixtureMintRefusal {
     /// No output directory was named at all. A mint with nowhere to go must say so: the failure
     /// this replaces is a run that "passes" having written a fixture nobody can find.
     Unset,
-    /// The named output is not a new path inside this process's temp directory. The mint is for a
-    /// task-owned throwaway prefix, never an arbitrary existing path and never a real profile.
+    /// The named output does not LAND inside the validated private prefix. Landing, not spelling:
+    /// the parent is resolved with `canonicalize`, so a `..` component and an intermediate
+    /// directory symlink are both refused for going outside, however the caller wrote it.
     NotPrivate(PathBuf),
     /// Something is already at the named path -- a directory, a file, or a symlink.
     Occupied(PathBuf),
+    /// The PREFIX itself is not a task-owned private directory, so nothing minted under it could
+    /// be private either. Astra's B18 review: treating any `TMPDIR` string as private establishes
+    /// no such property.
+    PrefixNotPrivate(PathBuf, PrefixFault),
+}
+
+/// What disqualifies a directory from being the task-owned private prefix.
+///
+/// `/tmp` itself is deliberately its own arm rather than folding into `GroupOrWorldAccessible`:
+/// `/tmp` is `1777` and shared by every process on the machine, and a fixture minted in it is
+/// visible to all of them. It is a different fault from a private directory left too open.
+#[derive(Debug, PartialEq, Eq)]
+enum PrefixFault {
+    NotAbsolute,
+    Missing,
+    NotUnderTmp,
+    IsSharedTmp,
+    NotADirectory,
+    NotOwnedByThisUser { owner: u32, expected: u32 },
+    GroupOrWorldAccessible { mode: u32 },
 }
 
 impl std::fmt::Display for FixtureMintRefusal {
@@ -10036,6 +10057,13 @@ impl std::fmt::Display for FixtureMintRefusal {
                 formatter,
                 "B18.FIXTURE.OUTPUT_OCCUPIED: {} already exists (a directory, a file, or a \
                  symlink); a mint creates its own directory and never writes into someone else's",
+                path.display()
+            ),
+            Self::PrefixNotPrivate(path, fault) => write!(
+                formatter,
+                "B18.FIXTURE.PREFIX_NOT_PRIVATE: {} is not a task-owned private prefix ({fault:?}). \
+                 Make one first -- `export TMPDIR=\"$(mktemp -d)\"` -- and mint inside it; /tmp \
+                 itself is 1777 and shared with every process on the machine",
                 path.display()
             ),
         }
@@ -10148,9 +10176,83 @@ fn mode_of(path: &Path) -> u32 {
 fn mint_private_outcome_fixture(
     output: Option<&Path>,
 ) -> Result<MintedOutcomeFixture, FixtureMintRefusal> {
+    mint_private_outcome_fixture_within(&std::env::temp_dir(), output)
+}
+
+/// The effective user this process writes as.
+///
+/// `geteuid` and not `getuid`: what decides whether this process can read the prefix back is the
+/// EFFECTIVE id, and those differ under setuid. The crate already calls libc directly
+/// (`git_object_store.rs:902`), so this follows the tree's own idiom rather than adding a crate.
+fn effective_uid() -> u32 {
+    // SAFETY: `geteuid` takes no arguments, touches no memory, and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+/// The prefix a mint is allowed to write inside, or why this one is not it.
+///
+/// Astra's B18 review is the reason this exists: the first version treated any `TMPDIR` string as
+/// private, which establishes nothing about the directory it names. Location, type, owner and
+/// permissions are each checked against the filesystem, and the returned path is CANONICAL so the
+/// caller compares resolved paths with a resolved prefix rather than two strings.
+fn validated_private_prefix(prefix: &Path) -> Result<PathBuf, PrefixFault> {
+    if !prefix.is_absolute() {
+        return Err(PrefixFault::NotAbsolute);
+    }
+    let resolved = fs::canonicalize(prefix).map_err(|_| PrefixFault::Missing)?;
+    // `/tmp` is canonicalized too: it is a symlink on some systems, and a prefix check that
+    // compares one resolved path against one unresolved one is the bug this fold is fixing.
+    let shared_tmp = fs::canonicalize("/tmp").map_err(|_| PrefixFault::NotUnderTmp)?;
+    if resolved == shared_tmp {
+        return Err(PrefixFault::IsSharedTmp);
+    }
+    if !resolved.starts_with(&shared_tmp) {
+        return Err(PrefixFault::NotUnderTmp);
+    }
+    // `canonicalize` already resolved every link, so this stats the real directory.
+    let metadata = fs::symlink_metadata(&resolved).map_err(|_| PrefixFault::Missing)?;
+    if !metadata.is_dir() {
+        return Err(PrefixFault::NotADirectory);
+    }
+    let expected = effective_uid();
+    if metadata.uid() != expected {
+        return Err(PrefixFault::NotOwnedByThisUser {
+            owner: metadata.uid(),
+            expected,
+        });
+    }
+    let mode = metadata.mode() & 0o7777;
+    if mode & 0o077 != 0 {
+        return Err(PrefixFault::GroupOrWorldAccessible { mode });
+    }
+    Ok(resolved)
+}
+
+/// Mints inside an explicitly named prefix. The parameter is what makes the guard testable: a bar
+/// can hand it a `/tmp`, a `0755` directory or a regular file and read the refusal, without any
+/// test mutating the process environment out from under every other test in the binary.
+fn mint_private_outcome_fixture_within(
+    prefix: &Path,
+    output: Option<&Path>,
+) -> Result<MintedOutcomeFixture, FixtureMintRefusal> {
     let output = output.ok_or(FixtureMintRefusal::Unset)?;
-    let private_prefix = std::env::temp_dir();
-    if !output.is_absolute() || !output.starts_with(&private_prefix) || output == private_prefix {
+    let prefix = validated_private_prefix(prefix)
+        .map_err(|fault| FixtureMintRefusal::PrefixNotPrivate(prefix.to_path_buf(), fault))?;
+
+    // Where the output LANDS, not how it is spelled. `starts_with` on the given path is lexical:
+    // `<prefix>/../elsewhere/mint` passes it, and so does `<prefix>/link/mint` where `link` points
+    // out of the prefix -- Astra's two probes. Resolving the PARENT with `canonicalize` collapses
+    // every `..` and follows every intermediate symlink, so both land outside and are refused.
+    // The parent must already exist: a mint creates one directory, never a chain of them.
+    if !output.is_absolute() || output.file_name().is_none() {
+        return Err(FixtureMintRefusal::NotPrivate(output.to_path_buf()));
+    }
+    let parent = output
+        .parent()
+        .ok_or_else(|| FixtureMintRefusal::NotPrivate(output.to_path_buf()))?;
+    let resolved_parent = fs::canonicalize(parent)
+        .map_err(|_| FixtureMintRefusal::NotPrivate(output.to_path_buf()))?;
+    if !resolved_parent.starts_with(&prefix) {
         return Err(FixtureMintRefusal::NotPrivate(output.to_path_buf()));
     }
     // `symlink_metadata`, not `exists`: a symlink is something that is already there, and a
@@ -10160,9 +10262,12 @@ fn mint_private_outcome_fixture(
         return Err(FixtureMintRefusal::Occupied(output.to_path_buf()));
     }
 
-    fs::create_dir(output).unwrap_or_else(|error| panic!("B18.FIXTURE.DIRECTORY_CREATED: {error}"));
-    fs::set_permissions(output, fs::Permissions::from_mode(0o700))
-        .expect("B18.FIXTURE.DIRECTORY_IS_0700");
+    // `0700` AT CREATION. `create_dir` then `set_permissions` leaves the directory readable for
+    // however long the second call takes, under whatever umask the caller happens to have.
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(output)
+        .unwrap_or_else(|error| panic!("B18.FIXTURE.DIRECTORY_CREATED: {error}"));
 
     // The public owner recipe, exactly as every other test in this file runs it.
     let fixture = admitted_mission("b18-private-fixture");
@@ -10332,7 +10437,35 @@ fn read_back_minted_fixture(minted: &MintedOutcomeFixture) -> MintedFixtureReadB
     read_back
 }
 
-/// A path under the temp directory that does not exist yet, removed when the test ends.
+/// A task-owned private prefix the bar creates for itself: `0700` at creation, under the temp
+/// directory, removed when the test ends.
+///
+/// The bars mint inside one of these rather than inside `TMPDIR` directly, so they hold whatever
+/// `TMPDIR` happens to be -- including a bare `/tmp`, which the guard now refuses as a prefix. A
+/// test whose result depends on how the operator exported one variable is measuring the operator.
+struct PrivatePrefix {
+    path: PathBuf,
+}
+
+impl PrivatePrefix {
+    fn new(label: &str) -> Self {
+        let path =
+            std::env::temp_dir().join(format!("b18-prefix-{label}-{}", Uuid::new_v4().simple()));
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .expect("B18.PREFIX.CREATED");
+        Self { path }
+    }
+}
+
+impl Drop for PrivatePrefix {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+/// A path that does not exist yet, removed when the test ends.
 struct PrivateOutput {
     path: PathBuf,
 }
@@ -10341,6 +10474,14 @@ impl PrivateOutput {
     fn new(label: &str) -> Self {
         Self {
             path: std::env::temp_dir().join(format!("b18-{label}-{}", Uuid::new_v4().simple())),
+        }
+    }
+
+    fn under(prefix: &PrivatePrefix, label: &str) -> Self {
+        Self {
+            path: prefix
+                .path
+                .join(format!("b18-{label}-{}", Uuid::new_v4().simple())),
         }
     }
 }
@@ -10355,8 +10496,10 @@ impl Drop for PrivateOutput {
 /// three private files describing it.
 #[test]
 fn a_minted_outcome_fixture_seeds_one_published_outcome_into_three_private_files() {
-    let output = PrivateOutput::new("seed");
-    let minted = mint_private_outcome_fixture(Some(&output.path)).expect("B18.MINT.SUCCEEDS");
+    let prefix = PrivatePrefix::new("seed");
+    let output = PrivateOutput::under(&prefix, "seed");
+    let minted = mint_private_outcome_fixture_within(&prefix.path, Some(&output.path))
+        .expect("B18.MINT.SUCCEEDS");
 
     assert_eq!(
         mode_of(&minted.directory),
@@ -10478,8 +10621,10 @@ fn a_minted_outcome_fixture_seeds_one_published_outcome_into_three_private_files
 /// the same publication -- and the artifact survives being read.
 #[test]
 fn the_minted_snapshot_reopens_through_the_normal_owner_with_the_exact_bytes_and_publication() {
-    let output = PrivateOutput::new("readback");
-    let minted = mint_private_outcome_fixture(Some(&output.path)).expect("B18.MINT.SUCCEEDS");
+    let prefix = PrivatePrefix::new("readback");
+    let output = PrivateOutput::under(&prefix, "readback");
+    let minted = mint_private_outcome_fixture_within(&prefix.path, Some(&output.path))
+        .expect("B18.MINT.SUCCEEDS");
     let read_back = read_back_minted_fixture(&minted);
 
     // Startup opened the SEEDED Workspace, and did not create a new one -- the difference between
@@ -10545,12 +10690,14 @@ fn a_mint_refuses_an_occupied_path_a_symlink_or_a_public_prefix_without_touching
     const SENTINEL: &[u8] = b"B18 sentinel: these bytes were here first.\n";
 
     // (a) A directory that already exists, holding a file.
-    let occupied = PrivateOutput::new("occupied");
+    let prefix = PrivatePrefix::new("refuse");
+    let occupied = PrivateOutput::under(&prefix, "occupied");
     fs::create_dir(&occupied.path).unwrap();
     let sentinel_file = occupied.path.join("sentinel.txt");
     fs::write(&sentinel_file, SENTINEL).unwrap();
     assert_eq!(
-        mint_private_outcome_fixture(Some(&occupied.path)).expect_err("an occupied path minted"),
+        mint_private_outcome_fixture_within(&prefix.path, Some(&occupied.path))
+            .expect_err("an occupied path minted"),
         FixtureMintRefusal::Occupied(occupied.path.clone())
     );
     assert_eq!(
@@ -10567,10 +10714,11 @@ fn a_mint_refuses_an_occupied_path_a_symlink_or_a_public_prefix_without_touching
     // (b) A symlink pointing at that same directory. `exists()` follows the link and would have
     // called this "a directory that is there"; a DANGLING link it would have called absent. Both
     // are things that are already at the path, and both are refused as such.
-    let link = PrivateOutput::new("symlink");
+    let link = PrivateOutput::under(&prefix, "symlink");
     std::os::unix::fs::symlink(&occupied.path, &link.path).unwrap();
     assert_eq!(
-        mint_private_outcome_fixture(Some(&link.path)).expect_err("a symlink minted"),
+        mint_private_outcome_fixture_within(&prefix.path, Some(&link.path))
+            .expect_err("a symlink minted"),
         FixtureMintRefusal::Occupied(link.path.clone())
     );
     assert_eq!(
@@ -10587,31 +10735,30 @@ fn a_mint_refuses_an_occupied_path_a_symlink_or_a_public_prefix_without_touching
     );
 
     // (c) A dangling symlink: absent to `exists()`, present to the refusal.
-    let dangling = PrivateOutput::new("dangling");
-    std::os::unix::fs::symlink(
-        std::env::temp_dir().join("b18-no-such-target"),
-        &dangling.path,
-    )
-    .unwrap();
+    let dangling = PrivateOutput::under(&prefix, "dangling");
+    std::os::unix::fs::symlink(prefix.path.join("b18-no-such-target"), &dangling.path).unwrap();
     assert!(
         !dangling.path.exists(),
         "the dangling link must look absent"
     );
     assert_eq!(
-        mint_private_outcome_fixture(Some(&dangling.path)).expect_err("a dangling symlink minted"),
+        mint_private_outcome_fixture_within(&prefix.path, Some(&dangling.path))
+            .expect_err("a dangling symlink minted"),
         FixtureMintRefusal::Occupied(dangling.path.clone())
     );
 
     // (d) Outside the private prefix entirely -- refused for THAT reason, not for existing.
     let public = PathBuf::from("/etc/beacon-b18-never-written");
     assert_eq!(
-        mint_private_outcome_fixture(Some(&public)).expect_err("a public path minted"),
+        mint_private_outcome_fixture_within(&prefix.path, Some(&public))
+            .expect_err("a public path minted"),
         FixtureMintRefusal::NotPrivate(public.clone())
     );
     assert!(!public.exists(), "B18.REFUSE.PUBLIC_PATH_WAS_NOT_CREATED");
     let relative = PathBuf::from("b18-relative");
     assert_eq!(
-        mint_private_outcome_fixture(Some(&relative)).expect_err("a relative path minted"),
+        mint_private_outcome_fixture_within(&prefix.path, Some(&relative))
+            .expect_err("a relative path minted"),
         FixtureMintRefusal::NotPrivate(relative.clone())
     );
     assert!(
@@ -10620,12 +10767,112 @@ fn a_mint_refuses_an_occupied_path_a_symlink_or_a_public_prefix_without_touching
     );
 
     // (e) The private prefix ITSELF is not a mint target: a fixture directory is one this mint
-    // created, never the shared parent everything else is already using.
-    let prefix = std::env::temp_dir();
+    // created, never the parent everything else under it is already using.
     assert_eq!(
-        mint_private_outcome_fixture(Some(&prefix)).expect_err("the temp prefix itself minted"),
-        FixtureMintRefusal::NotPrivate(prefix)
+        mint_private_outcome_fixture_within(&prefix.path, Some(&prefix.path))
+            .expect_err("the prefix itself minted"),
+        FixtureMintRefusal::NotPrivate(prefix.path.clone())
     );
+
+    // (f) Astra's two escapes, at the parameterized boundary as well as the environment one: a
+    // `..` component and an intermediate directory symlink both LAND outside the prefix, however
+    // they are spelled. The peer they escape to is created by this bar and holds a sentinel.
+    let peer = PrivatePrefix::new("peer");
+    let peer_sentinel = peer.path.join("sentinel.txt");
+    fs::write(&peer_sentinel, SENTINEL).unwrap();
+    let traversal = prefix
+        .path
+        .join("..")
+        .join(peer.path.file_name().unwrap())
+        .join("mint");
+    assert_eq!(
+        mint_private_outcome_fixture_within(&prefix.path, Some(&traversal))
+            .expect_err("a `..` traversal minted"),
+        FixtureMintRefusal::NotPrivate(traversal.clone())
+    );
+    let alias = prefix.path.join("alias");
+    std::os::unix::fs::symlink(&peer.path, &alias).unwrap();
+    let through_link = alias.join("mint");
+    assert_eq!(
+        mint_private_outcome_fixture_within(&prefix.path, Some(&through_link))
+            .expect_err("a parent symlink minted"),
+        FixtureMintRefusal::NotPrivate(through_link)
+    );
+    assert!(
+        !peer.path.join("mint").exists(),
+        "B18.REFUSE.NOTHING_WAS_WRITTEN_OUTSIDE_THE_PREFIX"
+    );
+    assert_eq!(
+        fs::read(&peer_sentinel).unwrap(),
+        SENTINEL,
+        "B18.REFUSE.PEER_SENTINEL_IS_BYTE_IDENTICAL"
+    );
+}
+
+/// Bar 5: a prefix that is not task-owned and private is refused, so nothing minted under it can
+/// claim to be private either.
+///
+/// Parameterized rather than environment-driven on purpose: `std::env::set_var` is unsafe and
+/// process-global, and a test that flips `TMPDIR` under a binary running its cases in parallel
+/// changes the answer for every other test in it.
+#[test]
+fn a_mint_refuses_a_prefix_that_is_not_task_owned_and_private() {
+    let prefix = PrivatePrefix::new("badprefix");
+    let output = PrivateOutput::under(&prefix, "unused");
+
+    // `/tmp` itself: it exists, it is a directory, and this process may write in it -- and it is
+    // `1777`, shared with every process on the machine. A different fault from "left too open".
+    let shared = PathBuf::from("/tmp");
+    assert_eq!(
+        mint_private_outcome_fixture_within(&shared, Some(&shared.join("b18-never")))
+            .expect_err("the shared /tmp minted"),
+        FixtureMintRefusal::PrefixNotPrivate(shared, PrefixFault::IsSharedTmp)
+    );
+
+    // Ours, under /tmp, a directory -- and group- and world-readable.
+    let open = prefix.path.join("open-prefix");
+    fs::DirBuilder::new().mode(0o755).create(&open).unwrap();
+    assert_eq!(
+        mint_private_outcome_fixture_within(&open, Some(&open.join("mint")))
+            .expect_err("a 0755 prefix minted"),
+        FixtureMintRefusal::PrefixNotPrivate(
+            open.clone(),
+            PrefixFault::GroupOrWorldAccessible { mode: 0o755 }
+        )
+    );
+
+    // A regular file, a path that is not there at all, one outside /tmp, and a relative one.
+    let file = prefix.path.join("not-a-directory");
+    fs::write(&file, b"x").unwrap();
+    assert_eq!(
+        mint_private_outcome_fixture_within(&file, Some(&file.join("mint")))
+            .expect_err("a file prefix minted"),
+        FixtureMintRefusal::PrefixNotPrivate(file, PrefixFault::NotADirectory)
+    );
+    let missing = prefix.path.join("no-such-prefix");
+    assert_eq!(
+        mint_private_outcome_fixture_within(&missing, Some(&missing.join("mint")))
+            .expect_err("a missing prefix minted"),
+        FixtureMintRefusal::PrefixNotPrivate(missing, PrefixFault::Missing)
+    );
+    let outside = PathBuf::from("/etc");
+    assert_eq!(
+        mint_private_outcome_fixture_within(&outside, Some(&outside.join("b18-never")))
+            .expect_err("a prefix outside /tmp minted"),
+        FixtureMintRefusal::PrefixNotPrivate(outside, PrefixFault::NotUnderTmp)
+    );
+    let relative = PathBuf::from("b18-relative-prefix");
+    assert_eq!(
+        mint_private_outcome_fixture_within(&relative, Some(&output.path))
+            .expect_err("a relative prefix minted"),
+        FixtureMintRefusal::PrefixNotPrivate(relative, PrefixFault::NotAbsolute)
+    );
+
+    // The prefix is checked BEFORE the output, so a bad prefix is never rescued by a good output
+    // and nothing was created anywhere.
+    assert!(!output.path.exists(), "B18.PREFIX.NOTHING_WAS_CREATED");
+    assert!(!PathBuf::from("/tmp/b18-never").exists());
+    assert!(!PathBuf::from("/etc/b18-never").exists());
 }
 
 /// Bar 4: no output named at all refuses BY NAME, rather than passing having written nowhere.
