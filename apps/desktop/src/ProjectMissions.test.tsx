@@ -176,11 +176,14 @@ it("retains the admitted Team and member identities, naming a Team only on an ex
     matched.getByText(new RegExp(configurationId)),
     "B9.MISSION.IDENTITIES_RETAINED",
   ).toBeVisible();
-  expect(matched.getByText(/Admitted/), "B9.MISSION.LIFECYCLE_NOT_RUNNING").toBeVisible();
+  // Scoped to the lifecycle line rather than the whole card: a page-wide regex would also read a
+  // rendered published Outcome document's own words as a lifecycle claim, which they are not.
+  const lifecycle = matched.getByText(/^Lifecycle:/);
+  expect(lifecycle, "B9.MISSION.LIFECYCLE_NOT_RUNNING").toHaveTextContent("Lifecycle: Admitted.");
   expect(
-    matched.queryByText(/running|in progress|complete/i),
+    /running|in progress|complete|started no work|unstarted/i.test(lifecycle.textContent ?? ""),
     "B9.MISSION.LIFECYCLE_NOT_RUNNING",
-  ).not.toBeInTheDocument();
+  ).toBe(false);
 
   // No Team in the loaded list matches this Mission's recorded teamId. The id must survive, and
   // nothing may suggest the recorded binding itself is gone.
@@ -213,12 +216,20 @@ it("keeps every Mission's sections inside its own card and adds no duplicate ele
 
   // This slice adds NO element ids, which is how it guarantees it introduces no duplicates across
   // repeated Mission cards. `MissionOutcomes` already renders a static `mission-outcomes-heading`
-  // id once per card (`MissionOutcomes.tsx:97`); that pre-existing duplicate is out of this fence
-  // and is recorded separately rather than absorbed here, so this bar measures only what this
-  // slice owns.
-  const briefIds = Array.from(container.querySelectorAll("article > [id], article > * > [id]"))
-    .filter((node) => node.closest("section[aria-labelledby]") === null)
-    .map((node) => node.id);
+  // id once per card (`MissionOutcomes.tsx:97`); it is a SIBLING of the brief, so scoping to the
+  // brief roots excludes that pre-existing duplicate without a filter. It is out of this fence and
+  // recorded separately rather than absorbed here.
+  //
+  // The first assertion is the harness check. An earlier version filtered on
+  // `closest("section[aria-labelledby]") === null`, which rejected every node -- the enclosing
+  // ProjectMissions section matches it -- so the bar passed on an empty array no matter what was
+  // rendered. A witness that cannot fail is not a witness.
+  const briefRoots = Array.from(container.querySelectorAll('section[aria-label="Mission brief"]'));
+  expect(briefRoots.length, "B9.MISSION.ID_WITNESS_SELECTS_SOMETHING").toBe(2);
+  const briefIds = briefRoots.flatMap((root) => [
+    ...(root.id === "" ? [] : [root.id]),
+    ...Array.from(root.querySelectorAll("[id]")).map((node) => node.id),
+  ]);
   expect(briefIds, "B9.MISSION.BRIEF_ADDS_NO_IDS").toEqual([]);
 });
 
