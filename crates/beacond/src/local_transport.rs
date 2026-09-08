@@ -71,6 +71,30 @@ const _: () = assert!(MAX_COMPLETION_REQUEST_BYTES < MAX_COMPLETION_PREVIEW_RESP
 const MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES: u64 = 1_403_904;
 const _: () =
     assert!(MAX_COMPLETION_PREVIEW_RESPONSE_BYTES < MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES);
+
+/// The client's response ceiling for `OutcomeDocument` ALONE. Requests, and every other command's
+/// response, keep `MAX_MESSAGE_BYTES`.
+///
+/// Derived from the byte domain, not chosen:
+///
+/// * `bytes: Vec<u8>` serialises as a JSON number array, so `N` body bytes cost at most
+///   `2` brackets + `3N` digits + `N - 1` commas = **`4N + 1`**.
+/// * every other field is bounded, so the rest of the envelope is a constant **482** bytes at its
+///   widest -- MEASURED by serialising a maximum-domain instance of the declared shape through
+///   real `serde_json`, not derived by hand (the B15 design's hand-derived 342 is 140 bytes short,
+///   and it said itself it was not yet a Rust serialization witness): `protocol` is the literal `1`, the tag is the fixed ASCII `outcome_document`, `error`
+///   is `null`, `digest` is `algorithm`/`canonicalizer` (<= 64 each, `artifact.rs:503-505`) plus a
+///   64-character lowercase hex `value` (`artifact.rs:153`), both versions are `u32` (<= 10
+///   digits), and `mediaType` is fixed per kind (`artifact.rs:498-499`) within the same 64.
+/// * `N` is the owner's own Markdown ceiling, **1 MiB** (`outcome.rs:68`
+///   `MAX_EMITTED_MARKDOWN_BYTES`, which `artifact.rs:67` `MAX_CONTENT_BYTES` repeats as the same
+///   bound per ADR 0040).
+///
+/// So `4 * 1_048_576 + 1 + 482`. **The owner constant is private**, so this file states `1 MiB`
+/// rather than importing it: nothing the compiler checks ties the two together, and a change to
+/// the owner bound will not move this one. Making `MAX_EMITTED_MARKDOWN_BYTES` `pub(crate)` is the
+/// one-line fix and is outside this slice's production fence.
+const OUTCOME_DOCUMENT_RESPONSE_BYTES: u64 = 4 * 1_048_576 + 1 + 482;
 const SERVER_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
 // Exact activation review makes three independently bounded provider reads (tags, show, tags).
 // Keep transport overhead outside that six-second worst case so a provider error is returned as
@@ -2917,6 +2941,7 @@ fn response_max(command: &LocalCommand) -> u64 {
         LocalCommand::PreviewMissionCompletion { .. } => MAX_COMPLETION_PREVIEW_RESPONSE_BYTES,
         // The ONE family that carries stored bytes, and the only reason this ceiling exists.
         LocalCommand::ReadOutcomeCandidateDocument { .. } => MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES,
+        LocalCommand::OutcomeDocument { .. } => OUTCOME_DOCUMENT_RESPONSE_BYTES,
         // Both C5 commands stay in the OLD domain: the widest classification view is ~8.7 KB and the
         // widest observation ~9.0 KB (measured, tools/c5/opus2/transport/c5-wire-bytes.json), so
         // neither needs a larger frame and neither widens one.
@@ -2957,7 +2982,6 @@ fn response_max(command: &LocalCommand) -> u64 {
         | LocalCommand::ProjectPolicy { .. }
         | LocalCommand::ProjectPolicyHistory { .. }
         | LocalCommand::MissionPublications { .. }
-        | LocalCommand::OutcomeDocument { .. }
         | LocalCommand::PublishProjectPolicy { .. }
         | LocalCommand::CurrentProjectRepository { .. }
         | LocalCommand::ProjectRepositoryHistory { .. }
