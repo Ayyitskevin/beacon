@@ -129,27 +129,7 @@ redact_recovery_key() {
     local target="$2"
     local tsv=/work/recovery.tsv
     tesseract "$raw" stdout --psm 6 tsv 2>/dev/null > "$tsv"
-    band="$(python3 - "$tsv" <<'PY'
-import csv
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as handle:
-    rows = list(csv.DictReader(handle, delimiter="\t"))
-
-def matching(word):
-    return [row for row in rows if row.get("text", "").strip(".,").casefold() == word]
-
-again = matching("again")
-saved = matching("saved")
-if len(again) != 1 or len(saved) != 1:
-    raise SystemExit("could not bound the Recovery Key between its instruction and checkbox")
-top = int(again[0]["top"]) + int(again[0]["height"]) + 4
-bottom = int(saved[0]["top"]) - 4
-if top >= bottom:
-    raise SystemExit("Recovery Key redaction band is empty")
-print(top, bottom)
-PY
-)" || return 1
+    band="$(python3 scripts/clean-host-first-run-band.py < "$tsv")" || return 1
     top="${band%% *}"
     bottom="${band##* }"
     # The Recovery Key block spans the 640px main column. Cover that whole
