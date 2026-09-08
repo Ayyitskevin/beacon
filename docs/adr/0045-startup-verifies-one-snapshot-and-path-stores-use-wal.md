@@ -66,6 +66,36 @@ so it can refuse a store that reconciliation has already written to — unchange
 beside it, and stated here because the chain is the pass most likely to be read as a guarantee that
 nothing happened.
 
+## Amended 2026-09-07 (R58.3): what the chain proves, and what it does not
+
+Stated here because the previous amendment is the one most likely to be read as more than it is.
+
+The chain proves two things about the Events a store still holds. Every surviving link is
+**authentic** — its digest is the digest of its own bytes under `beacon.event_chain.v1`, so no row
+was edited after it was recorded. And those links are **in order** — each names its predecessor's
+digest, exactly one begins the chain, and the walk ends on the digest and sequence
+`event_chain_state` records.
+
+It does not prove the history is **complete**. Delete the newest Event and rewrite the head to the
+previous link, and every check above still agrees: the remaining links are authentic, they are in
+order, and the head names the last of them. A truncated history and an honestly shorter one are
+internally identical, and hashing cannot separate them, because the head that would betray the
+truncation is stored in the same rows the same edit reaches. sol1's cold read demonstrated this
+against a running store (`sol1_b42_rewriting_the_head_cannot_hide_a_truncated_service_event`), which
+is why it is written down here as a property rather than filed as a bug.
+
+Completeness therefore comes from **owner reconciliation**: state a store keeps outside the Event
+rows, which the same edit does not reach, and which must agree with the Events. R58.3 does this for
+one owner — `installation_pause` holds the current pause state, and startup now requires the terminal
+pause or resume Event to account for it (`SupervisorError::PauseStateUnsupported`). That closes the
+pause owner and only the pause owner. **Every other owner whose current state lives outside the
+Event rows has the same exposure and no such pass**; this ADR says so rather than letting the
+chain's existence imply otherwise.
+
+Three ways forward, and choosing between them is not this ADR's to make: reconcile every owner at
+startup; anchor the head where an Event-row edit cannot reach it; or accept the limit for alpha with
+the boundary written down. That decision is Kevin's and sits on the board.
+
 ## Operating consequences
 
 The following is proposed operating text, not evidence that Beacon has executed or passed a
