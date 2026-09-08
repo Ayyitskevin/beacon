@@ -53,14 +53,15 @@ function decode(bytes: number[]): string {
   return new TextDecoder().decode(Uint8Array.from(bytes));
 }
 
-/// What the operator is told when the clipboard cannot be reached.
+/// What the operator is told when the copy does not happen.
 ///
 /// Fixed copy, never the thrown value: a `DOMException` string is about a browser API, not about
-/// what the operator can now do. The sentence names the fallback that is actually on screen -- the
-/// exact bytes are rendered above it -- which is the same shape the object-link copy already uses
-/// (`App.tsx:386-397`), where the text is placed in a visible field before the attempt.
-const CLIPBOARD_UNREACHABLE =
-  "Beacon could not reach the clipboard. The document above is the exact text; select and copy it.";
+/// what the operator can now do. Two things it deliberately does NOT say. It does not claim the
+/// clipboard was unreachable -- a `writeText` rejection does not establish reachability, only that
+/// this write did not succeed. And it does not say "above": this status renders in the action row,
+/// which sits BEFORE the document, so "above" pointed the operator the wrong way.
+const CLIPBOARD_COPY_FAILED =
+  "Beacon could not copy the Markdown. You can select and copy the displayed document.";
 
 export function MissionOutcomes({ missionId }: { missionId: string }): React.JSX.Element {
   const styles = useStyles();
@@ -71,19 +72,27 @@ export function MissionOutcomes({ missionId }: { missionId: string }): React.JSX
   const [error, setError] = useState<string | null>(null);
   const [copyStatus, setCopyStatus] = useState<string | null>(null);
   const [copying, setCopying] = useState(false);
-  // Which document any in-flight copy was started for. A clipboard promise that settles after the
-  // operator moved on must not drop a result beside bytes it was never about.
-  const selectionRef = useRef<string>("");
+  // Attempt identity, NOT selection identity. A `missionId#version` token is stable across
+  // 1 -> 2 -> 1, so an older attempt's token matched again on return and could release a newer
+  // pending one: the button re-enabled and stale feedback replaced the live attempt's state
+  // (Astra's B11 P1). A monotonic counter cannot collide with itself, so returning to a version
+  // never resurrects an attempt that belongs to an earlier visit.
+  const nextAttempt = useRef(0);
+  // The one attempt currently permitted to write status or release the control. `0` means none:
+  // a selection change invalidates every attempt still in flight.
+  const activeAttempt = useRef(0);
 
   useEffect(() => {
-    selectionRef.current = `${missionId}#${selected ?? "none"}`;
+    activeAttempt.current = 0;
     setCopyStatus(null);
     setCopying(false);
   }, [missionId, selected]);
 
   async function copyMarkdown(shown: ExportedOutcome): Promise<void> {
     if (copying) return;
-    const startedFor = selectionRef.current;
+    nextAttempt.current += 1;
+    const attempt = nextAttempt.current;
+    activeAttempt.current = attempt;
     // Decoded from the bytes ALREADY on screen: the same array the document renders, so the copy
     // cannot be a different version, a re-render, or a fresh fetch of the newest.
     const text = decode(shown.bytes);
@@ -92,13 +101,13 @@ export function MissionOutcomes({ missionId }: { missionId: string }): React.JSX
     try {
       if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
       await navigator.clipboard.writeText(text);
-      if (selectionRef.current !== startedFor) return;
+      if (activeAttempt.current !== attempt) return;
       setCopyStatus(`Copied version ${shown.publicationVersion}'s stored Markdown.`);
     } catch {
-      if (selectionRef.current !== startedFor) return;
-      setCopyStatus(CLIPBOARD_UNREACHABLE);
+      if (activeAttempt.current !== attempt) return;
+      setCopyStatus(CLIPBOARD_COPY_FAILED);
     } finally {
-      if (selectionRef.current === startedFor) setCopying(false);
+      if (activeAttempt.current === attempt) setCopying(false);
     }
   }
 
