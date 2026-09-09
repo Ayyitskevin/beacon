@@ -357,9 +357,14 @@ impl MissionService {
 
     pub fn get(&self, mission_id: Uuid) -> Result<MissionView, MissionError> {
         self.accounts.with_authenticated_store(|connection, _now| {
-            let mission = load_stored_mission(connection, self.workspace_id, mission_id)?
+            // The returned admission and its owner Event must come from one snapshot, including
+            // the verifier's re-read of the Mission and ordered roster.
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+            let mission = verified_mission_admission(&transaction, self.workspace_id, mission_id)?
                 .ok_or(MissionError::MissionNotFound)?;
-            Ok(render_mission(mission))
+            transaction.commit()?;
+            Ok(mission)
         })
     }
 
@@ -1759,5 +1764,143 @@ mod verified_admission_reader {
         let refusal = verified_mission_admission(&connection, store.workspace_id, admitted.id)
             .expect_err("the roster the Event names is not the roster the store holds");
         assert_eq!(refusal.name(), "InvalidStore");
+    }
+
+    #[test]
+    fn public_get_keeps_one_snapshot_when_an_admission_event_changes_between_queries() {
+        use rusqlite::ffi;
+        use std::ffi::{CStr, c_int, c_uint, c_void};
+
+        struct Rewrite {
+            writer: Connection,
+            mission_id: String,
+            attempted: bool,
+            changed: Option<Result<usize, String>>,
+            panicked: bool,
+        }
+
+        // This is SQLite's existing trace API, installed only on this test's account connection.
+        // No product hook, sleep, worker, or scheduling assumption is involved. The separate WAL
+        // connection commits after the Mission row/roster reads and before the Event read begins.
+        // https://www.sqlite.org/c3ref/c_trace.html
+        unsafe extern "C" fn before_statement(
+            kind: c_uint,
+            context: *mut c_void,
+            _statement: *mut c_void,
+            sql: *mut c_void,
+        ) -> c_int {
+            if kind != ffi::SQLITE_TRACE_STMT as c_uint || sql.is_null() {
+                return 0;
+            }
+            // SAFETY: SQLite passes the registered live Box and a NUL-terminated SQL string for
+            // SQLITE_TRACE_STMT. The callback runs synchronously on this test's calling thread.
+            let state = unsafe { &mut *context.cast::<Rewrite>() };
+            let sql = unsafe { CStr::from_ptr(sql.cast()) }.to_bytes();
+            if state.attempted || !sql.windows(11).any(|part| part == b"FROM events") {
+                return 0;
+            }
+            state.attempted = true;
+            // A Rust panic must never unwind through SQLite's C callback.
+            let changed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                state
+                    .writer
+                    .execute(
+                        "UPDATE events SET payload_json = json_set(
+                         payload_json, '$.mission.constraints[0]', 'Changed after snapshot')
+                     WHERE kind = 'mission.admitted'
+                       AND json_extract(payload_json, '$.mission.id') = ?1",
+                        [&state.mission_id],
+                    )
+                    .map_err(|error| error.to_string())
+            }));
+            match changed {
+                Ok(result) => state.changed = Some(result),
+                Err(_) => state.panicked = true,
+            }
+            0
+        }
+
+        struct TraceGuard {
+            handle: *mut ffi::sqlite3,
+            // Keeps the connection alive until Drop unregisters the callback, including unwinds.
+            _accounts: Arc<OperatorAccountService>,
+            state: Box<Rewrite>,
+        }
+        impl Drop for TraceGuard {
+            fn drop(&mut self) {
+                // SAFETY: the Arc keeps this handle alive, the test shares it with no worker,
+                // and unregistering precedes dropping the callback context even after an assertion.
+                unsafe {
+                    ffi::sqlite3_trace_v2(self.handle, 0, None, std::ptr::null_mut());
+                }
+            }
+        }
+
+        let (store, _prepared, admitted) = admitted_mission("public-snapshot");
+        let accounts = Arc::new(OperatorAccountService::open(&store.path).unwrap());
+        accounts
+            .authenticate_password(
+                SecretString::new("a long local passphrase".to_owned()),
+                crate::AccessOrigin::SameMachine,
+            )
+            .unwrap();
+        let missions = MissionService::new(Arc::clone(&accounts), store.workspace_id);
+        let writer = store.open();
+        let mode: String = writer
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal", "B11.GET.SNAPSHOT_WAL_PREMISE");
+        let mut guard = accounts
+            .with_authenticated_store(|connection, _now| {
+                let mut guard = TraceGuard {
+                    // SAFETY: the retained Arc owns this connection for the guard's whole lifetime.
+                    handle: unsafe { connection.handle() },
+                    _accounts: Arc::clone(&accounts),
+                    state: Box::new(Rewrite {
+                        writer,
+                        mission_id: admitted.id.to_string(),
+                        attempted: false,
+                        changed: None,
+                        panicked: false,
+                    }),
+                };
+                // SAFETY: Box address is stable, the function signature matches SQLite, and Drop
+                // removes the callback before the Box or account connection can be destroyed.
+                let code = unsafe {
+                    ffi::sqlite3_trace_v2(
+                        guard.handle,
+                        ffi::SQLITE_TRACE_STMT as c_uint,
+                        Some(before_statement),
+                        (&mut *guard.state as *mut Rewrite).cast(),
+                    )
+                };
+                assert_eq!(code, ffi::SQLITE_OK, "B11.GET.TRACE_INSTALLED");
+                Ok::<_, MissionError>(guard)
+            })
+            .unwrap();
+
+        let read = missions.get(admitted.id);
+        let attempted = guard.state.attempted;
+        let panicked = guard.state.panicked;
+        let changed = guard.state.changed.take();
+        drop(guard);
+        assert!(
+            attempted && !panicked,
+            "B11.GET.BETWEEN_QUERY_WRITE_REACHED"
+        );
+        assert_eq!(
+            changed,
+            Some(Ok(1)),
+            "B11.GET.BETWEEN_QUERY_WRITE_COMMITTED"
+        );
+        assert_eq!(
+            read.expect("B11.GET.ONE_SNAPSHOT"),
+            admitted,
+            "B11.GET.ONE_SNAPSHOT"
+        );
+        assert!(
+            matches!(missions.get(admitted.id), Err(MissionError::InvalidStore)),
+            "B11.GET.NEXT_READ_SEES_COMMITTED_CHANGE"
+        );
     }
 }
