@@ -1294,9 +1294,13 @@ export function App() {
 
   // Leave the open Project for the portfolio the owner already holds. It reads nothing: no
   // Projects re-fetch and no new navigation policy -- the list state is untouched, so returning to
-  // it is free and the rows are the ones already on screen. Everything cleared here is exactly
-  // what `openProject` replaces when it adopts a Project, in the same order, so the two cannot
-  // drift into disagreeing about what "Project-scoped" means. Stored records are not touched.
+  // it is free and the rows are the ones already on screen.
+  //
+  // It resets the transient per-Project detail and form state, plus the preflight display. That is
+  // the same FAMILY `openProject` replaces when it adopts a Project, but not a literal equivalence:
+  // on main `openProject` did not clear the preflight display at all -- that is a separate pending
+  // change -- and neither the membership nor the order is asserted to match. Stored records are not
+  // touched.
   function closeProject() {
     setSelectedProject(null);
     setCharterHistory(null);
