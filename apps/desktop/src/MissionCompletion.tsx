@@ -1,6 +1,8 @@
 import { Button, makeStyles, tokens } from "@fluentui/react-components";
 import { useEffect, useState } from "react";
 
+import { MissionCompletionCompose } from "./MissionCompletionCompose";
+
 import {
   type CompletionView,
   type MissionView,
@@ -113,7 +115,15 @@ export function MissionCompletion({ mission }: { mission: MissionView }) {
           Loading the Mission completion
         </p>
       ) : completion === null ? (
-        <p className={classes.body}>No completion recorded for this Mission.</p>
+        <>
+          <p className={classes.body}>No completion recorded for this Mission.</p>
+          {/* Offered only after a SUCCESSFUL null read. An unavailable read never enables it: not
+              knowing whether a completion exists is not the same as knowing none does. */}
+          <MissionCompletionCompose
+            mission={mission}
+            onRecorded={() => setAttempt((current) => current + 1)}
+          />
+        </>
       ) : (
         <>
           <p className={classes.body}>
