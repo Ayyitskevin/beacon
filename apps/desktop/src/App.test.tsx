@@ -3257,4 +3257,151 @@ describe("Beacon desktop shell", () => {
       "N16.LATE_RESULT.HELD_A_MUST_NOT_ERASE_B",
     ).not.toBeNull();
   });
+
+  // -------------------------------------------------------------------------------------------
+  // N17: return from an open Project to the portfolio
+  // -------------------------------------------------------------------------------------------
+  //
+  // N15 measured that once a Project is open there is no way back to the list: the rail's Projects
+  // button keeps the selection, and the only other route is a Beacon link. These bars are that
+  // missing navigation, asserted on what the operator can actually see.
+
+  const n17Charter = {
+    revision: 1,
+    purpose: "Ship the thing.",
+    desiredOutcomes: ["Reach the named Project"],
+    constraints: [],
+    prohibitions: [],
+    autonomyProfile: "supervised",
+    budgetBoundary: "no_spend",
+    externalEffects: "prohibited",
+    authoredAtMs: 123,
+  } as const;
+  const N17_A = "aaaaaaa1-1111-4111-8111-aaaaaaaaaaaa";
+  const N17_B = "bbbbbbb2-2222-4222-8222-bbbbbbbbbbbb";
+  // Held fields, not derived from any callback: each Project's purpose is its own witness.
+  const N17_A_PURPOSE = "n17-alpha-held-purpose";
+  const N17_B_PURPOSE = "n17-bravo-held-purpose";
+
+  function n17Project(id: string, name: string, purpose: string) {
+    return {
+      id,
+      workspaceId: acceptedOrganization.workspaceId,
+      name,
+      charter: { ...n17Charter, purpose },
+      createdAtMs: 123,
+    } as const;
+  }
+
+  function mockN17(extra?: (command: string, args: unknown) => Promise<unknown> | undefined) {
+    mockInitialState("unlocked");
+    const base = invokeMock.getMockImplementation()!;
+    const alpha = n17Project(N17_A, "Alpha Project", N17_A_PURPOSE);
+    const bravo = n17Project(N17_B, "Bravo Project", N17_B_PURPOSE);
+    const listReads: unknown[] = [];
+    invokeMock.mockImplementation((command, args) => {
+      const projectId = (args as { projectId?: string } | undefined)?.projectId;
+      const injected = extra?.(command, args);
+      if (injected !== undefined) return injected;
+
+      if (command === "projects") {
+        listReads.push(args);
+        return Promise.resolve([alpha, bravo].map((p) => ({
+          id: p.id,
+          name: p.name,
+          charterRevision: 1,
+          autonomyProfile: "supervised",
+          createdAtMs: 123,
+        })));
+      }
+      if (command === "project") return Promise.resolve(projectId === N17_B ? bravo : alpha);
+      if (command === "project_charter_history") {
+        return Promise.resolve([projectId === N17_B ? bravo.charter : alpha.charter]);
+      }
+      if (command === "project_policy") return Promise.resolve(null);
+      if (command === "project_policy_history") return Promise.resolve([]);
+      if (command === "current_project_repository") return Promise.resolve(null);
+      if (command === "project_repository_history") return Promise.resolve([]);
+      if (command === "teams" || command === "missions") return Promise.resolve([]);
+      return base(command, args);
+    });
+    return { listReads };
+  }
+
+  it("returns from an open Project to the portfolio and opens another by its own id", async () => {
+    const user = userEvent.setup();
+    const { listReads } = mockN17();
+
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    await user.click(await screen.findByRole("button", { name: /Alpha Project/i }));
+    expect((await screen.findAllByText(N17_A_PURPOSE)).length).toBeGreaterThan(0);
+    const readsAfterOpen = listReads.length;
+
+    // The new control, reached and activated from the keyboard.
+    const back = await screen.findByRole("button", { name: "All Projects" });
+    back.focus();
+    expect(back, "N17.LIST.RETURN_VISIBLE").toHaveFocus();
+    await user.keyboard("{Enter}");
+
+    // The portfolio is back, holding both rows, and Alpha's record is gone.
+    const portfolio = await screen.findByRole("button", { name: /Alpha Project/i });
+    expect(portfolio, "N17.LIST.RETURN_VISIBLE").toBeVisible();
+    expect(
+      screen.getByRole("button", { name: /Bravo Project/i }),
+      "N17.LIST.RETURN_VISIBLE",
+    ).toBeVisible();
+    expect(screen.queryAllByText(N17_A_PURPOSE), "N17.LIST.RETURN_VISIBLE").toHaveLength(0);
+    await expectNoWcagViolations(container);
+
+    // The cached list was not re-read to get back to it.
+    expect(listReads.length, "N17.LIST.NO_EXTRA_LIST_READ").toBe(readsAfterOpen);
+
+    // And the next Project opens by its own held id, showing its own held purpose.
+    await user.click(screen.getByRole("button", { name: /Bravo Project/i }));
+    expect(
+      (await screen.findAllByText(N17_B_PURPOSE)).length,
+      "N17.LIST.NEXT_PROJECT_ID",
+    ).toBeGreaterThan(0);
+    expect(screen.queryAllByText(N17_A_PURPOSE), "N17.LIST.NEXT_PROJECT_ID").toHaveLength(0);
+    expect(
+      screen.getByRole("heading", { name: "Bravo Project" }),
+      "N17.LIST.NEXT_PROJECT_ID",
+    ).toBeVisible();
+  });
+
+  it("disables returning to the portfolio while other work is in flight", async () => {
+    const user = userEvent.setup();
+    // `Form Team` runs `prepareTeamFormation`, which loads Resident configurations inside
+    // `runAction` -- so holding that read holds the shared busy state open.
+    let releaseConfigurations!: (configurations: unknown[]) => void;
+    mockN17((command) => {
+      if (command === "resident_configurations") {
+        return new Promise((resolve) => {
+          releaseConfigurations = resolve as (configurations: unknown[]) => void;
+        });
+      }
+      return undefined;
+    });
+
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    await user.click(await screen.findByRole("button", { name: /Alpha Project/i }));
+    await screen.findAllByText(N17_A_PURPOSE);
+    await expectNoWcagViolations(container);
+
+    // A held Team read keeps the shared busy state set; the new control follows it rather than
+    // inventing request semantics of its own.
+    await user.click(await screen.findByRole("button", { name: "Form Team" }));
+    expect(
+      await screen.findByRole("button", { name: "All Projects" }),
+      "N17.LIST.BUSY_DISABLED",
+    ).toBeDisabled();
+    await act(async () => {
+      releaseConfigurations([]);
+      await Promise.resolve();
+    });
+  });
 });

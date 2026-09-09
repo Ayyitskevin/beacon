@@ -1292,6 +1292,31 @@ export function App() {
     return opened;
   }
 
+  // Leave the open Project for the portfolio the owner already holds. It reads nothing: no
+  // Projects re-fetch and no new navigation policy -- the list state is untouched, so returning to
+  // it is free and the rows are the ones already on screen. Everything cleared here is exactly
+  // what `openProject` replaces when it adopts a Project, in the same order, so the two cannot
+  // drift into disagreeing about what "Project-scoped" means. Stored records are not touched.
+  function closeProject() {
+    setSelectedProject(null);
+    setCharterHistory(null);
+    setProjectPolicy(null);
+    setProjectPolicyHistory(null);
+    setProjectRepository(null);
+    setProjectRepositoryHistory(null);
+    setTeams(null);
+    setMissions(null);
+    setTeamConfigurations(null);
+    setPreflightReceipt(null);
+    setProjectComposerOpen(false);
+    setCharterComposerOpen(false);
+    setPolicyComposerOpen(false);
+    setRepositoryComposerOpen(false);
+    setTeamComposerOpen(false);
+    setMissionComposerOpen(false);
+    setLinkedMissionId(null);
+  }
+
   async function createProjectFromCharter(draft: ProjectDraft) {
     await runAction(async () => {
       const created = await createProject(draft);
@@ -1664,6 +1689,7 @@ export function App() {
               }}
               onCancelCreate={() => setProjectComposerOpen(false)}
               onOpenProject={openProject}
+              onCloseProject={closeProject}
               onCopyObjectLink={(link) => void copyObjectLink(link)}
               onSubmitProject={createProjectFromCharter}
               onReviseCharter={() => {
