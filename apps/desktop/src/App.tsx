@@ -331,6 +331,11 @@ export function App() {
   const [missions, setMissions] = useState<MissionView[] | null>(null);
   const [teamConfigurations, setTeamConfigurations] =
     useState<ResidentConfiguration[] | null>(null);
+  // The Teams+Missions bundle's own failure text, and the operator's explicit retry counter. The
+  // counter is a dependency of that read's effect and is bumped by the Retry control and nothing
+  // else -- no timer, no poll, no automatic loop.
+  const [projectReadFailure, setProjectReadFailure] = useState("");
+  const [projectReadAttempt, setProjectReadAttempt] = useState(0);
   const [projectComposerOpen, setProjectComposerOpen] = useState(false);
   const [charterComposerOpen, setCharterComposerOpen] = useState(false);
   const [policyComposerOpen, setPolicyComposerOpen] = useState(false);
@@ -722,20 +727,31 @@ export function App() {
     setRepositoryComposerOpen(false);
     setTeamComposerOpen(false);
     setMissionComposerOpen(false);
+    // This read's OWN failure, cleared at the start of every attempt. It is not the global action
+    // error: that one belongs to whatever Command the operator last ran, and writing a failed
+    // background read into it left both panels claiming to be loading while an unrelated banner
+    // carried the only trace of what happened.
+    setProjectReadFailure("");
     void Promise.all([loadTeams(selectedProject.id), loadMissions(selectedProject.id)]).then(
       ([loadedTeams, loadedMissions]) => {
         if (!active) return;
         setTeams(loadedTeams);
         setMissions(loadedMissions);
+        setProjectReadFailure("");
       },
       (error) => {
-        if (active) setActionError(describeLocalAccountError(error));
+        // The same lifetime guard the success leg uses. A rejection from an earlier Project or an
+        // earlier attempt finds `active` false and writes nothing -- it cannot overwrite the
+        // current result, cannot plant a failure over a healthy read, and cannot release the
+        // loading state of a read that is still running.
+        if (!active) return;
+        setProjectReadFailure(describeLocalAccountError(error));
       },
     );
     return () => {
       active = false;
     };
-  }, [activeApplication, selectedProject?.id, unlocked]);
+  }, [activeApplication, selectedProject?.id, unlocked, projectReadAttempt]);
 
   useEffect(() => {
     if (!unlocked) return;
@@ -1301,6 +1317,15 @@ export function App() {
   // on main `openProject` did not clear the preflight display at all -- that is a separate pending
   // change -- and neither the membership nor the order is asserted to match. Stored records are not
   // touched.
+  // Re-runs BOTH existing reads for the SAME selected Project: the bundle stays all-or-nothing and
+  // no panel gets an independent fetch. Clearing the failure is what removes the Retry control while
+  // the attempt is in flight, so a second click cannot start a second live request -- the pattern
+  // `MissionOutcomes` already uses. It runs no Command and writes nothing.
+  function retryProjectRead() {
+    setProjectReadFailure("");
+    setProjectReadAttempt((attempt) => attempt + 1);
+  }
+
   function closeProject() {
     setSelectedProject(null);
     setCharterHistory(null);
@@ -1311,6 +1336,7 @@ export function App() {
     setTeams(null);
     setMissions(null);
     setTeamConfigurations(null);
+    setProjectReadFailure("");
     setPreflightReceipt(null);
     setProjectComposerOpen(false);
     setCharterComposerOpen(false);
@@ -1694,6 +1720,8 @@ export function App() {
               onCancelCreate={() => setProjectComposerOpen(false)}
               onOpenProject={openProject}
               onCloseProject={closeProject}
+              projectReadFailure={projectReadFailure}
+              onRetryProjectRead={retryProjectRead}
               onCopyObjectLink={(link) => void copyObjectLink(link)}
               onSubmitProject={createProjectFromCharter}
               onReviseCharter={() => {

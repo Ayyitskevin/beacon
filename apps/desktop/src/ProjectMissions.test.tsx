@@ -84,6 +84,8 @@ const bareMission: MissionView = {
 function renderMissions(missions: MissionView[], teams: TeamView[] | null = [team]) {
   return render(
     <ProjectMissions
+      readFailure=""
+      onRetryRead={vi.fn()}
       project={project}
       teams={teams}
       missions={missions}
