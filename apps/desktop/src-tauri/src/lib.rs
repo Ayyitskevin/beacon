@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use beacond::{
+    CompletionView,
     AccessOrigin, BeaconCapability, BeaconCapabilityDescriptor, ExportedOutcome,
     LiveDataEncryptionReport, LocalErrorCode, LocalModelActivation, LocalModelActivationReview,
     LocalModelDiscoveryReport, LocalSupervisorClient, LocalTransportError, MissionDraft,
@@ -513,6 +514,16 @@ impl From<LocalTransportError> for CommandError {
                 "A Team member is no longer eligible for Mission admission.",
                 None,
             ),
+            // The one generic unavailable answer for a completion read. Existing typed session and
+            // authentication errors are matched earlier and keep their own semantics.
+            LocalTransportError::Remote {
+                code: LocalErrorCode::MissionCompletionUnavailable,
+                ..
+            } => (
+                "mission_completion_unavailable",
+                "The Mission completion could not be verified.",
+                None,
+            ),
             LocalTransportError::Remote {
                 code: LocalErrorCode::MissionUnavailable,
                 ..
@@ -972,6 +983,20 @@ fn missions_value(
     state.supervisor.missions(project_id).map_err(Into::into)
 }
 
+/// The verified completion of one Mission, or `null`.
+///
+/// Absence is `null`; a read that could not be verified rejects with a closed code and is never
+/// converted into `null`.
+fn get_mission_completion_value(
+    state: &DesktopState,
+    mission_id: uuid::Uuid,
+) -> Result<Option<CompletionView>, CommandError> {
+    state
+        .supervisor
+        .mission_completion(mission_id)
+        .map_err(Into::into)
+}
+
 fn mission_value(
     state: &DesktopState,
     mission_id: uuid::Uuid,
@@ -1429,6 +1454,14 @@ fn missions(
 }
 
 #[tauri::command]
+fn get_mission_completion(
+    state: State<'_, DesktopState>,
+    mission_id: uuid::Uuid,
+) -> Result<Option<CompletionView>, CommandError> {
+    get_mission_completion_value(&state, mission_id)
+}
+
+#[tauri::command]
 fn mission(
     state: State<'_, DesktopState>,
     mission_id: uuid::Uuid,
@@ -1740,6 +1773,7 @@ pub fn run() {
             team,
             form_team,
             missions,
+            get_mission_completion,
             mission,
             admit_mission,
             mission_publications,

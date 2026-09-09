@@ -131,8 +131,9 @@ pub use mission_completion::{
     UnfinishedKind,
 };
 pub use mission_completion_store::{
-    CompletionReadRefusal, declared_conditions_digest, enumerate_completions, record_completion,
-    verified_completion_within,
+    CompletionReadRefusal, CompletionUnavailable, CompletionView, ConditionResultView,
+    MissionCompletionReadError, MissionCompletionReadService, declared_conditions_digest,
+    enumerate_completions, record_completion, verified_completion_within,
 };
 pub use mission_impact::{
     CANONICALIZER as MISSION_IMPACT_CANONICALIZER, ClassificationActor, ClassificationBasis,

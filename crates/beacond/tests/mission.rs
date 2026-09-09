@@ -2403,3 +2403,261 @@ fn a_listed_mission_with_an_unreadable_admission_payload_refuses_as_json_not_abs
         "B12.LIST.UNREADABLE_PAYLOAD_IS_NOT_ABSENT: {refusal:?}"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// C3 — the read-only Mission completion summary, through its public owner
+//
+// The DTO literal below is written from `C3-interface.md`, not derived from the reader.
+// ---------------------------------------------------------------------------------------------
+
+/// One Mission with two declared conditions, admitted, plus a recorded completion.
+fn recorded_completion(
+    label: &str,
+) -> (TestStore, Arc<OperatorAccountService>, beacond::MissionView) {
+    let store = TestStore::new(label);
+    let accounts = enrolled_accounts(&store);
+    let mission = admit_with_conditions(
+        &store,
+        &accounts,
+        vec![
+            "Gates pass".to_owned(),
+            "Evidence filed".to_owned(),
+            "A non-author seat reviewed it".to_owned(),
+            "The change is reversible".to_owned(),
+        ],
+    );
+    let boundary = admitted_sequence(&store, mission.id);
+    let record = completion_for(
+        &store,
+        &mission,
+        boundary,
+        vec![
+            beacond::ConditionOutcome::Met,
+            beacond::ConditionOutcome::NotMet,
+            beacond::ConditionOutcome::NotAssessed,
+            beacond::ConditionOutcome::AssessmentInconclusive,
+        ],
+    );
+    let mut connection = Connection::open(&store.path).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .unwrap();
+    beacond::record_completion(&mut connection, &record).expect("the owner records it");
+    drop(connection);
+    (store, accounts, mission)
+}
+
+fn completion_reader(
+    store: &TestStore,
+    accounts: &Arc<OperatorAccountService>,
+) -> beacond::MissionCompletionReadService {
+    beacond::MissionCompletionReadService::new(Arc::clone(accounts), store.workspace_id)
+}
+
+#[test]
+fn c3_owner_returns_the_exact_recorded_completion() {
+    let (store, accounts, mission) = recorded_completion("c3-recorded");
+    let member = &mission.members[0];
+    let before = domain_row_counts(&store);
+
+    let view = completion_reader(&store, &accounts)
+        .get(mission.id)
+        .expect("C3.OWNER.RECORDED_EXACT")
+        .expect("C3.OWNER.RECORDED_EXACT: a completion was recorded");
+
+    // The whole DTO, against literals held here.
+    assert_eq!(view.mission_id, mission.id, "C3.OWNER.RECORDED_EXACT");
+    assert_eq!(view.actor, "operator", "C3.OWNER.RECORDED_EXACT");
+    assert_eq!(
+        view.accountable_resident_id, member.resident_id,
+        "C3.OWNER.RECORDED_EXACT"
+    );
+    assert_eq!(
+        view.accountable_resident_configuration_id, member.admission_configuration_id,
+        "C3.OWNER.RECORDED_EXACT: the SELECTED accountable configuration"
+    );
+    assert_eq!(view.disposition, "concluded", "C3.OWNER.RECORDED_EXACT");
+    assert_eq!(
+        view.condition_results
+            .iter()
+            .map(|result| (result.ordinal, result.outcome.as_str(), result.support_count, result.note.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (0_u32, "met", 0_u32, None),
+            (1, "not_met", 0, None),
+            (2, "not_assessed", 0, None),
+            (3, "assessment_inconclusive", 0, None),
+        ],
+        "C3.OWNER.RECORDED_EXACT: four outcomes, in declaration order"
+    );
+    assert_eq!(view.delivered_artifact_count, 0, "C3.OWNER.RECORDED_EXACT");
+    assert_eq!(view.unfinished_work_count, 0, "C3.OWNER.RECORDED_EXACT");
+
+    // A read writes nothing.
+    assert_eq!(
+        domain_row_counts(&store),
+        before,
+        "C3.OWNER.RECORDED_EXACT: the read changed a domain row or Event"
+    );
+}
+
+/// Rows and Events a read must not move.
+fn domain_row_counts(store: &TestStore) -> (i64, i64, i64) {
+    let connection = Connection::open(&store.path).unwrap();
+    let one = |sql: &str| {
+        connection
+            .query_row(sql, [], |row| row.get::<_, i64>(0))
+            .unwrap()
+    };
+    (
+        one("SELECT count(*) FROM mission_completions"),
+        one("SELECT count(*) FROM mission_completion_conditions"),
+        one("SELECT count(*) FROM events"),
+    )
+}
+
+#[test]
+fn c3_owner_absent_is_not_broken_and_corruption_is_not_absence() {
+    let store = TestStore::new("c3-absent");
+    let accounts = enrolled_accounts(&store);
+    let mission = admit_with_conditions(&store, &accounts, vec!["Gates pass".to_owned()]);
+    assert!(
+        completion_reader(&store, &accounts)
+            .get(mission.id)
+            .expect("C3.OWNER.ABSENT_IS_NOT_BROKEN")
+            .is_none(),
+        "C3.OWNER.ABSENT_IS_NOT_BROKEN: no completion recorded is null, not an error"
+    );
+
+    // The positive control first, then the corruption.
+    let (store, accounts, mission) = recorded_completion("c3-corrupt");
+    assert!(
+        completion_reader(&store, &accounts)
+            .get(mission.id)
+            .expect("C3.OWNER.ABSENT_IS_NOT_BROKEN control")
+            .is_some(),
+        "C3.OWNER.ABSENT_IS_NOT_BROKEN: the control must read before it is corrupted"
+    );
+    // INTENTIONAL CORRUPTION after a real owner mint: the stored bytes no longer hash to the digest.
+    let connection = Connection::open(&store.path).unwrap();
+    connection
+        .execute(
+            "UPDATE mission_completions SET canonical_bytes = zeroblob(64)",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let refusal = completion_reader(&store, &accounts)
+        .get(mission.id)
+        .expect_err("C3.OWNER.ABSENT_IS_NOT_BROKEN: corruption is a refusal");
+    assert!(
+        matches!(
+            refusal,
+            beacond::MissionCompletionReadError::Unavailable(
+                beacond::CompletionUnavailable::CompletionUnverified(_)
+            )
+        ),
+        "C3.OWNER.ABSENT_IS_NOT_BROKEN: {refusal:?}"
+    );
+}
+
+#[test]
+fn c3_owner_an_orphan_completed_event_is_not_absence() {
+    let (store, accounts, mission) = recorded_completion("c3-orphan");
+    assert!(
+        completion_reader(&store, &accounts)
+            .get(mission.id)
+            .expect("C3.OWNER.ORPHAN_EVENT_IS_NOT_ABSENCE control")
+            .is_some(),
+        "C3.OWNER.ORPHAN_EVENT_IS_NOT_ABSENCE: assert the successful control first"
+    );
+
+    // INTENTIONAL CORRUPTION: the row goes, its owner Event stays.
+    let connection = Connection::open(&store.path).unwrap();
+    connection
+        .execute_batch(
+            "DROP TRIGGER mission_completion_conditions_no_delete;
+             DROP TRIGGER mission_completions_no_delete;
+             DELETE FROM mission_completion_conditions;
+             DELETE FROM mission_completions;",
+        )
+        .unwrap();
+    let retained: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind = 'mission.completed'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(retained, 1, "C3.OWNER.ORPHAN_EVENT_IS_NOT_ABSENCE fixture");
+    drop(connection);
+
+    let refusal = completion_reader(&store, &accounts)
+        .get(mission.id)
+        .expect_err("C3.OWNER.ORPHAN_EVENT_IS_NOT_ABSENCE");
+    assert!(
+        matches!(
+            refusal,
+            beacond::MissionCompletionReadError::Unavailable(
+                beacond::CompletionUnavailable::OrphanCompletedEvent
+            )
+        ),
+        "C3.OWNER.ORPHAN_EVENT_IS_NOT_ABSENCE: {refusal:?}"
+    );
+}
+
+#[test]
+fn c3_owner_absent_and_cross_workspace_are_byte_identical() {
+    let (store, accounts, mission) = recorded_completion("c3-scope");
+    let reader = completion_reader(&store, &accounts);
+
+    let unknown = reader
+        .get(Uuid::new_v4())
+        .expect("C3.OWNER.SCOPE_OPACITY: an unknown Mission is not an error");
+    let foreign =
+        beacond::MissionCompletionReadService::new(Arc::clone(&accounts), Uuid::new_v4())
+            .get(mission.id)
+            .expect("C3.OWNER.SCOPE_OPACITY: a foreign Workspace is not an error");
+
+    assert!(unknown.is_none(), "C3.OWNER.SCOPE_OPACITY");
+    assert!(
+        foreign.is_none(),
+        "C3.OWNER.SCOPE_OPACITY: a foreign Workspace cannot leak a completion"
+    );
+    assert_eq!(
+        serde_json::to_string(&unknown).unwrap(),
+        serde_json::to_string(&foreign).unwrap(),
+        "C3.OWNER.SCOPE_OPACITY: the two answers must be byte-identical"
+    );
+    assert_eq!(
+        serde_json::to_string(&unknown).unwrap(),
+        "null",
+        "C3.OWNER.SCOPE_OPACITY: absence is JSON null"
+    );
+}
+
+#[test]
+fn c3_owner_keeps_its_authentication_refusal() {
+    let (store, accounts, mission) = recorded_completion("c3-auth");
+    assert!(
+        completion_reader(&store, &accounts)
+            .get(mission.id)
+            .expect("C3.OWNER.AUTHENTICATION_RETAINED control")
+            .is_some()
+    );
+    accounts.lock().expect("the session locks");
+
+    let refusal = completion_reader(&store, &accounts)
+        .get(mission.id)
+        .expect_err("C3.OWNER.AUTHENTICATION_RETAINED");
+    assert!(
+        matches!(
+            refusal,
+            beacond::MissionCompletionReadError::Account(
+                beacond::OperatorAccountError::NotAuthenticated
+            )
+        ),
+        "C3.OWNER.AUTHENTICATION_RETAINED: a locked session is its own refusal, not null and not \
+         a generic storage error: {refusal:?}"
+    );
+}
