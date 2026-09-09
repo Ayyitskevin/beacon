@@ -20,6 +20,20 @@ const useStyles = makeStyles({
   outcome: { fontWeight: tokens.fontWeightSemibold },
 });
 
+/** This read's own closed refusal gets its fixed sentence; everything else keeps the meaning it
+ *  already had. A session or authentication refusal relabelled as a completion problem would be a
+ *  false explanation, so only the one C3 code is intercepted. */
+function describeCompletionError(error: unknown): string {
+  const code =
+    typeof error === "object" && error !== null && !Array.isArray(error)
+      ? (error as Record<string, unknown>).code
+      : undefined;
+  if (code === "mission_completion_unavailable") {
+    return "The Mission completion could not be verified.";
+  }
+  return describeLocalAccountError(error);
+}
+
 const OUTCOME_LABEL: Record<CompletionView["conditionResults"][number]["outcome"], string> = {
   met: "Met",
   not_met: "Not met",
@@ -63,7 +77,7 @@ export function MissionCompletion({ mission }: { mission: MissionView }) {
       },
       (error: unknown) => {
         if (!active) return;
-        setFailure(describeLocalAccountError(error));
+        setFailure(describeCompletionError(error));
       },
     );
     return () => {
@@ -71,14 +85,16 @@ export function MissionCompletion({ mission }: { mission: MissionView }) {
     };
   }, [mission.id, attempt]);
 
-  // An ordinal outside this Mission's own declaration order cannot be paired with a condition, and
-  // showing the rest would silently omit one. Unavailable, like any other record that does not
-  // describe this Mission.
+  // The EXACT set, not "each one is in range". Uniqueness plus in-range still admits a completion
+  // that simply omits a declared condition, and rendering the rest would show a partial assessment
+  // as if it were whole -- the omission C3 requires to be unavailable. Every declared ordinal must
+  // appear exactly once, and no others.
   const pairable =
     completion == null ||
-    completion.conditionResults.every(
-      (result) => result.ordinal < mission.successConditions.length,
-    );
+    (completion.conditionResults.length === mission.successConditions.length &&
+      mission.successConditions.every((_condition, ordinal) =>
+        completion.conditionResults.some((result) => result.ordinal === ordinal),
+      ));
 
   return (
     <section className={classes.section} aria-label="Mission completion">

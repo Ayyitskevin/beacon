@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { expectNoWcagViolations } from "./test/axe";
@@ -4364,6 +4364,113 @@ describe("Beacon desktop shell", () => {
       "C3.UI.STALE_REJECTION_PLANTS_NO_FAILURE").toBeNull();
     expect(screen.queryByText("Loading the Mission completion"),
       "C3.UI.STALE_REJECTION_DOES_NOT_RELEASE_PENDING").not.toBeNull();
+  });
+
+
+  // -------------------------------------------------------------------------------------------
+  // C3 fold 1 — Blue's three measured P1s, reconstructed from DC3F-blue-review.md
+  // -------------------------------------------------------------------------------------------
+  //
+  // Blue's original probe files were not yet on disk when these were written, so these are
+  // RECONSTRUCTED from the report's stated counterexamples, NOT adopted verbatim.
+
+  it("refuses a completion that omits a declared condition instead of rendering it whole", async () => {
+    const user = userEvent.setup();
+    // Two of this Mission's four declared conditions are simply absent from the payload.
+    installC3(() =>
+      Promise.resolve(
+        c3Completion({
+          conditionResults: [
+            { ordinal: 0, outcome: "met", supportCount: 0, note: null },
+            { ordinal: 1, outcome: "met", supportCount: 0, note: null },
+          ],
+        }),
+      ),
+    );
+    await openC3Mission(user);
+    expect(
+      await screen.findByRole("button", { name: "Retry Mission completion" }),
+      "C3.UI.MISSING_CONDITION_IS_UNAVAILABLE",
+    ).toBeVisible();
+    expect(screen.queryByText("Concluded"), "C3.UI.MISSING_CONDITION_IS_UNAVAILABLE").toBeNull();
+  });
+
+  it("gives the completion refusal its own fixed sentence, not the app-wide fallback", async () => {
+    const user = userEvent.setup();
+    installC3(() => Promise.reject({ code: "mission_completion_unavailable" }));
+    await openC3Mission(user);
+    expect(
+      await screen.findByText("The Mission completion could not be verified."),
+      "C3.UI.UNAVAILABLE_HAS_FIXED_COPY",
+    ).toBeVisible();
+    expect(
+      screen.queryByText("Beacon could not complete that local request."),
+      "C3.UI.UNAVAILABLE_HAS_FIXED_COPY",
+    ).toBeNull();
+  });
+
+  it("keeps existing session refusals truthful rather than relabelling them", async () => {
+    const user = userEvent.setup();
+    installC3(() => Promise.reject({ code: "authentication_failed" }));
+    await openC3Mission(user);
+    expect(
+      await screen.findByText("That credential was not accepted."),
+      "C3.UI.EXISTING_REFUSALS_STAY_TRUTHFUL",
+    ).toBeVisible();
+  });
+
+  it("accepts a note at the owner's 500-scalar bound and refuses 501", async () => {
+    const user = userEvent.setup();
+    // Astral text: each emoji is ONE Unicode scalar and TWO UTF-16 units, so a JS `.length` bound
+    // would drift by a factor of two. `Array.from` is what the owner's scalar count means.
+    const at = "\u{1F5FF}".repeat(500);
+    const over = "\u{1F5FF}".repeat(501);
+    expect(at.length, "C3.UI.NOTE_BOUND_IS_SCALARS_NOT_UTF16").toBe(1_000);
+    installC3(() =>
+      Promise.resolve(
+        c3Completion({
+          conditionResults: [
+            { ordinal: 0, outcome: "met", supportCount: 0, note: at },
+            { ordinal: 1, outcome: "met", supportCount: 0, note: null },
+            { ordinal: 2, outcome: "met", supportCount: 0, note: null },
+            { ordinal: 3, outcome: "met", supportCount: 0, note: null },
+          ],
+        }),
+      ),
+    );
+    await openC3Mission(user);
+    expect(await screen.findByText("Concluded"), "C3.UI.NOTE_AT_OWNER_BOUND_IS_ACCEPTED").toBeVisible();
+
+    cleanup();
+    invokeMock.mockReset();
+    const user2 = userEvent.setup();
+    installC3(() =>
+      Promise.resolve(
+        c3Completion({
+          conditionResults: [
+            { ordinal: 0, outcome: "met", supportCount: 0, note: over },
+            { ordinal: 1, outcome: "met", supportCount: 0, note: null },
+            { ordinal: 2, outcome: "met", supportCount: 0, note: null },
+            { ordinal: 3, outcome: "met", supportCount: 0, note: null },
+          ],
+        }),
+      ),
+    );
+    await openC3Mission(user2);
+    expect(
+      await screen.findByRole("button", { name: "Retry Mission completion" }),
+      "C3.UI.NOTE_OVER_OWNER_BOUND_IS_REFUSED",
+    ).toBeVisible();
+  });
+
+  it("refuses counts above the owner's own limits", async () => {
+    const user = userEvent.setup();
+    installC3(() => Promise.resolve(c3Completion({ deliveredArtifactCount: 33 })));
+    await openC3Mission(user);
+    expect(
+      await screen.findByRole("button", { name: "Retry Mission completion" }),
+      "C3.UI.COUNTS_USE_OWNER_LIMITS",
+    ).toBeVisible();
   });
 
 });
