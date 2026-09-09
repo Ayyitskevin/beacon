@@ -119,6 +119,7 @@ pub enum LocalErrorCode {
     StaleMissionTeam,
     MissionMemberIneligible,
     MissionUnavailable,
+    MissionCompletionUnavailable,
     OutcomeAbsent,
     OutcomeUnavailable,
     LocalModelUnavailable,
@@ -157,6 +158,7 @@ pub enum LocalTransportError {
     SampleProject(SampleProjectError),
     Team(TeamError),
     Mission(MissionError),
+    MissionCompletionRead(crate::MissionCompletionReadError),
     ResourceDiscovery(ResourceDiscoveryError),
     LocalModelActivation(crate::LocalModelActivationError),
     Outcome(PublishRefusal),
@@ -500,6 +502,12 @@ impl fmt::Display for LocalTransportError {
                 )
             }
             Self::Team(error) => write!(formatter, "Team operation failed: {}", team_tag(error)),
+            // ONE closed literal: `MissionCompletionReadError`'s own Display is already a closed
+            // token, and nothing beneath it -- driver text, a path, a note an operator wrote -- is
+            // allowed onto this line.
+            Self::MissionCompletionRead(error) => {
+                write!(formatter, "Mission completion read failed: {}", error.name())
+            }
             Self::Mission(error) => {
                 write!(
                     formatter,
@@ -613,6 +621,12 @@ impl From<SampleProjectError> for LocalTransportError {
 impl From<TeamError> for LocalTransportError {
     fn from(error: TeamError) -> Self {
         Self::Team(error)
+    }
+}
+
+impl From<crate::MissionCompletionReadError> for LocalTransportError {
+    fn from(error: crate::MissionCompletionReadError) -> Self {
+        Self::MissionCompletionRead(error)
     }
 }
 
@@ -912,6 +926,9 @@ enum LocalCommand {
     Mission {
         mission_id: uuid::Uuid,
     },
+    MissionCompletion {
+        mission_id: uuid::Uuid,
+    },
     AdmitMission {
         draft: MissionDraft,
     },
@@ -1020,6 +1037,9 @@ enum LocalResult {
     Missions {
         missions: Vec<MissionView>,
     },
+    MissionCompletion {
+        completion: Option<crate::CompletionView>,
+    },
     Mission {
         mission: MissionView,
     },
@@ -1065,6 +1085,7 @@ pub struct LocalSupervisorServer {
     recent_receipts: crate::RecentReceiptService,
     teams: TeamService,
     missions: MissionService,
+    mission_completions: crate::MissionCompletionReadService,
     outcomes: OutcomeService,
     resource_discovery: ResourceDiscoveryService,
     disk_encryption: DiskEncryptionService,
@@ -1111,6 +1132,8 @@ impl LocalSupervisorServer {
             crate::RecentReceiptService::new(Arc::clone(&accounts), report.workspace.id);
         let teams = TeamService::new(Arc::clone(&accounts), report.workspace.id);
         let missions = MissionService::new(Arc::clone(&accounts), report.workspace.id);
+        let mission_completions =
+            crate::MissionCompletionReadService::new(Arc::clone(&accounts), report.workspace.id);
         let outcomes = OutcomeService::new(Arc::clone(&accounts), report.workspace.id);
         let resource_discovery =
             ResourceDiscoveryService::new(Arc::clone(&accounts), config.local_model_endpoint);
@@ -1145,6 +1168,7 @@ impl LocalSupervisorServer {
             recent_receipts,
             teams,
             missions,
+            mission_completions,
             outcomes,
             resource_discovery,
             disk_encryption,
@@ -1449,6 +1473,9 @@ impl LocalSupervisorServer {
             },
             LocalCommand::Mission { mission_id } => LocalResult::Mission {
                 mission: self.missions.get(mission_id)?,
+            },
+            LocalCommand::MissionCompletion { mission_id } => LocalResult::MissionCompletion {
+                completion: self.mission_completions.get(mission_id)?,
             },
             LocalCommand::AdmitMission { draft } => LocalResult::Mission {
                 mission: self.missions.admit(draft)?,
@@ -1890,6 +1917,15 @@ impl LocalSupervisorClient {
         expect_missions(self.send(LocalCommand::Missions { project_id })?)
     }
 
+    /// The verified completion of one Mission, or an honest absence. Absence is `None`; a read that
+    /// could not be verified is an error and is never converted into `None`.
+    pub fn mission_completion(
+        &self,
+        mission_id: uuid::Uuid,
+    ) -> Result<Option<crate::CompletionView>, LocalTransportError> {
+        expect_mission_completion(self.send(LocalCommand::MissionCompletion { mission_id })?)
+    }
+
     pub fn mission(&self, mission_id: uuid::Uuid) -> Result<MissionView, LocalTransportError> {
         expect_mission(self.send(LocalCommand::Mission { mission_id })?)
     }
@@ -2190,6 +2226,15 @@ fn expect_team(result: LocalResult) -> Result<TeamView, LocalTransportError> {
     }
 }
 
+fn expect_mission_completion(
+    result: LocalResult,
+) -> Result<Option<crate::CompletionView>, LocalTransportError> {
+    match result {
+        LocalResult::MissionCompletion { completion } => Ok(completion),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
 fn expect_missions(result: LocalResult) -> Result<Vec<MissionView>, LocalTransportError> {
     match result {
         LocalResult::Missions { missions } => Ok(missions),
@@ -2266,6 +2311,9 @@ fn response_from_transport_error(error: LocalTransportError) -> ResponseEnvelope
         LocalTransportError::RecentReceipt(error) => wire_error_from_recent_receipt(error),
         LocalTransportError::SampleProject(error) => wire_error_from_sample_project(error),
         LocalTransportError::Mission(error) => wire_error_from_mission(error),
+        LocalTransportError::MissionCompletionRead(error) => {
+            wire_error_from_mission_completion(error)
+        }
         LocalTransportError::ResourceDiscovery(ResourceDiscoveryError::Account(error)) => {
             wire_error_from_account(error)
         }
@@ -2541,6 +2589,20 @@ fn wire_error_from_team(error: TeamError) -> WireError {
     WireError {
         code,
         retry_after_ms: None,
+    }
+}
+
+/// One closed outward answer for every verification failure, and the account's own semantics kept.
+///
+/// The real cause never reaches this projection: it stays in the error's `Debug` and `source`, which
+/// is where R42 puts driver text, paths and user data.
+fn wire_error_from_mission_completion(error: crate::MissionCompletionReadError) -> WireError {
+    match error {
+        crate::MissionCompletionReadError::Account(error) => wire_error_from_account(error),
+        crate::MissionCompletionReadError::Unavailable(_) => WireError {
+            code: LocalErrorCode::MissionCompletionUnavailable,
+            retry_after_ms: None,
+        },
     }
 }
 
@@ -3333,6 +3395,16 @@ mod tests {
     }
 
     closed_table! {
+        expected_completion_read / completion_read_rows: crate::MissionCompletionReadError,
+        "Account" | crate::MissionCompletionReadError::Account(cause)
+            => format!("Account.{}", expected_account(cause).1),
+            crate::MissionCompletionReadError::Account(OperatorAccountError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "Unavailable" | crate::MissionCompletionReadError::Unavailable(_)
+            => "Unavailable",
+            crate::MissionCompletionReadError::Unavailable(crate::CompletionUnavailable::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+    }
+
+    closed_table! {
         expected_mission / mission_rows: MissionError,
         "Account" | MissionError::Account(cause)
             => format!("Account.{}", expected_account(cause).1),
@@ -3483,6 +3555,7 @@ mod tests {
         "StaleMissionTeam" | LocalErrorCode::StaleMissionTeam => "StaleMissionTeam", LocalErrorCode::StaleMissionTeam, &[];
         "MissionMemberIneligible" | LocalErrorCode::MissionMemberIneligible => "MissionMemberIneligible", LocalErrorCode::MissionMemberIneligible, &[];
         "MissionUnavailable" | LocalErrorCode::MissionUnavailable => "MissionUnavailable", LocalErrorCode::MissionUnavailable, &[];
+        "MissionCompletionUnavailable" | LocalErrorCode::MissionCompletionUnavailable => "MissionCompletionUnavailable", LocalErrorCode::MissionCompletionUnavailable, &[];
         "OutcomeAbsent" | LocalErrorCode::OutcomeAbsent => "OutcomeAbsent", LocalErrorCode::OutcomeAbsent, &[];
         "OutcomeUnavailable" | LocalErrorCode::OutcomeUnavailable => "OutcomeUnavailable", LocalErrorCode::OutcomeUnavailable, &[];
         "LocalModelUnavailable" | LocalErrorCode::LocalModelUnavailable => "LocalModelUnavailable", LocalErrorCode::LocalModelUnavailable, &[];
@@ -3553,6 +3626,9 @@ mod tests {
         "R42S2.TRANSPORT.Team" | LocalTransportError::Team(error)
             => format!("Team operation failed: {}", expected_team(error).1),
             LocalTransportError::Team(TeamError::TeamNotFound), &[];
+        "R42S2.TRANSPORT.MissionCompletionRead" | LocalTransportError::MissionCompletionRead(error)
+            => format!("Mission completion read failed: {}", expected_completion_read(error).1),
+            LocalTransportError::MissionCompletionRead(crate::MissionCompletionReadError::Unavailable(crate::CompletionUnavailable::OrphanCompletedEvent)), &[];
         "R42S2.TRANSPORT.Mission" | LocalTransportError::Mission(error)
             => format!("Mission operation failed: {}", expected_mission(error).1),
             LocalTransportError::Mission(MissionError::MissionNotFound), &[];

@@ -38,13 +38,19 @@
 use std::fmt;
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use data_encoding::HEXLOWER;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::mission_completion::{CompletionSupersedes, ConditionOutcome, MissionCompletionV1};
+use crate::mission::MissionError;
+use crate::mission_completion::{
+    CompletionActor, CompletionDisposition, CompletionSupersedes, ConditionOutcome,
+    MissionCompletionV1,
+};
+use crate::operator_account::{OperatorAccountError, OperatorAccountService};
 use crate::proposal::sha256;
 
 /// The indexed columns of one stored completion, named rather than spelled as a tuple: the query's
@@ -722,6 +728,22 @@ pub(crate) fn outcome_token(outcome: ConditionOutcome) -> &'static str {
     }
 }
 
+/// The actor token the boundary DTO carries. One arm today, and closed so a second cannot appear
+/// silently.
+pub(crate) fn actor_token(actor: CompletionActor) -> &'static str {
+    match actor {
+        CompletionActor::Operator => "operator",
+    }
+}
+
+/// How the Mission finished. NEITHER token is a success verdict.
+pub(crate) fn disposition_token(disposition: CompletionDisposition) -> &'static str {
+    match disposition {
+        CompletionDisposition::Concluded => "concluded",
+        CompletionDisposition::Abandoned => "abandoned",
+    }
+}
+
 /// Startup: every stored completion re-proves itself, and every `mission.completed` Event names one.
 /// The rows `verify_completion_state` enumerates, in the order it enumerates them.
 ///
@@ -993,5 +1015,244 @@ mod name_witness {
                 "a name is a name, not a rendering: {name}"
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// C3: the read-only completion summary
+//
+// A narrow by-Mission reader beside the existing by-digest one. It adds no write, changes no
+// prepare or publish behaviour, and reinterprets nothing: cited support is COUNTED, never read as
+// verified supporting content, and `concluded` is a disposition rather than a success.
+// ---------------------------------------------------------------------------------------------
+
+/// One condition's recorded outcome, as the desktop summary shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConditionResultView {
+    pub ordinal: u32,
+    pub outcome: String,
+    /// How many support references the record CITES for this condition. A count of citations, not
+    /// a claim that any of them was read or verified.
+    pub support_count: u32,
+    pub note: Option<String>,
+}
+
+/// The verified Mission completion, exactly the C3 boundary DTO.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompletionView {
+    pub mission_id: Uuid,
+    pub completion_id: Uuid,
+    pub actor: String,
+    pub accountable_resident_id: Uuid,
+    pub accountable_resident_configuration_id: Uuid,
+    pub disposition: String,
+    pub condition_results: Vec<ConditionResultView>,
+    /// Artifact record digests the completion RECORDS as delivered. A recorded count.
+    pub delivered_artifact_count: u32,
+    /// Items the completion RECORDS as unfinished. Zero is not a claim that nothing is unfinished.
+    pub unfinished_work_count: u32,
+}
+
+/// Why a completion read could not answer.
+///
+/// Two arms, and the split is the contract's: an authentication or session refusal keeps its own
+/// existing semantics all the way out, while every verification failure becomes one closed
+/// unavailable answer. The real cause rides in `Unavailable` for `Debug` and `source`, and never
+/// reaches the outward line.
+#[derive(Debug)]
+pub enum MissionCompletionReadError {
+    Account(OperatorAccountError),
+    Unavailable(CompletionUnavailable),
+}
+
+/// What actually went wrong, for a diagnostician. Never projected outward.
+#[derive(Debug)]
+pub enum CompletionUnavailable {
+    Store(rusqlite::Error),
+    /// The Mission itself does not re-prove against its own admission Event.
+    MissionUnverified(MissionError),
+    /// The completion record does not re-prove. Its owner's reason, carried whole.
+    CompletionUnverified(CompletionReadRefusal),
+    /// A retained `mission.completed` Event for this Mission has no row. Positive evidence that a
+    /// completion was recorded, so absence would be a statement the store contradicts.
+    OrphanCompletedEvent,
+    /// More than one scoped completion row or Event for one Mission: divergent owner evidence.
+    DivergentEvidence,
+}
+
+impl MissionCompletionReadError {
+    /// The closed outward token. `Debug` and `source` carry everything else.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Account(_) => "Account",
+            Self::Unavailable(_) => "Unavailable",
+        }
+    }
+}
+
+impl fmt::Display for MissionCompletionReadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.name())
+    }
+}
+
+impl std::error::Error for MissionCompletionReadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Account(error) => Some(error),
+            Self::Unavailable(_) => None,
+        }
+    }
+}
+
+impl From<OperatorAccountError> for MissionCompletionReadError {
+    fn from(error: OperatorAccountError) -> Self {
+        Self::Account(error)
+    }
+}
+
+fn unavailable(reason: CompletionUnavailable) -> MissionCompletionReadError {
+    MissionCompletionReadError::Unavailable(reason)
+}
+
+/// The verified completion of one Mission, or an honest absence, inside the caller's snapshot.
+///
+/// `Ok(None)` means this Workspace admitted no such Mission **or** admitted it and recorded no
+/// completion. Those are deliberately indistinguishable, so a caller cannot use the shape of the
+/// answer to learn that a Mission it cannot see exists.
+///
+/// Scoped both ways: every retained `mission.completed` Event for this Mission must have its row,
+/// and every row must have its Event. No global replay runs for a scoped read.
+pub(crate) fn verified_completion_for_mission_within(
+    transaction: &Transaction<'_>,
+    workspace_id: Uuid,
+    mission_id: Uuid,
+) -> Result<Option<CompletionView>, MissionCompletionReadError> {
+    // 1. The Mission, through its own owner. Absent is absence; unverified is a refusal.
+    let mission = crate::mission::verified_mission_admission(transaction, workspace_id, mission_id)
+        .map_err(|error| unavailable(CompletionUnavailable::MissionUnverified(error)))?;
+
+    // 2. Scoped owner evidence, counted in both directions BEFORE anything is selected.
+    let rows: Vec<String> = {
+        let mut statement = transaction
+            .prepare(
+                "SELECT digest_value FROM mission_completions
+                 WHERE workspace_id = ?1 AND mission_id = ?2
+                 ORDER BY digest_value",
+            )
+            .map_err(|error| unavailable(CompletionUnavailable::Store(error)))?;
+        statement
+            .query_map(
+                params![workspace_id.to_string(), mission_id.to_string()],
+                |row| row.get(0),
+            )
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|error| unavailable(CompletionUnavailable::Store(error)))?
+    };
+    let events: i64 = transaction
+        .query_row(
+            "SELECT count(*) FROM events
+             WHERE workspace_id = ?1 AND kind = 'mission.completed'
+               AND json_extract(payload_json, '$.missionId') = ?2",
+            params![workspace_id.to_string(), mission_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(|error| unavailable(CompletionUnavailable::Store(error)))?;
+
+    if mission.is_none() {
+        // The Mission is not this Workspace's. Any completion evidence bearing its id would be a
+        // contradiction, and silence about it is the scope answer.
+        if !rows.is_empty() || events > 0 {
+            return Err(unavailable(CompletionUnavailable::DivergentEvidence));
+        }
+        return Ok(None);
+    }
+
+    if rows.len() > 1 || events > 1 {
+        return Err(unavailable(CompletionUnavailable::DivergentEvidence));
+    }
+    let Some(digest_value) = rows.first() else {
+        // A retained Event with no row is positive evidence a completion was recorded.
+        if events > 0 {
+            return Err(unavailable(CompletionUnavailable::OrphanCompletedEvent));
+        }
+        return Ok(None);
+    };
+    if events == 0 {
+        return Err(unavailable(CompletionUnavailable::OrphanCompletedEvent));
+    }
+
+    // 3. The record, through its existing owner. No weaker reconstruction.
+    let completion = verified_completion_within(transaction, workspace_id, digest_value)
+        .map_err(|refusal| unavailable(CompletionUnavailable::CompletionUnverified(refusal)))?;
+    if completion.mission_id != mission_id {
+        return Err(unavailable(CompletionUnavailable::DivergentEvidence));
+    }
+
+    let mut condition_results = Vec::with_capacity(completion.condition_results.len());
+    for result in &completion.condition_results {
+        condition_results.push(ConditionResultView {
+            ordinal: result.ordinal,
+            outcome: outcome_token(result.outcome).to_owned(),
+            support_count: u32::try_from(result.support.len())
+                .map_err(|_| unavailable(CompletionUnavailable::DivergentEvidence))?,
+            note: result.note.clone(),
+        });
+    }
+    let count = |value: usize| {
+        u32::try_from(value).map_err(|_| unavailable(CompletionUnavailable::DivergentEvidence))
+    };
+    Ok(Some(CompletionView {
+        mission_id: completion.mission_id,
+        completion_id: completion.completion_id,
+        actor: actor_token(completion.actor).to_owned(),
+        accountable_resident_id: completion.accountable_resident_id,
+        accountable_resident_configuration_id: completion.accountable_resident_configuration_id,
+        disposition: disposition_token(completion.disposition).to_owned(),
+        condition_results,
+        delivered_artifact_count: count(completion.delivered_artifacts.len())?,
+        unfinished_work_count: count(completion.unfinished_work.len())?,
+    }))
+}
+
+/// The authenticated, Workspace-scoped read over recorded Mission completions.
+///
+/// It returns a verified summary or an honest absence, and nothing else: no connection, no
+/// transaction, no path, and no way to record, prepare or publish anything.
+pub struct MissionCompletionReadService {
+    accounts: Arc<OperatorAccountService>,
+    workspace_id: Uuid,
+}
+
+impl MissionCompletionReadService {
+    pub fn new(accounts: Arc<OperatorAccountService>, workspace_id: Uuid) -> Self {
+        Self {
+            accounts,
+            workspace_id,
+        }
+    }
+
+    /// One Deferred snapshot owns the Mission proof, the completion selection, the record's whole
+    /// owner proof and the scoped Event/row reconciliation.
+    pub fn get(
+        &self,
+        mission_id: Uuid,
+    ) -> Result<Option<CompletionView>, MissionCompletionReadError> {
+        self.accounts.with_authenticated_store(|connection, _now| {
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+            match verified_completion_for_mission_within(
+                &transaction,
+                self.workspace_id,
+                mission_id,
+            ) {
+                Ok(found) => {
+                    transaction.commit()?;
+                    Ok(Ok(found))
+                }
+                Err(refusal) => Ok::<_, OperatorAccountError>(Err(refusal)),
+            }
+        })?
     }
 }
