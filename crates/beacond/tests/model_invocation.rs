@@ -15,9 +15,10 @@
 //! the conductor's disposition rather than read out of the implementation.
 
 use beacond::{
-    AppendRefusal, Appended, IncompleteCause, InvocationAdmissionV1, InvocationObservationV1,
-    MalformedInvocation, ObservationKind, ReadCeiling, RetainedAuthority, RetainedHeader,
-    RetainedLimits, TransitionRefusal, TransportHistory, TransportObservation, TransportStatus,
+    AppendRefusal, Appended, ByteCoherenceFault, IncompleteCause, InvocationAdmissionV1,
+    InvocationObservationV1, MalformedInvocation, ObservationKind, OwnerAuthorizationBasis,
+    ReadCeiling, RetainedAuthority, RetainedBinding, RetainedHeader, RetainedLimits, SequenceFault,
+    TransitionRefusal, TransportHistory, TransportObservation, TransportStatus,
 };
 use uuid::Uuid;
 
@@ -32,7 +33,13 @@ const OTHER_INVOCATION: &str = "00000000-0000-4000-8000-00000000000f";
 
 const AUTHORITY_REFERENCE: &str = "beacon.invocation_authority.resolved.v1";
 const AUTHORITY_DIGEST: [u8; 32] = [0x11; 32];
+const BINDING_REFERENCE: &str = "beacon.local_model_activation.binding.v1";
+const BINDING_DIGEST: [u8; 32] = [0x33; 32];
 const PROMPT_PROFILE: &str = "beacon.mission-plan.prompt.v1";
+const PROMPT_DIGEST: [u8; 32] = [0x44; 32];
+const PROMPT_BYTES_LEN: u32 = 612;
+const ADAPTER_PROFILE: &str = "beacon.model_invocation.adapter.bounded-json.v1";
+const OWNER_BASIS_TAG: u8 = 0x01;
 const REQUEST_DIGEST: [u8; 32] = [0x22; 32];
 const REQUEST_BYTES_LEN: u32 = 1_024;
 const LIMIT_REQUEST: u32 = 4_096;
@@ -68,14 +75,22 @@ fn admission() -> InvocationAdmissionV1 {
             reference: AUTHORITY_REFERENCE.to_owned(),
             claimed_digest: AUTHORITY_DIGEST,
         },
+        binding: RetainedBinding {
+            reference: BINDING_REFERENCE.to_owned(),
+            claimed_digest: BINDING_DIGEST,
+        },
         prompt_profile: PROMPT_PROFILE.to_owned(),
-        request_digest: REQUEST_DIGEST,
-        request_bytes_len: REQUEST_BYTES_LEN,
+        claimed_prompt_digest: PROMPT_DIGEST,
+        claimed_prompt_bytes_len: PROMPT_BYTES_LEN,
+        adapter_profile: ADAPTER_PROFILE.to_owned(),
+        claimed_request_digest: REQUEST_DIGEST,
+        claimed_request_bytes_len: REQUEST_BYTES_LEN,
         limits: RetainedLimits {
             request_bytes: LIMIT_REQUEST,
             response_bytes: LIMIT_RESPONSE,
             prefix_bytes: LIMIT_PREFIX,
         },
+        owner_basis: OwnerAuthorizationBasis::Owner,
         admitted_at_ms: ADMITTED_AT_MS,
     }
 }
@@ -97,12 +112,18 @@ fn admission_bytes_by_hand() -> Vec<u8> {
     }
     push_framed(&mut bytes, AUTHORITY_REFERENCE.as_bytes());
     bytes.extend_from_slice(&AUTHORITY_DIGEST);
+    push_framed(&mut bytes, BINDING_REFERENCE.as_bytes());
+    bytes.extend_from_slice(&BINDING_DIGEST);
     push_framed(&mut bytes, PROMPT_PROFILE.as_bytes());
+    bytes.extend_from_slice(&PROMPT_DIGEST);
+    bytes.extend_from_slice(&PROMPT_BYTES_LEN.to_be_bytes());
+    push_framed(&mut bytes, ADAPTER_PROFILE.as_bytes());
     bytes.extend_from_slice(&REQUEST_DIGEST);
     bytes.extend_from_slice(&REQUEST_BYTES_LEN.to_be_bytes());
     bytes.extend_from_slice(&LIMIT_REQUEST.to_be_bytes());
     bytes.extend_from_slice(&LIMIT_RESPONSE.to_be_bytes());
     bytes.extend_from_slice(&LIMIT_PREFIX.to_be_bytes());
+    bytes.push(OWNER_BASIS_TAG);
     bytes.extend_from_slice(&ADMITTED_AT_MS.to_be_bytes());
     bytes
 }
@@ -567,35 +588,270 @@ fn no_admitted_word_holds_more_than_three_transport_rows() {
 fn astra_n29_the_first_observation_sequence_is_one() {
     let mut history = TransportHistory::admitted(&admission());
     let result = history.append_record(InvocationObservationV1 {
-        invocation_id: uuid(INVOCATION), sequence: 2, observation: headers(200),
+        invocation_id: uuid(INVOCATION),
+        sequence: 2,
+        observation: headers(200),
     });
-    assert!(result.is_err(), "N29.SEQUENCE.FIRST_MUST_BE_ONE: {result:?}");
+    assert!(
+        result.is_err(),
+        "N29.SEQUENCE.FIRST_MUST_BE_ONE: {result:?}"
+    );
 }
 
 #[test]
 fn astra_n29_later_observation_sequence_must_increase() {
     let mut history = history_of("H");
     let result = history.append_record(InvocationObservationV1 {
-        invocation_id: uuid(INVOCATION), sequence: 1,
-        observation: TransportObservation::BodyPrefix { bytes: b"first".to_vec() },
+        invocation_id: uuid(INVOCATION),
+        sequence: 1,
+        observation: TransportObservation::BodyPrefix {
+            bytes: b"first".to_vec(),
+        },
     });
-    assert!(result.is_err(), "N29.SEQUENCE.LATER_MUST_INCREASE: {result:?}");
+    assert!(
+        result.is_err(),
+        "N29.SEQUENCE.LATER_MUST_INCREASE: {result:?}"
+    );
 }
 
 #[test]
 fn astra_n29_complete_bytes_extend_the_observed_prefix() {
     let mut history = history_of("HP");
     let result = history.append(TransportObservation::BodyComplete {
-        bytes: b"a different response".to_vec(), elapsed_ms: 1,
+        bytes: b"a different response".to_vec(),
+        elapsed_ms: 1,
     });
-    assert!(result.is_err(), "N29.PREFIX.COMPLETE_MUST_EXTEND_OBSERVED_PREFIX: {result:?}");
+    assert!(
+        result.is_err(),
+        "N29.PREFIX.COMPLETE_MUST_EXTEND_OBSERVED_PREFIX: {result:?}"
+    );
 }
 
 #[test]
 fn astra_n29_incomplete_bytes_preserve_the_observed_prefix() {
     let mut history = history_of("HP");
     let result = history.append(TransportObservation::BodyIncomplete {
-        prefix: vec![], cause: IncompleteCause::BodyReadRefused,
+        prefix: vec![],
+        cause: IncompleteCause::BodyReadRefused,
     });
-    assert!(result.is_err(), "N29.PREFIX.INCOMPLETE_MUST_PRESERVE_OBSERVED_PREFIX: {result:?}");
+    assert!(
+        result.is_err(),
+        "N29.PREFIX.INCOMPLETE_MUST_PRESERVE_OBSERVED_PREFIX: {result:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// N32: the sequence domain, the byte-coherence guard, and the completed commitment categories
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn a_later_observation_may_take_a_sequence_beyond_the_next_one() {
+    let mut history = history_of("H");
+    let recorded = history
+        .append_record(InvocationObservationV1 {
+            invocation_id: uuid(INVOCATION),
+            sequence: 7,
+            observation: observation_for(ObservationKind::BodyPrefix),
+        })
+        .expect("a gap is legal: no contract in this repository requires contiguity");
+    assert_eq!(recorded, Appended::Recorded { sequence: 7 });
+    assert_eq!(history.len(), 2);
+}
+
+#[test]
+fn a_convenience_append_after_a_gap_continues_from_the_last_recorded_sequence() {
+    let mut history = history_of("H");
+    history
+        .append_record(InvocationObservationV1 {
+            invocation_id: uuid(INVOCATION),
+            sequence: 7,
+            observation: observation_for(ObservationKind::BodyPrefix),
+        })
+        .expect("prefix at seven");
+
+    let recorded = history
+        .append(observation_for(ObservationKind::BodyComplete))
+        .expect("a coherent complete body");
+    // Held literal: eight follows seven. Not `rows.len() + 1`, which would be three.
+    assert_eq!(recorded, Appended::Recorded { sequence: 8 });
+}
+
+#[test]
+fn a_convenience_append_refuses_when_no_next_sequence_is_representable() {
+    let mut history = history_of("H");
+    history
+        .append_record(InvocationObservationV1 {
+            invocation_id: uuid(INVOCATION),
+            sequence: u32::MAX,
+            observation: observation_for(ObservationKind::BodyPrefix),
+        })
+        .expect("the largest sequence is representable");
+
+    let refusal = history
+        .append(observation_for(ObservationKind::BodyComplete))
+        .expect_err("there is no next sequence");
+    assert_eq!(
+        refusal,
+        AppendRefusal::Sequence(SequenceFault::NoRepresentableNext { previous: u32::MAX })
+    );
+
+    // The two earlier rows and the status they reduce to are untouched.
+    assert_eq!(history.len(), 2);
+    assert_eq!(
+        history.status(),
+        TransportStatus::ResponsePartial {
+            status: 200,
+            prefix: b"{\"plan\":".to_vec(),
+        }
+    );
+
+    // And an exact re-offer of a record already present still answers idempotence normally.
+    let again = history
+        .append_record(InvocationObservationV1 {
+            invocation_id: uuid(INVOCATION),
+            sequence: u32::MAX,
+            observation: observation_for(ObservationKind::BodyPrefix),
+        })
+        .expect("idempotent");
+    assert_eq!(again, Appended::AlreadyPresent { sequence: u32::MAX });
+    assert_eq!(history.len(), 2);
+}
+
+#[test]
+fn a_complete_body_that_extends_the_observed_prefix_is_recorded() {
+    let mut history = history_of("HP");
+    history
+        .append(TransportObservation::BodyComplete {
+            bytes: b"{\"plan\":\"a longer draft\"}".to_vec(),
+            elapsed_ms: 5,
+        })
+        .expect("it extends the observed prefix");
+    assert_eq!(
+        history.status(),
+        TransportStatus::CompleteRetained {
+            status: 200,
+            bytes: b"{\"plan\":\"a longer draft\"}".to_vec(),
+        }
+    );
+}
+
+#[test]
+fn an_incomplete_terminal_that_preserves_the_observed_prefix_is_recorded() {
+    let mut history = history_of("HP");
+    history
+        .append(TransportObservation::BodyIncomplete {
+            prefix: b"{\"plan\":\"half".to_vec(),
+            cause: IncompleteCause::BodyReadRefused,
+        })
+        .expect("it preserves the observed prefix");
+    assert_eq!(
+        history.status(),
+        TransportStatus::Incomplete {
+            status: Some(200),
+            cause: IncompleteCause::BodyReadRefused,
+            prefix: b"{\"plan\":\"half".to_vec(),
+        }
+    );
+}
+
+#[test]
+fn a_complete_body_that_contradicts_the_observed_prefix_names_the_byte_fault() {
+    let mut history = history_of("HP");
+    let refusal = history
+        .append(TransportObservation::BodyComplete {
+            bytes: b"a different response".to_vec(),
+            elapsed_ms: 1,
+        })
+        .expect_err("two records cannot claim different first bytes");
+    assert_eq!(
+        refusal,
+        AppendRefusal::ByteCoherence(ByteCoherenceFault::CompleteDoesNotExtendPrefix {
+            observed_prefix_len: 8,
+            offered_len: 20,
+        })
+    );
+}
+
+#[test]
+fn an_incomplete_terminal_that_discards_the_observed_prefix_names_the_byte_fault() {
+    let mut history = history_of("HP");
+    let refusal = history
+        .append(TransportObservation::BodyIncomplete {
+            prefix: Vec::new(),
+            cause: IncompleteCause::BodyReadRefused,
+        })
+        .expect_err("a terminal cannot discard bytes already observed");
+    assert_eq!(
+        refusal,
+        AppendRefusal::ByteCoherence(ByteCoherenceFault::IncompleteDiscardsPrefix {
+            observed_prefix_len: 8,
+            offered_len: 0,
+        })
+    );
+}
+
+#[test]
+fn the_prompt_and_request_commitments_are_committed_independently() {
+    let base = admission().digest().expect("digest");
+
+    let mut prompt_digest = admission();
+    prompt_digest.claimed_prompt_digest = [0x45; 32];
+    let mut prompt_length = admission();
+    prompt_length.claimed_prompt_bytes_len = PROMPT_BYTES_LEN + 1;
+    let mut request_digest = admission();
+    request_digest.claimed_request_digest = [0x23; 32];
+    let mut request_length = admission();
+    request_length.claimed_request_bytes_len = REQUEST_BYTES_LEN - 1;
+
+    let digests = [
+        base,
+        prompt_digest.digest().expect("digest"),
+        prompt_length.digest().expect("digest"),
+        request_digest.digest().expect("digest"),
+        request_length.digest().expect("digest"),
+    ];
+    for (left, one) in digests.iter().enumerate() {
+        for (right, other) in digests.iter().enumerate() {
+            if left != right {
+                assert_ne!(one, other, "commitment {left} and {right} collided");
+            }
+        }
+    }
+}
+
+#[test]
+fn changing_the_adapter_profile_changes_the_admission_digest() {
+    let base = admission().digest().expect("digest");
+    let mut other = admission();
+    other.adapter_profile = "beacon.model_invocation.adapter.bounded-json.v2".to_owned();
+    assert_ne!(base, other.digest().expect("digest"));
+}
+
+#[test]
+fn changing_the_activation_binding_reference_or_its_claimed_digest_changes_the_admission() {
+    let base = admission().digest().expect("digest");
+
+    let mut renamed = admission();
+    renamed.binding.reference = "beacon.local_model_activation.binding.v2".to_owned();
+    let mut rehashed = admission();
+    rehashed.binding.claimed_digest = [0x34; 32];
+
+    let renamed = renamed.digest().expect("digest");
+    let rehashed = rehashed.digest().expect("digest");
+    assert_ne!(base, renamed);
+    assert_ne!(base, rehashed);
+    assert_ne!(renamed, rehashed);
+}
+
+#[test]
+fn an_unknown_owner_authorization_basis_tag_refuses() {
+    let mut bytes = admission().canonical_bytes().expect("canonical bytes");
+    // The basis tag sits immediately before the eight-byte timestamp that ends the record.
+    let tag = bytes.len() - 9;
+    assert_eq!(bytes[tag], OWNER_BASIS_TAG, "the fixture's own basis tag");
+    bytes[tag] = 0x02;
+
+    let refusal = InvocationAdmissionV1::from_canonical_bytes(&bytes, ceiling())
+        .expect_err("an unknown basis is not a value");
+    assert_eq!(refusal, MalformedInvocation::UnknownOwnerBasisTag);
 }

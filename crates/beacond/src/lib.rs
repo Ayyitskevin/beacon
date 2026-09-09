@@ -144,12 +144,13 @@ pub use mission_impact::{
     MissionImpactService, verified_classification_for_citation, verified_classification_within,
 };
 pub use model_invocation::{
-    ADMISSION_CANONICALIZER, AppendRefusal, Appended, INVOCATION_DIGEST_ALGORITHM, IncompleteCause,
-    InvocationAdmissionV1, InvocationObservationV1, MAX_AUTHORITY_REFERENCE_BYTES,
+    ADMISSION_CANONICALIZER, AppendRefusal, Appended, ByteCoherenceFault,
+    INVOCATION_DIGEST_ALGORITHM, IncompleteCause, InvocationAdmissionV1, InvocationObservationV1,
+    MAX_ADAPTER_PROFILE_BYTES, MAX_AUTHORITY_REFERENCE_BYTES, MAX_BINDING_REFERENCE_BYTES,
     MAX_HEADER_NAME_BYTES, MAX_HEADER_VALUE_BYTES, MAX_PROMPT_PROFILE_BYTES, MAX_RETAINED_HEADERS,
-    MalformedInvocation, OBSERVATION_CANONICALIZER, ObservationKind, ReadCeiling,
-    RetainedAuthority, RetainedHeader, RetainedLimits, TransitionRefusal, TransportHistory,
-    TransportObservation, TransportStatus,
+    MalformedInvocation, OBSERVATION_CANONICALIZER, ObservationKind, OwnerAuthorizationBasis,
+    ReadCeiling, RetainedAuthority, RetainedBinding, RetainedHeader, RetainedLimits, SequenceFault,
+    TransitionRefusal, TransportHistory, TransportObservation, TransportStatus,
 };
 pub use operator_account::{
     AccessOrigin, OperatorAccountError, OperatorAccountService, OperatorSessionPhase,
