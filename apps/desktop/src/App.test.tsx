@@ -3604,11 +3604,11 @@ describe("Beacon desktop shell", () => {
   ) {
     installN16ProjectAdapter();
     const installed = invokeMock.getMockImplementation()!;
-    const calls: string[] = [];
+    const calls: { command: string; args: unknown }[] = [];
     let rejected = 0;
     invokeMock.mockImplementation((command, args) => {
       if (command === "teams" || command === "missions") {
-        calls.push(command);
+        calls.push({ command: command as string, args });
         if (held && held.leg === command) return held.promise;
         if (reject && reject.leg === command && rejected < reject.times) {
           rejected += 1;
@@ -3675,7 +3675,12 @@ describe("Beacon desktop shell", () => {
     const { calls } = installB12({ leg: "teams", times: 1 });
     await openAlpha(user);
     const retry = await screen.findAllByRole("button", { name: "Retry Teams and Missions" });
-    expect(calls, "B12.RETRY.FIRST_ATTEMPT_ASKED_BOTH").toEqual(["teams", "missions"]);
+    // Held Alpha id, written here. Nothing is derived from whatever the product happened to pass.
+    const forAlpha = { projectId: N15_A };
+    expect(calls, "B12.RETRY.FIRST_ATTEMPT_ASKED_BOTH").toEqual([
+      { command: "teams", args: forAlpha },
+      { command: "missions", args: forAlpha },
+    ]);
 
     retry[0].focus();
     expect(retry[0], "B12.RETRY.KEYBOARD_REACHABLE").toHaveFocus();
@@ -3692,7 +3697,10 @@ describe("Beacon desktop shell", () => {
     // The bundle stayed all-or-nothing: the retry asked for BOTH reads again, same Project, and
     // added no other command.
     expect(calls, "B12.RETRY.SAME_BUNDLE_SAME_PROJECT").toEqual([
-      "teams", "missions", "teams", "missions",
+      { command: "teams", args: forAlpha },
+      { command: "missions", args: forAlpha },
+      { command: "teams", args: forAlpha },
+      { command: "missions", args: forAlpha },
     ]);
   });
 
@@ -3759,9 +3767,10 @@ describe("Beacon desktop shell", () => {
         "B12.RETRY.REPEATED_REJECTION_STAYS_FAILED",
       ).toBe(2),
     );
-    expect(calls, "B12.RETRY.REPEATED_REJECTION_STAYS_FAILED").toEqual([
-      "teams", "missions", "teams", "missions",
-    ]);
+    expect(
+      calls.map((call) => call.command),
+      "B12.RETRY.REPEATED_REJECTION_STAYS_FAILED",
+    ).toEqual(["teams", "missions", "teams", "missions"]);
     expect(screen.queryByText("Loading Teams"), "B12.RETRY.REPEATED_REJECTION_STAYS_FAILED").toBeNull();
   });
 
@@ -3796,75 +3805,140 @@ describe("Beacon desktop shell", () => {
     expect(caused, "B12.RETRY.NO_WRITE_COMMAND").toEqual(["teams", "missions"]);
   });
 
-  it("a stale success and a stale failure from the previous Project change nothing", async () => {
+  // A COMPLETE TeamView. The earlier fixture omitted `formedAtMs`, `formedBy` and `workspaceId` and
+  // carried no members, so `isTeamView` rejected it inside `loadTeams` and every "deferred success"
+  // was really the error leg. This one is proved live below before any stale case leans on it.
+  function b12Team(projectId: string, name: string) {
+    return {
+      id: "99999999-9999-4999-8999-999999999999",
+      workspaceId: acceptedOrganization.workspaceId,
+      projectId,
+      name,
+      formedBy: "operator",
+      formedAtMs: 125,
+      members: [
+        {
+          residentId: "88888888-8888-4888-8888-888888888888",
+          formationConfigurationId: "77777777-7777-4777-8777-777777777788",
+          currentConfigurationId: "77777777-7777-4777-8777-777777777788",
+          eligibleNow: true,
+          ineligibilityReasons: [],
+        },
+      ],
+    };
+  }
+
+  it("loads the B12 stale-case Team payload visibly, so the stale bars mean something", async () => {
     const user = userEvent.setup();
-    let releaseAlpha!: (teams: unknown[]) => void;
-    let rejectAlpha!: (cause: unknown) => void;
-    const heldTeams = new Promise<unknown[]>((resolve, reject) => {
-      releaseAlpha = resolve;
-      rejectAlpha = reject;
-    });
-    const heldMissions = new Promise<unknown[]>(() => {});
     installN16ProjectAdapter();
     const installed = invokeMock.getMockImplementation()!;
-    const alphaTeam = { id: "aaaaaaa9-9999-4999-8999-aaaaaaaaaaaa", projectId: N15_A,
-      name: "Stale Alpha Team", members: [] };
     invokeMock.mockImplementation((command, args) => {
-      const projectId = (args as { projectId?: string } | undefined)?.projectId;
-      if (command === "teams") return projectId === N15_A ? heldTeams : Promise.resolve([]);
-      if (command === "missions") return projectId === N15_A ? heldMissions : Promise.resolve([]);
+      if (command === "teams") return Promise.resolve([b12Team(N15_A, "Live Alpha Team")]);
+      if (command === "missions") return Promise.resolve([]);
       return installed(command, args);
     });
+    await openAlpha(user);
+    // Through the real `loadTeams` validation, in an active control. If this payload were invalid
+    // the read would reject and the panel would show the failure instead.
+    await vi.waitFor(() =>
+      expect(screen.queryByText("Live Alpha Team"), "B12.FIXTURE.VALID_TEAM_LOADS").not.toBeNull(),
+    );
+    expect(screen.queryAllByRole("button", { name: "Retry Teams and Missions" }),
+      "B12.FIXTURE.VALID_TEAM_LOADS").toHaveLength(0);
+  });
 
+  /** Alpha's bundle held open, Bravo's bundle ALSO held open, so a stale write would be visible
+   *  either as data or as a released pending state. Both of Alpha's legs settle; nothing is settled
+   *  twice and no leg is left pending in a claimed success. */
+  function installB12Stale() {
+    let releaseAlphaTeams!: (teams: unknown[]) => void;
+    let rejectAlphaTeams!: (cause: unknown) => void;
+    let releaseAlphaMissions!: (missions: unknown[]) => void;
+    const alphaTeams = new Promise<unknown[]>((resolve, reject) => {
+      releaseAlphaTeams = resolve;
+      rejectAlphaTeams = reject;
+    });
+    const alphaMissions = new Promise<unknown[]>((resolve) => {
+      releaseAlphaMissions = resolve;
+    });
+    const bravoTeams = new Promise<unknown[]>(() => {});
+    const bravoMissions = new Promise<unknown[]>(() => {});
+    installN16ProjectAdapter();
+    const installed = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation((command, args) => {
+      const projectId = (args as { projectId?: string } | undefined)?.projectId;
+      if (command === "teams") return projectId === N15_A ? alphaTeams : bravoTeams;
+      if (command === "missions") return projectId === N15_A ? alphaMissions : bravoMissions;
+      return installed(command, args);
+    });
+    return { releaseAlphaTeams, rejectAlphaTeams, releaseAlphaMissions };
+  }
+
+  async function leaveAlphaForBravo(user: ReturnType<typeof userEvent.setup>) {
     await openAlpha(user);
     expect(screen.queryByText("Loading Teams"), "B12.STALE.ALPHA_STILL_RUNNING").not.toBeNull();
-
-    // Leave Alpha for the portfolio, then open the OTHER Project. Alpha's read is still open.
     await user.click(screen.getByRole("button", { name: "All Projects" }));
     await user.click(await screen.findByRole("button", { name: /Bravo Project/i }));
     await screen.findByRole("heading", { name: "Bravo Project" });
-    await vi.waitFor(() =>
-      expect(
-        screen.queryByText("No Teams have been formed for this Project."),
-        "B12.STALE.BRAVO_LOADED",
-      ).not.toBeNull(),
-    );
+    // Bravo's own bundle is deliberately still running: a stale write would show up either as
+    // Alpha's data or as this pending state being released.
+    expect(screen.queryByText("Loading Teams"), "B12.STALE.BRAVO_STILL_PENDING").not.toBeNull();
+  }
 
-    // Alpha's deferred SUCCESS lands now. It must not overwrite Bravo's result.
+  it("a deferred SUCCESS from the previous Project overwrites neither data nor pending state", async () => {
+    const user = userEvent.setup();
+    const { releaseAlphaTeams, releaseAlphaMissions } = installB12Stale();
+    await leaveAlphaForBravo(user);
+
     await act(async () => {
-      releaseAlpha([alphaTeam]);
+      releaseAlphaTeams([b12Team(N15_A, "Stale Alpha Team")]);
+      releaseAlphaMissions([]);
+      await Promise.resolve();
       await Promise.resolve();
     });
-    expect(screen.queryByText("Stale Alpha Team"), "B12.STALE.SUCCESS_DOES_NOT_OVERWRITE").toBeNull();
-    expect(
-      screen.queryByText("No Teams have been formed for this Project."),
-      "B12.STALE.SUCCESS_DOES_NOT_OVERWRITE",
-    ).not.toBeNull();
 
-    // And a deferred FAILURE from that same abandoned read must not plant a failure over Bravo.
+    expect(screen.queryByText("Stale Alpha Team"),
+      "B12.STALE.SUCCESS_DOES_NOT_OVERWRITE_DATA").toBeNull();
+    expect(screen.queryByText("Loading Teams"),
+      "B12.STALE.SUCCESS_DOES_NOT_RELEASE_PENDING").not.toBeNull();
+    expect(screen.queryByText("No Teams have been formed for this Project."),
+      "B12.STALE.SUCCESS_DOES_NOT_RELEASE_PENDING").toBeNull();
+    expect(screen.queryAllByRole("button", { name: "Retry Teams and Missions" }),
+      "B12.STALE.SUCCESS_IS_NOT_A_FAILURE").toHaveLength(0);
+  });
+
+  it("a deferred ERROR from the previous Project overwrites neither data nor pending state", async () => {
+    const user = userEvent.setup();
+    const { rejectAlphaTeams } = installB12Stale();
+    await leaveAlphaForBravo(user);
+
     await act(async () => {
-      rejectAlpha(new Error("the local request failed"));
+      rejectAlphaTeams(new Error("the local request failed"));
+      await Promise.resolve();
       await Promise.resolve();
     });
-    expect(
-      screen.queryAllByRole("button", { name: "Retry Teams and Missions" }),
-      "B12.STALE.ERROR_DOES_NOT_OVERWRITE",
-    ).toHaveLength(0);
+
+    expect(screen.queryAllByRole("button", { name: "Retry Teams and Missions" }),
+      "B12.STALE.ERROR_DOES_NOT_PLANT_A_FAILURE").toHaveLength(0);
+    expect(screen.queryByText("Loading Teams"),
+      "B12.STALE.ERROR_DOES_NOT_RELEASE_PENDING").not.toBeNull();
   });
 
   it("a read still running when the Project is closed exposes nothing afterwards", async () => {
     const user = userEvent.setup();
     let releaseTeams!: (teams: unknown[]) => void;
+    let releaseMissions!: (missions: unknown[]) => void;
     const heldTeams = new Promise<unknown[]>((resolve) => {
       releaseTeams = resolve;
     });
+    const heldMissions = new Promise<unknown[]>((resolve) => {
+      releaseMissions = resolve;
+    });
     installN16ProjectAdapter();
     const installed = invokeMock.getMockImplementation()!;
-    const secretTeam = { id: "bbbbbbb9-9999-4999-8999-bbbbbbbbbbbb", projectId: N15_A,
-      name: "Protected Team Name", members: [] };
     invokeMock.mockImplementation((command, args) => {
       if (command === "teams") return heldTeams;
-      if (command === "missions") return Promise.resolve([]);
+      if (command === "missions") return heldMissions;
       return installed(command, args);
     });
     await openAlpha(user);
@@ -3873,11 +3947,49 @@ describe("Beacon desktop shell", () => {
       expect(screen.queryByRole("heading", { name: "Alpha Project" }),
         "B12.EXIT.RECORD_CLOSED").toBeNull(),
     );
+    // A VALID payload: if it were rejected by validation this would prove nothing about a success.
     await act(async () => {
-      releaseTeams([secretTeam]);
+      releaseTeams([b12Team(N15_A, "Protected Team Name")]);
+      releaseMissions([]);
+      await Promise.resolve();
       await Promise.resolve();
     });
-    expect(screen.queryByText("Protected Team Name"), "B12.EXIT.LATE_READ_EXPOSES_NOTHING").toBeNull();
+    expect(screen.queryByText("Protected Team Name"),
+      "B12.EXIT.LATE_READ_EXPOSES_NOTHING").toBeNull();
+  });
+
+  it("a read still running when the window is concealed exposes nothing while hidden", async () => {
+    const user = userEvent.setup();
+    let releaseTeams!: (teams: unknown[]) => void;
+    let releaseMissions!: (missions: unknown[]) => void;
+    const heldTeams = new Promise<unknown[]>((resolve) => {
+      releaseTeams = resolve;
+    });
+    const heldMissions = new Promise<unknown[]>((resolve) => {
+      releaseMissions = resolve;
+    });
+    installN16ProjectAdapter();
+    const installed = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "teams") return heldTeams;
+      if (command === "missions") return heldMissions;
+      return installed(command, args);
+    });
+    await openAlpha(user);
+    // The shell's existing conceal-on-blur path. No session product logic is changed here.
+    fireEvent.blur(window);
+    expect(screen.getByRole("heading", { name: "Beacon is concealed" }),
+      "B12.HIDE.CONCEALED").toBeVisible();
+    await act(async () => {
+      releaseTeams([b12Team(N15_A, "Concealed Team Name")]);
+      releaseMissions([]);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.queryByText("Concealed Team Name"),
+      "B12.HIDE.LATE_READ_EXPOSES_NOTHING").toBeNull();
+    expect(screen.queryByRole("heading", { name: "Alpha Project" }),
+      "B12.HIDE.PROTECTED_CONTENT_STAYS_HIDDEN").toBeNull();
   });
 
   it("a healthy empty Project is not a failed read", async () => {
@@ -3909,6 +4021,51 @@ describe("Beacon desktop shell", () => {
     await user.click(await screen.findByRole("button", { name: /Alpha Project/i }));
     await screen.findAllByRole("button", { name: "Retry Teams and Missions" });
     await expectNoWcagViolations(container);
+  });
+
+
+  it("a successful retry clears this read's failure and leaves an unrelated Command error alone", async () => {
+    const user = userEvent.setup();
+    installN16ProjectAdapter();
+    const installed = invokeMock.getMockImplementation()!;
+    let teamsAttempt = 0;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "teams") {
+        teamsAttempt += 1;
+        if (teamsAttempt === 1) return Promise.reject(new Error("the local request failed"));
+        return Promise.resolve([]);
+      }
+      if (command === "missions") return Promise.resolve([]);
+      // A REAL Command the operator can run from this same lens, refused with a code that projects
+      // to its own sentence -- so "the unrelated error survived" cannot be satisfied by the
+      // bundle's own message.
+      if (command === "preflight_project_checks") {
+        return Promise.reject({ code: "preflight_unavailable", message: "unused" });
+      }
+      return installed(command, args);
+    });
+    await openAlpha(user);
+    await screen.findAllByRole("button", { name: "Retry Teams and Missions" });
+
+    // The small real UI operation: run this Project's Preflight checks, refused by the daemon.
+    await user.click(screen.getByRole("button", { name: "Preflight checks" }));
+    const unrelated = /Beacon could not record the preflight/;
+    await vi.waitFor(() =>
+      expect(screen.queryByText(unrelated), "B12.RETRY.UNRELATED_ERROR_SEEDED").not.toBeNull(),
+    );
+
+    await user.click(screen.getAllByRole("button", { name: "Retry Teams and Missions" })[0]);
+    await vi.waitFor(() =>
+      expect(
+        screen.queryByText("No Teams have been formed for this Project."),
+        "B12.RETRY.SUCCESS_CLEARS_ONLY_THIS_FAILURE",
+      ).not.toBeNull(),
+    );
+    expect(screen.queryAllByRole("button", { name: "Retry Teams and Missions" }),
+      "B12.RETRY.SUCCESS_CLEARS_ONLY_THIS_FAILURE").toHaveLength(0);
+    // The other error is not this read's to answer, and a successful retry must not fake it away.
+    expect(screen.queryByText(unrelated),
+      "B12.RETRY.UNRELATED_ERROR_PRESERVED").not.toBeNull();
   });
 
 });
