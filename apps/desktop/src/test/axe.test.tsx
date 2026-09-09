@@ -105,6 +105,7 @@ it("every surface test file runs the WCAG bar", () => {
   ).toEqual([
     "App.test.tsx",
     "BriefingReceipts.test.tsx",
+    "MissionCompletion.test.tsx",
     "MissionOutcomes.test.tsx",
     "ProjectMissions.test.tsx",
     "SampleProject.test.tsx",
