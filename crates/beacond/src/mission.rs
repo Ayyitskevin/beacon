@@ -893,6 +893,50 @@ pub(crate) fn verified_mission_declaration(
     workspace_id: Uuid,
     mission_id: Uuid,
 ) -> Result<Option<MissionDeclaration>, MissionError> {
+    // The projection, of the one proof. The whole-payload comparison lives in
+    // `verified_mission_admission` and is not repeated here: two copies of an owner validator are
+    // two places to be wrong about what a Mission declared, and the second copy is the one nobody
+    // updates.
+    Ok(
+        verified_mission_admission(connection, workspace_id, mission_id)?.map(|mission| {
+            MissionDeclaration {
+                project_id: mission.project_id,
+                desired_outcome: mission.desired_outcome,
+                success_conditions: mission.success_conditions,
+            }
+        }),
+    )
+}
+
+/// The COMPLETE admitted Mission, proved the way startup proves it.
+///
+/// The stored row must equal the one `mission.admitted` Event payload that recorded it, whole --
+/// identities, Project and charter revision, Team, desired outcome, success conditions, constraints,
+/// prohibitions, lifecycle, admitting actor and time, and the ordered admission roster with each
+/// member's admission Configuration. Callers that must bind to what a Mission ADMITTED read this
+/// rather than the columns.
+///
+/// `Ok(None)` means this Workspace admitted no such Mission -- a different fact from a Mission whose
+/// row and Event disagree, which is `InvalidStore`. Exactly one Event must match: none is a Mission
+/// the log does not account for, and two would make "when was this Mission admitted" a question with
+/// two answers.
+///
+/// **What this proves, and what it does not.** It proves what was admitted. It says nothing about
+/// whether the named Residents are still active, whether their Configurations are still current,
+/// whether the activation behind them is still live, or whether anything is authorized to run a
+/// model. Those are separate owners, and a caller that needs them must ask them; deriving a current
+/// value from this admitted one would be rewriting history into eligibility.
+///
+/// **Snapshot expectations.** It performs two reads -- the Mission row and its Event -- on the
+/// `connection` it is handed, and opens no transaction of its own. A caller inside a transaction
+/// sees that transaction's snapshot; a caller outside one gets no atomicity guarantee between the
+/// two reads beyond what its connection already provides. It is deliberately not nested inside the
+/// existing Outcome and Completion callers' transactions in any new way.
+pub(crate) fn verified_mission_admission(
+    connection: &Connection,
+    workspace_id: Uuid,
+    mission_id: Uuid,
+) -> Result<Option<MissionView>, MissionError> {
     let Some(stored) = load_stored_mission(connection, workspace_id, mission_id)? else {
         return Ok(None);
     };
@@ -915,11 +959,7 @@ pub(crate) fn verified_mission_declaration(
     };
     let occurred_at_ms = u64::try_from(*occurred_at_ms).map_err(|_| MissionError::InvalidStore)?;
     verify_mission_event(connection, workspace_id, occurred_at_ms, payload_json)?;
-    Ok(Some(MissionDeclaration {
-        project_id: stored.project_id,
-        desired_outcome: stored.desired_outcome,
-        success_conditions: stored.success_conditions,
-    }))
+    Ok(Some(render_mission(stored)))
 }
 
 pub(crate) fn verify_mission_event(
@@ -1173,5 +1213,481 @@ mod name_witness {
                 "a name is a name, not a rendering: {name}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod verified_admission_reader {
+    //! The complete owner-verified Mission admission (N37).
+    //!
+    //! These bars build a real store through the real services -- Owner, Workspace, Project,
+    //! Policy, Residents, activation, Configurations, Team, Mission -- because the thing under test
+    //! is a proof against a real `mission.admitted` Event, and a hand-planted row would be proving
+    //! the fixture rather than the owner. **Raw SQL appears only to corrupt a store the owner has
+    //! already minted, and every such site says so.**
+    //!
+    //! Expected values are held here. Nothing asserts a field by reading it back out of the value
+    //! under test; the one clock-derived field, `admitted_at_ms`, is compared against the
+    //! `MissionService::admit` return, which is a different producer than the reader.
+    //!
+    //! **R58 door census, measured.** `event_chain::tests::no_product_code_writes_an_event_around_the_door`
+    //! exempts "everything from the file's own test module onward", but it finds that module by the
+    //! literal `"#[cfg(test)]\nmod tests"`. `mission.rs`'s test modules are named `name_witness` and
+    //! this one, so the census scans this whole file as product. It flagged an insert into the
+    //! Events table written here for a corruption fixture -- and then flagged the comment that
+    //! explained it, because the match is a plain substring over every line, comments included. The
+    //! corruption below therefore retags an existing Event instead, and no line here spells the
+    //! matched phrase. The census's narrow match is a real gap -- every in-crate test module not
+    //! literally named `tests` is scanned as product -- but `event_chain.rs` is outside this task's
+    //! fence, so it is reported rather than edited.
+
+    use std::fs;
+    use std::io::{Read, Write};
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::thread::{self, JoinHandle};
+
+    use rusqlite::Connection;
+    use serde_json::json;
+
+    use super::*;
+    use crate::local_model_activation::LocalModelActivationService;
+    use crate::operator_account::OperatorAccountService;
+    use crate::project::{AutonomyProfile, ProjectService, ProjectView};
+    use crate::resident_configuration::{ResidentConfiguration, ResidentConfigurationService};
+    use crate::resident_lifecycle::ResidentLifecycleService;
+    use crate::resource_discovery::LocalModelEndpoint;
+    use crate::starter_organization::{
+        StarterOrganizationService, StarterResidentDraft, StarterRole,
+    };
+    use crate::team::{TeamDraft, TeamMemberDraft, TeamService, TeamView};
+    use crate::{
+        BeaconCapability, ProjectCharterDraft, ProjectDraft, ProviderFeature, SecretString,
+        StartupConfig, Supervisor,
+    };
+
+    const MODEL_NAME: &str = "qwen3.8:27b";
+    const MODEL_DIGEST: &str = "22130167c4c20e20c7b71454612966ca8e8171e9b3cc8ab6ce8aa6cbfec79643";
+
+    // Held expectations. Every one is written here and read by the assertions; none is derived from
+    // the value under test.
+    const DESIRED_OUTCOME: &str = "Ship one reviewed Beacon feature.";
+    const CONDITION_ONE: &str = "Relevant gates pass";
+    const CONDITION_TWO: &str = "One non-author seat reviews the change";
+    const CONSTRAINT_ONE: &str = "Keep the change reversible";
+    const CONSTRAINT_TWO: &str = "Touch only the files the task names";
+    const PROHIBITION_ONE: &str = "Do not deploy";
+    const PROHIBITION_TWO: &str = "Do not rewrite another lane's tree";
+
+    struct TestStore {
+        path: PathBuf,
+        workspace_id: Uuid,
+    }
+
+    impl TestStore {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("beacond-n37-{label}-{}.sqlite3", Uuid::new_v4()));
+            let report = Supervisor::bootstrap(StartupConfig {
+                store_path: path.clone(),
+                initial_workspace_name: "Personal".to_owned(),
+            })
+            .unwrap();
+            Self {
+                path,
+                workspace_id: report.workspace.id,
+            }
+        }
+
+        fn open(&self) -> Connection {
+            Connection::open(&self.path).unwrap()
+        }
+    }
+
+    impl Drop for TestStore {
+        fn drop(&mut self) {
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = fs::remove_file(format!("{}{suffix}", self.path.display()));
+            }
+        }
+    }
+
+    fn enrolled_accounts(store: &TestStore) -> Arc<OperatorAccountService> {
+        let accounts = Arc::new(OperatorAccountService::open(&store.path).unwrap());
+        accounts
+            .begin_password_setup(
+                SecretString::new("a long local passphrase".to_owned()),
+                SecretString::new("a long local passphrase".to_owned()),
+            )
+            .unwrap();
+        accounts.complete_operator_setup(true).unwrap();
+        accounts
+    }
+
+    fn tags_response() -> String {
+        json!({
+            "models": [{
+                "name": MODEL_NAME,
+                "model": MODEL_NAME,
+                "modified_at": "2026-08-14T14:38:20.13373148-04:00",
+                "size": 17_741_872_154_u64,
+                "digest": MODEL_DIGEST,
+                "details": {
+                    "format": "gguf",
+                    "family": "qwen35",
+                    "families": ["qwen35"],
+                    "parameter_size": "27.3B",
+                    "quantization_level": "Q4_K_M"
+                }
+            }]
+        })
+        .to_string()
+    }
+
+    /// The crate's existing stub reader, carried across verbatim from `tests/mission.rs:120-143`
+    /// rather than rewritten: my own byte-at-a-time version dropped a request whose header arrived
+    /// split across reads, which killed the stub thread and surfaced as `InvalidProviderResponse`
+    /// in one run of six.
+    fn read_http_request(stream: &mut impl Read) -> String {
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let size = stream.read(&mut chunk).unwrap();
+            assert!(size > 0);
+            request.extend_from_slice(&chunk[..size]);
+            let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+            else {
+                continue;
+            };
+            let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            if request.len() >= header_end + 4 + content_length {
+                return String::from_utf8(request).unwrap();
+            }
+        }
+    }
+
+    /// A local stand-in for the model host's inspection endpoints. It is not a provider and no
+    /// model is called: the Mission fixture cannot mint a Configuration without an activation, and
+    /// an activation is minted from one inspection.
+    fn serve_ollama_inspections(count: usize) -> (SocketAddr, JoinHandle<()>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            for _ in 0..count {
+                for expected in ["GET /api/tags", "POST /api/show", "GET /api/tags"] {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let request = read_http_request(&mut stream);
+                    assert!(
+                        request.starts_with(expected),
+                        "unexpected request: {request}"
+                    );
+                    let body = if expected.starts_with("POST") {
+                        json!({ "capabilities": ["completion", "tools"] }).to_string()
+                    } else {
+                        tags_response()
+                    };
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .unwrap();
+                }
+            }
+        });
+        (address, handle)
+    }
+
+    struct PreparedTeam {
+        project: ProjectView,
+        team: TeamView,
+        configurations: Vec<ResidentConfiguration>,
+    }
+
+    fn prepare_team(store: &TestStore, accounts: &Arc<OperatorAccountService>) -> PreparedTeam {
+        let project = ProjectService::new(Arc::clone(accounts), store.workspace_id)
+            .create(ProjectDraft {
+                name: "Beacon Alpha".to_owned(),
+                charter: ProjectCharterDraft {
+                    purpose: "Prove the local agent office.".to_owned(),
+                    desired_outcomes: vec!["Complete one attributable Mission".to_owned()],
+                    constraints: vec!["Keep authority explicit".to_owned()],
+                    prohibitions: vec!["Do not deploy".to_owned()],
+                    autonomy_profile: AutonomyProfile::Supervised,
+                },
+            })
+            .unwrap();
+        let residents = StarterOrganizationService::new(Arc::clone(accounts), store.workspace_id)
+            .accept(
+                1,
+                vec![
+                    StarterResidentDraft {
+                        role: StarterRole::Lead,
+                        display_name: None,
+                    },
+                    StarterResidentDraft {
+                        role: StarterRole::Builder,
+                        display_name: None,
+                    },
+                ],
+            )
+            .unwrap()
+            .residents;
+        let lifecycle = ResidentLifecycleService::new(Arc::clone(accounts), store.workspace_id);
+        for resident in &residents {
+            lifecycle.activate(resident.id, None).unwrap();
+        }
+        let (address, ollama) = serve_ollama_inspections(2);
+        let models = LocalModelActivationService::new(
+            Arc::clone(accounts),
+            store.workspace_id,
+            LocalModelEndpoint::new(address).unwrap(),
+        );
+        let review = models.inspect(MODEL_NAME, MODEL_DIGEST).unwrap();
+        let activation = models
+            .activate(review, vec![ProviderFeature::Completion])
+            .unwrap();
+        ollama.join().unwrap();
+        let configurations = residents
+            .iter()
+            .map(|resident| {
+                ResidentConfigurationService::new(Arc::clone(accounts), store.workspace_id)
+                    .configure(
+                        resident.id,
+                        None,
+                        activation.id,
+                        vec![BeaconCapability::WorkCreateMission],
+                    )
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let team = TeamService::new(Arc::clone(accounts), store.workspace_id)
+            .form(TeamDraft {
+                project_id: project.id,
+                name: "Mission Team".to_owned(),
+                members: configurations
+                    .iter()
+                    .map(|configuration| TeamMemberDraft {
+                        resident_id: configuration.resident_id,
+                        expected_configuration_id: configuration.id,
+                    })
+                    .collect(),
+            })
+            .unwrap();
+        PreparedTeam {
+            project,
+            team,
+            configurations,
+        }
+    }
+
+    /// One admitted Mission with two ordered members carrying distinct Configurations, and two
+    /// distinct entries in each declared list.
+    fn admitted_mission(label: &str) -> (TestStore, PreparedTeam, MissionView) {
+        let store = TestStore::new(label);
+        let accounts = enrolled_accounts(&store);
+        let prepared = prepare_team(&store, &accounts);
+        let admitted = MissionService::new(Arc::clone(&accounts), store.workspace_id)
+            .admit(MissionDraft {
+                project_id: prepared.project.id,
+                expected_charter_revision: prepared.project.charter.revision,
+                team_id: prepared.team.id,
+                desired_outcome: DESIRED_OUTCOME.to_owned(),
+                success_conditions: vec![CONDITION_ONE.to_owned(), CONDITION_TWO.to_owned()],
+                constraints: vec![CONSTRAINT_ONE.to_owned(), CONSTRAINT_TWO.to_owned()],
+                prohibitions: vec![PROHIBITION_ONE.to_owned(), PROHIBITION_TWO.to_owned()],
+                members: prepared
+                    .configurations
+                    .iter()
+                    .map(|configuration| MissionMemberDraft {
+                        resident_id: configuration.resident_id,
+                        expected_configuration_id: configuration.id,
+                    })
+                    .collect(),
+            })
+            .unwrap();
+        assert_ne!(
+            prepared.configurations[0].id, prepared.configurations[1].id,
+            "the two members must carry distinct Configurations for the roster bars to discriminate"
+        );
+        (store, prepared, admitted)
+    }
+
+    #[test]
+    fn the_verified_reader_returns_every_admitted_field_including_the_ordered_roster() {
+        let (store, prepared, admitted) = admitted_mission("complete");
+        let connection = store.open();
+
+        let mission = verified_mission_admission(&connection, store.workspace_id, admitted.id)
+            .unwrap()
+            .expect("the Mission was admitted in this Workspace");
+
+        assert_eq!(mission.id, admitted.id);
+        assert_eq!(mission.workspace_id, store.workspace_id);
+        assert_eq!(mission.project_id, prepared.project.id);
+        assert_eq!(mission.charter_revision, prepared.project.charter.revision);
+        assert_eq!(mission.team_id, prepared.team.id);
+        assert_eq!(mission.desired_outcome, DESIRED_OUTCOME);
+        assert_eq!(
+            mission.success_conditions,
+            vec![CONDITION_ONE.to_owned(), CONDITION_TWO.to_owned()]
+        );
+        assert_eq!(
+            mission.constraints,
+            vec![CONSTRAINT_ONE.to_owned(), CONSTRAINT_TWO.to_owned()]
+        );
+        assert_eq!(
+            mission.prohibitions,
+            vec![PROHIBITION_ONE.to_owned(), PROHIBITION_TWO.to_owned()]
+        );
+        assert_eq!(mission.lifecycle, MissionLifecycle::Admitted);
+        assert_eq!(mission.admitted_by, MissionAdmissionActor::Operator);
+        // The one clock-derived field, compared against a DIFFERENT producer: the admit call's own
+        // return, never the reader's.
+        assert_eq!(mission.admitted_at_ms, admitted.admitted_at_ms);
+
+        assert_eq!(
+            mission.members.len(),
+            2,
+            "two ordered members were admitted"
+        );
+        assert_eq!(
+            mission.members[0],
+            MissionMemberView {
+                resident_id: prepared.configurations[0].resident_id,
+                admission_configuration_id: prepared.configurations[0].id,
+            }
+        );
+        assert_eq!(
+            mission.members[1],
+            MissionMemberView {
+                resident_id: prepared.configurations[1].resident_id,
+                admission_configuration_id: prepared.configurations[1].id,
+            }
+        );
+    }
+
+    #[test]
+    fn the_declaration_projection_keeps_its_shape_over_the_shared_proof() {
+        let (store, prepared, admitted) = admitted_mission("declaration");
+        let connection = store.open();
+
+        let declaration =
+            verified_mission_declaration(&connection, store.workspace_id, admitted.id)
+                .unwrap()
+                .expect("the Mission was admitted in this Workspace");
+        assert_eq!(
+            declaration,
+            MissionDeclaration {
+                project_id: prepared.project.id,
+                desired_outcome: DESIRED_OUTCOME.to_owned(),
+                success_conditions: vec![CONDITION_ONE.to_owned(), CONDITION_TWO.to_owned()],
+            }
+        );
+
+        let project = verified_mission_project(&connection, store.workspace_id, admitted.id)
+            .unwrap()
+            .expect("the Mission was admitted in this Workspace");
+        assert_eq!(project, prepared.project.id);
+    }
+
+    #[test]
+    fn a_missing_mission_and_another_workspaces_mission_are_both_absent() {
+        let (store, _prepared, admitted) = admitted_mission("absent");
+        let connection = store.open();
+
+        assert_eq!(
+            verified_mission_admission(&connection, store.workspace_id, Uuid::new_v4()).unwrap(),
+            None,
+            "a Mission this Workspace never admitted is absent"
+        );
+        assert_eq!(
+            verified_mission_admission(&connection, Uuid::new_v4(), admitted.id).unwrap(),
+            None,
+            "another Workspace's Mission is absent, not broken"
+        );
+    }
+
+    #[test]
+    fn a_mission_whose_admission_event_was_removed_refuses_as_invalid_store() {
+        let (store, _prepared, admitted) = admitted_mission("ownerless");
+        let connection = store.open();
+        // INTENTIONAL CORRUPTION, after the owner minted this Mission: drop its one Event.
+        connection
+            .execute(
+                "DELETE FROM events WHERE kind = 'mission.admitted'
+                 AND json_extract(payload_json, '$.mission.id') = ?1",
+                rusqlite::params![admitted.id.to_string()],
+            )
+            .unwrap();
+
+        let refusal = verified_mission_admission(&connection, store.workspace_id, admitted.id)
+            .expect_err("a Mission the log does not account for is not absent");
+        assert_eq!(refusal.name(), "InvalidStore");
+    }
+
+    #[test]
+    fn a_mission_with_two_admission_events_refuses_as_invalid_store() {
+        let (store, _prepared, admitted) = admitted_mission("duplicate");
+        let connection = store.open();
+        // INTENTIONAL CORRUPTION, after the owner minted this Mission: retag the store's first
+        // Event so a SECOND row claims this admission, and "when was this Mission admitted" has two
+        // answers. Retagging an existing row rather than inserting one keeps the chain's sequence
+        // contiguous -- and keeps the phrase R58's door census matches out of a source file it
+        // scans as product (see the note at the top of this module).
+        let changed = connection
+            .execute(
+                "UPDATE events
+                 SET kind = 'mission.admitted',
+                     payload_json = (
+                         SELECT payload_json FROM events
+                         WHERE kind = 'mission.admitted'
+                           AND json_extract(payload_json, '$.mission.id') = ?1)
+                 WHERE sequence = (SELECT min(sequence) FROM events)",
+                rusqlite::params![admitted.id.to_string()],
+            )
+            .unwrap();
+        assert_eq!(changed, 1, "exactly one earlier Event was retagged");
+
+        let refusal = verified_mission_admission(&connection, store.workspace_id, admitted.id)
+            .expect_err("two Events admitting one Mission is not a value");
+        assert_eq!(refusal.name(), "InvalidStore");
+    }
+
+    #[test]
+    fn a_second_roster_member_that_disagrees_with_the_event_refuses_as_invalid_store() {
+        let (store, _prepared, admitted) = admitted_mission("roster");
+        let connection = store.open();
+        // INTENTIONAL CORRUPTION, after the owner minted this Mission: rewrite the SECOND member's
+        // admission Configuration in the Event payload only. The row still says what it always
+        // said, so nothing but a whole-roster comparison can see this.
+        let rewritten = Uuid::new_v4().to_string();
+        let changed = connection
+            .execute(
+                "UPDATE events
+                 SET payload_json = json_set(
+                         payload_json,
+                         '$.mission.members[1].admissionConfigurationId',
+                         ?2)
+                 WHERE kind = 'mission.admitted'
+                   AND json_extract(payload_json, '$.mission.id') = ?1",
+                rusqlite::params![admitted.id.to_string(), rewritten],
+            )
+            .unwrap();
+        assert_eq!(changed, 1, "exactly one admission Event was rewritten");
+
+        let refusal = verified_mission_admission(&connection, store.workspace_id, admitted.id)
+            .expect_err("the roster the Event names is not the roster the store holds");
+        assert_eq!(refusal.name(), "InvalidStore");
     }
 }
