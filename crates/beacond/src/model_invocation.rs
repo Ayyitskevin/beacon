@@ -74,6 +74,10 @@ const MAGIC_OBSERVATION: &[u8] = b"beacon.model_invocation.observation.v1\0";
 pub const MAX_AUTHORITY_REFERENCE_BYTES: usize = 128;
 /// The longest prompt-profile token an admission may name.
 pub const MAX_PROMPT_PROFILE_BYTES: usize = 128;
+/// The longest adapter-profile token an admission may name.
+pub const MAX_ADAPTER_PROFILE_BYTES: usize = 128;
+/// The longest activation-binding reference token an admission may name.
+pub const MAX_BINDING_REFERENCE_BYTES: usize = 128;
 /// The most retained response headers one `headers_observed` record may carry.
 pub const MAX_RETAINED_HEADERS: usize = 32;
 /// The longest retained header name.
@@ -88,6 +92,8 @@ const TAG_HEADERS_OBSERVED: u8 = 0x01;
 const TAG_BODY_PREFIX_OBSERVED: u8 = 0x02;
 const TAG_BODY_COMPLETE: u8 = 0x03;
 const TAG_BODY_INCOMPLETE: u8 = 0x04;
+
+const TAG_OWNER_BASIS_OWNER: u8 = 0x01;
 
 const TAG_TRANSPORT_REFUSED: u8 = 0x01;
 const TAG_BODY_READ_REFUSED: u8 = 0x02;
@@ -163,6 +169,51 @@ pub struct RetainedAuthority {
     pub claimed_digest: [u8; 32],
 }
 
+/// On whose authority the admission was recorded. Closed, and today a singleton.
+///
+/// This is the basis the record REPORTS, not a grant this module confers. `Owner` says the
+/// admission was recorded under the Workspace owner's own authorization; it authorizes nothing by
+/// existing, and no production path mints one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnerAuthorizationBasis {
+    Owner,
+}
+
+impl OwnerAuthorizationBasis {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+        }
+    }
+
+    fn tag(self) -> u8 {
+        match self {
+            Self::Owner => TAG_OWNER_BASIS_OWNER,
+        }
+    }
+
+    fn parse(tag: u8) -> Result<Self, MalformedInvocation> {
+        match tag {
+            TAG_OWNER_BASIS_OWNER => Ok(Self::Owner),
+            _ => Err(MalformedInvocation::UnknownOwnerBasisTag),
+        }
+    }
+}
+
+/// A retained reference to the exact activation binding, and the digest the admission CLAIMED for
+/// it.
+///
+/// The eventual binding names a provider, endpoint, model name, model digest and inspection digest.
+/// **None of those bytes are held here and none is hashed here**, exactly as with
+/// [`RetainedAuthority`]: the future verified activation owner must supply those bytes and verify
+/// them. `activation_id` beside this field carries the identity; this carries the commitment. It
+/// does not verify the activation, and it selects no provider, endpoint or model.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RetainedBinding {
+    pub reference: String,
+    pub claimed_digest: [u8; 32],
+}
+
 /// One admitted Mission-plan Invocation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InvocationAdmissionV1 {
@@ -175,10 +226,27 @@ pub struct InvocationAdmissionV1 {
     pub admitted_configuration_id: Uuid,
     pub activation_id: Uuid,
     pub authority: RetainedAuthority,
+    /// The commitment to the exact activation binding behind `activation_id`.
+    pub binding: RetainedBinding,
+    /// Which prompt grammar built the prompt. A profile identifies a grammar, never a particular
+    /// prompt -- which is why the two fields below exist beside it.
     pub prompt_profile: String,
-    pub request_digest: [u8; 32],
-    pub request_bytes_len: u32,
+    /// The digest the admission CLAIMS for the exact prompt bytes. The bytes are not held here and
+    /// are not hashed here; a future storage owner must retain them and compare.
+    pub claimed_prompt_digest: [u8; 32],
+    /// The length the admission CLAIMS for those same prompt bytes.
+    pub claimed_prompt_bytes_len: u32,
+    /// Which adapter profile serialized the provider request body. Retained because the request
+    /// bytes cannot be re-read without knowing what wrote them.
+    pub adapter_profile: String,
+    /// The digest the admission CLAIMS for the exact serialized provider request body. Separate
+    /// from the prompt commitment above: a profile turns one into the other, and this codec asserts
+    /// no relationship between their lengths that no adapter profile has specified yet.
+    pub claimed_request_digest: [u8; 32],
+    /// The length the admission CLAIMS for those same request bytes.
+    pub claimed_request_bytes_len: u32,
     pub limits: RetainedLimits,
+    pub owner_basis: OwnerAuthorizationBasis,
     pub admitted_at_ms: i64,
 }
 
@@ -357,6 +425,7 @@ pub enum MalformedInvocation {
     InvalidUtf8,
     UnknownObservationTag,
     UnknownCauseTag,
+    UnknownOwnerBasisTag,
     /// A retained length disagrees with the envelope THIS RECORD recorded. A statement about the
     /// record, distinct from any ceiling.
     RetainedExceedsAdmittedLimit,
@@ -385,6 +454,7 @@ impl MalformedInvocation {
             Self::InvalidUtf8 => "invalid_utf8",
             Self::UnknownObservationTag => "unknown_observation_tag",
             Self::UnknownCauseTag => "unknown_cause_tag",
+            Self::UnknownOwnerBasisTag => "unknown_owner_basis_tag",
             Self::RetainedExceedsAdmittedLimit => "retained_exceeds_admitted_limit",
             Self::EmptyPrefix => "empty_prefix",
             Self::EmptyRequiredName => "empty_required_name",
@@ -440,6 +510,76 @@ impl fmt::Display for TransitionRefusal {
     }
 }
 
+/// Why an offered sequence is not in the domain the record documents: first is 1, later strictly
+/// increase.
+///
+/// This is the documented domain and nothing more. There is no contiguity requirement here, because
+/// no contract in this repository states one; a gap is legal until something says otherwise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SequenceFault {
+    FirstIsNotOne {
+        offered: u32,
+    },
+    NotIncreasing {
+        previous: u32,
+        offered: u32,
+    },
+    /// The convenience path was asked for the next sequence after the largest one `u32` can spell.
+    /// There is no next; wrapping would re-use a sequence this history has already passed.
+    NoRepresentableNext {
+        previous: u32,
+    },
+}
+
+impl SequenceFault {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FirstIsNotOne { .. } => "first_is_not_one",
+            Self::NotIncreasing { .. } => "not_increasing",
+            Self::NoRepresentableNext { .. } => "no_representable_next",
+        }
+    }
+}
+
+impl fmt::Display for SequenceFault {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Why a body terminal disagrees with the prefix already observed for the same response.
+///
+/// A recorded `body_prefix_observed` is the FIRST bytes of that body. A later terminal that does
+/// not carry those exact bytes is not a second reading of the same response — it is two records
+/// claiming different things about one stream, and the later one must not be allowed to conceal
+/// the earlier by being the one `status()` renders.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ByteCoherenceFault {
+    CompleteDoesNotExtendPrefix {
+        observed_prefix_len: usize,
+        offered_len: usize,
+    },
+    IncompleteDiscardsPrefix {
+        observed_prefix_len: usize,
+        offered_len: usize,
+    },
+}
+
+impl ByteCoherenceFault {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CompleteDoesNotExtendPrefix { .. } => "complete_does_not_extend_prefix",
+            Self::IncompleteDiscardsPrefix { .. } => "incomplete_discards_prefix",
+        }
+    }
+}
+
+impl fmt::Display for ByteCoherenceFault {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Why an append was refused.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppendRefusal {
@@ -455,6 +595,10 @@ pub enum AppendRefusal {
         offered_digest: [u8; 32],
     },
     Transition(TransitionRefusal),
+    /// The offered sequence is outside the documented domain.
+    Sequence(SequenceFault),
+    /// The offered terminal contradicts the prefix already observed.
+    ByteCoherence(ByteCoherenceFault),
     Malformed(MalformedInvocation),
 }
 
@@ -464,6 +608,8 @@ impl fmt::Display for AppendRefusal {
             Self::ForeignInvocation { .. } => formatter.write_str("foreign_invocation"),
             Self::IdentityConflict { .. } => formatter.write_str("observation_conflict"),
             Self::Transition(refusal) => write!(formatter, "transition:{refusal}"),
+            Self::Sequence(fault) => write!(formatter, "sequence:{fault}"),
+            Self::ByteCoherence(fault) => write!(formatter, "byte_coherence:{fault}"),
             Self::Malformed(fault) => write!(formatter, "malformed:{fault}"),
         }
     }
@@ -688,11 +834,18 @@ fn require_limits(limits: &RetainedLimits) -> Result<(), MalformedInvocation> {
 impl InvocationAdmissionV1 {
     /// This record's canonical bytes.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, MalformedInvocation> {
-        if self.authority.reference.is_empty() || self.prompt_profile.is_empty() {
+        if self.authority.reference.is_empty()
+            || self.binding.reference.is_empty()
+            || self.prompt_profile.is_empty()
+            || self.adapter_profile.is_empty()
+        {
             return Err(MalformedInvocation::EmptyRequiredName);
         }
         require_limits(&self.limits)?;
-        if self.request_bytes_len > self.limits.request_bytes {
+        // The REQUEST length is the one the request envelope bounds. The prompt length is
+        // deliberately not compared to it: what an adapter profile does to a prompt on the way to a
+        // request body is that profile's business, and no profile has specified it yet.
+        if self.claimed_request_bytes_len > self.limits.request_bytes {
             return Err(MalformedInvocation::RetainedExceedsAdmittedLimit);
         }
         if self.admitted_at_ms < 0 {
@@ -709,12 +862,18 @@ impl InvocationAdmissionV1 {
         encoder.uuid(&self.activation_id);
         encoder.string(&self.authority.reference, MAX_AUTHORITY_REFERENCE_BYTES)?;
         encoder.sha256(&self.authority.claimed_digest);
+        encoder.string(&self.binding.reference, MAX_BINDING_REFERENCE_BYTES)?;
+        encoder.sha256(&self.binding.claimed_digest);
         encoder.string(&self.prompt_profile, MAX_PROMPT_PROFILE_BYTES)?;
-        encoder.sha256(&self.request_digest);
-        encoder.u32(self.request_bytes_len);
+        encoder.sha256(&self.claimed_prompt_digest);
+        encoder.u32(self.claimed_prompt_bytes_len);
+        encoder.string(&self.adapter_profile, MAX_ADAPTER_PROFILE_BYTES)?;
+        encoder.sha256(&self.claimed_request_digest);
+        encoder.u32(self.claimed_request_bytes_len);
         encoder.u32(self.limits.request_bytes);
         encoder.u32(self.limits.response_bytes);
         encoder.u32(self.limits.prefix_bytes);
+        encoder.tag(self.owner_basis.tag());
         encoder.i64(self.admitted_at_ms);
         Ok(encoder.out)
     }
@@ -740,22 +899,34 @@ impl InvocationAdmissionV1 {
         let activation_id = decoder.uuid()?;
         let reference = decoder.string(MAX_AUTHORITY_REFERENCE_BYTES)?;
         let claimed_digest = decoder.sha256()?;
+        let binding_reference = decoder.string(MAX_BINDING_REFERENCE_BYTES)?;
+        let binding_claimed_digest = decoder.sha256()?;
         let prompt_profile = decoder.string(MAX_PROMPT_PROFILE_BYTES)?;
-        let request_digest = decoder.sha256()?;
-        let request_bytes_len = decoder.u32()?;
+        let claimed_prompt_digest = decoder.sha256()?;
+        let claimed_prompt_bytes_len = decoder.u32()?;
+        let adapter_profile = decoder.string(MAX_ADAPTER_PROFILE_BYTES)?;
+        let claimed_request_digest = decoder.sha256()?;
+        let claimed_request_bytes_len = decoder.u32()?;
         let limits = RetainedLimits {
             request_bytes: decoder.u32()?,
             response_bytes: decoder.u32()?,
             prefix_bytes: decoder.u32()?,
         };
+        // Closed BEFORE the timestamp it precedes: an unknown basis is named as itself rather than
+        // renamed by whatever the following field turns out to be.
+        let owner_basis = OwnerAuthorizationBasis::parse(decoder.tag()?)?;
         let admitted_at_ms = decoder.i64()?;
         decoder.finish()?;
 
-        if reference.is_empty() || prompt_profile.is_empty() {
+        if reference.is_empty()
+            || binding_reference.is_empty()
+            || prompt_profile.is_empty()
+            || adapter_profile.is_empty()
+        {
             return Err(MalformedInvocation::EmptyRequiredName);
         }
         require_limits(&limits)?;
-        if request_bytes_len > limits.request_bytes {
+        if claimed_request_bytes_len > limits.request_bytes {
             return Err(MalformedInvocation::RetainedExceedsAdmittedLimit);
         }
         if admitted_at_ms < 0 {
@@ -774,10 +945,18 @@ impl InvocationAdmissionV1 {
                 reference,
                 claimed_digest,
             },
+            binding: RetainedBinding {
+                reference: binding_reference,
+                claimed_digest: binding_claimed_digest,
+            },
             prompt_profile,
-            request_digest,
-            request_bytes_len,
+            claimed_prompt_digest,
+            claimed_prompt_bytes_len,
+            adapter_profile,
+            claimed_request_digest,
+            claimed_request_bytes_len,
             limits,
+            owner_basis,
             admitted_at_ms,
         })
     }
@@ -1009,6 +1188,56 @@ impl TransportHistory {
         self.rows.iter().find(|(row, _)| row.kind() == kind)
     }
 
+    /// The sequence of the most recently recorded row. Rows are appended in strictly increasing
+    /// sequence, so the last one carries the maximum.
+    fn last_sequence(&self) -> Option<u32> {
+        self.rows.last().map(|(row, _)| row.sequence)
+    }
+
+    /// The exact bytes of a recorded first prefix, if one was observed.
+    fn observed_prefix(&self) -> Option<&[u8]> {
+        self.recorded(ObservationKind::BodyPrefix)
+            .and_then(|(row, _)| match &row.observation {
+                TransportObservation::BodyPrefix { bytes } => Some(bytes.as_slice()),
+                _ => None,
+            })
+    }
+
+    /// Whether one more observation's bytes agree with the prefix already observed.
+    fn byte_coherence(&self, observation: &TransportObservation) -> Result<(), ByteCoherenceFault> {
+        let Some(prefix) = self.observed_prefix() else {
+            return Ok(());
+        };
+        match observation {
+            TransportObservation::BodyComplete { bytes, .. } if !bytes.starts_with(prefix) => {
+                Err(ByteCoherenceFault::CompleteDoesNotExtendPrefix {
+                    observed_prefix_len: prefix.len(),
+                    offered_len: bytes.len(),
+                })
+            }
+            TransportObservation::BodyIncomplete {
+                prefix: retained, ..
+            } if !retained.starts_with(prefix) => {
+                Err(ByteCoherenceFault::IncompleteDiscardsPrefix {
+                    observed_prefix_len: prefix.len(),
+                    offered_len: retained.len(),
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Whether an offered sequence is in the documented domain, given what is recorded.
+    fn sequence_domain(&self, offered: u32) -> Result<(), SequenceFault> {
+        match self.last_sequence() {
+            None if offered != 1 => Err(SequenceFault::FirstIsNotOne { offered }),
+            Some(previous) if offered <= previous => {
+                Err(SequenceFault::NotIncreasing { previous, offered })
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn terminal(&self) -> Option<ObservationKind> {
         self.rows
             .iter()
@@ -1043,8 +1272,12 @@ impl TransportHistory {
     /// Re-appending the identical record is idempotent and adds no row. The same kind with
     /// different bytes is a conflict, named as one.
     pub fn append(&mut self, observation: TransportObservation) -> Result<Appended, AppendRefusal> {
-        let sequence = u32::try_from(self.rows.len() + 1)
-            .map_err(|_| AppendRefusal::Malformed(MalformedInvocation::OverLimitLength))?;
+        // The LAST recorded sequence plus one, not the row count: sequences may legally skip, so a
+        // count would eventually offer a sequence that has already been passed.
+        let previous = self.last_sequence().unwrap_or(0);
+        let sequence = previous.checked_add(1).ok_or(AppendRefusal::Sequence(
+            SequenceFault::NoRepresentableNext { previous },
+        ))?;
         self.append_record(InvocationObservationV1 {
             invocation_id: self.invocation_id,
             sequence,
@@ -1088,7 +1321,14 @@ impl TransportHistory {
             });
         }
 
+        // Order: the grammar first, then the bytes, then the sequence domain. A crossing terminal
+        // is a grammar fault whatever its bytes say, and a terminal that contradicts the observed
+        // prefix is a byte fault whatever its sequence says.
         self.transition(kind).map_err(AppendRefusal::Transition)?;
+        self.byte_coherence(&record.observation)
+            .map_err(AppendRefusal::ByteCoherence)?;
+        self.sequence_domain(record.sequence)
+            .map_err(AppendRefusal::Sequence)?;
         let sequence = record.sequence;
         self.rows.push((record, offered_digest));
         Ok(Appended::Recorded { sequence })
