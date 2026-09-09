@@ -1191,6 +1191,39 @@ pub(crate) fn verified_completion_for_mission_within(
         return Err(unavailable(CompletionUnavailable::DivergentEvidence));
     }
 
+    // 4. The owner Event's BYTES, in this same snapshot.
+    //
+    // `verified_completion_within` finds the Event by `digestValue` and checks its sequence
+    // against the boundary; it does NOT open the payload. `verify_completion_event` is the
+    // verifier that does, and nothing called it outside startup -- so an Event whose
+    // `canonicalBytesBase64` had been rewritten, with its selectors intact, passed the by-digest
+    // read. Measured by root and closed here, for this scoped read only: no global replay runs.
+    //
+    // What that verifier proves: the payload parses, its `workspaceId` is this Workspace, the row
+    // it names by digest exists, and the bytes it carries are byte-equal to that row's stored
+    // canonical bytes. What it does NOT prove is the payload's own `missionId` and `completionId`,
+    // which are redundant selectors -- so those are compared here against the verified record
+    // rather than left unchecked.
+    let payload_json: String = transaction
+        .query_row(
+            "SELECT payload_json FROM events
+             WHERE workspace_id = ?1 AND kind = 'mission.completed'
+               AND json_extract(payload_json, '$.missionId') = ?2",
+            params![workspace_id.to_string(), mission_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(|error| unavailable(CompletionUnavailable::Store(error)))?;
+    verify_completion_event(transaction, workspace_id, &payload_json)
+        .map_err(|refusal| unavailable(CompletionUnavailable::CompletionUnverified(refusal)))?;
+    let redundant: MissionCompletedPayload = serde_json::from_str(&payload_json)
+        .map_err(|_| unavailable(CompletionUnavailable::DivergentEvidence))?;
+    if redundant.mission_id != completion.mission_id
+        || redundant.completion_id != completion.completion_id
+        || redundant.digest_value != *digest_value
+    {
+        return Err(unavailable(CompletionUnavailable::DivergentEvidence));
+    }
+
     let mut condition_results = Vec::with_capacity(completion.condition_results.len());
     for result in &completion.condition_results {
         condition_results.push(ConditionResultView {
