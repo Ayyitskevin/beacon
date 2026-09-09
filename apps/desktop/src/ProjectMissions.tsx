@@ -8,6 +8,7 @@ import {
 } from "@fluentui/react-components";
 import { type FormEvent, useMemo, useState } from "react";
 
+import { MissionCompletion } from "./MissionCompletion";
 import { MissionOutcomes } from "./MissionOutcomes";
 import type { AddressableObjectLink } from "./objectLinks";
 import type { MissionDraft, MissionView, ProjectView, TeamView } from "./session";
@@ -195,6 +196,7 @@ export function ProjectMissions({
                 {" · "}{mission.members.length} {mission.members.length === 1 ? "member" : "members"}
               </p>
               <MissionBrief mission={mission} teams={teams} />
+              <MissionCompletion mission={mission} />
               <MissionOutcomes missionId={mission.id} />
             </article>
           ))}
