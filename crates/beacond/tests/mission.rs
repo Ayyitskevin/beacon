@@ -1928,3 +1928,197 @@ fn restore_pre_0035_spend(connection: &Connection) {
         )
         .expect("the rows come back");
 }
+
+#[test]
+fn public_mission_read_refuses_constraints_changed_after_admission() {
+    let store = TestStore::new("public-read-constraints");
+    let accounts = enrolled_accounts(&store);
+    let prepared = prepare_team(&store, &accounts, 1);
+    let missions = MissionService::new(Arc::clone(&accounts), store.workspace_id);
+    let admitted = missions.admit(mission_draft(&prepared)).unwrap();
+    assert_eq!(missions.get(admitted.id).unwrap(), admitted);
+
+    // Deliberate corruption of a private, owner-minted fixture after the live service opened.
+    // Restore the trigger from its exact stored SQL; only the admission data changes.
+    let connection = Connection::open(&store.path).unwrap();
+    let trigger: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name = 'missions_no_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute_batch("DROP TRIGGER missions_no_update")
+        .unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE missions SET constraints_json = '[]' WHERE id = ?1",
+                [admitted.id.to_string()],
+            )
+            .unwrap(),
+        1,
+        "B11.GET.CONSTRAINTS_FIXTURE_CHANGED"
+    );
+    connection.execute_batch(&trigger).unwrap();
+
+    let refusal = missions
+        .get(admitted.id)
+        .expect_err("B11.GET.CHANGED_CONSTRAINTS_REFUSED");
+    assert!(
+        matches!(refusal, MissionError::InvalidStore),
+        "B11.GET.CHANGED_CONSTRAINTS_REFUSED: {refusal:?}"
+    );
+}
+
+fn public_read_fixture(label: &str) -> (TestStore, MissionService, beacond::MissionView) {
+    let store = TestStore::new(label);
+    let accounts = enrolled_accounts(&store);
+    let prepared = prepare_team(&store, &accounts, 2);
+    let missions = MissionService::new(Arc::clone(&accounts), store.workspace_id);
+    let admitted = missions.admit(mission_draft(&prepared)).unwrap();
+    assert_eq!(missions.get(admitted.id).unwrap(), admitted);
+    (store, missions, admitted)
+}
+
+#[test]
+fn public_mission_read_refuses_a_missing_admission_event() {
+    let (store, missions, admitted) = public_read_fixture("public-ownerless");
+    let connection = Connection::open(&store.path).unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "DELETE FROM events WHERE kind = 'mission.admitted'
+         AND json_extract(payload_json, '$.mission.id') = ?1",
+                [admitted.id.to_string()],
+            )
+            .unwrap(),
+        1,
+        "B11.GET.OWNER_EVENT_REMOVED"
+    );
+    let refusal = missions
+        .get(admitted.id)
+        .expect_err("B11.GET.OWNER_EVENT_REQUIRED");
+    assert!(
+        matches!(refusal, MissionError::InvalidStore),
+        "B11.GET.OWNER_EVENT_REQUIRED: {refusal:?}"
+    );
+}
+
+#[test]
+fn public_mission_read_refuses_two_otherwise_valid_admission_events() {
+    let (store, missions, admitted) = public_read_fixture("public-two-owners");
+    let connection = Connection::open(&store.path).unwrap();
+    // Retag a different real Event, keeping both admission payloads AND timestamps identical.
+    // The cardinality is wrong; neither candidate hides behind a different timestamp refusal.
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE events SET kind = 'mission.admitted',
+             payload_json = (SELECT payload_json FROM events WHERE kind = 'mission.admitted'
+                 AND json_extract(payload_json, '$.mission.id') = ?1),
+             occurred_at_ms = (SELECT occurred_at_ms FROM events WHERE kind = 'mission.admitted'
+                 AND json_extract(payload_json, '$.mission.id') = ?1)
+         WHERE sequence = (SELECT min(sequence) FROM events)",
+                [admitted.id.to_string()],
+            )
+            .unwrap(),
+        1,
+        "B11.GET.SECOND_OWNER_EVENT_PLANTED"
+    );
+    let (count, payloads, times): (i64, i64, i64) = connection
+        .query_row(
+            "SELECT count(*), count(DISTINCT payload_json), count(DISTINCT occurred_at_ms)
+         FROM events WHERE kind = 'mission.admitted'
+           AND json_extract(payload_json, '$.mission.id') = ?1",
+            [admitted.id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (count, payloads, times),
+        (2, 1, 1),
+        "B11.GET.TWO_IDENTICAL_OWNER_CANDIDATES"
+    );
+    let refusal = missions
+        .get(admitted.id)
+        .expect_err("B11.GET.EXACTLY_ONE_OWNER_EVENT");
+    assert!(
+        matches!(refusal, MissionError::InvalidStore),
+        "B11.GET.EXACTLY_ONE_OWNER_EVENT: {refusal:?}"
+    );
+}
+
+#[test]
+fn public_mission_read_refuses_a_changed_second_roster_member() {
+    let (store, missions, admitted) = public_read_fixture("public-roster");
+    let connection = Connection::open(&store.path).unwrap();
+    assert_eq!(admitted.members.len(), 2, "B11.GET.TWO_ROSTER_MEMBERS");
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE events SET payload_json = json_set(payload_json,
+             '$.mission.members[1].admissionConfigurationId', ?2)
+         WHERE kind = 'mission.admitted'
+           AND json_extract(payload_json, '$.mission.id') = ?1",
+                [admitted.id.to_string(), Uuid::new_v4().to_string()],
+            )
+            .unwrap(),
+        1,
+        "B11.GET.SECOND_MEMBER_CHANGED"
+    );
+    let refusal = missions
+        .get(admitted.id)
+        .expect_err("B11.GET.WHOLE_ROSTER_REQUIRED");
+    assert!(
+        matches!(refusal, MissionError::InvalidStore),
+        "B11.GET.WHOLE_ROSTER_REQUIRED: {refusal:?}"
+    );
+}
+
+#[test]
+fn public_mission_read_refuses_an_unreadable_admission_payload() {
+    let (store, missions, admitted) = public_read_fixture("public-unreadable");
+    let connection = Connection::open(&store.path).unwrap();
+    assert_eq!(connection.execute(
+        "UPDATE events SET payload_json = json_remove(payload_json, '$.mission.constraints')
+         WHERE kind = 'mission.admitted'
+           AND json_extract(payload_json, '$.mission.id') = ?1",
+        [admitted.id.to_string()],
+    ).unwrap(), 1, "B11.GET.OWNER_PAYLOAD_UNREADABLE");
+    let refusal = missions
+        .get(admitted.id)
+        .expect_err("B11.GET.UNREADABLE_IS_NOT_ABSENT");
+    assert!(
+        matches!(refusal, MissionError::Json(_)),
+        "B11.GET.UNREADABLE_IS_NOT_ABSENT: {refusal:?}"
+    );
+}
+
+#[test]
+fn public_mission_read_keeps_absent_and_foreign_workspace_indistinguishable() {
+    let store = TestStore::new("public-scope");
+    let accounts = enrolled_accounts(&store);
+    let prepared = prepare_team(&store, &accounts, 1);
+    let missions = MissionService::new(Arc::clone(&accounts), store.workspace_id);
+    let admitted = missions.admit(mission_draft(&prepared)).unwrap();
+    let missing = missions.get(Uuid::new_v4()).unwrap_err();
+    // Use the same connection and real Mission row, with a different Workspace scope.
+    let foreign = MissionService::new(accounts, Uuid::new_v4())
+        .get(admitted.id)
+        .unwrap_err();
+    assert!(
+        matches!(missing, MissionError::MissionNotFound),
+        "B11.GET.ABSENT_NAME"
+    );
+    assert!(
+        matches!(foreign, MissionError::MissionNotFound),
+        "B11.GET.FOREIGN_NAME"
+    );
+    assert_eq!(
+        missing.to_string().as_bytes(),
+        foreign.to_string().as_bytes(),
+        "B11.GET.SCOPE_REFUSALS_IDENTICAL"
+    );
+}
