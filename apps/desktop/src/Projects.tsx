@@ -39,7 +39,15 @@ import { ProjectTeams } from "./ProjectTeams";
 import { SampleProject } from "./SampleProject";
 
 const useStyles = makeStyles({
-  section: { width: "min(100%, 920px)" },
+  // `minWidth: 0` because this section is a GRID ITEM of App's `main`, and a grid item's default
+  // `min-width: auto` is its min-content size. That is the link that carried the publication
+  // table's intrinsic width all the way up: `main` is `display: grid` with no explicit columns, so
+  // its single implicit track is `auto`, and an `auto` track sizes to the largest item minimum
+  // contribution. The shell's own `minmax(0, 1fr)` middle track was never the constraint -- it
+  // could always shrink; this item could not (B25 measured the failure, B26 located it).
+  //
+  // `width: min(100%, 920px)` does not help: `width` is capped by `min-width`, which was auto.
+  section: { width: "min(100%, 920px)", minWidth: 0 },
   header: {
     display: "flex",
     justifyContent: "space-between",

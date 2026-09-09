@@ -31,6 +31,10 @@ const useStyles = makeStyles({
   warning: { color: tokens.colorPaletteDarkOrangeForeground1 },
   list: { display: "grid", rowGap: tokens.spacingVerticalM, marginTop: tokens.spacingVerticalL },
   mission: {
+    // The same grid-item rule one level down: each Mission card is an item of `list`, which is
+    // itself `display: grid` with an implicit `auto` track. Without this the card's min-content
+    // re-establishes the width inside a section that has just been allowed to shrink.
+    minWidth: 0,
     ...shorthands.border(tokens.strokeWidthThin, "solid", tokens.colorNeutralStroke2),
     ...shorthands.borderRadius(tokens.borderRadiusMedium),
     ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalM),
