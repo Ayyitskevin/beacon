@@ -927,11 +927,13 @@ pub(crate) fn verified_mission_declaration(
 /// model. Those are separate owners, and a caller that needs them must ask them; deriving a current
 /// value from this admitted one would be rewriting history into eligibility.
 ///
-/// **Snapshot expectations.** It performs two reads -- the Mission row and its Event -- on the
-/// `connection` it is handed, and opens no transaction of its own. A caller inside a transaction
-/// sees that transaction's snapshot; a caller outside one gets no atomicity guarantee between the
-/// two reads beyond what its connection already provides. It is deliberately not nested inside the
-/// existing Outcome and Completion callers' transactions in any new way.
+/// **Snapshot expectations.** It reads the Mission row and its admission roster, then the matching
+/// `mission.admitted` Event, then re-reads the Mission through `verify_mission_event` -- several
+/// SQL statements, not two -- on the `connection` it is handed, and opens no transaction of its
+/// own. A caller inside a transaction sees that transaction's snapshot; a caller outside one gets
+/// no atomicity guarantee across those statements beyond what its connection already provides. It
+/// is deliberately not nested inside the existing Outcome and Completion callers' transactions in
+/// any new way.
 pub(crate) fn verified_mission_admission(
     connection: &Connection,
     workspace_id: Uuid,
@@ -1642,15 +1644,30 @@ mod verified_admission_reader {
         let connection = store.open();
         // INTENTIONAL CORRUPTION, after the owner minted this Mission: retag the store's first
         // Event so a SECOND row claims this admission, and "when was this Mission admitted" has two
-        // answers. Retagging an existing row rather than inserting one keeps the chain's sequence
-        // contiguous -- and keeps the phrase R58's door census matches out of a source file it
-        // scans as product (see the note at the top of this module).
+        // answers.
+        //
+        // BOTH the payload AND the timestamp are copied. Root's N37 review measured why: copying
+        // the payload alone left the retagged row's own `occurred_at_ms` in place, so
+        // `verify_mission_event` could refuse it on the timestamp -- and an `accept the first of
+        // several` mutant then stayed GREEN, because the witness was reading a timestamp fault as
+        // if it were a cardinality fault. Two individually VALID Events are what makes the count
+        // the only thing wrong.
+        //
+        // Retagging rather than inserting keeps the chain's sequence contiguous. It does NOT keep
+        // the chain's hashes valid -- the retagged row's link digest no longer describes its bytes
+        // -- and nothing here claims otherwise; this bar calls the reader directly and never runs
+        // the chain verifier. It also keeps the phrase R58's door census matches out of a source
+        // file it scans as product (see the note at the top of this module).
         let changed = connection
             .execute(
                 "UPDATE events
                  SET kind = 'mission.admitted',
                      payload_json = (
                          SELECT payload_json FROM events
+                         WHERE kind = 'mission.admitted'
+                           AND json_extract(payload_json, '$.mission.id') = ?1),
+                     occurred_at_ms = (
+                         SELECT occurred_at_ms FROM events
                          WHERE kind = 'mission.admitted'
                            AND json_extract(payload_json, '$.mission.id') = ?1)
                  WHERE sequence = (SELECT min(sequence) FROM events)",
@@ -1659,9 +1676,62 @@ mod verified_admission_reader {
             .unwrap();
         assert_eq!(changed, 1, "exactly one earlier Event was retagged");
 
+        // The fixture proves its own premise before the reader is asked anything, so a timestamp,
+        // Workspace or payload fault cannot masquerade as a cardinality fault.
+        let candidates = scoped_admission_events(&connection, store.workspace_id, admitted.id);
+        assert_eq!(
+            candidates.len(),
+            2,
+            "N37.DUPLICATE_CARDINALITY.FIXTURE_HAS_TWO_CANDIDATES"
+        );
+        for (index, (payload_json, occurred_at_ms)) in candidates.iter().enumerate() {
+            verify_mission_event(
+                &connection,
+                store.workspace_id,
+                u64::try_from(*occurred_at_ms).unwrap(),
+                payload_json,
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "N37.DUPLICATE_CARDINALITY.EACH_CANDIDATE_IS_INDIVIDUALLY_VALID: \
+                     candidate {index} refused as {}",
+                    error.name()
+                )
+            });
+        }
+
         let refusal = verified_mission_admission(&connection, store.workspace_id, admitted.id)
-            .expect_err("two Events admitting one Mission is not a value");
-        assert_eq!(refusal.name(), "InvalidStore");
+            .expect_err("N37.DUPLICATE_CARDINALITY.EXACTLY_ONE_EVENT_REQUIRED");
+        assert_eq!(
+            refusal.name(),
+            "InvalidStore",
+            "N37.DUPLICATE_CARDINALITY.EXACTLY_ONE_EVENT_REQUIRED"
+        );
+    }
+
+    /// Every `mission.admitted` Event this Workspace holds for this Mission, in the reader's own
+    /// order. Written here rather than reusing the reader's query, so the fixture's count is an
+    /// independent observation of the store rather than a restatement of the code under test.
+    fn scoped_admission_events(
+        connection: &Connection,
+        workspace_id: Uuid,
+        mission_id: Uuid,
+    ) -> Vec<(String, i64)> {
+        let mut statement = connection
+            .prepare(
+                "SELECT payload_json, occurred_at_ms FROM events
+                 WHERE workspace_id = ?1 AND kind = 'mission.admitted'
+                   AND json_extract(payload_json, '$.mission.id') = ?2",
+            )
+            .unwrap();
+        statement
+            .query_map(
+                rusqlite::params![workspace_id.to_string(), mission_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
     }
 
     #[test]
