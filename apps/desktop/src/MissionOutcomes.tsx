@@ -93,6 +93,10 @@ export function MissionOutcomes({ missionId }: { missionId: string }): React.JSX
   // effect, so a retry re-runs exactly that read -- same Mission, same selected version -- through
   // the same `loadOutcomeDocument` the first attempt used. No generic retry and no poll.
   const [documentAttempt, setDocumentAttempt] = useState(0);
+  // The same idiom as `documentAttempt`, for the OTHER read. Bumped by the operator's explicit
+  // Retry and nothing else, and a dependency of the history effect, so a retry re-runs exactly that
+  // read -- same Mission, same `loadMissionPublications` -- with no timer, poll or generic retry.
+  const [historyAttempt, setHistoryAttempt] = useState(0);
   const [copyStatus, setCopyStatus] = useState<string | null>(null);
   const [copying, setCopying] = useState(false);
   // Attempt identity, NOT selection identity. A `missionId#version` token is stable across
@@ -149,10 +153,13 @@ export function MissionOutcomes({ missionId }: { missionId: string }): React.JSX
       .catch((cause: unknown) => {
         if (!cancelled) setFailure({ text: describeLocalAccountError(cause), source: "history" });
       });
+    // The existing lifetime guard is what makes the retry safe: the cleanup runs before the next
+    // attempt starts, so a promise from an earlier attempt -- or an earlier Mission -- finds
+    // `cancelled` true and writes nothing.
     return () => {
       cancelled = true;
     };
-  }, [missionId]);
+  }, [missionId, historyAttempt]);
 
   // The selected VERSION is what is asked for, every time. Never "the newest": a superseded version
   // is readable at its own number (R12.11), and a view that quietly showed the current document for
@@ -202,8 +209,28 @@ export function MissionOutcomes({ missionId }: { missionId: string }): React.JSX
           Retry version {selected}
         </button>
       )}
+      {failure?.source === "history" && (
+        <button
+          type="button"
+          onClick={() => {
+            setFailure(null);
+            setHistoryAttempt((attempt) => attempt + 1);
+          }}
+        >
+          Retry publication history
+        </button>
+      )}
       {selected !== null && document === null && failure === null && (
         <p role="status">Loading version {selected}&apos;s stored Markdown…</p>
+      )}
+      {/* A history read that has not answered yet is neither a failure nor an empty Mission, and
+          saying nothing is what made a failed list look like one. The same line covers the first
+          load and a retry: they are the same read, and inventing a second wording would be
+          claiming a distinction the reader does not have. While it shows, the Retry control is
+          gone -- the failure it renders for is cleared -- so a second click cannot start a second
+          live request. */}
+      {publications === null && failure === null && (
+        <p role="status">Loading this Mission&apos;s publication history…</p>
       )}
       {publications !== null && publications.length === 0 && (
         <p className={styles.body}>This Mission has no published Outcome.</p>

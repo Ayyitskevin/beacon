@@ -471,3 +471,208 @@ it("ignores a read that settles after the operator selected another version", as
   ).not.toBeInTheDocument();
   expect(screen.getByLabelText("Outcome Document")).toHaveTextContent("Outcome, version one");
 });
+
+// ---------------------------------------------------------------------------------------------
+// N4: a failed publication-history read is recoverable in place
+// ---------------------------------------------------------------------------------------------
+//
+// The history failure already renders an honest alert, but the only way out of it was to leave the
+// Project and come back. These bars are about the recovery control, and about the state it must NOT
+// be confused with: a Mission whose history failed to load is not a Mission with no published
+// Outcome, and the difference is the whole point.
+
+const historyRetryName = /^Retry publication history$/;
+
+it("does not call a failed publication history an empty one, and offers recovery", async () => {
+  invokeMock.mockImplementation((command) => {
+    if (command === "mission_publications") return Promise.reject(new Error("the list failed"));
+    return Promise.reject(new Error(`unexpected command: ${String(command)}`));
+  });
+
+  render(<MissionOutcomes missionId={missionId} />);
+
+  expect(await screen.findByRole("alert"), "N4.HISTORY.FAILURE_IS_NOT_ABSENCE").toBeInTheDocument();
+  expect(
+    screen.queryByText("This Mission has no published Outcome."),
+    "N4.HISTORY.FAILURE_IS_NOT_ABSENCE",
+  ).toBeNull();
+  expect(
+    screen.queryByRole("button", { name: historyRetryName }),
+    "N4.HISTORY.FAILURE_IS_NOT_ABSENCE",
+  ).not.toBeNull();
+});
+
+it("retries the publication history for the same Mission through the same reader", async () => {
+  const user = userEvent.setup();
+  let historyCalls = 0;
+  let documentCalls = 0;
+  const historyPayloads: unknown[] = [];
+  invokeMock.mockImplementation((command, payload) => {
+    if (command === "mission_publications") {
+      historyCalls += 1;
+      historyPayloads.push(payload);
+      return Promise.reject(new Error("the list failed"));
+    }
+    if (command === "outcome_document") {
+      documentCalls += 1;
+      return Promise.resolve(documentFor(2));
+    }
+    return Promise.reject(new Error(`unexpected command: ${String(command)}`));
+  });
+
+  render(<MissionOutcomes missionId={missionId} />);
+  await screen.findByRole("alert");
+  // The harness really asked once, or a retry could "pass" against nothing.
+  expect(historyCalls, "N4.HISTORY.RETRY_SAME_MISSION").toBe(1);
+
+  await user.click(screen.getByRole("button", { name: historyRetryName }));
+
+  expect(historyCalls, "N4.HISTORY.RETRY_SAME_MISSION").toBe(2);
+  expect(historyPayloads[1], "N4.HISTORY.RETRY_SAME_MISSION").toMatchObject({ missionId });
+  // It is the HISTORY reader, not the document one: no version read was provoked.
+  expect(documentCalls, "N4.HISTORY.RETRY_SAME_MISSION").toBe(0);
+});
+
+it("shows a pending status while a retried publication-history read is in flight", async () => {
+  const user = userEvent.setup();
+  let historyCalls = 0;
+  invokeMock.mockImplementation((command) => {
+    if (command === "mission_publications") {
+      historyCalls += 1;
+      if (historyCalls === 1) return Promise.reject(new Error("the list failed"));
+      // Held open on purpose: the pending state has to exist long enough to be observed.
+      return new Promise(() => {});
+    }
+    return Promise.reject(new Error(`unexpected command: ${String(command)}`));
+  });
+
+  render(<MissionOutcomes missionId={missionId} />);
+  await screen.findByRole("alert");
+  await user.click(screen.getByRole("button", { name: historyRetryName }));
+
+  expect(historyCalls, "N4.HISTORY.PENDING_IS_VISIBLE").toBe(2);
+  expect(
+    screen.queryByText(/loading this mission's publication history/i),
+    "N4.HISTORY.PENDING_IS_VISIBLE",
+  ).not.toBeNull();
+  // The stale failure is gone, and absence is still not claimed.
+  expect(screen.queryByRole("alert"), "N4.HISTORY.PENDING_IS_VISIBLE").toBeNull();
+  expect(
+    screen.queryByText("This Mission has no published Outcome."),
+    "N4.HISTORY.PENDING_IS_VISIBLE",
+  ).toBeNull();
+  // And no second live request can be started: the control is not there to click again.
+  expect(
+    screen.queryByRole("button", { name: historyRetryName }),
+    "N4.HISTORY.PENDING_IS_VISIBLE",
+  ).toBeNull();
+  expect(historyCalls, "N4.HISTORY.PENDING_IS_VISIBLE").toBe(2);
+});
+
+it("recovers the version list and the selected document after a successful history retry", async () => {
+  const user = userEvent.setup();
+  let historyCalls = 0;
+  invokeMock.mockImplementation((command, payload) => {
+    if (command === "mission_publications") {
+      historyCalls += 1;
+      if (historyCalls === 1) return Promise.reject(new Error("the list failed"));
+      return Promise.resolve(publications);
+    }
+    if (command === "outcome_document") {
+      const version = (payload as { version: number | null }).version ?? 2;
+      return Promise.resolve(documentFor(version));
+    }
+    return Promise.reject(new Error(`unexpected command: ${String(command)}`));
+  });
+
+  render(<MissionOutcomes missionId={missionId} />);
+  await screen.findByRole("alert");
+  await user.click(screen.getByRole("button", { name: historyRetryName }));
+
+  // Both rows of the independently chosen two-version list, newest first.
+  expect(
+    await screen.findByRole("row", { name: /2 \(current\)/ }),
+    "N4.HISTORY.SUCCESS_RECOVERS",
+  ).toBeTruthy();
+  expect(await screen.findAllByRole("row"), "N4.HISTORY.SUCCESS_RECOVERS").toHaveLength(3);
+  // And the newest version's document followed, so recovery reached the document read too.
+  expect(
+    await screen.findByLabelText("Outcome Document"),
+    "N4.HISTORY.SUCCESS_RECOVERS",
+  ).toHaveTextContent("version two");
+  expect(screen.queryByRole("alert"), "N4.HISTORY.SUCCESS_RECOVERS").toBeNull();
+});
+
+it("keeps a second failed publication-history read an error rather than an empty list", async () => {
+  const user = userEvent.setup();
+  let historyCalls = 0;
+  invokeMock.mockImplementation((command) => {
+    if (command === "mission_publications") {
+      historyCalls += 1;
+      return Promise.reject(new Error("the list failed again"));
+    }
+    return Promise.reject(new Error(`unexpected command: ${String(command)}`));
+  });
+
+  render(<MissionOutcomes missionId={missionId} />);
+  await screen.findByRole("alert");
+  await user.click(screen.getByRole("button", { name: historyRetryName }));
+
+  expect(historyCalls, "N4.HISTORY.REJECTION_STAYS_BROKEN").toBe(2);
+  expect(await screen.findByRole("alert"), "N4.HISTORY.REJECTION_STAYS_BROKEN").toBeInTheDocument();
+  expect(
+    screen.queryByText("This Mission has no published Outcome."),
+    "N4.HISTORY.REJECTION_STAYS_BROKEN",
+  ).toBeNull();
+  // Still recoverable: a second failure is not a dead end.
+  expect(
+    screen.queryByRole("button", { name: historyRetryName }),
+    "N4.HISTORY.REJECTION_STAYS_BROKEN",
+  ).not.toBeNull();
+});
+
+it("ignores a history read that settles after the operator opened another Mission", async () => {
+  const user = userEvent.setup();
+  const otherMission = "33333333-3333-4333-8333-333333333333";
+  let settleOld: ((value: unknown) => void) | null = null;
+  let historyCalls = 0;
+  invokeMock.mockImplementation((command, payload) => {
+    if (command === "mission_publications") {
+      historyCalls += 1;
+      const asked = (payload as { missionId: string }).missionId;
+      if (asked === otherMission) return Promise.resolve([]);
+      if (historyCalls === 1) return Promise.reject(new Error("the list failed"));
+      return new Promise((resolve) => {
+        settleOld = resolve;
+      });
+    }
+    return Promise.reject(new Error(`unexpected command: ${String(command)}`));
+  });
+
+  const view = render(<MissionOutcomes missionId={missionId} />);
+  await screen.findByRole("alert");
+  await user.click(screen.getByRole("button", { name: historyRetryName }));
+  expect(historyCalls, "N4.HISTORY.OLD_MISSION_CANNOT_WIN").toBe(2);
+
+  // The operator opens a different Mission while the retry is still in flight.
+  view.rerender(<MissionOutcomes missionId={otherMission} />);
+  expect(
+    await screen.findByText("This Mission has no published Outcome."),
+    "N4.HISTORY.OLD_MISSION_CANNOT_WIN",
+  ).toBeTruthy();
+
+  // The old Mission's retry now succeeds -- and must write nothing.
+  await act(async () => {
+    settleOld?.(publications);
+    await Promise.resolve();
+  });
+
+  expect(
+    screen.queryAllByRole("row"),
+    "N4.HISTORY.OLD_MISSION_CANNOT_WIN",
+  ).toHaveLength(0);
+  expect(
+    screen.getByText("This Mission has no published Outcome."),
+    "N4.HISTORY.OLD_MISSION_CANNOT_WIN",
+  ).toBeTruthy();
+});
