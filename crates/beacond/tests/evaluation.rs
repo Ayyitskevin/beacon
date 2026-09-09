@@ -751,7 +751,7 @@ fn a_recorded_evaluation_is_immutable_and_survives_startup_verification() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .expect("startup verifies the Evaluation");
-    assert_eq!(report.diagnostics.schema_version, 36);
+    assert_eq!(report.diagnostics.schema_version, 37);
     assert_eq!(
         evaluations.get(&evaluation.digest().value).unwrap(),
         evaluation
@@ -3455,7 +3455,14 @@ END;",
              SELECT workspace_id, subject_digest, evaluation_digest,
                     supersedes_evaluation_digest
              FROM supersessions_snapshot;
-             UPDATE schema_meta SET version = 27 WHERE singleton = 1 AND version = 36;
+             DROP TRIGGER model_invocation_observations_no_update;
+             DROP TRIGGER model_invocation_observations_no_delete;
+             DROP TABLE model_invocation_observations;
+             DROP TRIGGER model_invocations_no_update;
+             DROP TRIGGER model_invocations_no_delete;
+             DROP INDEX model_invocations_by_mission;
+             DROP TABLE model_invocations;
+             UPDATE schema_meta SET version = 27 WHERE singleton = 1 AND version = 37;
              COMMIT;",
         )
         .unwrap();

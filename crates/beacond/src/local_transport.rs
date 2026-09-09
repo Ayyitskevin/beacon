@@ -5583,6 +5583,7 @@ mod tests {
         "Proposal" | StartupPass::Proposal => "Proposal", StartupPass::Proposal, &[];
         "Evaluation" | StartupPass::Evaluation => "Evaluation", StartupPass::Evaluation, &[];
         "Artifact" | StartupPass::Artifact => "Artifact", StartupPass::Artifact, &[];
+        "Invocation" | StartupPass::Invocation => "Invocation", StartupPass::Invocation, &[];
         "Ruling" | StartupPass::Ruling => "Ruling", StartupPass::Ruling, &[];
         "Candidate" | StartupPass::Candidate => "Candidate", StartupPass::Candidate, &[];
         "ProjectRepository" | StartupPass::ProjectRepository => "ProjectRepository", StartupPass::ProjectRepository, &[];
@@ -5912,6 +5913,18 @@ mod tests {
         "EvaluationChainsMismatch" | SupervisorError::EvaluationChainsMismatch(cause)
             => format!("EvaluationChainsMismatch.{}", expected_evaluation(cause).1),
             SupervisorError::EvaluationChainsMismatch(EvaluationError::NotFound), &[];
+        "InvocationEventPayloadOverCeiling" | SupervisorError::InvocationEventPayloadOverCeiling { .. }
+            => "InvocationEventPayloadOverCeiling",
+            SupervisorError::InvocationEventPayloadOverCeiling { sequence: STORED_VERSION, payload_bytes: STORED_VERSION }, &[];
+        "InvocationEventMismatch" | SupervisorError::InvocationEventMismatch(..)
+            => "InvocationEventMismatch",
+            SupervisorError::InvocationEventMismatch(STORED_VERSION), &[];
+        "InvocationTotalsMismatch" | SupervisorError::InvocationTotalsMismatch(..)
+            => "InvocationTotalsMismatch",
+            SupervisorError::InvocationTotalsMismatch(TotalsMismatch { table: KNOWN_TOTALS_LABEL, expected: 7, observed: 11 }), &[];
+        "InvocationStateMismatch" | SupervisorError::InvocationStateMismatch { cause, .. }
+            => format!("InvocationStateMismatch.{}", cause.name()),
+            SupervisorError::InvocationStateMismatch { workspace_id: first_uuid(), invocation_id: first_uuid(), cause: crate::InvocationStoreError::InvalidStore }, &[];
         "ArtifactEventMismatch" | SupervisorError::ArtifactEventMismatch(..)
             => "ArtifactEventMismatch",
             SupervisorError::ArtifactEventMismatch(STORED_VERSION), &[];
@@ -6748,10 +6761,12 @@ mod tests {
         // `code_rows()`, so a code is also a case); five direct arms -- `ManifestNotFound`,
         // `Manifest`, `Candidate`, `Identity`, `Content`; and TWO `Account` arms, one per stage,
         // each over all eighteen account rows. 1006 + 2 + 5 + 36 = 1049. Counted on this head.
-        assert_eq!(cases.len(), 1049, "R42S2.TRANSPORT.CARDINALITY.CASES");
+        // C2 adds four Supervisor cases and one StoredIdentityUnreadable startup-pass case.
+        // Preserve every C3-C7 case: 1049 + 4 + 1 = 1054.
+        assert_eq!(cases.len(), 1054, "R42S2.TRANSPORT.CARDINALITY.CASES");
         assert_eq!(
             supervisor_rows().len(),
-            75,
+            79,
             "R42S2.TRANSPORT.CARDINALITY.Supervisor"
         );
         let ids: std::collections::BTreeSet<&str> =
