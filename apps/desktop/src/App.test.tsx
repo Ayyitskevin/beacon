@@ -3586,4 +3586,329 @@ describe("Beacon desktop shell", () => {
     // And Briefing was never re-read to do any of it.
     expect(receiptReads, "N23.JOURNEY.BRIEFING_NOT_RELOADED").toBe(receiptsAfterBriefing);
   });
+
+  // -------------------------------------------------------------------------------------------
+  // B12: the Teams + Missions read bundle gets explicit failure state and an Operator Retry
+  // -------------------------------------------------------------------------------------------
+  //
+  // `Promise.all([loadTeams, loadMissions])` wrote a GLOBAL action error and left both panel values
+  // null, so both panels went on saying "Loading Teams" / "Loading Missions" with nothing the
+  // operator could do. These bars are that read's own pending/failed/loaded state. The bundle stays
+  // all-or-nothing: one Retry re-runs BOTH existing reads for the same Project.
+
+  const B12_FAILURE = "Beacon could not complete that local request.";
+
+  function installB12(
+    reject: { leg: "teams" | "missions"; times: number } | null,
+    held?: { leg: "teams" | "missions"; promise: Promise<unknown> },
+  ) {
+    installN16ProjectAdapter();
+    const installed = invokeMock.getMockImplementation()!;
+    const calls: string[] = [];
+    let rejected = 0;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "teams" || command === "missions") {
+        calls.push(command);
+        if (held && held.leg === command) return held.promise;
+        if (reject && reject.leg === command && rejected < reject.times) {
+          rejected += 1;
+          return Promise.reject(new Error("the local request failed"));
+        }
+      }
+      return installed(command, args);
+    });
+    return { calls };
+  }
+
+  async function openAlpha(user: ReturnType<typeof userEvent.setup>) {
+    render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    await user.click(await screen.findByRole("button", { name: /Alpha Project/i }));
+    await screen.findByRole("heading", { name: "Alpha Project" });
+  }
+
+  it("shows the Teams and Missions read failure instead of loading forever, with a Retry", async () => {
+    const user = userEvent.setup();
+    installB12({ leg: "teams", times: 1 });
+    await openAlpha(user);
+
+    await vi.waitFor(() =>
+      expect(
+        screen.queryAllByText(B12_FAILURE).length,
+        "B12.BUNDLE.FAILURE_IS_VISIBLE",
+      ).toBeGreaterThan(0),
+    );
+    expect(screen.queryByText("Loading Teams"), "B12.BUNDLE.NOT_FOREVER_LOADING").toBeNull();
+    expect(screen.queryByText("Loading Missions"), "B12.BUNDLE.NOT_FOREVER_LOADING").toBeNull();
+    expect(
+      screen.queryByText("No Teams have been formed for this Project."),
+      "B12.BUNDLE.FAILED_IS_NOT_EMPTY",
+    ).toBeNull();
+    expect(
+      screen.queryByText("No Missions have been admitted for this Project."),
+      "B12.BUNDLE.FAILED_IS_NOT_EMPTY",
+    ).toBeNull();
+    expect(
+      screen.getAllByRole("button", { name: "Retry Teams and Missions" }).length,
+      "B12.BUNDLE.RETRY_OFFERED",
+    ).toBeGreaterThan(0);
+  });
+
+
+  it("shows the same failure when it is the Missions leg that rejects", async () => {
+    const user = userEvent.setup();
+    installB12({ leg: "missions", times: 1 });
+    await openAlpha(user);
+    await vi.waitFor(() =>
+      expect(
+        screen.getAllByRole("button", { name: "Retry Teams and Missions" }).length,
+        "B12.BUNDLE.EITHER_LEG_FAILS_THE_BUNDLE",
+      ).toBe(2),
+    );
+    expect(screen.queryByText("Loading Missions"), "B12.BUNDLE.EITHER_LEG_FAILS_THE_BUNDLE").toBeNull();
+    expect(screen.queryByText("Loading Teams"), "B12.BUNDLE.EITHER_LEG_FAILS_THE_BUNDLE").toBeNull();
+  });
+
+  it("retries BOTH reads for the same Project from the keyboard and clears only this failure", async () => {
+    const user = userEvent.setup();
+    const { calls } = installB12({ leg: "teams", times: 1 });
+    await openAlpha(user);
+    const retry = await screen.findAllByRole("button", { name: "Retry Teams and Missions" });
+    expect(calls, "B12.RETRY.FIRST_ATTEMPT_ASKED_BOTH").toEqual(["teams", "missions"]);
+
+    retry[0].focus();
+    expect(retry[0], "B12.RETRY.KEYBOARD_REACHABLE").toHaveFocus();
+    await user.keyboard("{Enter}");
+
+    await vi.waitFor(() =>
+      expect(
+        screen.queryByText("No Missions have been admitted for this Project."),
+        "B12.RETRY.SUCCESS_SHOWS_THE_LOADED_READ",
+      ).not.toBeNull(),
+    );
+    expect(screen.queryAllByRole("button", { name: "Retry Teams and Missions" }),
+      "B12.RETRY.SUCCESS_CLEARS_THE_FAILURE").toHaveLength(0);
+    // The bundle stayed all-or-nothing: the retry asked for BOTH reads again, same Project, and
+    // added no other command.
+    expect(calls, "B12.RETRY.SAME_BUNDLE_SAME_PROJECT").toEqual([
+      "teams", "missions", "teams", "missions",
+    ]);
+  });
+
+  it("offers no second Retry while a retry is still in flight", async () => {
+    const user = userEvent.setup();
+    let release!: (teams: unknown[]) => void;
+    const held = new Promise<unknown[]>((resolve) => {
+      release = resolve;
+    });
+    // First attempt rejects; the retry's teams read is HELD open.
+    installN16ProjectAdapter();
+    const installed = invokeMock.getMockImplementation()!;
+    const calls: string[] = [];
+    let attempt = 0;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "teams") {
+        calls.push(command);
+        attempt += 1;
+        if (attempt === 1) return Promise.reject(new Error("the local request failed"));
+        return held;
+      }
+      if (command === "missions") {
+        calls.push(command);
+        return installed(command, args);
+      }
+      return installed(command, args);
+    });
+    await openAlpha(user);
+    const retry = await screen.findAllByRole("button", { name: "Retry Teams and Missions" });
+    await user.click(retry[0]);
+
+    // The failure this control renders for is cleared, so the control is gone and a second click
+    // cannot start a second live request. The panels say what is true: the read is running.
+    await vi.waitFor(() =>
+      expect(
+        screen.queryAllByRole("button", { name: "Retry Teams and Missions" }),
+        "B12.PENDING.NO_DUPLICATE_RETRY",
+      ).toHaveLength(0),
+    );
+    expect(screen.queryByText("Loading Teams"), "B12.PENDING.TRUTHFUL_FEEDBACK").not.toBeNull();
+    expect(calls.filter((c) => c === "teams").length, "B12.PENDING.ONE_LIVE_ATTEMPT").toBe(2);
+
+    await act(async () => {
+      release([]);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(
+        screen.queryByText("No Teams have been formed for this Project."),
+        "B12.PENDING.HELD_READ_RESOLVES",
+      ).not.toBeNull(),
+    );
+  });
+
+  it("shows the failure again when the retry rejects too", async () => {
+    const user = userEvent.setup();
+    const { calls } = installB12({ leg: "teams", times: 2 });
+    await openAlpha(user);
+    const retry = await screen.findAllByRole("button", { name: "Retry Teams and Missions" });
+    await user.click(retry[0]);
+    await vi.waitFor(() =>
+      expect(
+        screen.getAllByRole("button", { name: "Retry Teams and Missions" }).length,
+        "B12.RETRY.REPEATED_REJECTION_STAYS_FAILED",
+      ).toBe(2),
+    );
+    expect(calls, "B12.RETRY.REPEATED_REJECTION_STAYS_FAILED").toEqual([
+      "teams", "missions", "teams", "missions",
+    ]);
+    expect(screen.queryByText("Loading Teams"), "B12.RETRY.REPEATED_REJECTION_STAYS_FAILED").toBeNull();
+  });
+
+  it("writes nothing: a failure and a retry run no Command", async () => {
+    const user = userEvent.setup();
+    installN16ProjectAdapter();
+    const installed = invokeMock.getMockImplementation()!;
+    const seen: string[] = [];
+    let attempt = 0;
+    invokeMock.mockImplementation((command, args) => {
+      seen.push(command as string);
+      if (command === "teams") {
+        attempt += 1;
+        if (attempt === 1) return Promise.reject(new Error("the local request failed"));
+      }
+      return installed(command, args);
+    });
+    await openAlpha(user);
+    const retry = await screen.findAllByRole("button", { name: "Retry Teams and Missions" });
+    // Everything the retry itself asks for, from the click onward -- an exact window, not a regex
+    // over the whole session.
+    const mark = seen.length;
+    await user.click(retry[0]);
+    await vi.waitFor(() =>
+      expect(screen.queryAllByRole("button", { name: "Retry Teams and Missions" }))
+        .toHaveLength(0),
+    );
+    // `record_operator_activity` is the shell's ambient activity ping, issued for any operator
+    // input and named exactly so it cannot stand in for a Project write. Everything else the retry
+    // caused must be the two reads themselves.
+    const caused = seen.slice(mark).filter((c) => c !== "record_operator_activity");
+    expect(caused, "B12.RETRY.NO_WRITE_COMMAND").toEqual(["teams", "missions"]);
+  });
+
+  it("a stale success and a stale failure from the previous Project change nothing", async () => {
+    const user = userEvent.setup();
+    let releaseAlpha!: (teams: unknown[]) => void;
+    let rejectAlpha!: (cause: unknown) => void;
+    const heldTeams = new Promise<unknown[]>((resolve, reject) => {
+      releaseAlpha = resolve;
+      rejectAlpha = reject;
+    });
+    const heldMissions = new Promise<unknown[]>(() => {});
+    installN16ProjectAdapter();
+    const installed = invokeMock.getMockImplementation()!;
+    const alphaTeam = { id: "aaaaaaa9-9999-4999-8999-aaaaaaaaaaaa", projectId: N15_A,
+      name: "Stale Alpha Team", members: [] };
+    invokeMock.mockImplementation((command, args) => {
+      const projectId = (args as { projectId?: string } | undefined)?.projectId;
+      if (command === "teams") return projectId === N15_A ? heldTeams : Promise.resolve([]);
+      if (command === "missions") return projectId === N15_A ? heldMissions : Promise.resolve([]);
+      return installed(command, args);
+    });
+
+    await openAlpha(user);
+    expect(screen.queryByText("Loading Teams"), "B12.STALE.ALPHA_STILL_RUNNING").not.toBeNull();
+
+    // Leave Alpha for the portfolio, then open the OTHER Project. Alpha's read is still open.
+    await user.click(screen.getByRole("button", { name: "All Projects" }));
+    await user.click(await screen.findByRole("button", { name: /Bravo Project/i }));
+    await screen.findByRole("heading", { name: "Bravo Project" });
+    await vi.waitFor(() =>
+      expect(
+        screen.queryByText("No Teams have been formed for this Project."),
+        "B12.STALE.BRAVO_LOADED",
+      ).not.toBeNull(),
+    );
+
+    // Alpha's deferred SUCCESS lands now. It must not overwrite Bravo's result.
+    await act(async () => {
+      releaseAlpha([alphaTeam]);
+      await Promise.resolve();
+    });
+    expect(screen.queryByText("Stale Alpha Team"), "B12.STALE.SUCCESS_DOES_NOT_OVERWRITE").toBeNull();
+    expect(
+      screen.queryByText("No Teams have been formed for this Project."),
+      "B12.STALE.SUCCESS_DOES_NOT_OVERWRITE",
+    ).not.toBeNull();
+
+    // And a deferred FAILURE from that same abandoned read must not plant a failure over Bravo.
+    await act(async () => {
+      rejectAlpha(new Error("the local request failed"));
+      await Promise.resolve();
+    });
+    expect(
+      screen.queryAllByRole("button", { name: "Retry Teams and Missions" }),
+      "B12.STALE.ERROR_DOES_NOT_OVERWRITE",
+    ).toHaveLength(0);
+  });
+
+  it("a read still running when the Project is closed exposes nothing afterwards", async () => {
+    const user = userEvent.setup();
+    let releaseTeams!: (teams: unknown[]) => void;
+    const heldTeams = new Promise<unknown[]>((resolve) => {
+      releaseTeams = resolve;
+    });
+    installN16ProjectAdapter();
+    const installed = invokeMock.getMockImplementation()!;
+    const secretTeam = { id: "bbbbbbb9-9999-4999-8999-bbbbbbbbbbbb", projectId: N15_A,
+      name: "Protected Team Name", members: [] };
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "teams") return heldTeams;
+      if (command === "missions") return Promise.resolve([]);
+      return installed(command, args);
+    });
+    await openAlpha(user);
+    await user.click(screen.getByRole("button", { name: "All Projects" }));
+    await vi.waitFor(() =>
+      expect(screen.queryByRole("heading", { name: "Alpha Project" }),
+        "B12.EXIT.RECORD_CLOSED").toBeNull(),
+    );
+    await act(async () => {
+      releaseTeams([secretTeam]);
+      await Promise.resolve();
+    });
+    expect(screen.queryByText("Protected Team Name"), "B12.EXIT.LATE_READ_EXPOSES_NOTHING").toBeNull();
+  });
+
+  it("a healthy empty Project is not a failed read", async () => {
+    const user = userEvent.setup();
+    installB12(null);
+    await openAlpha(user);
+    await vi.waitFor(() =>
+      expect(
+        screen.queryByText("No Teams have been formed for this Project."),
+        "B12.HEALTHY.EMPTY_IS_NOT_FAILED",
+      ).not.toBeNull(),
+    );
+    expect(
+      screen.queryByText("No Missions have been admitted for this Project."),
+      "B12.HEALTHY.EMPTY_IS_NOT_FAILED",
+    ).not.toBeNull();
+    expect(screen.queryAllByRole("button", { name: "Retry Teams and Missions" }),
+      "B12.HEALTHY.EMPTY_IS_NOT_FAILED").toHaveLength(0);
+    expect(screen.queryAllByRole("alert").map((node) => node.textContent),
+      "B12.HEALTHY.EMPTY_IS_NOT_FAILED").not.toContain(B12_FAILURE);
+  });
+
+  it("has no automated accessibility violations on the failed read surface", async () => {
+    const user = userEvent.setup();
+    installB12({ leg: "teams", times: 1 });
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    await user.click(await screen.findByRole("button", { name: /Alpha Project/i }));
+    await screen.findAllByRole("button", { name: "Retry Teams and Missions" });
+    await expectNoWcagViolations(container);
+  });
+
 });

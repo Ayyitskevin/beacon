@@ -181,6 +181,8 @@ export function ProjectsWorkspace({
   onCancelCreate,
   onOpenProject,
   onCloseProject,
+  projectReadFailure,
+  onRetryProjectRead,
   onCopyObjectLink,
   onSubmitProject,
   onReviseCharter,
@@ -228,6 +230,11 @@ export function ProjectsWorkspace({
   /** Leave the open Project and show the portfolio again. The workspace holds no navigation
    *  state of its own; the owner clears the selection, exactly as it sets it. */
   onCloseProject: () => void;
+  /** This Project's Teams+Missions read failed, in the owner's own words. Empty means it did not.
+   *  The workspace holds no read state of its own; it hands both panels the same one fact. */
+  projectReadFailure: string;
+  /** Re-run that one bundled read. The owner decides what retrying means. */
+  onRetryProjectRead: () => void;
   onCopyObjectLink: (link: AddressableObjectLink) => void;
   onSubmitProject: (draft: ProjectDraft) => void;
   onReviseCharter: () => void;
@@ -296,6 +303,8 @@ export function ProjectsWorkspace({
       ) : selectedProject ? (
         <ProjectRecord
           onCloseProject={onCloseProject}
+          projectReadFailure={projectReadFailure}
+          onRetryProjectRead={onRetryProjectRead}
           project={selectedProject}
           history={charterHistory}
           policy={projectPolicy}
@@ -561,6 +570,8 @@ function draftFromForm(value: CharterFormState): ProjectCharterDraft {
 
 function ProjectRecord({
   onCloseProject,
+  projectReadFailure,
+  onRetryProjectRead,
   project,
   history,
   policy,
@@ -613,6 +624,8 @@ function ProjectRecord({
   busy: boolean;
   onRevise: () => void;
   onCloseProject: () => void;
+  projectReadFailure: string;
+  onRetryProjectRead: () => void;
   onCopyObjectLink: (link: AddressableObjectLink) => void;
   onOpenPolicyComposer: () => void;
   onCancelPolicyComposer: () => void;
@@ -765,6 +778,8 @@ function ProjectRecord({
       <ProjectTeams
         projectId={project.id}
         teams={teams}
+        readFailure={projectReadFailure}
+        onRetryRead={onRetryProjectRead}
         residents={residents}
         configurations={teamConfigurations}
         composerOpen={teamComposerOpen}
@@ -777,6 +792,8 @@ function ProjectRecord({
         project={project}
         teams={teams}
         missions={missions}
+        readFailure={projectReadFailure}
+        onRetryRead={onRetryProjectRead}
         linkedMissionId={linkedMissionId}
         composerOpen={missionComposerOpen}
         busy={busy}
