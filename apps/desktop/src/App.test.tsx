@@ -4068,4 +4068,124 @@ describe("Beacon desktop shell", () => {
       "B12.RETRY.UNRELATED_ERROR_PRESERVED").not.toBeNull();
   });
 
+
+  // -------------------------------------------------------------------------------------------
+  // C3: the read-only Mission completion view
+  // -------------------------------------------------------------------------------------------
+  //
+  // MOCKED CONTRACT. `get_mission_completion` has no real owner until Opus's backend candidate
+  // integrates, so green here proves RENDERING against the agreed DTO and nothing end to end.
+
+  const C3_PROJECT = "44444444-4444-4444-8444-4444444c3000";
+  const C3_MISSION = "88888888-8888-4888-8888-8888888c3000";
+  const C3_OUTCOME = "Ship the completion view";
+
+  function c3Completion(overrides: Record<string, unknown> = {}) {
+    return {
+      missionId: C3_MISSION,
+      completionId: "11111111-2222-4333-8444-555555555555",
+      actor: "operator",
+      accountableResidentId: "66666666-7777-4888-8999-aaaaaaaaaaaa",
+      accountableResidentConfigurationId: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+      disposition: "concluded",
+      conditionResults: [
+        { ordinal: 0, outcome: "met", supportCount: 2, note: null },
+        { ordinal: 1, outcome: "not_met", supportCount: 0, note: "the check never ran green" },
+        { ordinal: 2, outcome: "not_assessed", supportCount: 0, note: null },
+        { ordinal: 3, outcome: "assessment_inconclusive", supportCount: 1, note: null },
+      ],
+      deliveredArtifactCount: 3,
+      unfinishedWorkCount: 1,
+      ...overrides,
+    };
+  }
+
+  function installC3(completion: (args: unknown) => Promise<unknown>) {
+    const project = {
+      id: C3_PROJECT,
+      workspaceId: acceptedOrganization.workspaceId,
+      name: "Completion Project",
+      charter: {
+        revision: 1,
+        purpose: "Prove the completion view.",
+        desiredOutcomes: ["Show what was recorded"],
+        constraints: [],
+        prohibitions: [],
+        autonomyProfile: "supervised",
+        budgetBoundary: "no_spend",
+        externalEffects: "prohibited",
+        authoredAtMs: 123,
+      },
+      createdAtMs: 120,
+    } as const;
+    const summary = {
+      id: project.id,
+      name: project.name,
+      charterRevision: 1,
+      autonomyProfile: "supervised",
+      createdAtMs: 120,
+    };
+    const mission = {
+      id: C3_MISSION,
+      workspaceId: project.workspaceId,
+      projectId: project.id,
+      charterRevision: 1,
+      teamId: "55555555-5555-4555-8555-555555555555",
+      desiredOutcome: C3_OUTCOME,
+      successConditions: ["Gates pass", "A reviewer signs", "The view renders", "Docs updated"],
+      constraints: [],
+      prohibitions: [],
+      lifecycle: "admitted",
+      admittedBy: "operator",
+      admittedAtMs: 126,
+      members: [
+        {
+          residentId: "66666666-6666-4666-8666-666666666666",
+          admissionConfigurationId: "77777777-7777-4777-8777-777777777777",
+        },
+      ],
+    } as const;
+    mockInitialState("unlocked");
+    const base = invokeMock.getMockImplementation()!;
+    const asked: unknown[] = [];
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "projects") return Promise.resolve([summary]);
+      if (command === "project") return Promise.resolve(project);
+      if (command === "project_charter_history") return Promise.resolve([project.charter]);
+      if (command === "project_policy") return Promise.resolve(null);
+      if (command === "project_policy_history") return Promise.resolve([]);
+      if (command === "current_project_repository") return Promise.resolve(null);
+      if (command === "project_repository_history") return Promise.resolve([]);
+      if (command === "teams") return Promise.resolve([]);
+      if (command === "missions") return Promise.resolve([mission]);
+      if (command === "mission_publications") return Promise.resolve([]);
+      if (command === "get_mission_completion") {
+        asked.push(args);
+        return completion(args);
+      }
+      return base(command, args);
+    });
+    return { asked, mission };
+  }
+
+  async function openC3Mission(user: ReturnType<typeof userEvent.setup>) {
+    render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    await user.click(await screen.findByRole("button", { name: /Completion Project/i }));
+    await screen.findByText(C3_OUTCOME);
+  }
+
+  it("shows a recorded Mission completion with every condition outcome distinct", async () => {
+    const user = userEvent.setup();
+    const { asked } = installC3(() => Promise.resolve(c3Completion()));
+    await openC3Mission(user);
+
+    expect(await screen.findByText("Concluded"), "C3.UI.RECORDED_SHOWS_EACH_OUTCOME").toBeVisible();
+    for (const label of ["Met", "Not met", "Not assessed", "Assessment inconclusive"]) {
+      expect(screen.queryByText(label), `C3.UI.RECORDED_SHOWS_EACH_OUTCOME: ${label}`).not.toBeNull();
+    }
+    expect(asked, "C3.UI.EXACT_MISSION_ARGUMENT").toEqual([{ missionId: C3_MISSION }]);
+  });
+
 });

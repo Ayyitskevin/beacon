@@ -2,6 +2,30 @@ import { invoke } from "@tauri-apps/api/core";
 
 type LockedPhase = "operator_setup_required" | "locked";
 
+
+/** One declared success condition's recorded result. `ordinal` is its 0-based index in the
+ *  Mission's own declaration order, which is how it pairs with `successConditions`. */
+export type CompletionConditionResult = {
+  ordinal: number;
+  outcome: "met" | "not_met" | "not_assessed" | "assessment_inconclusive";
+  supportCount: number;
+  note: string | null;
+};
+
+/** What a Mission's verified completion RECORDED. Neither disposition is a success verdict, and
+ *  the counts are counts of recorded and cited things -- this reader verifies none of them. */
+export type CompletionView = {
+  missionId: string;
+  completionId: string;
+  actor: "operator";
+  accountableResidentId: string;
+  accountableResidentConfigurationId: string;
+  disposition: "concluded" | "abandoned";
+  conditionResults: CompletionConditionResult[];
+  deliveredArtifactCount: number;
+  unfinishedWorkCount: number;
+};
+
 export type DesktopSessionStatus =
   | {
       phase: LockedPhase;
@@ -1234,6 +1258,71 @@ export function describeLocalAccountError(error: unknown): string {
     default:
       return "Beacon could not complete that local request.";
   }
+}
+
+/** This Mission's verified completion, or `null` when the Workspace recorded none.
+ *
+ *  Absence is a value the owner returns; a failed or refused read REJECTS and is never converted to
+ *  null, because "nothing was recorded" and "we could not tell" are different answers. The returned
+ *  `missionId` is compared against the one asked for: a payload about another Mission is a refusal,
+ *  not something to render under this heading. */
+export async function loadMissionCompletion(missionId: string): Promise<CompletionView | null> {
+  const value = await invokeAndValidate(
+    "get_mission_completion",
+    { missionId },
+    isCompletionViewOrAbsent,
+    "Mission completion",
+  );
+  if (value !== null && value.missionId !== missionId) {
+    throw new Error("Beacon received an invalid Mission completion.");
+  }
+  return value;
+}
+
+const COMPLETION_OUTCOMES = ["met", "not_met", "not_assessed", "assessment_inconclusive"] as const;
+
+function isCompletionConditionResult(value: unknown): value is CompletionConditionResult {
+  return (
+    hasExactKeys(value, ["note", "ordinal", "outcome", "supportCount"]) &&
+    isNonnegativeInteger(value.ordinal) &&
+    typeof value.outcome === "string" &&
+    (COMPLETION_OUTCOMES as readonly string[]).includes(value.outcome) &&
+    isNonnegativeInteger(value.supportCount) &&
+    (value.note === null || isTrimmedText(value.note, 4_096))
+  );
+}
+
+function isCompletionViewOrAbsent(value: unknown): value is CompletionView | null {
+  if (value === null) return true;
+  if (
+    !hasExactKeys(value, [
+      "accountableResidentConfigurationId",
+      "accountableResidentId",
+      "actor",
+      "completionId",
+      "conditionResults",
+      "deliveredArtifactCount",
+      "disposition",
+      "missionId",
+      "unfinishedWorkCount",
+    ]) ||
+    !isUuid(value.missionId) ||
+    !isUuid(value.completionId) ||
+    value.actor !== "operator" ||
+    !isUuid(value.accountableResidentId) ||
+    !isUuid(value.accountableResidentConfigurationId) ||
+    (value.disposition !== "concluded" && value.disposition !== "abandoned") ||
+    !isNonnegativeInteger(value.deliveredArtifactCount) ||
+    !isNonnegativeInteger(value.unfinishedWorkCount) ||
+    !Array.isArray(value.conditionResults) ||
+    !value.conditionResults.every(isCompletionConditionResult)
+  ) {
+    return false;
+  }
+  // A repeated ordinal would make one condition's result ambiguous. Refused here rather than
+  // silently collapsed, because dropping one is exactly the omission the contract forbids.
+  const ordinals = new Set(value.conditionResults.map((result) => result.ordinal));
+  return ordinals.size === value.conditionResults.length;
 }
 
 async function invokeAndValidate<T>(
