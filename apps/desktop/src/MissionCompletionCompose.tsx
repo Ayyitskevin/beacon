@@ -286,6 +286,24 @@ export function MissionCompletionCompose({
     reviewTrigger.current?.focus();
   }, [preview]);
 
+  // Unmount retires every leg by the SAME rule the rest of this screen uses.
+  //
+  // I previously reported unmount as unwitnessable, and that was WRONG: it is true only of
+  // `setState`, which React makes a silent no-op after unmount. Two effects here are not state at
+  // all -- `onRecorded` is the PARENT's callback, and a read-back is a NEW request to the native
+  // side -- so a late answer to a composer nobody is looking at used to refresh someone else's
+  // screen and issue a read for a Mission this component no longer shows. Root measured both.
+  //
+  // This does NOT cancel the native write, and nothing here claims it did; it stops a retired
+  // composer from speaking. (A StrictMode remount runs this cleanup once at mount, when no leg is
+  // in flight, so the extra bump retires nothing.)
+  useEffect(() => {
+    const lifetime = live;
+    return () => {
+      lifetime.current.attempt += 1;
+    };
+  }, []);
+
   // A different Mission inherits NOTHING: not an assessment, not a Resident, not a preview. The
   // draft is retained only while the Mission is the same one.
   useEffect(() => {
