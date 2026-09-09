@@ -1279,6 +1279,16 @@ export async function loadMissionCompletion(missionId: string): Promise<Completi
   return value;
 }
 
+// The OWNER's bounds, not this client's. `mission_completion.rs:128-133` fixes short text at 500
+// Unicode scalar values and applies it to a condition note; `isTrimmedText` counts with
+// `Array.from`, so astral text is one scalar per character rather than two UTF-16 units. A larger
+// cap here would accept a record the owner would refuse and call it recorded content.
+const COMPLETION_SHORT_TEXT_SCALARS = 500;
+const COMPLETION_MAX_CONDITIONS = 20;
+const COMPLETION_MAX_SUPPORT_PER_CONDITION = 8;
+const COMPLETION_MAX_DELIVERED_ARTIFACTS = 32;
+const COMPLETION_MAX_NARRATIVE_ITEMS = 32;
+
 const COMPLETION_OUTCOMES = ["met", "not_met", "not_assessed", "assessment_inconclusive"] as const;
 
 function isCompletionConditionResult(value: unknown): value is CompletionConditionResult {
@@ -1288,7 +1298,8 @@ function isCompletionConditionResult(value: unknown): value is CompletionConditi
     typeof value.outcome === "string" &&
     (COMPLETION_OUTCOMES as readonly string[]).includes(value.outcome) &&
     isNonnegativeInteger(value.supportCount) &&
-    (value.note === null || isTrimmedText(value.note, 4_096))
+    value.supportCount <= COMPLETION_MAX_SUPPORT_PER_CONDITION &&
+    (value.note === null || isTrimmedText(value.note, COMPLETION_SHORT_TEXT_SCALARS))
   );
 }
 
@@ -1313,8 +1324,11 @@ function isCompletionViewOrAbsent(value: unknown): value is CompletionView | nul
     !isUuid(value.accountableResidentConfigurationId) ||
     (value.disposition !== "concluded" && value.disposition !== "abandoned") ||
     !isNonnegativeInteger(value.deliveredArtifactCount) ||
+    value.deliveredArtifactCount > COMPLETION_MAX_DELIVERED_ARTIFACTS ||
     !isNonnegativeInteger(value.unfinishedWorkCount) ||
+    value.unfinishedWorkCount > COMPLETION_MAX_NARRATIVE_ITEMS ||
     !Array.isArray(value.conditionResults) ||
+    value.conditionResults.length > COMPLETION_MAX_CONDITIONS ||
     !value.conditionResults.every(isCompletionConditionResult)
   ) {
     return false;
