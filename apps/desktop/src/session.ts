@@ -26,6 +26,70 @@ export type CompletionView = {
   unfinishedWorkCount: number;
 };
 
+
+/** One manually entered supporting reference. Externally tagged, exactly as the C4 contract fixes
+ *  it -- and deliberately distinct from the daemon's outer command tag. */
+export type SupportRefDto =
+  | { artifact: string }
+  | { receipt: { runId: string; receiptVersion: number; receiptBytesSha256: string } }
+  | { evaluation: string }
+  | { ruling: string };
+
+export type CompletionConditionInput = {
+  ordinal: number;
+  outcome: "met" | "not_met" | "not_assessed" | "assessment_inconclusive";
+  support: SupportRefDto[];
+  note: string | null;
+};
+
+export type CompletionNarrativeInput<K extends string> = {
+  ordinal: number;
+  kind: K;
+  conditionOrdinal: number | null;
+  summary: string;
+};
+
+export type UnfinishedKindToken =
+  | "condition_not_met"
+  | "deferred_scope"
+  | "known_defect"
+  | "blocked_dependency";
+export type UncertaintyKindToken =
+  | "unverified_claim"
+  | "unmeasured_quantity"
+  | "conflicting_evidence"
+  | "outside_scope_of_checks";
+
+export type SpendReferenceDto =
+  | { recorded: { spendId: string; spendVersion: number; spendSha256: string } }
+  | { notMeasured: string };
+
+/** Everything the Operator authored. Identity, service time and the boundary are NOT here: Beacon
+ *  assigns them when it records. */
+export type CompletionIntentRequest = {
+  missionId: string;
+  accountableResidentId: string;
+  disposition: "concluded" | "abandoned";
+  conditionResults: CompletionConditionInput[];
+  deliveredArtifacts: string[];
+  unfinishedWork: CompletionNarrativeInput<UnfinishedKindToken>[];
+  uncertainty: CompletionNarrativeInput<UncertaintyKindToken>[];
+  spend: SpendReferenceDto;
+  summary: string;
+};
+
+/** The owner's normalized echo of the request, plus the bindings it verified. */
+export type CompletionPreview = {
+  request: CompletionIntentRequest;
+  intentSha256: string;
+  workspaceId: string;
+  projectId: string;
+  actor: "operator";
+  accountableResidentConfigurationId: string;
+  declaredConditionsSha256: string;
+  conditions: string[];
+};
+
 export type DesktopSessionStatus =
   | {
       phase: LockedPhase;
@@ -1337,6 +1401,189 @@ function isCompletionViewOrAbsent(value: unknown): value is CompletionView | nul
   // silently collapsed, because dropping one is exactly the omission the contract forbids.
   const ordinals = new Set(value.conditionResults.map((result) => result.ordinal));
   return ordinals.size === value.conditionResults.length;
+}
+
+// The owner's limits, cited to `mission_completion.rs:124-133`. The frontend refuses what the owner
+// would refuse; it is never the authority on canonical size or on what a citation means.
+const COMPLETION_MAX_SUMMARY_SCALARS = 2_000;
+
+function isHex64(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+
+function isSupportRefDto(value: unknown): value is SupportRefDto {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  if (keys.length !== 1) return false;
+  const record = value as Record<string, unknown>;
+  if (keys[0] === "artifact") return isHex64(record.artifact);
+  if (keys[0] === "evaluation") return isHex64(record.evaluation);
+  if (keys[0] === "ruling") return isHex64(record.ruling);
+  if (keys[0] !== "receipt") return false;
+  const receipt = record.receipt;
+  return (
+    hasExactKeys(receipt, ["receiptBytesSha256", "receiptVersion", "runId"]) &&
+    isUuid(receipt.runId) &&
+    isNonnegativeInteger(receipt.receiptVersion) &&
+    isHex64(receipt.receiptBytesSha256)
+  );
+}
+
+function isNarrativeInput(value: unknown, kinds: readonly string[]): boolean {
+  return (
+    hasExactKeys(value, ["conditionOrdinal", "kind", "ordinal", "summary"]) &&
+    isNonnegativeInteger(value.ordinal) &&
+    typeof value.kind === "string" &&
+    kinds.includes(value.kind) &&
+    (value.conditionOrdinal === null || isNonnegativeInteger(value.conditionOrdinal)) &&
+    isTrimmedText(value.summary, COMPLETION_SHORT_TEXT_SCALARS)
+  );
+}
+
+function isSpendReferenceDto(value: unknown): value is SpendReferenceDto {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  if (keys.length !== 1) return false;
+  const record = value as Record<string, unknown>;
+  if (keys[0] === "notMeasured") {
+    return isTrimmedText(record.notMeasured, COMPLETION_SHORT_TEXT_SCALARS);
+  }
+  if (keys[0] !== "recorded") return false;
+  const recorded = record.recorded;
+  return (
+    hasExactKeys(recorded, ["spendId", "spendSha256", "spendVersion"]) &&
+    isUuid(recorded.spendId) &&
+    isNonnegativeInteger(recorded.spendVersion) &&
+    isHex64(recorded.spendSha256)
+  );
+}
+
+const UNFINISHED_KINDS = [
+  "condition_not_met",
+  "deferred_scope",
+  "known_defect",
+  "blocked_dependency",
+] as const;
+const UNCERTAINTY_KINDS = [
+  "unverified_claim",
+  "unmeasured_quantity",
+  "conflicting_evidence",
+  "outside_scope_of_checks",
+] as const;
+
+function isCompletionIntentRequest(value: unknown): value is CompletionIntentRequest {
+  return (
+    hasExactKeys(value, [
+      "accountableResidentId",
+      "conditionResults",
+      "deliveredArtifacts",
+      "disposition",
+      "missionId",
+      "spend",
+      "summary",
+      "uncertainty",
+      "unfinishedWork",
+    ]) &&
+    isUuid(value.missionId) &&
+    isUuid(value.accountableResidentId) &&
+    (value.disposition === "concluded" || value.disposition === "abandoned") &&
+    Array.isArray(value.conditionResults) &&
+    value.conditionResults.length >= 1 &&
+    value.conditionResults.length <= COMPLETION_MAX_CONDITIONS &&
+    value.conditionResults.every(
+      (result: unknown) =>
+        hasExactKeys(result, ["note", "ordinal", "outcome", "support"]) &&
+        isNonnegativeInteger(result.ordinal) &&
+        typeof result.outcome === "string" &&
+        (COMPLETION_OUTCOMES as readonly string[]).includes(result.outcome) &&
+        Array.isArray(result.support) &&
+        result.support.length <= COMPLETION_MAX_SUPPORT_PER_CONDITION &&
+        result.support.every(isSupportRefDto) &&
+        (result.note === null || isTrimmedText(result.note, COMPLETION_SHORT_TEXT_SCALARS)),
+    ) &&
+    Array.isArray(value.deliveredArtifacts) &&
+    value.deliveredArtifacts.length <= COMPLETION_MAX_DELIVERED_ARTIFACTS &&
+    value.deliveredArtifacts.every(isHex64) &&
+    Array.isArray(value.unfinishedWork) &&
+    value.unfinishedWork.length <= COMPLETION_MAX_NARRATIVE_ITEMS &&
+    value.unfinishedWork.every((item: unknown) => isNarrativeInput(item, UNFINISHED_KINDS)) &&
+    Array.isArray(value.uncertainty) &&
+    value.uncertainty.length <= COMPLETION_MAX_NARRATIVE_ITEMS &&
+    value.uncertainty.every((item: unknown) => isNarrativeInput(item, UNCERTAINTY_KINDS)) &&
+    isSpendReferenceDto(value.spend) &&
+    isTrimmedText(value.summary, COMPLETION_MAX_SUMMARY_SCALARS)
+  );
+}
+
+function isCompletionPreview(value: unknown): value is CompletionPreview {
+  return (
+    hasExactKeys(value, [
+      "accountableResidentConfigurationId",
+      "actor",
+      "conditions",
+      "declaredConditionsSha256",
+      "intentSha256",
+      "projectId",
+      "request",
+      "workspaceId",
+    ]) &&
+    isCompletionIntentRequest(value.request) &&
+    isHex64(value.intentSha256) &&
+    isUuid(value.workspaceId) &&
+    isUuid(value.projectId) &&
+    value.actor === "operator" &&
+    isUuid(value.accountableResidentConfigurationId) &&
+    isHex64(value.declaredConditionsSha256) &&
+    Array.isArray(value.conditions) &&
+    value.conditions.every((condition: unknown) => typeof condition === "string")
+  );
+}
+
+function isIntentAcknowledgement(value: unknown): value is { intentSha256: string } {
+  return hasExactKeys(value, ["intentSha256"]) && isHex64(value.intentSha256);
+}
+
+function isIntentTokenOrAbsent(value: unknown): value is { intentSha256: string } | null {
+  return value === null || isIntentAcknowledgement(value);
+}
+
+/** Derive the owner's normalized record for review. Writes nothing. */
+export async function previewMissionCompletion(
+  request: CompletionIntentRequest,
+): Promise<CompletionPreview> {
+  return invokeAndValidate(
+    "preview_mission_completion",
+    { request },
+    isCompletionPreview,
+    "Mission completion preview",
+  );
+}
+
+/** Record the reviewed intent. The echoed token is a consistency check on authenticated input --
+ *  not proof a screen was viewed, and not an idempotency key. */
+export async function recordMissionCompletion(
+  request: CompletionIntentRequest,
+  reviewedIntentSha256: string,
+): Promise<{ intentSha256: string }> {
+  return invokeAndValidate(
+    "record_mission_completion",
+    { request, reviewedIntentSha256 },
+    isIntentAcknowledgement,
+    "Mission completion acknowledgement",
+  );
+}
+
+/** Recompute the stored completion's consistency token, for recovery. `null` means no completion is
+ *  visible in THAT snapshot -- never proof that a pending write cannot still arrive. */
+export async function getMissionCompletionIntent(
+  missionId: string,
+): Promise<{ intentSha256: string } | null> {
+  return invokeAndValidate(
+    "get_mission_completion_intent",
+    { missionId },
+    isIntentTokenOrAbsent,
+    "Mission completion intent",
+  );
 }
 
 async function invokeAndValidate<T>(
