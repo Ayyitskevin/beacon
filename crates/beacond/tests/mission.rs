@@ -2661,3 +2661,143 @@ fn c3_owner_keeps_its_authentication_refusal() {
          a generic storage error: {refusal:?}"
     );
 }
+
+// Astra-authored C3 Event-bytes probe, added verbatim as a committed regression.
+#[test]
+fn astra_c3_owner_verifies_the_event_bytes_not_only_its_digest_selector() {
+    let (store, accounts, mission) = recorded_completion("c3-event-bytes");
+    let reader = completion_reader(&store, &accounts);
+    assert!(reader.get(mission.id).expect("C3.OWNER.EVENT_BYTES_CONTROL").is_some(),
+        "C3.OWNER.EVENT_BYTES_CONTROL");
+    // INTENTIONAL CORRUPTION after the real owner minted BOTH the record and its Event.
+    // Keep Mission/digest selectors and sequence untouched; change only the Event's byte claim.
+    let connection = Connection::open(&store.path).unwrap();
+    let (sequence, before): (i64, String) = connection.query_row(
+        "SELECT sequence, payload_json FROM events WHERE workspace_id = ?1
+         AND kind = 'mission.completed' AND json_extract(payload_json, '$.missionId') = ?2",
+        rusqlite::params![store.workspace_id.to_string(), mission.id.to_string()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    let before: serde_json::Value = serde_json::from_str(&before).unwrap();
+    assert_ne!(before["canonicalBytesBase64"], "AA==", "C3.OWNER.EVENT_BYTES_PLANT_DIFFERS");
+    assert_eq!(connection.execute(
+        "UPDATE events SET payload_json = json_set(payload_json, '$.canonicalBytesBase64', 'AA==')
+         WHERE sequence = ?1", [sequence],
+    ).unwrap(), 1, "C3.OWNER.EVENT_BYTES_ONE_PLANT");
+    let after: String = connection.query_row("SELECT payload_json FROM events WHERE sequence = ?1",
+        [sequence], |row| row.get(0)).unwrap();
+    let after: serde_json::Value = serde_json::from_str(&after).unwrap();
+    assert_eq!(after["missionId"], before["missionId"], "C3.OWNER.EVENT_BYTES_SELECTOR_UNCHANGED");
+    assert_eq!(after["digestValue"], before["digestValue"], "C3.OWNER.EVENT_BYTES_SELECTOR_UNCHANGED");
+    drop(connection);
+    let refusal = reader.get(mission.id).expect_err("C3.OWNER.EVENT_BYTES_ARE_OWNER_VERIFIED");
+    assert!(matches!(refusal, beacond::MissionCompletionReadError::Unavailable(
+        beacond::CompletionUnavailable::CompletionUnverified(beacond::CompletionReadRefusal::BytesDisagree)
+    )), "C3.OWNER.EVENT_BYTES_ARE_OWNER_VERIFIED: {refusal:?}");
+}
+
+/// C3.WIRE.DTO_EXACT — the DTO across the real socket, not a service call.
+///
+/// A real `LocalSupervisorServer` is bound to the SAME store the owner fixture minted into, and a
+/// real `LocalSupervisorClient` asks for the completion. This proves the command name, the result
+/// arm and the serialized shape together; a service-level call proves none of them.
+///
+/// **Not yet executed:** Blue owned Cargo when this was written.
+#[test]
+fn c3_wire_returns_the_exact_dto_and_null_over_the_real_socket() {
+    let (store, accounts, mission) = recorded_completion("c3-wire");
+    let expected = beacond::MissionCompletionReadService::new(
+        Arc::clone(&accounts),
+        store.workspace_id,
+    )
+    .get(mission.id)
+    .expect("the owner reads it")
+    .expect("a completion was recorded");
+    // The owner service and the client must be talking to the same store, so the fixture's own
+    // handles are dropped before the server binds it.
+    drop(accounts);
+
+    let root = store.path.parent().unwrap().join(format!(
+        "beacon-c3-wire-{}",
+        Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let socket = root.join("beacond.sock");
+    let token = root.join("client.token");
+    beacond::initialize_local_auth_token(&token).unwrap();
+    let server = beacond::LocalSupervisorServer::bind(beacond::LocalServerConfig {
+        store_path: store.path.clone(),
+        initial_workspace_name: "Personal".to_owned(),
+        socket_path: socket.clone(),
+        auth_token_path: token.clone(),
+        lock_path: root.join("supervisor.lock"),
+        local_model_endpoint: beacond::LocalModelEndpoint::ollama_default(),
+    })
+    .expect("C3.WIRE.DTO_EXACT: the server binds the fixture's store");
+    let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running).unwrap());
+    let client = beacond::LocalSupervisorClient::connect(socket, token)
+        .expect("C3.WIRE.DTO_EXACT: the client connects");
+    client
+        .authenticate_password(
+            SecretString::new("a long local passphrase".to_owned()),
+            beacond::AccessOrigin::SameMachine,
+        )
+        .expect("C3.WIRE.DTO_EXACT: the existing session semantics are unchanged");
+
+    let over_the_wire = client
+        .mission_completion(mission.id)
+        .expect("C3.WIRE.DTO_EXACT")
+        .expect("C3.WIRE.DTO_EXACT: a completion was recorded");
+    assert_eq!(
+        over_the_wire, expected,
+        "C3.WIRE.DTO_EXACT: the wire must carry the owner's own value"
+    );
+    // The serialized shape, against the camelCase contract.
+    let json: serde_json::Value = serde_json::to_value(&over_the_wire).unwrap();
+    let mut keys: Vec<&str> = json.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec![
+            "accountableResidentConfigurationId",
+            "accountableResidentId",
+            "actor",
+            "completionId",
+            "conditionResults",
+            "deliveredArtifactCount",
+            "disposition",
+            "missionId",
+            "unfinishedWorkCount",
+        ],
+        "C3.WIRE.DTO_EXACT: exactly the C3-interface field set, camelCase"
+    );
+    let mut condition_keys: Vec<&str> = json["conditionResults"][0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    condition_keys.sort();
+    assert_eq!(
+        condition_keys,
+        vec!["note", "ordinal", "outcome", "supportCount"],
+        "C3.WIRE.DTO_EXACT: the condition shape"
+    );
+
+    // An unknown Mission crosses as null, never as a distinct answer.
+    let absent = client
+        .mission_completion(Uuid::new_v4())
+        .expect("C3.WIRE.DTO_EXACT: an unknown Mission is not an error");
+    assert_eq!(
+        serde_json::to_string(&absent).unwrap(),
+        "null",
+        "C3.WIRE.DTO_EXACT: absence is JSON null"
+    );
+
+    running.store(false, std::sync::atomic::Ordering::Release);
+    let _ = client;
+    thread.join().unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -1813,6 +1813,7 @@ mod tests {
     use super::{
         DesktopState, accept_starter_organization_value, activate_resident_value,
         admit_mission_value, authentication_capabilities_value, begin_password_setup_value,
+        get_mission_completion_value,
         bind_project_repository_value, complete_operator_setup_value, create_project_value,
         current_project_repository_value, install_sample_project_value, migrate_legacy_app_data,
         mission_value, outcome_document_value, platform_session_monitor_status_value,
@@ -2157,6 +2158,52 @@ mod tests {
             .unwrap();
         let refusal = outcome_document_value(&state.state, Uuid::new_v4(), None).unwrap_err();
         assert_eq!(refusal.code, "outcome_absent");
+    }
+
+
+    /// C3.DESKTOP.COMMAND_WIRED — the real native adapter path, not a mock.
+    ///
+    /// This calls the same value function the `#[tauri::command]` wrapper calls, over a real
+    /// `LocalSupervisorServer`/`LocalSupervisorClient` pair. A Mission with no completion is JSON
+    /// `null`; an unknown Mission is the same `null`, so scope stays opaque at the boundary too.
+    /// **Not yet executed:** Blue owns Cargo at the time of writing.
+    #[test]
+    fn c3_desktop_get_mission_completion_is_wired_to_the_real_adapter() {
+        let state = TestState::new();
+        state
+            .state
+            .supervisor
+            .begin_password_setup(
+                SecretString::new("a long local passphrase".to_owned()),
+                SecretString::new("a long local passphrase".to_owned()),
+            )
+            .unwrap();
+        state.state.supervisor.complete_operator_setup(true).unwrap();
+
+        let absent = get_mission_completion_value(&state.state, Uuid::new_v4())
+            .expect("C3.DESKTOP.COMMAND_WIRED: an unknown Mission is not an error");
+        assert!(absent.is_none(), "C3.DESKTOP.COMMAND_WIRED");
+        assert_eq!(
+            serde_json::to_string(&absent).unwrap(),
+            "null",
+            "C3.DESKTOP.COMMAND_WIRED: absence crosses as JSON null"
+        );
+    }
+
+    /// The closed code and copy, as independent literals from `C3-interface.md`.
+    #[test]
+    fn c3_desktop_the_unavailable_code_and_copy_are_exactly_the_contract() {
+        let error: CommandError = LocalTransportError::Remote {
+            code: LocalErrorCode::MissionCompletionUnavailable,
+            retry_after_ms: None,
+        }
+        .into();
+        assert_eq!(error.code, "mission_completion_unavailable", "C3.WIRE.CODE");
+        assert_eq!(
+            error.message, "The Mission completion could not be verified.",
+            "C3.WIRE.COPY"
+        );
+        assert_eq!(error.retry_after_ms, None, "C3.WIRE.NO_RETRY_ADVICE");
     }
 
     struct TestState {
