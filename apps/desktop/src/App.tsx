@@ -313,6 +313,17 @@ export function App() {
   const [projectPolicyHistory, setProjectPolicyHistory] = useState<ProjectPolicy[] | null>(null);
   const [projectRepository, setProjectRepository] = useState<ProjectRepository | null>(null);
   const [preflightReceipt, setPreflightReceipt] = useState<PreflightReceipt | null>(null);
+  // Which adoption the displayed preflight belongs to. Bumped only where a Project is actually
+  // adopted, and read again after the await, so a response that was already in flight when the
+  // operator moved on cannot publish itself over the Project now on screen.
+  //
+  // A generation and NOT the Project id: a same-id re-open is a fresh read under this component's
+  // own unconditional invalidation, so an observation started before that re-open would pass an
+  // id comparison and republish itself anyway. A counter cannot collide with itself.
+  //
+  // A ref and NOT a captured value: the whole point is to read the CURRENT state after awaiting,
+  // which a value captured in the closure cannot do.
+  const preflightGeneration = useRef(0);
   const [projectRepositoryHistory, setProjectRepositoryHistory] = useState<
     ProjectRepository[] | null
   >(null);
@@ -1272,6 +1283,10 @@ export function App() {
       // agreed, so a failed or refused open leaves the existing display untouched rather than
       // blanking it on the way to an error.
       setPreflightReceipt(null);
+      // Same place, same condition: this runs only after every Charter, Policy and Repository join
+      // has agreed, so a REFUSED open bumps nothing and a valid A observation still in flight stays
+      // publishable under A. Only an actual adoption retires the older observation.
+      preflightGeneration.current += 1;
       opened = true;
     });
     return opened;
@@ -1382,8 +1397,14 @@ export function App() {
 
   async function preflightChecks() {
     if (!selectedProject) return;
+    const generation = preflightGeneration.current;
     await runAction(async () => {
-      setPreflightReceipt(await preflightProjectChecks(selectedProject.id));
+      const receipt = await preflightProjectChecks(selectedProject.id);
+      // The observation is published only if the Project it was started for is still the adopted
+      // one. Nothing is filtered by text and no valid result is overwritten first: a retired
+      // observation simply never becomes the display.
+      if (preflightGeneration.current !== generation) return;
+      setPreflightReceipt(receipt);
     });
   }
 
