@@ -28,6 +28,7 @@ mod mission;
 mod mission_completion;
 mod mission_completion_store;
 mod mission_impact;
+mod model_invocation;
 mod operator_account;
 mod outcome;
 mod outcome_assembler;
@@ -141,6 +142,14 @@ pub use mission_impact::{
 pub use mission_impact::{
     ClassificationRecordError, ClassificationStoreError, MissionImpactClassification,
     MissionImpactService, verified_classification_for_citation, verified_classification_within,
+};
+pub use model_invocation::{
+    ADMISSION_CANONICALIZER, AppendRefusal, Appended, INVOCATION_DIGEST_ALGORITHM, IncompleteCause,
+    InvocationAdmissionV1, InvocationObservationV1, MAX_AUTHORITY_REFERENCE_BYTES,
+    MAX_HEADER_NAME_BYTES, MAX_HEADER_VALUE_BYTES, MAX_PROMPT_PROFILE_BYTES, MAX_RETAINED_HEADERS,
+    MalformedInvocation, OBSERVATION_CANONICALIZER, ObservationKind, ReadCeiling,
+    RetainedAuthority, RetainedHeader, RetainedLimits, TransitionRefusal, TransportHistory,
+    TransportObservation, TransportStatus,
 };
 pub use operator_account::{
     AccessOrigin, OperatorAccountError, OperatorAccountService, OperatorSessionPhase,
