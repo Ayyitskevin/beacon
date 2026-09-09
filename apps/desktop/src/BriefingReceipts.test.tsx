@@ -188,7 +188,14 @@ it("keeps loading, empty and failed apart, and stays accessible", async () => {
   const user = userEvent.setup();
   const onRefresh = vi.fn();
   const { container, rerender } = render(
-    <BriefingReceipts page={null} loading failure="" disabled={false} onRefresh={onRefresh} onOpenProject={vi.fn()} />,
+    <BriefingReceipts
+      page={null}
+      loading
+      failure=""
+      disabled={false}
+      onRefresh={onRefresh}
+      onOpenProject={vi.fn()}
+    />,
   );
   expect(screen.getByText("Loading Receipts")).toBeVisible();
   expect(screen.queryByText("No Receipts yet.")).toBeNull();

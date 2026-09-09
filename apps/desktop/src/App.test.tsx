@@ -2725,18 +2725,64 @@ describe("Beacon desktop shell", () => {
     createdAtMs: 120,
   } as const;
 
+  // Held, and held SEPARATELY from anything a callback produces: the ids and purposes below are
+  // the fixture's own, not read back out of `briefingProjects` or derived from the assertion under
+  // test. Root's P1 and opus2's Finding 2 were both about expectations that could not tell the
+  // clicked row's id from a constant.
+  const N11_A_ID = "aaaa1111-1111-4111-8111-aaaaaaaaaaaa";
+  const N11_B_ID = "bbbb2222-2222-4222-8222-bbbbbbbbbbbb";
+  const N11_A_PURPOSE = "n11-alpha-held-purpose";
+  const N11_B_PURPOSE = "n11-bravo-held-purpose";
+
+  function n11Project(id: string, name: string, purpose: string) {
+    return {
+      id,
+      workspaceId: acceptedOrganization.workspaceId,
+      name,
+      charter: { ...receiptProject.charter, purpose },
+      createdAtMs: 120,
+    } as const;
+  }
+
+  /** Two Receipts naming DIFFERENT Projects, newest first. The one to click is the second. */
+  function n11ReceiptPage() {
+    return {
+      receipts: [
+        { ...recentRow("cccccccc-3333-4333-8333-333333333333", 300, {
+            kind: "declared_checks", summary: "completed",
+          }), projectId: N11_A_ID, projectName: "Alpha Project" },
+        { ...recentRow("bbbbbbbb-2222-4222-8222-222222222222", 200, {
+            kind: "check_preflight", outcome: "verified",
+          }), projectId: N11_B_ID, projectName: "Bravo Project" },
+      ],
+      runsInFlightInWindow: 0,
+      runsUnconfirmedInWindow: 0,
+      runWindowApplied: 50,
+      moreRunsExist: false,
+    };
+  }
+
   it("opens the exact Project a Receipt names, from the keyboard", async () => {
     const user = userEvent.setup();
     mockInitialState("unlocked");
     const base = invokeMock.getMockImplementation()!;
+    const alpha = n11Project(N11_A_ID, "Alpha Project", N11_A_PURPOSE);
+    const bravo = n11Project(N11_B_ID, "Bravo Project", N11_B_PURPOSE);
     const asked: unknown[] = [];
+    let receiptReads = 0;
     invokeMock.mockImplementation((command, args) => {
-      if (command === "recent_receipts") return Promise.resolve(recentPage());
+      const projectId = (args as { projectId?: string } | undefined)?.projectId;
+      if (command === "recent_receipts") {
+        receiptReads += 1;
+        return Promise.resolve(n11ReceiptPage());
+      }
       if (command === "project") {
         asked.push(args);
-        return Promise.resolve(receiptProject);
+        return Promise.resolve(projectId === N11_B_ID ? bravo : alpha);
       }
-      if (command === "project_charter_history") return Promise.resolve([receiptProject.charter]);
+      if (command === "project_charter_history") {
+        return Promise.resolve([projectId === N11_B_ID ? bravo.charter : alpha.charter]);
+      }
       if (command === "project_policy") return Promise.resolve(null);
       if (command === "project_policy_history") return Promise.resolve([]);
       if (command === "current_project_repository") return Promise.resolve(null);
@@ -2748,61 +2794,115 @@ describe("Beacon desktop shell", () => {
     const { container } = render(<App />);
     await screen.findByRole("heading", { name: "Briefing" });
     const list = await screen.findByRole("list", { name: "Recent Receipts" });
-    // The changed render: Receipt rows now carry a control.
     await expectNoWcagViolations(container);
-    const open = within(list).getAllByRole("button", { name: /^Open .* Project$/ })[0];
+    const readsBefore = receiptReads;
+
+    // The SECOND row, so a control that hard-coded the first would be caught here.
+    const rows = within(list).getAllByRole("listitem");
+    const open = within(rows[1]).getByRole("button", { name: "Open Bravo Project Project" });
     open.focus();
     await user.keyboard("{Enter}");
 
-    // The held id was asked for, and the Projects lens is what the operator now sees.
-    expect(asked, "N11.OPEN.EXACT_PROJECT").toEqual([{ projectId: briefingProjects[0].id }]);
-    // "Selects Projects" is the navigation state, not a heading: the rail marks the active
-    // application with aria-current, which is the same thing a screen reader is told.
+    // Settle on something true under BOTH the clean code and root's dropped-adoption mutant --
+    // the read is issued either way -- so every assertion below is reached and can name itself
+    // rather than dying inside a `findBy*` that throws before `expect` runs.
+    await vi.waitFor(() => expect(asked).toHaveLength(1));
+
+    // The id actually asked for is the clicked row's held id, and no other row's.
+    expect(asked, "N11.OPEN.EXACT_PROJECT").toEqual([{ projectId: N11_B_ID }]);
+    // And a Project record was really adopted: root's P1 mutant drops exactly this.
+    await vi.waitFor(() =>
+      expect(
+        screen.queryByRole("heading", { name: "Bravo Project" }),
+        "N11.OPEN.PROJECT_RECORD_VISIBLE",
+      ).not.toBeNull(),
+    );
+    expect(
+      screen.queryAllByText(N11_B_PURPOSE).length,
+      "N11.OPEN.PROJECT_RECORD_VISIBLE",
+    ).toBeGreaterThan(0);
+    expect(screen.queryAllByText(N11_A_PURPOSE), "N11.OPEN.PROJECT_RECORD_VISIBLE").toHaveLength(0);
     expect(
       await screen.findByRole("button", { name: "Projects", current: "page" }),
       "N11.OPEN.EXACT_PROJECT",
     ).toBeVisible();
+    // Measured through App, not through a component callback: opening read no Receipts again.
+    expect(receiptReads, "N11.OPEN.NO_RECEIPT_RELOAD").toBe(readsBefore);
   });
 
   it("stays on Briefing and shows the error when the Project behind a Receipt cannot be read", async () => {
     const user = userEvent.setup();
     mockInitialState("unlocked");
     const base = invokeMock.getMockImplementation()!;
+    const alpha = n11Project(N11_A_ID, "Alpha Project", N11_A_PURPOSE);
     invokeMock.mockImplementation((command, args) => {
-      if (command === "recent_receipts") return Promise.resolve(recentPage());
-      if (command === "project") return Promise.reject(new Error("the Project read failed"));
-      if (command === "project_charter_history") return Promise.resolve([receiptProject.charter]);
+      const projectId = (args as { projectId?: string } | undefined)?.projectId;
+      if (command === "recent_receipts") return Promise.resolve(n11ReceiptPage());
+      if (command === "project") {
+        // A reads; B refuses. The prior successful selection is what makes the refusal meaningful.
+        return projectId === N11_B_ID
+          ? Promise.reject(new Error("the Project read failed"))
+          : Promise.resolve(alpha);
+      }
+      if (command === "project_charter_history") return Promise.resolve([alpha.charter]);
       if (command === "project_policy") return Promise.resolve(null);
       if (command === "project_policy_history") return Promise.resolve([]);
       if (command === "current_project_repository") return Promise.resolve(null);
       if (command === "project_repository_history") return Promise.resolve([]);
+      if (command === "teams" || command === "missions") return Promise.resolve([]);
       return base(command, args);
     });
 
     const { container } = render(<App />);
     await screen.findByRole("heading", { name: "Briefing" });
-    const list = await screen.findByRole("list", { name: "Recent Receipts" });
-    await user.click(within(list).getAllByRole("button", { name: /^Open .* Project$/ })[0]);
-    await expectNoWcagViolations(container);
+    const firstList = await screen.findByRole("list", { name: "Recent Receipts" });
+    const firstRows = within(firstList).getAllByRole("listitem");
 
-    // The refusal is visible, the operator is still on Briefing, and no Project lens was drawn.
+    // 1. A is really selected first.
+    await user.click(within(firstRows[0]).getByRole("button", { name: "Open Alpha Project Project" }));
     expect(
-      await screen.findByText(/Beacon could not/i),
+      await screen.findByRole("heading", { name: "Alpha Project" }),
       "N11.OPEN.FAILURE_STAYS_BRIEFING",
     ).toBeVisible();
+
+    // 2. Back to Briefing through the rail, with A still the selected Project underneath.
+    await user.click(screen.getByRole("button", { name: "Briefing" }));
+    const list = await screen.findByRole("list", { name: "Recent Receipts" });
+    const rows = within(list).getAllByRole("listitem");
+
+    // 3. B refuses.
+    await user.click(within(rows[1]).getByRole("button", { name: "Open Bravo Project Project" }));
+
+    // Settle on the refusal being rendered -- true under BOTH the clean code and the
+    // navigate-after-failed-read mutant -- so the named rail assertions below are always reached.
+    // opus2's Finding 3 was that this test died inside an ambiguous query before `expect` ran.
+    await vi.waitFor(() =>
+      expect(
+        screen.queryAllByText("Beacon could not complete that local request.").length,
+      ).toBeGreaterThan(0),
+    );
     expect(
-      screen.getByRole("heading", { name: "Briefing" }),
+      screen.queryByRole("button", { name: "Briefing", current: "page" }),
       "N11.OPEN.FAILURE_STAYS_BRIEFING",
-    ).toBeVisible();
-    // Still on Briefing: the rail never moved, so no Project lens was drawn.
-    const failedRail = screen.getByRole("navigation", { name: "Beacon applications" });
+    ).not.toBeNull();
     expect(
-      within(failedRail).getByRole("button", { name: "Briefing" }),
+      screen.queryByRole("button", { name: "Projects", current: "page" }),
       "N11.OPEN.FAILURE_STAYS_BRIEFING",
-    ).toHaveAttribute("aria-current", "page");
+    ).toBeNull();
+    // No mislabelling: B's record never appears, and A's is not drawn on Briefing either.
     expect(
-      within(failedRail).getByRole("button", { name: "Projects" }),
-      "N11.OPEN.FAILURE_STAYS_BRIEFING",
-    ).not.toHaveAttribute("aria-current");
+      screen.queryByRole("heading", { name: "Bravo Project" }),
+      "N11.OPEN.NO_MISLABELLED_PROJECT",
+    ).toBeNull();
+    expect(
+      screen.queryByRole("heading", { name: "Alpha Project" }),
+      "N11.OPEN.NO_MISLABELLED_PROJECT",
+    ).toBeNull();
+    // The refusal is visible, matched exactly and scoped, not by a substring that matches twice.
+    expect(
+      screen.getAllByText("Beacon could not complete that local request.").length,
+      "N11.OPEN.FAILURE_IS_VISIBLE",
+    ).toBeGreaterThan(0);
+    await expectNoWcagViolations(container);
   });
 });
