@@ -1767,7 +1767,7 @@ export function App() {
               onRetireResident={(resident) => changeResident(retireResident, resident)}
               onRefreshResidents={refreshResidents}
               onOpenReceiptProject={openProjectFromReceipt}
-        recentReceiptPage={recentReceiptPage}
+              recentReceiptPage={recentReceiptPage}
               loadingRecentReceipts={loadingRecentReceipts}
               recentReceiptFailure={recentReceiptFailure}
               onRefreshReceipts={loadRecentReceipts}
