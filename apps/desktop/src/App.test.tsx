@@ -4188,4 +4188,182 @@ describe("Beacon desktop shell", () => {
     expect(asked, "C3.UI.EXACT_MISSION_ARGUMENT").toEqual([{ missionId: C3_MISSION }]);
   });
 
+
+  it("says no completion is recorded when the owner answers with a real absence", async () => {
+    const user = userEvent.setup();
+    installC3(() => Promise.resolve(null));
+    await openC3Mission(user);
+    expect(
+      await screen.findByText("No completion recorded for this Mission."),
+      "C3.UI.NO_RECORD_IS_NOT_FAILURE",
+    ).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Retry Mission completion" }),
+      "C3.UI.NO_RECORD_IS_NOT_FAILURE").toBeNull();
+    expect(screen.queryByText("Concluded"), "C3.UI.NO_RECORD_IS_NOT_FAILURE").toBeNull();
+  });
+
+  it("offers Retry when the completion read fails, and never shows an empty completion", async () => {
+    const user = userEvent.setup();
+    let attempt = 0;
+    const { asked } = installC3(() => {
+      attempt += 1;
+      return attempt === 1
+        ? Promise.reject(new Error("the local request failed"))
+        : Promise.resolve(c3Completion());
+    });
+    await openC3Mission(user);
+    const retry = await screen.findByRole("button", { name: "Retry Mission completion" });
+    expect(screen.queryByText("No completion recorded for this Mission."),
+      "C3.UI.UNAVAILABLE_OFFERS_RETRY").toBeNull();
+    expect(screen.queryByText("Loading the Mission completion"),
+      "C3.UI.UNAVAILABLE_OFFERS_RETRY").toBeNull();
+
+    retry.focus();
+    expect(retry, "C3.UI.ACCESSIBLE_AND_KEYBOARD").toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(await screen.findByText("Concluded"), "C3.UI.RETRY_REREADS_THE_SAME_MISSION").toBeVisible();
+    expect(asked, "C3.UI.RETRY_REREADS_THE_SAME_MISSION").toEqual([
+      { missionId: C3_MISSION },
+      { missionId: C3_MISSION },
+    ]);
+    await expectNoWcagViolations(document.body);
+  });
+
+  it("refuses a payload about a different Mission instead of rendering it", async () => {
+    const user = userEvent.setup();
+    installC3(() =>
+      Promise.resolve(c3Completion({ missionId: "99999999-9999-4999-8999-999999999999" })),
+    );
+    await openC3Mission(user);
+    expect(
+      await screen.findByRole("button", { name: "Retry Mission completion" }),
+      "C3.UI.WRONG_MISSION_IS_REFUSED",
+    ).toBeVisible();
+    expect(screen.queryByText("Concluded"), "C3.UI.WRONG_MISSION_IS_REFUSED").toBeNull();
+    expect(screen.queryByText("No completion recorded for this Mission."),
+      "C3.UI.WRONG_MISSION_IS_REFUSED").toBeNull();
+  });
+
+  it("refuses a completion whose condition ordinal this Mission does not declare", async () => {
+    const user = userEvent.setup();
+    installC3(() =>
+      Promise.resolve(
+        c3Completion({
+          conditionResults: [{ ordinal: 9, outcome: "met", supportCount: 0, note: null }],
+        }),
+      ),
+    );
+    await openC3Mission(user);
+    expect(
+      await screen.findByRole("button", { name: "Retry Mission completion" }),
+      "C3.UI.UNPAIRABLE_ORDINAL_IS_REFUSED",
+    ).toBeVisible();
+    expect(screen.queryByText("Met"), "C3.UI.UNPAIRABLE_ORDINAL_IS_REFUSED").toBeNull();
+  });
+
+
+  /** Two Projects, one Mission each, both completions held open. A stale write shows up either as
+   *  the other Mission's data or as this one's pending state being released. The payload released
+   *  below is the SAME shape `shows a recorded Mission completion` already proves renders, so its
+   *  absence here is the lifetime guard and not an invalid fixture. */
+  function installC3TwoProjects() {
+    const second = "44444444-4444-4444-8444-4444444c3111";
+    const secondMission = "88888888-8888-4888-8888-8888888c3111";
+    let releaseFirst!: (value: unknown) => void;
+    let rejectFirst!: (cause: unknown) => void;
+    const firstCompletion = new Promise<unknown>((resolve, reject) => {
+      releaseFirst = resolve;
+      rejectFirst = reject;
+    });
+    const heldSecond = new Promise<unknown>(() => {});
+    const base = installC3(() => firstCompletion);
+    const installed = invokeMock.getMockImplementation()!;
+    const summaries = [
+      { id: C3_PROJECT, name: "Completion Project", charterRevision: 1,
+        autonomyProfile: "supervised", createdAtMs: 120 },
+      { id: second, name: "Second Project", charterRevision: 1,
+        autonomyProfile: "supervised", createdAtMs: 121 },
+    ];
+    invokeMock.mockImplementation((command, args) => {
+      const projectId = (args as { projectId?: string } | undefined)?.projectId;
+      const missionId = (args as { missionId?: string } | undefined)?.missionId;
+      if (command === "projects") return Promise.resolve(summaries);
+      if (command === "project" && projectId === second) {
+        return Promise.resolve({
+          id: second, workspaceId: acceptedOrganization.workspaceId, name: "Second Project",
+          charter: { revision: 1, purpose: "The other Project.", desiredOutcomes: ["Stay separate"],
+            constraints: [], prohibitions: [], autonomyProfile: "supervised",
+            budgetBoundary: "no_spend", externalEffects: "prohibited", authoredAtMs: 123 },
+          createdAtMs: 121,
+        });
+      }
+      if (command === "missions" && projectId === second) {
+        return Promise.resolve([{
+          id: secondMission, workspaceId: acceptedOrganization.workspaceId, projectId: second,
+          charterRevision: 1, teamId: "55555555-5555-4555-8555-555555555555",
+          desiredOutcome: "Hold the second Mission",
+          successConditions: ["Stay pending"], constraints: [], prohibitions: [],
+          lifecycle: "admitted", admittedBy: "operator", admittedAtMs: 127,
+          members: [{ residentId: "66666666-6666-4666-8666-666666666666",
+            admissionConfigurationId: "77777777-7777-4777-8777-777777777777" }],
+        }]);
+      }
+      if (command === "get_mission_completion") {
+        return missionId === C3_MISSION ? firstCompletion : heldSecond;
+      }
+      return installed(command, args);
+    });
+    return { releaseFirst, rejectFirst, base };
+  }
+
+  async function leaveForTheSecondMission(user: ReturnType<typeof userEvent.setup>) {
+    await openC3Mission(user);
+    expect(screen.queryByText("Loading the Mission completion"),
+      "C3.UI.FIRST_MISSION_STILL_PENDING").not.toBeNull();
+    await user.click(screen.getByRole("button", { name: "All Projects" }));
+    await user.click(await screen.findByRole("button", { name: /Second Project/i }));
+    await screen.findByText("Hold the second Mission");
+    expect(screen.queryByText("Loading the Mission completion"),
+      "C3.UI.SECOND_MISSION_STILL_PENDING").not.toBeNull();
+  }
+
+  // UNMOUNT path. Leaving a Project unmounts this Mission's card, so a late `setState` is a silent
+  // no-op and BOTH lifetime mutants survive these two bars -- measured, not assumed. The guard
+  // itself is witnessed in `MissionCompletion.test.tsx`, where the component stays mounted across a
+  // Mission change. These two remain because the unmount path is worth holding too.
+  it("a stale completion success after leaving the Project replaces nothing", async () => {
+    const user = userEvent.setup();
+    const { releaseFirst } = installC3TwoProjects();
+    await leaveForTheSecondMission(user);
+
+    await act(async () => {
+      releaseFirst(c3Completion());
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByText("Concluded"), "C3.UI.STALE_SUCCESS_DOES_NOT_REPLACE").toBeNull();
+    expect(screen.queryByText("Loading the Mission completion"),
+      "C3.UI.STALE_SUCCESS_DOES_NOT_RELEASE_PENDING").not.toBeNull();
+    expect(screen.queryByText("No completion recorded for this Mission."),
+      "C3.UI.STALE_SUCCESS_DOES_NOT_RELEASE_PENDING").toBeNull();
+  });
+
+  it("a stale completion rejection after leaving the Project plants no failure", async () => {
+    const user = userEvent.setup();
+    const { rejectFirst } = installC3TwoProjects();
+    await leaveForTheSecondMission(user);
+
+    await act(async () => {
+      rejectFirst(new Error("the local request failed"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByRole("button", { name: "Retry Mission completion" }),
+      "C3.UI.STALE_REJECTION_PLANTS_NO_FAILURE").toBeNull();
+    expect(screen.queryByText("Loading the Mission completion"),
+      "C3.UI.STALE_REJECTION_DOES_NOT_RELEASE_PENDING").not.toBeNull();
+  });
+
 });
