@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 
@@ -483,4 +483,33 @@ it("labels every reference as manually entered and unverified here", async () =>
     screen.getByText("Reference entered manually; supporting content is not verified here."),
     "C4.COPY.REFERENCES_ARE_LABELLED_UNVERIFIED",
   ).toBeVisible();
+});
+
+it("accepts a note at the owner's 500-scalar bound and refuses 501", async () => {
+  const user = userEvent.setup();
+  // Astral: one scalar, two UTF-16 units. A `.length` bound would drift by a factor of two.
+  const at = "\u{1F5FF}".repeat(500);
+  expect(at.length, "C4.TEXT.BOUND_IS_SCALARS_NOT_UTF16").toBe(1_000);
+  invokeMock.mockImplementation((command, args) =>
+    command === "preview_mission_completion"
+      ? Promise.resolve(previewFor((args as { request: unknown }).request))
+      : Promise.reject(new Error("no")),
+  );
+  render(<MissionCompletionCompose mission={mission()} onRecorded={vi.fn()} />);
+  await fillMinimum(user);
+  const note = screen.getByLabelText("Note for condition 1");
+  await act(async () => {
+    await user.clear(note);
+  });
+  fireEvent.change(note, { target: { value: at } });
+  expect(
+    screen.getByRole("button", { name: "Review completion" }),
+    "C4.TEXT.AT_THE_OWNER_BOUND_IS_ACCEPTED",
+  ).toBeEnabled();
+
+  fireEvent.change(note, { target: { value: `${at}\u{1F5FF}` } });
+  expect(
+    screen.getByRole("button", { name: "Review completion" }),
+    "C4.TEXT.OVER_THE_OWNER_BOUND_IS_REFUSED",
+  ).toBeDisabled();
 });

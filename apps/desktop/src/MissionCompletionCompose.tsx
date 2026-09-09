@@ -55,6 +55,14 @@ const UNCERTAINTY: readonly (readonly [UncertaintyKindToken, string])[] = [
 
 /** Every reference here was typed by the Operator. No picker exists for any class yet, and this
  *  screen opens none of them, so the label is the honest one. */
+// The OWNER's bounds (`mission_completion.rs:124-133`), counted in Unicode SCALARS. A JS `.length`
+// bound would accept half as much astral text as it should, and the owner would then refuse a
+// request this screen called complete.
+const SHORT_TEXT_SCALARS = 500;
+const SUMMARY_SCALARS = 2_000;
+const scalars = (text: string) => Array.from(text).length;
+const withinShort = (text: string) => scalars(text) <= SHORT_TEXT_SCALARS;
+
 const MANUAL_LABEL = "Reference entered manually; supporting content is not verified here.";
 
 const CODE_COPY: Record<string, string> = {
@@ -191,6 +199,7 @@ export function MissionCompletionCompose({
         if (ref === null) return null;
         refs.push(ref);
       }
+      if (!withinShort(notes[ordinal])) return null;
       conditionResults.push({
         ordinal,
         outcome: chosen as CompletionConditionInput["outcome"],
@@ -209,6 +218,10 @@ export function MissionCompletionCompose({
           : null
         : { notMeasured: spendReason };
     if (spend === null) return null;
+    if (spendKind === "notMeasured" && !withinShort(spendReason)) return null;
+    if (unfinishedItems.some((item) => !withinShort(item.summary))) return null;
+    if (uncertaintyItems.some((item) => !withinShort(item.summary))) return null;
+    if (scalars(summary) > SUMMARY_SCALARS) return null;
     return {
       missionId: mission.id,
       accountableResidentId: resident,
