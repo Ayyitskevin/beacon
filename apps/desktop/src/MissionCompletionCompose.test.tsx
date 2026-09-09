@@ -125,7 +125,8 @@ it("sends every citation kind and both narrative lists exactly as entered", asyn
   await user.type(screen.getByLabelText("Delivered Artifact digests"), A);
   await user.click(screen.getByRole("button", { name: "Add unfinished work item" }));
   await choose(user, "Unfinished work kind 1", "Known defect");
-  await user.type(screen.getByLabelText("Unfinished work condition 1"), "1");
+  // The Operator types the condition NUMBER shown on screen; the owner stores the ordinal below it.
+  await user.type(screen.getByLabelText("Unfinished work condition 1"), "2");
   await user.type(screen.getByLabelText("Unfinished work summary 1"), "one defect stands");
   await user.click(screen.getByRole("button", { name: "Add uncertainty item" }));
   await choose(user, "Uncertainty kind 1", "Unverified claim");
@@ -252,7 +253,7 @@ it("returns focus to the review control when the review is cancelled", async () 
   expect(
     screen.getByRole("button", { name: "Review completion" }),
     "C4.REVIEW.CANCEL_RETURNS_TO_COMPOSE",
-  ).toBeVisible();
+  ).toHaveFocus();
 });
 
 async function recordWith(
@@ -286,6 +287,8 @@ it("accepts an acknowledgement whose token equals the reviewed one", async () =>
     "C4.RECORD.MATCHING_TOKEN_IS_CONTENT_EQUALITY",
   ).toBeVisible();
   expect(onRecorded, "C4.RECORD.EXPLICIT_REFRESH_SIGNAL").toHaveBeenCalledTimes(1);
+  // State 7 of 10: recorded match.
+  await expectNoWcagViolations(document.body);
   void user;
 });
 
@@ -307,6 +310,8 @@ it("does not accept a differing acknowledgement as success, and reads back inste
     "C4.RECORD.DIFFERING_TOKEN_IS_NOT_SUCCESS",
   ).toBeVisible();
   expect(reads, "C4.RECOVERY.READS_BACK_THE_SAME_MISSION").toEqual([{ missionId: MISSION }]);
+  // State 8 of 10: a conflicting record.
+  await expectNoWcagViolations(document.body);
 });
 
 it("preserves the form and reads back when the record itself fails", async () => {
@@ -331,6 +336,8 @@ it("preserves the form and reads back when the record itself fails", async () =>
     "C4.RECOVERY.FORM_IS_PRESERVED",
   ).toHaveValue("Shipped it.");
   expect(writes.length, "C4.RECOVERY.NO_AUTOMATIC_SECOND_WRITE").toBe(1);
+  // State 9 of 10: nothing visible yet.
+  await expectNoWcagViolations(document.body);
 });
 
 it("offers a read Retry, never a repeated write, when the read-back is unavailable", async () => {
@@ -348,7 +355,13 @@ it("offers a read Retry, never a repeated write, when the read-back is unavailab
     await screen.findByText("The recorded completion could not be read. Retry the read."),
     "C4.RECOVERY.UNAVAILABLE_OFFERS_READ_RETRY",
   ).toBeVisible();
+  expect(
+    screen.getByRole("button", { name: "Retry the read" }),
+    "C4.RECOVERY.UNAVAILABLE_OFFERS_A_READ_CONTROL",
+  ).toBeEnabled();
   expect(writes.length, "C4.RECOVERY.NO_AUTOMATIC_SECOND_WRITE").toBe(1);
+  // State 10 of 10: the read-back could not be run.
+  await expectNoWcagViolations(document.body);
 });
 
 /** Fill and ask for a preview only: used where the preview itself refuses, so no review appears. */
@@ -380,48 +393,205 @@ it("gives each new completion code its own fixed copy", async () => {
   ).toBeVisible();
 });
 
-it("a stale preview success or rejection for another Mission replaces nothing", async () => {
+/* The combined stale-preview case that used to stand here was a FALSE GREEN, measured by root: its
+   "success" payload was an invalid preview the component would have refused anyway, and its second
+   leg rejected a promise that had already been resolved, which does nothing at all. Root's
+   `AstraC4Lifetimes.test.tsx` now owns the two preview legs with a genuinely held request; the legs
+   below are the record and read-back siblings it does not cover. */
+
+/** Holds one command open and hands back its settle functions. Every leg below keeps its own
+ *  promise: a single shared promise cannot be rejected after it has resolved, which is how the
+ *  removed test passed while the component was wrong. */
+function held() {
+  let settle!: { resolve: (value: unknown) => void; reject: (cause: unknown) => void };
+  const promise = new Promise<unknown>((resolve, reject) => {
+    settle = { resolve, reject };
+  });
+  return { promise, settle };
+}
+
+/** Fills and reviews for MISSION, then records, with `record_mission_completion` held open. */
+async function recordHeldForMission(onRecorded = vi.fn()) {
   const user = userEvent.setup();
-  let releaseFirst!: (value: unknown) => void;
-  let rejectFirst!: (cause: unknown) => void;
-  const first = new Promise<unknown>((resolve, reject) => {
-    releaseFirst = resolve;
-    rejectFirst = reject;
-  });
+  const write = held();
+  const reads: unknown[] = [];
+  let writes = 0;
   invokeMock.mockImplementation((command, args) => {
-    if (command !== "preview_mission_completion") return Promise.reject(new Error("no"));
-    return (args as { request: { missionId: string } }).request.missionId === MISSION
-      ? first
-      : new Promise<unknown>(() => {});
+    if (command === "preview_mission_completion") {
+      return Promise.resolve(previewFor((args as { request: unknown }).request));
+    }
+    if (command === "record_mission_completion") {
+      writes += 1;
+      return write.promise;
+    }
+    if (command === "get_mission_completion_intent") {
+      reads.push(args);
+      return Promise.resolve(null);
+    }
+    return Promise.reject(new Error(`unexpected ${String(command)}`));
   });
+  const view = render(<MissionCompletionCompose mission={mission()} onRecorded={onRecorded} />);
+  await fillMinimum(user);
+  await user.click(screen.getByRole("button", { name: "Review completion" }));
+  await screen.findByLabelText("Completion review");
+  await user.click(screen.getByRole("button", { name: "Confirm this record cannot be replaced" }));
+  await user.click(screen.getByRole("button", { name: "Record completion" }));
+  await screen.findByText("Recording the completion");
+  return { user, view, write, reads, onRecorded, writes: () => writes };
+}
+
+it("a matching acknowledgement for the Mission the Operator left records nothing here", async () => {
+  const { view, write, onRecorded } = await recordHeldForMission();
+  view.rerender(<MissionCompletionCompose mission={mission(OTHER_MISSION)} onRecorded={onRecorded} />);
+  await act(async () => {
+    write.settle.resolve({ intentSha256: TOKEN });
+  });
+  expect(
+    screen.queryByText("A recorded completion matches the reviewed details."),
+    "C4.LIFETIME.OLD_MISSION_ACK_IS_NOT_THIS_MISSION_RECORDED",
+  ).toBeNull();
+  expect(onRecorded, "C4.LIFETIME.OLD_MISSION_ACK_REFRESHES_NOTHING").not.toHaveBeenCalled();
+});
+
+it("a record refusal for the Mission the Operator left plants no failure and no read", async () => {
+  const { view, write, reads, onRecorded } = await recordHeldForMission();
+  view.rerender(<MissionCompletionCompose mission={mission(OTHER_MISSION)} onRecorded={onRecorded} />);
+  await act(async () => {
+    write.settle.reject({ code: "completion_unavailable" });
+  });
+  expect(
+    screen.queryByText("The Mission completion could not be verified."),
+    "C4.LIFETIME.OLD_MISSION_REFUSAL_LABELS_NOTHING",
+  ).toBeNull();
+  expect(reads, "C4.LIFETIME.OLD_MISSION_REFUSAL_READS_NOTHING_BACK").toEqual([]);
+});
+
+it("an edit while the write is in flight still reports what the write did", async () => {
+  const { user, write, onRecorded, writes } = await recordHeldForMission();
+  // Ignoring a late result would NOT cancel the write. The draft changed, so the review is gone --
+  // but the submitted write is still owed a truthful answer.
+  await user.type(screen.getByLabelText("Completion summary"), " Typed while recording.");
+  await act(async () => {
+    write.settle.resolve({ intentSha256: TOKEN });
+  });
+  expect(
+    await screen.findByText("A recorded completion matches the reviewed details."),
+    "C4.LIFETIME.EDIT_DURING_WRITE_STILL_REPORTS_THE_WRITE",
+  ).toBeVisible();
+  expect(onRecorded, "C4.LIFETIME.EDIT_DURING_WRITE_STILL_REFRESHES").toHaveBeenCalledTimes(1);
+  expect(writes(), "C4.LIFETIME.EDIT_DURING_WRITE_NEVER_WRITES_AGAIN").toBe(1);
+});
+
+it("a read-back for the Mission the Operator left reports nothing here", async () => {
+  const user = userEvent.setup();
+  const read = held();
+  const onRecorded = vi.fn();
+  invokeMock.mockImplementation((command, args) => {
+    if (command === "preview_mission_completion") {
+      return Promise.resolve(previewFor((args as { request: unknown }).request));
+    }
+    if (command === "record_mission_completion") {
+      return Promise.reject({ code: "completion_unavailable" });
+    }
+    if (command === "get_mission_completion_intent") return read.promise;
+    return Promise.reject(new Error(`unexpected ${String(command)}`));
+  });
+  const view = render(<MissionCompletionCompose mission={mission()} onRecorded={onRecorded} />);
+  await fillMinimum(user);
+  await user.click(screen.getByRole("button", { name: "Review completion" }));
+  await screen.findByLabelText("Completion review");
+  await user.click(screen.getByRole("button", { name: "Confirm this record cannot be replaced" }));
+  await user.click(screen.getByRole("button", { name: "Record completion" }));
+  await screen.findByText("Reading back what was recorded");
+  view.rerender(<MissionCompletionCompose mission={mission(OTHER_MISSION)} onRecorded={onRecorded} />);
+  await act(async () => {
+    read.settle.resolve({ intentSha256: TOKEN });
+  });
+  expect(
+    screen.queryByText("A recorded completion matches the reviewed details."),
+    "C4.LIFETIME.OLD_MISSION_READ_BACK_REPORTS_NOTHING",
+  ).toBeNull();
+  expect(onRecorded, "C4.LIFETIME.OLD_MISSION_READ_BACK_REFRESHES_NOTHING").not.toHaveBeenCalled();
+});
+
+it("an older leg cannot clear the pending action of the Mission now on screen", async () => {
+  const user = userEvent.setup();
+  const write = held();
+  const secondPreview = held();
+  let previews = 0;
+  invokeMock.mockImplementation((command, args) => {
+    if (command === "preview_mission_completion") {
+      previews += 1;
+      return previews === 1
+        ? Promise.resolve(previewFor((args as { request: unknown }).request))
+        : secondPreview.promise;
+    }
+    if (command === "record_mission_completion") return write.promise;
+    return Promise.reject(new Error(`unexpected ${String(command)}`));
+  });
+  const onRecorded = vi.fn();
+  const view = render(<MissionCompletionCompose mission={mission()} onRecorded={onRecorded} />);
+  await fillMinimum(user);
+  await user.click(screen.getByRole("button", { name: "Review completion" }));
+  await screen.findByLabelText("Completion review");
+  await user.click(screen.getByRole("button", { name: "Confirm this record cannot be replaced" }));
+  await user.click(screen.getByRole("button", { name: "Record completion" }));
+  await screen.findByText("Recording the completion");
+
+  view.rerender(<MissionCompletionCompose mission={mission(OTHER_MISSION)} onRecorded={onRecorded} />);
+  await fillMinimum(user);
+  await user.click(screen.getByRole("button", { name: "Review completion" }));
+  await screen.findByText("Deriving the completion for review");
+
+  await act(async () => {
+    write.settle.resolve({ intentSha256: TOKEN });
+  });
+  expect(
+    screen.queryByText("Deriving the completion for review"),
+    "C4.LIFETIME.OLD_LEG_CANNOT_CLEAR_A_NEWER_PENDING",
+  ).not.toBeNull();
+  expect(
+    screen.queryByText("A recorded completion matches the reviewed details."),
+    "C4.LIFETIME.OLD_LEG_REPORTS_NO_OUTCOME_HERE",
+  ).toBeNull();
+});
+
+it("a different Mission inherits no assessment, no Resident and no review", async () => {
+  const user = userEvent.setup();
+  invokeMock.mockImplementation((command, args) =>
+    command === "preview_mission_completion"
+      ? Promise.resolve(previewFor((args as { request: unknown }).request))
+      : Promise.reject(new Error("no")),
+  );
   const view = render(<MissionCompletionCompose mission={mission()} onRecorded={vi.fn()} />);
   await fillMinimum(user);
   await user.click(screen.getByRole("button", { name: "Review completion" }));
-  expect(screen.queryByText("Deriving the completion for review")).not.toBeNull();
+  await screen.findByLabelText("Completion review");
 
-  // The SAME mounted instance, a different Mission: the guard is the only thing between the old
-  // answer and this Mission's state.
   view.rerender(<MissionCompletionCompose mission={mission(OTHER_MISSION)} onRecorded={vi.fn()} />);
 
-  await act(async () => {
-    releaseFirst(previewFor({ missionId: MISSION }));
-    await Promise.resolve();
-    await Promise.resolve();
-  });
   expect(
     screen.queryByLabelText("Completion review"),
-    "C4.STALE.PREVIEW_SUCCESS_DOES_NOT_REPLACE",
+    "C4.LIFETIME.NEW_MISSION_INHERITS_NO_REVIEW",
   ).toBeNull();
-
-  await act(async () => {
-    rejectFirst({ code: "completion_intent_changed" });
-    await Promise.resolve();
-    await Promise.resolve();
-  });
   expect(
-    screen.queryByText("The reviewed details changed. Review the completion again."),
-    "C4.STALE.PREVIEW_REJECTION_PLANTS_NO_FAILURE",
+    screen.getByLabelText("Completion summary"),
+    "C4.LIFETIME.NEW_MISSION_INHERITS_NO_SUMMARY",
+  ).toHaveValue("");
+  expect(
+    screen.queryByLabelText("Why spend was not measured"),
+    "C4.LIFETIME.NEW_MISSION_INHERITS_NO_SPEND_REASON",
   ).toBeNull();
+  for (const label of ["Accountable Resident", "Disposition", "Outcome for condition 1", "Spend"]) {
+    expect(
+      screen.getByLabelText(label),
+      `C4.LIFETIME.NEW_MISSION_INHERITS_NO_CHOICE: ${label}`,
+    ).toHaveValue("");
+  }
+  expect(
+    screen.getByRole("button", { name: "Review completion" }),
+    "C4.LIFETIME.NEW_MISSION_CANNOT_BE_REVIEWED_YET",
+  ).toBeDisabled();
 });
 
 it("refuses a preview whose declared conditions no longer match this Mission", async () => {
@@ -512,4 +682,262 @@ it("accepts a note at the owner's 500-scalar bound and refuses 501", async () =>
     screen.getByRole("button", { name: "Review completion" }),
     "C4.TEXT.OVER_THE_OWNER_BOUND_IS_REFUSED",
   ).toBeDisabled();
+});
+
+it("blue refuses an owner preview bound to a different Project", async () => {
+  const user = userEvent.setup();
+  invokeMock.mockImplementation((command, args) =>
+    command === "preview_mission_completion"
+      ? Promise.resolve({
+          ...previewFor((args as { request: unknown }).request),
+          projectId: "99999999-9999-4999-8999-999999999999",
+        })
+      : Promise.reject(new Error("no")),
+  );
+  render(<MissionCompletionCompose mission={mission()} onRecorded={vi.fn()} />);
+  await fillMinimum(user);
+  await user.click(screen.getByRole("button", { name: "Review completion" }));
+  expect(
+    screen.queryByLabelText("Completion review"),
+    "C4.REVIEW.DIFFERENT_PROJECT_IS_REFUSED",
+  ).toBeNull();
+});
+
+it("blue refuses an out-of-domain u32 in the owner preview", async () => {
+  const user = userEvent.setup();
+  invokeMock.mockImplementation((command, args) => {
+    if (command !== "preview_mission_completion") return Promise.reject(new Error("no"));
+    const request = (args as { request: Record<string, unknown> }).request;
+    const conditionResults = request.conditionResults as Array<Record<string, unknown>>;
+    return Promise.resolve(
+      previewFor({
+        ...request,
+        conditionResults: [
+          {
+            ...conditionResults[0],
+            support: [
+              {
+                receipt: {
+                  runId: RUN,
+                  receiptVersion: 4_294_967_296,
+                  receiptBytesSha256: B,
+                },
+              },
+            ],
+          },
+          conditionResults[1],
+        ],
+      }),
+    );
+  });
+  render(<MissionCompletionCompose mission={mission()} onRecorded={vi.fn()} />);
+  await fillMinimum(user);
+  await user.click(screen.getByRole("button", { name: "Review completion" }));
+  expect(
+    screen.queryByLabelText("Completion review"),
+    "C4.VALIDATION.U32_ABOVE_MAX_IS_REFUSED",
+  ).toBeNull();
+});
+
+it("blue review exposes the exact normalized request and every binding", async () => {
+  const user = userEvent.setup();
+  invokeMock.mockImplementation((command, args) => {
+    if (command !== "preview_mission_completion") return Promise.reject(new Error("no"));
+    const request = (args as { request: Record<string, unknown> }).request;
+    const conditionResults = request.conditionResults as Array<Record<string, unknown>>;
+    return Promise.resolve(
+      previewFor({
+        ...request,
+        conditionResults: [
+          {
+            ...conditionResults[0],
+            support: [
+              { artifact: A },
+              { receipt: { runId: RUN, receiptVersion: 2, receiptBytesSha256: B } },
+            ],
+          },
+          {
+            ...conditionResults[1],
+            support: [{ evaluation: C }, { ruling: D }],
+          },
+        ],
+        deliveredArtifacts: [A],
+        unfinishedWork: [
+          { ordinal: 0, kind: "known_defect", conditionOrdinal: 1, summary: "exact unfinished" },
+        ],
+        uncertainty: [
+          {
+            ordinal: 0,
+            kind: "unverified_claim",
+            conditionOrdinal: null,
+            summary: "exact uncertainty",
+          },
+        ],
+        spend: { recorded: { spendId: SPEND, spendVersion: 2, spendSha256: C } },
+      }),
+    );
+  });
+  render(<MissionCompletionCompose mission={mission()} onRecorded={vi.fn()} />);
+  await fillMinimum(user);
+  await user.click(screen.getByRole("button", { name: "Review completion" }));
+  const review = await screen.findByLabelText("Completion review");
+  const text = review.textContent ?? "";
+  const required = [
+    "11111111-1111-4111-8111-111111111111",
+    "22222222-2222-4222-8222-222222222222",
+    MISSION,
+    "operator",
+    D,
+    A,
+    RUN,
+    B,
+    C,
+    "exact unfinished",
+    "condition 2",
+    "exact uncertainty",
+    SPEND,
+  ];
+  expect(
+    required.filter((value) => !text.includes(value)),
+    "C4.REVIEW.EXACT_NORMALIZED_INTENT_AND_BINDINGS_ARE_VISIBLE",
+  ).toEqual([]);
+});
+
+it("blue refuses blank mandatory summary before invoking preview", async () => {
+  const user = userEvent.setup();
+  render(<MissionCompletionCompose mission={mission()} onRecorded={vi.fn()} />);
+  await fillMinimum(user);
+  await user.clear(screen.getByLabelText("Completion summary"));
+  expect(
+    screen.getByRole("button", { name: "Review completion" }),
+    "C4.VALIDATION.EMPTY_REQUIRED_TEXT_IS_REFUSED_BEFORE_INVOKE",
+  ).toBeDisabled();
+});
+
+/* WCAG 2.1 AA over every rendered state this screen has, not only the two it started with. The
+   states are: compose, review, preview pending, preview refusal, record pending, read-back pending,
+   recorded match, conflicting record, nothing visible yet, and read unavailable. Compose and review
+   are witnessed in the tests above; the four transient states are witnessed here because no other
+   test holds them open long enough to run the bar. */
+async function reachPending(command: string, hold: Promise<unknown>) {
+  const user = userEvent.setup();
+  invokeMock.mockImplementation((name, args) => {
+    if (name === command) return hold;
+    if (name === "preview_mission_completion") {
+      return Promise.resolve(previewFor((args as { request: unknown }).request));
+    }
+    return Promise.reject(new Error(`unexpected ${String(name)}`));
+  });
+  render(<MissionCompletionCompose mission={mission()} onRecorded={vi.fn()} />);
+  await fillMinimum(user);
+  await user.click(screen.getByRole("button", { name: "Review completion" }));
+  return user;
+}
+
+it("axe: the preview-pending state", async () => {
+  await reachPending("preview_mission_completion", new Promise<unknown>(() => {}));
+  await screen.findByText("Deriving the completion for review");
+  await expectNoWcagViolations(document.body);
+});
+
+it("axe: the preview-refusal state", async () => {
+  await previewRefusedBy("completion_condition_coverage_incomplete");
+  await screen.findByText("Assess every declared condition explicitly.");
+  await expectNoWcagViolations(document.body);
+});
+
+it("axe: the record-pending state", async () => {
+  const user = await reachPending("record_mission_completion", new Promise<unknown>(() => {}));
+  await screen.findByLabelText("Completion review");
+  await user.click(screen.getByRole("button", { name: "Confirm this record cannot be replaced" }));
+  await user.click(screen.getByRole("button", { name: "Record completion" }));
+  await screen.findByText("Recording the completion");
+  await expectNoWcagViolations(document.body);
+});
+
+it("axe: the read-back-pending state", async () => {
+  const user = userEvent.setup();
+  invokeMock.mockImplementation((command, args) => {
+    if (command === "preview_mission_completion") {
+      return Promise.resolve(previewFor((args as { request: unknown }).request));
+    }
+    if (command === "record_mission_completion") {
+      return Promise.reject({ code: "completion_unavailable" });
+    }
+    if (command === "get_mission_completion_intent") return new Promise<unknown>(() => {});
+    return Promise.reject(new Error(`unexpected ${String(command)}`));
+  });
+  render(<MissionCompletionCompose mission={mission()} onRecorded={vi.fn()} />);
+  await fillMinimum(user);
+  await user.click(screen.getByRole("button", { name: "Review completion" }));
+  await screen.findByLabelText("Completion review");
+  await user.click(screen.getByRole("button", { name: "Confirm this record cannot be replaced" }));
+  await user.click(screen.getByRole("button", { name: "Record completion" }));
+  await screen.findByText("Reading back what was recorded");
+  await expectNoWcagViolations(document.body);
+});
+
+it("sends the exact frozen reviewed request and token on the record leg", async () => {
+  const user = userEvent.setup();
+  const writes: unknown[] = [];
+  invokeMock.mockImplementation((command, args) => {
+    if (command === "preview_mission_completion") {
+      return Promise.resolve(previewFor((args as { request: unknown }).request));
+    }
+    if (command === "record_mission_completion") {
+      writes.push(args);
+      return Promise.resolve({ intentSha256: TOKEN });
+    }
+    return Promise.reject(new Error(`unexpected ${String(command)}`));
+  });
+  render(<MissionCompletionCompose mission={mission()} onRecorded={vi.fn()} />);
+  await fillMinimum(user);
+  await user.click(screen.getByRole("button", { name: "Add support to condition 2" }));
+  await choose(user, "Reference kind 2.1", "Receipt");
+  await user.type(screen.getByLabelText("Run id 2.1"), RUN);
+  await user.type(screen.getByLabelText("Receipt version 2.1"), "2");
+  await user.type(screen.getByLabelText("Receipt bytes digest 2.1"), B);
+  await user.click(screen.getByRole("button", { name: "Add uncertainty item" }));
+  await choose(user, "Uncertainty kind 1", "Conflicting evidence");
+  await user.type(screen.getByLabelText("Uncertainty condition 1"), "1");
+  await user.type(screen.getByLabelText("Uncertainty summary 1"), "two runs disagree");
+  await user.click(screen.getByRole("button", { name: "Review completion" }));
+  await screen.findByLabelText("Completion review");
+  await user.click(screen.getByRole("button", { name: "Confirm this record cannot be replaced" }));
+  await user.click(screen.getByRole("button", { name: "Record completion" }));
+  await screen.findByText("A recorded completion matches the reviewed details.");
+
+  // Count for count, the WRITE leg -- not only the preview leg. An independent literal, so a wrong
+  // captured request cannot agree with itself.
+  expect(writes, "C4.RECORD.EXACT_FROZEN_REQUEST_AND_TOKEN").toEqual([
+    {
+      request: {
+        missionId: MISSION,
+        accountableResidentId: RESIDENT,
+        disposition: "concluded",
+        conditionResults: [
+          { ordinal: 0, outcome: "met", support: [], note: null },
+          {
+            ordinal: 1,
+            outcome: "not_met",
+            support: [{ receipt: { runId: RUN, receiptVersion: 2, receiptBytesSha256: B } }],
+            note: null,
+          },
+        ],
+        deliveredArtifacts: [],
+        unfinishedWork: [],
+        uncertainty: [
+          {
+            ordinal: 0,
+            kind: "conflicting_evidence",
+            conditionOrdinal: 0,
+            summary: "two runs disagree",
+          },
+        ],
+        spend: { notMeasured: "no meter on this Mission" },
+        summary: "Shipped it.",
+      },
+      reviewedIntentSha256: TOKEN,
+    },
+  ]);
 });

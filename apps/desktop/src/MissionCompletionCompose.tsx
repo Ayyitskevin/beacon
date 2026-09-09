@@ -8,7 +8,7 @@ import {
   makeStyles,
   tokens,
 } from "@fluentui/react-components";
-import { useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   type CompletionConditionInput,
@@ -61,7 +61,46 @@ const UNCERTAINTY: readonly (readonly [UncertaintyKindToken, string])[] = [
 const SHORT_TEXT_SCALARS = 500;
 const SUMMARY_SCALARS = 2_000;
 const scalars = (text: string) => Array.from(text).length;
-const withinShort = (text: string) => scalars(text) <= SHORT_TEXT_SCALARS;
+
+/** The owner's text grammar, `require_text` at `mission_completion.rs:489-506`: nonempty, trimmed,
+ *  within the scalar bound, and no control character other than LF or TAB. An upper bound alone is
+ *  not the grammar -- a blank or untrimmed summary is a request the owner refuses, so this screen
+ *  must not call it complete. */
+const isOwnerText = (text: string, maxScalars: number) =>
+  text !== "" &&
+  text.trim() === text &&
+  scalars(text) <= maxScalars &&
+  !Array.from(text).some(
+    (character) => /\p{Cc}/u.test(character) && character !== "\n" && character !== "\t",
+  );
+const isShortText = (text: string) => isOwnerText(text, SHORT_TEXT_SCALARS);
+
+/** Counts, versions and ordinals are lossless `u32` in the owner's codec. `2**32` is a safe JS
+ *  integer and an out-of-domain completion value. */
+const U32_MAX = 4_294_967_295;
+const isU32 = (value: number) => Number.isSafeInteger(value) && value >= 0 && value <= U32_MAX;
+
+/** One support reference written out in full: its class and every value it carries. A count is not
+ *  a citation, and the Operator is confirming a permanent record. */
+function supportText(ref: SupportRefDto): string {
+  if ("artifact" in ref) return `Artifact ${ref.artifact}`;
+  if ("evaluation" in ref) return `Evaluation ${ref.evaluation}`;
+  if ("ruling" in ref) return `Ruling ${ref.ruling}`;
+  return (
+    `Receipt run ${ref.receipt.runId} version ${ref.receipt.receiptVersion}` +
+    ` bytes ${ref.receipt.receiptBytesSha256}`
+  );
+}
+
+/** Narrative relations are shown in the Operator's 1-based condition numbering, the same numbering
+ *  the compose labels use. */
+const relationText = (conditionOrdinal: number | null) =>
+  conditionOrdinal === null ? "no condition named" : `condition ${conditionOrdinal + 1}`;
+
+const labelFor = (
+  table: readonly (readonly [string, string])[],
+  kind: string,
+) => table.find(([token]) => token === kind)?.[1] ?? kind;
 
 const MANUAL_LABEL = "Reference entered manually; supporting content is not verified here.";
 
@@ -113,7 +152,7 @@ function supportFromDraft(draft: SupportDraft): SupportRefDto | null {
   if (draft.kind === "ruling") return { ruling: draft.digest };
   if (draft.kind === "receipt") {
     const version = Number(draft.receiptVersion);
-    if (!Number.isSafeInteger(version) || version < 0) return null;
+    if (!isU32(version)) return null;
     return {
       receipt: {
         runId: draft.runId,
@@ -129,14 +168,21 @@ function narrativeFromDrafts<K extends string>(drafts: NarrativeDraft[]): Comple
   const items: CompletionNarrativeInput<K>[] = [];
   for (const [index, draft] of drafts.entries()) {
     if (draft.kind === "") return null;
+    // The Operator types the condition NUMBER they can see on this screen ("condition 2"), and the
+    // owner stores the ordinal (1). Review renders the number again, so all three agree; a raw
+    // 0-based box under a 1-based screen would silently cite the neighbouring condition.
     const relation =
-      draft.conditionOrdinal === "" ? null : Number(draft.conditionOrdinal);
-    if (relation !== null && !Number.isSafeInteger(relation)) return null;
+      draft.conditionOrdinal === "" ? null : Number(draft.conditionOrdinal) - 1;
+    if (relation !== null && !isU32(relation)) return null;
+    if (!isShortText(draft.summary)) return null;
     // Dense from zero: the ordinal is the item's position, never a number the Operator picks.
     items.push({ ordinal: index, kind: draft.kind as K, conditionOrdinal: relation, summary: draft.summary });
   }
   return items;
 }
+
+/** A single asynchronous leg: which attempt it is, and which draft it was derived from. */
+type Leg = { attempt: number; draft: number };
 
 export function MissionCompletionCompose({
   mission,
@@ -173,13 +219,87 @@ export function MissionCompletionCompose({
   const [outcome, setOutcome] = useState<
     "" | "recorded" | "conflicting" | "not_visible" | "unavailable"
   >("");
-  // Every asynchronous leg is keyed to this. A leg from an earlier attempt or an earlier Mission
-  // finds a different value and writes nothing.
-  const attempt = useMemo(() => ({ current: 0 }), []);
+  // The reviewed token of the write that was actually submitted. Retained so an unavailable read can
+  // be retried as a READ of that same submission; a further write is only ever an explicit Operator
+  // action on the preserved review, never this screen's idea.
+  const [submitted, setSubmitted] = useState("");
+  /** The control the review was opened from, so cancelling returns the keyboard where it was. */
+  const reviewTrigger = useRef<HTMLButtonElement | null>(null);
+  const returnFocus = useRef(false);
+  // Lifetime counters, read at CALLBACK time through a ref. The first version compared `mission.id`
+  // against a value captured in the same render, so both sides moved together and the comparison
+  // could never fail -- a valid answer for the Mission the Operator had left still entered the new
+  // Mission's review.
+  //
+  // TWO counters because an edit and a Mission change retire DIFFERENT things. `attempt` retires a
+  // leg outright: a newer leg owns the screen, or this is no longer that Mission, so the answer is
+  // written nowhere. `draft` retires only a PREVIEW's content: a preview describes the draft it was
+  // derived from, and after an edit that draft is gone. A record's outcome is never retired by an
+  // edit -- ignoring a late result does not cancel a native write, so the write is still owed a
+  // truthful answer even if the Operator typed while it was in flight.
+  const live = useRef({ missionId: mission.id, attempt: 0, draft: 0 });
 
-  /** Any edit discards the preview: what was reviewed is no longer what would be sent. */
+  /** Start an asynchronous leg. Everything older is now stale. */
+  function fresh(): Leg {
+    live.current.attempt += 1;
+    return { attempt: live.current.attempt, draft: live.current.draft };
+  }
+
+  /** A newer leg started, or this is no longer that Mission: write nothing at all. */
+  function stale(mine: Leg): boolean {
+    return live.current.attempt !== mine.attempt;
+  }
+
+  /** The draft moved on, so a preview of it describes something that no longer exists. */
+  function describesAGoneDraft(mine: Leg): boolean {
+    return live.current.draft !== mine.draft;
+  }
+
+  function resetDraft() {
+    setResident("");
+    setDisposition("");
+    setOutcomes(mission.successConditions.map(() => ""));
+    setNotes(mission.successConditions.map(() => ""));
+    setSupport(mission.successConditions.map(() => []));
+    setArtifacts("");
+    setUnfinished([]);
+    setUncertainty([]);
+    setSpendKind("");
+    setSpendId("");
+    setSpendVersion("");
+    setSpendSha("");
+    setSpendReason("");
+    setSummary("");
+    setPreview(null);
+    setConfirmed(false);
+    setPending("");
+    setFailure("");
+    setOutcome("");
+  }
+
+  // Cancelling the review removes the control that had focus. Focus is returned to the control the
+  // review was opened from once it is back on screen; leaving it on <body> loses a keyboard user's
+  // place entirely.
+  useEffect(() => {
+    if (preview !== null || !returnFocus.current) return;
+    returnFocus.current = false;
+    reviewTrigger.current?.focus();
+  }, [preview]);
+
+  // A different Mission inherits NOTHING: not an assessment, not a Resident, not a preview. The
+  // draft is retained only while the Mission is the same one.
+  useEffect(() => {
+    if (live.current.missionId === mission.id) return;
+    live.current.missionId = mission.id;
+    live.current.attempt += 1;
+    resetDraft();
+  }, [mission.id]);
+
+  /** Any edit discards the preview AND retires any leg still running: what was reviewed is no longer
+   *  what would be sent, and a preview that arrives after the edit describes a draft that is gone. */
   function edited<T>(set: (value: T) => void) {
     return (value: T) => {
+      live.current.draft += 1;
       setPreview(null);
       setConfirmed(false);
       setOutcome("");
@@ -199,7 +319,7 @@ export function MissionCompletionCompose({
         if (ref === null) return null;
         refs.push(ref);
       }
-      if (!withinShort(notes[ordinal])) return null;
+      if (notes[ordinal] !== "" && !isShortText(notes[ordinal])) return null;
       conditionResults.push({
         ordinal,
         outcome: chosen as CompletionConditionInput["outcome"],
@@ -213,15 +333,15 @@ export function MissionCompletionCompose({
     const version = Number(spendVersion);
     const spend =
       spendKind === "recorded"
-        ? Number.isSafeInteger(version) && version >= 0
+        ? isU32(version)
           ? { recorded: { spendId, spendVersion: version, spendSha256: spendSha } }
           : null
         : { notMeasured: spendReason };
     if (spend === null) return null;
-    if (spendKind === "notMeasured" && !withinShort(spendReason)) return null;
-    if (unfinishedItems.some((item) => !withinShort(item.summary))) return null;
-    if (uncertaintyItems.some((item) => !withinShort(item.summary))) return null;
-    if (scalars(summary) > SUMMARY_SCALARS) return null;
+    if (spendKind === "notMeasured" && !isShortText(spendReason)) return null;
+    if (unfinishedItems.some((item) => !isShortText(item.summary))) return null;
+    if (uncertaintyItems.some((item) => !isShortText(item.summary))) return null;
+    if (!isOwnerText(summary, SUMMARY_SCALARS)) return null;
     return {
       missionId: mission.id,
       accountableResidentId: resident,
@@ -243,17 +363,37 @@ export function MissionCompletionCompose({
   function runPreview() {
     const value = request();
     if (value === null) return;
-    attempt.current += 1;
-    const mine = attempt.current;
-    const missionId = mission.id;
+    const mine = fresh();
     setPending("preview");
     setFailure("");
     previewMissionCompletion(value).then(
       (loaded) => {
-        if (attempt.current !== mine || mission.id !== missionId) return;
+        if (stale(mine)) return;
         setPending("");
+        if (describesAGoneDraft(mine)) return;
         if (loaded.request.missionId !== mission.id) {
           setFailure("The preview describes a different Mission.");
+          return;
+        }
+        // A structurally valid preview is still the wrong record if it is bound somewhere else. The
+        // Operator is about to confirm a permanent record: Workspace, Project and the historical
+        // admitted configuration are part of what is being confirmed, not decoration.
+        if (loaded.workspaceId !== mission.workspaceId) {
+          setFailure("The preview describes a different Workspace.");
+          return;
+        }
+        if (loaded.projectId !== mission.projectId) {
+          setFailure("The preview describes a different Project.");
+          return;
+        }
+        const admitted = mission.members.find(
+          (member) => member.residentId === value.accountableResidentId,
+        );
+        if (
+          admitted === undefined ||
+          loaded.accountableResidentConfigurationId !== admitted.admissionConfigurationId
+        ) {
+          setFailure("The preview names a different admitted configuration for that Resident.");
           return;
         }
         if (
@@ -270,18 +410,19 @@ export function MissionCompletionCompose({
         setPreview(loaded);
       },
       (error: unknown) => {
-        if (attempt.current !== mine || mission.id !== missionId) return;
+        if (stale(mine)) return;
         setPending("");
+        if (describesAGoneDraft(mine)) return;
         setFailure(describeCompletionWriteError(error));
       },
     );
   }
 
-  function readBack(reviewed: string, mine: number, missionId: string) {
+  function readBack(reviewed: string, mine: Leg) {
     setPending("recovery");
     getMissionCompletionIntent(mission.id).then(
       (token) => {
-        if (attempt.current !== mine || mission.id !== missionId) return;
+        if (stale(mine)) return;
         setPending("");
         if (token === null) setOutcome("not_visible");
         else if (token.intentSha256 === reviewed) {
@@ -290,7 +431,7 @@ export function MissionCompletionCompose({
         } else setOutcome("conflicting");
       },
       (error: unknown) => {
-        if (attempt.current !== mine || mission.id !== missionId) return;
+        if (stale(mine)) return;
         setPending("");
         setOutcome("unavailable");
         setFailure(describeCompletionWriteError(error));
@@ -298,18 +439,27 @@ export function MissionCompletionCompose({
     );
   }
 
+  /** A second READ of the submission that was already made. It never writes: the submitted review
+   *  is preserved, and recording again stays an explicit Operator action on it. */
+  function retryRead() {
+    if (submitted === "" || pending !== "") return;
+    const mine = fresh();
+    setOutcome("");
+    setFailure("");
+    readBack(submitted, mine);
+  }
+
   function runRecord() {
     if (preview === null || !confirmed) return;
-    attempt.current += 1;
-    const mine = attempt.current;
-    const missionId = mission.id;
+    const mine = fresh();
     const reviewed = preview.intentSha256;
+    setSubmitted(reviewed);
     setPending("record");
     setFailure("");
     // The FROZEN reviewed request, never a re-read of the live form.
     recordMissionCompletion(preview.request, reviewed).then(
       (ack) => {
-        if (attempt.current !== mine || mission.id !== missionId) return;
+        if (stale(mine)) return;
         if (ack.intentSha256 === reviewed) {
           setPending("");
           setOutcome("recorded");
@@ -317,13 +467,15 @@ export function MissionCompletionCompose({
           return;
         }
         // A differing acknowledgement is not accepted as success just because it arrived.
-        readBack(reviewed, mine, missionId);
+        readBack(reviewed, mine);
       },
       (error: unknown) => {
-        if (attempt.current !== mine || mission.id !== missionId) return;
+        // Ignoring a late result does NOT cancel a native write; the read-back is what establishes
+        // what happened, and it is still owed even when this leg is the current one.
+        if (stale(mine)) return;
         setFailure(describeCompletionWriteError(error));
         // The form and the frozen reviewed token are preserved; the READ decides what happened.
-        readBack(reviewed, mine, missionId);
+        readBack(reviewed, mine);
       },
     );
   }
@@ -557,7 +709,10 @@ export function MissionCompletionCompose({
                   ))}
                 </Dropdown>
               </Field>
-              <Field label={`${label} condition ${index + 1}`} hint="Blank for none">
+              <Field
+                label={`${label} condition ${index + 1}`}
+                hint="Condition number as numbered above; blank for none"
+              >
                 <Input
                   aria-label={`${label} condition ${index + 1}`}
                   value={draft.conditionOrdinal}
@@ -659,7 +814,12 @@ export function MissionCompletionCompose({
       )}
 
       {preview === null ? (
-        <Button appearance="primary" disabled={!ready || pending !== ""} onClick={runPreview}>
+        <Button
+          appearance="primary"
+          disabled={!ready || pending !== ""}
+          onClick={runPreview}
+          ref={reviewTrigger}
+        >
           Review completion
         </Button>
       ) : (
@@ -669,6 +829,17 @@ export function MissionCompletionCompose({
             Beacon assigns the completion identity, the recorded time and the boundary when it
             records. A completion cannot currently be replaced once recorded.
           </p>
+          {/* Every value the owner normalized, written out. A count is not a citation and a digest
+              the Operator never saw is not a reviewed binding, so the whole record is here as
+              readable detail -- never as raw JSON, which is not a review. */}
+          <p className={classes.body}>
+            Workspace {preview.workspaceId} · Project {preview.projectId} · Mission{" "}
+            {preview.request.missionId}
+          </p>
+          <p className={classes.body}>
+            Authored by the authenticated {preview.actor} · declared conditions digest{" "}
+            {preview.declaredConditionsSha256}
+          </p>
           <p className={classes.body}>
             Accountable Resident {preview.request.accountableResidentId} · admitted configuration{" "}
             {preview.accountableResidentConfigurationId} ·{" "}
@@ -677,34 +848,66 @@ export function MissionCompletionCompose({
           <ol className={classes.list} aria-label="Reviewed condition results">
             {preview.request.conditionResults.map((result) => (
               <li key={result.ordinal} className={classes.body}>
-                {preview.conditions[result.ordinal]} —{" "}
-                {OUTCOMES.find(([value]) => value === result.outcome)?.[1]} ·{" "}
-                {result.support.length === 0
-                  ? "none cited"
-                  : `${result.support.length} cited`}
-                {result.note !== null && ` · ${result.note}`}
+                Condition {result.ordinal + 1}: {preview.conditions[result.ordinal]} —{" "}
+                {labelFor(OUTCOMES, result.outcome)}
+                {result.note === null ? " · no note" : ` · note: ${result.note}`}
+                {result.support.length === 0 ? (
+                  " · none cited"
+                ) : (
+                  <ul className={classes.list} aria-label={`Support cited for condition ${result.ordinal + 1}`}>
+                    {result.support.map((ref) => (
+                      <li key={supportText(ref)} className={classes.body}>
+                        {supportText(ref)}
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </li>
             ))}
           </ol>
-          <p className={classes.body}>
-            {preview.request.deliveredArtifacts.length === 0
-              ? "No delivered Artifacts cited"
-              : `${preview.request.deliveredArtifacts.length} delivered Artifacts cited`}
-            {" · "}
-            {preview.request.unfinishedWork.length === 0
-              ? "No unfinished work recorded"
-              : `${preview.request.unfinishedWork.length} unfinished items recorded`}
-            {" · "}
-            {preview.request.uncertainty.length === 0
-              ? "No uncertainty recorded"
-              : `${preview.request.uncertainty.length} uncertainty items recorded`}
-          </p>
+          {preview.request.deliveredArtifacts.length === 0 ? (
+            <p className={classes.body}>No delivered Artifacts cited</p>
+          ) : (
+            <ul className={classes.list} aria-label="Reviewed delivered Artifacts">
+              {preview.request.deliveredArtifacts.map((digest) => (
+                <li key={digest} className={classes.body}>
+                  Delivered Artifact {digest}
+                </li>
+              ))}
+            </ul>
+          )}
+          {preview.request.unfinishedWork.length === 0 ? (
+            <p className={classes.body}>No unfinished work recorded</p>
+          ) : (
+            <ul className={classes.list} aria-label="Reviewed unfinished work">
+              {preview.request.unfinishedWork.map((item) => (
+                <li key={item.ordinal} className={classes.body}>
+                  {labelFor(UNFINISHED, item.kind)} · {relationText(item.conditionOrdinal)} ·{" "}
+                  {item.summary}
+                </li>
+              ))}
+            </ul>
+          )}
+          {preview.request.uncertainty.length === 0 ? (
+            <p className={classes.body}>No uncertainty recorded</p>
+          ) : (
+            <ul className={classes.list} aria-label="Reviewed uncertainty">
+              {preview.request.uncertainty.map((item) => (
+                <li key={item.ordinal} className={classes.body}>
+                  {labelFor(UNCERTAINTY, item.kind)} · {relationText(item.conditionOrdinal)} ·{" "}
+                  {item.summary}
+                </li>
+              ))}
+            </ul>
+          )}
           <p className={classes.body}>
             {"notMeasured" in preview.request.spend
               ? `Spend not measured: ${preview.request.spend.notMeasured}`
-              : `Spend record ${preview.request.spend.recorded.spendId} v${preview.request.spend.recorded.spendVersion}`}
+              : `Spend record ${preview.request.spend.recorded.spendId} version ` +
+                `${preview.request.spend.recorded.spendVersion} bytes ` +
+                `${preview.request.spend.recorded.spendSha256}`}
           </p>
-          <p className={classes.body}>{preview.request.summary}</p>
+          <p className={classes.body}>Summary: {preview.request.summary}</p>
           <div className={classes.row}>
             <Button
               appearance={confirmed ? "primary" : "secondary"}
@@ -723,6 +926,7 @@ export function MissionCompletionCompose({
             </Button>
             <Button
               onClick={() => {
+                returnFocus.current = true;
                 setPreview(null);
                 setConfirmed(false);
               }}
@@ -750,9 +954,14 @@ export function MissionCompletionCompose({
         </p>
       )}
       {outcome === "unavailable" && (
-        <p role="alert" className={classes.body}>
-          The recorded completion could not be read. Retry the read.
-        </p>
+        <>
+          <p role="alert" className={classes.body}>
+            The recorded completion could not be read. Retry the read.
+          </p>
+          <Button disabled={submitted === "" || pending !== ""} onClick={retryRead}>
+            Retry the read
+          </Button>
+        </>
       )}
     </section>
   );
