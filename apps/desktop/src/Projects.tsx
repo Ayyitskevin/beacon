@@ -180,6 +180,7 @@ export function ProjectsWorkspace({
   onCreate,
   onCancelCreate,
   onOpenProject,
+  onCloseProject,
   onCopyObjectLink,
   onSubmitProject,
   onReviseCharter,
@@ -224,6 +225,9 @@ export function ProjectsWorkspace({
   onCreate: () => void;
   onCancelCreate: () => void;
   onOpenProject: (projectId: string) => void;
+  /** Leave the open Project and show the portfolio again. The workspace holds no navigation
+   *  state of its own; the owner clears the selection, exactly as it sets it. */
+  onCloseProject: () => void;
   onCopyObjectLink: (link: AddressableObjectLink) => void;
   onSubmitProject: (draft: ProjectDraft) => void;
   onReviseCharter: () => void;
@@ -291,6 +295,7 @@ export function ProjectsWorkspace({
         />
       ) : selectedProject ? (
         <ProjectRecord
+          onCloseProject={onCloseProject}
           project={selectedProject}
           history={charterHistory}
           policy={projectPolicy}
@@ -555,6 +560,7 @@ function draftFromForm(value: CharterFormState): ProjectCharterDraft {
 }
 
 function ProjectRecord({
+  onCloseProject,
   project,
   history,
   policy,
@@ -606,6 +612,7 @@ function ProjectRecord({
   missionComposerOpen: boolean;
   busy: boolean;
   onRevise: () => void;
+  onCloseProject: () => void;
   onCopyObjectLink: (link: AddressableObjectLink) => void;
   onOpenPolicyComposer: () => void;
   onCancelPolicyComposer: () => void;
@@ -647,6 +654,12 @@ function ProjectRecord({
           </Button>
           <Button onClick={onRevise} disabled={busy}>
             Revise Charter
+          </Button>
+          {/* The way back. It sits in the record header beside the other record-level actions and
+              never inside a composer, so it cannot become a destructive control in a dirty form.
+              It reads nothing: the portfolio the owner already holds is what it returns to. */}
+          <Button onClick={onCloseProject} disabled={busy}>
+            All Projects
           </Button>
         </div>
       </div>
