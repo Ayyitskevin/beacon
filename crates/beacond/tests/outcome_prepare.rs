@@ -9680,6 +9680,23 @@ fn b12_payload_json_len(bytes: &[u8]) -> usize {
     serde_json::to_vec(&bytes.to_vec()).unwrap().len()
 }
 
+/// The completion's own maximum of unfinished-work items, at the largest summary each may carry.
+///
+/// 32 is `MAX_NARRATIVE_ITEMS` and each summary sits inside `MAX_SHORT_TEXT_SCALARS`: valid content
+/// an owner really recorded, not a synthetic blob. Extracted from
+/// `b16_a_large_owner_minted_outcome_crosses_byte_identically` so the large fixture recipe and that
+/// test cannot drift into producing different documents while claiming the same provenance.
+fn large_unfinished_work_items() -> Vec<NarrativeItem<UnfinishedKind>> {
+    (0..32)
+        .map(|ordinal| NarrativeItem {
+            ordinal,
+            kind: UnfinishedKind::DeferredScope,
+            condition_ordinal: None,
+            summary: format!("Deferred scope item {ordinal}: {}", "x".repeat(460)),
+        })
+        .collect()
+}
+
 #[test]
 fn b16_a_large_owner_minted_outcome_crosses_byte_identically() {
     // SMALL CONTROL -----------------------------------------------------------------------
@@ -9716,15 +9733,10 @@ fn b16_a_large_owner_minted_outcome_crosses_byte_identically() {
     // inside MAX_SHORT_TEXT_SCALARS. Valid content recorded by the owner, not a synthetic blob.
     let large = admitted_mission("b12-large");
     large.classify(ImpactLevel::Ordinary);
-    let unfinished: Vec<NarrativeItem<UnfinishedKind>> = (0..32)
-        .map(|ordinal| NarrativeItem {
-            ordinal,
-            kind: UnfinishedKind::DeferredScope,
-            condition_ordinal: None,
-            summary: format!("Deferred scope item {ordinal}: {}", "x".repeat(460)),
-        })
-        .collect();
-    large.complete_with((large.resident_id, large.configuration_id), unfinished);
+    large.complete_with(
+        (large.resident_id, large.configuration_id),
+        large_unfinished_work_items(),
+    );
     let (_c2, digest2, evaluation2) = large.publishable();
     large
         .outcomes
@@ -11106,16 +11118,45 @@ struct TwoVersionReadBack {
 /// recipe, its `fixture.json` schema and its three-file output are untouched: this writes its own
 /// manifest filename and its own per-version Markdown files, because a reader that cannot tell the
 /// two shapes apart is a reader that will eventually mistake one for the other.
+/// How much unfinished work the seeded completion records -- the ONLY thing that differs between
+/// the ordinary two-version fixture and the large one.
+///
+/// A parameter rather than a second generator: the recipe, the guards, the snapshot, the manifest
+/// and the readback are all the same code, so the two fixtures cannot drift apart in any respect
+/// except the one they are meant to differ in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FixtureScale {
+    /// No unfinished work: the B28 default, unchanged.
+    Ordinary,
+    /// The completion's maximum unfinished-work items, which pushes the exported Markdown's
+    /// serialized `number[]` payload past the old command-specific response allowance.
+    LargeUnfinishedWork,
+}
+
 fn mint_two_version_outcome_fixture_within(
     prefix: &Path,
     output: Option<&Path>,
+) -> Result<MintedTwoVersionFixture, FixtureMintRefusal> {
+    mint_two_version_fixture_with_scale(prefix, output, FixtureScale::Ordinary)
+}
+
+fn mint_two_version_fixture_with_scale(
+    prefix: &Path,
+    output: Option<&Path>,
+    scale: FixtureScale,
 ) -> Result<MintedTwoVersionFixture, FixtureMintRefusal> {
     let output = prepare_private_output(prefix, output)?;
     let output = output.as_path();
 
     let fixture = admitted_mission("b28-two-version-fixture");
     fixture.classify(ImpactLevel::Ordinary);
-    fixture.complete((fixture.resident_id, fixture.configuration_id));
+    match scale {
+        FixtureScale::Ordinary => fixture.complete((fixture.resident_id, fixture.configuration_id)),
+        FixtureScale::LargeUnfinishedWork => fixture.complete_with(
+            (fixture.resident_id, fixture.configuration_id),
+            large_unfinished_work_items(),
+        ),
+    };
 
     let (_, first_digest, first_evaluation) = fixture.publishable();
     fixture
@@ -11490,4 +11531,235 @@ fn mint_two_version_outcome_fixture_into_the_named_directory() {
         );
     }
     println!("  manifest           {}", minted.manifest_path.display());
+}
+
+// ---------------------------------------------------------------------------------------------
+// B31: the same two-version fixture, large enough to cross the old response allowance
+// ---------------------------------------------------------------------------------------------
+//
+// PR148's command-specific response limit has an owner/client test but no packaged large-document
+// copy. This mints the discriminating input for that: a two-version fixture whose exported Markdown,
+// serialized the way the wire actually carries it, exceeds the old allowance on its own. B26's
+// package `0fce9e6` still carries the old client limit and can serve as the negative control; a
+// later UI+PR148 package is the positive one. **Neither package is built here.**
+//
+// Only the completion's unfinished work differs from the ordinary two-version fixture. Same guards,
+// same snapshot, same manifest schema, same readback.
+
+/// The old command-specific response allowance, as a plain number rather than an imported constant.
+///
+/// Deliberately NOT `MAX_MESSAGE_BYTES`: a bar that reads the same constant the code reads moves
+/// whenever the code moves and can never fail. This is the figure the fixture must beat, written out.
+const B31_OLD_RESPONSE_ALLOWANCE: usize = 64 * 1024;
+
+/// The positive bar: both versions are large, different, and each is reachable at its own number.
+#[test]
+fn a_large_two_version_fixture_exceeds_the_old_response_allowance_in_both_versions() {
+    let prefix = PrivatePrefix::new("b31-large");
+    let output = PrivateOutput::under(&prefix, "large-two-version");
+    let minted = mint_two_version_fixture_with_scale(
+        &prefix.path,
+        Some(&output.path),
+        FixtureScale::LargeUnfinishedWork,
+    )
+    .expect("B31.MINT.SUCCEEDS");
+
+    let v1 = minted.at(1).clone();
+    let v2 = minted.at(2).clone();
+
+    // The size precondition, measured through serde_json's ACTUAL serialization of the `number[]`
+    // the wire carries -- not hand arithmetic, and a lower bound on the whole response, since the
+    // envelope, digest, version fields and media type are all additional.
+    for p in [&v1, &v2] {
+        let payload = b12_payload_json_len(&p.markdown_bytes);
+        println!(
+            "B31.VERSION {} stored_bytes = {} payload_json_len = {}",
+            p.version,
+            p.markdown_bytes.len(),
+            payload
+        );
+        assert!(
+            payload > B31_OLD_RESPONSE_ALLOWANCE,
+            "B31.PAYLOAD_EXCEEDS_OLD_RESPONSE_ALLOWANCE: version {} serialized to {} bytes, \
+             which does not exceed {}",
+            p.version,
+            payload,
+            B31_OLD_RESPONSE_ALLOWANCE
+        );
+    }
+
+    // Still two genuinely different versions, so the selection test stays discriminating.
+    assert_ne!(
+        v1.markdown_bytes, v2.markdown_bytes,
+        "B31.MINT.BYTES_DIFFER"
+    );
+    assert_ne!(
+        v1.candidate_artifact_digest, v2.candidate_artifact_digest,
+        "B31.MINT.DIGESTS_DIFFER"
+    );
+    assert!(!v1.is_current && v2.is_current, "B31.MINT.V2_IS_CURRENT");
+
+    // The owner-recorded content really is what makes them large.
+    for p in [&v1, &v2] {
+        let text = String::from_utf8(p.markdown_bytes.clone()).expect("B31.MINT.MARKDOWN_IS_UTF8");
+        assert!(
+            text.contains("Deferred scope item 0:") && text.contains("Deferred scope item 31:"),
+            "B31.MINT.DOCUMENT_CARRIES_THE_OWNER_RECORDED_UNFINISHED_WORK"
+        );
+        assert!(
+            text.contains(FIXTURE_MISSION_DECLARATION),
+            "B31.MINT.DOCUMENT_CARRIES_THE_SEEDED_DECLARATION"
+        );
+    }
+
+    // Modes and every retained hash, before anything reopens the store.
+    assert_eq!(
+        mode_of(&minted.directory),
+        0o700,
+        "B31.MINT.DIRECTORY_IS_0700"
+    );
+    for path in [
+        &minted.snapshot_path,
+        &minted.manifest_path,
+        &v1.markdown_path,
+        &v2.markdown_path,
+    ] {
+        assert_eq!(mode_of(path), 0o600, "B31.MINT.FILE_IS_0600");
+    }
+    for p in [&v1, &v2] {
+        let on_disk = fs::read(&p.markdown_path).expect("B31.MINT.MARKDOWN_READS");
+        assert_eq!(
+            on_disk, p.markdown_bytes,
+            "B31.MINT.MARKDOWN_FILE_IS_THE_EXPORT"
+        );
+        assert_eq!(
+            sha256_hex_of(&on_disk),
+            p.markdown_sha256,
+            "B31.MINT.MARKDOWN_SHA"
+        );
+    }
+    let snapshot_before =
+        sha256_hex_of(&fs::read(&minted.snapshot_path).expect("B31.MINT.SNAPSHOT_READS"));
+    assert_eq!(
+        snapshot_before, minted.snapshot_sha256,
+        "B31.MINT.SNAPSHOT_SHA"
+    );
+
+    // The B28 readback assertions, reused: a verified COPY is opened, never the retained original.
+    let read_back = read_back_two_version_fixture(&minted);
+    assert!(
+        !read_back.workspace_created,
+        "B31.READBACK.WORKSPACE_WAS_NOT_CREATED_FRESH"
+    );
+    assert_eq!(read_back.workspace_id, minted.workspace_id);
+    assert_eq!(
+        read_back.history,
+        vec![
+            (2, true, v2.candidate_artifact_digest.clone()),
+            (1, false, v1.candidate_artifact_digest.clone()),
+        ],
+        "B31.READBACK.HISTORY_IS_2_NEWEST_1_SUPERSEDED"
+    );
+    let (v1_version, v1_count, v1_bytes, v1_digest) = read_back.exports[0].clone();
+    let (v2_version, v2_count, v2_bytes, v2_digest) = read_back.exports[1].clone();
+    assert_eq!(
+        (v1_version, v1_count),
+        (1, 2),
+        "B31.READBACK.V1_REPORTS_1_OF_2"
+    );
+    assert_eq!(
+        (v2_version, v2_count),
+        (2, 2),
+        "B31.READBACK.V2_REPORTS_2_OF_2"
+    );
+    assert_eq!(
+        v1_bytes, v1.markdown_bytes,
+        "B31.READBACK.V1_EXPORTS_ITS_OWN_BYTES"
+    );
+    assert_eq!(
+        v2_bytes, v2.markdown_bytes,
+        "B31.READBACK.V2_EXPORTS_ITS_OWN_BYTES"
+    );
+    assert_eq!(
+        v1_digest, v1.candidate_artifact_digest,
+        "B31.READBACK.V1_DIGEST"
+    );
+    assert_eq!(
+        v2_digest, v2.candidate_artifact_digest,
+        "B31.READBACK.V2_DIGEST"
+    );
+
+    // And the retained artifact is untouched by its own proof.
+    assert_eq!(
+        sha256_hex_of(&fs::read(&minted.snapshot_path).expect("B31.READBACK.SNAPSHOT_STILL_READS")),
+        minted.snapshot_sha256,
+        "B31.READBACK.RETAINED_SNAPSHOT_SURVIVES_ITS_OWN_PROOF"
+    );
+    for p in [&v1, &v2] {
+        assert_eq!(
+            sha256_hex_of(&fs::read(&p.markdown_path).expect("B31.READBACK.MARKDOWN_STILL_READS")),
+            p.markdown_sha256,
+            "B31.READBACK.RETAINED_MARKDOWN_SURVIVES_ITS_OWN_PROOF"
+        );
+    }
+}
+
+/// Mints the LARGE two-version fixture into a directory you name. Not part of the suite.
+///
+///     export TMPDIR="$(mktemp -d)"    # 0700, yours, under /tmp -- the prefix the guard requires
+///     BEACON_B31_FIXTURE_DIR="$(mktemp -u "$TMPDIR/beacon-b31-XXXXXX")" \
+///         cargo test -p beacond --test outcome_prepare -- --ignored --exact \
+///         mint_large_two_version_outcome_fixture_into_the_named_directory --nocapture
+///
+/// Its own env variable, so neither the one-version nor the ordinary two-version manual test
+/// changes meaning. It writes the SAME two-version manifest schema -- only the content is larger --
+/// so a consumer reads it exactly as it reads the ordinary one.
+#[test]
+#[ignore = "mints a large two-version private fixture into a directory you name; run deliberately, never as part of the suite"]
+fn mint_large_two_version_outcome_fixture_into_the_named_directory() {
+    let named = std::env::var_os("BEACON_B31_FIXTURE_DIR").map(PathBuf::from);
+    let prefix = std::env::temp_dir();
+    let minted = mint_two_version_fixture_with_scale(
+        &prefix,
+        named.as_deref(),
+        FixtureScale::LargeUnfinishedWork,
+    )
+    .unwrap_or_else(|refusal| panic!("{refusal}"));
+
+    for p in &minted.publications {
+        assert!(
+            b12_payload_json_len(&p.markdown_bytes) > B31_OLD_RESPONSE_ALLOWANCE,
+            "B31.PAYLOAD_EXCEEDS_OLD_RESPONSE_ALLOWANCE"
+        );
+    }
+    let read_back = read_back_two_version_fixture(&minted);
+    assert_eq!(read_back.exports[0].2, minted.at(1).markdown_bytes);
+    assert_eq!(read_back.exports[1].2, minted.at(2).markdown_bytes);
+
+    println!(
+        "B31 large two-version fixture minted at {}",
+        minted.directory.display()
+    );
+    println!("  source head        {}", minted.source_head);
+    println!("  schema version     {}", minted.schema_version);
+    println!("  mission            {}", minted.mission_id);
+    println!("  snapshot           {}", minted.snapshot_path.display());
+    println!("  snapshot sha256    {}", minted.snapshot_sha256);
+    println!("  manifest           {}", minted.manifest_path.display());
+    for p in &minted.publications {
+        println!(
+            "  version {} ({}) {} markdown_bytes {} payload_json_len {} sha256 {} digest {}",
+            p.version,
+            if p.is_current {
+                "current"
+            } else {
+                "superseded"
+            },
+            p.markdown_file,
+            p.markdown_bytes.len(),
+            b12_payload_json_len(&p.markdown_bytes),
+            p.markdown_sha256,
+            p.candidate_artifact_digest
+        );
+    }
 }
