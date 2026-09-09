@@ -2180,10 +2180,9 @@ fn a_listed_mission_whose_event_disagrees_refuses_the_whole_list() {
     let refusal = MissionService::new(Arc::clone(&accounts), store.workspace_id)
         .list(project_id)
         .expect_err("B12.LIST.EVERY_ROW_IS_OWNER_VERIFIED");
-    assert_eq!(
-        refusal.to_string(),
-        MissionError::InvalidStore.to_string(),
-        "B12.LIST.EVERY_ROW_IS_OWNER_VERIFIED"
+    assert!(
+        matches!(refusal, MissionError::InvalidStore),
+        "B12.LIST.EVERY_ROW_IS_OWNER_VERIFIED: {refusal:?}"
     );
 }
 
@@ -2197,10 +2196,9 @@ fn a_broken_last_row_refuses_the_whole_list_rather_than_returning_a_good_prefix(
     let refusal = MissionService::new(Arc::clone(&accounts), store.workspace_id)
         .list(project_id)
         .expect_err("B12.LIST.NO_GOOD_PREFIX");
-    assert_eq!(
-        refusal.to_string(),
-        MissionError::InvalidStore.to_string(),
-        "B12.LIST.NO_GOOD_PREFIX"
+    assert!(
+        matches!(refusal, MissionError::InvalidStore),
+        "B12.LIST.NO_GOOD_PREFIX: {refusal:?}"
     );
 }
 
@@ -2252,10 +2250,9 @@ fn a_listed_mission_with_no_admission_event_refuses_the_list() {
     let refusal = MissionService::new(Arc::clone(&accounts), store.workspace_id)
         .list(project_id)
         .expect_err("B12.LIST.UNREADABLE_IS_NOT_ABSENT");
-    assert_eq!(
-        refusal.to_string(),
-        MissionError::InvalidStore.to_string(),
-        "B12.LIST.UNREADABLE_IS_NOT_ABSENT"
+    assert!(
+        matches!(refusal, MissionError::InvalidStore),
+        "B12.LIST.UNREADABLE_IS_NOT_ABSENT: {refusal:?}"
     );
 }
 
@@ -2288,10 +2285,9 @@ fn a_listed_mission_with_two_admission_events_refuses_the_list() {
     let refusal = MissionService::new(Arc::clone(&accounts), store.workspace_id)
         .list(project_id)
         .expect_err("B12.LIST.EXACTLY_ONE_EVENT_PER_LISTED_MISSION");
-    assert_eq!(
-        refusal.to_string(),
-        MissionError::InvalidStore.to_string(),
-        "B12.LIST.EXACTLY_ONE_EVENT_PER_LISTED_MISSION"
+    assert!(
+        matches!(refusal, MissionError::InvalidStore),
+        "B12.LIST.EXACTLY_ONE_EVENT_PER_LISTED_MISSION: {refusal:?}"
     );
 }
 
@@ -2309,29 +2305,38 @@ fn a_project_with_no_admitted_missions_lists_empty_rather_than_refusing() {
 
 #[test]
 fn an_absent_project_and_another_workspaces_project_are_both_project_not_found() {
-    let store = TestStore::new("b12-scope-a");
+    // ONE store, one connection, one REAL Project row -- read once under its own Workspace and once
+    // under a foreign one. A second database would only prove that an id absent from an empty store
+    // is absent, which is a different claim (root's B12 fold finding).
+    let store = TestStore::new("b12-scope");
     let accounts = enrolled_accounts(&store);
-    let (_project_id, _expected) = project_with_two_missions(&store, &accounts);
-    let other = TestStore::new("b12-scope-b");
-    let other_accounts = enrolled_accounts(&other);
-    let other_project = prepare_team(&other, &other_accounts, 1).project.id;
-
+    let (project_id, _expected) = project_with_two_missions(&store, &accounts);
     let missions = MissionService::new(Arc::clone(&accounts), store.workspace_id);
+    assert_eq!(
+        missions.list(project_id).unwrap().len(),
+        2,
+        "the held Project id really exists in this store"
+    );
+
     let absent = missions
         .list(Uuid::new_v4())
-        .expect_err("B12.LIST.SCOPE_IS_OPAQUE");
-    let foreign = missions
-        .list(other_project)
-        .expect_err("B12.LIST.SCOPE_IS_OPAQUE");
-    assert_eq!(
-        absent.to_string(),
-        MissionError::ProjectNotFound.to_string(),
-        "B12.LIST.SCOPE_IS_OPAQUE"
+        .expect_err("B12.LIST.ABSENT_NAME");
+    let foreign = MissionService::new(accounts, Uuid::new_v4())
+        .list(project_id)
+        .expect_err("B12.LIST.FOREIGN_NAME");
+
+    assert!(
+        matches!(absent, MissionError::ProjectNotFound),
+        "B12.LIST.ABSENT_NAME: {absent:?}"
+    );
+    assert!(
+        matches!(foreign, MissionError::ProjectNotFound),
+        "B12.LIST.FOREIGN_NAME: {foreign:?}"
     );
     assert_eq!(
-        foreign.to_string(),
-        absent.to_string(),
-        "B12.LIST.SCOPE_IS_OPAQUE: another Workspace's Project must not be distinguishable"
+        absent.to_string().as_bytes(),
+        foreign.to_string().as_bytes(),
+        "B12.LIST.SCOPE_REFUSALS_IDENTICAL"
     );
 }
 
@@ -2367,5 +2372,34 @@ fn the_listing_keeps_the_admitted_configuration_after_the_resident_is_reconfigur
     assert_eq!(
         listed[0].members[0].admission_configuration_id, original.id,
         "B12.LIST.HISTORY_IS_NOT_REWRITTEN_BY_CURRENT_STATE"
+    );
+}
+
+#[test]
+fn a_listed_mission_with_an_unreadable_admission_payload_refuses_as_json_not_absent() {
+    let store = TestStore::new("b12-unreadable-payload");
+    let accounts = enrolled_accounts(&store);
+    let (project_id, expected) = project_with_two_missions(&store, &accounts);
+    // INTENTIONAL CORRUPTION, after a real owner mint: still valid JSON, no longer a Mission.
+    let connection = Connection::open(&store.path).unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE events SET payload_json = json_remove(payload_json, '$.mission.constraints')
+                 WHERE kind = 'mission.admitted'
+                   AND json_extract(payload_json, '$.mission.id') = ?1",
+                [expected[1].id.to_string()],
+            )
+            .unwrap(),
+        1,
+        "B12.LIST.OWNER_PAYLOAD_UNREADABLE"
+    );
+
+    let refusal = MissionService::new(Arc::clone(&accounts), store.workspace_id)
+        .list(project_id)
+        .expect_err("B12.LIST.UNREADABLE_PAYLOAD_IS_NOT_ABSENT");
+    assert!(
+        matches!(refusal, MissionError::Json(_)),
+        "B12.LIST.UNREADABLE_PAYLOAD_IS_NOT_ABSENT: {refusal:?}"
     );
 }
