@@ -104,6 +104,8 @@ it("every surface test file runs the WCAG bar", () => {
     "the surface derivation found no test files: it has stopped matching",
   ).toEqual([
     "App.test.tsx",
+    "AstraC4Lifetimes.test.tsx",
+    "AstraC4Recovery.test.tsx",
     "BriefingReceipts.test.tsx",
     "MissionCompletion.test.tsx",
     "MissionCompletionCompose.test.tsx",

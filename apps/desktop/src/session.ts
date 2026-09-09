@@ -1358,12 +1358,12 @@ const COMPLETION_OUTCOMES = ["met", "not_met", "not_assessed", "assessment_incon
 function isCompletionConditionResult(value: unknown): value is CompletionConditionResult {
   return (
     hasExactKeys(value, ["note", "ordinal", "outcome", "supportCount"]) &&
-    isNonnegativeInteger(value.ordinal) &&
+    isCompletionU32(value.ordinal) &&
     typeof value.outcome === "string" &&
     (COMPLETION_OUTCOMES as readonly string[]).includes(value.outcome) &&
-    isNonnegativeInteger(value.supportCount) &&
+    isCompletionU32(value.supportCount) &&
     value.supportCount <= COMPLETION_MAX_SUPPORT_PER_CONDITION &&
-    (value.note === null || isTrimmedText(value.note, COMPLETION_SHORT_TEXT_SCALARS))
+    (value.note === null || isCompletionText(value.note, COMPLETION_SHORT_TEXT_SCALARS))
   );
 }
 
@@ -1387,9 +1387,9 @@ function isCompletionViewOrAbsent(value: unknown): value is CompletionView | nul
     !isUuid(value.accountableResidentId) ||
     !isUuid(value.accountableResidentConfigurationId) ||
     (value.disposition !== "concluded" && value.disposition !== "abandoned") ||
-    !isNonnegativeInteger(value.deliveredArtifactCount) ||
+    !isCompletionU32(value.deliveredArtifactCount) ||
     value.deliveredArtifactCount > COMPLETION_MAX_DELIVERED_ARTIFACTS ||
-    !isNonnegativeInteger(value.unfinishedWorkCount) ||
+    !isCompletionU32(value.unfinishedWorkCount) ||
     value.unfinishedWorkCount > COMPLETION_MAX_NARRATIVE_ITEMS ||
     !Array.isArray(value.conditionResults) ||
     value.conditionResults.length > COMPLETION_MAX_CONDITIONS ||
@@ -1406,6 +1406,28 @@ function isCompletionViewOrAbsent(value: unknown): value is CompletionView | nul
 // The owner's limits, cited to `mission_completion.rs:124-133`. The frontend refuses what the owner
 // would refuse; it is never the authority on canonical size or on what a citation means.
 const COMPLETION_MAX_SUMMARY_SCALARS = 2_000;
+
+/** A completion count, version or ordinal is a lossless `u32` in the owner's codec, so `2**32`
+ *  is out of domain even though it is a safe JS integer. Deliberately NOT a narrowing of the shared
+ *  `isNonnegativeInteger`: that helper also guards millisecond instants (`createdAtMs`,
+ *  `admittedAtMs`, ...) for unrelated commands, where a u32 ceiling would refuse correct values. */
+function isCompletionU32(value: unknown): value is number {
+  return isNonnegativeInteger(value) && value <= MAX_U32_COUNT;
+}
+
+/** The owner's completion text grammar, `require_text` at `mission_completion.rs:489-506`: nonempty,
+ *  trimmed, at most `maxScalars` Unicode scalars, and no control character other than LF or TAB,
+ *  which the owner treats as content. Neither shared helper is this grammar -- `isTrimmedText`
+ *  accepts every control character and `isTrimmedTextWithoutControls` refuses the LF and TAB the
+ *  owner allows -- and changing either would change unrelated commands. */
+function isCompletionText(value: unknown, maxScalars: number): value is string {
+  return (
+    isTrimmedText(value, maxScalars) &&
+    !Array.from(value).some(
+      (character) => /\p{Cc}/u.test(character) && character !== "\n" && character !== "\t",
+    )
+  );
+}
 
 function isHex64(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
@@ -1424,7 +1446,7 @@ function isSupportRefDto(value: unknown): value is SupportRefDto {
   return (
     hasExactKeys(receipt, ["receiptBytesSha256", "receiptVersion", "runId"]) &&
     isUuid(receipt.runId) &&
-    isNonnegativeInteger(receipt.receiptVersion) &&
+    isCompletionU32(receipt.receiptVersion) &&
     isHex64(receipt.receiptBytesSha256)
   );
 }
@@ -1432,11 +1454,11 @@ function isSupportRefDto(value: unknown): value is SupportRefDto {
 function isNarrativeInput(value: unknown, kinds: readonly string[]): boolean {
   return (
     hasExactKeys(value, ["conditionOrdinal", "kind", "ordinal", "summary"]) &&
-    isNonnegativeInteger(value.ordinal) &&
+    isCompletionU32(value.ordinal) &&
     typeof value.kind === "string" &&
     kinds.includes(value.kind) &&
-    (value.conditionOrdinal === null || isNonnegativeInteger(value.conditionOrdinal)) &&
-    isTrimmedText(value.summary, COMPLETION_SHORT_TEXT_SCALARS)
+    (value.conditionOrdinal === null || isCompletionU32(value.conditionOrdinal)) &&
+    isCompletionText(value.summary, COMPLETION_SHORT_TEXT_SCALARS)
   );
 }
 
@@ -1446,14 +1468,14 @@ function isSpendReferenceDto(value: unknown): value is SpendReferenceDto {
   if (keys.length !== 1) return false;
   const record = value as Record<string, unknown>;
   if (keys[0] === "notMeasured") {
-    return isTrimmedText(record.notMeasured, COMPLETION_SHORT_TEXT_SCALARS);
+    return isCompletionText(record.notMeasured, COMPLETION_SHORT_TEXT_SCALARS);
   }
   if (keys[0] !== "recorded") return false;
   const recorded = record.recorded;
   return (
     hasExactKeys(recorded, ["spendId", "spendSha256", "spendVersion"]) &&
     isUuid(recorded.spendId) &&
-    isNonnegativeInteger(recorded.spendVersion) &&
+    isCompletionU32(recorded.spendVersion) &&
     isHex64(recorded.spendSha256)
   );
 }
@@ -1493,13 +1515,13 @@ function isCompletionIntentRequest(value: unknown): value is CompletionIntentReq
     value.conditionResults.every(
       (result: unknown) =>
         hasExactKeys(result, ["note", "ordinal", "outcome", "support"]) &&
-        isNonnegativeInteger(result.ordinal) &&
+        isCompletionU32(result.ordinal) &&
         typeof result.outcome === "string" &&
         (COMPLETION_OUTCOMES as readonly string[]).includes(result.outcome) &&
         Array.isArray(result.support) &&
         result.support.length <= COMPLETION_MAX_SUPPORT_PER_CONDITION &&
         result.support.every(isSupportRefDto) &&
-        (result.note === null || isTrimmedText(result.note, COMPLETION_SHORT_TEXT_SCALARS)),
+        (result.note === null || isCompletionText(result.note, COMPLETION_SHORT_TEXT_SCALARS)),
     ) &&
     Array.isArray(value.deliveredArtifacts) &&
     value.deliveredArtifacts.length <= COMPLETION_MAX_DELIVERED_ARTIFACTS &&
@@ -1511,7 +1533,7 @@ function isCompletionIntentRequest(value: unknown): value is CompletionIntentReq
     value.uncertainty.length <= COMPLETION_MAX_NARRATIVE_ITEMS &&
     value.uncertainty.every((item: unknown) => isNarrativeInput(item, UNCERTAINTY_KINDS)) &&
     isSpendReferenceDto(value.spend) &&
-    isTrimmedText(value.summary, COMPLETION_MAX_SUMMARY_SCALARS)
+    isCompletionText(value.summary, COMPLETION_MAX_SUMMARY_SCALARS)
   );
 }
 
