@@ -636,42 +636,13 @@ fn list_missions(
     // standing in for a refusal. A row that vanished between the enumeration and its read is
     // `InvalidStore` for the same reason -- the enumeration saw it.
     ids.into_iter()
-        .enumerate()
-        .map(|(index, id)| {
+        .map(|id| {
             let id = parse_uuid(id)?;
-            let verified = verified_mission_admission(connection, workspace_id, id)?
-                .ok_or(MissionError::InvalidStore)?;
-            after_listed_row(index);
-            Ok(verified)
+            verified_mission_admission(connection, workspace_id, id)?
+                .ok_or(MissionError::InvalidStore)
         })
         .collect()
 }
-
-/// A private observation point between two listed rows, compiled only into this crate's own test
-/// build. It exists so a bar can commit an independent write at the exact instant that
-/// distinguishes one whole-list snapshot from a snapshot per returned Mission; there is no public
-/// hook, no feature, and nothing outside `cfg(test)` can install one.
-#[cfg(test)]
-type ListedRowHook = Box<dyn Fn(usize) + Send>;
-
-#[cfg(test)]
-static AFTER_LISTED_ROW: std::sync::Mutex<Option<ListedRowHook>> = std::sync::Mutex::new(None);
-
-#[cfg(test)]
-fn set_after_listed_row_hook(hook: Option<ListedRowHook>) {
-    *AFTER_LISTED_ROW.lock().unwrap() = hook;
-}
-
-#[cfg(test)]
-fn after_listed_row(index: usize) {
-    let hook = AFTER_LISTED_ROW.lock().unwrap();
-    if let Some(hook) = hook.as_ref() {
-        hook(index);
-    }
-}
-
-#[cfg(not(test))]
-fn after_listed_row(_index: usize) {}
 
 fn load_stored_mission(
     connection: &Connection,
@@ -1294,7 +1265,6 @@ mod verified_admission_reader {
     use std::net::{Ipv4Addr, SocketAddr, TcpListener};
     use std::path::PathBuf;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread::{self, JoinHandle};
 
     use rusqlite::Connection;
@@ -1608,69 +1578,160 @@ mod verified_admission_reader {
 
     /// The whole list comes from ONE snapshot, not one per returned Mission.
     ///
-    /// A private `cfg(test)` observation point fires between the two rows. The hook opens a
-    /// SECOND connection and commits a real WAL write that would make the *second* Mission refuse
-    /// -- so a snapshot per Mission produces `InvalidStore`, and one snapshot for the list produces
-    /// the two coherent views the store held when the read began. The write is then proved to have
-    /// reached and committed by the next read observing it. No sleep, no generated load, and the
-    /// discrimination is against a per-row TRANSACTION, not against a raw unverified read.
+    /// The interleave uses B11's connection-owned SQLite trace idiom: `sqlite3_trace_v2` installed
+    /// on **this test's own account connection handle**, removed by an RAII guard whose `Drop` runs
+    /// even when an assertion unwinds. There is no process-global, no product hook, no public API,
+    /// no sleep and no scheduling assumption -- and, because the callback is keyed to one
+    /// connection, another store's public listing cannot consume this test's trigger. Root measured
+    /// that failure on the previous global-callback version (`probe-unrelated-list.*`), and the
+    /// unrelated-store call below is the regression for it.
+    ///
+    /// The write lands while the FIRST Mission is being proved and targets the SECOND. Under one
+    /// list snapshot nothing sees it; under a transaction per returned Mission the second Mission's
+    /// own snapshot begins after the commit and refuses.
     #[test]
     fn the_whole_listing_comes_from_one_snapshot_not_one_per_mission() {
-        let store = TestStore::new("b12-snapshot");
-        let accounts = enrolled_accounts(&store);
-        let (project_id, expected) = project_with_two_missions(&store, &accounts);
-        let missions = MissionService::new(Arc::clone(&accounts), store.workspace_id);
+        use rusqlite::ffi;
+        use std::ffi::{CStr, c_int, c_uint, c_void};
 
-        let path = store.path.clone();
-        let victim = expected[1].id;
-        let fired = Arc::new(AtomicUsize::new(0));
-        let changed_rows = Arc::new(AtomicUsize::new(0));
-        let hook_fired = Arc::clone(&fired);
-        let hook_changed = Arc::clone(&changed_rows);
-        set_after_listed_row_hook(Some(Box::new(move |index| {
-            // Exactly once, immediately after the FIRST row is verified and before the second is.
-            if index != 0 || hook_fired.fetch_add(1, Ordering::SeqCst) != 0 {
-                return;
+        struct Rewrite {
+            writer: Connection,
+            mission_id: String,
+            attempted: bool,
+            changed: Option<Result<usize, String>>,
+            panicked: bool,
+        }
+
+        unsafe extern "C" fn before_statement(
+            kind: c_uint,
+            context: *mut c_void,
+            _statement: *mut c_void,
+            sql: *mut c_void,
+        ) -> c_int {
+            if kind != ffi::SQLITE_TRACE_STMT as c_uint || sql.is_null() {
+                return 0;
             }
-            // INTENTIONAL CORRUPTION on an independent connection, committed while the list read
-            // is in flight: the second Mission's Event stops matching its row.
-            let writer = Connection::open(&path).unwrap();
-            let changed = writer
-                .execute(
-                    "UPDATE events
-                     SET payload_json =
-                         json_set(payload_json, '$.mission.desiredOutcome', 'rewritten mid-list')
-                     WHERE kind = 'mission.admitted'
-                       AND json_extract(payload_json, '$.mission.id') = ?1",
-                    rusqlite::params![victim.to_string()],
-                )
-                .unwrap();
-            hook_changed.store(changed, Ordering::SeqCst);
-        })));
+            // SAFETY: SQLite passes the registered live Box and a NUL-terminated SQL string for
+            // SQLITE_TRACE_STMT. The callback runs synchronously on this test's calling thread.
+            let state = unsafe { &mut *context.cast::<Rewrite>() };
+            let sql = unsafe { CStr::from_ptr(sql.cast()) }.to_bytes();
+            // The first Event read: the reader has begun proving the FIRST listed Mission.
+            if state.attempted || !sql.windows(11).any(|part| part == b"FROM events") {
+                return 0;
+            }
+            state.attempted = true;
+            // A Rust panic must never unwind through SQLite's C callback.
+            let changed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                state
+                    .writer
+                    .execute(
+                        "UPDATE events SET payload_json = json_set(
+                             payload_json, '$.mission.desiredOutcome', 'Rewritten mid-list')
+                         WHERE kind = 'mission.admitted'
+                           AND json_extract(payload_json, '$.mission.id') = ?1",
+                        [&state.mission_id],
+                    )
+                    .map_err(|error| error.to_string())
+            }));
+            match changed {
+                Ok(result) => state.changed = Some(result),
+                Err(_) => state.panicked = true,
+            }
+            0
+        }
 
-        let listed = missions.list(project_id);
-        set_after_listed_row_hook(None);
+        struct TraceGuard {
+            handle: *mut ffi::sqlite3,
+            // Keeps the connection alive until Drop unregisters the callback, including unwinds.
+            _accounts: Arc<OperatorAccountService>,
+            state: Box<Rewrite>,
+        }
+        impl Drop for TraceGuard {
+            fn drop(&mut self) {
+                // SAFETY: the Arc keeps this handle alive, the test shares it with no worker,
+                // and unregistering precedes dropping the callback context even after an assertion.
+                unsafe {
+                    ffi::sqlite3_trace_v2(self.handle, 0, None, std::ptr::null_mut());
+                }
+            }
+        }
 
-        // The writer reached its point and committed exactly one row.
-        assert_eq!(fired.load(Ordering::SeqCst), 1, "B12.LIST.WRITER_REACHED");
-        assert_eq!(
-            changed_rows.load(Ordering::SeqCst),
-            1,
-            "B12.LIST.WRITER_COMMITTED"
+        let store = TestStore::new("b12-snapshot");
+        let setup_accounts = enrolled_accounts(&store);
+        let (project_id, expected) = project_with_two_missions(&store, &setup_accounts);
+
+        let accounts = Arc::new(OperatorAccountService::open(&store.path).unwrap());
+        accounts
+            .authenticate_password(
+                SecretString::new("a long local passphrase".to_owned()),
+                crate::AccessOrigin::SameMachine,
+            )
+            .unwrap();
+        let missions = MissionService::new(Arc::clone(&accounts), store.workspace_id);
+        let writer = store.open();
+        let mode: String = writer
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal", "B12.LIST.SNAPSHOT_WAL_PREMISE");
+
+        let mut guard = accounts
+            .with_authenticated_store(|connection, _now| {
+                let mut guard = TraceGuard {
+                    // SAFETY: the retained Arc owns this connection for the guard's whole lifetime.
+                    handle: unsafe { connection.handle() },
+                    _accounts: Arc::clone(&accounts),
+                    state: Box::new(Rewrite {
+                        writer,
+                        mission_id: expected[1].id.to_string(),
+                        attempted: false,
+                        changed: None,
+                        panicked: false,
+                    }),
+                };
+                // SAFETY: Box address is stable, the function signature matches SQLite, and Drop
+                // removes the callback before the Box or account connection can be destroyed.
+                let code = unsafe {
+                    ffi::sqlite3_trace_v2(
+                        guard.handle,
+                        ffi::SQLITE_TRACE_STMT as c_uint,
+                        Some(before_statement),
+                        (&mut *guard.state as *mut Rewrite).cast(),
+                    )
+                };
+                assert_eq!(code, ffi::SQLITE_OK, "B12.LIST.TRACE_INSTALLED");
+                Ok::<_, MissionError>(guard)
+            })
+            .unwrap();
+
+        // REGRESSION for root's measured isolation failure: a public listing on a SECOND real store
+        // runs on its own connection and must not consume this test's trigger.
+        let unrelated = TestStore::new("b12-snapshot-unrelated");
+        let unrelated_accounts = enrolled_accounts(&unrelated);
+        let (unrelated_project, _unrelated_missions) =
+            project_with_two_missions(&unrelated, &unrelated_accounts);
+        MissionService::new(Arc::clone(&unrelated_accounts), unrelated.workspace_id)
+            .list(unrelated_project)
+            .expect("the unrelated Project lists");
+        assert!(
+            !guard.state.attempted,
+            "B12.LIST.TRIGGER_IS_CONNECTION_OWNED: an unrelated store's list consumed it"
         );
 
-        // The first result is coherent with the instant the read began.
-        let listed = listed.expect("B12.LIST.ONE_SNAPSHOT_FOR_THE_WHOLE_LIST");
-        assert_eq!(listed, expected, "B12.LIST.ONE_SNAPSHOT_FOR_THE_WHOLE_LIST");
+        let listed = missions.list(project_id);
+        let attempted = guard.state.attempted;
+        let panicked = guard.state.panicked;
+        let changed = guard.state.changed.take();
+        drop(guard);
 
-        // And the very next read observes the committed change, so the write was real and durable
-        // rather than rolled back or invisible.
-        let refusal = missions
-            .list(project_id)
-            .expect_err("B12.LIST.NEXT_READ_OBSERVES_THE_WRITE");
+        assert!(attempted && !panicked, "B12.LIST.WRITER_REACHED");
+        assert_eq!(changed, Some(Ok(1)), "B12.LIST.WRITER_COMMITTED");
         assert_eq!(
-            refusal.name(),
-            "InvalidStore",
+            listed.expect("B12.LIST.ONE_SNAPSHOT_FOR_THE_WHOLE_LIST"),
+            expected,
+            "B12.LIST.ONE_SNAPSHOT_FOR_THE_WHOLE_LIST"
+        );
+        assert!(
+            matches!(missions.list(project_id), Err(MissionError::InvalidStore)),
             "B12.LIST.NEXT_READ_OBSERVES_THE_WRITE"
         );
     }
