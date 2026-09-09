@@ -2905,4 +2905,167 @@ describe("Beacon desktop shell", () => {
     ).toBeGreaterThan(0);
     await expectNoWcagViolations(container);
   });
+
+  // -------------------------------------------------------------------------------------------
+  // N15: a Project-scoped preflight display must not survive opening another Project
+  // -------------------------------------------------------------------------------------------
+  //
+  // App.tsx:1216-1255 `openProject` replaces the Project, Charter, Policy, Repository, Team and
+  // Mission state but never touches `preflightReceipt` (declared at :315). Projects.tsx:723-728
+  // hands that state straight to CheckPreflightSection, which speaks about "this Project"
+  // (CheckPreflight.tsx:78) and renders the stored commands and repository revision without ever
+  // receiving a Project key. Whether an ordinary UI path reaches it is what this measures.
+
+  const n15Charter = {
+    revision: 1,
+    purpose: "Ship the thing.",
+    desiredOutcomes: ["Reach the named Project"],
+    constraints: [],
+    prohibitions: [],
+    autonomyProfile: "supervised",
+    budgetBoundary: "no_spend",
+    externalEffects: "prohibited",
+    authoredAtMs: 123,
+  } as const;
+
+  function n15Project(id: string, name: string) {
+    return {
+      id,
+      workspaceId: acceptedOrganization.workspaceId,
+      name,
+      charter: n15Charter,
+      createdAtMs: 123,
+    } as const;
+  }
+
+  function n15Repository(projectId: string, command: string) {
+    return {
+      workspaceId: acceptedOrganization.workspaceId,
+      projectId,
+      revision: 1,
+      charterRevision: 1,
+      authorKind: "operator",
+      authoredAtMs: 200,
+      appliesToCurrentCharter: true,
+      sourceKind: "local_path",
+      source: "/srv/repo",
+      baseRevision: "0".repeat(40),
+      declaredChecks: [{ name: "gate", argv: [command], workingDirectory: "." }],
+    } as const;
+  }
+
+  function n15Receipt(projectId: string, runId: string, command: string) {
+    return {
+      version: 1,
+      runId,
+      workspaceId: acceptedOrganization.workspaceId,
+      projectId,
+      repositoryRevision: 1,
+      charterRevision: 1,
+      outcome: "verified",
+      sourceKind: "local_path",
+      source: "/srv/repo",
+      baseRevision: "0".repeat(40),
+      resolvedChecks: [
+        {
+          name: "gate",
+          argv: [command],
+          declaredWorkingDirectory: ".",
+          resolvedWorkingDirectory: { kind: "present", value: "/srv/repo" },
+        },
+      ],
+      sandboxVersion: "sandbox-1",
+      policyCharterRevision: 1,
+      policyRepositoryRevision: 1,
+      startedAtMs: 1_756_000_000_000,
+      endedAtMs: 1_756_000_000_001,
+      notVerified: [],
+      unavailable: {
+        proposalDigest: { kind: "absent", reason: "no Proposal is cited" },
+        rulingDigest: { kind: "absent", reason: "no Ruling is cited" },
+        resultingRevision: { kind: "absent", reason: "nothing was executed" },
+        filesystemEffects: { kind: "absent", reason: "nothing was executed" },
+        diffDigest: { kind: "absent", reason: "nothing was executed" },
+        modelInvocations: { kind: "absent", reason: "nothing was invoked" },
+        costUsdMicros: { kind: "absent", reason: "nothing was spent" },
+      },
+    } as const;
+  }
+
+  const N15_A = "66666666-6666-4666-8666-666666666666";
+  const N15_B = "77777777-7777-4777-8777-777777777777";
+  const N15_A_COMMAND = "n15-alpha-only-command";
+  const N15_B_COMMAND = "n15-bravo-only-command";
+
+  it("does not show one Project's preflight result under another Project", async () => {
+    const user = userEvent.setup();
+    mockInitialState("unlocked");
+    const base = invokeMock.getMockImplementation()!;
+    const alpha = n15Project(N15_A, "Alpha Project");
+    const bravo = n15Project(N15_B, "Bravo Project");
+    invokeMock.mockImplementation((command, args) => {
+      const projectId = (args as { projectId?: string } | undefined)?.projectId;
+      if (command === "projects") {
+        return Promise.resolve([alpha, bravo].map((p) => ({
+          id: p.id,
+          name: p.name,
+          charterRevision: 1,
+          autonomyProfile: "supervised",
+          createdAtMs: 123,
+        })));
+      }
+      if (command === "project") return Promise.resolve(projectId === N15_B ? bravo : alpha);
+      if (command === "project_charter_history") return Promise.resolve([n15Charter]);
+      if (command === "project_policy") return Promise.resolve(null);
+      if (command === "project_policy_history") return Promise.resolve([]);
+      if (command === "current_project_repository") {
+        return Promise.resolve(
+          n15Repository(projectId ?? N15_A, projectId === N15_B ? N15_B_COMMAND : N15_A_COMMAND),
+        );
+      }
+      if (command === "project_repository_history") {
+        return Promise.resolve([
+          n15Repository(projectId ?? N15_A, projectId === N15_B ? N15_B_COMMAND : N15_A_COMMAND),
+        ]);
+      }
+      if (command === "teams" || command === "missions") return Promise.resolve([]);
+      if (command === "preflight_project_checks") {
+        return Promise.resolve(
+          projectId === N15_B
+            ? n15Receipt(N15_B, "88888888-8888-4888-8888-888888888888", N15_B_COMMAND)
+            : n15Receipt(N15_A, "99999999-9999-4999-8999-999999999999", N15_A_COMMAND),
+        );
+      }
+      return base(command, args);
+    });
+
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+
+    // Project A, through the ordinary Projects list, then its ordinary Preflight control.
+    await user.click(await screen.findByRole("button", { name: /Alpha Project/i }));
+    await user.click(await screen.findByRole("button", { name: "Preflight checks" }));
+    expect(await screen.findByText(N15_A_COMMAND)).toBeVisible();
+    await expectNoWcagViolations(container);
+
+    // Now open B the same ordinary way -- back to the Projects list through the rail, then the
+    // Bravo row. Nothing is injected and no component state is reached into.
+    // There is no "back to the list" control once a Project is open, so B is reached the other
+    // ordinary way an operator opens a Project: a Beacon link, which runs the same `openProject`.
+    await user.click(screen.getByRole("button", { name: "Briefing" }));
+    await user.type(
+      await screen.findByLabelText("Beacon link"),
+      `beacon:/${acceptedOrganization.workspaceId}/project/${N15_B}`,
+    );
+    await user.click(screen.getByRole("button", { name: "Open Beacon link" }));
+    expect(
+      await screen.findByRole("heading", { name: "Bravo Project" }),
+      "N15.PROJECT_SCOPE.OLD_PREFLIGHT_ABSENT",
+    ).toBeVisible();
+    expect(
+      screen.queryByText(N15_A_COMMAND),
+      "N15.PROJECT_SCOPE.OLD_PREFLIGHT_ABSENT",
+    ).toBeNull();
+  });
 });
