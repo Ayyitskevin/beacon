@@ -836,6 +836,26 @@ pub fn record_completion(
     connection: &mut Connection,
     record: &MissionCompletionV1,
 ) -> Result<String, CompletionReadRefusal> {
+    // PRESERVED WRAPPER. Ten existing callers pass a `&mut Connection` and expect this to own its
+    // own transaction; the body moved to `record_completion_within` so a caller that already holds
+    // one can write inside it. No behaviour moved with it.
+    let transaction = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(store)?;
+    let digest = record_completion_within(&transaction, record)?;
+    transaction.commit().map_err(store)?;
+    Ok(digest)
+}
+
+/// Write one completion, its condition rows and its Event **inside the caller's transaction**.
+///
+/// Crate-internal. The C4 owner derives identity, time and boundary in the same transaction, so it
+/// cannot call the wrapper above without nesting -- and a second writer would be a second place to
+/// keep the row, its projections and its Event atomic.
+pub(crate) fn record_completion_within(
+    transaction: &Transaction<'_>,
+    record: &MissionCompletionV1,
+) -> Result<String, CompletionReadRefusal> {
     // A delivered-Artifact digest is stored as cited, not verified here (R19.1, R32.1). The
     // collector reads each one through the Artifact module's own verified reader at the
     // completion's boundary and ABORTS on one that does not resolve or is scoped elsewhere
@@ -847,9 +867,6 @@ pub fn record_completion(
     let digest = record
         .digest()
         .map_err(|_| CompletionReadRefusal::BytesDisagree)?;
-    let transaction = connection
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(store)?;
     transaction
         .execute(
             "INSERT INTO mission_completions (
@@ -899,7 +916,7 @@ pub fn record_completion(
     })
     .map_err(|_| CompletionReadRefusal::BytesDisagree)?;
     crate::event_chain::append_event(
-        &transaction,
+        transaction,
         &record.workspace_id.to_string(),
         "mission.completed",
         &payload,
@@ -915,11 +932,10 @@ pub fn record_completion(
     // then unreadable -- found by the Outcome collector's slice-2 test, which is one lane too late
     // for a caller who was told the write succeeded. `MeasuredSpendService::record` already had
     // this shape; this module did not, and the difference was invisible until something read.
-    let stored = verified_completion_within(&transaction, record.workspace_id, &digest.value)?;
+    let stored = verified_completion_within(transaction, record.workspace_id, &digest.value)?;
     if &stored != record {
         return Err(CompletionReadRefusal::BytesDisagree);
     }
-    transaction.commit().map_err(store)?;
     Ok(digest.value)
 }
 
@@ -1116,11 +1132,30 @@ fn unavailable(reason: CompletionUnavailable) -> MissionCompletionReadError {
 ///
 /// Scoped both ways: every retained `mission.completed` Event for this Mission must have its row,
 /// and every row must have its Event. No global replay runs for a scoped read.
+/// C3's read, unchanged: the same proof, projected to the same view.
+///
+/// Factored so C4's recovery can compute a token over the ACTUAL FULL stored record rather than
+/// reconstructing one from counts or trusting a weaker by-digest read. The projection below is the
+/// only difference between the two, and it is byte-identical to what C3 returned.
 pub(crate) fn verified_completion_for_mission_within(
     transaction: &Transaction<'_>,
     workspace_id: Uuid,
     mission_id: Uuid,
 ) -> Result<Option<CompletionView>, MissionCompletionReadError> {
+    let Some(completion) =
+        verified_full_completion_for_mission_within(transaction, workspace_id, mission_id)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(project_completion_view(&completion)?))
+}
+
+/// The whole verified record for one Mission, with every proof C3 performs.
+pub(crate) fn verified_full_completion_for_mission_within(
+    transaction: &Transaction<'_>,
+    workspace_id: Uuid,
+    mission_id: Uuid,
+) -> Result<Option<MissionCompletionV1>, MissionCompletionReadError> {
     // 1. The Mission, through its own owner. Absent is absence; unverified is a refusal.
     let mission = crate::mission::verified_mission_admission(transaction, workspace_id, mission_id)
         .map_err(|error| unavailable(CompletionUnavailable::MissionUnverified(error)))?;
@@ -1215,6 +1250,14 @@ pub(crate) fn verified_completion_for_mission_within(
         return Err(unavailable(CompletionUnavailable::DivergentEvidence));
     }
 
+    Ok(Some(completion))
+}
+
+/// The C3 view, derived from an already-verified record. Counts are RECORDED counts: cited support
+/// is counted, never read as verified supporting content.
+fn project_completion_view(
+    completion: &MissionCompletionV1,
+) -> Result<CompletionView, MissionCompletionReadError> {
     let mut condition_results = Vec::with_capacity(completion.condition_results.len());
     for result in &completion.condition_results {
         condition_results.push(ConditionResultView {
@@ -1228,17 +1271,17 @@ pub(crate) fn verified_completion_for_mission_within(
     let count = |value: usize| {
         u32::try_from(value).map_err(|_| unavailable(CompletionUnavailable::DivergentEvidence))
     };
-    Ok(Some(CompletionView {
+    Ok(CompletionView {
         mission_id: completion.mission_id,
         completion_id: completion.completion_id,
         actor: actor_token(completion.actor).to_owned(),
         accountable_resident_id: completion.accountable_resident_id,
         accountable_resident_configuration_id: completion.accountable_resident_configuration_id,
-        disposition: disposition_token(&completion).to_owned(),
+        disposition: disposition_token(completion).to_owned(),
         condition_results,
         delivered_artifact_count: count(completion.delivered_artifacts.len())?,
         unfinished_work_count: count(completion.unfinished_work.len())?,
-    }))
+    })
 }
 
 /// The authenticated, Workspace-scoped read over recorded Mission completions.
