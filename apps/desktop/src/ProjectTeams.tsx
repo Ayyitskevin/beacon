@@ -66,6 +66,8 @@ const useStyles = makeStyles({
 export function ProjectTeams({
   projectId,
   teams,
+  readFailure,
+  onRetryRead,
   residents,
   configurations,
   composerOpen,
@@ -75,6 +77,11 @@ export function ProjectTeams({
   onSubmit,
 }: {
   projectId: string;
+  /** The Teams+Missions read's own failure, already projected by the owner. Empty means no
+   *  failure. This panel never interpolates a raw rejection, a path or any user data. */
+  readFailure: string;
+  /** Ask the owner to re-run that one bundled read. Runs no Command. */
+  onRetryRead: () => void;
   teams: TeamView[] | null;
   residents: ResidentAgentView[] | null;
   configurations: ResidentConfiguration[] | null;
@@ -117,6 +124,15 @@ export function ProjectTeams({
           onCancel={onCancel}
           onSubmit={onSubmit}
         />
+      ) : readFailure ? (
+        // A failed read is not an empty Project and not a read still running. Both of those
+        // sentences would be false, and one of them was what this panel used to say for ever.
+        <>
+          <p role="alert">{readFailure}</p>
+          <Button size="small" onClick={onRetryRead}>
+            Retry Teams and Missions
+          </Button>
+        </>
       ) : teams === null ? (
         <p role="status">Loading Teams</p>
       ) : teams.length === 0 ? (
