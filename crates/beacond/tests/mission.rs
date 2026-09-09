@@ -306,7 +306,7 @@ fn operator_admits_a_finite_mission_from_exact_current_team_evidence() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 36);
+    assert_eq!(report.diagnostics.schema_version, 37);
 }
 
 #[test]
@@ -659,7 +659,7 @@ fn schema_ten_migrates_without_rewriting_events_or_the_team_roster_guard() {
         initial_workspace_name: "Ignored".to_owned(),
     })
     .unwrap();
-    assert_eq!(report.diagnostics.schema_version, 36);
+    assert_eq!(report.diagnostics.schema_version, 37);
     let connection = Connection::open(&path).unwrap();
     let after = connection
         .query_row(
@@ -1166,8 +1166,17 @@ fn a_store_at_the_previous_schema_version_migrates_and_keeps_its_condition_rows(
             // is not enough: the rebuilt definition has to come off too or the store no longer
             // matches schema 23. 0027 rebuilt `events` too; `restore_pre_0025_events` below
             // unwinds every rebuild at once, back to 0023's definition.
-            // R58: 0036's chain objects come off first, newest migration first.
-            "DROP TRIGGER event_chain_state_no_delete;
+            // R58: 0036's chain objects come off first, newest migration first -- and 0037's
+            // Invocation store is newer still, so it comes off before them. Its observations key
+            // into `model_invocations`, so the child goes first.
+            "DROP TRIGGER model_invocation_observations_no_update;
+             DROP TRIGGER model_invocation_observations_no_delete;
+             DROP TABLE model_invocation_observations;
+             DROP TRIGGER model_invocations_no_update;
+             DROP TRIGGER model_invocations_no_delete;
+             DROP INDEX model_invocations_by_mission;
+             DROP TABLE model_invocations;
+             DROP TRIGGER event_chain_state_no_delete;
              DROP TABLE event_chain_state;
              DROP TRIGGER outcome_publications_no_update;
              DROP TRIGGER outcome_publications_no_delete;
@@ -1208,7 +1217,7 @@ fn a_store_at_the_previous_schema_version_migrates_and_keeps_its_condition_rows(
         initial_workspace_name: "Ignored".to_owned(),
     })
     .expect("a store at the previous schema version must migrate");
-    assert_eq!(report.diagnostics.schema_version, 36);
+    assert_eq!(report.diagnostics.schema_version, 37);
 
     assert_eq!(
         condition_rows(&store.path, mission.id),

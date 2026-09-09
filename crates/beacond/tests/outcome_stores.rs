@@ -2129,6 +2129,13 @@ fn a_store_with_classifications_crosses_0032_and_keeps_them() {
              -- R58: a rollback past 0036 undoes the chain too, or the store carries objects the
              -- version it claims never had. The roster triggers come off first because the rename
              -- below rewrites every trigger that names `events`.
+             DROP TRIGGER model_invocation_observations_no_update;
+             DROP TRIGGER model_invocation_observations_no_delete;
+             DROP TABLE model_invocation_observations;
+             DROP TRIGGER model_invocations_no_update;
+             DROP TRIGGER model_invocations_no_delete;
+             DROP INDEX model_invocations_by_mission;
+             DROP TABLE model_invocations;
              DROP TRIGGER event_chain_state_no_delete;
              DROP TABLE event_chain_state;
              DROP TRIGGER team_formation_members_no_insert_after_formation;
@@ -2194,7 +2201,7 @@ END;",
     })
     .expect("a store written before 0032 migrates forward");
     assert_eq!(report.diagnostics.status, DiagnosticStatus::Ready);
-    assert_eq!(report.diagnostics.schema_version, 36);
+    assert_eq!(report.diagnostics.schema_version, 37);
 
     let connection = stored.connection();
     let carried: Vec<u8> = connection
@@ -2496,7 +2503,7 @@ fn a_store_with_a_v1_spend_row_crosses_0035_and_still_reads_it_as_unattributed()
     })
     .expect("a store written before 0035 migrates forward");
     assert_eq!(report.diagnostics.status, DiagnosticStatus::Ready);
-    assert_eq!(report.diagnostics.schema_version, 36);
+    assert_eq!(report.diagnostics.schema_version, 37);
 
     let connection = stored.connection();
     let carried: Vec<u8> = connection
@@ -2559,7 +2566,14 @@ fn a_store_with_a_v1_spend_row_crosses_0035_and_still_reads_it_as_unattributed()
 fn undo_r58_chain(connection: &Connection) {
     connection
         .execute_batch(
-            "DROP TRIGGER event_chain_state_no_delete;
+            "DROP TRIGGER model_invocation_observations_no_update;
+             DROP TRIGGER model_invocation_observations_no_delete;
+             DROP TABLE model_invocation_observations;
+             DROP TRIGGER model_invocations_no_update;
+             DROP TRIGGER model_invocations_no_delete;
+             DROP INDEX model_invocations_by_mission;
+             DROP TABLE model_invocations;
+             DROP TRIGGER event_chain_state_no_delete;
              DROP TABLE event_chain_state;
              DROP TRIGGER team_formation_members_no_insert_after_formation;
              DROP TRIGGER mission_admission_members_no_insert_after_admission;
