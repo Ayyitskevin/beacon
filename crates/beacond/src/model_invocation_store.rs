@@ -1692,12 +1692,26 @@ mod tests {
         let fixture = fixture("stored-corrupt");
         fixture.admit().expect("C2.ADMIT.STORES");
         // INTENTIONAL CORRUPTION, after the owner minted the row.
+        // A DIFFERENT prompt of exactly the SAME length, held here independently. The previous
+        // 21-byte string let this bar pass on its length check alone, so a mutant that dropped only
+        // the SHA-256 comparison would have survived it -- the bar could not tell digest
+        // verification from length verification (root's measurement).
+        const SAME_LENGTH_PROMPT: &[u8] = b"Draft a PLAN for the admitted Mission.";
+        assert_eq!(
+            SAME_LENGTH_PROMPT.len(),
+            PROMPT.len(),
+            "C2.STORED_CORRUPTION.SAME_LENGTH"
+        );
+        assert_ne!(
+            SAME_LENGTH_PROMPT, PROMPT,
+            "C2.STORED_CORRUPTION.DIFFERENT_BYTES"
+        );
         let connection = fixture.store.open();
         without_trigger(
             &connection,
             "model_invocations_no_update",
             NO_UPDATE_TRIGGER,
-            "UPDATE model_invocations SET prompt_inline = CAST('tampered prompt bytes' AS BLOB);",
+            "UPDATE model_invocations SET prompt_inline = CAST('Draft a PLAN for the admitted Mission.' AS BLOB);",
         );
         drop(connection);
 
@@ -1708,11 +1722,15 @@ mod tests {
             "C2.GET.STORED_CONTENT_MISMATCH: {refusal}"
         );
         let startup = fixture.store.reopen().expect_err("C2.STARTUP.REFUSES");
-        assert!(
-            startup
-                .to_string()
-                .contains("does not re-prove: StoredContentMismatch"),
-            "C2.STARTUP.NAMES_THE_ROW_AND_THE_CAUSE: {startup}"
+        // The WHOLE line, against the fixture's own held identities -- not a substring, and not an
+        // expectation read back out of the refusal.
+        assert_eq!(
+            startup.to_string(),
+            format!(
+                "Invocation {} in Workspace {} does not re-prove: StoredContentMismatch",
+                fixture.admission.invocation_id, fixture.store.workspace_id
+            ),
+            "C2.STARTUP.NAMES_THE_ROW_AND_THE_CAUSE"
         );
     }
 
@@ -2521,9 +2539,10 @@ mod tests {
             .unwrap()
     }
 
-    fn o2_events_rows(
-        connection: &Connection,
-    ) -> Vec<(
+    /// One `events` row, exactly as the rebuild must carry it across. Named because the tuple is
+    /// eight columns wide and clippy is right that an unnamed one is unreadable; the shape is
+    /// Opus2's, unchanged.
+    type O2EventRow = (
         i64,
         String,
         String,
@@ -2532,7 +2551,9 @@ mod tests {
         String,
         Option<Vec<u8>>,
         Option<Vec<u8>>,
-    )> {
+    );
+
+    fn o2_events_rows(connection: &Connection) -> Vec<O2EventRow> {
         let mut statement = connection
             .prepare(
                 "SELECT sequence, workspace_id, kind, payload_json, occurred_at_ms,
