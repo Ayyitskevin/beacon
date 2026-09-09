@@ -135,6 +135,7 @@ export function BriefingReceipts({
   failure,
   disabled,
   onRefresh,
+  onOpenProject,
 }: {
   /** One bounded reading, as the daemon answered it. Null before the first
    *  read and after one that failed. */
@@ -145,6 +146,9 @@ export function BriefingReceipts({
    *  does not label this button "Refreshing…" while no Receipt read is running. */
   disabled: boolean;
   onRefresh: () => void;
+  /** Open the Project a Receipt names. The caller decides what "open" means; this panel only
+   *  hands over the id the Receipt already holds and never synthesises a link or a name lookup. */
+  onOpenProject: (projectId: string) => void;
 }) {
   const styles = useStyles();
   // No sort here. The daemon defines the order and the adapter refuses a page
@@ -196,6 +200,18 @@ export function BriefingReceipts({
                 <span className={styles.identity} title={receipt.runId}>
                   Run {shortRunId(receipt.runId)}
                 </span>
+                {/* The Project is identified to the caller by the id the Receipt carries, never by
+                    the name shown beside it: two Projects may share a display name, and a control
+                    that navigated by name would be undetectably wrong for one of them. The
+                    accessible name still says which Project, because a row of identical "Open"
+                    buttons tells a screen reader nothing. */}
+                <Button
+                  size="small"
+                  disabled={disabled}
+                  onClick={() => onOpenProject(receipt.projectId)}
+                >
+                  Open {receipt.projectName} Project
+                </Button>
               </li>
             ))}
           </ul>

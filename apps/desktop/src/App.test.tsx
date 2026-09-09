@@ -2702,4 +2702,107 @@ describe("Beacon desktop shell", () => {
 
     await expectNoWcagViolations(container);
   });
+
+  // -------------------------------------------------------------------------------------------
+  // N11: open the Project behind a Receipt
+  // -------------------------------------------------------------------------------------------
+
+  const receiptProject = {
+    id: briefingProjects[0].id,
+    workspaceId: acceptedOrganization.workspaceId,
+    name: "Task tracker",
+    charter: {
+      revision: 1,
+      purpose: "Track the work.",
+      desiredOutcomes: ["Reach the named Project"],
+      constraints: [],
+      prohibitions: [],
+      autonomyProfile: "supervised",
+      budgetBoundary: "no_spend",
+      externalEffects: "prohibited",
+      authoredAtMs: 123,
+    },
+    createdAtMs: 120,
+  } as const;
+
+  it("opens the exact Project a Receipt names, from the keyboard", async () => {
+    const user = userEvent.setup();
+    mockInitialState("unlocked");
+    const base = invokeMock.getMockImplementation()!;
+    const asked: unknown[] = [];
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "recent_receipts") return Promise.resolve(recentPage());
+      if (command === "project") {
+        asked.push(args);
+        return Promise.resolve(receiptProject);
+      }
+      if (command === "project_charter_history") return Promise.resolve([receiptProject.charter]);
+      if (command === "project_policy") return Promise.resolve(null);
+      if (command === "project_policy_history") return Promise.resolve([]);
+      if (command === "current_project_repository") return Promise.resolve(null);
+      if (command === "project_repository_history") return Promise.resolve([]);
+      if (command === "teams" || command === "missions") return Promise.resolve([]);
+      return base(command, args);
+    });
+
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    const list = await screen.findByRole("list", { name: "Recent Receipts" });
+    // The changed render: Receipt rows now carry a control.
+    await expectNoWcagViolations(container);
+    const open = within(list).getAllByRole("button", { name: /^Open .* Project$/ })[0];
+    open.focus();
+    await user.keyboard("{Enter}");
+
+    // The held id was asked for, and the Projects lens is what the operator now sees.
+    expect(asked, "N11.OPEN.EXACT_PROJECT").toEqual([{ projectId: briefingProjects[0].id }]);
+    // "Selects Projects" is the navigation state, not a heading: the rail marks the active
+    // application with aria-current, which is the same thing a screen reader is told.
+    expect(
+      await screen.findByRole("button", { name: "Projects", current: "page" }),
+      "N11.OPEN.EXACT_PROJECT",
+    ).toBeVisible();
+  });
+
+  it("stays on Briefing and shows the error when the Project behind a Receipt cannot be read", async () => {
+    const user = userEvent.setup();
+    mockInitialState("unlocked");
+    const base = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "recent_receipts") return Promise.resolve(recentPage());
+      if (command === "project") return Promise.reject(new Error("the Project read failed"));
+      if (command === "project_charter_history") return Promise.resolve([receiptProject.charter]);
+      if (command === "project_policy") return Promise.resolve(null);
+      if (command === "project_policy_history") return Promise.resolve([]);
+      if (command === "current_project_repository") return Promise.resolve(null);
+      if (command === "project_repository_history") return Promise.resolve([]);
+      return base(command, args);
+    });
+
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    const list = await screen.findByRole("list", { name: "Recent Receipts" });
+    await user.click(within(list).getAllByRole("button", { name: /^Open .* Project$/ })[0]);
+    await expectNoWcagViolations(container);
+
+    // The refusal is visible, the operator is still on Briefing, and no Project lens was drawn.
+    expect(
+      await screen.findByText(/Beacon could not/i),
+      "N11.OPEN.FAILURE_STAYS_BRIEFING",
+    ).toBeVisible();
+    expect(
+      screen.getByRole("heading", { name: "Briefing" }),
+      "N11.OPEN.FAILURE_STAYS_BRIEFING",
+    ).toBeVisible();
+    // Still on Briefing: the rail never moved, so no Project lens was drawn.
+    const failedRail = screen.getByRole("navigation", { name: "Beacon applications" });
+    expect(
+      within(failedRail).getByRole("button", { name: "Briefing" }),
+      "N11.OPEN.FAILURE_STAYS_BRIEFING",
+    ).toHaveAttribute("aria-current", "page");
+    expect(
+      within(failedRail).getByRole("button", { name: "Projects" }),
+      "N11.OPEN.FAILURE_STAYS_BRIEFING",
+    ).not.toHaveAttribute("aria-current");
+  });
 });
