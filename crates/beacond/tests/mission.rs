@@ -2122,3 +2122,250 @@ fn public_mission_read_keeps_absent_and_foreign_workspace_indistinguishable() {
         "B11.GET.SCOPE_REFUSALS_IDENTICAL"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// B12 — the Project Mission listing is owner-verified, in one snapshot
+// ---------------------------------------------------------------------------------------------
+
+const B12_FIRST_OUTCOME: &str = "Ship the first reviewed Beacon feature.";
+const B12_SECOND_OUTCOME: &str = "Ship the second reviewed Beacon feature.";
+
+/// One Project with two admitted Missions, and the admit returns that produced them.
+///
+/// The admit returns are a different producer than `list`, so the expected ORDER may be derived
+/// from them; the expected CONTENT is held in the constants above.
+fn project_with_two_missions(
+    store: &TestStore,
+    accounts: &Arc<OperatorAccountService>,
+) -> (Uuid, Vec<beacond::MissionView>) {
+    let prepared = prepare_team(store, accounts, 1);
+    let missions = MissionService::new(Arc::clone(accounts), store.workspace_id);
+    let mut first = mission_draft(&prepared);
+    first.desired_outcome = B12_FIRST_OUTCOME.to_owned();
+    let mut second = mission_draft(&prepared);
+    second.desired_outcome = B12_SECOND_OUTCOME.to_owned();
+    let admitted = vec![
+        missions.admit(first).unwrap(),
+        missions.admit(second).unwrap(),
+    ];
+    let mut expected = admitted.clone();
+    expected.sort_by(|left, right| {
+        (left.admitted_at_ms, left.id).cmp(&(right.admitted_at_ms, right.id))
+    });
+    (prepared.project.id, expected)
+}
+
+/// INTENTIONAL CORRUPTION, after a real owner mint: the Event now says something the row does not.
+fn corrupt_admission_event(path: &PathBuf, mission_id: Uuid) {
+    let connection = Connection::open(path).unwrap();
+    let changed = connection
+        .execute(
+            "UPDATE events
+             SET payload_json = json_set(payload_json, '$.mission.desiredOutcome', ?2)
+             WHERE kind = 'mission.admitted'
+               AND json_extract(payload_json, '$.mission.id') = ?1",
+            rusqlite::params![mission_id.to_string(), "an outcome nobody admitted"],
+        )
+        .unwrap();
+    assert_eq!(changed, 1, "exactly one admission Event was rewritten");
+}
+
+#[test]
+fn a_listed_mission_whose_event_disagrees_refuses_the_whole_list() {
+    let store = TestStore::new("b12-first-broken");
+    let accounts = enrolled_accounts(&store);
+    let (project_id, expected) = project_with_two_missions(&store, &accounts);
+    corrupt_admission_event(&store.path, expected[0].id);
+
+    let refusal = MissionService::new(Arc::clone(&accounts), store.workspace_id)
+        .list(project_id)
+        .expect_err("B12.LIST.EVERY_ROW_IS_OWNER_VERIFIED");
+    assert_eq!(
+        refusal.to_string(),
+        MissionError::InvalidStore.to_string(),
+        "B12.LIST.EVERY_ROW_IS_OWNER_VERIFIED"
+    );
+}
+
+#[test]
+fn a_broken_last_row_refuses_the_whole_list_rather_than_returning_a_good_prefix() {
+    let store = TestStore::new("b12-last-broken");
+    let accounts = enrolled_accounts(&store);
+    let (project_id, expected) = project_with_two_missions(&store, &accounts);
+    corrupt_admission_event(&store.path, expected[1].id);
+
+    let refusal = MissionService::new(Arc::clone(&accounts), store.workspace_id)
+        .list(project_id)
+        .expect_err("B12.LIST.NO_GOOD_PREFIX");
+    assert_eq!(
+        refusal.to_string(),
+        MissionError::InvalidStore.to_string(),
+        "B12.LIST.NO_GOOD_PREFIX"
+    );
+}
+
+#[test]
+fn a_healthy_project_lists_every_admission_in_admitted_order() {
+    let store = TestStore::new("b12-healthy");
+    let accounts = enrolled_accounts(&store);
+    let (project_id, expected) = project_with_two_missions(&store, &accounts);
+
+    let listed = MissionService::new(Arc::clone(&accounts), store.workspace_id)
+        .list(project_id)
+        .expect("a healthy Project lists");
+
+    assert_eq!(listed.len(), 2, "B12.LIST.EVERY_ADMISSION_IS_RETURNED");
+    // Content against held literals; order against the admit returns, a different producer.
+    let outcomes: Vec<&str> = listed
+        .iter()
+        .map(|mission| mission.desired_outcome.as_str())
+        .collect();
+    let mut held = [B12_FIRST_OUTCOME, B12_SECOND_OUTCOME];
+    held.sort();
+    let mut observed = outcomes.clone();
+    observed.sort();
+    assert_eq!(observed, held.to_vec(), "both admitted outcomes are listed");
+    assert_eq!(
+        listed.iter().map(|m| m.id).collect::<Vec<_>>(),
+        expected.iter().map(|m| m.id).collect::<Vec<_>>(),
+        "B12.LIST.ORDER_IS_ADMITTED_AT_THEN_ID"
+    );
+    assert_eq!(listed, expected, "the full views must survive verification");
+}
+
+#[test]
+fn a_listed_mission_with_no_admission_event_refuses_the_list() {
+    let store = TestStore::new("b12-no-event");
+    let accounts = enrolled_accounts(&store);
+    let (project_id, expected) = project_with_two_missions(&store, &accounts);
+    // INTENTIONAL CORRUPTION, after a real owner mint.
+    let connection = Connection::open(&store.path).unwrap();
+    let removed = connection
+        .execute(
+            "DELETE FROM events WHERE kind = 'mission.admitted'
+             AND json_extract(payload_json, '$.mission.id') = ?1",
+            rusqlite::params![expected[1].id.to_string()],
+        )
+        .unwrap();
+    assert_eq!(removed, 1);
+
+    let refusal = MissionService::new(Arc::clone(&accounts), store.workspace_id)
+        .list(project_id)
+        .expect_err("B12.LIST.UNREADABLE_IS_NOT_ABSENT");
+    assert_eq!(
+        refusal.to_string(),
+        MissionError::InvalidStore.to_string(),
+        "B12.LIST.UNREADABLE_IS_NOT_ABSENT"
+    );
+}
+
+#[test]
+fn a_listed_mission_with_two_admission_events_refuses_the_list() {
+    let store = TestStore::new("b12-two-events");
+    let accounts = enrolled_accounts(&store);
+    let (project_id, expected) = project_with_two_missions(&store, &accounts);
+    // INTENTIONAL CORRUPTION, after a real owner mint: retag the store's first Event so a second
+    // row claims this admission, payload and timestamp together so only the count is wrong.
+    let connection = Connection::open(&store.path).unwrap();
+    let changed = connection
+        .execute(
+            "UPDATE events
+             SET kind = 'mission.admitted',
+                 payload_json = (
+                     SELECT payload_json FROM events
+                     WHERE kind = 'mission.admitted'
+                       AND json_extract(payload_json, '$.mission.id') = ?1),
+                 occurred_at_ms = (
+                     SELECT occurred_at_ms FROM events
+                     WHERE kind = 'mission.admitted'
+                       AND json_extract(payload_json, '$.mission.id') = ?1)
+             WHERE sequence = (SELECT min(sequence) FROM events)",
+            rusqlite::params![expected[0].id.to_string()],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+
+    let refusal = MissionService::new(Arc::clone(&accounts), store.workspace_id)
+        .list(project_id)
+        .expect_err("B12.LIST.EXACTLY_ONE_EVENT_PER_LISTED_MISSION");
+    assert_eq!(
+        refusal.to_string(),
+        MissionError::InvalidStore.to_string(),
+        "B12.LIST.EXACTLY_ONE_EVENT_PER_LISTED_MISSION"
+    );
+}
+
+#[test]
+fn a_project_with_no_admitted_missions_lists_empty_rather_than_refusing() {
+    let store = TestStore::new("b12-empty");
+    let accounts = enrolled_accounts(&store);
+    let prepared = prepare_team(&store, &accounts, 1);
+
+    let listed = MissionService::new(Arc::clone(&accounts), store.workspace_id)
+        .list(prepared.project.id)
+        .expect("an empty Project is not a broken one");
+    assert!(listed.is_empty(), "B12.LIST.EMPTY_IS_NOT_A_REFUSAL");
+}
+
+#[test]
+fn an_absent_project_and_another_workspaces_project_are_both_project_not_found() {
+    let store = TestStore::new("b12-scope-a");
+    let accounts = enrolled_accounts(&store);
+    let (_project_id, _expected) = project_with_two_missions(&store, &accounts);
+    let other = TestStore::new("b12-scope-b");
+    let other_accounts = enrolled_accounts(&other);
+    let other_project = prepare_team(&other, &other_accounts, 1).project.id;
+
+    let missions = MissionService::new(Arc::clone(&accounts), store.workspace_id);
+    let absent = missions
+        .list(Uuid::new_v4())
+        .expect_err("B12.LIST.SCOPE_IS_OPAQUE");
+    let foreign = missions
+        .list(other_project)
+        .expect_err("B12.LIST.SCOPE_IS_OPAQUE");
+    assert_eq!(
+        absent.to_string(),
+        MissionError::ProjectNotFound.to_string(),
+        "B12.LIST.SCOPE_IS_OPAQUE"
+    );
+    assert_eq!(
+        foreign.to_string(),
+        absent.to_string(),
+        "B12.LIST.SCOPE_IS_OPAQUE: another Workspace's Project must not be distinguishable"
+    );
+}
+
+#[test]
+fn the_listing_keeps_the_admitted_configuration_after_the_resident_is_reconfigured() {
+    let store = TestStore::new("b12-historical");
+    let accounts = enrolled_accounts(&store);
+    let prepared = prepare_team(&store, &accounts, 1);
+    let missions = MissionService::new(Arc::clone(&accounts), store.workspace_id);
+    let admitted = missions.admit(mission_draft(&prepared)).unwrap();
+
+    let original = &prepared.configurations[0];
+    let activation_id = original.binding.as_ref().unwrap().activation_id;
+    let configurations =
+        ResidentConfigurationService::new(Arc::clone(&accounts), store.workspace_id);
+    let cleared = configurations
+        .clear(original.resident_id, original.id)
+        .unwrap();
+    let replacement = configurations
+        .configure(
+            original.resident_id,
+            Some(cleared.id),
+            activation_id,
+            vec![BeaconCapability::ArtifactProduce],
+        )
+        .unwrap();
+    assert_ne!(replacement.id, original.id);
+
+    let listed = missions
+        .list(prepared.project.id)
+        .expect("the Project lists");
+    assert_eq!(listed, vec![admitted]);
+    assert_eq!(
+        listed[0].members[0].admission_configuration_id, original.id,
+        "B12.LIST.HISTORY_IS_NOT_REWRITTEN_BY_CURRENT_STATE"
+    );
+}
