@@ -561,3 +561,41 @@ fn no_admitted_word_holds_more_than_three_transport_rows() {
         );
     }
 }
+
+// Astra's fixed-head C1 review probes: behavior only, held fixture values.
+#[test]
+fn astra_n29_the_first_observation_sequence_is_one() {
+    let mut history = TransportHistory::admitted(&admission());
+    let result = history.append_record(InvocationObservationV1 {
+        invocation_id: uuid(INVOCATION), sequence: 2, observation: headers(200),
+    });
+    assert!(result.is_err(), "N29.SEQUENCE.FIRST_MUST_BE_ONE: {result:?}");
+}
+
+#[test]
+fn astra_n29_later_observation_sequence_must_increase() {
+    let mut history = history_of("H");
+    let result = history.append_record(InvocationObservationV1 {
+        invocation_id: uuid(INVOCATION), sequence: 1,
+        observation: TransportObservation::BodyPrefix { bytes: b"first".to_vec() },
+    });
+    assert!(result.is_err(), "N29.SEQUENCE.LATER_MUST_INCREASE: {result:?}");
+}
+
+#[test]
+fn astra_n29_complete_bytes_extend_the_observed_prefix() {
+    let mut history = history_of("HP");
+    let result = history.append(TransportObservation::BodyComplete {
+        bytes: b"a different response".to_vec(), elapsed_ms: 1,
+    });
+    assert!(result.is_err(), "N29.PREFIX.COMPLETE_MUST_EXTEND_OBSERVED_PREFIX: {result:?}");
+}
+
+#[test]
+fn astra_n29_incomplete_bytes_preserve_the_observed_prefix() {
+    let mut history = history_of("HP");
+    let result = history.append(TransportObservation::BodyIncomplete {
+        prefix: vec![], cause: IncompleteCause::BodyReadRefused,
+    });
+    assert!(result.is_err(), "N29.PREFIX.INCOMPLETE_MUST_PRESERVE_OBSERVED_PREFIX: {result:?}");
+}
