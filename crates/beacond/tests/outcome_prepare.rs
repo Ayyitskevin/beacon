@@ -10167,6 +10167,50 @@ fn mode_of(path: &Path) -> u32 {
         & 0o7777
 }
 
+/// The private-output guard and the `0700` directory, shared by every mint recipe.
+///
+/// Extracted rather than copied: a second recipe with its own copy of these checks is a
+/// second place for them to drift, and these are the checks Astra's B18 probes were about.
+fn prepare_private_output(
+    prefix: &Path,
+    output: Option<&Path>,
+) -> Result<PathBuf, FixtureMintRefusal> {
+    let output = output.ok_or(FixtureMintRefusal::Unset)?;
+    let prefix = validated_private_prefix(prefix)
+        .map_err(|fault| FixtureMintRefusal::PrefixNotPrivate(prefix.to_path_buf(), fault))?;
+
+    // Where the output LANDS, not how it is spelled. `starts_with` on the given path is lexical:
+    // `<prefix>/../elsewhere/mint` passes it, and so does `<prefix>/link/mint` where `link` points
+    // out of the prefix -- Astra's two probes. Resolving the PARENT with `canonicalize` collapses
+    // every `..` and follows every intermediate symlink, so both land outside and are refused.
+    // The parent must already exist: a mint creates one directory, never a chain of them.
+    if !output.is_absolute() || output.file_name().is_none() {
+        return Err(FixtureMintRefusal::NotPrivate(output.to_path_buf()));
+    }
+    let parent = output
+        .parent()
+        .ok_or_else(|| FixtureMintRefusal::NotPrivate(output.to_path_buf()))?;
+    let resolved_parent = fs::canonicalize(parent)
+        .map_err(|_| FixtureMintRefusal::NotPrivate(output.to_path_buf()))?;
+    if !resolved_parent.starts_with(&prefix) {
+        return Err(FixtureMintRefusal::NotPrivate(output.to_path_buf()));
+    }
+    // `symlink_metadata`, not `exists`: a symlink is something that is already there, and a
+    // DANGLING one is exactly what `exists()` reports as absent. Refusing on the link itself is
+    // what stops a mint from following someone else's pointer into a directory it did not create.
+    if fs::symlink_metadata(output).is_ok() {
+        return Err(FixtureMintRefusal::Occupied(output.to_path_buf()));
+    }
+
+    // `0700` AT CREATION. `create_dir` then `set_permissions` leaves the directory readable for
+    // however long the second call takes, under whatever umask the caller happens to have.
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(output)
+        .unwrap_or_else(|error| panic!("B18.FIXTURE.DIRECTORY_CREATED: {error}"));
+    Ok(output.to_path_buf())
+}
+
 /// Mints one private fixture into a directory that does not exist yet.
 ///
 /// The seeding is this file's own public owner recipe, unchanged: `admitted_mission` ->
@@ -10235,39 +10279,8 @@ fn mint_private_outcome_fixture_within(
     prefix: &Path,
     output: Option<&Path>,
 ) -> Result<MintedOutcomeFixture, FixtureMintRefusal> {
-    let output = output.ok_or(FixtureMintRefusal::Unset)?;
-    let prefix = validated_private_prefix(prefix)
-        .map_err(|fault| FixtureMintRefusal::PrefixNotPrivate(prefix.to_path_buf(), fault))?;
-
-    // Where the output LANDS, not how it is spelled. `starts_with` on the given path is lexical:
-    // `<prefix>/../elsewhere/mint` passes it, and so does `<prefix>/link/mint` where `link` points
-    // out of the prefix -- Astra's two probes. Resolving the PARENT with `canonicalize` collapses
-    // every `..` and follows every intermediate symlink, so both land outside and are refused.
-    // The parent must already exist: a mint creates one directory, never a chain of them.
-    if !output.is_absolute() || output.file_name().is_none() {
-        return Err(FixtureMintRefusal::NotPrivate(output.to_path_buf()));
-    }
-    let parent = output
-        .parent()
-        .ok_or_else(|| FixtureMintRefusal::NotPrivate(output.to_path_buf()))?;
-    let resolved_parent = fs::canonicalize(parent)
-        .map_err(|_| FixtureMintRefusal::NotPrivate(output.to_path_buf()))?;
-    if !resolved_parent.starts_with(&prefix) {
-        return Err(FixtureMintRefusal::NotPrivate(output.to_path_buf()));
-    }
-    // `symlink_metadata`, not `exists`: a symlink is something that is already there, and a
-    // DANGLING one is exactly what `exists()` reports as absent. Refusing on the link itself is
-    // what stops a mint from following someone else's pointer into a directory it did not create.
-    if fs::symlink_metadata(output).is_ok() {
-        return Err(FixtureMintRefusal::Occupied(output.to_path_buf()));
-    }
-
-    // `0700` AT CREATION. `create_dir` then `set_permissions` leaves the directory readable for
-    // however long the second call takes, under whatever umask the caller happens to have.
-    fs::DirBuilder::new()
-        .mode(0o700)
-        .create(output)
-        .unwrap_or_else(|error| panic!("B18.FIXTURE.DIRECTORY_CREATED: {error}"));
+    let output = prepare_private_output(prefix, output)?;
+    let output = output.as_path();
 
     // The public owner recipe, exactly as every other test in this file runs it.
     let fixture = admitted_mission("b18-private-fixture");
@@ -10363,6 +10376,51 @@ fn mint_private_outcome_fixture_within(
     })
 }
 
+/// A minted snapshot reopened as a private COPY, through the ordinary owner services.
+///
+/// Shared by both readbacks. The copy is a new `0600` file under a `0700` directory whose guard
+/// removes it -- and any `-wal`/`-shm` sibling opening leaves -- even if a later assertion unwinds.
+struct ReopenedFixtureStore {
+    _prefix: PrivatePrefix,
+    path: PathBuf,
+    accounts: Arc<OperatorAccountService>,
+    workspace_id: Uuid,
+    workspace_created: bool,
+}
+
+fn reopen_minted_snapshot(snapshot_bytes: &[u8]) -> ReopenedFixtureStore {
+    let prefix = PrivatePrefix::new("readback");
+    let path = prefix.path.join("store.sqlite3");
+    write_private_file(&path, snapshot_bytes);
+
+    let report = Supervisor::bootstrap(StartupConfig {
+        store_path: path.clone(),
+        initial_workspace_name: "Personal".to_owned(),
+    })
+    .expect("B18.READBACK.STARTUP_SUCCEEDS");
+
+    let accounts =
+        Arc::new(OperatorAccountService::open(&path).expect("B18.READBACK.ACCOUNT_SERVICE_OPENS"));
+    assert_eq!(
+        accounts
+            .authenticate_password(
+                SecretString::new(FIXTURE_PASSPHRASE.to_owned()),
+                AccessOrigin::SameMachine,
+            )
+            .expect("B18.READBACK.STORE_UNLOCKS")
+            .phase,
+        OperatorSessionPhase::Unlocked
+    );
+
+    ReopenedFixtureStore {
+        _prefix: prefix,
+        path,
+        accounts,
+        workspace_id: report.workspace.id,
+        workspace_created: report.workspace.created,
+    }
+}
+
 /// Reopens a byte-identical COPY of the minted snapshot through the ordinary owner services.
 ///
 /// A copy, and not the artifact itself, because opening writes: `Supervisor::bootstrap` runs
@@ -10377,34 +10435,11 @@ fn read_back_minted_fixture(minted: &MintedOutcomeFixture) -> MintedFixtureReadB
         minted.snapshot_sha256,
         "B18.READBACK.SNAPSHOT_IS_THE_MINTED_BYTES"
     );
-    // Opening can leave WAL siblings; keep the copy in a private directory whose guard also
-    // removes them if startup, authentication, or any later assertion unwinds.
-    let opened_prefix = PrivatePrefix::new("readback");
-    let opened = opened_prefix.path.join("store.sqlite3");
-    // Write exactly the bytes just verified, in a new 0600 file under the 0700 directory.
-    write_private_file(&opened, &snapshot_bytes);
-
-    let report = Supervisor::bootstrap(StartupConfig {
-        store_path: opened.clone(),
-        initial_workspace_name: "Personal".to_owned(),
-    })
-    .expect("B18.READBACK.STARTUP_SUCCEEDS");
-
-    let accounts = Arc::new(
-        OperatorAccountService::open(&opened).expect("B18.READBACK.ACCOUNT_SERVICE_OPENS"),
-    );
-    assert_eq!(
-        accounts
-            .authenticate_password(
-                SecretString::new(FIXTURE_PASSPHRASE.to_owned()),
-                AccessOrigin::SameMachine,
-            )
-            .expect("B18.READBACK.STORE_UNLOCKS")
-            .phase,
-        OperatorSessionPhase::Unlocked
-    );
-
-    let outcomes = OutcomeService::new(accounts, report.workspace.id);
+    let store = reopen_minted_snapshot(&snapshot_bytes);
+    let opened = store.path.clone();
+    let report_workspace_id = store.workspace_id;
+    let report_workspace_created = store.workspace_created;
+    let outcomes = OutcomeService::new(Arc::clone(&store.accounts), report_workspace_id);
     let history = outcomes
         .publication_history(minted.mission_id)
         .expect("B18.READBACK.PUBLICATION_HISTORY_READS");
@@ -10413,8 +10448,8 @@ fn read_back_minted_fixture(minted: &MintedOutcomeFixture) -> MintedFixtureReadB
         .expect("B18.READBACK.VERSION_EXPORTS");
 
     MintedFixtureReadBack {
-        workspace_id: report.workspace.id,
-        workspace_created: report.workspace.created,
+        workspace_id: report_workspace_id,
+        workspace_created: report_workspace_created,
         schema_version: declared_schema_version_of(&opened),
         publication_versions: history
             .iter()
@@ -10998,4 +11033,461 @@ fn astra_b18_parent_symlink_cannot_escape_the_private_prefix() {
         "B18.OUTPUT.NO_PARENT_SYMLINK_ESCAPE"
     );
     assert!(!created, "B18.OUTPUT.NO_OUTSIDE_WRITES");
+}
+
+// ---------------------------------------------------------------------------------------------
+// B28: a TWO-publication private fixture, so a packaged selection test can discriminate
+// ---------------------------------------------------------------------------------------------
+//
+// B26 measured why this is needed. With one publication, `MissionOutcomes` auto-selects it on
+// load, so version 1's document and Copy control are already on screen BEFORE anything is clicked
+// (`b26 evidence-940x800/21-initial.png`). A predicate that looks for "Version 1 of 1" or "Copy
+// Markdown" after clicking Show therefore passes whether or not the click did anything. That is a
+// gap in the harness and the brief, not a product-handler failure -- and the fix is a fixture where
+// the requested version is NOT the one already selected.
+//
+// The recipe is the file's own: publish version 1 through `publishable`, then prepare a correction
+// with `AppendixRequest::Include` -- exactly what
+// `the_pdf_of_a_superseded_version_is_rendered_from_that_versions_bytes` does -- evaluate it
+// independently, and publish it as version 2. Different appendix request, different canonical
+// bytes, different candidate digest. Nothing is planted and no snapshot is edited.
+
+const TWO_VERSION_MANIFEST_FILE: &str = "fixture-two-version.json";
+const TWO_VERSION_V1_FILE: &str = "expected-outcome-v1.md";
+const TWO_VERSION_V2_FILE: &str = "expected-outcome-v2.md";
+
+/// One published version of a two-version fixture, as it was exported at mint time.
+#[derive(Debug, Clone)]
+struct MintedPublication {
+    version: u32,
+    is_current: bool,
+    candidate_artifact_digest: String,
+    markdown_file: &'static str,
+    markdown_path: PathBuf,
+    markdown_bytes: Vec<u8>,
+    markdown_sha256: String,
+}
+
+#[derive(Debug)]
+struct MintedTwoVersionFixture {
+    directory: PathBuf,
+    snapshot_path: PathBuf,
+    manifest_path: PathBuf,
+    source_head: String,
+    schema_version: i64,
+    workspace_id: Uuid,
+    mission_id: Uuid,
+    media_type: String,
+    publications: Vec<MintedPublication>,
+    snapshot_sha256: String,
+}
+
+impl MintedTwoVersionFixture {
+    fn at(&self, version: u32) -> &MintedPublication {
+        self.publications
+            .iter()
+            .find(|p| p.version == version)
+            .expect("B28.FIXTURE.VERSION_PRESENT")
+    }
+}
+
+#[derive(Debug)]
+struct TwoVersionReadBack {
+    workspace_id: Uuid,
+    workspace_created: bool,
+    history: Vec<(u32, bool, String)>,
+    exports: Vec<(u32, u32, Vec<u8>, String)>,
+}
+
+/// Mints a private fixture holding TWO publications of one Mission.
+///
+/// Reuses `prepare_private_output` for the prefix/parent/no-overwrite guards and the `0700`
+/// directory, and the same `VACUUM INTO` snapshot as the one-version recipe. The one-version
+/// recipe, its `fixture.json` schema and its three-file output are untouched: this writes its own
+/// manifest filename and its own per-version Markdown files, because a reader that cannot tell the
+/// two shapes apart is a reader that will eventually mistake one for the other.
+fn mint_two_version_outcome_fixture_within(
+    prefix: &Path,
+    output: Option<&Path>,
+) -> Result<MintedTwoVersionFixture, FixtureMintRefusal> {
+    let output = prepare_private_output(prefix, output)?;
+    let output = output.as_path();
+
+    let fixture = admitted_mission("b28-two-version-fixture");
+    fixture.classify(ImpactLevel::Ordinary);
+    fixture.complete((fixture.resident_id, fixture.configuration_id));
+
+    let (_, first_digest, first_evaluation) = fixture.publishable();
+    fixture
+        .outcomes
+        .publish(fixture.mission_id, &first_digest, &first_evaluation)
+        .expect("B28.FIXTURE.V1_PUBLISHES");
+
+    // The correction. `Include` rather than `PolicyDefault`, so the request is inside the manifest
+    // and the canonical bytes differ even though this Mission is ordinary.
+    let corrected = fixture
+        .outcomes
+        .prepare_for_mission(fixture.mission_id, AppendixRequest::Include)
+        .expect("B28.FIXTURE.V2_PREPARES");
+    let corrected_record = fixture
+        .artifacts()
+        .get(&corrected.candidate_artifact_digest)
+        .expect("B28.FIXTURE.V2_CANDIDATE_READS");
+    let corrected_evaluation =
+        fixture.evaluate(&corrected.candidate_artifact_digest, Verdict::Meets);
+    fixture
+        .outcomes
+        .publish(
+            fixture.mission_id,
+            corrected_record.digest(),
+            corrected_evaluation.digest(),
+        )
+        .expect("B28.FIXTURE.V2_PUBLISHES");
+
+    let one = fixture
+        .outcomes
+        .export_markdown_version(fixture.mission_id, 1)
+        .expect("B28.FIXTURE.V1_EXPORTS");
+    let two = fixture
+        .outcomes
+        .export_markdown_version(fixture.mission_id, 2)
+        .expect("B28.FIXTURE.V2_EXPORTS");
+
+    // The whole point of this fixture. A mint that produced two identical versions would hand a
+    // later selection test a predicate that still cannot discriminate, so it refuses here instead.
+    assert_ne!(
+        one.bytes(),
+        two.bytes(),
+        "B28.FIXTURE.VERSIONS_DIFFER_IN_BYTES"
+    );
+    assert_ne!(
+        one.digest().value,
+        two.digest().value,
+        "B28.FIXTURE.VERSIONS_DIFFER_IN_DIGEST"
+    );
+    assert_eq!(
+        (one.publication_version(), one.publication_version_count()),
+        (1, 2),
+        "B28.FIXTURE.V1_IS_ONE_OF_TWO"
+    );
+    assert_eq!(
+        (two.publication_version(), two.publication_version_count()),
+        (2, 2),
+        "B28.FIXTURE.V2_IS_TWO_OF_TWO"
+    );
+
+    let snapshot_path = output.join(FIXTURE_SNAPSHOT_FILE);
+    Connection::open(&fixture.store.path)
+        .expect("B28.FIXTURE.LIVE_STORE_OPENS")
+        .execute(
+            "VACUUM INTO ?1",
+            params![
+                snapshot_path
+                    .to_str()
+                    .expect("B28.FIXTURE.SNAPSHOT_PATH_IS_UTF8")
+            ],
+        )
+        .expect("B28.FIXTURE.VACUUM_INTO_SUCCEEDS");
+    fs::set_permissions(&snapshot_path, fs::Permissions::from_mode(0o600))
+        .expect("B28.FIXTURE.SNAPSHOT_IS_0600");
+
+    let mut publications = Vec::new();
+    for (exported, file) in [(&one, TWO_VERSION_V1_FILE), (&two, TWO_VERSION_V2_FILE)] {
+        let markdown_path = output.join(file);
+        write_private_file(&markdown_path, exported.bytes());
+        publications.push(MintedPublication {
+            version: exported.publication_version(),
+            is_current: exported.publication_version() == exported.publication_version_count(),
+            candidate_artifact_digest: exported.digest().value.clone(),
+            markdown_file: file,
+            markdown_path,
+            markdown_bytes: exported.bytes().to_vec(),
+            markdown_sha256: sha256_hex_of(exported.bytes()),
+        });
+    }
+
+    let snapshot_bytes = fs::read(&snapshot_path).expect("B28.FIXTURE.SNAPSHOT_READS");
+    let snapshot_sha256 = sha256_hex_of(&snapshot_bytes);
+    let schema_version = declared_schema_version_of(&snapshot_path);
+    let source_head = fixture_source_head();
+
+    // Its OWN schema tag and filename. Identity and digests only -- no passphrase, no recovery key.
+    let manifest_path = output.join(TWO_VERSION_MANIFEST_FILE);
+    let manifest = serde_json::json!({
+        "fixture": "beacon.b28.outcome-fixture.two-version.v1",
+        "source_head": source_head,
+        "schema_version": schema_version,
+        "workspace_id": fixture.workspace_id.to_string(),
+        "mission_id": fixture.mission_id.to_string(),
+        "media_type": one.media_type(),
+        "publication_version_count": 2,
+        "publications": publications.iter().map(|p| serde_json::json!({
+            "publication_version": p.version,
+            "is_current": p.is_current,
+            "candidate_artifact_digest": p.candidate_artifact_digest,
+            "markdown_file": p.markdown_file,
+            "markdown_bytes": p.markdown_bytes.len(),
+            "markdown_sha256": p.markdown_sha256,
+        })).collect::<Vec<_>>(),
+        "snapshot_file": FIXTURE_SNAPSHOT_FILE,
+        "snapshot_bytes": snapshot_bytes.len(),
+        "snapshot_sha256": snapshot_sha256,
+    });
+    write_private_file(
+        &manifest_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&manifest).expect("B28.FIXTURE.MANIFEST_SERIALIZES")
+        )
+        .as_bytes(),
+    );
+
+    Ok(MintedTwoVersionFixture {
+        directory: output.to_path_buf(),
+        snapshot_path,
+        manifest_path,
+        source_head,
+        schema_version,
+        workspace_id: fixture.workspace_id,
+        mission_id: fixture.mission_id,
+        media_type: one.media_type().to_owned(),
+        publications,
+        snapshot_sha256,
+    })
+}
+
+/// Reopens the two-version snapshot and exports EACH version at its own number.
+fn read_back_two_version_fixture(minted: &MintedTwoVersionFixture) -> TwoVersionReadBack {
+    let snapshot_bytes = fs::read(&minted.snapshot_path).expect("B28.READBACK.SNAPSHOT_READS");
+    assert_eq!(
+        sha256_hex_of(&snapshot_bytes),
+        minted.snapshot_sha256,
+        "B28.READBACK.SNAPSHOT_IS_THE_MINTED_BYTES"
+    );
+    let store = reopen_minted_snapshot(&snapshot_bytes);
+    let outcomes = OutcomeService::new(Arc::clone(&store.accounts), store.workspace_id);
+
+    let history = outcomes
+        .publication_history(minted.mission_id)
+        .expect("B28.READBACK.PUBLICATION_HISTORY_READS")
+        .iter()
+        .map(|row| {
+            (
+                row.publication_version,
+                row.is_current,
+                row.candidate_artifact_digest.clone(),
+            )
+        })
+        .collect();
+
+    let mut exports = Vec::new();
+    for version in [1_u32, 2_u32] {
+        let exported = outcomes
+            .export_markdown_version(minted.mission_id, version)
+            .expect("B28.READBACK.VERSION_EXPORTS");
+        exports.push((
+            exported.publication_version(),
+            exported.publication_version_count(),
+            exported.bytes().to_vec(),
+            exported.digest().value.clone(),
+        ));
+    }
+
+    TwoVersionReadBack {
+        workspace_id: store.workspace_id,
+        workspace_created: store.workspace_created,
+        history,
+        exports,
+    }
+}
+
+/// The positive bar: two publications, different bytes, each reachable at its OWN number.
+#[test]
+fn a_two_version_fixture_reopens_and_exports_each_version_at_its_own_number() {
+    let prefix = PrivatePrefix::new("b28-two");
+    let output = PrivateOutput::under(&prefix, "two-version");
+    let minted = mint_two_version_outcome_fixture_within(&prefix.path, Some(&output.path))
+        .expect("B28.MINT.SUCCEEDS");
+
+    // Four private files, and the one-version recipe's names are not among them.
+    let mut written: Vec<String> = fs::read_dir(&minted.directory)
+        .expect("B28.MINT.DIRECTORY_LISTS")
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    written.sort();
+    assert_eq!(
+        written,
+        vec![
+            TWO_VERSION_V1_FILE.to_owned(),
+            TWO_VERSION_V2_FILE.to_owned(),
+            TWO_VERSION_MANIFEST_FILE.to_owned(),
+            FIXTURE_SNAPSHOT_FILE.to_owned(),
+        ],
+        "B28.MINT.WRITES_ITS_OWN_FOUR_FILES"
+    );
+    assert_eq!(
+        mode_of(&minted.directory),
+        0o700,
+        "B28.MINT.DIRECTORY_IS_0700"
+    );
+    for path in [
+        &minted.snapshot_path,
+        &minted.manifest_path,
+        &minted.at(1).markdown_path,
+        &minted.at(2).markdown_path,
+    ] {
+        assert_eq!(mode_of(path), 0o600, "B28.MINT.FILE_IS_0600");
+    }
+
+    let v1 = minted.at(1).clone();
+    let v2 = minted.at(2).clone();
+    assert_ne!(
+        v1.markdown_bytes, v2.markdown_bytes,
+        "B28.MINT.BYTES_DIFFER"
+    );
+    assert_ne!(
+        v1.candidate_artifact_digest, v2.candidate_artifact_digest,
+        "B28.MINT.DIGESTS_DIFFER"
+    );
+    assert!(!v1.is_current && v2.is_current, "B28.MINT.V2_IS_CURRENT");
+    for p in [&v1, &v2] {
+        assert_eq!(
+            fs::read(&p.markdown_path).expect("B28.MINT.MARKDOWN_READS"),
+            p.markdown_bytes,
+            "B28.MINT.MARKDOWN_FILE_IS_THE_EXPORTED_BYTES"
+        );
+        assert!(
+            String::from_utf8(p.markdown_bytes.clone())
+                .expect("B28.MINT.MARKDOWN_IS_UTF8")
+                .contains(FIXTURE_MISSION_DECLARATION),
+            "B28.MINT.DOCUMENT_CARRIES_THE_SEEDED_DECLARATION"
+        );
+    }
+
+    let read_back = read_back_two_version_fixture(&minted);
+    assert!(
+        !read_back.workspace_created,
+        "B28.READBACK.WORKSPACE_WAS_NOT_CREATED_FRESH"
+    );
+    assert_eq!(read_back.workspace_id, minted.workspace_id);
+    assert_eq!(
+        read_back.history,
+        vec![
+            (2, true, v2.candidate_artifact_digest.clone()),
+            (1, false, v1.candidate_artifact_digest.clone()),
+        ],
+        "B28.READBACK.HISTORY_IS_2_NEWEST_1_SUPERSEDED"
+    );
+
+    // Each version at its OWN number. This is the assertion the mutant below has to break: an
+    // export that answers the newest for every request returns version 2's bytes here.
+    let (v1_version, v1_count, v1_bytes, v1_digest) = read_back.exports[0].clone();
+    let (v2_version, v2_count, v2_bytes, v2_digest) = read_back.exports[1].clone();
+    assert_eq!(
+        (v1_version, v1_count),
+        (1, 2),
+        "B28.READBACK.V1_REPORTS_1_OF_2"
+    );
+    assert_eq!(
+        (v2_version, v2_count),
+        (2, 2),
+        "B28.READBACK.V2_REPORTS_2_OF_2"
+    );
+    assert_eq!(
+        v1_bytes, v1.markdown_bytes,
+        "B28.READBACK.V1_EXPORTS_ITS_OWN_BYTES"
+    );
+    assert_eq!(
+        v2_bytes, v2.markdown_bytes,
+        "B28.READBACK.V2_EXPORTS_ITS_OWN_BYTES"
+    );
+    assert_eq!(
+        v1_digest, v1.candidate_artifact_digest,
+        "B28.READBACK.V1_DIGEST"
+    );
+    assert_eq!(
+        v2_digest, v2.candidate_artifact_digest,
+        "B28.READBACK.V2_DIGEST"
+    );
+    assert_ne!(v1_bytes, v2_bytes, "B28.READBACK.THE_TWO_EXPORTS_DIFFER");
+
+    // The manifest names both versions, and carries no way into the store.
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&minted.manifest_path).expect("B28.MINT.MANIFEST_READS"))
+            .expect("B28.MINT.MANIFEST_IS_JSON");
+    assert_eq!(
+        manifest["fixture"], "beacon.b28.outcome-fixture.two-version.v1",
+        "B28.MINT.MANIFEST_HAS_ITS_OWN_SCHEMA_TAG"
+    );
+    assert_eq!(manifest["source_head"], minted.source_head);
+    assert_eq!(manifest["schema_version"], minted.schema_version);
+    assert_eq!(manifest["snapshot_sha256"], minted.snapshot_sha256);
+    assert_eq!(manifest["publication_version_count"], 2);
+    for (index, p) in [(0, &v1), (1, &v2)] {
+        let row = &manifest["publications"][index];
+        assert_eq!(row["publication_version"], p.version);
+        assert_eq!(row["is_current"], p.is_current);
+        assert_eq!(
+            row["candidate_artifact_digest"],
+            p.candidate_artifact_digest
+        );
+        assert_eq!(row["markdown_file"], p.markdown_file);
+        assert_eq!(row["markdown_sha256"], p.markdown_sha256);
+    }
+    assert!(
+        !fs::read_to_string(&minted.manifest_path)
+            .unwrap()
+            .contains(FIXTURE_PASSPHRASE),
+        "B28.MINT.MANIFEST_CARRIES_NO_PASSPHRASE"
+    );
+}
+
+/// Mints the two-version fixture into a directory you name. Not part of the suite.
+///
+///     export TMPDIR="$(mktemp -d)"    # 0700, yours, under /tmp -- the prefix the guard requires
+///     BEACON_B28_FIXTURE_DIR="$(mktemp -u "$TMPDIR/beacon-b28-XXXXXX")" \
+///         cargo test -p beacond --test outcome_prepare -- --ignored --exact \
+///         mint_two_version_outcome_fixture_into_the_named_directory --nocapture
+///
+/// Separate from the one-version manual test in every way that matters: its own env variable, its
+/// own manifest filename and schema tag, and its own per-version Markdown files. Neither the
+/// one-version recipe nor its `fixture.json` shape changes.
+#[test]
+#[ignore = "mints a two-version private fixture into a directory you name; run deliberately, never as part of the suite"]
+fn mint_two_version_outcome_fixture_into_the_named_directory() {
+    let named = std::env::var_os("BEACON_B28_FIXTURE_DIR").map(PathBuf::from);
+    let prefix = std::env::temp_dir();
+    let minted = mint_two_version_outcome_fixture_within(&prefix, named.as_deref())
+        .unwrap_or_else(|refusal| panic!("{refusal}"));
+
+    let read_back = read_back_two_version_fixture(&minted);
+    assert_eq!(read_back.exports[0].2, minted.at(1).markdown_bytes);
+    assert_eq!(read_back.exports[1].2, minted.at(2).markdown_bytes);
+    assert_ne!(read_back.exports[0].2, read_back.exports[1].2);
+
+    println!(
+        "B28 two-version fixture minted at {}",
+        minted.directory.display()
+    );
+    println!("  source head        {}", minted.source_head);
+    println!("  schema version     {}", minted.schema_version);
+    println!("  mission            {}", minted.mission_id);
+    println!("  media type         {}", minted.media_type);
+    println!("  snapshot           {}", minted.snapshot_path.display());
+    println!("  snapshot sha256    {}", minted.snapshot_sha256);
+    for p in &minted.publications {
+        println!(
+            "  version {} ({}) {} sha256 {} digest {}",
+            p.version,
+            if p.is_current {
+                "current"
+            } else {
+                "superseded"
+            },
+            p.markdown_file,
+            p.markdown_sha256,
+            p.candidate_artifact_digest
+        );
+    }
+    println!("  manifest           {}", minted.manifest_path.display());
 }
