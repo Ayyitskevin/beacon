@@ -26,6 +26,7 @@ mod git_object_store;
 mod local_model_activation;
 mod mission;
 mod mission_completion;
+mod mission_completion_command;
 mod mission_completion_store;
 mod mission_impact;
 mod model_invocation;
@@ -129,6 +130,11 @@ pub use mission_completion::{
     CompletionSupersedes, ConditionOutcome, ConditionResultRecord, MalformedCompletion,
     MissionCompletionV1, NarrativeItem, SpendReference, SupportKind, SupportRef, UncertaintyKind,
     UnfinishedKind,
+};
+pub use mission_completion_command::{
+    CompletionCommandError, CompletionCommandUnavailable, CompletionIntentRequest,
+    CompletionPreview, ConditionResultDto, MissionCompletionCommandService, NarrativeItemDto,
+    REVIEWED_INTENT_PREFIX, ReviewedIntent, SpendDto, SupportRefDto,
 };
 pub use mission_completion_store::{
     CompletionReadRefusal, CompletionUnavailable, CompletionView, ConditionResultView,
