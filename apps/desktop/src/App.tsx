@@ -1261,6 +1261,17 @@ export function App() {
       setTeamComposerOpen(false);
       setMissionComposerOpen(false);
       setLinkedMissionId(null);
+      // The preflight Receipt on screen is Project-scoped and ephemeral: CheckPreflightSection
+      // speaks about "this Project" (CheckPreflight.tsx:78) and renders the stored commands and
+      // repository revision without ever receiving a Project key, so leaving it in place showed
+      // the Project just closed underneath the one just opened. Cleared beside the other
+      // Project-scoped state, and unconditionally -- re-opening the SAME Project is a fresh read
+      // too, and a Receipt from before it is stale in the same way, only harder to notice.
+      //
+      // Placement matters: this runs only after every Charter, Policy and Repository join has
+      // agreed, so a failed or refused open leaves the existing display untouched rather than
+      // blanking it on the way to an error.
+      setPreflightReceipt(null);
       opened = true;
     });
     return opened;
