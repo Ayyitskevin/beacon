@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Barrier};
 use std::thread::{self, JoinHandle};
@@ -2480,7 +2481,12 @@ fn c3_owner_returns_the_exact_recorded_completion() {
     assert_eq!(
         view.condition_results
             .iter()
-            .map(|result| (result.ordinal, result.outcome.as_str(), result.support_count, result.note.clone()))
+            .map(|result| (
+                result.ordinal,
+                result.outcome.as_str(),
+                result.support_count,
+                result.note.clone()
+            ))
             .collect::<Vec<_>>(),
         vec![
             (0_u32, "met", 0_u32, None),
@@ -2539,11 +2545,18 @@ fn c3_owner_absent_is_not_broken_and_corruption_is_not_absence() {
         "C3.OWNER.ABSENT_IS_NOT_BROKEN: the control must read before it is corrupted"
     );
     // INTENTIONAL CORRUPTION after a real owner mint: the stored bytes no longer hash to the digest.
+    // The immutability trigger is dropped and recreated BYTE-IDENTICALLY to 0026's own text, so
+    // the schema signature startup verifies is unchanged.
     let connection = Connection::open(&store.path).unwrap();
     connection
-        .execute(
-            "UPDATE mission_completions SET canonical_bytes = zeroblob(64)",
-            [],
+        .execute_batch(
+            "DROP TRIGGER mission_completions_no_update;
+             UPDATE mission_completions SET canonical_bytes = zeroblob(64);",
+        )
+        .unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER mission_completions_no_update\nBEFORE UPDATE ON mission_completions\nBEGIN\n    SELECT RAISE(ABORT, 'Mission completions are immutable');\nEND;",
         )
         .unwrap();
     drop(connection);
@@ -2614,10 +2627,9 @@ fn c3_owner_absent_and_cross_workspace_are_byte_identical() {
     let unknown = reader
         .get(Uuid::new_v4())
         .expect("C3.OWNER.SCOPE_OPACITY: an unknown Mission is not an error");
-    let foreign =
-        beacond::MissionCompletionReadService::new(Arc::clone(&accounts), Uuid::new_v4())
-            .get(mission.id)
-            .expect("C3.OWNER.SCOPE_OPACITY: a foreign Workspace is not an error");
+    let foreign = beacond::MissionCompletionReadService::new(Arc::clone(&accounts), Uuid::new_v4())
+        .get(mission.id)
+        .expect("C3.OWNER.SCOPE_OPACITY: a foreign Workspace is not an error");
 
     assert!(unknown.is_none(), "C3.OWNER.SCOPE_OPACITY");
     assert!(
@@ -2667,33 +2679,64 @@ fn c3_owner_keeps_its_authentication_refusal() {
 fn astra_c3_owner_verifies_the_event_bytes_not_only_its_digest_selector() {
     let (store, accounts, mission) = recorded_completion("c3-event-bytes");
     let reader = completion_reader(&store, &accounts);
-    assert!(reader.get(mission.id).expect("C3.OWNER.EVENT_BYTES_CONTROL").is_some(),
-        "C3.OWNER.EVENT_BYTES_CONTROL");
+    assert!(
+        reader
+            .get(mission.id)
+            .expect("C3.OWNER.EVENT_BYTES_CONTROL")
+            .is_some(),
+        "C3.OWNER.EVENT_BYTES_CONTROL"
+    );
     // INTENTIONAL CORRUPTION after the real owner minted BOTH the record and its Event.
     // Keep Mission/digest selectors and sequence untouched; change only the Event's byte claim.
     let connection = Connection::open(&store.path).unwrap();
-    let (sequence, before): (i64, String) = connection.query_row(
-        "SELECT sequence, payload_json FROM events WHERE workspace_id = ?1
+    let (sequence, before): (i64, String) = connection
+        .query_row(
+            "SELECT sequence, payload_json FROM events WHERE workspace_id = ?1
          AND kind = 'mission.completed' AND json_extract(payload_json, '$.missionId') = ?2",
-        rusqlite::params![store.workspace_id.to_string(), mission.id.to_string()],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    ).unwrap();
+            rusqlite::params![store.workspace_id.to_string(), mission.id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
     let before: serde_json::Value = serde_json::from_str(&before).unwrap();
-    assert_ne!(before["canonicalBytesBase64"], "AA==", "C3.OWNER.EVENT_BYTES_PLANT_DIFFERS");
+    assert_ne!(
+        before["canonicalBytesBase64"], "AA==",
+        "C3.OWNER.EVENT_BYTES_PLANT_DIFFERS"
+    );
     assert_eq!(connection.execute(
         "UPDATE events SET payload_json = json_set(payload_json, '$.canonicalBytesBase64', 'AA==')
          WHERE sequence = ?1", [sequence],
     ).unwrap(), 1, "C3.OWNER.EVENT_BYTES_ONE_PLANT");
-    let after: String = connection.query_row("SELECT payload_json FROM events WHERE sequence = ?1",
-        [sequence], |row| row.get(0)).unwrap();
+    let after: String = connection
+        .query_row(
+            "SELECT payload_json FROM events WHERE sequence = ?1",
+            [sequence],
+            |row| row.get(0),
+        )
+        .unwrap();
     let after: serde_json::Value = serde_json::from_str(&after).unwrap();
-    assert_eq!(after["missionId"], before["missionId"], "C3.OWNER.EVENT_BYTES_SELECTOR_UNCHANGED");
-    assert_eq!(after["digestValue"], before["digestValue"], "C3.OWNER.EVENT_BYTES_SELECTOR_UNCHANGED");
+    assert_eq!(
+        after["missionId"], before["missionId"],
+        "C3.OWNER.EVENT_BYTES_SELECTOR_UNCHANGED"
+    );
+    assert_eq!(
+        after["digestValue"], before["digestValue"],
+        "C3.OWNER.EVENT_BYTES_SELECTOR_UNCHANGED"
+    );
     drop(connection);
-    let refusal = reader.get(mission.id).expect_err("C3.OWNER.EVENT_BYTES_ARE_OWNER_VERIFIED");
-    assert!(matches!(refusal, beacond::MissionCompletionReadError::Unavailable(
-        beacond::CompletionUnavailable::CompletionUnverified(beacond::CompletionReadRefusal::BytesDisagree)
-    )), "C3.OWNER.EVENT_BYTES_ARE_OWNER_VERIFIED: {refusal:?}");
+    let refusal = reader
+        .get(mission.id)
+        .expect_err("C3.OWNER.EVENT_BYTES_ARE_OWNER_VERIFIED");
+    assert!(
+        matches!(
+            refusal,
+            beacond::MissionCompletionReadError::Unavailable(
+                beacond::CompletionUnavailable::CompletionUnverified(
+                    beacond::CompletionReadRefusal::BytesDisagree
+                )
+            )
+        ),
+        "C3.OWNER.EVENT_BYTES_ARE_OWNER_VERIFIED: {refusal:?}"
+    );
 }
 
 /// C3.WIRE.DTO_EXACT — the DTO across the real socket, not a service call.
@@ -2706,22 +2749,23 @@ fn astra_c3_owner_verifies_the_event_bytes_not_only_its_digest_selector() {
 #[test]
 fn c3_wire_returns_the_exact_dto_and_null_over_the_real_socket() {
     let (store, accounts, mission) = recorded_completion("c3-wire");
-    let expected = beacond::MissionCompletionReadService::new(
-        Arc::clone(&accounts),
-        store.workspace_id,
-    )
-    .get(mission.id)
-    .expect("the owner reads it")
-    .expect("a completion was recorded");
+    let expected =
+        beacond::MissionCompletionReadService::new(Arc::clone(&accounts), store.workspace_id)
+            .get(mission.id)
+            .expect("the owner reads it")
+            .expect("a completion was recorded");
     // The owner service and the client must be talking to the same store, so the fixture's own
     // handles are dropped before the server binds it.
     drop(accounts);
 
-    let root = store.path.parent().unwrap().join(format!(
-        "beacon-c3-wire-{}",
-        Uuid::new_v4()
-    ));
+    let root = store
+        .path
+        .parent()
+        .unwrap()
+        .join(format!("beacon-c3-wire-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&root).unwrap();
+    // The supervisor refuses a runtime directory anyone else can read.
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let socket = root.join("beacond.sock");
     let token = root.join("client.token");
     beacond::initialize_local_auth_token(&token).unwrap();
@@ -2756,7 +2800,12 @@ fn c3_wire_returns_the_exact_dto_and_null_over_the_real_socket() {
     );
     // The serialized shape, against the camelCase contract.
     let json: serde_json::Value = serde_json::to_value(&over_the_wire).unwrap();
-    let mut keys: Vec<&str> = json.as_object().unwrap().keys().map(String::as_str).collect();
+    let mut keys: Vec<&str> = json
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
     keys.sort();
     assert_eq!(
         keys,

@@ -47,8 +47,7 @@ use uuid::Uuid;
 
 use crate::mission::MissionError;
 use crate::mission_completion::{
-    CompletionActor, CompletionDisposition, CompletionSupersedes, ConditionOutcome,
-    MissionCompletionV1,
+    CompletionActor, CompletionSupersedes, ConditionOutcome, MissionCompletionV1,
 };
 use crate::operator_account::{OperatorAccountError, OperatorAccountService};
 use crate::proposal::sha256;
@@ -736,14 +735,6 @@ pub(crate) fn actor_token(actor: CompletionActor) -> &'static str {
     }
 }
 
-/// How the Mission finished. NEITHER token is a success verdict.
-pub(crate) fn disposition_token(disposition: CompletionDisposition) -> &'static str {
-    match disposition {
-        CompletionDisposition::Concluded => "concluded",
-        CompletionDisposition::Abandoned => "abandoned",
-    }
-}
-
 /// Startup: every stored completion re-proves itself, and every `mission.completed` Event names one.
 /// The rows `verify_completion_state` enumerates, in the order it enumerates them.
 ///
@@ -1243,7 +1234,7 @@ pub(crate) fn verified_completion_for_mission_within(
         actor: actor_token(completion.actor).to_owned(),
         accountable_resident_id: completion.accountable_resident_id,
         accountable_resident_configuration_id: completion.accountable_resident_configuration_id,
-        disposition: disposition_token(completion.disposition).to_owned(),
+        disposition: disposition_token(&completion).to_owned(),
         condition_results,
         delivered_artifact_count: count(completion.delivered_artifacts.len())?,
         unfinished_work_count: count(completion.unfinished_work.len())?,
@@ -1274,7 +1265,8 @@ impl MissionCompletionReadService {
         mission_id: Uuid,
     ) -> Result<Option<CompletionView>, MissionCompletionReadError> {
         self.accounts.with_authenticated_store(|connection, _now| {
-            let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
             match verified_completion_for_mission_within(
                 &transaction,
                 self.workspace_id,

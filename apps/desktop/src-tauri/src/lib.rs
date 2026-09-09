@@ -8,8 +8,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use beacond::{
-    CompletionView,
-    AccessOrigin, BeaconCapability, BeaconCapabilityDescriptor, ExportedOutcome,
+    AccessOrigin, BeaconCapability, BeaconCapabilityDescriptor, CompletionView, ExportedOutcome,
     LiveDataEncryptionReport, LocalErrorCode, LocalModelActivation, LocalModelActivationReview,
     LocalModelDiscoveryReport, LocalSupervisorClient, LocalTransportError, MissionDraft,
     MissionView, OperatorSessionPolicy, OperatorSessionStatus, PlatformSessionMonitorStatus,
@@ -582,6 +581,7 @@ impl From<LocalTransportError> for CommandError {
             | LocalTransportError::ProjectRepository(_)
             | LocalTransportError::Team(_)
             | LocalTransportError::Mission(_)
+            | LocalTransportError::MissionCompletionRead(_)
             | LocalTransportError::CheckPreflight(_)
             | LocalTransportError::RecentReceipt(_)
             | LocalTransportError::SampleProject(_)
@@ -1813,10 +1813,10 @@ mod tests {
     use super::{
         DesktopState, accept_starter_organization_value, activate_resident_value,
         admit_mission_value, authentication_capabilities_value, begin_password_setup_value,
-        get_mission_completion_value,
         bind_project_repository_value, complete_operator_setup_value, create_project_value,
-        current_project_repository_value, install_sample_project_value, migrate_legacy_app_data,
-        mission_value, outcome_document_value, platform_session_monitor_status_value,
+        current_project_repository_value, get_mission_completion_value,
+        install_sample_project_value, migrate_legacy_app_data, mission_value,
+        outcome_document_value, platform_session_monitor_status_value,
         preflight_project_checks_value, prepare_runtime_directory, project_charter_history_value,
         project_policy_history_value, project_policy_value, project_repository_history_value,
         project_value, projects_value, publish_project_policy_value, reactivate_resident_value,
@@ -2116,6 +2116,7 @@ mod tests {
                 "allow-teams",
                 "allow-team",
                 "allow-form-team",
+                "allow-get-mission-completion",
                 "allow-missions",
                 "allow-mission",
                 "allow-admit-mission",
@@ -2160,7 +2161,6 @@ mod tests {
         assert_eq!(refusal.code, "outcome_absent");
     }
 
-
     /// C3.DESKTOP.COMMAND_WIRED — the real native adapter path, not a mock.
     ///
     /// This calls the same value function the `#[tauri::command]` wrapper calls, over a real
@@ -2178,7 +2178,11 @@ mod tests {
                 SecretString::new("a long local passphrase".to_owned()),
             )
             .unwrap();
-        state.state.supervisor.complete_operator_setup(true).unwrap();
+        state
+            .state
+            .supervisor
+            .complete_operator_setup(true)
+            .unwrap();
 
         let absent = get_mission_completion_value(&state.state, Uuid::new_v4())
             .expect("C3.DESKTOP.COMMAND_WIRED: an unknown Mission is not an error");
@@ -2966,6 +2970,7 @@ mod tests {
         "STALE_MISSION_TEAM" | StaleMissionTeam => ("stale_mission_team", "The Team or a Resident configuration changed. Reload before admitting the Mission.", None);
         "MISSION_MEMBER_INELIGIBLE" | MissionMemberIneligible => ("mission_member_ineligible", "A Team member is no longer eligible for Mission admission.", None);
         "MISSION_UNAVAILABLE" | MissionUnavailable => ("mission_unavailable", "Beacon could not verify Mission state.", None);
+        "MISSION_COMPLETION_UNAVAILABLE" | MissionCompletionUnavailable => ("mission_completion_unavailable", "The Mission completion could not be verified.", None);
         "SETUP_NOT_STARTED" | SetupNotStarted => ("local_request_failed", "Beacon could not complete that local request.", None);
         "ACCOUNT_ALREADY_EXISTS" | AccountAlreadyExists => ("local_request_failed", "Beacon could not complete that local request.", None);
         "ACCOUNT_MISSING" | AccountMissing => ("local_request_failed", "Beacon could not complete that local request.", None);
@@ -3006,6 +3011,8 @@ mod tests {
             LocalTransportError::Team(beacond::TeamError::Store(driver_error!())), &[NEEDLE_A];
         "MISSION" | LocalTransportError::Mission(_) => ("local_request_failed", "Beacon could not complete that local request."),
             LocalTransportError::Mission(beacond::MissionError::Store(driver_error!())), &[NEEDLE_A];
+        "MISSION_COMPLETION_READ" | LocalTransportError::MissionCompletionRead(_) => ("local_request_failed", "Beacon could not complete that local request."),
+            LocalTransportError::MissionCompletionRead(beacond::MissionCompletionReadError::Unavailable(beacond::CompletionUnavailable::Store(driver_error!()))), &[NEEDLE_A];
         "CHECK_PREFLIGHT" | LocalTransportError::CheckPreflight(_) => ("local_request_failed", "Beacon could not complete that local request."),
             LocalTransportError::CheckPreflight(beacond::CheckPreflightError::Store(driver_error!())), &[NEEDLE_A];
         "RECENT_RECEIPT" | LocalTransportError::RecentReceipt(_) => ("local_request_failed", "Beacon could not complete that local request."),
@@ -3092,9 +3099,9 @@ mod tests {
     fn r42_desktop_projection_is_truthful() {
         let cases = desktop_cases();
 
-        assert_eq!(remote_rows().len(), 62, "R42S1.DESKTOP.CARDINALITY.REMOTE");
-        assert_eq!(local_rows().len(), 21, "R42S1.DESKTOP.CARDINALITY.LOCAL");
-        assert_eq!(cases.len(), 83, "R42S1.DESKTOP.CARDINALITY.CASES");
+        assert_eq!(remote_rows().len(), 63, "R42S1.DESKTOP.CARDINALITY.REMOTE");
+        assert_eq!(local_rows().len(), 22, "R42S1.DESKTOP.CARDINALITY.LOCAL");
+        assert_eq!(cases.len(), 85, "R42S1.DESKTOP.CARDINALITY.CASES");
         let ids: std::collections::BTreeSet<&str> =
             cases.iter().map(|case| case.id.as_str()).collect();
         assert_eq!(ids.len(), cases.len(), "R42S1.DESKTOP.CASE_IDS_UNIQUE");

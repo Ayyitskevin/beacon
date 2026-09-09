@@ -506,7 +506,11 @@ impl fmt::Display for LocalTransportError {
             // token, and nothing beneath it -- driver text, a path, a note an operator wrote -- is
             // allowed onto this line.
             Self::MissionCompletionRead(error) => {
-                write!(formatter, "Mission completion read failed: {}", error.name())
+                write!(
+                    formatter,
+                    "Mission completion read failed: {}",
+                    error.name()
+                )
             }
             Self::Mission(error) => {
                 write!(
@@ -5174,19 +5178,19 @@ mod tests {
         );
         assert_eq!(
             code_rows().len(),
-            62,
+            63,
             "R42S2.TRANSPORT.CARDINALITY.LocalErrorCode"
         );
         assert_eq!(
             transport_rows().len(),
-            22,
+            23,
             "R42S2.TRANSPORT.CARDINALITY.ROOT"
         );
         // 22 roots expanded: 62 Remote codes, 72 Supervisor roots PLUS every child of all 26
         // cause-bearing Supervisor parents (including the two nested classification
         // vocabularies), 18 account faults at each of 14 wrappers, the three draft reasons, both
         // charter-revision pairs, and slice 1's 83-case Outcome tree.
-        assert_eq!(cases.len(), 876, "R42S2.TRANSPORT.CARDINALITY.CASES");
+        assert_eq!(cases.len(), 878, "R42S2.TRANSPORT.CARDINALITY.CASES");
         assert_eq!(
             supervisor_rows().len(),
             75,
