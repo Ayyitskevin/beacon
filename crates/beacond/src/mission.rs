@@ -350,8 +350,16 @@ impl MissionService {
 
     pub fn list(&self, project_id: Uuid) -> Result<Vec<MissionView>, MissionError> {
         self.accounts.with_authenticated_store(|connection, _now| {
-            require_project(connection, self.workspace_id, project_id)?;
-            list_missions(connection, self.workspace_id, project_id)
+            // ONE snapshot for the whole answer: the Project lookup, the ordered enumeration, and
+            // every Mission's owner proof -- including each verifier's re-read of its row, roster
+            // and Event. A transaction per returned Mission would let a write land between two of
+            // them and produce a list no instant of this store ever held.
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+            require_project(&transaction, self.workspace_id, project_id)?;
+            let missions = list_missions(&transaction, self.workspace_id, project_id)?;
+            transaction.commit()?;
+            Ok(missions)
         })
     }
 
@@ -622,15 +630,48 @@ fn list_missions(
             |row| row.get::<_, String>(0),
         )?
         .collect::<Result<Vec<_>, _>>()?;
+    // Every listed Mission is proved against its own admission Event, exactly as `get` proves the
+    // one it returns. `collect` into a `Result` short-circuits, so ONE row that does not re-prove
+    // refuses the whole list: a caller never receives a good prefix, an omission, or an empty list
+    // standing in for a refusal. A row that vanished between the enumeration and its read is
+    // `InvalidStore` for the same reason -- the enumeration saw it.
     ids.into_iter()
-        .map(|id| {
+        .enumerate()
+        .map(|(index, id)| {
             let id = parse_uuid(id)?;
-            load_stored_mission(connection, workspace_id, id)?
-                .map(render_mission)
-                .ok_or(MissionError::InvalidStore)
+            let verified = verified_mission_admission(connection, workspace_id, id)?
+                .ok_or(MissionError::InvalidStore)?;
+            after_listed_row(index);
+            Ok(verified)
         })
         .collect()
 }
+
+/// A private observation point between two listed rows, compiled only into this crate's own test
+/// build. It exists so a bar can commit an independent write at the exact instant that
+/// distinguishes one whole-list snapshot from a snapshot per returned Mission; there is no public
+/// hook, no feature, and nothing outside `cfg(test)` can install one.
+#[cfg(test)]
+type ListedRowHook = Box<dyn Fn(usize) + Send>;
+
+#[cfg(test)]
+static AFTER_LISTED_ROW: std::sync::Mutex<Option<ListedRowHook>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn set_after_listed_row_hook(hook: Option<ListedRowHook>) {
+    *AFTER_LISTED_ROW.lock().unwrap() = hook;
+}
+
+#[cfg(test)]
+fn after_listed_row(index: usize) {
+    let hook = AFTER_LISTED_ROW.lock().unwrap();
+    if let Some(hook) = hook.as_ref() {
+        hook(index);
+    }
+}
+
+#[cfg(not(test))]
+fn after_listed_row(_index: usize) {}
 
 fn load_stored_mission(
     connection: &Connection,
@@ -1253,6 +1294,7 @@ mod verified_admission_reader {
     use std::net::{Ipv4Addr, SocketAddr, TcpListener};
     use std::path::PathBuf;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread::{self, JoinHandle};
 
     use rusqlite::Connection;
@@ -1528,6 +1570,109 @@ mod verified_admission_reader {
             "the two members must carry distinct Configurations for the roster bars to discriminate"
         );
         (store, prepared, admitted)
+    }
+
+    /// One Project with two admitted Missions, in the order `list` must return them.
+    fn project_with_two_missions(
+        store: &TestStore,
+        accounts: &Arc<OperatorAccountService>,
+    ) -> (Uuid, Vec<MissionView>) {
+        let prepared = prepare_team(store, accounts);
+        let missions = MissionService::new(Arc::clone(accounts), store.workspace_id);
+        let draft = |outcome: &str| MissionDraft {
+            project_id: prepared.project.id,
+            expected_charter_revision: prepared.project.charter.revision,
+            team_id: prepared.team.id,
+            desired_outcome: outcome.to_owned(),
+            success_conditions: vec![CONDITION_ONE.to_owned(), CONDITION_TWO.to_owned()],
+            constraints: vec![CONSTRAINT_ONE.to_owned(), CONSTRAINT_TWO.to_owned()],
+            prohibitions: vec![PROHIBITION_ONE.to_owned(), PROHIBITION_TWO.to_owned()],
+            members: prepared
+                .configurations
+                .iter()
+                .map(|configuration| MissionMemberDraft {
+                    resident_id: configuration.resident_id,
+                    expected_configuration_id: configuration.id,
+                })
+                .collect(),
+        };
+        let mut admitted = vec![
+            missions.admit(draft(DESIRED_OUTCOME)).unwrap(),
+            missions.admit(draft("A second admitted outcome.")).unwrap(),
+        ];
+        admitted.sort_by(|left, right| {
+            (left.admitted_at_ms, left.id).cmp(&(right.admitted_at_ms, right.id))
+        });
+        (prepared.project.id, admitted)
+    }
+
+    /// The whole list comes from ONE snapshot, not one per returned Mission.
+    ///
+    /// A private `cfg(test)` observation point fires between the two rows. The hook opens a
+    /// SECOND connection and commits a real WAL write that would make the *second* Mission refuse
+    /// -- so a snapshot per Mission produces `InvalidStore`, and one snapshot for the list produces
+    /// the two coherent views the store held when the read began. The write is then proved to have
+    /// reached and committed by the next read observing it. No sleep, no generated load, and the
+    /// discrimination is against a per-row TRANSACTION, not against a raw unverified read.
+    #[test]
+    fn the_whole_listing_comes_from_one_snapshot_not_one_per_mission() {
+        let store = TestStore::new("b12-snapshot");
+        let accounts = enrolled_accounts(&store);
+        let (project_id, expected) = project_with_two_missions(&store, &accounts);
+        let missions = MissionService::new(Arc::clone(&accounts), store.workspace_id);
+
+        let path = store.path.clone();
+        let victim = expected[1].id;
+        let fired = Arc::new(AtomicUsize::new(0));
+        let changed_rows = Arc::new(AtomicUsize::new(0));
+        let hook_fired = Arc::clone(&fired);
+        let hook_changed = Arc::clone(&changed_rows);
+        set_after_listed_row_hook(Some(Box::new(move |index| {
+            // Exactly once, immediately after the FIRST row is verified and before the second is.
+            if index != 0 || hook_fired.fetch_add(1, Ordering::SeqCst) != 0 {
+                return;
+            }
+            // INTENTIONAL CORRUPTION on an independent connection, committed while the list read
+            // is in flight: the second Mission's Event stops matching its row.
+            let writer = Connection::open(&path).unwrap();
+            let changed = writer
+                .execute(
+                    "UPDATE events
+                     SET payload_json =
+                         json_set(payload_json, '$.mission.desiredOutcome', 'rewritten mid-list')
+                     WHERE kind = 'mission.admitted'
+                       AND json_extract(payload_json, '$.mission.id') = ?1",
+                    rusqlite::params![victim.to_string()],
+                )
+                .unwrap();
+            hook_changed.store(changed, Ordering::SeqCst);
+        })));
+
+        let listed = missions.list(project_id);
+        set_after_listed_row_hook(None);
+
+        // The writer reached its point and committed exactly one row.
+        assert_eq!(fired.load(Ordering::SeqCst), 1, "B12.LIST.WRITER_REACHED");
+        assert_eq!(
+            changed_rows.load(Ordering::SeqCst),
+            1,
+            "B12.LIST.WRITER_COMMITTED"
+        );
+
+        // The first result is coherent with the instant the read began.
+        let listed = listed.expect("B12.LIST.ONE_SNAPSHOT_FOR_THE_WHOLE_LIST");
+        assert_eq!(listed, expected, "B12.LIST.ONE_SNAPSHOT_FOR_THE_WHOLE_LIST");
+
+        // And the very next read observes the committed change, so the write was real and durable
+        // rather than rolled back or invisible.
+        let refusal = missions
+            .list(project_id)
+            .expect_err("B12.LIST.NEXT_READ_OBSERVES_THE_WRITE");
+        assert_eq!(
+            refusal.name(),
+            "InvalidStore",
+            "B12.LIST.NEXT_READ_OBSERVES_THE_WRITE"
+        );
     }
 
     #[test]
