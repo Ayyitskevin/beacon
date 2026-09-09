@@ -473,6 +473,17 @@ export function App() {
     });
   }
 
+  // Briefing's Receipts already carry the Project id they were recorded against. Opening one is
+  // the existing `openProject` read and nothing else: no extra Receipt request, no refresh, no
+  // synthesised link. Only a successful, fully validated read moves the operator to Projects; a
+  // refusal leaves them on Briefing with `runAction`'s error already on screen and no Project lens
+  // drawn, because `openProject` writes no state until every join has agreed.
+  function openProjectFromReceipt(projectId: string) {
+    void openProject(projectId).then((opened) => {
+      if (opened) setActiveApplication("Projects");
+    });
+  }
+
   function applyVerifiedSession(nextSession: DesktopSessionStatus, expectedEpoch: number) {
     setSession(nextSession);
     if (nextSession.phase !== "unlocked") {
@@ -1693,7 +1704,8 @@ export function App() {
               onReactivateResident={(resident) => changeResident(reactivateResident, resident)}
               onRetireResident={(resident) => changeResident(retireResident, resident)}
               onRefreshResidents={refreshResidents}
-              recentReceiptPage={recentReceiptPage}
+              onOpenReceiptProject={openProjectFromReceipt}
+        recentReceiptPage={recentReceiptPage}
               loadingRecentReceipts={loadingRecentReceipts}
               recentReceiptFailure={recentReceiptFailure}
               onRefreshReceipts={loadRecentReceipts}
@@ -2011,6 +2023,7 @@ function Briefing({
   loadingRecentReceipts,
   recentReceiptFailure,
   onRefreshReceipts,
+  onOpenReceiptProject,
   onLock,
 }: {
   classes: StyleClasses;
@@ -2054,6 +2067,7 @@ function Briefing({
   loadingRecentReceipts: boolean;
   recentReceiptFailure: string;
   onRefreshReceipts: () => void;
+  onOpenReceiptProject: (projectId: string) => void;
   onLock: () => void;
 }) {
   const [retirementCandidateId, setRetirementCandidateId] = useState<string | null>(null);
@@ -2138,6 +2152,7 @@ function Briefing({
         loading={loadingRecentReceipts}
         disabled={busy}
         onRefresh={onRefreshReceipts}
+        onOpenProject={onOpenReceiptProject}
       />
       {retirementCandidate && (
         <section

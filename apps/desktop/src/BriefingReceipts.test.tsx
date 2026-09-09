@@ -56,6 +56,7 @@ it("lists Receipts of every kind in the order the daemon sent them", async () =>
       failure=""
       disabled={false}
       onRefresh={vi.fn()}
+      onOpenProject={vi.fn()}
     />,
   );
 
@@ -77,6 +78,7 @@ it("never says a Declared Check passed", async () => {
       failure=""
       disabled={false}
       onRefresh={vi.fn()}
+      onOpenProject={vi.fn()}
     />,
   );
 
@@ -109,6 +111,7 @@ it("states every count the reading carries, not a bare 'and more'", async () => 
       failure=""
       disabled={false}
       onRefresh={vi.fn()}
+      onOpenProject={vi.fn()}
     />,
   );
 
@@ -131,6 +134,7 @@ it("omits the counts it does not have rather than printing zeros", async () => {
       failure=""
       disabled={false}
       onRefresh={vi.fn()}
+      onOpenProject={vi.fn()}
     />,
   );
 
@@ -152,6 +156,7 @@ it("does not call an empty window an empty Workspace", async () => {
       failure=""
       disabled={false}
       onRefresh={vi.fn()}
+      onOpenProject={vi.fn()}
     />,
   );
 
@@ -171,6 +176,7 @@ it("earns the absolute empty sentence only when the window saw every Run", async
       failure=""
       disabled={false}
       onRefresh={vi.fn()}
+      onOpenProject={vi.fn()}
     />,
   );
 
@@ -182,7 +188,7 @@ it("keeps loading, empty and failed apart, and stays accessible", async () => {
   const user = userEvent.setup();
   const onRefresh = vi.fn();
   const { container, rerender } = render(
-    <BriefingReceipts page={null} loading failure="" disabled={false} onRefresh={onRefresh} />,
+    <BriefingReceipts page={null} loading failure="" disabled={false} onRefresh={onRefresh} onOpenProject={vi.fn()} />,
   );
   expect(screen.getByText("Loading Receipts")).toBeVisible();
   expect(screen.queryByText("No Receipts yet.")).toBeNull();
@@ -194,6 +200,7 @@ it("keeps loading, empty and failed apart, and stays accessible", async () => {
       failure="Beacon could not read recent Run and Receipt state."
       disabled={false}
       onRefresh={onRefresh}
+      onOpenProject={vi.fn()}
     />,
   );
   // A read that failed is not a Workspace with no Receipts.
@@ -207,6 +214,7 @@ it("keeps loading, empty and failed apart, and stays accessible", async () => {
       failure=""
       disabled={false}
       onRefresh={onRefresh}
+      onOpenProject={vi.fn()}
     />,
   );
   await user.click(screen.getByRole("button", { name: "Refresh Receipts" }));
@@ -238,6 +246,7 @@ it("does not take the panel down on an instant it cannot render", async () => {
         failure=""
         disabled={false}
         onRefresh={vi.fn()}
+        onOpenProject={vi.fn()}
       />,
     ),
   ).not.toThrow();
@@ -245,4 +254,95 @@ it("does not take the panel down on an instant it cannot render", async () => {
   // And it says so rather than showing a plausible wrong time.
   const list = screen.getByRole("list", { name: "Recent Receipts" });
   expect(within(list).getAllByRole("listitem")[0].textContent).toMatch(/time not renderable/);
+});
+
+// ---------------------------------------------------------------------------------------------
+// N11: open the Project behind a Receipt
+// ---------------------------------------------------------------------------------------------
+
+it("offers a keyboard-operable control per Receipt that names its Project", async () => {
+  const user = userEvent.setup();
+  const onOpenProject = vi.fn();
+  const rows = [execution("cccccccc-3333-4333-8333-333333333333", 300, "completed")];
+  render(
+    <BriefingReceipts
+      page={page({ receipts: rows })}
+      loading={false}
+      failure=""
+      disabled={false}
+      onRefresh={vi.fn()}
+      onOpenProject={onOpenProject}
+    />,
+  );
+
+  const open = screen.getByRole("button", { name: "Open Task tracker Project" });
+  // A real control, reached and activated the way a keyboard user reaches it.
+  open.focus();
+  expect(open, "N11.OPEN.EXACT_PROJECT").toHaveFocus();
+  await user.keyboard("{Enter}");
+  expect(onOpenProject, "N11.OPEN.EXACT_PROJECT").toHaveBeenCalledTimes(1);
+  expect(onOpenProject, "N11.OPEN.EXACT_PROJECT").toHaveBeenCalledWith(rows[0].projectId);
+});
+
+it("opens the Project the Receipt holds, not the one its name matches", async () => {
+  // Two Receipts whose Projects share a display name and differ only by id. A control that
+  // navigated by name would be right half the time and undetectably wrong the other half.
+  const user = userEvent.setup();
+  const onOpenProject = vi.fn();
+  const sameName = "Task tracker";
+  const first = { ...execution("aaaaaaaa-1111-4111-8111-111111111111", 100, "completed"), projectId: "11111111-aaaa-4aaa-8aaa-111111111111", projectName: sameName };
+  const second = { ...execution("bbbbbbbb-2222-4222-8222-222222222222", 200, "completed"), projectId: "22222222-bbbb-4bbb-8bbb-222222222222", projectName: sameName };
+  render(
+    <BriefingReceipts
+      page={page({ receipts: [second, first] })}
+      loading={false}
+      failure=""
+      disabled={false}
+      onRefresh={vi.fn()}
+      onOpenProject={onOpenProject}
+    />,
+  );
+
+  const list = screen.getByRole("list", { name: "Recent Receipts" });
+  const items = within(list).getAllByRole("listitem");
+  await user.click(within(items[1]).getByRole("button", { name: `Open ${sameName} Project` }));
+  expect(onOpenProject, "N11.OPEN.IDENTITY_NOT_NAME").toHaveBeenCalledWith(first.projectId);
+  expect(onOpenProject, "N11.OPEN.IDENTITY_NOT_NAME").not.toHaveBeenCalledWith(second.projectId);
+});
+
+it("disables opening a Project while other work is in flight", async () => {
+  const onOpenProject = vi.fn();
+  render(
+    <BriefingReceipts
+      page={page({ receipts: [execution("cccccccc-3333-4333-8333-333333333333", 300, "completed")] })}
+      loading={false}
+      failure=""
+      disabled
+      onRefresh={vi.fn()}
+      onOpenProject={onOpenProject}
+    />,
+  );
+  expect(
+    screen.getByRole("button", { name: "Open Task tracker Project" }),
+    "N11.OPEN.BUSY_DISABLED",
+  ).toBeDisabled();
+});
+
+it("does not re-read Receipts when a Project is opened", async () => {
+  const user = userEvent.setup();
+  const onRefresh = vi.fn();
+  const onOpenProject = vi.fn();
+  render(
+    <BriefingReceipts
+      page={page({ receipts: [execution("cccccccc-3333-4333-8333-333333333333", 300, "completed")] })}
+      loading={false}
+      failure=""
+      disabled={false}
+      onRefresh={onRefresh}
+      onOpenProject={onOpenProject}
+    />,
+  );
+  await user.click(screen.getByRole("button", { name: "Open Task tracker Project" }));
+  expect(onRefresh, "N11.OPEN.NO_RECEIPT_RELOAD").not.toHaveBeenCalled();
+  expect(onOpenProject, "N11.OPEN.NO_RECEIPT_RELOAD").toHaveBeenCalledTimes(1);
 });
