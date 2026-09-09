@@ -3469,4 +3469,121 @@ describe("Beacon desktop shell", () => {
       "N17.LIST.RETURN_VISIBLE",
     ).not.toBeNull();
   });
+
+  // -------------------------------------------------------------------------------------------
+  // N23: one composed operator journey across both added controls
+  // -------------------------------------------------------------------------------------------
+  //
+  // A NEW integration witness, not a reproduced defect. N11 added the way in from a Receipt and
+  // N17 added the way back to the portfolio; each is covered on its own. What no bar observes is
+  // the two composed: enter by a Receipt, return, and enter a DIFFERENT Project by its own id
+  // without the app re-reading Briefing. This deliberately does not restate the preflight cases or
+  // any renderer coverage.
+
+  it("walks Receipt to Project, back to the portfolio, and into the other Project", async () => {
+    const user = userEvent.setup();
+    mockInitialState("unlocked");
+    const base = invokeMock.getMockImplementation()!;
+    const alpha = n11Project(N11_A_ID, "Alpha Project", N11_A_PURPOSE);
+    const bravo = n11Project(N11_B_ID, "Bravo Project", N11_B_PURPOSE);
+    // The actual request sequence, in order, and the Briefing read count -- both observed rather
+    // than inferred from a callback.
+    const projectReads: string[] = [];
+    let receiptReads = 0;
+    invokeMock.mockImplementation((command, args) => {
+      const projectId = (args as { projectId?: string } | undefined)?.projectId;
+      if (command === "recent_receipts") {
+        receiptReads += 1;
+        return Promise.resolve(n11ReceiptPage());
+      }
+      if (command === "projects") {
+        return Promise.resolve([alpha, bravo].map((project) => ({
+          id: project.id,
+          name: project.name,
+          charterRevision: 1,
+          autonomyProfile: "supervised",
+          createdAtMs: 123,
+        })));
+      }
+      if (command === "project") {
+        projectReads.push(String(projectId));
+        return Promise.resolve(projectId === N11_B_ID ? bravo : alpha);
+      }
+      if (command === "project_charter_history") {
+        return Promise.resolve([projectId === N11_B_ID ? bravo.charter : alpha.charter]);
+      }
+      if (command === "project_policy") return Promise.resolve(null);
+      if (command === "project_policy_history") return Promise.resolve([]);
+      if (command === "current_project_repository") return Promise.resolve(null);
+      if (command === "project_repository_history") return Promise.resolve([]);
+      if (command === "teams" || command === "missions") return Promise.resolve([]);
+      return base(command, args);
+    });
+
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    const list = await screen.findByRole("list", { name: "Recent Receipts" });
+    const receiptsAfterBriefing = receiptReads;
+
+    // 1. Enter by the SECOND Receipt, from the keyboard.
+    const rows = within(list).getAllByRole("listitem");
+    const open = within(rows[1]).getByRole("button", { name: "Open Bravo Project Project" });
+    open.focus();
+    await user.keyboard("{Enter}");
+
+    await vi.waitFor(() =>
+      expect(
+        screen.queryByRole("heading", { name: "Bravo Project" }),
+        "N23.JOURNEY.RECEIPT_OPENS_ITS_OWN_PROJECT",
+      ).not.toBeNull(),
+    );
+    expect(
+      screen.queryAllByText(N11_B_PURPOSE).length,
+      "N23.JOURNEY.RECEIPT_OPENS_ITS_OWN_PROJECT",
+    ).toBeGreaterThan(0);
+    await expectNoWcagViolations(container);
+
+    // 2. Return through the actual control. Settle on the record leaving, independently of the
+    //    portfolio arriving, so the named claim below is always reached.
+    await user.click(screen.getByRole("button", { name: "All Projects" }));
+    await vi.waitFor(() =>
+      expect(
+        screen.queryAllByText(N11_B_PURPOSE),
+        "N23.JOURNEY.RETURN_SHOWS_THE_PORTFOLIO",
+      ).toHaveLength(0),
+    );
+    expect(
+      screen.queryByRole("button", { name: /Alpha Project/i }),
+      "N23.JOURNEY.RETURN_SHOWS_THE_PORTFOLIO",
+    ).not.toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /Bravo Project/i }),
+      "N23.JOURNEY.RETURN_SHOWS_THE_PORTFOLIO",
+    ).not.toBeNull();
+
+    // 3. Enter the OTHER Project from that cached portfolio.
+    await user.click(screen.getByRole("button", { name: /Alpha Project/i }));
+    await vi.waitFor(() =>
+      expect(
+        screen.queryByRole("heading", { name: "Alpha Project" }),
+        "N23.JOURNEY.OTHER_PROJECT_BY_ITS_OWN_ID",
+      ).not.toBeNull(),
+    );
+    expect(
+      screen.queryAllByText(N11_A_PURPOSE).length,
+      "N23.JOURNEY.OTHER_PROJECT_BY_ITS_OWN_ID",
+    ).toBeGreaterThan(0);
+    expect(
+      screen.queryAllByText(N11_B_PURPOSE),
+      "N23.JOURNEY.OTHER_PROJECT_BY_ITS_OWN_ID",
+    ).toHaveLength(0);
+
+    // The requests the walk actually made, in order: the Receipt's Project, then the other one.
+    expect(projectReads, "N23.JOURNEY.EXACT_PROJECT_REQUEST_SEQUENCE").toEqual([
+      N11_B_ID,
+      N11_A_ID,
+    ]);
+    // And Briefing was never re-read to do any of it.
+    expect(receiptReads, "N23.JOURNEY.BRIEFING_NOT_RELOADED").toBe(receiptsAfterBriefing);
+  });
 });
