@@ -3345,14 +3345,24 @@ describe("Beacon desktop shell", () => {
     expect(back, "N17.LIST.RETURN_VISIBLE").toHaveFocus();
     await user.keyboard("{Enter}");
 
-    // The portfolio is back, holding both rows, and Alpha's record is gone.
-    const portfolio = await screen.findByRole("button", { name: /Alpha Project/i });
-    expect(portfolio, "N17.LIST.RETURN_VISIBLE").toBeVisible();
+    // Settle on something independent of the property under test -- Alpha's record leaving the
+    // screen -- so the named assertions below are always reached. Under the removed-clear mutant
+    // this waitFor is what fails, and it fails BY NAME rather than inside a findBy that throws
+    // before any assertion runs.
+    await vi.waitFor(() =>
+      expect(
+        screen.queryAllByText(N17_A_PURPOSE),
+        "N17.LIST.RETURN_VISIBLE",
+      ).toHaveLength(0),
+    );
     expect(
-      screen.getByRole("button", { name: /Bravo Project/i }),
+      screen.queryByRole("button", { name: /Alpha Project/i }),
       "N17.LIST.RETURN_VISIBLE",
-    ).toBeVisible();
-    expect(screen.queryAllByText(N17_A_PURPOSE), "N17.LIST.RETURN_VISIBLE").toHaveLength(0);
+    ).not.toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /Bravo Project/i }),
+      "N17.LIST.RETURN_VISIBLE",
+    ).not.toBeNull();
     await expectNoWcagViolations(container);
 
     // The cached list was not re-read to get back to it.
@@ -3403,5 +3413,60 @@ describe("Beacon desktop shell", () => {
       releaseConfigurations([]);
       await Promise.resolve();
     });
+  });
+
+  it("cannot silently discard an unsaved Repository draft, and Cancel restores the way back", async () => {
+    const user = userEvent.setup();
+    mockN17();
+    const HELD_DRAFT = "n17-held-unsaved-repository-source";
+
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    await user.click(await screen.findByRole("button", { name: /Alpha Project/i }));
+    await screen.findAllByText(N17_A_PURPOSE);
+
+    // The way back exists before any composer is open.
+    expect(
+      screen.queryByRole("button", { name: "All Projects" }),
+      "N18.COMPOSER.DRAFT_CANNOT_BE_SILENTLY_DISCARDED",
+    ).not.toBeNull();
+
+    // Open the real Repository form and hold a real value in its own scoped input.
+    await user.click(await screen.findByRole("button", { name: "Bind Repository" }));
+    const form = await screen.findByRole("form", { name: "Bind Repository" });
+    const source = within(form).getByLabelText("Repository source");
+    await user.type(source, HELD_DRAFT);
+    expect(source, "N18.COMPOSER.DRAFT_CANNOT_BE_SILENTLY_DISCARDED").toHaveValue(HELD_DRAFT);
+    await expectNoWcagViolations(container);
+
+    // With a draft held, there is no control that would discard it without Cancel.
+    expect(
+      screen.queryByRole("button", { name: "All Projects" }),
+      "N18.COMPOSER.DRAFT_CANNOT_BE_SILENTLY_DISCARDED",
+    ).toBeNull();
+    expect(
+      within(await screen.findByRole("form", { name: "Bind Repository" })).getByLabelText(
+        "Repository source",
+      ),
+      "N18.COMPOSER.DRAFT_CANNOT_BE_SILENTLY_DISCARDED",
+    ).toHaveValue(HELD_DRAFT);
+
+    // The form's own Cancel is the way out, and it brings the way back with it.
+    await user.click(within(form).getByRole("button", { name: "Cancel" }));
+    await vi.waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "All Projects" }),
+        "N17.LIST.RETURN_VISIBLE",
+      ).not.toBeNull(),
+    );
+    await user.click(screen.getByRole("button", { name: "All Projects" }));
+    await vi.waitFor(() =>
+      expect(screen.queryAllByText(N17_A_PURPOSE), "N17.LIST.RETURN_VISIBLE").toHaveLength(0),
+    );
+    expect(
+      screen.queryByRole("button", { name: /Bravo Project/i }),
+      "N17.LIST.RETURN_VISIBLE",
+    ).not.toBeNull();
   });
 });

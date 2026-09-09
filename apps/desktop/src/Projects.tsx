@@ -655,12 +655,27 @@ function ProjectRecord({
           <Button onClick={onRevise} disabled={busy}>
             Revise Charter
           </Button>
-          {/* The way back. It sits in the record header beside the other record-level actions and
-              never inside a composer, so it cannot become a destructive control in a dirty form.
-              It reads nothing: the portfolio the owner already holds is what it returns to. */}
-          <Button onClick={onCloseProject} disabled={busy}>
-            All Projects
-          </Button>
+          {/* The way back. It reads nothing: the portfolio the owner already holds is what it
+              returns to.
+
+              It is not rendered while a non-Charter composer is open. DN18 measured that with the
+              Repository form holding an unsaved draft the control was reachable and enabled, and
+              activating it discarded that draft with no confirmation and without the operator using
+              the Cancel sitting in the same form. The guard is the composer flags themselves, not a
+              count of inputs or a dirty-state tracker: a form being open is the property that makes
+              leaving destructive, and Cancel -- untouched -- is what makes leaving available again.
+
+              Hidden rather than disabled, matching `Create Project` a few lines above, which already
+              disappears under the same flags. The Charter composer needs no mention: it replaces the
+              record, so this header is not rendered at all. */}
+          {!teamComposerOpen &&
+            !policyComposerOpen &&
+            !repositoryComposerOpen &&
+            !missionComposerOpen && (
+              <Button onClick={onCloseProject} disabled={busy}>
+                All Projects
+              </Button>
+            )}
         </div>
       </div>
       <p className={classes.body}>{charter.purpose}</p>
