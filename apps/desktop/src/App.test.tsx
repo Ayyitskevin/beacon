@@ -2997,6 +2997,59 @@ describe("Beacon desktop shell", () => {
   const N15_A_COMMAND = "n15-alpha-only-command";
   const N15_B_COMMAND = "n15-bravo-only-command";
 
+  function installN16ProjectAdapter(
+    options: {
+      alphaPreflight?: Promise<ReturnType<typeof n15Receipt>>;
+      bravoProjectFailure?: unknown;
+    } = {},
+  ) {
+    mockInitialState("unlocked");
+    const base = invokeMock.getMockImplementation()!;
+    const alpha = n15Project(N15_A, "Alpha Project");
+    const bravo = n15Project(N15_B, "Bravo Project");
+    invokeMock.mockImplementation((command, args) => {
+      const projectId = (args as { projectId?: string } | undefined)?.projectId;
+      if (command === "projects") {
+        return Promise.resolve([alpha, bravo].map((project) => ({
+          id: project.id,
+          name: project.name,
+          charterRevision: 1,
+          autonomyProfile: "supervised",
+          createdAtMs: 123,
+        })));
+      }
+      if (command === "project") {
+        if (projectId === N15_B && "bravoProjectFailure" in options) {
+          return Promise.reject(options.bravoProjectFailure);
+        }
+        return Promise.resolve(projectId === N15_B ? bravo : alpha);
+      }
+      if (command === "project_charter_history") return Promise.resolve([n15Charter]);
+      if (command === "project_policy") return Promise.resolve(null);
+      if (command === "project_policy_history") return Promise.resolve([]);
+      if (command === "current_project_repository") {
+        return Promise.resolve(
+          n15Repository(projectId ?? N15_A, projectId === N15_B ? N15_B_COMMAND : N15_A_COMMAND),
+        );
+      }
+      if (command === "project_repository_history") {
+        return Promise.resolve([
+          n15Repository(projectId ?? N15_A, projectId === N15_B ? N15_B_COMMAND : N15_A_COMMAND),
+        ]);
+      }
+      if (command === "teams" || command === "missions") return Promise.resolve([]);
+      if (command === "preflight_project_checks") {
+        if (projectId === N15_A && options.alphaPreflight) return options.alphaPreflight;
+        return Promise.resolve(
+          projectId === N15_B
+            ? n15Receipt(N15_B, "88888888-8888-4888-8888-888888888888", N15_B_COMMAND)
+            : n15Receipt(N15_A, "99999999-9999-4999-8999-999999999999", N15_A_COMMAND),
+        );
+      }
+      return base(command, args);
+    });
+  }
+
   it("does not show one Project's preflight result under another Project", async () => {
     const user = userEvent.setup();
     mockInitialState("unlocked");
@@ -3067,5 +3120,141 @@ describe("Beacon desktop shell", () => {
       screen.queryByText(N15_A_COMMAND),
       "N15.PROJECT_SCOPE.OLD_PREFLIGHT_ABSENT",
     ).toBeNull();
+  });
+
+  it("blue shows Project B's own subsequent preflight result", async () => {
+    const user = userEvent.setup();
+    installN16ProjectAdapter();
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    await user.click(await screen.findByRole("button", { name: /Alpha Project/i }));
+    await user.click(await screen.findByRole("button", { name: "Preflight checks" }));
+    expect(await screen.findByText(N15_A_COMMAND)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Briefing" }));
+    await user.type(
+      screen.getByLabelText("Beacon link"),
+      `beacon:/${acceptedOrganization.workspaceId}/project/${N15_B}`,
+    );
+    await user.click(screen.getByRole("button", { name: "Open Beacon link" }));
+    await screen.findByRole("heading", { name: "Bravo Project" });
+    await user.click(await screen.findByRole("button", { name: "Preflight checks" }));
+    expect(
+      await screen.findByText(N15_B_COMMAND),
+      "N16.PROJECT_SCOPE.B_OWN_RESULT_VISIBLE",
+    ).toBeVisible();
+    expect(screen.queryByText(N15_A_COMMAND)).toBeNull();
+    await expectNoWcagViolations(container);
+  });
+
+  it("blue preserves Project A's display when opening B is refused", async () => {
+    const user = userEvent.setup();
+    installN16ProjectAdapter({
+      bravoProjectFailure: { code: "project_absent", message: "the named Project was refused" },
+    });
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    await user.click(await screen.findByRole("button", { name: /Alpha Project/i }));
+    await user.click(await screen.findByRole("button", { name: "Preflight checks" }));
+    expect(await screen.findByText(N15_A_COMMAND)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Briefing" }));
+    await user.type(
+      screen.getByLabelText("Beacon link"),
+      `beacon:/${acceptedOrganization.workspaceId}/project/${N15_B}`,
+    );
+    await user.click(screen.getByRole("button", { name: "Open Beacon link" }));
+    await screen.findByText("Beacon could not open the Project named by that link.");
+    expect(
+      screen.getByRole("heading", { name: "Alpha Project" }),
+      "N16.PROJECT_SCOPE.REFUSED_B_PRESERVES_A",
+    ).toBeVisible();
+    expect(screen.getByText(N15_A_COMMAND)).toBeVisible();
+    await expectNoWcagViolations(container);
+  });
+
+  it("blue does not let a held Project A preflight result reappear under B", async () => {
+    const user = userEvent.setup();
+    let releaseAlpha!: (receipt: ReturnType<typeof n15Receipt>) => void;
+    const heldAlpha = new Promise<ReturnType<typeof n15Receipt>>((resolve) => {
+      releaseAlpha = resolve;
+    });
+    installN16ProjectAdapter({ alphaPreflight: heldAlpha });
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    await user.click(await screen.findByRole("button", { name: /Alpha Project/i }));
+    await user.click(await screen.findByRole("button", { name: "Preflight checks" }));
+    await screen.findByRole("button", { name: "Preflighting…" });
+
+    const briefing = screen.getByRole("button", { name: "Briefing" });
+    expect(briefing, "N16.LATE_RESULT.BEACON_LINK_REMAINS_REACHABLE").toBeEnabled();
+    await user.click(briefing);
+    await user.type(
+      screen.getByLabelText("Beacon link"),
+      `beacon:/${acceptedOrganization.workspaceId}/project/${N15_B}`,
+    );
+    const openLink = screen.getByRole("button", { name: "Open Beacon link" });
+    expect(openLink, "N16.LATE_RESULT.BEACON_LINK_REMAINS_REACHABLE").toBeEnabled();
+    await user.click(openLink);
+    await screen.findByRole("heading", { name: "Bravo Project" });
+    expect(screen.queryByText(N15_A_COMMAND)).toBeNull();
+
+    await act(async () => {
+      releaseAlpha(n15Receipt(N15_A, "99999999-9999-4999-8999-999999999999", N15_A_COMMAND));
+      await heldAlpha;
+    });
+    expect(
+      screen.queryByText(N15_A_COMMAND),
+      "N16.LATE_RESULT.HELD_A_MUST_NOT_REAPPEAR_UNDER_B",
+    ).toBeNull();
+    await expectNoWcagViolations(container);
+  });
+
+  it("keeps Project B's own preflight when a held Project A result completes afterwards", async () => {
+    // The fifth case of the table: A pending, B opened, B's OWN preflight completes, and only then
+    // A's older observation lands. B's valid result must survive it -- a retired observation must
+    // not erase a current one any more than it may replace it.
+    const user = userEvent.setup();
+    let releaseAlpha!: (receipt: unknown) => void;
+    const heldAlpha = new Promise<unknown>((resolve) => {
+      releaseAlpha = resolve;
+    });
+    installN16ProjectAdapter({
+      alphaPreflight: heldAlpha as Promise<ReturnType<typeof n15Receipt>>,
+    });
+
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Briefing" });
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    await user.click(await screen.findByRole("button", { name: /Alpha Project/i }));
+    await user.click(await screen.findByRole("button", { name: "Preflight checks" }));
+
+    // B is opened while A's read is still held, then B runs its own preflight to completion.
+    await user.click(screen.getByRole("button", { name: "Briefing" }));
+    await user.type(
+      await screen.findByLabelText("Beacon link"),
+      `beacon:/${acceptedOrganization.workspaceId}/project/${N15_B}`,
+    );
+    await user.click(screen.getByRole("button", { name: "Open Beacon link" }));
+    await screen.findByRole("heading", { name: "Bravo Project" });
+    await user.click(await screen.findByRole("button", { name: "Preflight checks" }));
+    expect(await screen.findByText(N15_B_COMMAND)).toBeVisible();
+    await expectNoWcagViolations(container);
+
+    // Now A's older observation completes.
+    await act(async () => {
+      releaseAlpha(n15Receipt(N15_A, "99999999-9999-4999-8999-999999999999", N15_A_COMMAND));
+      await Promise.resolve();
+    });
+
+    expect(
+      screen.queryByText(N15_A_COMMAND),
+      "N16.LATE_RESULT.HELD_A_MUST_NOT_ERASE_B",
+    ).toBeNull();
+    expect(
+      screen.queryByText(N15_B_COMMAND),
+      "N16.LATE_RESULT.HELD_A_MUST_NOT_ERASE_B",
+    ).not.toBeNull();
   });
 });
