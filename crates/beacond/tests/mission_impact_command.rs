@@ -213,6 +213,12 @@ struct Fixture {
 }
 
 fn fixture(label: &str) -> Fixture {
+    fixture_with(label, true)
+}
+
+/// `publish_policies: false` leaves the Project with no published Policy revision at all, which is
+/// its own answer and not a failure to read one.
+fn fixture_with(label: &str, publish_policies: bool) -> Fixture {
     let store = TestStore::new(label);
     let accounts = enrolled_accounts(&store);
     let projects = ProjectService::new(Arc::clone(&accounts), store.workspace_id);
@@ -220,26 +226,30 @@ fn fixture(label: &str) -> Fixture {
 
     let project = projects.create(project_draft()).unwrap();
     assert_eq!(project.charter.revision, 1, "C5 fixture: charter 1");
-    let first = policies
-        .publish(project.id, 1, None, policy_draft())
-        .unwrap();
-    assert_eq!(
-        (first.revision, first.charter_revision),
-        (1, 1),
-        "C5 fixture: Policy 1 cites charter 1"
-    );
+    if publish_policies {
+        let first = policies
+            .publish(project.id, 1, None, policy_draft())
+            .unwrap();
+        assert_eq!(
+            (first.revision, first.charter_revision),
+            (1, 1),
+            "C5 fixture: Policy 1 cites charter 1"
+        );
+    }
     let project = projects
         .revise_charter(project.id, 1, charter_draft(2))
         .unwrap();
     assert_eq!(project.charter.revision, 2, "C5 fixture: charter 2");
-    let second = policies
-        .publish(project.id, 2, Some(1), policy_draft())
-        .unwrap();
-    assert_eq!(
-        (second.revision, second.charter_revision),
-        (2, 2),
-        "C5 fixture: Policy 2 cites charter 2"
-    );
+    if publish_policies {
+        let second = policies
+            .publish(project.id, 2, Some(1), policy_draft())
+            .unwrap();
+        assert_eq!(
+            (second.revision, second.charter_revision),
+            (2, 2),
+            "C5 fixture: Policy 2 cites charter 2"
+        );
+    }
     let project = projects
         .revise_charter(project.id, 2, charter_draft(3))
         .unwrap();
@@ -617,4 +627,442 @@ fn astra_c5_policy_revision_projection_is_checked_before_narrowing() {
             "C5.ASTRA.NUMERIC.REFUSAL_WRITES_NOTHING"
         );
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The bounded observation read — one Deferred snapshot, zero writes, the SAME proof as the writer.
+// ---------------------------------------------------------------------------------------------
+
+/// C5.OWNER.OBSERVE_IS_A_PROVED_ABSENCE — no classification beside a present Policy.
+#[test]
+fn c5_observe_reports_an_absent_classification_beside_a_present_policy() {
+    let fixture = fixture("observe-absent");
+    let before = fixture.counts();
+
+    let observation = fixture
+        .owner()
+        .observe(fixture.mission.id)
+        .expect("C5.OWNER.OBSERVE_IS_A_PROVED_ABSENCE");
+
+    assert_eq!(
+        observation.mission_id, fixture.mission.id,
+        "C5.OWNER.OBSERVE_IS_A_PROVED_ABSENCE"
+    );
+    assert_eq!(
+        observation.latest, None,
+        "C5.OWNER.OBSERVE_IS_A_PROVED_ABSENCE: nothing has been classified"
+    );
+    assert_eq!(
+        observation.published_policy,
+        Some(beacond::PolicyCitationDto {
+            project_id: fixture.project.id,
+            policy_revision: 2,
+            charter_revision: 2,
+        }),
+        "C5.OWNER.OBSERVE_IS_A_PROVED_ABSENCE: the Policy a NEW classification would cite"
+    );
+    // A canonical nonnegative decimal in the u64 domain: no sign, no space, no leading zero.
+    let cursor = &observation.observed_at_event_seq;
+    assert!(
+        !cursor.is_empty()
+            && cursor.bytes().all(|byte| byte.is_ascii_digit())
+            && (cursor == "0" || !cursor.starts_with('0')),
+        "C5.OWNER.OBSERVE_IS_A_PROVED_ABSENCE: {cursor:?} is not a canonical decimal"
+    );
+    assert_eq!(
+        cursor
+            .parse::<u64>()
+            .expect("C5.OWNER.OBSERVE_IS_A_PROVED_ABSENCE"),
+        u64::try_from(
+            fixture
+                .store
+                .connect()
+                .query_row(
+                    "SELECT coalesce(max(sequence), 0) FROM events WHERE workspace_id = ?1",
+                    [fixture.store.workspace_id.to_string()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        )
+        .unwrap(),
+        "C5.OWNER.OBSERVE_IS_A_PROVED_ABSENCE: the cursor is this Workspace's chain head"
+    );
+    assert_eq!(
+        fixture.counts(),
+        before,
+        "C5.OWNER.OBSERVE_IS_A_PROVED_ABSENCE: a read wrote something"
+    );
+
+    // The JSON shape the client is promised: four camelCase keys, both nullables PRESENT as null.
+    let json: serde_json::Value = serde_json::to_value(&beacond::ClassificationObservation {
+        mission_id: fixture.mission.id,
+        observed_at_event_seq: "9007199254740993".to_owned(),
+        published_policy: None,
+        latest: None,
+    })
+    .unwrap();
+    assert_eq!(
+        json.as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        // `serde_json`'s object map is SORTED, so the order here is the map's and not the
+        // contract's. What the contract fixes is the set of keys and their spelling.
+        [
+            "latest",
+            "missionId",
+            "observedAtEventSeq",
+            "publishedPolicy"
+        ],
+        "C5.OWNER.OBSERVE_IS_A_PROVED_ABSENCE: exactly four keys, in the contract's spelling"
+    );
+    assert_eq!(
+        json["observedAtEventSeq"],
+        serde_json::Value::String("9007199254740993".to_owned()),
+        "C5.OWNER.OBSERVE_IS_A_PROVED_ABSENCE: a cursor above 2^53 stays a string, verbatim"
+    );
+    assert!(json["publishedPolicy"].is_null() && json["latest"].is_null());
+}
+
+/// C5.OWNER.OBSERVE_A_PROJECT_WITH_NO_POLICY — null is a proved absence, not a failed read.
+#[test]
+fn c5_observe_reports_an_absent_policy_as_its_own_answer() {
+    let fixture = fixture_with("observe-no-policy", false);
+
+    let observation = fixture
+        .owner()
+        .observe(fixture.mission.id)
+        .expect("C5.OWNER.OBSERVE_A_PROJECT_WITH_NO_POLICY");
+    assert_eq!(
+        observation.published_policy, None,
+        "C5.OWNER.OBSERVE_A_PROJECT_WITH_NO_POLICY"
+    );
+    assert_eq!(
+        observation.latest, None,
+        "C5.OWNER.OBSERVE_A_PROJECT_WITH_NO_POLICY"
+    );
+
+    // And the writer says so in its own words rather than through a foreign-key refusal.
+    let refusal = fixture
+        .owner()
+        .classify(ClassificationIntentRequest {
+            expected_policy_revision: None,
+            ..high_declaration(fixture.mission.id)
+        })
+        .expect_err(
+            "C5.OWNER.OBSERVE_A_PROJECT_WITH_NO_POLICY: a write cannot cite what is absent",
+        );
+    assert_eq!(
+        refusal.name(),
+        "NoPolicyPublished",
+        "C5.OWNER.OBSERVE_A_PROJECT_WITH_NO_POLICY: {refusal:?}"
+    );
+}
+
+/// C5.OWNER.OBSERVE_SEPARATES_HISTORY_FROM_NOW — the cited Policy and the current one differ.
+#[test]
+fn c5_observe_distinguishes_the_historical_citation_from_the_current_policy() {
+    let fixture = fixture("observe-history-vs-now");
+    let recorded = fixture
+        .owner()
+        .classify(high_declaration(fixture.mission.id))
+        .expect("C5.OWNER.OBSERVE_SEPARATES_HISTORY_FROM_NOW");
+
+    // Policy moves AFTER the classification.
+    let third =
+        ProjectPolicyService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+            .publish(fixture.project.id, 3, Some(2), policy_draft())
+            .expect("C5.OWNER.OBSERVE_SEPARATES_HISTORY_FROM_NOW: Policy 3");
+    assert_eq!(
+        (third.revision, third.charter_revision),
+        (3, 3),
+        "C5.OWNER.OBSERVE_SEPARATES_HISTORY_FROM_NOW fixture"
+    );
+
+    let observation = fixture
+        .owner()
+        .observe(fixture.mission.id)
+        .expect("C5.OWNER.OBSERVE_SEPARATES_HISTORY_FROM_NOW");
+    assert_eq!(
+        observation
+            .published_policy
+            .as_ref()
+            .map(|policy| (policy.policy_revision, policy.charter_revision)),
+        Some((3, 3)),
+        "C5.OWNER.OBSERVE_SEPARATES_HISTORY_FROM_NOW: what a NEW classification would cite"
+    );
+    let latest = observation
+        .latest
+        .as_ref()
+        .expect("C5.OWNER.OBSERVE_SEPARATES_HISTORY_FROM_NOW");
+    assert_eq!(
+        (
+            latest.policy.policy_revision,
+            latest.policy.charter_revision
+        ),
+        (2, 2),
+        "C5.OWNER.OBSERVE_SEPARATES_HISTORY_FROM_NOW: what the existing record DID cite"
+    );
+    assert_eq!(
+        latest, &recorded,
+        "C5.OWNER.OBSERVE_SEPARATES_HISTORY_FROM_NOW: the same view"
+    );
+    assert_eq!(
+        latest.rule_id, None,
+        "C5.OWNER.OBSERVE_SEPARATES_HISTORY_FROM_NOW: a declaration names no rule"
+    );
+}
+
+/// C5.OWNER.OBSERVE_KEEPS_A_LEGACY_RULE_IDENTITY — a `policy_rule` row is read as what it says.
+///
+/// The record is minted through the EXISTING public `MissionImpactService::classify`, which admits
+/// `PolicyRule` with a rule id (`mission_impact.rs:332-343`). This owner writes no such record and
+/// gains no permission to; it must simply not relabel one that exists.
+#[test]
+fn c5_observe_reads_a_legacy_policy_rule_record_with_its_actual_rule_identity() {
+    let fixture = fixture("observe-legacy-rule");
+    let legacy = beacond::MissionImpactClassificationV1 {
+        workspace_id: fixture.store.workspace_id,
+        mission_id: fixture.mission.id,
+        classification_id: Uuid::new_v4(),
+        version: 1,
+        impact: beacond::ImpactLevel::High,
+        basis: beacond::ClassificationBasis::PolicyRule,
+        policy: beacond::PolicyRevisionRef {
+            project_id: fixture.project.id,
+            policy_revision: 2,
+            charter_revision: 2,
+        },
+        rule_id: Some("appendix.high-impact".to_owned()),
+        reason: "The shipped store admits this basis with a named rule.".to_owned(),
+        classified_by: beacond::ClassificationActor::Operator,
+        classified_at_ms: 1_789_000_000_000,
+        supersedes: beacond::ClassificationSupersedes::None,
+    };
+    let bytes = legacy
+        .canonical_bytes()
+        .expect("C5.OWNER.OBSERVE_KEEPS_A_LEGACY_RULE_IDENTITY: the grammar admits it");
+    beacond::MissionImpactService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+        .classify(&bytes)
+        .expect("C5.OWNER.OBSERVE_KEEPS_A_LEGACY_RULE_IDENTITY: the shipped writer records it");
+
+    let latest = fixture
+        .owner()
+        .observe(fixture.mission.id)
+        .expect("C5.OWNER.OBSERVE_KEEPS_A_LEGACY_RULE_IDENTITY")
+        .latest
+        .expect("C5.OWNER.OBSERVE_KEEPS_A_LEGACY_RULE_IDENTITY");
+    assert_eq!(
+        (latest.basis.as_str(), latest.rule_id.as_deref()),
+        ("policy_rule", Some("appendix.high-impact")),
+        "C5.OWNER.OBSERVE_KEEPS_A_LEGACY_RULE_IDENTITY: a recorded basis is not relabelled"
+    );
+    // The key is present on the wire for both shapes.
+    let json = serde_json::to_value(&latest).unwrap();
+    assert_eq!(
+        json["ruleId"],
+        serde_json::Value::String("appendix.high-impact".to_owned())
+    );
+    assert_eq!(
+        json.as_object().unwrap().len(),
+        12,
+        "C5.OWNER.OBSERVE_KEEPS_A_LEGACY_RULE_IDENTITY: exactly twelve view fields"
+    );
+    assert!(
+        json.get("ruleId").is_some(),
+        "C5.OWNER.OBSERVE_KEEPS_A_LEGACY_RULE_IDENTITY: ruleId is a required key"
+    );
+}
+
+/// C5.OWNER.OBSERVE_REFUSES_BROKEN_EVIDENCE — corruption and orphans are never a null.
+#[test]
+fn c5_observe_refuses_corrupt_and_orphan_evidence() {
+    // A corrupt row.
+    let corrupted = fixture("observe-corrupt");
+    corrupted
+        .owner()
+        .classify(high_declaration(corrupted.mission.id))
+        .expect("C5.OWNER.OBSERVE_REFUSES_BROKEN_EVIDENCE control");
+    let connection = corrupted.store.connect();
+    connection
+        .execute_batch(
+            "DROP TRIGGER mission_impact_classifications_no_update;
+             UPDATE mission_impact_classifications SET canonical_bytes = zeroblob(64);",
+        )
+        .unwrap();
+    let before = corrupted.counts();
+    let refusal = corrupted
+        .owner()
+        .observe(corrupted.mission.id)
+        .expect_err("C5.OWNER.OBSERVE_REFUSES_BROKEN_EVIDENCE: corruption is not absence");
+    assert_eq!(
+        refusal.name(),
+        "Unavailable",
+        "C5.OWNER.OBSERVE_REFUSES_BROKEN_EVIDENCE: {refusal:?}"
+    );
+    assert_eq!(
+        corrupted.counts(),
+        before,
+        "C5.OWNER.OBSERVE_REFUSES_BROKEN_EVIDENCE: a refused read wrote"
+    );
+    drop(connection);
+
+    // An orphan Event, on the READ path this time.
+    let orphaned = fixture("observe-orphan");
+    let recorded = orphaned
+        .owner()
+        .classify(high_declaration(orphaned.mission.id))
+        .expect("C5.OWNER.OBSERVE_REFUSES_BROKEN_EVIDENCE control");
+    let connection = orphaned.store.connect();
+    connection
+        .execute_batch("DROP TRIGGER mission_impact_classifications_no_delete;")
+        .unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "DELETE FROM mission_impact_classifications WHERE digest_value = ?1",
+                [&recorded.digest.value],
+            )
+            .unwrap(),
+        1,
+        "C5.OWNER.OBSERVE_REFUSES_BROKEN_EVIDENCE fixture"
+    );
+    drop(connection);
+    let refusal = orphaned
+        .owner()
+        .observe(orphaned.mission.id)
+        .expect_err("C5.OWNER.OBSERVE_REFUSES_BROKEN_EVIDENCE: an orphan is not absence");
+    assert_eq!(
+        refusal.name(),
+        "Unavailable",
+        "C5.OWNER.OBSERVE_REFUSES_BROKEN_EVIDENCE: {refusal:?}"
+    );
+}
+
+/// C5.OWNER.OBSERVE_PROVES_THE_POLICY_EVENT — missing or duplicated, both refuse.
+#[test]
+fn c5_observe_refuses_a_missing_or_duplicated_policy_event() {
+    // Duplicated.
+    let duplicated = fixture("observe-policy-event-double");
+    // INTENTIONAL: revision 1's own Event is relabelled as a second claim about revision 2. The
+    // chain columns 0036 added (`predecessor_kind` and its siblings) make an INSERT here a forgery
+    // this test has no business building; relabelling produces the same two-Events-one-revision
+    // state without pretending to extend the chain.
+    let connection = duplicated.store.connect();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE events
+                 SET payload_json = json_set(payload_json, '$.policy.revision', 2)
+                 WHERE kind = 'project.policy_published'
+                   AND json_extract(payload_json, '$.policy.revision') = 1",
+                [],
+            )
+            .expect("C5.OWNER.OBSERVE_PROVES_THE_POLICY_EVENT: relabel revision 1"),
+        1,
+        "C5.OWNER.OBSERVE_PROVES_THE_POLICY_EVENT: exactly one Event is relabelled"
+    );
+    drop(connection);
+    let refusal = duplicated
+        .owner()
+        .observe(duplicated.mission.id)
+        .expect_err("C5.OWNER.OBSERVE_PROVES_THE_POLICY_EVENT: two Events, one revision");
+    assert_eq!(
+        refusal.name(),
+        "Unavailable",
+        "C5.OWNER.OBSERVE_PROVES_THE_POLICY_EVENT: {refusal:?}"
+    );
+
+    // Missing.
+    let missing = fixture("observe-policy-event-missing");
+    let connection = missing.store.connect();
+    assert_eq!(
+        connection
+            .execute(
+                "DELETE FROM events WHERE kind = 'project.policy_published'
+                   AND json_extract(payload_json, '$.policy.revision') = 2",
+                [],
+            )
+            .unwrap(),
+        1,
+        "C5.OWNER.OBSERVE_PROVES_THE_POLICY_EVENT fixture"
+    );
+    drop(connection);
+    let refusal = missing
+        .owner()
+        .observe(missing.mission.id)
+        .expect_err("C5.OWNER.OBSERVE_PROVES_THE_POLICY_EVENT: a row the log does not account for");
+    assert_eq!(
+        refusal.name(),
+        "Unavailable",
+        "C5.OWNER.OBSERVE_PROVES_THE_POLICY_EVENT: {refusal:?}"
+    );
+}
+
+/// C5.OWNER.SCOPE_IS_OPAQUE — an unknown Mission and a foreign Workspace are one answer, on both.
+#[test]
+fn c5_scope_opacity_and_authentication_hold_on_both_methods() {
+    let fixture = fixture("scope-and-auth");
+    let foreign = MissionImpactCommandService::new(Arc::clone(&fixture.accounts), Uuid::new_v4());
+
+    let unknown = fixture
+        .owner()
+        .observe(Uuid::new_v4())
+        .expect_err("C5.OWNER.SCOPE_IS_OPAQUE: unknown");
+    let elsewhere = foreign
+        .observe(fixture.mission.id)
+        .expect_err("C5.OWNER.SCOPE_IS_OPAQUE: another Workspace");
+    assert_eq!(
+        format!("{unknown}"),
+        format!("{elsewhere}"),
+        "C5.OWNER.SCOPE_IS_OPAQUE: the two answers must be indistinguishable"
+    );
+    assert_eq!(
+        format!("{unknown}"),
+        "Unavailable",
+        "C5.OWNER.SCOPE_IS_OPAQUE"
+    );
+
+    let unknown = fixture
+        .owner()
+        .classify(high_declaration(Uuid::new_v4()))
+        .expect_err("C5.OWNER.SCOPE_IS_OPAQUE: unknown, writing");
+    let elsewhere = foreign
+        .classify(high_declaration(fixture.mission.id))
+        .expect_err("C5.OWNER.SCOPE_IS_OPAQUE: another Workspace, writing");
+    assert_eq!(
+        format!("{unknown}"),
+        format!("{elsewhere}"),
+        "C5.OWNER.SCOPE_IS_OPAQUE"
+    );
+
+    // A locked session keeps its own meaning on both methods.
+    let before = fixture.counts();
+    fixture.accounts.lock().expect("the session locks");
+    for refusal in [
+        fixture
+            .owner()
+            .classify(high_declaration(fixture.mission.id))
+            .expect_err("C5.OWNER.AUTHENTICATION_RETAINED: classify"),
+        fixture
+            .owner()
+            .observe(fixture.mission.id)
+            .expect_err("C5.OWNER.AUTHENTICATION_RETAINED: observe"),
+    ] {
+        assert!(
+            matches!(
+                refusal,
+                beacond::ClassificationCommandError::Account(
+                    beacond::OperatorAccountError::NotAuthenticated
+                )
+            ),
+            "C5.OWNER.AUTHENTICATION_RETAINED: {refusal:?}"
+        );
+    }
+    assert_eq!(
+        fixture.counts(),
+        before,
+        "C5.OWNER.AUTHENTICATION_RETAINED: a locked session wrote"
+    );
 }

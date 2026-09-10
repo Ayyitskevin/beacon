@@ -98,9 +98,18 @@ pub struct ClassificationView {
     pub classification_id: Uuid,
     pub version: u32,
     pub impact: String,
-    /// Fixed `operator_declared` in v1. ADR 0044 gives `policy_rule` a tag and no path, so it is
-    /// not an input and cannot be one.
+    /// What the STORED record says decided. A new write is always `operator_declared` -- ADR 0044
+    /// gives `policy_rule` a tag and no path, so it is not an input and cannot be one -- but the
+    /// shipped canonical-byte store admits a `policy_rule` record with a rule id
+    /// (`mission_impact.rs:332-343`), and a read of one must not relabel it.
     pub basis: String,
+    /// The rule identity a `policy_rule` record names, `null` for an Operator declaration.
+    /// Required as a KEY: absent and null are different facts, and only one of them is recorded.
+    ///
+    /// Projecting it is not a claim that a rule was applied or evaluated -- only that the record
+    /// says so.
+    #[serde(deserialize_with = "required_explicit_null")]
+    pub rule_id: Option<String>,
     pub reason: String,
     pub policy: PolicyCitationDto,
     pub classified_by: String,
@@ -109,6 +118,29 @@ pub struct ClassificationView {
     /// Content identity, whole. A reclassification needs the predecessor's digest, and it should
     /// come from a previous answer rather than a second round trip.
     pub digest: ClassificationDigestDto,
+}
+
+/// What one Mission's classification state looks like in ONE snapshot.
+///
+/// Four fields and no more: no record count, no history, no "current" verdict and no
+/// `isHighImpact`. `publishedPolicy` is what a NEW classification would cite; `latest.policy` is
+/// what the newest existing one DID cite, and the two differ whenever Policy has moved since.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClassificationObservation {
+    pub mission_id: Uuid,
+    /// The chain head this snapshot was taken at, as a canonical nonnegative decimal string in the
+    /// `u64` domain. A string because the boundary is JavaScript: above 2^53 a JSON number is not
+    /// the value any more, and a cursor that silently rounds is worse than no cursor.
+    pub observed_at_event_seq: String,
+    /// The latest VERIFIED published Policy of this Mission's Project, in this same snapshot.
+    /// `null` is a proved absence -- this Project has published none -- never a failed read.
+    #[serde(deserialize_with = "required_explicit_null")]
+    pub published_policy: Option<PolicyCitationDto>,
+    /// The highest proven classification version in this snapshot, whole. `null` is a proved
+    /// absence, never an orphan Event or an unreadable row.
+    #[serde(deserialize_with = "required_explicit_null")]
+    pub latest: Option<ClassificationView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -348,6 +380,75 @@ impl MissionImpactCommandService {
         // The record just written proves itself the same way every older one had to.
         self.prove_owning_event(transaction, &recorded)?;
         Ok(view_of(&recorded))
+    }
+
+    /// What this Mission's classification state is, in ONE Deferred snapshot, writing nothing.
+    ///
+    /// The same proof the writer uses, reused rather than re-spelled: an adjacent read path with
+    /// its own idea of what "proven" means is two answers to one question.
+    pub fn observe(
+        &self,
+        mission_id: Uuid,
+    ) -> Result<ClassificationObservation, ClassificationCommandError> {
+        self.accounts.with_authenticated_store(|connection, _now| {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+            let outcome = self.observed_within(&transaction, mission_id);
+            match outcome {
+                Ok(observation) => {
+                    transaction.commit()?;
+                    Ok(Ok(observation))
+                }
+                Err(refusal) => Ok::<_, OperatorAccountError>(Err(refusal)),
+            }
+        })?
+    }
+
+    fn observed_within(
+        &self,
+        transaction: &Transaction<'_>,
+        mission_id: Uuid,
+    ) -> Result<ClassificationObservation, ClassificationCommandError> {
+        // Scope first: nothing about a Mission this Workspace cannot see is answerable, and an
+        // unknown Mission and a foreign one are the same answer.
+        let mission =
+            crate::mission::verified_mission_admission(transaction, self.workspace_id, mission_id)
+                .map_err(|error| unavailable(Unprovable::MissionUnverified(format!("{error:?}"))))?
+                .ok_or_else(|| unavailable(Unprovable::MissionAbsent))?;
+
+        let published_policy = crate::project_policy::verified_latest_policy_citation(
+            transaction,
+            self.workspace_id,
+            mission.project_id,
+        )
+        .map_err(|error| unavailable(Unprovable::PolicyBindingUnproven(format!("{error:?}"))))?
+        .map(|(policy_revision, charter_revision)| PolicyCitationDto {
+            project_id: mission.project_id,
+            policy_revision,
+            charter_revision,
+        });
+
+        let ladder = self.proven_ladder(transaction, mission_id)?;
+        let latest = ladder.last().map(view_of);
+
+        // The cursor, in its own domain, stringified exactly. No lossy cast anywhere on this path.
+        let head: i64 = transaction.query_row(
+            "SELECT coalesce(max(sequence), 0) FROM events WHERE workspace_id = ?1",
+            rusqlite::params![self.workspace_id.to_string()],
+            |row| row.get(0),
+        )?;
+        let head = u64::try_from(head).map_err(|_| {
+            unavailable(Unprovable::LadderUnprovable(format!(
+                "chain head {head} is outside the sequence domain"
+            )))
+        })?;
+
+        Ok(ClassificationObservation {
+            mission_id,
+            observed_at_event_seq: head.to_string(),
+            published_policy,
+            latest,
+        })
     }
 
     /// Every classification of one Mission, each proven by its bytes AND by its owning Event, in
@@ -679,7 +780,9 @@ fn view_of(record: &MissionImpactClassification) -> ClassificationView {
         classification_id: payload.classification_id,
         version: payload.version,
         impact: payload.impact.as_str().to_owned(),
+        // The ACTUAL stored basis and rule identity. A legacy `policy_rule` record keeps both.
         basis: payload.basis.as_str().to_owned(),
+        rule_id: payload.rule_id.clone(),
         reason: payload.reason.clone(),
         policy: PolicyCitationDto {
             project_id: payload.policy.project_id,
