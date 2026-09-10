@@ -117,7 +117,7 @@ pub use candidate_evaluation_collector::{Citation, collect_entry_within};
 pub use candidate_evaluation_packet::{
     ActivationFacts, EntryBody, EntryIndexRow, EntryKind, EvidenceEntry, FidelityPacketRefusal,
     HeaderFacts, MIN_ENTRY_BYTES, MalformedFidelityPacket, PacketCap, PacketGap, PacketInputs,
-    RecipeFacts, RequestKey, RubricFacts, SubjectFacts, VerifiedEvaluationPacket,
+    RecipeFacts, RequestKey, RubricFacts, SubjectFacts, VerifiedEvaluationPacket, WireDigest,
     admits_entry_count, encode_packet, min_entry_bytes,
 };
 pub use candidate_evaluation_result::{
