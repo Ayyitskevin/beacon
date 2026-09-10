@@ -16,6 +16,7 @@ use uuid::Uuid;
 mod artifact;
 mod candidate;
 mod candidate_evaluation;
+mod candidate_evaluation_collector;
 mod candidate_evaluation_packet;
 mod candidate_evaluation_result;
 mod check_preflight;
@@ -112,6 +113,7 @@ pub use candidate::{
     Candidate, CandidateDigest, CandidateEntry, CandidateError, CandidateImages, CandidateService,
     CandidateV1, InconsistentCandidate, MalformedCandidate, enumerate_candidates,
 };
+pub use candidate_evaluation_collector::{Citation, collect_entry_within};
 pub use candidate_evaluation_packet::{
     ActivationFacts, EntryBody, EntryIndexRow, EntryKind, EvidenceEntry, FidelityPacketRefusal,
     HeaderFacts, MIN_ENTRY_BYTES, MalformedFidelityPacket, PacketCap, PacketGap, PacketInputs,

@@ -2166,3 +2166,83 @@ mod nil_sentinel {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// R68/H1: the recording Event, proved
+// ---------------------------------------------------------------------------------------------
+
+/// Why a spend record did not prove itself WITH its recording Event.
+///
+/// A distinct type rather than a new arm on [`SpendStoreError`], for the same reason the
+/// classification reader has one: a failure mode only this reader can raise belongs beside this
+/// reader, not on an enum matched exhaustively across the crate.
+#[derive(Debug)]
+pub(crate) enum SpendEventProof {
+    Store(SpendStoreError),
+    /// No `spend.measured` Event in this Workspace names this digest, or more than one does.
+    RecordingEventUnaccounted,
+    /// The Event exists, and what it carries disagrees with the verified record.
+    DivergentEvidence,
+}
+
+impl SpendEventProof {
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Store(_) => "Store",
+            Self::RecordingEventUnaccounted => "RecordingEventUnaccounted",
+            Self::DivergentEvidence => "DivergentEvidence",
+        }
+    }
+}
+
+/// The verified spend record AND the `spend.measured` Event that recorded it.
+///
+/// `verified_spend_within` proves bytes, columns, lines, scope and predecessor and returns without
+/// proving the ledger ever recorded it. A packet calling itself independent owner evidence needs
+/// the Event too: a digest is never sufficient provenance (R68/H1).
+pub(crate) fn verified_spend_with_event_within(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+) -> Result<Option<MeasuredSpend>, SpendEventProof> {
+    let Some(record) = verified_spend_within(connection, workspace_id, digest_value)
+        .map_err(SpendEventProof::Store)?
+    else {
+        return Ok(None);
+    };
+
+    let mut statement = connection
+        .prepare(
+            "SELECT payload_json FROM events
+             WHERE workspace_id = ?1 AND kind = 'spend.measured'
+               AND json_extract(payload_json, '$.digest.value') = ?2",
+        )
+        .map_err(|_| SpendEventProof::RecordingEventUnaccounted)?;
+    let payloads: Vec<String> = statement
+        .query_map(
+            rusqlite::params![workspace_id.to_string(), digest_value],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|_| SpendEventProof::RecordingEventUnaccounted)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| SpendEventProof::RecordingEventUnaccounted)?;
+    let [payload_json] = payloads.as_slice() else {
+        return Err(SpendEventProof::RecordingEventUnaccounted);
+    };
+
+    let payload: SpendMeasuredPayload =
+        serde_json::from_str(payload_json).map_err(|_| SpendEventProof::DivergentEvidence)?;
+    // The era decides which canonicalizer these bytes are written in, so the Event's claim is
+    // checked against the RECORD's era rather than against whichever spelling is current.
+    if payload.workspace_id != workspace_id.to_string()
+        || payload.digest.value != *digest_value
+        || payload.digest.canonicalizer != record.payload().era.canonicalizer()
+        || payload.spend_id != record.payload().spend_id.to_string()
+        || payload.mission_id != record.payload().mission_id.to_string()
+        || payload.version != record.payload().version
+        || payload.canonical_bytes_base64 != BASE64.encode(record.canonical_bytes())
+    {
+        return Err(SpendEventProof::DivergentEvidence);
+    }
+    Ok(Some(record))
+}

@@ -1324,3 +1324,78 @@ impl MissionCompletionReadService {
         })?
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// R68/H1: the recording Event, proved, for a by-digest read
+// ---------------------------------------------------------------------------------------------
+
+/// Why a completion did not prove itself WITH its recording Event.
+#[derive(Debug)]
+pub(crate) enum CompletionEventProof {
+    Owner(CompletionReadRefusal),
+    /// No `mission.completed` Event in this Workspace names this digest, or more than one does.
+    RecordingEventUnaccounted,
+    /// The Event exists, and the owning verifier or a redundant selector refuses it.
+    DivergentEvidence,
+}
+
+impl CompletionEventProof {
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Owner(_) => "Owner",
+            Self::RecordingEventUnaccounted => "RecordingEventUnaccounted",
+            Self::DivergentEvidence => "DivergentEvidence",
+        }
+    }
+}
+
+/// The verified completion's exact canonical bytes, WITH the Event that recorded them.
+///
+/// `verified_completion_within` finds the Event by `digestValue` and checks its sequence but "does
+/// NOT open the payload" (`mission_completion_store.rs:1222-1226`); `verify_completion_event` is
+/// the verifier that does. For a packet whose S4 calls itself independent owner evidence, the
+/// weaker read is not enough (R68/H1), so this composes both in one snapshot.
+pub(crate) fn verified_completion_with_event_bytes(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+) -> Result<Option<Vec<u8>>, CompletionEventProof> {
+    let completion = match verified_completion_within(connection, workspace_id, digest_value) {
+        Ok(completion) => completion,
+        Err(CompletionReadRefusal::Absent) => return Ok(None),
+        Err(other) => return Err(CompletionEventProof::Owner(other)),
+    };
+    let bytes = completion
+        .canonical_bytes()
+        .map_err(|_| CompletionEventProof::DivergentEvidence)?;
+
+    let mut statement = connection
+        .prepare(
+            "SELECT payload_json FROM events
+             WHERE workspace_id = ?1 AND kind = 'mission.completed'
+               AND json_extract(payload_json, '$.digestValue') = ?2",
+        )
+        .map_err(|_| CompletionEventProof::RecordingEventUnaccounted)?;
+    let payloads: Vec<String> = statement
+        .query_map(
+            rusqlite::params![workspace_id.to_string(), digest_value],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|_| CompletionEventProof::RecordingEventUnaccounted)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| CompletionEventProof::RecordingEventUnaccounted)?;
+    let [payload_json] = payloads.as_slice() else {
+        return Err(CompletionEventProof::RecordingEventUnaccounted);
+    };
+
+    verify_completion_event(connection, workspace_id, payload_json)
+        .map_err(|_| CompletionEventProof::DivergentEvidence)?;
+    let redundant: MissionCompletedPayload =
+        serde_json::from_str(payload_json).map_err(|_| CompletionEventProof::DivergentEvidence)?;
+    if redundant.digest_value != *digest_value
+        || redundant.canonical_bytes_base64 != data_encoding::BASE64.encode(&bytes)
+    {
+        return Err(CompletionEventProof::DivergentEvidence);
+    }
+    Ok(Some(bytes))
+}

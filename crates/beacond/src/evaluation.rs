@@ -3267,3 +3267,72 @@ mod name_witness {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// R68/H1: the recording Event, required for BOTH subjects
+// ---------------------------------------------------------------------------------------------
+
+/// Why an Evaluation did not prove itself WITH its recording Event.
+#[derive(Debug)]
+pub(crate) enum EvaluationEventProof {
+    Owner(EvaluationError),
+    /// No `evaluation.recorded` Event in this Workspace names this digest, or more than one does.
+    RecordingEventUnaccounted,
+    /// The Event exists, and the owning verifier refuses it against the record.
+    DivergentEvidence,
+}
+
+impl EvaluationEventProof {
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Owner(_) => "Owner",
+            Self::RecordingEventUnaccounted => "RecordingEventUnaccounted",
+            Self::DivergentEvidence => "DivergentEvidence",
+        }
+    }
+}
+
+/// The verified Evaluation AND its `evaluation.recorded` Event, for **either** subject arm.
+///
+/// `verify_evaluation_event` already exists and already proves what an Event must say. What did
+/// not exist is a reader that REQUIRES it regardless of subject: the record's own Event-byte check
+/// is conditional on an Artifact subject, and a Proposal subject supplies `None`. A packet that
+/// calls its entries independent owner evidence cannot have one arm proved by the ledger and the
+/// other proved only by a digest (R68/H1).
+pub(crate) fn verified_evaluation_with_event_within(
+    connection: &Connection,
+    workspace_id: Uuid,
+    digest_value: &str,
+) -> Result<Option<Evaluation>, EvaluationEventProof> {
+    let Some(record) = verified_evaluation_within(connection, workspace_id, digest_value)
+        .map_err(EvaluationEventProof::Owner)?
+    else {
+        return Ok(None);
+    };
+
+    let mut statement = connection
+        .prepare(
+            "SELECT payload_json, occurred_at_ms FROM events
+             WHERE workspace_id = ?1 AND kind = 'evaluation.recorded'
+               AND json_extract(payload_json, '$.evaluation.digest.value') = ?2",
+        )
+        .map_err(|_| EvaluationEventProof::RecordingEventUnaccounted)?;
+    let rows: Vec<(String, i64)> = statement
+        .query_map(
+            rusqlite::params![workspace_id.to_string(), digest_value],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .map_err(|_| EvaluationEventProof::RecordingEventUnaccounted)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| EvaluationEventProof::RecordingEventUnaccounted)?;
+    let [(payload_json, occurred_at_ms)] = rows.as_slice() else {
+        return Err(EvaluationEventProof::RecordingEventUnaccounted);
+    };
+    let occurred_at_ms =
+        u64::try_from(*occurred_at_ms).map_err(|_| EvaluationEventProof::DivergentEvidence)?;
+
+    // The owning verifier, unconditionally -- not "when the subject is an Artifact".
+    verify_evaluation_event(connection, workspace_id, occurred_at_ms, payload_json)
+        .map_err(|_| EvaluationEventProof::DivergentEvidence)?;
+    Ok(Some(record))
+}
