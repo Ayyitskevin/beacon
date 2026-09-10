@@ -1620,6 +1620,37 @@ fn a_prepared_candidate_receipt_equals_the_owners_own_records() {
     thread.join().unwrap().unwrap();
 }
 
+/// The three row counts this bar's no-write claim is actually ABOUT, read from the isolated store.
+///
+/// Read-only, and read from the STORE rather than from the receipt: a count derived from the reply
+/// would be the reply agreeing with itself. One Deferred read transaction, so the three counts are
+/// one consistent picture rather than three moments; and the connection is opened AND dropped inside
+/// this call, so no transaction of this test's is ever live across the command under test — holding
+/// one there would turn a measurement into interference.
+///
+/// `busy_timeout` follows the existing read pattern in this file (see the repository-revision read
+/// below); no sleep and no retry loop is invented here.
+fn domain_row_counts(store: &std::path::Path) -> (i64, i64, i64) {
+    let mut connection = rusqlite::Connection::open(store).expect("the isolated store opens");
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .expect("the read waits rather than failing fast");
+    let read = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
+        .expect("one read transaction over the three tables");
+    let count = |table: &str| -> i64 {
+        read.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))
+            .unwrap_or_else(|error| panic!("counting {table}: {error}"))
+    };
+    let counts = (
+        count("outcome_manifests"),
+        count("artifacts"),
+        count("events"),
+    );
+    read.commit().expect("a read transaction commits");
+    counts
+}
+
 /// Re-preparing an ALREADY PUBLISHED candidate: the same identities come back, nothing is written
 /// again, and the publication that exists is untouched.
 ///
@@ -1701,9 +1732,13 @@ fn re_preparing_a_published_candidate_changes_nothing_that_is_published() {
     );
 
     // 3. Re-prepare the SAME request over the socket. Owner idempotence is the only repeat mechanism.
+    //    The store is counted immediately before and immediately after, and nothing else runs
+    //    between the two snapshots and the command.
+    let before_repeat = domain_row_counts(&runtime.store);
     let repeat = client
         .prepare_outcome_candidate(fixture.mission_id, AppendixRequestDto::PolicyDefault)
         .unwrap_or_else(|error| panic!("C6T.PUBLISHED.THE_REPEAT_IS_ACCEPTED: {error}"));
+    let after_repeat = domain_row_counts(&runtime.store);
 
     assert_eq!(
         repeat, first,
@@ -1727,14 +1762,22 @@ fn re_preparing_a_published_candidate_changes_nothing_that_is_published() {
         "C6T.PUBLISHED.EVERY_HELD_IDENTITY_IS_UNCHANGED"
     );
 
-    // 4. Nothing was written again: the Artifact's creation Event is where a second write would show.
+    // 4. Nothing was written again -- MEASURED, on the three tables the claim names. An unmoved
+    //    creation Event says the re-read returned the original Artifact; it cannot fail on a second
+    //    manifest row, a second Artifact row, or a new Event anywhere else, so it kept a promise it
+    //    was not making (non-author review, DC6T). Both facts are now asserted, each under the name
+    //    that is true of it.
+    assert_eq!(
+        after_repeat, before_repeat,
+        "C6T.PUBLISHED.NO_SECOND_MANIFEST_ARTIFACT_OR_EVENT_WRITE"
+    );
     let after = outcomes
         .candidate(&first.manifest_digest.value)
         .expect("the candidate is still readable");
     assert_eq!(
         after.creation_event_seq(),
         creation_event_seq,
-        "C6T.PUBLISHED.NO_SECOND_MANIFEST_ARTIFACT_OR_EVENT_WRITE"
+        "C6T.PUBLISHED.THE_ORIGINAL_ARTIFACT_CREATION_EVENT_IS_UNMOVED"
     );
 
     // 5. And the publication is exactly as it was: same version, same count, same bytes.
