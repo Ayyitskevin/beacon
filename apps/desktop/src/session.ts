@@ -1805,6 +1805,115 @@ export async function getMissionCompletionIntent(
   );
 }
 
+/** One digest, whole: never a bare hex string. Which canonicalizer produced it is part of the
+ *  identity, so this surface holds the exact expected canonicalizer for each of the three. */
+export type OutcomeDigestValue = {
+  algorithm: string;
+  canonicalizer: string;
+  value: string;
+};
+
+/** What the Operator asked for. Two arms, no `omit`: a caller must not be able to suppress the
+ *  verification appendix by asking. */
+export type AppendixRequest = "policy_default" | "include";
+
+/** What that request resolved to against the verified Policy classification. Derived by the owner
+ *  from the manifest, never a stored column. */
+export type AppendixMode = "included" | "policy_state_not_high_impact";
+
+/** The nine fields of C6's preparation receipt. Metadata only: no document, no verdict, no
+ *  permission, and deliberately no `isEvaluated`/`isPublished`/`isCurrent` bit -- preparation asks
+ *  neither of those owners, so this surface cannot answer for them. */
+export type PreparedOutcomeCandidate = {
+  missionId: string;
+  appendixRequest: AppendixRequest;
+  appendixMode: AppendixMode;
+  manifestId: string;
+  manifestDigest: OutcomeDigestValue;
+  candidateArtifactDigest: OutcomeDigestValue;
+  candidateContentDigest: OutcomeDigestValue;
+  candidateContentBytes: number;
+  mediaType: string;
+};
+
+/** The owner's own content bound (`artifact.rs`, MAX_CONTENT_BYTES). The byte count is safe as a JS
+ *  number because THIS domain is a mebibyte -- not because a `u64` is safe on this boundary. */
+const MAX_CANDIDATE_CONTENT_BYTES = 1_048_576;
+const CANDIDATE_MEDIA_TYPE = "text/markdown; charset=utf-8";
+
+function isOutcomeDigest(value: unknown, canonicalizer: string): value is OutcomeDigestValue {
+  return (
+    hasExactKeys(value, ["algorithm", "canonicalizer", "value"]) &&
+    value.algorithm === "sha256" &&
+    value.canonicalizer === canonicalizer &&
+    isHex64(value.value)
+  );
+}
+
+function isPreparedOutcomeCandidate(value: unknown): value is PreparedOutcomeCandidate {
+  if (
+    !hasExactKeys(value, [
+      "appendixMode",
+      "appendixRequest",
+      "candidateArtifactDigest",
+      "candidateContentBytes",
+      "candidateContentDigest",
+      "manifestDigest",
+      "manifestId",
+      "mediaType",
+      "missionId",
+    ])
+  ) {
+    return false;
+  }
+  if (!isUuid(value.missionId) || !isUuid(value.manifestId)) return false;
+  if (value.appendixRequest !== "policy_default" && value.appendixRequest !== "include") return false;
+  if (value.appendixMode !== "included" && value.appendixMode !== "policy_state_not_high_impact") {
+    return false;
+  }
+  // Each canonicalizer is named here, exactly. A digest whose canonicalizer is another module's is
+  // a different identity wearing the right shape, and accepting it would let this screen show one
+  // record's hex under another record's label.
+  if (!isOutcomeDigest(value.manifestDigest, "beacon.outcome.manifest.v2")) return false;
+  if (!isOutcomeDigest(value.candidateArtifactDigest, "beacon.artifact.v1")) return false;
+  if (!isOutcomeDigest(value.candidateContentDigest, "beacon.raw.v1")) return false;
+  if (!isNonnegativeInteger(value.candidateContentBytes)) return false;
+  if (value.candidateContentBytes > MAX_CANDIDATE_CONTENT_BYTES) return false;
+  return value.mediaType === CANDIDATE_MEDIA_TYPE;
+}
+
+/** Prepare one Outcome candidate from a Mission's recorded completion and evidence.
+ *
+ *  The Operator's two values go out unchanged and nothing else does: the owner derives the manifest,
+ *  the candidate Artifact, every digest and the resolved appendix mode. Preparation writes a
+ *  candidate; it does not evaluate or publish one, and this function makes no claim about either.
+ *
+ *  A reply that does not answer the request it was sent -- another Mission, another appendix request,
+ *  or `include` resolved to the excluded mode -- is refused here rather than displayed. That refusal
+ *  is an UNCONFIRMED outcome, never proof that nothing was written: the owner commits before it
+ *  builds this receipt.
+ *
+ *  MOCKED CONTRACT: `prepare_outcome_candidate` has no owner behind it yet. */
+export async function prepareOutcomeCandidate(request: {
+  missionId: string;
+  appendixRequest: AppendixRequest;
+}): Promise<PreparedOutcomeCandidate> {
+  const value = await invokeAndValidate(
+    "prepare_outcome_candidate",
+    { missionId: request.missionId, appendixRequest: request.appendixRequest },
+    isPreparedOutcomeCandidate,
+    "Outcome candidate",
+  );
+  if (
+    value.missionId !== request.missionId ||
+    value.appendixRequest !== request.appendixRequest ||
+    (value.appendixRequest === "include" && value.appendixMode !== "included")
+  ) {
+    throw new Error("Beacon received an invalid Outcome candidate.");
+  }
+  return value;
+}
+
 async function invokeAndValidate<T>(
   command: string,
   argumentsValue: Record<string, unknown> | undefined,
