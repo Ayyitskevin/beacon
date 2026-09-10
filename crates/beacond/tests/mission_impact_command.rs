@@ -1796,3 +1796,26 @@ fn b15_order_no_retroactive_repair() {
         "B15.ORDER.NO_RETROACTIVE_REPAIR: {refusal:?}"
     );
 }
+
+/// The guard's PLACEMENT, made observable.
+///
+/// Row and Event counts cannot see where inside one Immediate transaction the guard sits -- a
+/// refusal drops the transaction either way. What an Operator sees is the CODE, and that is decided
+/// by which refusal runs first. An unclassified Mission whose reviewed token is also stale must be
+/// told to classify, because that is the step that has to happen first; being told the token
+/// changed would send them to re-review a completion they cannot record yet.
+#[test]
+fn b15_order_required_before_write_is_the_first_refusal() {
+    let fixture = fixture("b15-first");
+    let owner = b15_completion_owner(&fixture);
+    let request = b15_completion_request(&fixture.mission);
+
+    let refusal = owner
+        .record(request, &"0".repeat(64))
+        .expect_err("B15.ORDER.REQUIRED_BEFORE_WRITE: an unclassified Mission must refuse");
+    assert_eq!(
+        refusal.name(),
+        "ClassificationRequired",
+        "B15.ORDER.REQUIRED_BEFORE_WRITE: the order is decided before the review: {refusal:?}"
+    );
+}
