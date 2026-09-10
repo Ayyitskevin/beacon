@@ -1066,3 +1066,385 @@ fn c5_scope_opacity_and_authentication_hold_on_both_methods() {
         "C5.OWNER.AUTHENTICATION_RETAINED: a locked session wrote"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// The writer's remaining groups.
+// ---------------------------------------------------------------------------------------------
+
+/// C5.OWNER.RECLASSIFICATION_NAMES_ITS_PREDECESSOR — and concurrent intent is never overwritten.
+#[test]
+fn c5_a_reclassification_names_and_proves_its_predecessor() {
+    // Built first: `fixture` is shadowed by the binding below.
+    let elsewhere = fixture("reclassify-foreign");
+    let fixture = fixture("reclassify");
+    let owner = fixture.owner();
+    let first = owner
+        .classify(high_declaration(fixture.mission.id))
+        .expect("C5.OWNER.RECLASSIFICATION_NAMES_ITS_PREDECESSOR");
+
+    // A second "first" classification is refused: the ladder is not empty.
+    let before = fixture.counts();
+    let refusal = owner
+        .classify(high_declaration(fixture.mission.id))
+        .expect_err(
+            "C5.OWNER.RECLASSIFICATION_NAMES_ITS_PREDECESSOR: none on a classified Mission",
+        );
+    assert_eq!(
+        refusal.name(),
+        "AlreadyClassified",
+        "C5.OWNER.RECLASSIFICATION_NAMES_ITS_PREDECESSOR: {refusal:?}"
+    );
+    assert_eq!(
+        fixture.counts(),
+        before,
+        "C5.OWNER.RECLASSIFICATION_NAMES_ITS_PREDECESSOR: it wrote"
+    );
+
+    let reclassify = |predecessor: &str| ClassificationIntentRequest {
+        impact: "ordinary".to_owned(),
+        reason: "A non-author seat reviewed it and the blast radius is one file.".to_owned(),
+        supersedes: SupersedesDto::Record {
+            predecessor_digest: predecessor.to_owned(),
+        },
+        ..high_declaration(fixture.mission.id)
+    };
+    let second = owner
+        .classify(reclassify(&first.digest.value))
+        .expect("C5.OWNER.RECLASSIFICATION_NAMES_ITS_PREDECESSOR");
+    assert_eq!(
+        second.version, 2,
+        "C5.OWNER.RECLASSIFICATION_NAMES_ITS_PREDECESSOR"
+    );
+    assert_eq!(
+        second.supersedes,
+        SupersedesDto::Record {
+            predecessor_digest: first.digest.value.clone()
+        },
+        "C5.OWNER.RECLASSIFICATION_NAMES_ITS_PREDECESSOR"
+    );
+    assert_eq!(
+        second.impact, "ordinary",
+        "C5.OWNER.RECLASSIFICATION_NAMES_ITS_PREDECESSOR"
+    );
+    assert_eq!(
+        owner.observe(fixture.mission.id).unwrap().latest.unwrap(),
+        second,
+        "C5.OWNER.RECLASSIFICATION_NAMES_ITS_PREDECESSOR: the newest proven record"
+    );
+
+    // The predecessor that is no longer latest: concurrent intent is refused, not stacked.
+    let before = fixture.counts();
+    let refusal = owner
+        .classify(reclassify(&first.digest.value))
+        .expect_err("C5.OWNER.CONCURRENT_INTENT_IS_NEVER_OVERWRITTEN");
+    assert_eq!(
+        refusal.name(),
+        "PredecessorNotLatest",
+        "C5.OWNER.CONCURRENT_INTENT_IS_NEVER_OVERWRITTEN: {refusal:?}"
+    );
+
+    // A predecessor that is not this Mission's, and one that is not stored at all.
+    let foreign = elsewhere
+        .owner()
+        .classify(high_declaration(elsewhere.mission.id))
+        .expect("C5.OWNER.CONCURRENT_INTENT_IS_NEVER_OVERWRITTEN fixture");
+    for digest in [foreign.digest.value.as_str(), &"0".repeat(64)] {
+        let refusal = owner
+            .classify(reclassify(digest))
+            .expect_err("C5.OWNER.PREDECESSOR_IS_PROVEN");
+        assert_eq!(
+            refusal.name(),
+            "PredecessorUnproven",
+            "C5.OWNER.PREDECESSOR_IS_PROVEN: {refusal:?}"
+        );
+    }
+    assert_eq!(
+        fixture.counts(),
+        before,
+        "C5.OWNER.PREDECESSOR_IS_PROVEN: a refused write left something"
+    );
+}
+
+/// C5.OWNER.STALE_POLICY_REFUSES — the echoed revision is the Operator's guard, not decoration.
+#[test]
+fn c5_a_stale_policy_revision_refuses_before_writing() {
+    let fixture = fixture("stale-policy");
+    let before = fixture.counts();
+
+    for echoed in [Some(1), Some(3), None] {
+        let refusal = fixture
+            .owner()
+            .classify(ClassificationIntentRequest {
+                expected_policy_revision: echoed,
+                ..high_declaration(fixture.mission.id)
+            })
+            .expect_err("C5.OWNER.STALE_POLICY_REFUSES");
+        assert_eq!(
+            refusal.name(),
+            "StalePolicyRevision",
+            "C5.OWNER.STALE_POLICY_REFUSES ({echoed:?}): {refusal:?}"
+        );
+    }
+    assert_eq!(
+        fixture.counts(),
+        before,
+        "C5.OWNER.STALE_POLICY_REFUSES: a refusal wrote"
+    );
+
+    // And a revision published between the read and the write is refused with the same name.
+    let owner = fixture.owner();
+    ProjectPolicyService::new(Arc::clone(&fixture.accounts), fixture.store.workspace_id)
+        .publish(fixture.project.id, 3, Some(2), policy_draft())
+        .expect("C5.OWNER.STALE_POLICY_REFUSES: Policy 3");
+    let refusal = owner
+        .classify(high_declaration(fixture.mission.id))
+        .expect_err("C5.OWNER.STALE_POLICY_REFUSES: the form's revision is gone");
+    assert_eq!(
+        refusal.name(),
+        "StalePolicyRevision",
+        "C5.OWNER.STALE_POLICY_REFUSES: {refusal:?}"
+    );
+}
+
+/// C5.OWNER.INPUT_DOMAINS — explicit tags, present-but-nullable keys, and the codec's text classes.
+#[test]
+fn c5_the_request_domains_are_explicit() {
+    // Built first: `fixture` is shadowed by the binding below.
+    let broken = fixture("input-domains-digest");
+    let fixture = fixture("input-domains");
+    let before = fixture.counts();
+
+    // The impact tag is closed and has no default.
+    for token in ["", "High", "unclassified", "ordinary "] {
+        let refusal = fixture
+            .owner()
+            .classify(ClassificationIntentRequest {
+                impact: token.to_owned(),
+                ..high_declaration(fixture.mission.id)
+            })
+            .expect_err("C5.OWNER.INPUT_DOMAINS: an unknown impact must refuse");
+        assert!(
+            matches!(&refusal, beacond::ClassificationCommandError::MalformedRequest(field) if *field == "impact"),
+            "C5.OWNER.INPUT_DOMAINS ({token:?}): {refusal:?}"
+        );
+    }
+
+    // The codec's own text classes, each its own refusal and only one of them length-shaped.
+    for (reason, expected) in [
+        ("x".repeat(2_001), "TextOverLimit"),
+        ("\u{1f9ed}".repeat(2_001), "TextOverLimit"),
+        (String::new(), "MalformedRequest"),
+        (" untrimmed".to_owned(), "MalformedRequest"),
+        ("a\u{7}bell".to_owned(), "MalformedRequest"),
+    ] {
+        let refusal = fixture
+            .owner()
+            .classify(ClassificationIntentRequest {
+                reason: reason.clone(),
+                ..high_declaration(fixture.mission.id)
+            })
+            .expect_err("C5.OWNER.INPUT_DOMAINS: a malformed reason must refuse");
+        assert_eq!(
+            refusal.name(),
+            expected,
+            "C5.OWNER.INPUT_DOMAINS ({} scalars): {refusal:?}",
+            reason.chars().count()
+        );
+    }
+    // 2000 scalars is legal, astral included.
+    fixture
+        .owner()
+        .classify(ClassificationIntentRequest {
+            reason: "\u{1f9ed}".repeat(2_000),
+            ..high_declaration(fixture.mission.id)
+        })
+        .expect("C5.OWNER.INPUT_DOMAINS: 2000 astral scalars are within the bound");
+
+    // The predecessor digest's shape.
+    for digest in [
+        "0".repeat(63),
+        "0".repeat(65),
+        "A".repeat(64),
+        "g".repeat(64),
+    ] {
+        let refusal = broken
+            .owner()
+            .classify(ClassificationIntentRequest {
+                supersedes: SupersedesDto::Record {
+                    predecessor_digest: digest.clone(),
+                },
+                ..high_declaration(broken.mission.id)
+            })
+            .expect_err("C5.OWNER.INPUT_DOMAINS: a malformed digest must refuse");
+        assert!(
+            matches!(&refusal, beacond::ClassificationCommandError::MalformedRequest(field) if field.ends_with("predecessorDigest")),
+            "C5.OWNER.INPUT_DOMAINS ({digest}): {refusal:?}"
+        );
+    }
+    assert_eq!(
+        broken.counts(),
+        before,
+        "C5.OWNER.INPUT_DOMAINS: a refused request wrote"
+    );
+
+    // Present-but-nullable at the DTO boundary: an OMITTED key refuses, an explicit null passes.
+    let complete = serde_json::json!({
+        "missionId": Uuid::new_v4(),
+        "impact": "high",
+        "reason": "A reason.",
+        "expectedPolicyRevision": serde_json::Value::Null,
+        "supersedes": { "kind": "none" },
+    });
+    serde_json::from_value::<ClassificationIntentRequest>(complete.clone())
+        .expect("C5.OWNER.INPUT_DOMAINS: an explicit null is a claim");
+    let mut omitted = complete.as_object().unwrap().clone();
+    omitted.remove("expectedPolicyRevision");
+    let refusal =
+        serde_json::from_value::<ClassificationIntentRequest>(serde_json::Value::Object(omitted))
+            .expect_err("C5.OWNER.INPUT_DOMAINS: an omitted key is not a null");
+    assert!(
+        refusal.to_string().contains("expectedPolicyRevision"),
+        "C5.OWNER.INPUT_DOMAINS: {refusal}"
+    );
+    let mut unknown = complete.as_object().unwrap().clone();
+    unknown.insert(
+        "basis".to_owned(),
+        serde_json::Value::String("policy_rule".to_owned()),
+    );
+    serde_json::from_value::<ClassificationIntentRequest>(serde_json::Value::Object(unknown))
+        .expect_err("C5.OWNER.INPUT_DOMAINS: basis is not an input and an unknown key refuses");
+}
+
+/// C5.OWNER.ONE_ATOMIC_TRANSACTION — a failed write leaves no row and no Event.
+#[test]
+fn c5_a_failed_write_leaves_no_row_and_no_event() {
+    let fixture = fixture("atomic");
+    let before = fixture.counts();
+
+    // A FORCED failure inside the writer, planted on a second connection after the account service
+    // opened its own, and removed before the store is reopened.
+    let connection = fixture.store.connect();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER c5_forced_write_failure
+             BEFORE INSERT ON mission_impact_classifications
+             BEGIN SELECT RAISE(ABORT, 'c5 forced write failure'); END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let refusal = fixture
+        .owner()
+        .classify(high_declaration(fixture.mission.id))
+        .expect_err("C5.OWNER.ONE_ATOMIC_TRANSACTION: the forced failure must refuse");
+    assert_eq!(
+        refusal.name(),
+        "Unavailable",
+        "C5.OWNER.ONE_ATOMIC_TRANSACTION: {refusal:?}"
+    );
+    assert_eq!(
+        fixture.counts(),
+        before,
+        "C5.OWNER.ONE_ATOMIC_TRANSACTION: a failed write left a row or an Event behind"
+    );
+
+    let connection = fixture.store.connect();
+    connection
+        .execute_batch("DROP TRIGGER c5_forced_write_failure;")
+        .unwrap();
+    drop(connection);
+
+    // Reopened from disk: the rollback survives the process, not just the handle that made it.
+    let reopened = Arc::new(OperatorAccountService::open(&fixture.store.path).unwrap());
+    reopened
+        .authenticate_password(
+            SecretString::new("a long local passphrase".to_owned()),
+            beacond::AccessOrigin::SameMachine,
+        )
+        .expect("C5.OWNER.ONE_ATOMIC_TRANSACTION: the store reopens");
+    let owner = MissionImpactCommandService::new(Arc::clone(&reopened), fixture.store.workspace_id);
+    assert_eq!(
+        owner
+            .observe(fixture.mission.id)
+            .expect("C5.OWNER.ONE_ATOMIC_TRANSACTION")
+            .latest,
+        None,
+        "C5.OWNER.ONE_ATOMIC_TRANSACTION: the reopened store must show no classification"
+    );
+    owner
+        .classify(high_declaration(fixture.mission.id))
+        .expect("C5.OWNER.ONE_ATOMIC_TRANSACTION: the unblocked write records");
+    assert_eq!(
+        fixture.counts(),
+        (before.0 + 1, before.1 + 1),
+        "C5.OWNER.ONE_ATOMIC_TRANSACTION: one row, one owning Event"
+    );
+}
+
+/// C5.OWNER.CLOSED_PROJECTION — every outward arm, against literals written here.
+#[test]
+fn c5_every_outward_refusal_projects_one_closed_literal() {
+    use beacond::ClassificationCommandError as Refusal;
+    use beacond::OperatorAccountError as Account;
+
+    // The whole outward vocabulary, spelled out here rather than read from `name()`.
+    let arms: Vec<(Refusal, &str)> = vec![
+        (Refusal::Account(Account::NotAuthenticated), "Account"),
+        (Refusal::StalePolicyRevision, "StalePolicyRevision"),
+        (Refusal::NoPolicyPublished, "NoPolicyPublished"),
+        (Refusal::AlreadyClassified, "AlreadyClassified"),
+        (Refusal::PredecessorNotLatest, "PredecessorNotLatest"),
+        (Refusal::PredecessorUnproven, "PredecessorUnproven"),
+        (Refusal::VersionCeilingReached, "VersionCeilingReached"),
+        (Refusal::TextOverLimit, "TextOverLimit"),
+        (
+            Refusal::MalformedRequest("C5_PRIVATE_FIELD\r\nneedle"),
+            "MalformedRequest",
+        ),
+        (
+            Refusal::Unavailable(beacond::ClassificationCommandUnavailable::LadderUnprovable(
+                "C5_PRIVATE_LADDER\r\nneedle".to_owned(),
+            )),
+            "Unavailable",
+        ),
+    ];
+    assert_eq!(
+        arms.len(),
+        10,
+        "C5.OWNER.CLOSED_PROJECTION: ten outward arms"
+    );
+
+    for (refusal, expected) in &arms {
+        assert_eq!(
+            &refusal.to_string(),
+            expected,
+            "C5.OWNER.CLOSED_PROJECTION: {refusal:?}"
+        );
+        assert_eq!(refusal.name(), *expected, "C5.OWNER.CLOSED_PROJECTION");
+        let line = refusal.to_string();
+        assert!(
+            !line.contains("C5_PRIVATE") && !line.contains('\n') && !line.contains('\r'),
+            "C5.OWNER.CLOSED_PROJECTION: a needle reached the caller line: {line:?}"
+        );
+    }
+    // The needles survive in Debug, escaped, and only there.
+    assert!(
+        format!("{:?}", arms[8].0).contains("C5_PRIVATE_FIELD"),
+        "C5.OWNER.CLOSED_PROJECTION: Debug keeps the field"
+    );
+    assert!(
+        format!("{:?}", arms[9].0).contains("C5_PRIVATE_LADDER"),
+        "C5.OWNER.CLOSED_PROJECTION: Debug keeps the reason"
+    );
+
+    // The nested account child keeps its own meaning and its own source.
+    let account = Refusal::Account(Account::NotAuthenticated);
+    assert!(
+        std::error::Error::source(&account).is_some(),
+        "C5.OWNER.CLOSED_PROJECTION: the account child is reachable through source"
+    );
+    assert!(
+        std::error::Error::source(&Refusal::AlreadyClassified).is_none(),
+        "C5.OWNER.CLOSED_PROJECTION: a leaf has no source"
+    );
+}

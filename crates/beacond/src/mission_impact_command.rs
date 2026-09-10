@@ -322,6 +322,18 @@ impl MissionImpactCommandService {
         request: &ClassificationIntentRequest,
         now: i64,
     ) -> Result<ClassificationView, ClassificationCommandError> {
+        // The REQUEST's own domains first. A digest that is not a digest is a malformed request
+        // whatever the store holds; reporting it as `PredecessorUnproven` because the ladder
+        // happened to be empty would send a caller to look for a record they never named.
+        let impact = impact_from(&request.impact)?;
+        let named_predecessor = match &request.supersedes {
+            SupersedesDto::None => None,
+            SupersedesDto::Record { predecessor_digest } => Some(digest64(
+                predecessor_digest,
+                "supersedes.predecessorDigest",
+            )?),
+        };
+
         // The Mission, through its OWN verified admission -- not the `missions` projection column
         // `mission_project_of` reads. An unknown Mission and another Workspace's are one answer.
         let mission = crate::mission::verified_mission_admission(
@@ -347,14 +359,14 @@ impl MissionImpactCommandService {
 
         // The ladder, proven before ANY of it is judged.
         let ladder = self.proven_ladder(transaction, request.mission_id)?;
-        let (version, supersedes) = self.ladder_position(request, &ladder)?;
+        let (version, supersedes) = self.ladder_position(named_predecessor, &ladder)?;
 
         let record = MissionImpactClassificationV1 {
             workspace_id: self.workspace_id,
             mission_id: request.mission_id,
             classification_id: Uuid::new_v4(),
             version,
-            impact: impact_from(&request.impact)?,
+            impact,
             // Fixed. ADR 0044 gives `policy_rule` a tag and no path, so there is no input for it
             // and `rule_id` is absent by construction rather than by a caller remembering.
             basis: ClassificationBasis::OperatorDeclared,
@@ -677,17 +689,14 @@ impl MissionImpactCommandService {
     /// Initial or reclassification, decided only from PROVEN records.
     fn ladder_position(
         &self,
-        request: &ClassificationIntentRequest,
+        named_predecessor: Option<String>,
         ladder: &[MissionImpactClassification],
     ) -> Result<(u32, ClassificationSupersedes), ClassificationCommandError> {
-        match (&request.supersedes, ladder.last()) {
-            (SupersedesDto::None, None) => Ok((1, ClassificationSupersedes::None)),
-            (SupersedesDto::None, Some(_)) => Err(ClassificationCommandError::AlreadyClassified),
-            (SupersedesDto::Record { .. }, None) => {
-                Err(ClassificationCommandError::PredecessorUnproven)
-            }
-            (SupersedesDto::Record { predecessor_digest }, Some(latest)) => {
-                let named = digest64(predecessor_digest, "supersedes.predecessorDigest")?;
+        match (named_predecessor, ladder.last()) {
+            (None, None) => Ok((1, ClassificationSupersedes::None)),
+            (None, Some(_)) => Err(ClassificationCommandError::AlreadyClassified),
+            (Some(_), None) => Err(ClassificationCommandError::PredecessorUnproven),
+            (Some(named), Some(latest)) => {
                 if !ladder.iter().any(|record| record.digest().value == named) {
                     return Err(ClassificationCommandError::PredecessorUnproven);
                 }
