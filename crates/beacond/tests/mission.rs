@@ -2999,12 +2999,11 @@ fn c4_stored_bytes(store: &TestStore) -> Vec<(String, Vec<u8>)> {
             "SELECT digest_value, canonical_bytes FROM mission_completions ORDER BY digest_value",
         )
         .unwrap();
-    let rows = statement
+    statement
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    rows
+        .unwrap()
 }
 
 fn c4_chain_head(store: &TestStore) -> i64 {
