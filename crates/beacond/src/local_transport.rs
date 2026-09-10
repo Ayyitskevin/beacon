@@ -237,6 +237,20 @@ fn invalid_draft_tag(reason: &crate::InvalidRepositoryDraft) -> &'static str {
     }
 }
 
+/// `MissionCompletionReadError::name()` is a closed TWO-token vocabulary -- `Account` and
+/// `Unavailable` -- so the account child it wraps never reached this caller line, while
+/// `expected_completion_read` has always said `Account.<child>`. Projected here, in the same shape
+/// as `recent_receipt_tag` below, so the owner keeps its own closed name and the wire mapping in
+/// `wire_error_from_mission_completion` is untouched.
+fn completion_read_tag(error: &crate::MissionCompletionReadError) -> String {
+    match error {
+        crate::MissionCompletionReadError::Account(cause) => {
+            format!("Account.{}", account_tag(cause))
+        }
+        crate::MissionCompletionReadError::Unavailable(_) => "Unavailable".to_owned(),
+    }
+}
+
 /// The completion command fault's NAME for a transport caller, with its account child named too.
 ///
 /// `CompletionCommandError::name()` answers a bare `"Account"`, which is right for the owner's own
@@ -554,14 +568,13 @@ impl fmt::Display for LocalTransportError {
                 )
             }
             Self::Team(error) => write!(formatter, "Team operation failed: {}", team_tag(error)),
-            // ONE closed literal: `MissionCompletionReadError`'s own Display is already a closed
-            // token, and nothing beneath it -- driver text, a path, a note an operator wrote -- is
-            // allowed onto this line.
+            // ONE closed literal, and the account child is part of it: nothing beneath the
+            // child -- driver text, a path, a note an operator wrote -- is allowed onto this line.
             Self::MissionCompletionRead(error) => {
                 write!(
                     formatter,
                     "Mission completion read failed: {}",
-                    error.name()
+                    completion_read_tag(error)
                 )
             }
             // ONE closed literal, the owner's own outward token. `MalformedRequest` and
