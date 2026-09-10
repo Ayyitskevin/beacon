@@ -59,16 +59,36 @@ const CODE_COPY: Record<string, string> = {
     "Beacon could not verify the records needed to prepare this Outcome candidate.",
 };
 
-/** The answers that do NOT settle whether a candidate was written.
+/** The codes that are DECIDED BEFORE anything could have been written.
  *
- *  The three sequencing refusals above are decided BEFORE the owner assembles or writes anything, so
- *  they are definite. `outcome_preparation_unavailable` is not: it is one outward code over several
- *  owner causes, and the contract puts a failed post-commit owner read behind it -- the write is
- *  preserved and the receipt is not. An uncoded failure is the same situation: a transport or shape
- *  fault can follow a commit the daemon really made, and a reply this client refuses to read is a
- *  reply, not an absence. None of these may be announced as "nothing happened". */
+ *  Membership in a known vocabulary, never the mere presence of a code. Root measured the difference:
+ *  the native's `local_request_failed` carries Io, Json and Protocol faults (`lib.rs:634-660`), and a
+ *  protocol or I/O fault can follow a commit the daemon really made -- so "it has a code" was
+ *  classifying a lost acknowledgement as a definite no-write.
+ *
+ *  Two families are definite. This surface's three sequencing refusals: the owner decides each of
+ *  them before it assembles or writes anything. And the session gate: these stop the request before
+ *  it reaches the owner at all, so no candidate could exist.
+ *
+ *  Everything else is UNKNOWN, deliberately: `outcome_preparation_unavailable` is one outward code
+ *  over several owner causes and the contract puts a failed post-commit read behind it;
+ *  `local_request_failed` is transport; an unrecognized code is a vocabulary this build has not seen.
+ *  A code added upstream that this set does not know is classified unknown, which is the SAFE
+ *  direction -- unknown never claims nothing happened, and a wrong "nothing happened" is the one
+ *  answer that cannot be walked back. */
+const DEFINITE_CODES: ReadonlySet<string> = new Set([
+  "outcome_not_completed",
+  "outcome_not_classified",
+  "outcome_no_classification_at_completion",
+  "not_authenticated",
+  "authentication_failed",
+  "authentication_throttled",
+  "credential_disabled",
+  "account_service_unavailable",
+]);
+
 function settles(code: string | undefined): boolean {
-  return code !== undefined && code !== "outcome_preparation_unavailable";
+  return code !== undefined && DEFINITE_CODES.has(code);
 }
 
 function codeOf(error: unknown): string | undefined {

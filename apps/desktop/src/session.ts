@@ -1893,7 +1893,10 @@ function isPreparedOutcomeCandidate(value: unknown): value is PreparedOutcomeCan
  *  is an UNCONFIRMED outcome, never proof that nothing was written: the owner commits before it
  *  builds this receipt.
  *
- *  MOCKED CONTRACT: `prepare_outcome_candidate` has no owner behind it yet. */
+ *  MOCKED CONTRACT, precisely: the OWNER exists -- `OutcomeService::prepare_for_mission` already
+ *  owns the collector, the assembler and the transactional write. What does not exist yet is the
+ *  route to it: there is no `prepare_outcome_candidate` LocalCommand and no native command, so
+ *  this call is answered by a test double and never by the daemon. */
 export async function prepareOutcomeCandidate(request: {
   missionId: string;
   appendixRequest: AppendixRequest;
