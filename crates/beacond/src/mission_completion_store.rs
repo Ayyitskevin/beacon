@@ -1370,12 +1370,9 @@ pub(crate) fn verified_completion_with_event_bytes(
         .map_err(|_| CompletionEventProof::DivergentEvidence)?;
 
     // The strongest scoped reader counts both directions by Mission before selecting the row.
-    let mission = crate::mission::verified_mission_admission(
-        connection,
-        workspace_id,
-        completion.mission_id,
-    )
-    .map_err(|_| CompletionEventProof::DivergentEvidence)?;
+    let mission =
+        crate::mission::verified_mission_admission(connection, workspace_id, completion.mission_id)
+            .map_err(|_| CompletionEventProof::DivergentEvidence)?;
     if mission.is_none() {
         return Err(CompletionEventProof::DivergentEvidence);
     }

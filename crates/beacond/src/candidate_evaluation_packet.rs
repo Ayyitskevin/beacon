@@ -821,11 +821,7 @@ pub(crate) fn charge_declared_packet(
     if !inputs.evidence.is_empty() {
         return Err(FidelityPacketRefusal::ScopeMismatch);
     }
-    charge_packet_parts(
-        inputs,
-        evidence_body_bytes.iter().copied().map(Ok),
-        cap,
-    )
+    charge_packet_parts(inputs, evidence_body_bytes.iter().copied().map(Ok), cap)
 }
 
 fn charge_packet_parts(

@@ -129,7 +129,16 @@ fn declared_entry_charge(
                 )
                 .optional()
                 .map_err(|_| owner_refused(EntryKind::Mission))?;
-            let Some((desired, _success_count, success, _constraint_count, constraints, _prohibition_count, prohibitions)) = row else {
+            let Some((
+                desired,
+                _success_count,
+                success,
+                _constraint_count,
+                constraints,
+                _prohibition_count,
+                prohibitions,
+            )) = row
+            else {
                 return Err(FidelityPacketRefusal::MissionAbsent);
             };
             let desired = checked_len(desired, EntryKind::Mission)?;
@@ -176,14 +185,16 @@ fn declared_entry_charge(
                     kind: EntryKind::Artifact.as_str(),
                 });
             }
-            Ok(crate::candidate_evaluation_packet::digest_charge(canonicalizer)
-                + 8
-                + record
-                + crate::candidate_evaluation_packet::digest_charge(
-                    crate::candidate_evaluation_packet::RAW_CANONICALIZER.len() as u64,
-                )
-                + 8
-                + content)
+            Ok(
+                crate::candidate_evaluation_packet::digest_charge(canonicalizer)
+                    + 8
+                    + record
+                    + crate::candidate_evaluation_packet::digest_charge(
+                        crate::candidate_evaluation_packet::RAW_CANONICALIZER.len() as u64,
+                    )
+                    + 8
+                    + content,
+            )
         }
         Citation::Record { kind, digest } => {
             record_declaration(connection, workspace_id, *kind, digest)
@@ -207,13 +218,7 @@ fn declared_entry_charge(
                     kind: EntryKind::Receipt.as_str(),
                 });
             }
-            Ok(16
-                + 4
-                + 8
-                + crate::outcome::RECEIPT_CHECKSUM_LABEL.len() as u64
-                + 32
-                + 8
-                + bytes)
+            Ok(16 + 4 + 8 + crate::outcome::RECEIPT_CHECKSUM_LABEL.len() as u64 + 32 + 8 + bytes)
         }
     }
 }
@@ -496,10 +501,7 @@ mod tests {
                 "INSERT INTO events
                  (sequence, workspace_id, kind, payload_json, occurred_at_ms)
                  VALUES (1, ?1, 'proposal.dispatched', ?2, 1)",
-                params![
-                    workspace.to_string(),
-                    format!(r#"{{"runId":"{run}"}}"#),
-                ],
+                params![workspace.to_string(), format!(r#"{{"runId":"{run}"}}"#),],
             )
             .expect("dispatch event");
 

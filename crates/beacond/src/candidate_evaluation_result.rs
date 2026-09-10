@@ -602,10 +602,13 @@ fn parse_result(
 
     // 8. Conflicts: absence is a value, so it encodes as one.
     let conflicts_value = get("conflicts");
-    let conflicts_pairs = conflicts_value
-        .as_object()
-        .ok_or(MalformedCode::Conflict)?;
-    if conflicts_pairs.iter().filter(|(key, _)| key == "state").count() != 1 {
+    let conflicts_pairs = conflicts_value.as_object().ok_or(MalformedCode::Conflict)?;
+    if conflicts_pairs
+        .iter()
+        .filter(|(key, _)| key == "state")
+        .count()
+        != 1
+    {
         return Err(MalformedCode::UnknownOrDuplicateField);
     }
     let state = field(conflicts_pairs, "state")

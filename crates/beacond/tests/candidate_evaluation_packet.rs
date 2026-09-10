@@ -417,7 +417,10 @@ fn packet_preserves_owner_scoped_receipt_versions_and_exact_stored_json() {
                 receipt_json,
                 ..
             } => {
-                assert_eq!(*carried_version, version, "the Receipt slot carries its version");
+                assert_eq!(
+                    *carried_version, version,
+                    "the Receipt slot carries its version"
+                );
                 assert_eq!(
                     receipt_json,
                     format!(r#"{{"version":{version}}}"#).as_bytes(),
