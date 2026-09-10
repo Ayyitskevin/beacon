@@ -10,8 +10,10 @@
 //! which Policy revision they were looking at, and -- for a reclassification -- which record they
 //! are replacing. Everything else is derived here from proven store state.
 //!
-//! **Scope, deliberately.** One write. No reader, no `history()`, no `current(mission_id)` and no
-//! `is_high_impact` (ADR 0044 refuses the last two by name). No completion prerequisite is added
+//! **Scope, deliberately.** One write and one bounded observation read. No `history()` on the wire,
+//! no `current(mission_id)` and no `is_high_impact` (ADR 0044 refuses the last two by name); the
+//! read answers four fields in one snapshot and reuses the writer's own proof. No completion
+//! prerequisite is added
 //! and no Outcome policy changes: a classification recorded after a completion's boundary does not
 //! and must not change that completion's Outcome (R23.4).
 
@@ -224,7 +226,7 @@ pub enum ClassificationCommandUnavailable {
 }
 
 impl ClassificationCommandError {
-    /// The closed outward token. Eleven arms, and a caller sees nothing else.
+    /// The closed outward token. Ten arms, and a caller sees nothing else.
     pub fn name(&self) -> &'static str {
         match self {
             Self::Account(_) => "Account",
@@ -295,8 +297,8 @@ impl MissionImpactCommandService {
     /// every ladder row against its bytes and its owning Event. Discovery columns choose candidates;
     /// they never decide.
     ///
-    /// **NOT IMPLEMENTED.** The skeleton exists so the first public-service bar can be written and
-    /// executed RED against the real contract rather than against a guess.
+    /// Every value the write depends on is read inside that transaction and PROVEN before anything
+    /// is judged; discovery columns choose candidates and decide nothing.
     pub fn classify(
         &self,
         request: ClassificationIntentRequest,
