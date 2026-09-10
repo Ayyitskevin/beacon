@@ -31,12 +31,30 @@ const DISABLED: Readonly<Record<string, { enabled: false }>> = {
 /// large objects: the reader gets the whole axe result and has to find the rule in it. A failure
 /// here names the rule id, its help text, its WCAG tags and the offending HTML, because the point
 /// of the bar is that somebody can act on it.
+/// WCAG 2.2 Level AA, which is the criterion `AGENTS.md:117` actually states. Additive on purpose:
+/// the 2.1 helper below is the bar every existing surface was measured against, and silently moving
+/// it would change sixteen other surfaces' bar in a commit about one new panel. A new surface uses
+/// this one; migrating the rest is its own piece of work.
+const WCAG_22_AA: readonly string[] = [...WCAG_21_AA, "wcag22a", "wcag22aa"];
+
+export async function expectNoWcag22Violations(container: HTMLElement): Promise<void> {
+  return runWcag(container, WCAG_22_AA, "WCAG 2.2 AA");
+}
+
 export async function expectNoWcagViolations(container: HTMLElement): Promise<void> {
+  return runWcag(container, WCAG_21_AA, "WCAG 2.1 AA");
+}
+
+async function runWcag(
+  container: HTMLElement,
+  tags: readonly string[],
+  level: string,
+): Promise<void> {
   if (vi.isFakeTimers()) {
     throw new Error("WCAG bar cannot run under fake timers — switch to real timers around the bar");
   }
   const results = await axe.run(container, {
-    runOnly: { type: "tag", values: [...WCAG_21_AA] },
+    runOnly: { type: "tag", values: [...tags] },
     rules: DISABLED,
   });
   if (results.violations.length === 0) {
@@ -49,7 +67,7 @@ export async function expectNoWcagViolations(container: HTMLElement): Promise<vo
       return `  ${violation.id} [${violation.impact ?? "unknown"}] (${tags})\n    ${violation.help}\n${nodes}`;
     })
     .join("\n");
-  throw new Error(
-    `WCAG 2.1 AA: ${results.violations.length} violation(s)\n${report}`,
-  );
+  // The 2.1 wording is left exactly as it was: an existing control test holds that literal, and the
+  // level is the only part that differs between the two bars.
+  throw new Error(`${level}: ${results.violations.length} violation(s)\n${report}`);
 }
