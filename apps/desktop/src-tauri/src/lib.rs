@@ -591,6 +591,16 @@ impl From<LocalTransportError> for CommandError {
                 "Explain why spend was not measured.",
                 None,
             ),
+            // B15 F1. It names the ACTION, because the Operator's next step is a different screen;
+            // the generic invalid-details line would send them to re-read a request that is fine.
+            LocalTransportError::Remote {
+                code: LocalErrorCode::CompletionClassificationRequired,
+                ..
+            } => (
+                "completion_classification_required",
+                "Classify this Mission's impact first, then record the completion.",
+                None,
+            ),
             // A malformed identity, digest, tag or integer, or the same entry twice in a set. It is
             // NOT a length problem and must never be shown as one.
             LocalTransportError::Remote {
@@ -3425,6 +3435,7 @@ mod tests {
         "COMPLETION_SUPPORT_OVER_LIMIT" | CompletionSupportOverLimit => ("completion_support_over_limit", "This condition cites more support than a completion can record.", None);
         "COMPLETION_TEXT_OVER_LIMIT" | CompletionTextOverLimit => ("completion_text_over_limit", "Some completion text exceeds the supported length.", None);
         "COMPLETION_SPEND_REASON_REQUIRED" | CompletionSpendReasonRequired => ("completion_spend_reason_required", "Explain why spend was not measured.", None);
+        "COMPLETION_CLASSIFICATION_REQUIRED" | CompletionClassificationRequired => ("completion_classification_required", "Classify this Mission's impact first, then record the completion.", None);
         "COMPLETION_INVALID_DETAILS" | CompletionInvalidDetails => ("completion_invalid_details", "Some completion details are invalid. Review the completion again.", None);
         "CLASSIFICATION_STALE_POLICY_REVISION" | ClassificationStalePolicyRevision => ("classification_stale_policy_revision", "The Project Policy changed. Review the Policy and classify again.", None);
         "CLASSIFICATION_NO_POLICY_PUBLISHED" | ClassificationNoPolicyPublished => ("classification_no_policy_published", "No Team Lead Policy is published for this Project.", None);
@@ -3608,11 +3619,13 @@ mod tests {
         // carrier, and their sum.
         // Counted at THIS source: 80 + the four preparation codes, 24 + the two preparation carriers.
         // 84 before C7, plus its two candidate-document codes.
-        assert_eq!(remote_rows().len(), 86, "R42S1.DESKTOP.CARDINALITY.REMOTE");
+        // 86 before B15 F1, plus `COMPLETION_CLASSIFICATION_REQUIRED`.
+        assert_eq!(remote_rows().len(), 87, "R42S1.DESKTOP.CARDINALITY.REMOTE");
         // 26 before C7, plus its `OutcomeCandidateDocument` carrier.
         assert_eq!(local_rows().len(), 27, "R42S1.DESKTOP.CARDINALITY.LOCAL");
         // 110 before C7: two new Remote codes and the new local carrier.
-        assert_eq!(cases.len(), 113, "R42S1.DESKTOP.CARDINALITY.CASES");
+        // 113 before B15 F1, plus the one new Remote code.
+        assert_eq!(cases.len(), 114, "R42S1.DESKTOP.CARDINALITY.CASES");
         let ids: std::collections::BTreeSet<&str> =
             cases.iter().map(|case| case.id.as_str()).collect();
         assert_eq!(ids.len(), cases.len(), "R42S1.DESKTOP.CASE_IDS_UNIQUE");
