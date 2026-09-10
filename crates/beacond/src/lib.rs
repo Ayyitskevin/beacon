@@ -77,9 +77,8 @@ pub use disk_encryption::{
 };
 pub use local_transport::{
     AppendixRequestDto, CandidateDocumentFault, LocalErrorCode, LocalServerConfig,
-    LocalSupervisorClient, LocalSupervisorServer, LocalTransportError,
-    OutcomeCandidateDocumentDto, PostPreparationFault, PreparedOutcomeCandidateDto,
-    initialize_local_auth_token,
+    LocalSupervisorClient, LocalSupervisorServer, LocalTransportError, OutcomeCandidateDocumentDto,
+    PostPreparationFault, PreparedOutcomeCandidateDto, initialize_local_auth_token,
 };
 #[cfg(unix)]
 pub use recent_receipts::{

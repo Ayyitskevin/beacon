@@ -13,13 +13,13 @@ use beacond::{
     CompletionIntentRequest, CompletionPreview, CompletionView, ExportedOutcome,
     LiveDataEncryptionReport, LocalErrorCode, LocalModelActivation, LocalModelActivationReview,
     LocalModelDiscoveryReport, LocalSupervisorClient, LocalTransportError, MissionDraft,
-    MissionView, OperatorSessionPolicy, OperatorSessionStatus, PlatformSessionMonitorStatus,
-    PreflightReceipt, OutcomeCandidateDocumentDto, PreparedOutcomeCandidateDto, ProjectCharter, ProjectCharterDraft,
-    ProjectDraft, ProjectPolicy, ProjectPolicyDraft, ProjectRepository, ProjectSummary,
-    ProjectView, ProviderFeature, PublicationSummary, RecentReceiptPage, RepositoryDraft,
-    ResidentAgentView, ResidentConfiguration, ReviewedIntent, SampleProjectInstallResult,
-    SampleProjectStatus, SecretString, StarterOrganizationView, StarterResidentDraft, TeamDraft,
-    TeamView, initialize_local_auth_token,
+    MissionView, OperatorSessionPolicy, OperatorSessionStatus, OutcomeCandidateDocumentDto,
+    PlatformSessionMonitorStatus, PreflightReceipt, PreparedOutcomeCandidateDto, ProjectCharter,
+    ProjectCharterDraft, ProjectDraft, ProjectPolicy, ProjectPolicyDraft, ProjectRepository,
+    ProjectSummary, ProjectView, ProviderFeature, PublicationSummary, RecentReceiptPage,
+    RepositoryDraft, ResidentAgentView, ResidentConfiguration, ReviewedIntent,
+    SampleProjectInstallResult, SampleProjectStatus, SecretString, StarterOrganizationView,
+    StarterResidentDraft, TeamDraft, TeamView, initialize_local_auth_token,
 };
 use serde::Serialize;
 use tauri::{Manager, State};
