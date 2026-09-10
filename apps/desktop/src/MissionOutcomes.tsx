@@ -1,6 +1,7 @@
 import { makeStyles, shorthands, tokens } from "@fluentui/react-components";
 import { useEffect, useId, useRef, useState } from "react";
 
+import { MissionOutcomePreparation } from "./MissionOutcomePreparation";
 import {
   type ExportedOutcome,
   type PublicationSummary,
@@ -298,6 +299,10 @@ export function MissionOutcomes({ missionId }: { missionId: string }): React.JSX
           </pre>
         </>
       )}
+      {/* Preparation sits BESIDE the published history and never replaces it: a Mission can have a
+          published Outcome and a candidate prepared under a different appendix request, which are
+          different manifest identities. This panel runs nothing on mount. */}
+      <MissionOutcomePreparation missionId={missionId} />
     </section>
   );
 }
