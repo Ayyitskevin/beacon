@@ -15,13 +15,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use beacond::{
     AutonomyProfile, BeaconCapability, ClassificationIntentRequest, LocalModelActivationService,
     LocalModelEndpoint, MissionDraft, MissionImpactCommandService, MissionMemberDraft,
-    MissionService, MissionView, OperatorAccountService, OperatorSessionPhase,
-    ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService, ProjectService,
-    ProjectView, ProviderFeature, ResidentConfiguration, ResidentConfigurationService,
-    ResidentLifecycleService, SecretString, StarterOrganizationService, StarterResidentDraft,
-    StarterRole, StartupConfig, SupersedesDto, Supervisor, TeamDraft, TeamLeadAmbiguityRule,
-    TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
-    TeamService, TrackRecordEvidenceKind, TrackRecordRequirement,
+    MissionService, MissionView, OperatorAccountService, OperatorSessionPhase, ProjectCharterDraft,
+    ProjectDraft, ProjectPolicyDraft, ProjectPolicyService, ProjectService, ProjectView,
+    ProviderFeature, ResidentConfiguration, ResidentConfigurationService, ResidentLifecycleService,
+    SecretString, StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig,
+    SupersedesDto, Supervisor, TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
+    TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft, TeamService,
+    TrackRecordEvidenceKind, TrackRecordRequirement,
 };
 use rusqlite::Connection;
 use serde_json::json;
@@ -445,7 +445,10 @@ fn c5_the_first_classification_records_the_operator_judgment_and_the_owner_bindi
 
     // Content identity, whole.
     assert_eq!(
-        (view.digest.algorithm.as_str(), view.digest.canonicalizer.as_str()),
+        (
+            view.digest.algorithm.as_str(),
+            view.digest.canonicalizer.as_str()
+        ),
         ("sha256", "beacon.mission-impact.v1"),
         "C5.OWNER.DERIVES_EVERYTHING_BUT_THE_JUDGMENT"
     );
@@ -493,23 +496,44 @@ fn c5_the_first_classification_records_the_operator_judgment_and_the_owner_bindi
 #[test]
 fn astra_c5_orphan_classification_event_is_not_an_empty_ladder() {
     let f = fixture("astra-orphan-classification");
-    let first = f.owner().classify(high_declaration(f.mission.id))
+    let first = f
+        .owner()
+        .classify(high_declaration(f.mission.id))
         .expect("C5.ASTRA.ORPHAN.PREMISE_FIRST_CLASSIFICATION");
     let c = f.store.connect();
     let payload: String = c.query_row(
         "SELECT payload_json FROM events WHERE kind='mission.impact_classified' AND json_extract(payload_json,'$.digest.value')=?1",
         [&first.digest.value], |r| r.get(0)).expect("C5.ASTRA.ORPHAN.PREMISE_REAL_EVENT");
     let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
-    assert_eq!(json["mission_id"], f.mission.id.to_string(), "C5.ASTRA.ORPHAN.PREMISE_OWNER_KEY_IS_SNAKE_CASE");
-    assert!(json.get("missionId").is_none(), "C5.ASTRA.ORPHAN.PREMISE_NO_CAMEL_KEY");
+    assert_eq!(
+        json["mission_id"],
+        f.mission.id.to_string(),
+        "C5.ASTRA.ORPHAN.PREMISE_OWNER_KEY_IS_SNAKE_CASE"
+    );
+    assert!(
+        json.get("missionId").is_none(),
+        "C5.ASTRA.ORPHAN.PREMISE_NO_CAMEL_KEY"
+    );
     c.execute_batch("DROP TRIGGER mission_impact_classifications_no_delete;")
         .expect("C5.ASTRA.ORPHAN.FAULT_ONLY_DISPOSABLE_STORE");
-    assert_eq!(c.execute("DELETE FROM mission_impact_classifications WHERE digest_value=?1", [&first.digest.value]).unwrap(),1,
-        "C5.ASTRA.ORPHAN.PREMISE_ONE_ROW_REMOVED");
+    assert_eq!(
+        c.execute(
+            "DELETE FROM mission_impact_classifications WHERE digest_value=?1",
+            [&first.digest.value]
+        )
+        .unwrap(),
+        1,
+        "C5.ASTRA.ORPHAN.PREMISE_ONE_ROW_REMOVED"
+    );
     let before = f.counts();
     let got = f.owner().classify(high_declaration(f.mission.id));
-    assert!(matches!(got, Err(beacond::ClassificationCommandError::Unavailable(_))),
-        "C5.ASTRA.ORPHAN_EVENT_IS_NOT_ABSENCE: {got:?}");
+    assert!(
+        matches!(
+            got,
+            Err(beacond::ClassificationCommandError::Unavailable(_))
+        ),
+        "C5.ASTRA.ORPHAN_EVENT_IS_NOT_ABSENCE: {got:?}"
+    );
     assert_eq!(f.counts(), before, "C5.ASTRA.ORPHAN.REFUSAL_WRITES_NOTHING");
 }
 
@@ -517,7 +541,9 @@ fn astra_c5_orphan_classification_event_is_not_an_empty_ladder() {
 fn astra_c5_event_digest_domain_is_part_of_owner_proof() {
     for field in ["algorithm", "canonicalizer"] {
         let f = fixture("astra-event-digest-domain");
-        let first = f.owner().classify(high_declaration(f.mission.id))
+        let first = f
+            .owner()
+            .classify(high_declaration(f.mission.id))
             .expect("C5.ASTRA.EVENT_DIGEST.PREMISE_FIRST_CLASSIFICATION");
         let c = f.store.connect();
         let path = format!("$.digest.{field}");
@@ -527,9 +553,18 @@ fn astra_c5_event_digest_domain_is_part_of_owner_proof() {
             "C5.ASTRA.EVENT_DIGEST.PREMISE_ONE_FIELD_CHANGED");
         let before = f.counts();
         let got = f.owner().classify(high_declaration(f.mission.id));
-        assert!(matches!(got, Err(beacond::ClassificationCommandError::Unavailable(_))),
-            "C5.ASTRA.EVENT_DIGEST_DOMAIN_IS_PROVEN_BEFORE_ALREADY_CLASSIFIED ({field}): {got:?}");
-        assert_eq!(f.counts(), before, "C5.ASTRA.EVENT_DIGEST.REFUSAL_WRITES_NOTHING");
+        assert!(
+            matches!(
+                got,
+                Err(beacond::ClassificationCommandError::Unavailable(_))
+            ),
+            "C5.ASTRA.EVENT_DIGEST_DOMAIN_IS_PROVEN_BEFORE_ALREADY_CLASSIFIED ({field}): {got:?}"
+        );
+        assert_eq!(
+            f.counts(),
+            before,
+            "C5.ASTRA.EVENT_DIGEST.REFUSAL_WRITES_NOTHING"
+        );
     }
 }
 
@@ -537,21 +572,49 @@ fn astra_c5_event_digest_domain_is_part_of_owner_proof() {
 fn astra_c5_policy_revision_projection_is_checked_before_narrowing() {
     for column in ["policy_revision", "charter_revision"] {
         let f = fixture("astra-numeric-domain");
-        let first = f.owner().classify(high_declaration(f.mission.id))
+        let first = f
+            .owner()
+            .classify(high_declaration(f.mission.id))
             .expect("C5.ASTRA.NUMERIC.PREMISE_FIRST_CLASSIFICATION");
         let c = f.store.connect();
-        c.execute_batch("PRAGMA foreign_keys=OFF; DROP TRIGGER mission_impact_classifications_no_update;")
-            .expect("C5.ASTRA.NUMERIC.FAULT_ONLY_DISPOSABLE_STORE");
-        let sql = format!("UPDATE mission_impact_classifications SET {column}={column}+4294967296 WHERE digest_value=?1");
-        assert_eq!(c.execute(&sql, [&first.digest.value]).unwrap(),1,
-            "C5.ASTRA.NUMERIC.PREMISE_ONE_PROJECTION_CHANGED");
-        let raw: i64 = c.query_row(&format!("SELECT {column} FROM mission_impact_classifications WHERE digest_value=?1"),
-            [&first.digest.value], |r| r.get(0)).unwrap();
-        assert!(raw > i64::from(u32::MAX), "C5.ASTRA.NUMERIC.PREMISE_OUT_OF_DOMAIN");
+        c.execute_batch(
+            "PRAGMA foreign_keys=OFF; DROP TRIGGER mission_impact_classifications_no_update;",
+        )
+        .expect("C5.ASTRA.NUMERIC.FAULT_ONLY_DISPOSABLE_STORE");
+        let sql = format!(
+            "UPDATE mission_impact_classifications SET {column}={column}+4294967296 WHERE digest_value=?1"
+        );
+        assert_eq!(
+            c.execute(&sql, [&first.digest.value]).unwrap(),
+            1,
+            "C5.ASTRA.NUMERIC.PREMISE_ONE_PROJECTION_CHANGED"
+        );
+        let raw: i64 = c
+            .query_row(
+                &format!(
+                    "SELECT {column} FROM mission_impact_classifications WHERE digest_value=?1"
+                ),
+                [&first.digest.value],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            raw > i64::from(u32::MAX),
+            "C5.ASTRA.NUMERIC.PREMISE_OUT_OF_DOMAIN"
+        );
         let before = f.counts();
         let got = f.owner().classify(high_declaration(f.mission.id));
-        assert!(matches!(got, Err(beacond::ClassificationCommandError::Unavailable(_))),
-            "C5.ASTRA.NUMERIC_DOMAIN_IS_PROVEN_BEFORE_ALREADY_CLASSIFIED ({column}): {got:?}");
-        assert_eq!(f.counts(), before, "C5.ASTRA.NUMERIC.REFUSAL_WRITES_NOTHING");
+        assert!(
+            matches!(
+                got,
+                Err(beacond::ClassificationCommandError::Unavailable(_))
+            ),
+            "C5.ASTRA.NUMERIC_DOMAIN_IS_PROVEN_BEFORE_ALREADY_CLASSIFIED ({column}): {got:?}"
+        );
+        assert_eq!(
+            f.counts(),
+            before,
+            "C5.ASTRA.NUMERIC.REFUSAL_WRITES_NOTHING"
+        );
     }
 }
