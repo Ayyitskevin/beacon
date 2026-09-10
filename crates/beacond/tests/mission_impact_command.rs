@@ -14,15 +14,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use beacond::{
     AutonomyProfile, BeaconCapability, ClassificationCommandError, ClassificationIntentRequest,
-    LocalModelActivationService,
-    LocalModelEndpoint, MissionDraft, MissionImpactCommandService, MissionMemberDraft,
-    MissionService, MissionView, OperatorAccountService, OperatorSessionPhase, ProjectCharterDraft,
-    ProjectDraft, ProjectPolicyDraft, ProjectPolicyService, ProjectService, ProjectView,
-    ProviderFeature, ResidentConfiguration, ResidentConfigurationService, ResidentLifecycleService,
-    SecretString, StarterOrganizationService, StarterResidentDraft, StarterRole, StartupConfig,
-    SupersedesDto, Supervisor, TeamDraft, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
-    TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft, TeamService,
-    TrackRecordEvidenceKind, TrackRecordRequirement,
+    LocalModelActivationService, LocalModelEndpoint, MissionDraft, MissionImpactCommandService,
+    MissionMemberDraft, MissionService, MissionView, OperatorAccountService, OperatorSessionPhase,
+    ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProjectPolicyService, ProjectService,
+    ProjectView, ProviderFeature, ResidentConfiguration, ResidentConfigurationService,
+    ResidentLifecycleService, SecretString, StarterOrganizationService, StarterResidentDraft,
+    StarterRole, StartupConfig, SupersedesDto, Supervisor, TeamDraft, TeamLeadAmbiguityRule,
+    TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
+    TeamService, TrackRecordEvidenceKind, TrackRecordRequirement,
 };
 use rusqlite::Connection;
 use serde_json::json;
@@ -1460,12 +1459,30 @@ fn c5_every_outward_refusal_projects_one_closed_literal() {
 #[test]
 fn astra_c5_policy_events_without_rows_are_not_no_published_policy() {
     let f = fixture("astra-policy-rowless");
-    assert_eq!(f.owner().observe(f.mission.id).unwrap().published_policy.unwrap().policy_revision,
-        2, "C5.ASTRA.POLICY_ROW_LOSS_PREMISE");
+    assert_eq!(
+        f.owner()
+            .observe(f.mission.id)
+            .unwrap()
+            .published_policy
+            .unwrap()
+            .policy_revision,
+        2,
+        "C5.ASTRA.POLICY_ROW_LOSS_PREMISE"
+    );
     let connection = f.store.connect();
-    connection.execute_batch("DROP TRIGGER project_policy_revisions_no_delete").unwrap();
-    assert_eq!(connection.execute("DELETE FROM project_policy_revisions WHERE project_id = ?1",
-        [f.project.id.to_string()]).unwrap(), 2, "C5.ASTRA.POLICY_ROW_LOSS_PREMISE");
+    connection
+        .execute_batch("DROP TRIGGER project_policy_revisions_no_delete")
+        .unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "DELETE FROM project_policy_revisions WHERE project_id = ?1",
+                [f.project.id.to_string()]
+            )
+            .unwrap(),
+        2,
+        "C5.ASTRA.POLICY_ROW_LOSS_PREMISE"
+    );
     let retained: i64 = connection.query_row("SELECT count(*) FROM events WHERE kind = 'project.policy_published' AND json_extract(payload_json, '$.policy.projectId') = ?1",
         [f.project.id.to_string()], |row| row.get(0)).unwrap();
     assert_eq!(retained, 2, "C5.ASTRA.POLICY_ROW_LOSS_RETAINS_OWNER_EVENTS");
@@ -1475,32 +1492,65 @@ fn astra_c5_policy_events_without_rows_are_not_no_published_policy() {
     let mut request = high_declaration(f.mission.id);
     request.expected_policy_revision = None;
     let written = f.owner().classify(request);
-    assert!(matches!(&observed, Err(ClassificationCommandError::Unavailable(_)))
-        && matches!(&written, Err(ClassificationCommandError::Unavailable(_))),
-        "C5.ASTRA.POLICY_ORPHAN_IS_UNAVAILABLE_NOT_ABSENT: observe={observed:?}; classify={written:?}");
-    assert_eq!(f.counts(), before, "C5.ASTRA.POLICY_ORPHAN_REFUSAL_WRITES_NOTHING");
+    assert!(
+        matches!(&observed, Err(ClassificationCommandError::Unavailable(_)))
+            && matches!(&written, Err(ClassificationCommandError::Unavailable(_))),
+        "C5.ASTRA.POLICY_ORPHAN_IS_UNAVAILABLE_NOT_ABSENT: observe={observed:?}; classify={written:?}"
+    );
+    assert_eq!(
+        f.counts(),
+        before,
+        "C5.ASTRA.POLICY_ORPHAN_REFUSAL_WRITES_NOTHING"
+    );
 }
 
 #[test]
 fn astra_c5_a_missing_latest_policy_row_cannot_revive_an_older_revision() {
     let f = fixture("astra-policy-latest-lost");
-    assert_eq!(f.owner().observe(f.mission.id).unwrap().published_policy.unwrap().policy_revision,
-        2, "C5.ASTRA.POLICY_LATEST_LOSS_PREMISE");
+    assert_eq!(
+        f.owner()
+            .observe(f.mission.id)
+            .unwrap()
+            .published_policy
+            .unwrap()
+            .policy_revision,
+        2,
+        "C5.ASTRA.POLICY_LATEST_LOSS_PREMISE"
+    );
     let connection = f.store.connect();
-    connection.execute_batch("DROP TRIGGER project_policy_revisions_no_delete").unwrap();
-    assert_eq!(connection.execute("DELETE FROM project_policy_revisions WHERE project_id = ?1 AND revision = 2",
-        [f.project.id.to_string()]).unwrap(), 1, "C5.ASTRA.POLICY_LATEST_LOSS_PREMISE");
+    connection
+        .execute_batch("DROP TRIGGER project_policy_revisions_no_delete")
+        .unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "DELETE FROM project_policy_revisions WHERE project_id = ?1 AND revision = 2",
+                [f.project.id.to_string()]
+            )
+            .unwrap(),
+        1,
+        "C5.ASTRA.POLICY_LATEST_LOSS_PREMISE"
+    );
     let retained: i64 = connection.query_row("SELECT count(*) FROM events WHERE kind = 'project.policy_published' AND json_extract(payload_json, '$.policy.projectId') = ?1",
         [f.project.id.to_string()], |row| row.get(0)).unwrap();
-    assert_eq!(retained, 2, "C5.ASTRA.POLICY_LATEST_LOSS_RETAINS_OWNER_EVENTS");
+    assert_eq!(
+        retained, 2,
+        "C5.ASTRA.POLICY_LATEST_LOSS_RETAINS_OWNER_EVENTS"
+    );
     drop(connection);
     let before = f.counts();
     let observed = f.owner().observe(f.mission.id);
     let mut request = high_declaration(f.mission.id);
     request.expected_policy_revision = Some(1);
     let written = f.owner().classify(request);
-    assert!(matches!(&observed, Err(ClassificationCommandError::Unavailable(_)))
-        && matches!(&written, Err(ClassificationCommandError::Unavailable(_))),
-        "C5.ASTRA.LOST_POLICY_HEAD_IS_NOT_AN_OLDER_CURRENT: observe={observed:?}; classify={written:?}");
-    assert_eq!(f.counts(), before, "C5.ASTRA.LOST_POLICY_HEAD_REFUSAL_WRITES_NOTHING");
+    assert!(
+        matches!(&observed, Err(ClassificationCommandError::Unavailable(_)))
+            && matches!(&written, Err(ClassificationCommandError::Unavailable(_))),
+        "C5.ASTRA.LOST_POLICY_HEAD_IS_NOT_AN_OLDER_CURRENT: observe={observed:?}; classify={written:?}"
+    );
+    assert_eq!(
+        f.counts(),
+        before,
+        "C5.ASTRA.LOST_POLICY_HEAD_REFUSAL_WRITES_NOTHING"
+    );
 }
