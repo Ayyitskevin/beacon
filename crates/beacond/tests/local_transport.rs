@@ -2479,9 +2479,9 @@ fn the_candidate_document_crosses_the_socket_as_the_owners_exact_bytes() {
 /// THE ONE FIXTURE WRITE NO PUBLIC OWNER CAN PRODUCE, and why it is unavoidable: this store bootstraps
 /// exactly ONE Workspace, and the supervisor binds to it, so no sequence of public commands can put a
 /// second Workspace's manifest in it. The manifest below is minted by the real owner through public
-/// commands and then RE-FILED under another Workspace id -- one UPDATE of one column. Its canonical
-/// bytes are untouched and nothing is fabricated: what changes is only which Workspace owns a real
-/// record. This is never a happy-path plant; the happy path is the bar above.
+/// commands and remains in its original Workspace. The fixture inserts one second Workspace row so
+/// the next supervisor bootstrap binds to that Workspace instead. The canonical records are untouched;
+/// only the asking Workspace changes. The happy path is the separate bar above.
 #[test]
 fn an_absent_manifest_and_a_foreign_manifest_answer_identical_bytes() {
     let runtime = TestRuntime::new("c7opaque");
@@ -2500,7 +2500,7 @@ fn an_absent_manifest_and_a_foreign_manifest_answer_identical_bytes() {
         .unwrap_or_else(|error| panic!("C7T.OPACITY.THE_CANDIDATE_IS_PREPARED: {error}"));
     let real_digest = receipt.manifest_digest.value.clone();
 
-    // It reads as this Workspace's own first, so the re-filing below is what changes the answer.
+    // It reads as this Workspace's own first; the second Workspace below changes who is asking.
     client
         .read_outcome_candidate_document(&real_digest)
         .unwrap_or_else(|error| panic!("C7T.OPACITY.THE_MANIFEST_IS_OURS_FIRST: {error}"));

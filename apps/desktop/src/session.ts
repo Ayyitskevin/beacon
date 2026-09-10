@@ -2007,9 +2007,9 @@ function sameDigest(left: OutcomeDigestValue, right: OutcomeDigestValue): boolea
  *  This function does not re-hash anything: the owner verifies the digest/content relationship, and
  *  restating that here without implementing it would be a claim this client cannot make.
  *
- *  MOCKED CONTRACT, precisely: the OWNERS exist -- `OutcomeService::manifest` and
- *  `OutcomeService::candidate` already read and verify these records. What is missing is the ROUTE:
- *  there is no `read_outcome_candidate_document` LocalCommand and no native command yet. */
+ *  The native command now routes through `OutcomeService::manifest` and
+ *  `OutcomeService::candidate`. Frontend tests still answer invoke with a double;
+ *  those tests prove client behavior, while native socket tests cover the owner path. */
 export async function readOutcomeCandidateDocument(
   held: PreparedOutcomeCandidate,
 ): Promise<ReadCandidateDocument> {
