@@ -16,6 +16,8 @@ use uuid::Uuid;
 mod artifact;
 mod candidate;
 mod candidate_evaluation;
+mod candidate_evaluation_packet;
+mod candidate_evaluation_result;
 mod check_preflight;
 mod declared_checks;
 #[cfg(unix)]
@@ -109,6 +111,18 @@ pub use artifact::{
 pub use candidate::{
     Candidate, CandidateDigest, CandidateEntry, CandidateError, CandidateImages, CandidateService,
     CandidateV1, InconsistentCandidate, MalformedCandidate, enumerate_candidates,
+};
+pub use candidate_evaluation_packet::{
+    ActivationFacts, EntryBody, EntryIndexRow, EntryKind, EvidenceEntry, FidelityPacketRefusal,
+    HeaderFacts, MIN_ENTRY_BYTES, MalformedFidelityPacket, PacketCap, PacketGap, PacketInputs,
+    RecipeFacts, RequestKey, RubricFacts, SubjectFacts, VerifiedEvaluationPacket,
+    admits_entry_count, encode_packet, min_entry_bytes,
+};
+pub use candidate_evaluation_result::{
+    CRITERION_IDS, Conflicts as ResultConflicts, CriterionVerdict,
+    FindingSeverity as ResultFindingSeverity, IncoherentObservation, Judgment, MalformedCode,
+    NotTerminal, OVER_LIMIT_WITNESS, PROFILE, RESPONSE_CEILING, ResultFinding, ResultOutcome,
+    TerminalObservation, Verdict as ResultVerdict, classify, parse_result,
 };
 #[cfg(debug_assertions)]
 #[doc(hidden)]
