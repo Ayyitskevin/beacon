@@ -10,8 +10,10 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 const invokeMock = vi.mocked(invoke);
 
-// MOCKED CONTRACT ONLY. `prepare_outcome_candidate` has no owner behind it yet: C6 backend and
-// native wait on C5's native release. Green here is FRONTEND behaviour and never an end-to-end
+// MOCKED CONTRACT ONLY, and precisely: the OWNER exists -- `OutcomeService::prepare_for_mission`
+// already owns collection, assembly and the transactional write. What is missing is the ROUTE: no
+// `prepare_outcome_candidate` LocalCommand and no native command, which wait on C5's native release.
+// Every invoke here is answered by a double, so green is FRONTEND behaviour and never an end-to-end
 // claim about preparation.
 const MISSION = "99999999-9999-4999-8999-9999999c6000";
 
@@ -300,4 +302,37 @@ it("astra_c6_a_coded_transport_failure_is_an_unconfirmed_preparation", async () 
   expect(screen.getByRole("button", { name: "Prepare again with the same choice" }),
     "C6.ASTRA.UNKNOWN_KEEPS_EXPLICIT_RECOVERY").toBeEnabled();
   expect(invokeMock.mock.calls, "C6.ASTRA.NO_AUTOMATIC_TRANSPORT_REPLAY").toHaveLength(1);
+});
+
+it("C6.PREPARE.AN_UNRECOGNISED_CODE_IS_UNKNOWN: a vocabulary this build has not seen settles nothing", async () => {
+  const user = userEvent.setup();
+  invokeMock.mockRejectedValue({ code: "outcome_preparation_reticulated" });
+  render(<MissionOutcomePreparation missionId={MISSION} />);
+  await chooseAndPrepare(user, /Include verification appendix/);
+
+  expect(await screen.findByText(UNKNOWN_COPY), "C6.PREPARE.AN_UNRECOGNISED_CODE_IS_UNKNOWN").toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "Prepare again with the same choice" }),
+    "C6.PREPARE.AN_UNRECOGNISED_CODE_IS_UNKNOWN: the explicit recovery is offered",
+  ).toBeEnabled();
+  expect(invokeMock.mock.calls, "C6.PREPARE.AN_UNRECOGNISED_CODE_IS_UNKNOWN: no automatic replay").toHaveLength(1);
+});
+
+it("C6.PREPARE.THE_SESSION_GATE_IS_DEFINITE: an authentication refusal keeps its own meaning", async () => {
+  const user = userEvent.setup();
+  invokeMock.mockRejectedValue({ code: "not_authenticated" });
+  render(<MissionOutcomePreparation missionId={MISSION} />);
+  await chooseAndPrepare(user, /Include verification appendix/);
+
+  // The session's own fixed copy, unchanged by this surface.
+  expect(
+    await screen.findByText("Unlock Beacon to continue."),
+    "C6.PREPARE.THE_SESSION_GATE_IS_DEFINITE: the account copy is preserved",
+  ).toBeInTheDocument();
+  // It stopped the request before the owner, so nothing could have been written.
+  expect(screen.queryByText(UNKNOWN_COPY), "C6.PREPARE.THE_SESSION_GATE_IS_DEFINITE: not unknown").toBeNull();
+  expect(
+    screen.queryByRole("button", { name: "Prepare again with the same choice" }),
+    "C6.PREPARE.THE_SESSION_GATE_IS_DEFINITE: no unknown recovery",
+  ).toBeNull();
 });
