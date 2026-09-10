@@ -4175,9 +4175,6 @@ mod tests {
     /// outward line or wire code containing it would be the owner's private diagnostic escaping.
     const NEEDLE_FIELD: &str = "R42S2_PRIVATE_FIELD";
 
-    /// A post-commit read that refused on the ACCOUNT. Test scaffolding: the closed tables use it so
-    /// the eighteen account children are exercised THROUGH the post-commit arm rather than asserted
-    /// once, and production has no reason to construct one.
     /// A real `Utf8Error` from a real failed decode. The bytes are assembled at run time because an
     /// invalid literal is a clippy error -- and because a literal would read as a constant rather than
     /// as what this is: the outcome of actually trying to decode something that is not text.
@@ -4186,6 +4183,9 @@ mod tests {
         std::str::from_utf8(&bytes).expect_err("the fixture bytes are not UTF-8")
     }
 
+    /// A post-commit read that refused on the ACCOUNT. Test scaffolding: the closed tables use it so
+    /// the eighteen account children are exercised THROUGH the post-commit arm rather than asserted
+    /// once, and production has no reason to construct one.
     fn post_read_account(cause: OperatorAccountError) -> PostPreparationFault {
         PostPreparationFault::Read(crate::PrepareRefusal::Account(cause))
     }

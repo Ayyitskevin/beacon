@@ -11,10 +11,9 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 const invokeMock = vi.mocked(invoke);
 
-// MOCKED CONTRACT ONLY, and precisely: the OWNERS exist -- `OutcomeService::manifest` and
-// `OutcomeService::candidate` already read and verify these records. What is missing is the ROUTE:
-// there is no `read_outcome_candidate_document` LocalCommand and no native command. Every invoke
-// below is answered by a double, so these are FRONTEND bars and NOT an end-to-end claim.
+// FRONTEND CONTRACT: the native route now uses `OutcomeService::manifest` and
+// `OutcomeService::candidate`. Every invoke below is still answered by a double;
+// native socket tests separately cover the owner path.
 const MISSION = "99999999-9999-4999-8999-9999999c7000";
 const MANIFEST = "66666666-6666-4666-8666-666666666666";
 const MANIFEST_HEX = "a".repeat(64);
