@@ -3896,8 +3896,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        CandidateDocumentFault, LocalCommand, LocalErrorCode, LocalServerConfig,
-        LocalSupervisorClient, LocalSupervisorServer, LocalTransportError,
+        CandidateDocumentFault, DigestEnvelopeDto, LocalCommand, LocalErrorCode, LocalResult,
+        LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer, LocalTransportError,
         MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES, MAX_COMPLETION_PREVIEW_RESPONSE_BYTES,
         MAX_COMPLETION_REQUEST_BYTES, MAX_MESSAGE_BYTES, OutcomeCandidateDocumentDto,
         PostPreparationFault, PreparedOutcomeCandidateDto, ResponseEnvelope, WireError,
@@ -9138,6 +9138,255 @@ mod tests {
             }))
             .is_err(),
             "C6T.WIRE.THE_MISSION_IS_REQUIRED"
+        );
+    }
+
+    /// The candidate read's two STAGES answer differently, and only the first can say "absent".
+    ///
+    /// **Mapper evidence, labelled as such.** A live stage-2 fault is not constructible in this store:
+    /// `artifacts` and `outcome_manifests` carry unconditional `BEFORE UPDATE`/`BEFORE DELETE`
+    /// triggers that abort with "... are immutable", so no fixture can remove or corrupt a candidate
+    /// behind a real manifest without dropping a deliberate guard. This bar therefore drives the
+    /// mapper with the SAME refusal values at both stages and asserts they answer differently -- which
+    /// is the whole claim the phase distinction makes -- rather than pretending to a live interleaving.
+    #[test]
+    fn the_candidate_read_stages_map_to_their_own_answers() {
+        let read = |fault| envelope_of(LocalTransportError::OutcomeCandidateDocument(fault));
+
+        // The two absence-shaped refusals, at stage ONE: one answer, byte for byte.
+        let absent = read(CandidateDocumentFault::Manifest(
+            crate::PrepareRefusal::Manifest(ManifestStoreRefusal::Absent),
+        ));
+        let foreign = read(CandidateDocumentFault::Manifest(
+            crate::PrepareRefusal::Manifest(ManifestStoreRefusal::CrossWorkspace),
+        ));
+        assert_eq!(
+            absent,
+            expected_envelope("outcome_candidate_not_found", None),
+            "C7T.STAGE.AN_ABSENT_MANIFEST_IS_NOT_FOUND"
+        );
+        assert_eq!(
+            foreign, absent,
+            "C7T.STAGE.A_FOREIGN_MANIFEST_IS_THE_SAME_ANSWER"
+        );
+
+        // The SAME two values at stage TWO are unavailable, because a manifest was already held.
+        for (name, refusal) in [
+            (
+                "Absent",
+                crate::PrepareRefusal::Manifest(ManifestStoreRefusal::Absent),
+            ),
+            (
+                "CrossWorkspace",
+                crate::PrepareRefusal::Manifest(ManifestStoreRefusal::CrossWorkspace),
+            ),
+            (
+                "ArtifactNotFound",
+                crate::PrepareRefusal::Artifact(ArtifactError::NotFound),
+            ),
+        ] {
+            assert_eq!(
+                read(CandidateDocumentFault::Candidate(refusal)),
+                expected_envelope("outcome_candidate_unavailable", None),
+                "C7T.STAGE.THE_CANDIDATE_STAGE_IS_NEVER_ABSENCE: {name}"
+            );
+        }
+
+        // Everything else at stage one is unavailable too: absence is the exception, not the default.
+        assert_eq!(
+            read(CandidateDocumentFault::Manifest(
+                crate::PrepareRefusal::Manifest(ManifestStoreRefusal::BytesDisagree)
+            )),
+            expected_envelope("outcome_candidate_unavailable", None),
+            "C7T.STAGE.A_DISAGREEING_MANIFEST_IS_NOT_AN_ABSENCE"
+        );
+
+        // And an account refusal keeps its OWN code at BOTH stages -- a read wrote nothing, so there
+        // is no uncertainty to collapse it into. This is the one place C7 and C6 deliberately differ.
+        for (stage, wrap) in [
+            (
+                "Manifest",
+                CandidateDocumentFault::Manifest as fn(crate::PrepareRefusal) -> _,
+            ),
+            (
+                "Candidate",
+                CandidateDocumentFault::Candidate as fn(crate::PrepareRefusal) -> _,
+            ),
+        ] {
+            for (child, cause, _) in account_rows() {
+                let (code, retry) = account_expectation(child);
+                assert_eq!(
+                    read(wrap(crate::PrepareRefusal::Account(cause))),
+                    expected_envelope(code, retry),
+                    "C7T.STAGE.AN_ACCOUNT_REFUSAL_KEEPS_ITS_CODE: {stage}.{child}"
+                );
+            }
+        }
+    }
+
+    /// The candidate read's identity label is a CLOSED vocabulary on the outward line.
+    ///
+    /// `Identity.field` is a public `&'static str`, so the type permits any static text at all. C6
+    /// learned this after shipping the hole; C7 closes it before, and this witness holds its own
+    /// literals rather than calling the production guard or its table.
+    #[test]
+    fn the_candidate_identity_label_is_a_closed_vocabulary() {
+        let known: [(&str, &str); 3] = [
+            (
+                "manifestDigest",
+                "Outcome candidate document read failed: Identity.manifestDigest",
+            ),
+            (
+                "candidateArtifactDigest",
+                "Outcome candidate document read failed: Identity.candidateArtifactDigest",
+            ),
+            (
+                "candidateContentBytes",
+                "Outcome candidate document read failed: Identity.candidateContentBytes",
+            ),
+        ];
+        for (label, expected_line) in known {
+            let error =
+                LocalTransportError::OutcomeCandidateDocument(CandidateDocumentFault::Identity {
+                    field: label,
+                    expected: payload_a(),
+                    observed: payload_b(),
+                });
+            assert_eq!(
+                error.to_string(),
+                expected_line,
+                "C7T.LABEL.IDENTITY_FIELD_IS_CLOSED: {label}"
+            );
+        }
+
+        for unknown in [
+            "R42S2_PRIVATE_A /home/example/private.md\r\nsecond-line: manifestDigest",
+            "",
+            "someOtherField",
+        ] {
+            let error =
+                LocalTransportError::OutcomeCandidateDocument(CandidateDocumentFault::Identity {
+                    field: unknown,
+                    expected: payload_a(),
+                    observed: payload_b(),
+                });
+            let line = error.to_string();
+            assert_eq!(
+                line, "Outcome candidate document read failed: Identity",
+                "C7T.LABEL.IDENTITY_FIELD_IS_CLOSED: {unknown:?}"
+            );
+            assert!(
+                !line.contains(NEEDLE_A) && !line.contains('\r') && !line.contains('\n'),
+                "C7T.LABEL.AN_UNKNOWN_LABEL_NEVER_REACHES_THE_LINE: {unknown:?}"
+            );
+            let debug = format!("{error:?}");
+            assert!(
+                debug.contains(NEEDLE_A)
+                    && debug.contains(NEEDLE_B)
+                    && debug.contains(&format!("{unknown:?}")),
+                "C7T.LABEL.THE_LABEL_AND_VALUES_SURVIVE_IN_DEBUG: {unknown:?}"
+            );
+        }
+
+        // The UTF-8 refusal carries a byte count in `Debug` and NOT on the line: how much private
+        // content there is, is a fact about private content.
+        let broken = LocalTransportError::OutcomeCandidateDocument(
+            CandidateDocumentFault::Content {
+                bytes: 987_654,
+                error: std::str::from_utf8(&[0x66, 0xff]).unwrap_err(),
+            },
+        );
+        assert_eq!(
+            broken.to_string(),
+            "Outcome candidate document read failed: Content",
+            "C7T.LABEL.A_DECODE_FAILURE_NAMES_ITSELF_ONLY"
+        );
+        assert!(
+            format!("{broken:?}").contains("987654"),
+            "C7T.LABEL.THE_BYTE_COUNT_SURVIVES_IN_DEBUG"
+        );
+    }
+
+    /// The largest DTO this command can answer with fits its own ceiling, and does NOT fit the
+    /// default frame.
+    ///
+    /// **A framing certificate, and only that.** The body is a synthetic 1 MiB of content, not a
+    /// renderer-produced candidate: nothing here claims Beacon's renderer can emit a 1 MiB Outcome
+    /// document, and no such fixture was built. What it proves is that the DTO's REAL serialized shape
+    /// at the owner's content ceiling stays inside `MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES`, measured
+    /// by serde rather than reproduced in another language.
+    #[test]
+    fn the_largest_candidate_document_fits_its_own_ceiling_and_not_the_default() {
+        let content = vec![b'\x01'; 1_048_576];
+        let digest = |canonicalizer: &str| DigestEnvelopeDto {
+            algorithm: "sha256".to_owned(),
+            canonicalizer: canonicalizer.to_owned(),
+            value: "f".repeat(64),
+        };
+        let document = OutcomeCandidateDocumentDto {
+            mission_id: Uuid::new_v4(),
+            manifest_id: Uuid::new_v4(),
+            manifest_digest: digest("beacon.outcome.manifest.v2"),
+            candidate_artifact_digest: digest("beacon.artifact.v1"),
+            candidate_content_digest: digest("beacon.raw.v1"),
+            candidate_content_bytes: content.len() as u64,
+            media_type: "text/markdown; charset=utf-8".to_owned(),
+            candidate_content_base64: data_encoding::BASE64.encode(&content),
+        };
+        // 4 * ceil(1048576 / 3), computed here rather than read from the value under test.
+        assert_eq!(
+            document.candidate_content_base64.len(),
+            1_398_104,
+            "C7T.SIZE.BASE64_IS_A_PURE_FUNCTION_OF_THE_BYTE_COUNT"
+        );
+
+        let response = ResponseEnvelope {
+            protocol: 1,
+            result: Some(LocalResult::OutcomeCandidateDocument { document }),
+            error: None,
+        };
+        let serialized = serde_json::to_vec(&response).expect("the response serializes");
+        let length = serialized.len() as u64;
+        assert!(
+            length <= MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES,
+            "C7T.SIZE.THE_LARGEST_DOCUMENT_FITS_ITS_CEILING: {length} > {MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES}"
+        );
+        assert!(
+            length > MAX_MESSAGE_BYTES,
+            "C7T.SIZE.IT_DOES_NOT_FIT_THE_DEFAULT_FRAME: {length}"
+        );
+        // The headroom is real but not generous, and it is stated rather than left to be discovered.
+        assert!(
+            MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES - length < 8 * 1024,
+            "C7T.SIZE.THE_CEILING_IS_NOT_A_GUESS: {length}"
+        );
+
+        // And the ceiling belongs to THIS command alone.
+        assert_eq!(
+            response_max(&LocalCommand::ReadOutcomeCandidateDocument {
+                manifest_digest: "a".repeat(64),
+            }),
+            MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES,
+            "C7T.SIZE.THE_READ_HAS_ITS_OWN_DOMAIN"
+        );
+        assert_eq!(
+            response_max(&LocalCommand::Status),
+            MAX_MESSAGE_BYTES,
+            "C7T.SIZE.AN_OLD_COMMAND_KEEPS_THE_DEFAULT"
+        );
+        assert_eq!(
+            response_max(&LocalCommand::PreviewMissionCompletion {
+                request: completion_request_fixture(),
+            }),
+            MAX_COMPLETION_PREVIEW_RESPONSE_BYTES,
+            "C7T.SIZE.THE_PREVIEW_FAMILY_IS_UNCHANGED"
+        );
+        // The REQUEST stays in the default domain: it is one digest.
+        assert!(
+            !accepts_completion_sized_request(&LocalCommand::ReadOutcomeCandidateDocument {
+                manifest_digest: "a".repeat(64),
+            }),
+            "C7T.SIZE.THE_REQUEST_STAYS_SMALL"
         );
     }
 
