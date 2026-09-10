@@ -34,17 +34,42 @@ use crate::proposal::sha256;
 
 /// The one-NUL-terminated ASCII prefix the reviewed-intent token is computed over.
 ///
-/// A token is not a record identity: prefixing the canonical bytes means an intent digest can never
-/// be mistaken for, or collide with, a completion's own content digest over the same bytes.
+/// A token is not a record identity. Prefixing the canonical bytes separates the two DOMAINS, so an
+/// intent digest and a content digest are taken over different inputs and neither can be presented
+/// as the other. No claim is made about SHA-256 itself.
 pub const REVIEWED_INTENT_PREFIX: &[u8] = b"beacon.mission_completion.reviewed_intent.v1\0";
 
 // ---------------------------------------------------------------------------------------------
 // The request DTO. Strict: unknown fields, unknown tags and out-of-domain values all refuse.
 // ---------------------------------------------------------------------------------------------
 
+/// Require the KEY, permit the value to be `null`.
+///
+/// Serde's own missing-field path (`serde/src/private/de.rs:24-58`) hands a type a deserializer
+/// that supports only `deserialize_option`, so ANY type that forwards to `Option` -- including a
+/// transparent newtype over one -- accepts an omitted key. **Measured, not assumed:** both of those
+/// shapes were tried here and both accepted an omitted `note`. A field-level `deserialize_with`
+/// takes a different branch in the derive, which returns `missing field` instead, and that is the
+/// only shape that tells "the Operator recorded no note" from "the client forgot the key".
+fn required_explicit_null<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 /// One support reference, externally tagged as the C4 contract specifies.
+///
+/// `rename_all` renames the VARIANTS; `rename_all_fields` renames a struct variant's own fields,
+/// which the first rule does not touch. Without the second, `Receipt` expects `run_id` and the
+/// contract sends `runId` (root's checkpoint read, finding 2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum SupportRefDto {
     Artifact(String),
     Receipt {
@@ -62,7 +87,9 @@ pub struct ConditionResultDto {
     pub ordinal: u32,
     pub outcome: String,
     pub support: Vec<SupportRefDto>,
-    /// Explicit `null`, never an absent key: an omitted note and an empty note are different facts.
+    /// Explicit `null`, never an absent key: an omitted note and a recorded absence are different
+    /// facts, and only one of them is something the Operator said.
+    #[serde(deserialize_with = "required_explicit_null")]
     pub note: Option<String>,
 }
 
@@ -71,13 +98,18 @@ pub struct ConditionResultDto {
 pub struct NarrativeItemDto {
     pub ordinal: u32,
     pub kind: String,
-    /// The declared condition this relates to, or explicit `null`.
+    /// The declared condition this relates to, as explicit `null` when there is none.
+    #[serde(deserialize_with = "required_explicit_null")]
     pub condition_ordinal: Option<u32>,
     pub summary: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum SpendDto {
     Recorded {
         spend_id: Uuid,
@@ -220,6 +252,47 @@ impl From<rusqlite::Error> for CompletionCommandError {
     }
 }
 
+/// The codec's refusal, projected into the small truthful set this owner already has.
+///
+/// No new policy and no second validator: every arm is the codec's own class, and only the
+/// genuinely length-shaped ones reach a length-shaped caller line.
+fn codec_refusal(
+    refusal: crate::mission_completion::MalformedCompletion,
+) -> CompletionCommandError {
+    use crate::mission_completion::MalformedCompletion as Codec;
+    match refusal {
+        // Actually about length.
+        Codec::TextTooLong => CompletionCommandError::TextOverLimit,
+        // NOT SupportOverLimit. `OverLimitLength` covers a 33rd narrative item or delivered
+        // Artifact as well as a support set, and `RecordTooLarge` is the whole envelope -- a caller
+        // told "this condition cites more support than a completion can record" would be reading a
+        // false sentence about a record with no support at all. `SupportOverLimit` is reached only
+        // by the explicit per-condition check in `derive_record`, where the count is the actual
+        // failing input (root's finding 4, second pass).
+        Codec::OverLimitLength => CompletionCommandError::MalformedRequest("list.overLimit"),
+        Codec::RecordTooLarge => CompletionCommandError::MalformedRequest("record.tooLarge"),
+        // Actually about a set.
+        Codec::SupportOrder => CompletionCommandError::DuplicateSetEntry("support"),
+        Codec::DeliveredArtifactOrder => {
+            CompletionCommandError::DuplicateSetEntry("deliveredArtifacts")
+        }
+        // Actually about the declared condition set.
+        Codec::NoConditionResults | Codec::ConditionOrdinals => {
+            CompletionCommandError::ConditionCoverageIncomplete
+        }
+        // Everything else is a malformed request, named by the field class it came from.
+        Codec::NarrativeOrdinals => CompletionCommandError::MalformedRequest("narrative.ordinal"),
+        Codec::ControlCharacter => CompletionCommandError::MalformedRequest("text.control"),
+        Codec::EmptyText => CompletionCommandError::MalformedRequest("text.empty"),
+        Codec::UntrimmedText => CompletionCommandError::MalformedRequest("text.untrimmed"),
+        Codec::Magic
+        | Codec::Truncated
+        | Codec::TrailingBytes
+        | Codec::UnknownTag
+        | Codec::InvalidUtf8 => CompletionCommandError::MalformedRequest("canonical_bytes"),
+    }
+}
+
 fn malformed(field: &'static str) -> CompletionCommandError {
     CompletionCommandError::MalformedRequest(field)
 }
@@ -233,6 +306,10 @@ fn malformed(field: &'static str) -> CompletionCommandError {
 /// The three owner-assigned fields are cleared **on a temporary clone** and the EXISTING
 /// `canonical_bytes` encoder does the rest: no subset encoder, no second grammar. The normalized
 /// object is never stored, never returned as a completion, and never accepted as a real record.
+///
+/// The prefix is DOMAIN SEPARATION: an intent token and a completion's own content digest are
+/// computed over different input grammars, so one cannot be presented as the other. That is a claim
+/// about the inputs, not a cryptographic promise about SHA-256.
 ///
 /// It is a consistency token. It is not a record identity, an authorization, or evidence that any
 /// screen was looked at.
@@ -262,7 +339,9 @@ fn digest32(value: &str, field: &'static str) -> Result<[u8; 32], CompletionComm
     if value.bytes().any(|byte| byte.is_ascii_uppercase()) {
         return Err(malformed(field));
     }
-    let raw = HEXLOWER.decode(value.as_bytes()).map_err(|_| malformed(field))?;
+    let raw = HEXLOWER
+        .decode(value.as_bytes())
+        .map_err(|_| malformed(field))?;
     let mut out = [0_u8; 32];
     out.copy_from_slice(&raw);
     Ok(out)
@@ -308,7 +387,9 @@ fn uncertainty_from(token: &str) -> Result<UncertaintyKind, CompletionCommandErr
 
 fn support_from(dto: &SupportRefDto) -> Result<SupportRef, CompletionCommandError> {
     Ok(match dto {
-        SupportRefDto::Artifact(digest) => SupportRef::Artifact(digest32(digest, "support.artifact")?),
+        SupportRefDto::Artifact(digest) => {
+            SupportRef::Artifact(digest32(digest, "support.artifact")?)
+        }
         SupportRefDto::Evaluation(digest) => {
             SupportRef::Evaluation(digest32(digest, "support.evaluation")?)
         }
@@ -351,7 +432,9 @@ fn canonical_artifacts(
     digests.sort();
     for window in digests.windows(2) {
         if window[0].cmp(&window[1]) != Ordering::Less {
-            return Err(CompletionCommandError::DuplicateSetEntry("deliveredArtifacts"));
+            return Err(CompletionCommandError::DuplicateSetEntry(
+                "deliveredArtifacts",
+            ));
         }
     }
     Ok(digests)
@@ -381,7 +464,11 @@ fn normalized_request(
     record: &MissionCompletionV1,
 ) -> Result<CompletionIntentRequest, CompletionCommandError> {
     let mut condition_results = Vec::with_capacity(record.condition_results.len());
-    for (result, source) in record.condition_results.iter().zip(&request.condition_results) {
+    for (result, source) in record
+        .condition_results
+        .iter()
+        .zip(&request.condition_results)
+    {
         let mut support = Vec::with_capacity(result.support.len());
         for reference in &result.support {
             support.push(match reference {
@@ -497,8 +584,8 @@ fn derive_record(
     }
     let mut seen = vec![false; bindings.declared_conditions.len()];
     for result in &request.condition_results {
-        let index = usize::try_from(result.ordinal)
-            .map_err(|_| malformed("conditionResults.ordinal"))?;
+        let index =
+            usize::try_from(result.ordinal).map_err(|_| malformed("conditionResults.ordinal"))?;
         let slot = seen
             .get_mut(index)
             .ok_or(CompletionCommandError::ConditionCoverageIncomplete)?;
@@ -525,8 +612,9 @@ fn derive_record(
             note: result.note.clone(),
         });
     }
-    // The codec keys conditions by ordinal, so the stored sequence is the declaration order.
-    condition_results.sort_by_key(|result| result.ordinal);
+    // NOT sorted. Only the two SETS normalize; a submitted condition SEQUENCE is the Operator's,
+    // and repairing [1,0] into [0,1] would silently accept a record about different conditions than
+    // the one that was sent. The codec's own dense-ascending rule refuses it (root's finding 3).
 
     let delivered_artifacts = canonical_artifacts(
         request
@@ -565,19 +653,18 @@ fn derive_record(
         declared_conditions_sha256: bindings.declared_conditions_sha256,
         condition_results,
         delivered_artifacts,
-        unfinished_work: narrative_from(&request.unfinished_work, |token| {
-            unfinished_from(token)
-        })?,
-        uncertainty: narrative_from(&request.uncertainty, |token| uncertainty_from(token))?,
+        unfinished_work: narrative_from(&request.unfinished_work, unfinished_from)?,
+        uncertainty: narrative_from(&request.uncertainty, uncertainty_from)?,
         spend,
         supersedes: CompletionSupersedes::None,
         summary: request.summary.clone(),
+        completed_at_ms,
     };
     // The codec's own grammar is the validator: every bound, every text class and the envelope
-    // ceiling are its rules, and a second copy here would be a second thing to keep true.
-    record
-        .canonical_bytes()
-        .map_err(|_| CompletionCommandError::TextOverLimit)?;
+    // ceiling are its rules, and a second copy here would be a second thing to keep true. Its
+    // classes are PROJECTED, not flattened -- an invalid narrative ordinal or a control character
+    // is not "text too long", and a caller told so would go looking for the wrong thing.
+    record.canonical_bytes().map_err(codec_refusal)?;
     Ok(record)
 }
 
@@ -689,7 +776,8 @@ impl MissionCompletionCommandService {
                 )?;
                 let boundary =
                     u64::try_from(boundary).map_err(|_| malformed("boundary_event_seq"))?;
-                let completed_at_ms = u64::try_from(now).map_err(|_| malformed("completed_at_ms"))?;
+                let completed_at_ms =
+                    u64::try_from(now).map_err(|_| malformed("completed_at_ms"))?;
                 let record = derive_record(
                     &bindings,
                     &request,
@@ -701,7 +789,9 @@ impl MissionCompletionCommandService {
                 // The existing writer, in THIS transaction. It writes the row, its condition
                 // projections and the Event together, and reads the record back before returning.
                 record_completion_within(&transaction, &record).map_err(|refusal| {
-                    CompletionCommandError::Unavailable(CompletionCommandUnavailable::Write(refusal))
+                    CompletionCommandError::Unavailable(CompletionCommandUnavailable::Write(
+                        refusal,
+                    ))
                 })?;
 
                 // And the whole thing proves itself through C3's reader before the commit.
@@ -777,5 +867,503 @@ impl MissionCompletionCommandService {
                 Err(refusal) => Ok::<_, OperatorAccountError>(Err(refusal)),
             }
         })?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Codec-level probes with no store, no account and no Mission.
+
+    use super::*;
+
+    /// Placeholder bindings, for SIZE and REFUSAL measurement only. Never a derived completion:
+    /// the bindings are invented, so nothing here is storable and nothing proves an admission.
+    fn size_reference_record(
+        request: &CompletionIntentRequest,
+    ) -> Result<MissionCompletionV1, CompletionCommandError> {
+        let declared: Vec<String> = (0..request.condition_results.len())
+            .map(|ordinal| format!("Declared condition {ordinal}"))
+            .collect();
+        let bindings = OwnerBindings {
+            workspace_id: Uuid::nil(),
+            project_id: Uuid::nil(),
+            accountable_resident_configuration_id: Uuid::nil(),
+            declared_conditions_sha256: declared_conditions_digest(&declared),
+            declared_conditions: declared,
+        };
+        derive_record(&bindings, request, Uuid::nil(), 0, 0)
+    }
+
+    /// C4.OWNER.FINGERPRINT_REFERENCE, size half: the ACTUAL codec on root's actual fixture.
+    ///
+    /// Root CALCULATED 52 525 canonical bytes with a Python re-implementation and measured the file
+    /// at 66 348 JSON bytes; neither was an owner encode. This is the encoder itself saying so.
+    /// The owner-assigned fields are fixed width, so the canonical length does not depend on which
+    /// Workspace, Project or instant the record would belong to.
+    #[test]
+    fn the_root_complete_request_encodes_to_the_calculated_canonical_size() {
+        let raw = include_str!("../tests/fixtures/c4-complete-request.json");
+        assert_eq!(
+            raw.len(),
+            66_348,
+            "C4.OWNER.FINGERPRINT_REFERENCE: root's JSON byte count"
+        );
+        #[derive(Deserialize)]
+        struct Arguments {
+            request: CompletionIntentRequest,
+        }
+        let request = serde_json::from_str::<Arguments>(raw)
+            .expect("C4.OWNER.FINGERPRINT_REFERENCE: a contract-shaped request")
+            .request;
+        let record = size_reference_record(&request)
+            .expect("C4.OWNER.FINGERPRINT_REFERENCE: the owner grammar accepts it");
+        let canonical = record
+            .canonical_bytes()
+            .expect("C4.OWNER.FINGERPRINT_REFERENCE: the codec encodes it");
+        assert_eq!(
+            canonical.len(),
+            52_525,
+            "C4.OWNER.FINGERPRINT_REFERENCE: the codec disagrees with the calculated size"
+        );
+        // The seam the transport design rests on, from the codec rather than from arithmetic.
+        assert!(
+            raw.len() > 65_536,
+            "C4.OWNER.FINGERPRINT_REFERENCE: over the frame"
+        );
+        assert!(
+            canonical.len() < 65_536,
+            "C4.OWNER.FINGERPRINT_REFERENCE: the owner accepts what the frame cannot carry"
+        );
+    }
+
+    /// C4.OWNER.INPUT_DOMAINS, truthful refusals: a length-shaped caller line only for length.
+    #[test]
+    fn a_generic_grammar_refusal_is_never_a_support_count_sentence() {
+        let raw = include_str!("../tests/fixtures/c4-complete-request.json");
+        #[derive(Deserialize)]
+        struct Arguments {
+            request: CompletionIntentRequest,
+        }
+        let base = serde_json::from_str::<Arguments>(raw).unwrap().request;
+
+        // A 33rd narrative item, on a record whose conditions cite NO support at all. The old
+        // mapping called this "this condition cites more support than a completion can record".
+        let mut narrative = base.clone();
+        for result in &mut narrative.condition_results {
+            result.support.clear();
+        }
+        narrative.unfinished_work = (0..33_u32)
+            .map(|ordinal| NarrativeItemDto {
+                ordinal,
+                kind: "deferred_scope".to_owned(),
+                condition_ordinal: None,
+                summary: "Deferred.".to_owned(),
+            })
+            .collect();
+        let refusal = size_reference_record(&narrative)
+            .expect_err("C4.OWNER.INPUT_DOMAINS: 33 narrative items must refuse");
+        assert_eq!(
+            refusal.name(),
+            "MalformedRequest",
+            "C4.OWNER.INPUT_DOMAINS: a narrative list length is not a support count: {refusal:?}"
+        );
+
+        // Actual over-length text keeps the length-shaped projection.
+        let mut long_text = base.clone();
+        long_text.summary = "x".repeat(2_001);
+        let refusal = size_reference_record(&long_text)
+            .expect_err("C4.OWNER.INPUT_DOMAINS: an over-length summary must refuse");
+        assert_eq!(
+            refusal.name(),
+            "TextOverLimit",
+            "C4.OWNER.INPUT_DOMAINS: over-length text keeps its own projection: {refusal:?}"
+        );
+
+        // A control character is malformed, not long.
+        let mut control = base.clone();
+        control.summary = "before\u{7}after".to_owned();
+        let refusal = size_reference_record(&control)
+            .expect_err("C4.OWNER.INPUT_DOMAINS: a control character must refuse");
+        assert_eq!(
+            refusal.name(),
+            "MalformedRequest",
+            "C4.OWNER.INPUT_DOMAINS: a control character is not over-length text: {refusal:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // C4.OWNER.FINGERPRINT_REFERENCE — the token half.
+    //
+    // Blue captured four real canonical vectors from the EXISTING golden test's own encoder and
+    // published their tokens from an independent Python calculator
+    // (`beacon-team/tools/c4/blue/reviewed_intent_reference.py`, and
+    // `reference-status.json` for the expected values). Every expectation below is that file's,
+    // held here as a literal; none of them is computed from this owner.
+    // -----------------------------------------------------------------------------------------
+
+    const GOLDEN: &[u8] = include_bytes!("../tests/fixtures/c4-vector-canonical-v1.bin");
+    const SAME_TOKEN: &[u8] = include_bytes!("../tests/fixtures/c4-vector-same-token.bin");
+    const OTHER_CONTEXT: &[u8] =
+        include_bytes!("../tests/fixtures/c4-vector-different-context.bin");
+    const OTHER_CONTENT: &[u8] =
+        include_bytes!("../tests/fixtures/c4-vector-different-content.bin");
+
+    const GOLDEN_TOKEN: &str = "02d3b998eaf4d5524374ee9a24d7e94d6329e7b69b578d1aa6195e68f8adce62";
+    const OTHER_CONTEXT_TOKEN: &str =
+        "b83d871b64dd6ee754fa4b56e7bfa59f0c56cb95ed59c08f7a99884c538d6de9";
+    const OTHER_CONTENT_TOKEN: &str =
+        "5a3a24a426da9b1d1e7f107d7ab231ff633837b93c7c9bfa7bd422976267a0f5";
+
+    fn vector(bytes: &[u8], expected_sha256: &str, label: &str) -> MissionCompletionV1 {
+        assert_eq!(
+            bytes.len(),
+            707,
+            "C4.OWNER.FINGERPRINT_REFERENCE: {label} length"
+        );
+        assert_eq!(
+            HEXLOWER.encode(&sha256(bytes)),
+            expected_sha256,
+            "C4.OWNER.FINGERPRINT_REFERENCE: {label} is not the captured vector"
+        );
+        MissionCompletionV1::from_canonical_bytes(bytes).unwrap_or_else(|refusal| {
+            panic!("C4.OWNER.FINGERPRINT_REFERENCE: {label}: {refusal:?}")
+        })
+    }
+
+    #[test]
+    fn the_captured_vectors_agree_with_the_independent_reference_token() {
+        let golden = vector(
+            GOLDEN,
+            "705034373a787f7936d2bc2d086f5ef0295bbea5aa02ef3ccc66fb8deb951dfe",
+            "the golden vector",
+        );
+        assert_eq!(
+            reviewed_intent_token(&golden).expect("C4.OWNER.FINGERPRINT_REFERENCE"),
+            GOLDEN_TOKEN,
+            "C4.OWNER.FINGERPRINT_REFERENCE: this owner disagrees with the independent calculator"
+        );
+
+        // ONLY the three ephemerals differ, and the token does not move.
+        let same = vector(
+            SAME_TOKEN,
+            "68c9ea95ea71180794c0f871e5ef1ae6330fcc3fdb46c9bb683d73f1fca3ba5b",
+            "the same-token control",
+        );
+        assert_ne!(
+            (
+                same.completion_id,
+                same.boundary_event_seq,
+                same.completed_at_ms
+            ),
+            (
+                golden.completion_id,
+                golden.boundary_event_seq,
+                golden.completed_at_ms
+            ),
+            "C4.OWNER.FINGERPRINT_REFERENCE: the control must actually differ"
+        );
+        assert_eq!(
+            MissionCompletionV1 {
+                completion_id: golden.completion_id,
+                boundary_event_seq: golden.boundary_event_seq,
+                completed_at_ms: golden.completed_at_ms,
+                ..same.clone()
+            },
+            golden,
+            "C4.OWNER.FINGERPRINT_REFERENCE: and must differ in NOTHING else"
+        );
+        assert_eq!(
+            reviewed_intent_token(&same).expect("C4.OWNER.FINGERPRINT_REFERENCE"),
+            GOLDEN_TOKEN,
+            "C4.OWNER.FINGERPRINT_REFERENCE: identity, boundary and time are not the intent"
+        );
+
+        // A different stable context is a different intent, at the same length.
+        let context = vector(
+            OTHER_CONTEXT,
+            "95593b761810d435f8b50b26461173d6d99655526699a22f7eeabb8d227ad6d2",
+            "the stable-context control",
+        );
+        assert_ne!(
+            context.workspace_id, golden.workspace_id,
+            "C4.OWNER.FINGERPRINT_REFERENCE"
+        );
+        assert_eq!(
+            reviewed_intent_token(&context).expect("C4.OWNER.FINGERPRINT_REFERENCE"),
+            OTHER_CONTEXT_TOKEN,
+            "C4.OWNER.FINGERPRINT_REFERENCE"
+        );
+        assert_ne!(
+            OTHER_CONTEXT_TOKEN, GOLDEN_TOKEN,
+            "C4.OWNER.FINGERPRINT_REFERENCE: a different Workspace is a different intent"
+        );
+
+        // So is a different authored character, at the same length.
+        let content = vector(
+            OTHER_CONTENT,
+            "728208fa64df16e4912918a845b089582ea07556205c3a49b5f96e5bffbe9b28",
+            "the authored-content control",
+        );
+        assert_eq!(
+            reviewed_intent_token(&content).expect("C4.OWNER.FINGERPRINT_REFERENCE"),
+            OTHER_CONTENT_TOKEN,
+            "C4.OWNER.FINGERPRINT_REFERENCE"
+        );
+        assert_ne!(
+            OTHER_CONTENT_TOKEN, GOLDEN_TOKEN,
+            "C4.OWNER.FINGERPRINT_REFERENCE: one changed character is a different intent"
+        );
+
+        // The prefix is what the recipe says it is: one trailing NUL, no literal backslash-zero.
+        assert_eq!(
+            REVIEWED_INTENT_PREFIX.len(),
+            45,
+            "C4.OWNER.FINGERPRINT_REFERENCE"
+        );
+        assert_eq!(
+            REVIEWED_INTENT_PREFIX[44], 0,
+            "C4.OWNER.FINGERPRINT_REFERENCE"
+        );
+        assert_eq!(
+            REVIEWED_INTENT_PREFIX
+                .iter()
+                .filter(|byte| **byte == 0)
+                .count(),
+            1,
+            "C4.OWNER.FINGERPRINT_REFERENCE: exactly one NUL"
+        );
+        assert!(
+            !REVIEWED_INTENT_PREFIX.windows(2).any(|pair| pair == b"\\0"),
+            "C4.OWNER.FINGERPRINT_REFERENCE: no literal backslash-zero"
+        );
+        // And a token is not a content digest: the same bytes under the two domains differ.
+        assert_ne!(
+            reviewed_intent_token(&golden).expect("C4.OWNER.FINGERPRINT_REFERENCE"),
+            HEXLOWER.encode(&sha256(GOLDEN)),
+            "C4.OWNER.FINGERPRINT_REFERENCE: the prefix separates the two domains"
+        );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // C4.OWNER.INPUT_DOMAINS — the numeric and text domains, and the exact envelope ceiling.
+    // -----------------------------------------------------------------------------------------
+
+    /// A request with `conditions` declared conditions, `astral_notes` of them carrying a
+    /// 500-SCALAR astral note, the rest a 500-character ASCII one, both narrative lists full, and
+    /// `summary` ASCII characters of summary.
+    fn ceiling_request(astral_notes: usize, summary: usize) -> CompletionIntentRequest {
+        let digest = |seed: usize| format!("{:064x}", seed);
+        CompletionIntentRequest {
+            mission_id: Uuid::nil(),
+            accountable_resident_id: Uuid::nil(),
+            disposition: "concluded".to_owned(),
+            condition_results: (0..20)
+                .map(|ordinal| ConditionResultDto {
+                    ordinal: u32::try_from(ordinal).unwrap(),
+                    outcome: "met".to_owned(),
+                    support: (0..8)
+                        .map(|slot| SupportRefDto::Artifact(digest(ordinal * 8 + slot + 1)))
+                        .collect(),
+                    note: Some(if ordinal < astral_notes {
+                        "\u{1f9ed}".repeat(500)
+                    } else {
+                        "n".repeat(500)
+                    }),
+                })
+                .collect(),
+            delivered_artifacts: (0..32).map(|slot| digest(1_000 + slot)).collect(),
+            unfinished_work: (0..32)
+                .map(|ordinal| NarrativeItemDto {
+                    ordinal: u32::try_from(ordinal).unwrap(),
+                    kind: "deferred_scope".to_owned(),
+                    condition_ordinal: None,
+                    summary: "u".repeat(500),
+                })
+                .collect(),
+            uncertainty: (0..32)
+                .map(|ordinal| NarrativeItemDto {
+                    ordinal: u32::try_from(ordinal).unwrap(),
+                    kind: "unmeasured_quantity".to_owned(),
+                    condition_ordinal: None,
+                    summary: "q".repeat(500),
+                })
+                .collect(),
+            spend: SpendDto::NotMeasured("no spend record exists".to_owned()),
+            summary: "s".repeat(summary),
+        }
+    }
+
+    fn ceiling_bytes(astral_notes: usize, summary: usize) -> Result<usize, CompletionCommandError> {
+        Ok(
+            size_reference_record(&ceiling_request(astral_notes, summary))?
+                .canonical_bytes()
+                .expect("a record that derived encodes")
+                .len(),
+        )
+    }
+
+    /// The exact 65 536-byte envelope boundary, found by measurement rather than asserted.
+    #[test]
+    fn the_canonical_envelope_ceiling_is_exact() {
+        // The search is well-founded only if the two ends actually straddle the ceiling.
+        assert!(
+            ceiling_bytes(0, 1).expect("C4.OWNER.INPUT_DOMAINS") <= 65_536,
+            "C4.OWNER.INPUT_DOMAINS: the all-ASCII floor must fit"
+        );
+        assert!(
+            ceiling_bytes(20, 1).is_err(),
+            "C4.OWNER.INPUT_DOMAINS: the all-astral ceiling must not fit"
+        );
+        // The largest astral count that still fits with a one-character summary. Each astral note
+        // costs 1 500 bytes more than its ASCII twin, so the remaining gap is always inside the
+        // 2 000-scalar summary budget -- which is what makes the exact byte reachable at all.
+        let (notes, floor) = (0..20)
+            .rev()
+            .find_map(|notes| ceiling_bytes(notes, 1).ok().map(|size| (notes, size)))
+            .expect("C4.OWNER.INPUT_DOMAINS: some astral count fits");
+        let summary = 1 + (65_536 - floor);
+        assert!(
+            summary <= 2_000,
+            "C4.OWNER.INPUT_DOMAINS: the ceiling is not reachable from this fixture ({summary})"
+        );
+
+        assert_eq!(
+            ceiling_bytes(notes, summary).expect("C4.OWNER.INPUT_DOMAINS"),
+            65_536,
+            "C4.OWNER.INPUT_DOMAINS: exactly at the ceiling"
+        );
+        let refusal = size_reference_record(&ceiling_request(notes, summary + 1))
+            .expect_err("C4.OWNER.INPUT_DOMAINS: one byte over the ceiling must refuse");
+        assert_eq!(
+            refusal.name(),
+            "MalformedRequest",
+            "C4.OWNER.INPUT_DOMAINS: an oversized ENVELOPE is not a support count: {refusal:?}"
+        );
+    }
+
+    /// Every text class the codec knows, and both ends of `u32`.
+    #[test]
+    fn the_text_and_number_domains_are_the_codecs_own() {
+        let base = || {
+            let mut request = ceiling_request(0, 10);
+            request.condition_results.truncate(1);
+            request.condition_results[0].support.clear();
+            request.delivered_artifacts.clear();
+            request.unfinished_work.truncate(1);
+            request.uncertainty.clear();
+            request
+        };
+
+        // 500 scalars pass and 501 refuse -- in ASCII and in ASTRAL scalars alike, because the
+        // bound is scalars, not bytes.
+        for (label, text) in [
+            ("ascii", "n".repeat(500)),
+            ("astral", "\u{1f9ed}".repeat(500)),
+        ] {
+            let mut request = base();
+            request.condition_results[0].note = Some(text.clone());
+            size_reference_record(&request).unwrap_or_else(|refusal| {
+                panic!("C4.OWNER.INPUT_DOMAINS: 500 {label}: {refusal:?}")
+            });
+
+            let mut request = base();
+            request.condition_results[0].note =
+                Some(format!("{text}{}", &text[..text.len() / 500]));
+            let refusal = size_reference_record(&request)
+                .expect_err("C4.OWNER.INPUT_DOMAINS: 501 scalars must refuse");
+            assert_eq!(
+                refusal.name(),
+                "TextOverLimit",
+                "C4.OWNER.INPUT_DOMAINS: 501 {label}: {refusal:?}"
+            );
+        }
+
+        // The summary has its own, larger bound.
+        let mut request = base();
+        request.summary = "s".repeat(2_000);
+        size_reference_record(&request).expect("C4.OWNER.INPUT_DOMAINS: 2000 summary scalars");
+        let mut request = base();
+        request.summary = "s".repeat(2_001);
+        assert_eq!(
+            size_reference_record(&request)
+                .expect_err("C4.OWNER.INPUT_DOMAINS: 2001 must refuse")
+                .name(),
+            "TextOverLimit",
+            "C4.OWNER.INPUT_DOMAINS"
+        );
+
+        // Empty, untrimmed and control-bearing text are each their own refusal, never a length.
+        for (text, field) in [
+            (String::new(), "text.empty"),
+            (" untrimmed".to_owned(), "text.untrimmed"),
+            ("a\u{7}bell".to_owned(), "text.control"),
+        ] {
+            let mut request = base();
+            request.summary = text.clone();
+            let refusal = size_reference_record(&request)
+                .expect_err("C4.OWNER.INPUT_DOMAINS: a malformed text class must refuse");
+            assert!(
+                matches!(refusal, CompletionCommandError::MalformedRequest(named) if named == field),
+                "C4.OWNER.INPUT_DOMAINS: {field}: {refusal:?}"
+            );
+        }
+
+        // Both ends of u32, on both versioned references.
+        for version in [0_u32, u32::MAX] {
+            let mut request = base();
+            request.condition_results[0].support = vec![SupportRefDto::Receipt {
+                run_id: Uuid::nil(),
+                receipt_version: version,
+                receipt_bytes_sha256: format!("{:064x}", 1),
+            }];
+            request.spend = SpendDto::Recorded {
+                spend_id: Uuid::nil(),
+                spend_version: version,
+                spend_sha256: format!("{:064x}", 2),
+            };
+            let record = size_reference_record(&request).unwrap_or_else(|refusal| {
+                panic!("C4.OWNER.INPUT_DOMAINS: u32 {version}: {refusal:?}")
+            });
+            let round_tripped = MissionCompletionV1::from_canonical_bytes(
+                &record.canonical_bytes().expect("C4.OWNER.INPUT_DOMAINS"),
+            )
+            .expect("C4.OWNER.INPUT_DOMAINS");
+            assert_eq!(
+                round_tripped, record,
+                "C4.OWNER.INPUT_DOMAINS: u32 {version} is lossless"
+            );
+        }
+
+        // A 9-entry support set is the ONE place a support-count sentence is true.
+        let mut request = base();
+        request.condition_results[0].support = (0..9)
+            .map(|slot| SupportRefDto::Artifact(format!("{:064x}", slot + 1)))
+            .collect();
+        let refusal = size_reference_record(&request)
+            .expect_err("C4.OWNER.INPUT_DOMAINS: 9 citations must refuse");
+        assert_eq!(
+            refusal.name(),
+            "SupportOverLimit",
+            "C4.OWNER.INPUT_DOMAINS: {refusal:?}"
+        );
+
+        // Needles survive Debug and never reach Display. MEASURED, not assumed: the derived Debug
+        // ESCAPES a CR/LF rather than emitting it, so the needle survives as `\\r\\n` -- readable
+        // and greppable, and it cannot forge a line break in a log.
+        let needle = CompletionCommandError::MalformedRequest("crlf\r\nneedle");
+        assert_eq!(
+            format!("{needle:?}"),
+            r#"MalformedRequest("crlf\r\nneedle")"#,
+            "C4.OWNER.INPUT_DOMAINS: Debug keeps the detail, escaped"
+        );
+        assert!(
+            !format!("{needle:?}").contains('\n'),
+            "C4.OWNER.INPUT_DOMAINS: and cannot forge a line break"
+        );
+        assert_eq!(
+            needle.to_string(),
+            "MalformedRequest",
+            "C4.OWNER.INPUT_DOMAINS: Display is one independent literal"
+        );
     }
 }

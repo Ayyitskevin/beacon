@@ -2850,3 +2850,928 @@ fn c3_wire_returns_the_exact_dto_and_null_over_the_real_socket() {
     thread.join().unwrap();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ---------------------------------------------------------------------------------------------
+// C4 — the Operator completion owner, through its public service
+//
+// Every bar below drives the REAL store through `MissionCompletionCommandService`. The C3 bars
+// above prove the READER; not one of them calls `preview`, `record` or `get_intent`, so none of
+// them is coverage for this owner.
+// ---------------------------------------------------------------------------------------------
+
+const C4_CONDITIONS: [&str; 4] = [
+    "Gates pass",
+    "Evidence filed",
+    "A non-author seat reviewed it",
+    "The change is reversible",
+];
+
+fn c4_owner(
+    store: &TestStore,
+    accounts: &Arc<OperatorAccountService>,
+) -> beacond::MissionCompletionCommandService {
+    beacond::MissionCompletionCommandService::new(Arc::clone(accounts), store.workspace_id)
+}
+
+/// One admitted Mission with `members` roster entries and the four declared conditions above.
+fn c4_admitted(
+    label: &str,
+    members: usize,
+) -> (
+    TestStore,
+    Arc<OperatorAccountService>,
+    PreparedTeam,
+    beacond::MissionView,
+) {
+    let store = TestStore::new(label);
+    let accounts = enrolled_accounts(&store);
+    let prepared = prepare_team(&store, &accounts, members);
+    let mut draft = mission_draft(&prepared);
+    draft.success_conditions = C4_CONDITIONS
+        .iter()
+        .map(|condition| (*condition).to_owned())
+        .collect();
+    let mission = MissionService::new(Arc::clone(&accounts), store.workspace_id)
+        .admit(draft)
+        .unwrap();
+    (store, accounts, prepared, mission)
+}
+
+/// The same Mission, with a completion minted through the OWNER rather than the store writer.
+fn c4_recorded(label: &str) -> (TestStore, Arc<OperatorAccountService>, beacond::MissionView) {
+    let (store, accounts, _prepared, mission) = c4_admitted(label, 1);
+    let owner = c4_owner(&store, &accounts);
+    let resident = mission.members[0].resident_id;
+    let token = owner
+        .preview(c4_request(&mission, resident))
+        .expect("the fixture previews")
+        .intent_sha256;
+    owner
+        .record(c4_request(&mission, resident), &token)
+        .expect("the fixture records");
+    (store, accounts, mission)
+}
+
+fn c4_hex32(byte: u8) -> String {
+    format!("{byte:02x}").repeat(32)
+}
+
+fn c4_hex(digest: [u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn c4_uuid(last: u8) -> Uuid {
+    Uuid::parse_str(&format!("00000000-0000-4000-8000-0000000000{last:02}")).unwrap()
+}
+
+/// A complete intent: every citation class, both narrative lists, a recorded spend, notes present
+/// and explicitly absent — and the two SETS submitted in the REVERSE of their canonical order.
+fn c4_request(
+    mission: &beacond::MissionView,
+    accountable_resident_id: Uuid,
+) -> beacond::CompletionIntentRequest {
+    beacond::CompletionIntentRequest {
+        mission_id: mission.id,
+        accountable_resident_id,
+        disposition: "concluded".to_owned(),
+        condition_results: vec![
+            beacond::ConditionResultDto {
+                ordinal: 0,
+                outcome: "met".to_owned(),
+                support: vec![
+                    beacond::SupportRefDto::Ruling(c4_hex32(0x44)),
+                    beacond::SupportRefDto::Evaluation(c4_hex32(0x33)),
+                    beacond::SupportRefDto::Receipt {
+                        run_id: c4_uuid(7),
+                        receipt_version: 2,
+                        receipt_bytes_sha256: c4_hex32(0x22),
+                    },
+                    beacond::SupportRefDto::Artifact(c4_hex32(0x11)),
+                ],
+                note: Some("Every declared gate passed.".to_owned()),
+            },
+            beacond::ConditionResultDto {
+                ordinal: 1,
+                outcome: "not_met".to_owned(),
+                support: vec![],
+                note: None,
+            },
+            beacond::ConditionResultDto {
+                ordinal: 2,
+                outcome: "not_assessed".to_owned(),
+                support: vec![],
+                note: None,
+            },
+            beacond::ConditionResultDto {
+                ordinal: 3,
+                outcome: "assessment_inconclusive".to_owned(),
+                support: vec![beacond::SupportRefDto::Artifact(c4_hex32(0x77))],
+                note: Some("The probe disagreed with itself.".to_owned()),
+            },
+        ],
+        delivered_artifacts: vec![c4_hex32(0x66), c4_hex32(0x55)],
+        unfinished_work: vec![beacond::NarrativeItemDto {
+            ordinal: 0,
+            kind: "deferred_scope".to_owned(),
+            condition_ordinal: Some(1),
+            summary: "The second condition's probe was deferred.".to_owned(),
+        }],
+        uncertainty: vec![beacond::NarrativeItemDto {
+            ordinal: 0,
+            kind: "unmeasured_quantity".to_owned(),
+            condition_ordinal: None,
+            summary: "Nothing measured model spend for this window.".to_owned(),
+        }],
+        spend: beacond::SpendDto::Recorded {
+            spend_id: c4_uuid(8),
+            spend_version: 1,
+            spend_sha256: c4_hex32(0x88),
+        },
+        summary: "One reviewed feature shipped; the second condition is unresolved.".to_owned(),
+    }
+}
+
+/// The stored completion's own bytes and digest, read outside the owner.
+fn c4_stored_bytes(store: &TestStore) -> Vec<(String, Vec<u8>)> {
+    let connection = Connection::open(&store.path).unwrap();
+    let mut statement = connection
+        .prepare(
+            "SELECT digest_value, canonical_bytes FROM mission_completions ORDER BY digest_value",
+        )
+        .unwrap();
+    let rows = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    rows
+}
+
+fn c4_chain_head(store: &TestStore) -> i64 {
+    Connection::open(&store.path)
+        .unwrap()
+        .query_row(
+            "SELECT coalesce(max(sequence), 0) FROM events WHERE workspace_id = ?1",
+            [store.workspace_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn c4_preview_is_read_only_and_complete() {
+    let (store, accounts, _prepared, mission) = c4_admitted("c4-preview", 1);
+    let owner = c4_owner(&store, &accounts);
+    let resident = mission.members[0].resident_id;
+    let submitted = c4_request(&mission, resident);
+    let before = domain_row_counts(&store);
+
+    let preview = owner
+        .preview(c4_request(&mission, resident))
+        .expect("C4.OWNER.PREVIEW_IS_READ_ONLY_AND_COMPLETE");
+
+    // The bindings, against values this test holds from the Mission — not from the owner.
+    assert_eq!(
+        preview.workspace_id, store.workspace_id,
+        "C4.OWNER.PREVIEW_IS_READ_ONLY_AND_COMPLETE: the Workspace is the service's"
+    );
+    assert_eq!(
+        preview.project_id, mission.project_id,
+        "C4.OWNER.PREVIEW_IS_READ_ONLY_AND_COMPLETE: the Project is the Mission's"
+    );
+    assert_eq!(
+        preview.actor, "operator",
+        "C4.OWNER.PREVIEW_IS_READ_ONLY_AND_COMPLETE"
+    );
+    assert_eq!(
+        preview.accountable_resident_configuration_id,
+        mission.members[0].admission_configuration_id,
+        "C4.OWNER.PREVIEW_IS_READ_ONLY_AND_COMPLETE: the admission roster entry's configuration"
+    );
+    assert_eq!(
+        preview.declared_conditions_sha256,
+        c4_hex(beacond::declared_conditions_digest(
+            &mission.success_conditions
+        )),
+        "C4.OWNER.PREVIEW_IS_READ_ONLY_AND_COMPLETE"
+    );
+    assert_eq!(
+        preview.conditions, mission.success_conditions,
+        "C4.OWNER.PREVIEW_IS_READ_ONLY_AND_COMPLETE: the Mission's own declaration"
+    );
+
+    // The normalization: the two SETS moved into canonical order and nothing else moved at all.
+    assert_eq!(
+        preview.request.delivered_artifacts,
+        vec![c4_hex32(0x55), c4_hex32(0x66)],
+        "C4.OWNER.PREVIEW_IS_READ_ONLY_AND_COMPLETE: delivered Artifacts ascend"
+    );
+    assert_eq!(
+        preview.request.condition_results[0].support,
+        vec![
+            beacond::SupportRefDto::Artifact(c4_hex32(0x11)),
+            beacond::SupportRefDto::Receipt {
+                run_id: c4_uuid(7),
+                receipt_version: 2,
+                receipt_bytes_sha256: c4_hex32(0x22),
+            },
+            beacond::SupportRefDto::Evaluation(c4_hex32(0x33)),
+            beacond::SupportRefDto::Ruling(c4_hex32(0x44)),
+        ],
+        "C4.OWNER.PREVIEW_IS_READ_ONLY_AND_COMPLETE: support in the codec's own (kind, key) order"
+    );
+    assert_eq!(
+        preview
+            .request
+            .condition_results
+            .iter()
+            .map(|result| (result.ordinal, result.outcome.clone(), result.note.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                0_u32,
+                "met".to_owned(),
+                Some("Every declared gate passed.".to_owned())
+            ),
+            (1, "not_met".to_owned(), None),
+            (2, "not_assessed".to_owned(), None),
+            (
+                3,
+                "assessment_inconclusive".to_owned(),
+                Some("The probe disagreed with itself.".to_owned())
+            ),
+        ],
+        "C4.OWNER.PREVIEW_IS_READ_ONLY_AND_COMPLETE: four explicit outcomes, sequence preserved"
+    );
+    assert_eq!(
+        preview.request.unfinished_work, submitted.unfinished_work,
+        "C4.OWNER.PREVIEW_IS_READ_ONLY_AND_COMPLETE: a narrative SEQUENCE is not a set"
+    );
+    assert_eq!(
+        preview.request.uncertainty, submitted.uncertainty,
+        "C4.OWNER.PREVIEW_IS_READ_ONLY_AND_COMPLETE"
+    );
+    assert_eq!(
+        preview.request.spend, submitted.spend,
+        "C4.OWNER.PREVIEW_IS_READ_ONLY_AND_COMPLETE"
+    );
+    assert_eq!(
+        preview.request.summary, submitted.summary,
+        "C4.OWNER.PREVIEW_IS_READ_ONLY_AND_COMPLETE: text is preserved character for character"
+    );
+    assert_eq!(
+        (
+            preview.request.mission_id,
+            preview.request.accountable_resident_id,
+            preview.request.disposition.clone()
+        ),
+        (mission.id, resident, "concluded".to_owned()),
+        "C4.OWNER.PREVIEW_IS_READ_ONLY_AND_COMPLETE"
+    );
+
+    // A preview writes nothing at all.
+    assert_eq!(
+        domain_row_counts(&store),
+        before,
+        "C4.OWNER.PREVIEW_IS_READ_ONLY_AND_COMPLETE: a preview moved a row or an Event"
+    );
+    assert!(
+        owner
+            .get_intent(mission.id)
+            .expect("C4.OWNER.PREVIEW_IS_READ_ONLY_AND_COMPLETE")
+            .is_none(),
+        "C4.OWNER.PREVIEW_IS_READ_ONLY_AND_COMPLETE: a preview is not a completion"
+    );
+
+    // A SET permutation is the SAME intent; a repeated entry is refused.
+    let mut permuted = c4_request(&mission, resident);
+    permuted.condition_results[0].support.reverse();
+    permuted.delivered_artifacts.reverse();
+    assert_eq!(
+        owner
+            .preview(permuted)
+            .expect("C4.OWNER.PREVIEW_IS_READ_ONLY_AND_COMPLETE")
+            .intent_sha256,
+        preview.intent_sha256,
+        "C4.OWNER.PREVIEW_IS_READ_ONLY_AND_COMPLETE: a set order is not part of the intent"
+    );
+    let mut duplicated = c4_request(&mission, resident);
+    duplicated.condition_results[0]
+        .support
+        .push(beacond::SupportRefDto::Artifact(c4_hex32(0x11)));
+    let refusal = owner
+        .preview(duplicated)
+        .expect_err("C4.OWNER.PREVIEW_IS_READ_ONLY_AND_COMPLETE: a repeated citation refuses");
+    assert_eq!(
+        refusal.name(),
+        "DuplicateSetEntry",
+        "C4.OWNER.PREVIEW_IS_READ_ONLY_AND_COMPLETE: {refusal:?}"
+    );
+
+    // And the reviewed token is exactly the one the later `get` returns.
+    let recorded = owner
+        .record(c4_request(&mission, resident), &preview.intent_sha256)
+        .expect("C4.OWNER.PREVIEW_IS_READ_ONLY_AND_COMPLETE: the reviewed intent records");
+    assert_eq!(
+        recorded.intent_sha256, preview.intent_sha256,
+        "C4.OWNER.PREVIEW_IS_READ_ONLY_AND_COMPLETE"
+    );
+    assert_eq!(
+        owner
+            .get_intent(mission.id)
+            .expect("C4.OWNER.PREVIEW_IS_READ_ONLY_AND_COMPLETE")
+            .expect("C4.OWNER.PREVIEW_IS_READ_ONLY_AND_COMPLETE: it was recorded")
+            .intent_sha256,
+        preview.intent_sha256,
+        "C4.OWNER.PREVIEW_IS_READ_ONLY_AND_COMPLETE: the stored record answers the reviewed token"
+    );
+}
+
+#[test]
+fn c4_record_is_one_atomic_transaction() {
+    let (store, accounts, _prepared, mission) = c4_admitted("c4-atomic", 1);
+    let owner = c4_owner(&store, &accounts);
+    let resident = mission.members[0].resident_id;
+    let token = owner
+        .preview(c4_request(&mission, resident))
+        .expect("C4.OWNER.RECORD_IS_ONE_ATOMIC_TRANSACTION")
+        .intent_sha256;
+    let before = domain_row_counts(&store);
+
+    // A FORCED failure INSIDE the writer: the completion row inserts, its condition projections
+    // cannot. Planted on a second connection after the account service opened its own — nothing
+    // re-verifies the schema signature against it — and removed before the store is reopened.
+    let connection = Connection::open(&store.path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER c4_forced_write_failure
+             BEFORE INSERT ON mission_completion_conditions
+             BEGIN SELECT RAISE(ABORT, 'c4 forced write failure'); END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let refusal = owner
+        .record(c4_request(&mission, resident), &token)
+        .expect_err("C4.OWNER.RECORD_IS_ONE_ATOMIC_TRANSACTION: the forced failure must refuse");
+    assert!(
+        matches!(
+            refusal,
+            beacond::CompletionCommandError::Unavailable(
+                beacond::CompletionCommandUnavailable::Write(
+                    beacond::CompletionReadRefusal::Store(_)
+                )
+            )
+        ),
+        "C4.OWNER.RECORD_IS_ONE_ATOMIC_TRANSACTION: {refusal:?}"
+    );
+    assert_eq!(
+        domain_row_counts(&store),
+        before,
+        "C4.OWNER.RECORD_IS_ONE_ATOMIC_TRANSACTION: a failed write left a row, a projection or an \
+         Event behind"
+    );
+
+    let connection = Connection::open(&store.path).unwrap();
+    connection
+        .execute_batch("DROP TRIGGER c4_forced_write_failure;")
+        .unwrap();
+    drop(connection);
+
+    // Reopened from disk, through C3's reader: the rollback survives the process, not just the
+    // handle that made it.
+    let reopened = Arc::new(OperatorAccountService::open(&store.path).unwrap());
+    reopened
+        .authenticate_password(
+            SecretString::new("a long local passphrase".to_owned()),
+            beacond::AccessOrigin::SameMachine,
+        )
+        .expect("C4.OWNER.RECORD_IS_ONE_ATOMIC_TRANSACTION: the store reopens");
+    assert!(
+        beacond::MissionCompletionReadService::new(Arc::clone(&reopened), store.workspace_id)
+            .get(mission.id)
+            .expect("C4.OWNER.RECORD_IS_ONE_ATOMIC_TRANSACTION")
+            .is_none(),
+        "C4.OWNER.RECORD_IS_ONE_ATOMIC_TRANSACTION: the reopened store must show no completion"
+    );
+
+    // The same intent, unblocked: one row, its four projections and exactly one owner Event.
+    c4_owner(&store, &reopened)
+        .record(c4_request(&mission, resident), &token)
+        .expect("C4.OWNER.RECORD_IS_ONE_ATOMIC_TRANSACTION: the unblocked write records");
+    assert_eq!(
+        domain_row_counts(&store),
+        (before.0 + 1, before.1 + 4, before.2 + 1),
+        "C4.OWNER.RECORD_IS_ONE_ATOMIC_TRANSACTION: one completion, four conditions, one Event"
+    );
+    let connection = Connection::open(&store.path).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM events WHERE workspace_id = ?1 AND kind = 'mission.completed'
+                   AND json_extract(payload_json, '$.missionId') = ?2",
+                rusqlite::params![store.workspace_id.to_string(), mission.id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1,
+        "C4.OWNER.RECORD_IS_ONE_ATOMIC_TRANSACTION: exactly one owner Event names this Mission"
+    );
+}
+
+#[test]
+fn c4_a_stale_intent_writes_nothing() {
+    let (store, accounts, _prepared, mission) = c4_admitted("c4-stale", 2);
+    let owner = c4_owner(&store, &accounts);
+    let resident = mission.members[0].resident_id;
+    let reviewed = owner
+        .preview(c4_request(&mission, resident))
+        .expect("C4.OWNER.STALE_INTENT_WRITES_NOTHING")
+        .intent_sha256;
+    let before = domain_row_counts(&store);
+
+    // A changed user field is a different intent.
+    let mut changed = c4_request(&mission, resident);
+    changed.summary = "One reviewed feature shipped; the second condition is resolved.".to_owned();
+    let refusal = owner
+        .record(changed, &reviewed)
+        .expect_err("C4.OWNER.STALE_INTENT_WRITES_NOTHING: changed text must refuse");
+    assert_eq!(
+        refusal.name(),
+        "IntentChanged",
+        "C4.OWNER.STALE_INTENT_WRITES_NOTHING: {refusal:?}"
+    );
+
+    // A changed stable BINDING is a different intent: the other roster member is another
+    // accountability, not a detail.
+    let other = mission.members[1].resident_id;
+    assert_ne!(
+        other, resident,
+        "C4.OWNER.STALE_INTENT_WRITES_NOTHING fixture"
+    );
+    let refusal = owner
+        .record(c4_request(&mission, other), &reviewed)
+        .expect_err("C4.OWNER.STALE_INTENT_WRITES_NOTHING: a changed binding must refuse");
+    assert_eq!(
+        refusal.name(),
+        "IntentChanged",
+        "C4.OWNER.STALE_INTENT_WRITES_NOTHING: {refusal:?}"
+    );
+    assert_eq!(
+        domain_row_counts(&store),
+        before,
+        "C4.OWNER.STALE_INTENT_WRITES_NOTHING: a stale intent wrote something"
+    );
+
+    // The three TRANSIENT owner values move on their own, and a review survives them: an unrelated
+    // Event advances the chain head this record would report at, and the clock advances by itself.
+    let head_before = c4_chain_head(&store);
+    let lifecycle = ResidentLifecycleService::new(Arc::clone(&accounts), store.workspace_id);
+    let current = lifecycle
+        .list()
+        .expect("C4.OWNER.STALE_INTENT_WRITES_NOTHING fixture")
+        .into_iter()
+        .find(|resident| resident.id == other)
+        .expect("C4.OWNER.STALE_INTENT_WRITES_NOTHING fixture");
+    lifecycle
+        .suspend(other, current.latest_decision_id)
+        .expect("C4.OWNER.STALE_INTENT_WRITES_NOTHING: an unrelated owner Event");
+    let head_after = c4_chain_head(&store);
+    assert!(
+        head_after > head_before,
+        "C4.OWNER.STALE_INTENT_WRITES_NOTHING: the boundary must actually have moved \
+         ({head_before} -> {head_after})"
+    );
+    owner
+        .record(c4_request(&mission, resident), &reviewed)
+        .expect("C4.OWNER.STALE_INTENT_WRITES_NOTHING: a moved boundary is not a changed intent");
+    assert_eq!(
+        owner
+            .get_intent(mission.id)
+            .expect("C4.OWNER.STALE_INTENT_WRITES_NOTHING")
+            .expect("C4.OWNER.STALE_INTENT_WRITES_NOTHING")
+            .intent_sha256,
+        reviewed,
+        "C4.OWNER.STALE_INTENT_WRITES_NOTHING"
+    );
+    let connection = Connection::open(&store.path).unwrap();
+    let boundary: i64 = connection
+        .query_row(
+            "SELECT boundary_event_seq FROM mission_completions",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        boundary, head_after,
+        "C4.OWNER.STALE_INTENT_WRITES_NOTHING: the record reports at the CURRENT cut, not the \
+         reviewed one"
+    );
+}
+
+#[test]
+fn c4_a_second_intent_never_overwrites() {
+    let (store, accounts, _prepared, mission) = c4_admitted("c4-conflict", 1);
+    let owner = c4_owner(&store, &accounts);
+    let resident = mission.members[0].resident_id;
+    let first = owner
+        .preview(c4_request(&mission, resident))
+        .expect("C4.OWNER.CONFLICT_NEVER_OVERWRITES")
+        .intent_sha256;
+    owner
+        .record(c4_request(&mission, resident), &first)
+        .expect("C4.OWNER.CONFLICT_NEVER_OVERWRITES");
+    let stored = c4_stored_bytes(&store);
+    let counts = domain_row_counts(&store);
+
+    // A genuinely different completion of the same Mission.
+    let mut different = c4_request(&mission, resident);
+    different.disposition = "abandoned".to_owned();
+    let second = owner
+        .preview(different.clone())
+        .expect("C4.OWNER.CONFLICT_NEVER_OVERWRITES: preview stays read-only after a record")
+        .intent_sha256;
+    assert_ne!(
+        second, first,
+        "C4.OWNER.CONFLICT_NEVER_OVERWRITES: the fixture must actually differ"
+    );
+    let refusal = owner
+        .record(different, &second)
+        .expect_err("C4.OWNER.CONFLICT_NEVER_OVERWRITES: a second completion must refuse");
+    assert_eq!(
+        refusal.name(),
+        "AlreadyRecorded",
+        "C4.OWNER.CONFLICT_NEVER_OVERWRITES: {refusal:?}"
+    );
+
+    assert_eq!(
+        c4_stored_bytes(&store),
+        stored,
+        "C4.OWNER.CONFLICT_NEVER_OVERWRITES: the stored bytes moved"
+    );
+    assert_eq!(
+        domain_row_counts(&store),
+        counts,
+        "C4.OWNER.CONFLICT_NEVER_OVERWRITES: the refused write left something behind"
+    );
+    assert_eq!(
+        owner
+            .get_intent(mission.id)
+            .expect("C4.OWNER.CONFLICT_NEVER_OVERWRITES")
+            .expect("C4.OWNER.CONFLICT_NEVER_OVERWRITES")
+            .intent_sha256,
+        first,
+        "C4.OWNER.CONFLICT_NEVER_OVERWRITES: the ORIGINAL intent still answers"
+    );
+
+    // An equal token is content equality and NOTHING else. The stored record carries a fresh
+    // identity and a boundary this review never saw, and still answers the same token — so the
+    // token cannot be read as evidence that this particular write was the reviewed one.
+    let connection = Connection::open(&store.path).unwrap();
+    let (completion_id, boundary): (String, i64) = connection
+        .query_row(
+            "SELECT completion_id, boundary_event_seq FROM mission_completions",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_ne!(
+        completion_id,
+        Uuid::nil().to_string(),
+        "C4.OWNER.CONFLICT_NEVER_OVERWRITES: the identity is the owner's, not the token's sentinel"
+    );
+    assert!(
+        boundary > 0,
+        "C4.OWNER.CONFLICT_NEVER_OVERWRITES: the boundary is the owner's, not the token's sentinel"
+    );
+}
+
+#[test]
+fn c4_absence_scope_and_broken_evidence_stay_distinct() {
+    // Genuine absence, an unknown Mission and a foreign Workspace are one answer.
+    let (store, accounts, _prepared, mission) = c4_admitted("c4-absent", 1);
+    let owner = c4_owner(&store, &accounts);
+    let absent = owner
+        .get_intent(mission.id)
+        .expect("C4.OWNER.ABSENT_SCOPE_AND_BROKEN_STAY_DISTINCT");
+    let unknown = owner
+        .get_intent(Uuid::new_v4())
+        .expect("C4.OWNER.ABSENT_SCOPE_AND_BROKEN_STAY_DISTINCT");
+    let foreign =
+        beacond::MissionCompletionCommandService::new(Arc::clone(&accounts), Uuid::new_v4())
+            .get_intent(mission.id)
+            .expect("C4.OWNER.ABSENT_SCOPE_AND_BROKEN_STAY_DISTINCT");
+    assert_eq!(
+        serde_json::to_string(&absent).unwrap(),
+        "null",
+        "C4.OWNER.ABSENT_SCOPE_AND_BROKEN_STAY_DISTINCT: absence is JSON null"
+    );
+    assert_eq!(
+        serde_json::to_string(&unknown).unwrap(),
+        serde_json::to_string(&foreign).unwrap(),
+        "C4.OWNER.ABSENT_SCOPE_AND_BROKEN_STAY_DISTINCT: scope must not be distinguishable"
+    );
+    assert_eq!(
+        serde_json::to_string(&absent).unwrap(),
+        serde_json::to_string(&foreign).unwrap(),
+        "C4.OWNER.ABSENT_SCOPE_AND_BROKEN_STAY_DISTINCT"
+    );
+
+    // Corrupt canonical bytes. INTENTIONAL, after a real owner mint; the immutability trigger is
+    // dropped and recreated BYTE-IDENTICALLY to 0026's own text.
+    let (store, accounts, mission) = c4_recorded("c4-corrupt");
+    let owner = c4_owner(&store, &accounts);
+    assert!(
+        owner
+            .get_intent(mission.id)
+            .expect("C4.OWNER.ABSENT_SCOPE_AND_BROKEN_STAY_DISTINCT control")
+            .is_some(),
+        "C4.OWNER.ABSENT_SCOPE_AND_BROKEN_STAY_DISTINCT: assert the control before corrupting it"
+    );
+    let connection = Connection::open(&store.path).unwrap();
+    connection
+        .execute_batch(
+            "DROP TRIGGER mission_completions_no_update;
+             UPDATE mission_completions SET canonical_bytes = zeroblob(64);",
+        )
+        .unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER mission_completions_no_update\nBEFORE UPDATE ON mission_completions\nBEGIN\n    SELECT RAISE(ABORT, 'Mission completions are immutable');\nEND;",
+        )
+        .unwrap();
+    drop(connection);
+    let refusal = owner
+        .get_intent(mission.id)
+        .expect_err("C4.OWNER.ABSENT_SCOPE_AND_BROKEN_STAY_DISTINCT: corruption is not absence");
+    assert!(
+        matches!(
+            refusal,
+            beacond::CompletionCommandError::Unavailable(
+                beacond::CompletionCommandUnavailable::Read(
+                    beacond::MissionCompletionReadError::Unavailable(
+                        beacond::CompletionUnavailable::CompletionUnverified(_)
+                    )
+                )
+            )
+        ),
+        "C4.OWNER.ABSENT_SCOPE_AND_BROKEN_STAY_DISTINCT: {refusal:?}"
+    );
+
+    // A surviving owner Event with no row is positive evidence, never null.
+    let (store, accounts, mission) = c4_recorded("c4-orphan");
+    let owner = c4_owner(&store, &accounts);
+    let connection = Connection::open(&store.path).unwrap();
+    connection
+        .execute_batch(
+            "DROP TRIGGER mission_completion_conditions_no_delete;
+             DROP TRIGGER mission_completions_no_delete;
+             DELETE FROM mission_completion_conditions;
+             DELETE FROM mission_completions;",
+        )
+        .unwrap();
+    drop(connection);
+    let refusal = owner
+        .get_intent(mission.id)
+        .expect_err("C4.OWNER.ABSENT_SCOPE_AND_BROKEN_STAY_DISTINCT: an orphan is not absence");
+    assert!(
+        matches!(
+            refusal,
+            beacond::CompletionCommandError::Unavailable(
+                beacond::CompletionCommandUnavailable::Read(
+                    beacond::MissionCompletionReadError::Unavailable(
+                        beacond::CompletionUnavailable::OrphanCompletedEvent
+                    )
+                )
+            )
+        ),
+        "C4.OWNER.ABSENT_SCOPE_AND_BROKEN_STAY_DISTINCT: {refusal:?}"
+    );
+
+    // The Event's byte claim, with its selectors untouched.
+    let (store, accounts, mission) = c4_recorded("c4-event-bytes");
+    let owner = c4_owner(&store, &accounts);
+    let connection = Connection::open(&store.path).unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE events SET payload_json =
+                   json_set(payload_json, '$.canonicalBytesBase64', 'AA==')
+                 WHERE workspace_id = ?1 AND kind = 'mission.completed'
+                   AND json_extract(payload_json, '$.missionId') = ?2",
+                rusqlite::params![store.workspace_id.to_string(), mission.id.to_string()],
+            )
+            .unwrap(),
+        1,
+        "C4.OWNER.ABSENT_SCOPE_AND_BROKEN_STAY_DISTINCT: exactly one Event is planted"
+    );
+    drop(connection);
+    let refusal = owner.get_intent(mission.id).expect_err(
+        "C4.OWNER.ABSENT_SCOPE_AND_BROKEN_STAY_DISTINCT: an Event byte mismatch is not absence",
+    );
+    assert!(
+        matches!(
+            refusal,
+            beacond::CompletionCommandError::Unavailable(
+                beacond::CompletionCommandUnavailable::Read(
+                    beacond::MissionCompletionReadError::Unavailable(
+                        beacond::CompletionUnavailable::CompletionUnverified(
+                            beacond::CompletionReadRefusal::BytesDisagree
+                        )
+                    )
+                )
+            )
+        ),
+        "C4.OWNER.ABSENT_SCOPE_AND_BROKEN_STAY_DISTINCT: {refusal:?}"
+    );
+}
+
+#[test]
+fn c4_assessment_is_explicit_and_the_roster_is_historical() {
+    let (store, accounts, prepared, mission) = c4_admitted("c4-roster", 2);
+    let owner = c4_owner(&store, &accounts);
+    // NOT the first member and NOT a sole member: the Operator chose this one.
+    let chosen = mission.members[1].clone();
+
+    // The chosen Resident is reconfigured AND suspended AFTER admission.
+    let previous = prepared
+        .configurations
+        .iter()
+        .find(|configuration| configuration.resident_id == chosen.resident_id)
+        .expect("C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER fixture");
+    let replacement = ResidentConfigurationService::new(Arc::clone(&accounts), store.workspace_id)
+        .configure(
+            chosen.resident_id,
+            Some(previous.id),
+            previous
+                .binding
+                .as_ref()
+                .expect("C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER fixture")
+                .activation_id,
+            vec![BeaconCapability::WorkCreateMission],
+        )
+        .expect("C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER: the Resident is reconfigured");
+    assert_ne!(
+        replacement.id, chosen.admission_configuration_id,
+        "C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER: the fixture must actually move"
+    );
+    let lifecycle = ResidentLifecycleService::new(Arc::clone(&accounts), store.workspace_id);
+    let current = lifecycle
+        .list()
+        .expect("C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER fixture")
+        .into_iter()
+        .find(|resident| resident.id == chosen.resident_id)
+        .expect("C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER fixture");
+    lifecycle
+        .suspend(chosen.resident_id, current.latest_decision_id)
+        .expect("C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER: and is then suspended");
+
+    let preview = owner
+        .preview(c4_request(&mission, chosen.resident_id))
+        .expect("C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER");
+    assert_eq!(
+        preview.accountable_resident_configuration_id, chosen.admission_configuration_id,
+        "C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER: the ADMISSION configuration"
+    );
+    assert_ne!(
+        preview.accountable_resident_configuration_id, replacement.id,
+        "C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER: never the current configuration"
+    );
+
+    let before = domain_row_counts(&store);
+
+    // A Resident who was never admitted to this Mission.
+    for refusal in [
+        owner
+            .preview(c4_request(&mission, Uuid::new_v4()))
+            .expect_err("C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER: preview"),
+        owner
+            .record(c4_request(&mission, Uuid::new_v4()), &preview.intent_sha256)
+            .expect_err("C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER: record"),
+    ] {
+        assert_eq!(
+            refusal.name(),
+            "ResidentNotInAdmissionRoster",
+            "C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER: {refusal:?}"
+        );
+    }
+
+    // A missing condition, and a duplicated one. Nothing is inferred and nothing defaults.
+    let mut missing = c4_request(&mission, chosen.resident_id);
+    missing.condition_results.pop();
+    let mut duplicated = c4_request(&mission, chosen.resident_id);
+    duplicated.condition_results[3].ordinal = 2;
+    for refusal in [
+        owner
+            .record(missing, &preview.intent_sha256)
+            .expect_err("C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER: a missing condition"),
+        owner.record(duplicated, &preview.intent_sha256).expect_err(
+            "C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER: a duplicated condition",
+        ),
+    ] {
+        assert_eq!(
+            refusal.name(),
+            "ConditionCoverageIncomplete",
+            "C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER: {refusal:?}"
+        );
+    }
+    assert_eq!(
+        domain_row_counts(&store),
+        before,
+        "C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER: a refused request wrote something"
+    );
+
+    // All four outcomes survive the round trip as chosen, against the HISTORICAL configuration.
+    owner
+        .record(
+            c4_request(&mission, chosen.resident_id),
+            &preview.intent_sha256,
+        )
+        .expect("C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER");
+    let view =
+        beacond::MissionCompletionReadService::new(Arc::clone(&accounts), store.workspace_id)
+            .get(mission.id)
+            .expect("C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER")
+            .expect("C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER");
+    assert_eq!(
+        view.condition_results
+            .iter()
+            .map(|result| result.outcome.as_str())
+            .collect::<Vec<_>>(),
+        ["met", "not_met", "not_assessed", "assessment_inconclusive"],
+        "C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER: four explicit human states"
+    );
+    assert_eq!(
+        view.disposition, "concluded",
+        "C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER"
+    );
+    assert_eq!(
+        view.accountable_resident_configuration_id, chosen.admission_configuration_id,
+        "C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER: the stored record kept the history"
+    );
+
+    // Both dispositions are reachable human choices.
+    let (other_store, other_accounts, _other_prepared, other_mission) =
+        c4_admitted("c4-abandoned", 1);
+    let other_owner = c4_owner(&other_store, &other_accounts);
+    let mut abandoned = c4_request(&other_mission, other_mission.members[0].resident_id);
+    abandoned.disposition = "abandoned".to_owned();
+    let token = other_owner
+        .preview(abandoned.clone())
+        .expect("C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER")
+        .intent_sha256;
+    other_owner
+        .record(abandoned, &token)
+        .expect("C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER");
+    assert_eq!(
+        beacond::MissionCompletionReadService::new(
+            Arc::clone(&other_accounts),
+            other_store.workspace_id
+        )
+        .get(other_mission.id)
+        .expect("C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER")
+        .expect("C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER")
+        .disposition,
+        "abandoned",
+        "C4.OWNER.EXPLICIT_ASSESSMENT_AND_HISTORICAL_ROSTER: abandoned is a recordable choice"
+    );
+}
+
+#[test]
+fn c4_the_owner_keeps_its_authentication_refusal() {
+    let (store, accounts, _prepared, mission) = c4_admitted("c4-auth", 1);
+    let owner = c4_owner(&store, &accounts);
+    let resident = mission.members[0].resident_id;
+    let token = owner
+        .preview(c4_request(&mission, resident))
+        .expect("C4.OWNER.AUTHENTICATION_RETAINED control")
+        .intent_sha256;
+    accounts.lock().expect("the session locks");
+
+    for refusal in [
+        owner
+            .preview(c4_request(&mission, resident))
+            .expect_err("C4.OWNER.AUTHENTICATION_RETAINED: preview"),
+        owner
+            .record(c4_request(&mission, resident), &token)
+            .expect_err("C4.OWNER.AUTHENTICATION_RETAINED: record"),
+        owner
+            .get_intent(mission.id)
+            .expect_err("C4.OWNER.AUTHENTICATION_RETAINED: get_intent"),
+    ] {
+        assert!(
+            matches!(
+                refusal,
+                beacond::CompletionCommandError::Account(
+                    beacond::OperatorAccountError::NotAuthenticated
+                )
+            ),
+            "C4.OWNER.AUTHENTICATION_RETAINED: a locked session keeps its own meaning: {refusal:?}"
+        );
+    }
+    assert_eq!(
+        domain_row_counts(&store),
+        (0, 0, domain_row_counts(&store).2),
+        "C4.OWNER.AUTHENTICATION_RETAINED: a locked session wrote a completion"
+    );
+}
