@@ -298,12 +298,32 @@ fn prepare_refusal_tag(error: &crate::PrepareRefusal) -> String {
     }
 }
 
+/// The identity labels this transport's own re-read supplies, and the whole outward vocabulary of
+/// `PostPreparationFault::Identity`.
+///
+/// `Identity.field` is a public `&'static str`, so the type permits a construction carrying any
+/// static text at all -- a path, a column name, a CR/LF. An outward line must never interpolate
+/// what it has not named, so the projection below is closed against THIS list and falls back to the
+/// bare arm. R42's static-field lesson: a `&'static str` is still caller-supplied.
+const IDENTITY_FIELD_LABELS: [&str; 5] = [
+    "manifestId",
+    "manifestDigest",
+    "candidateArtifactDigest",
+    "missionId",
+    "appendixRequest",
+];
+
 /// The post-commit fault's NAME. The phase is part of the name, because the phase is the fact that
 /// decides what a caller may conclude.
 fn post_preparation_tag(fault: &PostPreparationFault) -> String {
     match fault {
         PostPreparationFault::Read(refusal) => format!("Read.{}", prepare_refusal_tag(refusal)),
-        PostPreparationFault::Identity { field, .. } => format!("Identity.{field}"),
+        PostPreparationFault::Identity { field, .. } => {
+            match IDENTITY_FIELD_LABELS.iter().find(|named| *named == field) {
+                Some(named) => format!("Identity.{named}"),
+                None => "Identity".to_owned(),
+            }
+        }
     }
 }
 
@@ -4350,8 +4370,19 @@ mod tests {
         "Read" | PostPreparationFault::Read(refusal)
             => format!("Read.{}", expected_preparation(refusal).1),
             PostPreparationFault::Read(crate::PrepareRefusal::ClassificationAbsent), &[];
+        // Each label spelled out, and a closed fallback -- NOT a repeat of the production
+        // interpolation. The five are transcribed from the dispatch at `prepare_outcome_candidate`;
+        // anything else is the bare arm, so an unnamed static label can never reach a line.
+        // `the_identity_label_is_a_closed_vocabulary_on_the_line` drives every one of these.
         "Identity" | PostPreparationFault::Identity { field, .. }
-            => format!("Identity.{field}"),
+            => match *field {
+                "manifestId" => "Identity.manifestId",
+                "manifestDigest" => "Identity.manifestDigest",
+                "candidateArtifactDigest" => "Identity.candidateArtifactDigest",
+                "missionId" => "Identity.missionId",
+                "appendixRequest" => "Identity.appendixRequest",
+                _ => "Identity",
+            },
             PostPreparationFault::Identity {
                 field: "manifestId",
                 expected: payload_a(),
@@ -8646,6 +8677,124 @@ mod tests {
             .is_err(),
             "C6T.WIRE.THE_MISSION_IS_REQUIRED"
         );
+    }
+
+    /// A static label that no dispatch of this transport supplies, carrying CR/LF and a private-looking
+    /// path. If an outward line ever interpolates a label, this is what it would print.
+    const NEEDLE_LABEL: &str =
+        "R42S2_PRIVATE_A /home/example/private.txt\r\nsecond-line: manifestId";
+
+    /// The identity label is a CLOSED vocabulary on the caller line.
+    ///
+    /// `PostPreparationFault::Identity.field` is a PUBLIC `&'static str`, so nothing in the type stops
+    /// a future construction from carrying any static text at all. The outward line therefore must not
+    /// interpolate it blind: known labels are named, and anything else falls back to the bare arm.
+    /// R42's static-field lesson, applied to a field this slice introduced.
+    ///
+    /// Expectations here are written from the contract, not from the production guard: this test
+    /// holds its own list and its own fallback, so a change to either side has to disagree.
+    #[test]
+    fn the_identity_label_is_a_closed_vocabulary_on_the_line() {
+        // The five labels this transport's dispatch actually supplies, with whole expected lines
+        // written out: transcribed from the dispatch, never formatted from the label under test.
+        let known: [(&str, &str, &str); 5] = [
+            (
+                "manifestId",
+                "Identity.manifestId",
+                "Outcome preparation failed after the candidate was written: Identity.manifestId",
+            ),
+            (
+                "manifestDigest",
+                "Identity.manifestDigest",
+                "Outcome preparation failed after the candidate was written: Identity.manifestDigest",
+            ),
+            (
+                "candidateArtifactDigest",
+                "Identity.candidateArtifactDigest",
+                "Outcome preparation failed after the candidate was written: Identity.candidateArtifactDigest",
+            ),
+            (
+                "missionId",
+                "Identity.missionId",
+                "Outcome preparation failed after the candidate was written: Identity.missionId",
+            ),
+            (
+                "appendixRequest",
+                "Identity.appendixRequest",
+                "Outcome preparation failed after the candidate was written: Identity.appendixRequest",
+            ),
+        ];
+        for (label, expected_tag, expected_line) in known {
+            let fault = PostPreparationFault::Identity {
+                field: label,
+                expected: payload_a(),
+                observed: payload_b(),
+            };
+            assert_eq!(
+                expected_post_preparation(&fault),
+                ("Identity", expected_tag.to_owned()),
+                "C6T.PHASE.THE_EXPECTED_TABLE_NAMES_EVERY_LABEL: {label}"
+            );
+            let error = LocalTransportError::OutcomePreparationAfterCommit(fault);
+            assert_eq!(
+                error.to_string(),
+                expected_line,
+                "C6T.PHASE.IDENTITY_FIELD_IS_CLOSED: {label}"
+            );
+            assert_eq!(
+                envelope_of(error),
+                expected_envelope("outcome_preparation_unavailable", None),
+                "C6T.PHASE.THE_CODE_IS_UNCHANGED_BY_THE_LABEL: {label}"
+            );
+        }
+
+        // Anything else: the bare arm, with NO interpolation of the value.
+        for unknown in [NEEDLE_LABEL, "", "someOtherField", "Identity.manifestId"] {
+            let fault = PostPreparationFault::Identity {
+                field: unknown,
+                expected: payload_a(),
+                observed: payload_b(),
+            };
+            assert_eq!(
+                expected_post_preparation(&fault),
+                ("Identity", "Identity".to_owned()),
+                "C6T.PHASE.THE_EXPECTED_TABLE_CLOSES_AN_UNNAMED_LABEL: {unknown:?}"
+            );
+            let error = LocalTransportError::OutcomePreparationAfterCommit(fault);
+            let line = error.to_string();
+            assert_eq!(
+                line, "Outcome preparation failed after the candidate was written: Identity",
+                "C6T.PHASE.IDENTITY_FIELD_IS_CLOSED: {unknown:?}"
+            );
+            assert!(
+                !line.contains(NEEDLE_A) && !line.contains('\r') && !line.contains('\n'),
+                "C6T.PHASE.AN_UNKNOWN_LABEL_NEVER_REACHES_THE_LINE: {unknown:?}"
+            );
+            // The label and both compared values survive where R42 puts them.
+            let debug = format!("{error:?}");
+            assert!(
+                debug.contains(NEEDLE_A) && debug.contains(NEEDLE_B),
+                "C6T.PHASE.THE_COMPARED_VALUES_SURVIVE_IN_DEBUG: {unknown:?}"
+            );
+            // `Debug` escapes, so the label survives there as its escaped spelling -- which is
+            // exactly what a developer reading a log needs, and still not the outward line.
+            assert!(
+                debug.contains(&format!("{unknown:?}")),
+                "C6T.PHASE.THE_LABEL_SURVIVES_IN_DEBUG: {unknown:?}"
+            );
+            // And the wire code is unchanged: this is a LINE contract, not a code change.
+            assert_eq!(
+                envelope_of(LocalTransportError::OutcomePreparationAfterCommit(
+                    PostPreparationFault::Identity {
+                        field: unknown,
+                        expected: payload_a(),
+                        observed: payload_b(),
+                    }
+                )),
+                expected_envelope("outcome_preparation_unavailable", None),
+                "C6T.PHASE.THE_CODE_IS_UNCHANGED_BY_THE_LABEL: {unknown:?}"
+            );
+        }
     }
 
     /// Every account child, count for count: definite BEFORE the commit, never definite after it.
