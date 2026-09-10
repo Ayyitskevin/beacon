@@ -2552,8 +2552,7 @@ fn the_command_journey_retains_completion_and_candidate_bytes_across_server_rest
     // Each call drops its services/connections, leaving only owned values across the server stop.
     let read_owner_records = |phase| {
         let accounts = Arc::new(
-            OperatorAccountService::open(&runtime.store)
-                .expect("B14.JOURNEY.OWNER_STORE_OPENS"),
+            OperatorAccountService::open(&runtime.store).expect("B14.JOURNEY.OWNER_STORE_OPENS"),
         );
         accounts
             .authenticate_password(
@@ -2564,14 +2563,10 @@ fn the_command_journey_retains_completion_and_candidate_bytes_across_server_rest
         let outcomes = OutcomeService::new(accounts, fixture.workspace_id);
         let manifest = outcomes
             .manifest(&receipt_before.manifest_digest.value)
-            .unwrap_or_else(|error| {
-                panic!("B14.JOURNEY.OWNER_MANIFEST_READS: {phase}: {error}")
-            });
+            .unwrap_or_else(|error| panic!("B14.JOURNEY.OWNER_MANIFEST_READS: {phase}: {error}"));
         let candidate = outcomes
             .candidate(&receipt_before.manifest_digest.value)
-            .unwrap_or_else(|error| {
-                panic!("B14.JOURNEY.OWNER_CANDIDATE_READS: {phase}: {error}")
-            });
+            .unwrap_or_else(|error| panic!("B14.JOURNEY.OWNER_CANDIDATE_READS: {phase}: {error}"));
         let connection = rusqlite::Connection::open_with_flags(
             &runtime.store,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -2582,9 +2577,7 @@ fn the_command_journey_retains_completion_and_candidate_bytes_across_server_rest
             fixture.workspace_id,
             &manifest.manifest().completion.digest.value,
         )
-        .unwrap_or_else(|error| {
-            panic!("B14.JOURNEY.OWNER_COMPLETION_READS: {phase}: {error}")
-        });
+        .unwrap_or_else(|error| panic!("B14.JOURNEY.OWNER_COMPLETION_READS: {phase}: {error}"));
         (manifest, candidate, completion)
     };
     let (manifest_before, candidate_before, full_completion_before) =
@@ -2608,7 +2601,10 @@ fn the_command_journey_retains_completion_and_candidate_bytes_across_server_rest
     let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token)
         .expect("B14.JOURNEY.REOPENED_CLIENT_CONNECTS");
     assert_eq!(
-        client.status().expect("B14.JOURNEY.REOPENED_STATUS_READS").phase,
+        client
+            .status()
+            .expect("B14.JOURNEY.REOPENED_STATUS_READS")
+            .phase,
         OperatorSessionPhase::Locked,
         "B14.JOURNEY.REOPENED_SESSION_REQUIRES_SIGN_IN"
     );
