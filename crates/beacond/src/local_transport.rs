@@ -54,6 +54,10 @@ const MAX_COMPLETION_REQUEST_BYTES: u64 = 160 * 1024;
 /// null, so both keep the 64 KiB domain. Only the preview echoes the whole normalized request, plus
 /// its bindings and the Mission's declared condition texts.
 const MAX_COMPLETION_PREVIEW_RESPONSE_BYTES: u64 = 192 * 1024;
+/// The three domains are ordered, and a violation cannot compile: the old domain is the smallest, a
+/// completion request may exceed it, and only a preview response may exceed that.
+const _: () = assert!(MAX_MESSAGE_BYTES < MAX_COMPLETION_REQUEST_BYTES);
+const _: () = assert!(MAX_COMPLETION_REQUEST_BYTES < MAX_COMPLETION_PREVIEW_RESPONSE_BYTES);
 const SERVER_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
 // Exact activation review makes three independently bounded provider reads (tags, show, tags).
 // Keep transport overhead outside that six-second worst case so a provider error is returned as
@@ -230,6 +234,26 @@ fn invalid_draft_tag(reason: &crate::InvalidRepositoryDraft) -> &'static str {
         crate::InvalidRepositoryDraft::Source => "Source",
         crate::InvalidRepositoryDraft::BaseRevision => "BaseRevision",
         crate::InvalidRepositoryDraft::DeclaredChecks => "DeclaredChecks",
+    }
+}
+
+/// The completion command fault's NAME for a transport caller, with its account child named too.
+///
+/// `CompletionCommandError::name()` answers a bare `"Account"`, which is right for the owner's own
+/// closed vocabulary and wrong for this line: every other wrapper here -- `recent_receipt_tag`,
+/// `resource_discovery_tag`, `starter_organization_tag` -- names the account fault beneath it, and a
+/// transport line that says only "Account" cannot tell a reader whether the session was locked or
+/// the store was unreadable. Recursing HERE keeps the owner's vocabulary untouched (its file is not
+/// this slice's to edit) while this caller's line stays as specific as its siblings'.
+///
+/// `MalformedRequest` and `DuplicateSetEntry` carry the refused FIELD; it stays in `Debug` and
+/// `source` and never reaches this line.
+fn completion_command_tag(error: &crate::CompletionCommandError) -> String {
+    match error {
+        crate::CompletionCommandError::Account(cause) => {
+            format!("Account.{}", account_tag(cause))
+        }
+        named => named.name().to_owned(),
     }
 }
 
@@ -547,7 +571,7 @@ impl fmt::Display for LocalTransportError {
                 write!(
                     formatter,
                     "Mission completion command failed: {}",
-                    error.name()
+                    completion_command_tag(error)
                 )
             }
             Self::Mission(error) => {
@@ -2899,7 +2923,9 @@ fn wire_error_from_completion_command(error: crate::CompletionCommandError) -> W
         crate::CompletionCommandError::ConditionCoverageIncomplete => {
             LocalErrorCode::CompletionConditionCoverageIncomplete
         }
-        crate::CompletionCommandError::SupportOverLimit => LocalErrorCode::CompletionSupportOverLimit,
+        crate::CompletionCommandError::SupportOverLimit => {
+            LocalErrorCode::CompletionSupportOverLimit
+        }
         crate::CompletionCommandError::TextOverLimit => LocalErrorCode::CompletionTextOverLimit,
         crate::CompletionCommandError::SpendReasonRequired => {
             LocalErrorCode::CompletionSpendReasonRequired
@@ -2910,7 +2936,9 @@ fn wire_error_from_completion_command(error: crate::CompletionCommandError) -> W
         }
         // The same code C3's read already uses, with C3's exact sentence: an unverifiable Mission
         // completion is one condition, and the caller knows which operation it asked for.
-        crate::CompletionCommandError::Unavailable(_) => LocalErrorCode::MissionCompletionUnavailable,
+        crate::CompletionCommandError::Unavailable(_) => {
+            LocalErrorCode::MissionCompletionUnavailable
+        }
     };
     WireError {
         code,
@@ -5382,9 +5410,7 @@ mod tests {
                 "R42S2.TRANSPORT.SampleProject" => sample_cases(&mut cases),
                 "R42S2.TRANSPORT.Team" => team_cases(&mut cases),
                 "R42S2.TRANSPORT.Mission" => mission_cases(&mut cases),
-                "R42S2.TRANSPORT.MissionCompletionCommand" => {
-                    completion_command_cases(&mut cases)
-                }
+                "R42S2.TRANSPORT.MissionCompletionCommand" => completion_command_cases(&mut cases),
                 "R42S2.TRANSPORT.ResourceDiscovery" => discovery_cases(&mut cases),
                 "R42S2.TRANSPORT.LocalModelActivation" => activation_cases(&mut cases),
                 "R42S2.TRANSPORT.Supervisor" => {
@@ -5548,18 +5574,21 @@ mod tests {
             71,
             "R42S2.TRANSPORT.CARDINALITY.LocalErrorCode"
         );
+        // 23 before this slice, plus the `MissionCompletionCommand` carrier.
         assert_eq!(
             transport_rows().len(),
-            23,
+            24,
             "R42S2.TRANSPORT.CARDINALITY.ROOT"
         );
         // 22 roots expanded: 62 Remote codes, 72 Supervisor roots PLUS every child of all 26
         // cause-bearing Supervisor parents (including the two nested classification
         // vocabularies), 18 account faults at each of 14 wrappers, the three draft reasons, both
         // charter-revision pairs, and slice 1's 83-case Outcome tree.
-        // 878 before this slice. The completion-command carrier adds its ten direct arms and
-        // expands its `Account` arm over all eighteen account rows: 878 + 10 + 18 = 906.
-        assert_eq!(cases.len(), 906, "R42S2.TRANSPORT.CARDINALITY.CASES");
+        // 878 before this slice, and my first arithmetic here was wrong by exactly the eight new
+        // wire codes -- the `Remote` branch expands `code_rows()`, so adding a code adds a case too.
+        // 878 + 8 (new Remote codes) + 10 (the carrier's direct arms) + 18 (its `Account` arm over
+        // every account row) = 914.
+        assert_eq!(cases.len(), 914, "R42S2.TRANSPORT.CARDINALITY.CASES");
         assert_eq!(
             supervisor_rows().len(),
             75,
@@ -6230,10 +6259,7 @@ mod tests {
         // The completion COMMAND family. Transcribed from the contract, one row per owner arm:
         // malformed grammar and duplicated set entries are `completion_invalid_details`, never
         // "text over limit", and an unverifiable completion reuses C3's existing code.
-        (
-            "MissionCompletionCommand.Account",
-            WireExpectation::Account,
-        ),
+        ("MissionCompletionCommand.Account", WireExpectation::Account),
         (
             "MissionCompletionCommand.IntentChanged",
             WireExpectation::Code("completion_intent_changed"),
@@ -6741,7 +6767,8 @@ mod tests {
                 checked += 1;
             }
         }
-        assert_eq!(checked, 135, "R42S2.WIRE.CARDINALITY.DOMAIN_ARMS");
+        // 135 before this slice, plus the completion family's eleven owner arms.
+        assert_eq!(checked, 146, "R42S2.WIRE.CARDINALITY.DOMAIN_ARMS");
 
         // All 18 account faults at the root...
         for (variant, account, _) in account_rows() {
@@ -7128,7 +7155,10 @@ mod tests {
         // never reach it.
         let held = ["PreviewMissionCompletion", "RecordMissionCompletion"];
         let predicate = include_str!("local_transport.rs")
-            .split(concat!("fn accepts_completion", "_sized_request(command: &LocalCommand) -> bool {"))
+            .split(concat!(
+                "fn accepts_completion",
+                "_sized_request(command: &LocalCommand) -> bool {"
+            ))
             .nth(1)
             .expect("the family predicate is a function in this file")
             .split("\n}")
@@ -7210,10 +7240,17 @@ mod tests {
     fn every_command_states_its_response_domain() {
         let source = include_str!("local_transport.rs");
         let arms = wire_command_arms();
-        assert!(arms.len() >= 55, "C4.RESPONSE.TABLE.ARMS_FOUND: {}", arms.len());
+        assert!(
+            arms.len() >= 55,
+            "C4.RESPONSE.TABLE.ARMS_FOUND: {}",
+            arms.len()
+        );
 
         let table = source
-            .split(concat!("fn response", "_max(command: &LocalCommand) -> u64 {"))
+            .split(concat!(
+                "fn response",
+                "_max(command: &LocalCommand) -> u64 {"
+            ))
             .nth(1)
             .expect("the response table is a function in this file")
             .split("\n}")
@@ -7235,7 +7272,9 @@ mod tests {
             "C4.RESPONSE.TABLE.ONLY_PREVIEW_IS_LARGER"
         );
         assert_eq!(
-            table.matches(concat!("MAX_COMPLETION_PREVIEW", "_RESPONSE_BYTES")).count(),
+            table
+                .matches(concat!("MAX_COMPLETION_PREVIEW", "_RESPONSE_BYTES"))
+                .count(),
             1,
             "C4.RESPONSE.TABLE.LARGER_CEILING_APPEARS_ONCE"
         );
@@ -7272,7 +7311,10 @@ mod tests {
         const PREVIEW_RESPONSE_ENVELOPE_OVERHEAD: u64 = 85;
 
         let request_upper = 2 * OWNER_CANONICAL_CAP + K_MAX_RESIDUAL + REQUEST_ENVELOPE_OVERHEAD;
-        assert_eq!(request_upper, 147_921, "C4.BOUND.REQUEST_UPPER_IS_UNCHANGED");
+        assert_eq!(
+            request_upper, 147_921,
+            "C4.BOUND.REQUEST_UPPER_IS_UNCHANGED"
+        );
         assert!(
             request_upper <= MAX_COMPLETION_REQUEST_BYTES,
             "C4.BOUND.REQUEST_CEILING_COVERS_THE_GRAMMAR"
@@ -7282,7 +7324,10 @@ mod tests {
             + K_MAX_RESIDUAL
             + PREVIEW_RESPONSE_EXTRA
             + PREVIEW_RESPONSE_ENVELOPE_OVERHEAD;
-        assert_eq!(preview_upper, 172_241, "C4.BOUND.PREVIEW_UPPER_IS_UNCHANGED");
+        assert_eq!(
+            preview_upper, 172_241,
+            "C4.BOUND.PREVIEW_UPPER_IS_UNCHANGED"
+        );
         assert!(
             preview_upper <= MAX_COMPLETION_PREVIEW_RESPONSE_BYTES,
             "C4.BOUND.PREVIEW_CEILING_COVERS_THE_GRAMMAR"
@@ -7299,12 +7344,13 @@ mod tests {
             "C4.BOUND.PREVIEW_CEILING_IS_EXACTLY_192_KIB"
         );
 
-        // The old domain is untouched, and the new ones are strictly above it.
-        assert_eq!(MAX_MESSAGE_BYTES, 64 * 1024, "C4.BOUND.OLD_DOMAIN_UNCHANGED");
-        assert!(
-            MAX_COMPLETION_REQUEST_BYTES > MAX_MESSAGE_BYTES
-                && MAX_COMPLETION_PREVIEW_RESPONSE_BYTES > MAX_COMPLETION_REQUEST_BYTES,
-            "C4.BOUND.CEILINGS_ARE_ORDERED"
+        // The old domain is untouched. The ORDERING of the three lives beside the constants as a
+        // compile-time invariant: clippy is right that asserting a constant at runtime proves nothing
+        // later, and a `const` assertion refuses to BUILD instead of refusing to pass.
+        assert_eq!(
+            MAX_MESSAGE_BYTES,
+            64 * 1024,
+            "C4.BOUND.OLD_DOMAIN_UNCHANGED"
         );
     }
 
@@ -7378,7 +7424,7 @@ mod tests {
 
         let (server, _socket_path, _token_path, _scratch) = completion_fixture("malformed");
 
-        let mut refuse = |length: usize| {
+        let refuse = |length: usize| {
             let (mut ours, mut theirs) = std::os::unix::net::UnixStream::pair().unwrap();
             let body = vec![b'{'; length];
             thread::spawn(move || {
@@ -7480,9 +7526,8 @@ mod tests {
     /// unknown field, no unknown command.
     #[test]
     fn the_completion_wire_vocabulary_is_strict() {
-        let with_command = |command: serde_json::Value| {
-            serde_json::from_value::<LocalCommand>(command)
-        };
+        let with_command =
+            |command: serde_json::Value| serde_json::from_value::<LocalCommand>(command);
 
         let mut request = serde_json::json!({
             "missionId": "11111111-1111-4111-8111-111111111111",
@@ -7592,7 +7637,9 @@ mod tests {
         let call_sites: Vec<&str> = source
             .lines()
             .filter(|line| line.contains(needle))
-            .filter(|line| !line.trim_start().starts_with("//") && !line.trim_start().starts_with("///"))
+            .filter(|line| {
+                !line.trim_start().starts_with("//") && !line.trim_start().starts_with("///")
+            })
             .collect();
         // One definition, one call site. Anything else means a second command took the slow budget.
         assert_eq!(

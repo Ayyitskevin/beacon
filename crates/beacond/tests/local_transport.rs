@@ -14,17 +14,17 @@ use std::time::Duration;
 
 use beacond::{
     AccessOrigin, AutonomyProfile, BeaconCapability, BudgetBoundary, CompletionPreview,
-    DeclaredCheck, MissionCompletionCommandService, OperatorAccountService,
-    DiscoveryStatus, LiveDataEncryption, LocalErrorCode, LocalModelActivationState,
+    DeclaredCheck, DiscoveryStatus, LiveDataEncryption, LocalErrorCode, LocalModelActivationState,
     LocalModelEndpoint, LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer,
-    LocalTransportError, MAX_RECENT_RUN_WINDOW, MissionAdmissionActor, MissionDraft,
-    MissionLifecycle, MissionMemberDraft, ModelActivation, OperatorSessionPhase,
-    PlatformMonitorState, PolicyAuthor, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft,
-    ProviderFeature, RepositoryAuthor, RepositoryDraft, RepositorySourceKind,
-    ResidentConfigurationState, ResidentLifecycle, SecretString, StarterOrganizationDecision,
-    StarterResidentDraft, StarterRole, TeamDraft, TeamFormationActor, TeamIneligibilityReason,
-    TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy,
-    TeamMemberDraft, TrackRecordEvidenceKind, TrackRecordRequirement, initialize_local_auth_token,
+    LocalTransportError, MAX_RECENT_RUN_WINDOW, MissionAdmissionActor,
+    MissionCompletionCommandService, MissionDraft, MissionLifecycle, MissionMemberDraft,
+    ModelActivation, OperatorAccountService, OperatorSessionPhase, PlatformMonitorState,
+    PolicyAuthor, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProviderFeature,
+    RepositoryAuthor, RepositoryDraft, RepositorySourceKind, ResidentConfigurationState,
+    ResidentLifecycle, SecretString, StarterOrganizationDecision, StarterResidentDraft,
+    StarterRole, TeamDraft, TeamFormationActor, TeamIneligibilityReason, TeamLeadAmbiguityRule,
+    TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft,
+    TrackRecordEvidenceKind, TrackRecordRequirement, initialize_local_auth_token,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -1115,10 +1115,8 @@ fn the_completion_commands_round_trip_a_wide_record_over_the_real_socket() {
             AccessOrigin::SameMachine,
         )
         .unwrap();
-    let owner = MissionCompletionCommandService::new(
-        Arc::clone(&direct_accounts),
-        project.workspace_id,
-    );
+    let owner =
+        MissionCompletionCommandService::new(Arc::clone(&direct_accounts), project.workspace_id);
     let direct_preview: CompletionPreview = owner
         .preview(request.clone())
         .expect("C4.PREMISE.OWNER_ACCEPTS_THE_WIDE_REQUEST");
@@ -1162,10 +1160,14 @@ fn the_completion_commands_round_trip_a_wide_record_over_the_real_socket() {
     );
 
     let mut raw = UnixStream::connect(&runtime.socket).unwrap();
-    raw.write_all(&request_bytes).unwrap();
+    raw.write_all(&request_bytes)
+        .unwrap_or_else(|error| panic!("C4.RAW.SUPERVISOR_READS_THE_WIDE_BODY: write {error}"));
     raw.shutdown(std::net::Shutdown::Write).unwrap();
     let mut answer = Vec::new();
-    raw.read_to_end(&mut answer).unwrap();
+    // Named, because a refused oversize body arrives here as a RESET rather than as a refusal
+    // envelope: an anonymous `unwrap` would report a ceiling regression as an I/O accident.
+    raw.read_to_end(&mut answer)
+        .unwrap_or_else(|error| panic!("C4.RAW.SUPERVISOR_READS_THE_WIDE_BODY: read {error}"));
     assert!(
         answer.len() > 65_536,
         "C4.RAW.RESPONSE_IS_OVER_THE_OLD_FRAME: {} bytes",
@@ -1226,10 +1228,7 @@ fn the_completion_commands_round_trip_a_wide_record_over_the_real_socket() {
     }
 
     let preview = client.preview_mission_completion(request.clone()).unwrap();
-    assert_eq!(
-        preview, direct_preview,
-        "C4.WIDE.CLIENT_AND_OWNER_AGREE"
-    );
+    assert_eq!(preview, direct_preview, "C4.WIDE.CLIENT_AND_OWNER_AGREE");
 
     // Bindings the client never sent and cannot forge.
     assert_eq!(preview.actor, "operator", "C4.WIDE.ACTOR");
@@ -1238,7 +1237,10 @@ fn the_completion_commands_round_trip_a_wide_record_over_the_real_socket() {
         preview.accountable_resident_configuration_id, configuration.id,
         "C4.WIDE.HISTORICAL_CONFIGURATION"
     );
-    assert_eq!(preview.conditions, conditions, "C4.WIDE.DECLARED_CONDITIONS");
+    assert_eq!(
+        preview.conditions, conditions,
+        "C4.WIDE.DECLARED_CONDITIONS"
+    );
     assert_eq!(preview.intent_sha256.len(), 64, "C4.WIDE.TOKEN_IS_HEX64");
 
     // Nothing dropped and nothing truncated. Scalar fields must be identical; the two SET fields are
@@ -1249,14 +1251,20 @@ fn the_completion_commands_round_trip_a_wide_record_over_the_real_socket() {
         echoed.accountable_resident_id, request.accountable_resident_id,
         "C4.WIDE.ACCOUNTABLE_RESIDENT"
     );
-    assert_eq!(echoed.disposition, request.disposition, "C4.WIDE.DISPOSITION");
+    assert_eq!(
+        echoed.disposition, request.disposition,
+        "C4.WIDE.DISPOSITION"
+    );
     assert_eq!(echoed.summary, request.summary, "C4.WIDE.SUMMARY");
     assert_eq!(echoed.spend, request.spend, "C4.WIDE.SPEND");
     assert_eq!(
         echoed.unfinished_work, request.unfinished_work,
         "C4.WIDE.UNFINISHED_WORK"
     );
-    assert_eq!(echoed.uncertainty, request.uncertainty, "C4.WIDE.UNCERTAINTY");
+    assert_eq!(
+        echoed.uncertainty, request.uncertainty,
+        "C4.WIDE.UNCERTAINTY"
+    );
     assert_eq!(
         echoed.condition_results.len(),
         request.condition_results.len(),
@@ -1267,8 +1275,14 @@ fn the_completion_commands_round_trip_a_wide_record_over_the_real_socket() {
         .iter()
         .zip(request.condition_results.iter())
     {
-        assert_eq!(echoed_result.ordinal, sent_result.ordinal, "C4.WIDE.ORDINAL");
-        assert_eq!(echoed_result.outcome, sent_result.outcome, "C4.WIDE.OUTCOME");
+        assert_eq!(
+            echoed_result.ordinal, sent_result.ordinal,
+            "C4.WIDE.ORDINAL"
+        );
+        assert_eq!(
+            echoed_result.outcome, sent_result.outcome,
+            "C4.WIDE.OUTCOME"
+        );
         assert_eq!(echoed_result.note, sent_result.note, "C4.WIDE.NOTE");
         assert_eq!(
             echoed_result.support.len(),
@@ -1298,7 +1312,10 @@ fn the_completion_commands_round_trip_a_wide_record_over_the_real_socket() {
     // what is sent.
     let acknowledgement = client
         .record_mission_completion(echoed.clone(), preview.intent_sha256.clone())
-        .unwrap();
+        .unwrap_or_else(|error| {
+            // `Display` is the closed transport line; the request and the token never reach it.
+            panic!("C4.WIDE.RECORD_ACCEPTS_THE_REVIEWED_TOKEN: {error}")
+        });
     assert_eq!(
         acknowledgement.intent_sha256, preview.intent_sha256,
         "C4.WIDE.ACKNOWLEDGEMENT_IS_THE_REVIEWED_TOKEN"
