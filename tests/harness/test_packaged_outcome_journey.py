@@ -37,6 +37,10 @@ PROJECT = "33333333-3333-4333-8333-333333333333"
 TEAM = "44444444-4444-4444-8444-444444444444"
 MISSION = "55555555-5555-4555-8555-555555555555"
 MANIFEST = "66666666-6666-4666-8666-666666666666"
+# Two DIFFERENT owners' identities. `activate_resident` mints a ResidentLifecycleDecision; the
+# activation id comes from `activate_local_model`. Configuration needs the second, never the first.
+LIFECYCLE_DECISION = "77777777-7777-4777-8777-777777777777"
+ACTIVATION = "88888888-8888-4888-8888-888888888888"
 
 CONTENT = b"# Outcome candidate\n\nThe disposable journey Mission concluded.\n"
 CONTENT_VALUE = hashlib.sha256(CONTENT).hexdigest()
@@ -88,7 +92,30 @@ RESULTS: dict[str, dict] = {
             {"id": REVIEWER, "role": "reviewer", "lifecycle": "inactive", "latestDecisionId": None},
         ]
     },
-    "activate_resident": {"resident": {"lifecycle": "active", "latestDecisionId": "decision-1"}},
+    "discover_local_models": {
+        "report": {
+            "status": "reachable",
+            "endpoint": "127.0.0.1:11434",
+            "models": [{"name": "qwen3.8:27b", "digest": "sha256:" + "0" * 64}],
+        }
+    },
+    "inspect_local_model": {
+        "review": {
+            "binding": {
+                "provider": "ollama",
+                "endpoint": "127.0.0.1:11434",
+                "modelName": "qwen3.8:27b",
+                "modelDigest": "sha256:" + "0" * 64,
+                "inspectionDigest": "sha256:" + "1" * 64,
+            },
+            "providerFeatures": ["completion"],
+            "unrecognizedFeatures": [],
+        }
+    },
+    "activate_local_model": {"activation": {"id": ACTIVATION, "state": "active"}},
+    "activate_resident": {
+        "resident": {"lifecycle": "active", "latestDecisionId": LIFECYCLE_DECISION}
+    },
     "configure_resident": {"configuration": {"id": "configuration-1"}},
     "sample_project_status": {"status": {"installed": False}},
     "install_sample_project": {"result": {"outcome": "installed"}},
@@ -143,7 +170,7 @@ class FakeDriver:
 
 def _run(tmp_path: Path, driver: FakeDriver) -> tuple[int, dict]:
     evidence = tmp_path / "evidence"
-    evidence.mkdir()
+    evidence.mkdir(parents=True)
     status = journey.run_journey(driver, evidence, "/nowhere/Beacon.AppImage")
     return status, json.loads((evidence / "summary.json").read_text())
 
@@ -239,6 +266,9 @@ def test_the_journey_walks_the_f5_order(tmp_path: Path) -> None:
         "starter_organization",
         "accept_starter_organization",
         "residents",
+        "discover_local_models",
+        "inspect_local_model",
+        "activate_local_model",
         "activate_resident",
         "configure_resident",
         "activate_resident",
@@ -420,6 +450,77 @@ def test_the_same_resident_cannot_be_both_author_and_reviewer() -> None:
         assert "the same Resident" in refusal.detail
     else:  # pragma: no cover - the assertion above is the test
         raise AssertionError("one Resident was accepted as both author and reviewer")
+
+
+def test_step_two_uses_the_activation_uuid_not_the_lifecycle_decision(tmp_path: Path) -> None:
+    """blue's P1. The two ids come from different owners and must never be the same value."""
+
+    def lifecycle_id_as_the_activation(result: dict) -> dict:
+        result["activation"]["id"] = LIFECYCLE_DECISION
+        return result
+
+    status, summary = _run(
+        tmp_path / "fault",
+        FakeDriver(overrides={"activate_local_model": lifecycle_id_as_the_activation}),
+    )
+
+    assert status == 1
+    row = summary["steps"]["starter_organization_with_author_and_reviewer"]
+    assert row["status"] == "broken"
+    assert "activation_id is the Resident lifecycle decision id" in row["detail"]
+    assert LIFECYCLE_DECISION in row["detail"]
+
+    # The CONTROL leg, in the same bar. Without it this asserts only that something refused, and a
+    # production change that sends the lifecycle id would satisfy it for the wrong reason -- which
+    # is what the first version of this test did, until the mutant showed it passing.
+    control, _ = _run(tmp_path / "control", FakeDriver())
+    assert control == 0
+
+
+def test_step_two_configures_against_an_absent_configuration_predecessor(tmp_path: Path) -> None:
+    """`expected_decision_id` is the latest CONFIGURATION predecessor, absent on a new Resident."""
+    driver = FakeDriver()
+
+    status, _ = _run(tmp_path, driver)
+
+    assert status == 0
+    configures = [
+        params
+        for command, params in zip(driver.asked, driver.params, strict=True)
+        if command == "configure_resident"
+    ]
+    assert len(configures) == 2
+    for params in configures:
+        assert params["expected_decision_id"] is None
+        assert params["activation_id"] == ACTIVATION
+
+
+def test_an_ambiguous_local_model_host_is_refused_not_guessed() -> None:
+    two = [{"name": "a", "digest": "sha256:0"}, {"name": "b", "digest": "sha256:1"}]
+
+    try:
+        journey.select_local_model(two, None)
+    except journey.JourneyRefusal as refusal:
+        assert refusal.status == "absent"
+        assert "offers 2, not one" in refusal.detail
+    else:  # pragma: no cover - the assertion above is the test
+        raise AssertionError("an ambiguous host was silently resolved")
+
+    assert journey.select_local_model(two, "b")["name"] == "b"
+
+
+def test_command_fields_are_sent_in_snake_case(tmp_path: Path) -> None:
+    """`LocalCommand` has no `rename_all_fields`, so its own fields stay snake_case on the wire."""
+    driver = FakeDriver()
+
+    _run(tmp_path, driver)
+
+    sent = {key for params in driver.params for key in params}
+    assert sent, "the journey sent no parameters at all"
+    # A camelCase key differs from its own lowercase; a snake_case one does not.
+    assert [key for key in sorted(sent) if key != key.lower()] == []
+    for expected in ("model_name", "expected_digest", "activation_id", "expected_decision_id"):
+        assert expected in sent, expected
 
 
 def test_a_roster_with_no_reviewer_is_absent_not_broken() -> None:
