@@ -2571,7 +2571,9 @@ fn an_absent_manifest_and_a_foreign_manifest_answer_identical_bytes() {
             rusqlite::params![real_digest],
             |row| row.get(0),
         )
-        .unwrap_or_else(|error| panic!("C7T.OPACITY.THE_REAL_MANIFEST_ROW_IS_STILL_PRESENT: {error}"));
+        .unwrap_or_else(|error| {
+            panic!("C7T.OPACITY.THE_REAL_MANIFEST_ROW_IS_STILL_PRESENT: {error}")
+        });
     drop(connection);
     assert_eq!(
         owner,
@@ -2619,12 +2621,32 @@ fn an_absent_manifest_and_a_foreign_manifest_answer_identical_bytes() {
     thread.join().unwrap().unwrap();
 }
 
-/// A candidate Artifact missing BEHIND a verified manifest is unavailable, never absence.
+/// A candidate Artifact that has gone missing is `unavailable`, never absence -- and the stage the
+/// fault ACTUALLY arises at, measured rather than assumed.
 ///
-/// This is the distinction the phase rule turns on. The manifest is held, so "no such candidate" would
-/// be a claim this transport cannot make: the owner answers `Artifact(NotFound)` from its SECOND read
-/// (`outcome_store.rs:1100`), and a store disagreeing with itself between two independent reads is not
-/// an absence a caller may act on.
+/// This bar first claimed the fault was `candidate()`'s `Artifact(NotFound)` at the second read. It is
+/// not, and root's narrowing is what exposed it: calling the owner's own verifier after the deletion
+/// returns `ManifestStoreRefusal::CandidateNotAccounted`, so the manifest **stops verifying at the
+/// FIRST read**. A manifest's candidate Artifact IS its accounting -- there is no `outcome.prepared`
+/// Event, so the Artifact is the manifest's position in the log (R18.7,
+/// `outcome_store.rs:146-152`) -- and removing it makes the manifest unaccounted, not merely
+/// candidate-less.
+///
+/// **Consequence, stated rather than papered over:** a genuine stage-2 `Artifact(NotFound)` is
+/// structurally unreachable while the manifest verifies, because the state it needs -- a verifying
+/// manifest whose Artifact is absent -- is the state the owner refuses to call verified. The stage-2
+/// vocabulary is therefore witnessed by the labelled mapper bar
+/// `the_candidate_read_stages_map_to_their_own_answers`, and reported NOT PROBED live with this
+/// reason.
+///
+/// The same accounting is why a live non-UTF-8 candidate is unreachable too: `candidate_proves_manifest`
+/// decodes the content and returns false when it is not UTF-8 (`outcome_store.rs:529-537`), and
+/// `verified_manifest_within` calls it -- so such a store fails the FIRST read as well. The
+/// transport's own decode check is defensive, and no bar here claims to have reached it.
+///
+/// What this bar DOES prove, and it is the behaviour that matters to a caller: a first-read refusal
+/// that is not `Absent`/`CrossWorkspace` answers `outcome_candidate_unavailable` and never
+/// `outcome_candidate_not_found`, so a broken record is never reported as an absent one.
 ///
 /// THE CORRUPTION FIXTURE, labelled and bounded. The candidate is minted by the real owner through
 /// public commands first; only then is one row removed. `artifacts` carries an unconditional
@@ -2635,7 +2657,7 @@ fn an_absent_manifest_and_a_foreign_manifest_answer_identical_bytes() {
 /// failpoint is added, and the owner happy path above is untouched: this store is already corrupt by
 /// the time the read runs, which is the whole point.
 #[test]
-fn a_missing_candidate_behind_a_verified_manifest_is_unavailable() {
+fn a_missing_candidate_artifact_is_unavailable_and_never_absence() {
     let runtime = TestRuntime::new("c7broken");
     let address = serve_ollama_inspections(2);
     let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
@@ -2681,7 +2703,9 @@ fn a_missing_candidate_behind_a_verified_manifest_is_unavailable() {
     // other connection is affected.
     connection
         .execute_batch("PRAGMA foreign_keys = OFF")
-        .unwrap_or_else(|error| panic!("C7T.BROKEN.THE_FIXTURE_SUSPENDS_ITS_OWN_FK_CHECK: {error}"));
+        .unwrap_or_else(|error| {
+            panic!("C7T.BROKEN.THE_FIXTURE_SUSPENDS_ITS_OWN_FK_CHECK: {error}")
+        });
     let removed = connection
         .execute(
             "DELETE FROM artifacts WHERE digest_value = ?1",
@@ -2700,6 +2724,33 @@ fn a_missing_candidate_behind_a_verified_manifest_is_unavailable() {
         )
         .unwrap_or_else(|error| panic!("C7T.BROKEN.THE_GUARD_IS_RESTORED: {error}"));
     drop(connection);
+
+    // WHICH STAGE, measured through the owner's own verifier -- the same `verified_manifest_within`
+    // that `OutcomeService::manifest` calls. A row count is presence, not verification.
+    let verifying = rusqlite::Connection::open(&runtime.store).unwrap();
+    let refusal = beacond::verified_manifest_within(
+        &verifying,
+        prepared_mission.workspace_id,
+        &receipt.manifest_digest.value,
+    )
+    .expect_err("C7T.BROKEN.THE_MANIFEST_NO_LONGER_VERIFIES");
+    drop(verifying);
+    assert!(
+        matches!(
+            refusal,
+            beacond::ManifestStoreRefusal::CandidateNotAccounted { .. }
+        ),
+        "C7T.BROKEN.THE_FAULT_IS_THE_UNACCOUNTED_CANDIDATE_AT_THE_FIRST_READ: {refusal:?}"
+    );
+    // And it is emphatically NOT the absence vocabulary, which is why the wire answer below is
+    // unavailable rather than not-found.
+    assert!(
+        !matches!(
+            refusal,
+            beacond::ManifestStoreRefusal::Absent | beacond::ManifestStoreRefusal::CrossWorkspace
+        ),
+        "C7T.BROKEN.A_BROKEN_RECORD_IS_NOT_AN_ABSENT_ONE: {refusal:?}"
+    );
 
     let token = fs::read_to_string(&runtime.token).unwrap();
     let body = serde_json::to_vec(&json!({
@@ -2740,10 +2791,7 @@ fn a_missing_candidate_behind_a_verified_manifest_is_unavailable() {
         )
         .unwrap();
     drop(still_there);
-    assert_eq!(
-        manifests, 1,
-        "C7T.BROKEN.THE_MANIFEST_IS_STILL_PRESENT_AND_VERIFIED"
-    );
+    assert_eq!(manifests, 1, "C7T.BROKEN.THE_MANIFEST_ROW_IS_STILL_PRESENT");
     // And the refused read wrote nothing of its own: only the fixture's one deletion moved.
     let after = domain_row_counts(&runtime.store);
     assert_eq!(
@@ -2867,7 +2915,9 @@ fn the_candidate_read_request_is_one_required_field() {
             "C7T.REQUEST.THE_DIGEST_ENVELOPE_IS_WHOLE: {field}"
         );
         assert_eq!(
-            envelope.get("algorithm").and_then(serde_json::Value::as_str),
+            envelope
+                .get("algorithm")
+                .and_then(serde_json::Value::as_str),
             Some("sha256"),
             "C7T.REQUEST.THE_ALGORITHM_IS_NAMED: {field}"
         );
@@ -2883,12 +2933,17 @@ fn the_candidate_read_request_is_one_required_field() {
             .and_then(serde_json::Value::as_str)
             .unwrap();
         assert!(
-            value.len() == 64 && value.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            value.len() == 64
+                && value
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
             "C7T.REQUEST.THE_VALUE_IS_LOWER_HEX_64: {field}"
         );
     }
     assert_eq!(
-        document.get("mediaType").and_then(serde_json::Value::as_str),
+        document
+            .get("mediaType")
+            .and_then(serde_json::Value::as_str),
         Some("text/markdown; charset=utf-8"),
         "C7T.REQUEST.THE_MEDIA_TYPE_IS_FIXED"
     );
@@ -2991,9 +3046,12 @@ fn a_document_response_may_exceed_the_default_frame_and_its_ceiling_is_finite() 
         .unwrap()
     }
 
-    // 70 KiB of content -> ~93 KiB on the wire: past the 64 KiB default, well inside the read's own
-    // ceiling. The lengths are measured and asserted, not assumed.
-    let accepted = document_reply(70 * 1024);
+    // The LARGEST accepted document: the owner's whole 1 MiB content ceiling, crossing a real socket.
+    //
+    // SYNTHETIC, and labelled: this body is 1,048,576 bytes written by this test, NOT a candidate any
+    // renderer produced. No such fixture exists and none is claimed. What it proves is that the real
+    // client accepts the real maximum over the real transport.
+    let accepted = document_reply(1_048_576);
     assert!(
         accepted.len() > 64 * 1024 && accepted.len() < 1_403_904,
         "C7T.FRAME.THE_ACCEPTED_FIXTURE_IS_BETWEEN_THE_TWO_CEILINGS: {}",
@@ -3026,15 +3084,23 @@ fn a_document_response_may_exceed_the_default_frame_and_its_ceiling_is_finite() 
     let document = client
         .read_outcome_candidate_document(&"a".repeat(64))
         .unwrap_or_else(|error| panic!("C7T.FRAME.THE_READ_ACCEPTS_A_LARGE_REPLY: {error}"));
+    // Both counts written out as literals rather than derived from the reply.
     assert_eq!(
-        document.candidate_content_bytes,
-        70 * 1024,
+        document.candidate_content_bytes, 1_048_576,
         "C7T.FRAME.THE_WHOLE_BODY_ARRIVED"
     );
     assert_eq!(
         document.candidate_content_base64.len(),
-        4 * (70 * 1024 / 3 + 1),
+        1_398_104,
         "C7T.FRAME.THE_BODY_IS_WHOLE_NOT_TRUNCATED"
+    );
+    assert_eq!(
+        data_encoding::BASE64
+            .decode(document.candidate_content_base64.as_bytes())
+            .expect("C7T.FRAME.THE_LARGEST_BODY_IS_CANONICAL_BASE64")
+            .len(),
+        1_048_576,
+        "C7T.FRAME.THE_LARGEST_BODY_DECODES_TO_ITS_DECLARED_COUNT"
     );
 
     let over = client

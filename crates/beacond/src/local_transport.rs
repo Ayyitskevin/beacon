@@ -69,7 +69,8 @@ const _: () = assert!(MAX_COMPLETION_REQUEST_BYTES < MAX_COMPLETION_PREVIEW_RESP
 /// A RESPONSE ceiling only. The request stays in the default domain -- it is one digest -- and no
 /// other family's limit, refusal order or deadline moves.
 const MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES: u64 = 1_403_904;
-const _: () = assert!(MAX_COMPLETION_PREVIEW_RESPONSE_BYTES < MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES);
+const _: () =
+    assert!(MAX_COMPLETION_PREVIEW_RESPONSE_BYTES < MAX_CANDIDATE_DOCUMENT_RESPONSE_BYTES);
 const SERVER_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
 // Exact activation review makes three independently bounded provider reads (tags, show, tags).
 // Keep transport overhead outside that six-second worst case so a provider error is returned as
@@ -1819,10 +1820,16 @@ impl LocalSupervisorServer {
                 observed_bytes.to_string(),
             ));
         }
-        // UTF-8 is guaranteed at WRITE time -- the renderer stores a `String` -- but no reader proves
-        // it, and a content digest is equally happy with bytes that are not UTF-8. So the check is
-        // here, as a refusal, and it is never repaired: a replacement character would be a byte this
-        // transport invented.
+        // DEFENSIVE, and named as defensive rather than as the only proof. The owner already decodes
+        // this content: `candidate_proves_manifest` calls `std::str::from_utf8` and returns false when
+        // it fails (`outcome_store.rs:529-537`), and `verified_manifest_within` calls that as part of
+        // accounting the manifest against its candidate -- so content that is not UTF-8 makes the
+        // FIRST read refuse, before this line is ever reached. An earlier version of this comment said
+        // no reader proves UTF-8, which was false.
+        //
+        // The check stays because this transport must not depend on a proof it does not perform for a
+        // guarantee it states in its own DTO, and because the two could drift apart. It is never a
+        // repair: a replacement character would be a byte this transport invented.
         if let Err(error) = std::str::from_utf8(content) {
             return Err(fault(CandidateDocumentFault::Content {
                 bytes: observed_bytes,
@@ -4171,6 +4178,14 @@ mod tests {
     /// A post-commit read that refused on the ACCOUNT. Test scaffolding: the closed tables use it so
     /// the eighteen account children are exercised THROUGH the post-commit arm rather than asserted
     /// once, and production has no reason to construct one.
+    /// A real `Utf8Error` from a real failed decode. The bytes are assembled at run time because an
+    /// invalid literal is a clippy error -- and because a literal would read as a constant rather than
+    /// as what this is: the outcome of actually trying to decode something that is not text.
+    fn not_utf8() -> std::str::Utf8Error {
+        let bytes = vec![0x66_u8, 0xff];
+        std::str::from_utf8(&bytes).expect_err("the fixture bytes are not UTF-8")
+    }
+
     fn post_read_account(cause: OperatorAccountError) -> PostPreparationFault {
         PostPreparationFault::Read(crate::PrepareRefusal::Account(cause))
     }
@@ -4746,7 +4761,7 @@ mod tests {
             => "Content",
             CandidateDocumentFault::Content {
                 bytes: 7,
-                error: std::str::from_utf8(&[0xff]).unwrap_err(),
+                error: not_utf8(),
             }, &[];
     }
 
@@ -9290,12 +9305,11 @@ mod tests {
 
         // The UTF-8 refusal carries a byte count in `Debug` and NOT on the line: how much private
         // content there is, is a fact about private content.
-        let broken = LocalTransportError::OutcomeCandidateDocument(
-            CandidateDocumentFault::Content {
+        let broken =
+            LocalTransportError::OutcomeCandidateDocument(CandidateDocumentFault::Content {
                 bytes: 987_654,
-                error: std::str::from_utf8(&[0x66, 0xff]).unwrap_err(),
-            },
-        );
+                error: not_utf8(),
+            });
         assert_eq!(
             broken.to_string(),
             "Outcome candidate document read failed: Content",
@@ -9304,6 +9318,155 @@ mod tests {
         assert!(
             format!("{broken:?}").contains("987654"),
             "C7T.LABEL.THE_BYTE_COUNT_SURVIVES_IN_DEBUG"
+        );
+    }
+
+    /// Every one of the eight keys is REQUIRED, and nothing else is accepted.
+    ///
+    /// A deserialization witness on the actual `OutcomeCandidateDocumentDto`, which the live
+    /// produced-key bar cannot stand in for: a produced reply proves what this version writes, while
+    /// adding `serde(default)` to a field or dropping `deny_unknown_fields` would change what a future
+    /// version ACCEPTS without changing a single produced key. The literal below is written out here,
+    /// not serialized from a value, so the two sides cannot agree by construction.
+    #[test]
+    fn the_candidate_document_dto_requires_its_eight_keys_and_admits_no_others() {
+        let whole = serde_json::json!({
+            "missionId": "11111111-1111-4111-8111-111111111111",
+            "manifestId": "22222222-2222-4222-8222-222222222222",
+            "manifestDigest": {
+                "algorithm": "sha256",
+                "canonicalizer": "beacon.outcome.manifest.v2",
+                "value": "a".repeat(64),
+            },
+            "candidateArtifactDigest": {
+                "algorithm": "sha256",
+                "canonicalizer": "beacon.artifact.v1",
+                "value": "b".repeat(64),
+            },
+            "candidateContentDigest": {
+                "algorithm": "sha256",
+                "canonicalizer": "beacon.raw.v1",
+                "value": "c".repeat(64),
+            },
+            "candidateContentBytes": 11,
+            "mediaType": "text/markdown; charset=utf-8",
+            "candidateContentBase64": "aGVsbG8gdGhlcmU=",
+        });
+
+        // It round trips, and every field lands where this test says it should.
+        let document: OutcomeCandidateDocumentDto = serde_json::from_value(whole.clone())
+            .unwrap_or_else(|error| panic!("C7T.DTO.THE_WHOLE_DOCUMENT_DESERIALIZES: {error}"));
+        assert_eq!(
+            document.mission_id.to_string(),
+            "11111111-1111-4111-8111-111111111111",
+            "C7T.DTO.MISSION_ID"
+        );
+        assert_eq!(
+            document.manifest_id.to_string(),
+            "22222222-2222-4222-8222-222222222222",
+            "C7T.DTO.MANIFEST_ID"
+        );
+        assert_eq!(
+            (
+                document.manifest_digest.canonicalizer.as_str(),
+                document.candidate_artifact_digest.canonicalizer.as_str(),
+                document.candidate_content_digest.canonicalizer.as_str(),
+            ),
+            (
+                "beacon.outcome.manifest.v2",
+                "beacon.artifact.v1",
+                "beacon.raw.v1",
+            ),
+            "C7T.DTO.THREE_CANONICALIZERS_IN_THEIR_OWN_FIELDS"
+        );
+        assert_eq!(
+            document.candidate_content_bytes, 11,
+            "C7T.DTO.CONTENT_BYTES"
+        );
+        assert_eq!(
+            document.media_type, "text/markdown; charset=utf-8",
+            "C7T.DTO.MEDIA_TYPE"
+        );
+        assert_eq!(
+            document.candidate_content_base64, "aGVsbG8gdGhlcmU=",
+            "C7T.DTO.CONTENT_BODY"
+        );
+        // And it serializes back to exactly the same eight keys: no key is dropped on the way out.
+        assert_eq!(
+            serde_json::to_value(&document).expect("the document serializes"),
+            whole,
+            "C7T.DTO.THE_ROUND_TRIP_IS_THE_SAME_EIGHT_KEYS"
+        );
+
+        // Each key REMOVED, one at a time.
+        for key in [
+            "missionId",
+            "manifestId",
+            "manifestDigest",
+            "candidateArtifactDigest",
+            "candidateContentDigest",
+            "candidateContentBytes",
+            "mediaType",
+            "candidateContentBase64",
+        ] {
+            let mut missing = whole.clone();
+            missing
+                .as_object_mut()
+                .unwrap()
+                .remove(key)
+                .unwrap_or_else(|| panic!("C7T.DTO.THE_FIXTURE_HAS_THE_KEY: {key}"));
+            assert!(
+                serde_json::from_value::<OutcomeCandidateDocumentDto>(missing).is_err(),
+                "C7T.DTO.EVERY_KEY_IS_REQUIRED: {key}"
+            );
+        }
+
+        // And each of the facts this DTO must NOT carry, refused rather than ignored. Every one of
+        // these is something a caller could mistake for a verdict about the candidate.
+        for (extra, value) in [
+            ("status", serde_json::json!("ready")),
+            ("evaluation", serde_json::json!({ "verdict": "pass" })),
+            ("published", serde_json::json!(true)),
+            ("current", serde_json::json!(true)),
+            ("publicationVersion", serde_json::json!(1)),
+            ("appendixMode", serde_json::json!("included")),
+            ("summary", serde_json::json!("looks good")),
+        ] {
+            let mut widened = whole.clone();
+            widened
+                .as_object_mut()
+                .unwrap()
+                .insert(extra.to_owned(), value);
+            assert!(
+                serde_json::from_value::<OutcomeCandidateDocumentDto>(widened).is_err(),
+                "C7T.DTO.NO_OTHER_FACT_IS_ADMITTED: {extra}"
+            );
+        }
+
+        // A digest envelope is whole, too: three keys, each required, nothing extra.
+        for key in ["algorithm", "canonicalizer", "value"] {
+            let mut partial = whole.clone();
+            partial
+                .get_mut("manifestDigest")
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+            assert!(
+                serde_json::from_value::<OutcomeCandidateDocumentDto>(partial).is_err(),
+                "C7T.DTO.THE_DIGEST_ENVELOPE_IS_WHOLE: {key}"
+            );
+        }
+        let mut widened_envelope = whole.clone();
+        widened_envelope
+            .get_mut("candidateContentDigest")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("verified".to_owned(), serde_json::json!(true));
+        assert!(
+            serde_json::from_value::<OutcomeCandidateDocumentDto>(widened_envelope).is_err(),
+            "C7T.DTO.THE_DIGEST_ENVELOPE_ADMITS_NOTHING_ELSE"
         );
     }
 
