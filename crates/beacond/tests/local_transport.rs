@@ -1639,8 +1639,10 @@ fn domain_row_counts(store: &std::path::Path) -> (i64, i64, i64) {
         .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
         .expect("one read transaction over the three tables");
     let count = |table: &str| -> i64 {
-        read.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))
-            .unwrap_or_else(|error| panic!("counting {table}: {error}"))
+        read.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .unwrap_or_else(|error| panic!("counting {table}: {error}"))
     };
     let counts = (
         count("outcome_manifests"),
