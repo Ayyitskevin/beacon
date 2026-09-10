@@ -7659,4 +7659,89 @@ mod tests {
             "C4.DEADLINE.SLOW_BUDGET_BELONGS_TO_INSTALL"
         );
     }
+
+    /// R42S2.TRANSPORT.MissionCompletionRead.Account — the wrapper must name the CHILD.
+    ///
+    /// The `MissionCompletionRead` root is expanded in the big case table with ONE sample, and that
+    /// sample is an `Unavailable`, whose projection happens to equal the owner's own `name()`. So
+    /// the `Account` arm -- the only one where the wrapper's line and the child's differ -- has
+    /// never been reached at this boundary, and the caller line has been saying a bare `Account`
+    /// while `expected_completion_read` (:3402-3405) says `Account.<child>`. Two statements about
+    /// the same string, and nothing made them meet.
+    ///
+    /// Every expected line here is composed from the child's OWN case label in `account_rows()`,
+    /// which is a hand-written literal in that table -- never from `MissionCompletionReadError::name`
+    /// and never from the selector under test.
+    #[test]
+    fn r42s2_transport_mission_completion_read_names_its_account_child() {
+        let rows = account_rows();
+        assert_eq!(
+            rows.len(),
+            18,
+            "R42S2.TRANSPORT.MissionCompletionRead.Account.CARDINALITY: every account child must \
+             reach this wrapper, so a shrunken vocabulary cannot pass by not being tried"
+        );
+
+        for (child, account, markers) in rows {
+            let value = LocalTransportError::MissionCompletionRead(
+                crate::MissionCompletionReadError::Account(account),
+            );
+            let line = value.to_string();
+            let expected = format!("Mission completion read failed: Account.{child}");
+
+            assert_eq!(
+                line, expected,
+                "R42S2.TRANSPORT.MissionCompletionRead.Account.{child}.PROJECTION"
+            );
+            // The two test-side statements about this line must agree with each other as well.
+            assert_eq!(
+                line,
+                format!(
+                    "Mission completion read failed: {}",
+                    expected_completion_read(match &value {
+                        LocalTransportError::MissionCompletionRead(error) => error,
+                        other => panic!("R42S2.TRANSPORT.MissionCompletionRead.{child}: {other:?}"),
+                    })
+                    .1
+                ),
+                "R42S2.TRANSPORT.MissionCompletionRead.Account.{child}.TABLE_AGREES"
+            );
+
+            for marker in markers {
+                assert!(
+                    !line.contains(marker),
+                    "R42S2.TRANSPORT.MissionCompletionRead.Account.{child}.NO_NEEDLE: {line}"
+                );
+                assert!(
+                    format!("{value:?}").contains(marker),
+                    "R42S2.TRANSPORT.MissionCompletionRead.Account.{child}.DEBUG_RETAINS"
+                );
+            }
+            assert!(
+                !line.contains('\n') && !line.contains('\r'),
+                "R42S2.TRANSPORT.MissionCompletionRead.Account.{child}.ONE_LINE: {line:?}"
+            );
+        }
+
+        // The OTHER arm, pinned in the same bar: `Unavailable` carries no child on this line, and a
+        // fix that started forwarding everything would have to break this to pass the loop above.
+        let value = LocalTransportError::MissionCompletionRead(
+            crate::MissionCompletionReadError::Unavailable(crate::CompletionUnavailable::Store(
+                driver_error(NEEDLE_A),
+            )),
+        );
+        let line = value.to_string();
+        assert_eq!(
+            line, "Mission completion read failed: Unavailable",
+            "R42S2.TRANSPORT.MissionCompletionRead.Unavailable.PROJECTION"
+        );
+        assert!(
+            !line.contains(NEEDLE_A),
+            "R42S2.TRANSPORT.MissionCompletionRead.Unavailable.NO_NEEDLE: {line}"
+        );
+        assert!(
+            format!("{value:?}").contains(NEEDLE_A),
+            "R42S2.TRANSPORT.MissionCompletionRead.Unavailable.DEBUG_RETAINS"
+        );
+    }
 }
