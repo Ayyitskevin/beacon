@@ -86,11 +86,18 @@ fn inputs(evidence: Vec<EvidenceEntry>) -> PacketInputs {
 }
 
 fn record_entry(kind: EntryKind, canonicalizer: &str, fill: u8) -> EvidenceEntry {
+    // A Ruling's stored row is 17..65_536 (`0022_candidates.sql:168`), so the fixture respects the
+    // owner's floor rather than encoding a row the store itself would refuse.
+    let size = if matches!(kind, EntryKind::Ruling) {
+        24
+    } else {
+        8
+    };
     EvidenceEntry {
         kind,
         body: EntryBody::Record {
             digest: digest(canonicalizer, fill),
-            bytes: vec![fill; 8],
+            bytes: vec![fill; size],
         },
     }
 }
@@ -537,8 +544,8 @@ fn packet_min_entry_bytes_are_the_measured_minimum() {
     assert!(admits_entry_count(2, 10_000).is_ok());
     assert_eq!(
         admits_entry_count(256, 100),
-        Err(MalformedFidelityPacket::Truncated),
-        "a declared count is checked against the remaining input before any reserve"
+        Err(MalformedFidelityPacket::EntryCount),
+        "T:C8 names this EntryCount: the fault is the declared count, not the input length"
     );
     assert_eq!(
         admits_entry_count(257, u64::MAX),
@@ -797,4 +804,141 @@ fn an_incoherent_over_limit_observation_refuses_and_is_never_missing() {
         IncompleteCause::ResponseOverLimit,
     );
     assert_eq!(outcome(&exact, &built).name(), "OverLimit");
+}
+
+// ---------------------------------------------------------------------------------------------
+// F3 — the decoder is the only reader, and it raises the framing refusals
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn the_decoder_round_trips_the_encoder_and_raises_every_framing_refusal() {
+    let built = packet(one_of_each_reversed());
+    let decoded =
+        beacond::decode_packet(built.bytes()).expect("a packet this encoder wrote decodes");
+    assert_eq!(decoded.entries().len(), 9);
+    assert_eq!(
+        encode_packet(decoded.inputs(), cap())
+            .expect("re-encodes")
+            .bytes(),
+        built.bytes(),
+        "decode then encode must reproduce the exact bytes"
+    );
+
+    let mut wrong = built.bytes().to_vec();
+    wrong[0] = b'X';
+    assert_eq!(
+        beacond::decode_packet(&wrong),
+        Err(MalformedFidelityPacket::Magic)
+    );
+
+    let mut trailing = built.bytes().to_vec();
+    trailing.push(0);
+    assert_eq!(
+        beacond::decode_packet(&trailing),
+        Err(MalformedFidelityPacket::TrailingBytes)
+    );
+
+    let mut reordered = built.bytes().to_vec();
+    reordered[33] = 0x02;
+    assert_eq!(
+        beacond::decode_packet(&reordered),
+        Err(MalformedFidelityPacket::SectionOrder)
+    );
+
+    // SectionLengthMismatch: S1's body carries one byte its fields do not consume -- distinct from
+    // Truncated (a field running off the end) and TrailingBytes (slack after the last section).
+    let declared = u64::from_be_bytes(built.bytes()[34..42].try_into().unwrap());
+    let mut slack = built.bytes().to_vec();
+    slack.insert(42 + declared as usize, 0x00);
+    slack[34..42].copy_from_slice(&(declared + 1).to_be_bytes());
+    assert_eq!(
+        beacond::decode_packet(&slack),
+        Err(MalformedFidelityPacket::SectionLengthMismatch)
+    );
+
+    let mut short = built.bytes().to_vec();
+    short.remove(42 + declared as usize - 1);
+    short[34..42].copy_from_slice(&(declared - 1).to_be_bytes());
+    assert_eq!(
+        beacond::decode_packet(&short),
+        Err(MalformedFidelityPacket::Truncated)
+    );
+
+    // InvalidUtf8 in a length-prefixed token.
+    let needle = b"outcome-fidelity-draft";
+    let at = built
+        .bytes()
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .expect("the rubric id is in the header");
+    let mut bad_utf8 = built.bytes().to_vec();
+    bad_utf8[at] = 0xFF;
+    assert_eq!(
+        beacond::decode_packet(&bad_utf8),
+        Err(MalformedFidelityPacket::InvalidUtf8)
+    );
+
+    // A declared count larger than the input can hold refuses before any reserve.
+    assert_eq!(
+        admits_entry_count(256, 100),
+        Err(MalformedFidelityPacket::EntryCount)
+    );
+}
+
+#[test]
+fn the_decoder_pins_every_canonicalizer_the_table_pins() {
+    let mut source = inputs(one_of_each_reversed());
+    source.subject.record_digest.canonicalizer = "beacon.artifact.v2".to_owned();
+    assert_eq!(
+        encode_packet(&source, cap()),
+        Err(FidelityPacketRefusal::Malformed(
+            MalformedFidelityPacket::CanonicalizerNotAdmitted
+        ))
+    );
+
+    let mut source = inputs(one_of_each_reversed());
+    source.subject.content_digest.canonicalizer = "beacon.cooked.v1".to_owned();
+    assert!(encode_packet(&source, cap()).is_err());
+
+    let mut source = inputs(one_of_each_reversed());
+    source.recipe.renderer_version = "beacon.outcome.md.v2".to_owned();
+    assert_eq!(
+        encode_packet(&source, cap()),
+        Err(FidelityPacketRefusal::Malformed(
+            MalformedFidelityPacket::CanonicalizerNotAdmitted
+        ))
+    );
+
+    assert!(
+        encode_packet(
+            &inputs(vec![record_entry(EntryKind::Ruling, "beacon.ruling.v3", 5)]),
+            cap()
+        )
+        .is_err()
+    );
+    assert!(
+        encode_packet(
+            &inputs(vec![record_entry(EntryKind::Spend, "beacon.spend.v3", 8)]),
+            cap()
+        )
+        .is_err()
+    );
+
+    // The Ruling stored-row floor of 17.
+    let short_ruling = EvidenceEntry {
+        kind: EntryKind::Ruling,
+        body: EntryBody::Record {
+            digest: digest("beacon.ruling.v2", 5),
+            bytes: vec![0_u8; 16],
+        },
+    };
+    assert!(encode_packet(&inputs(vec![short_ruling]), cap()).is_err());
+
+    // S5 requires the four criteria, exactly, in file order.
+    let mut source = inputs(one_of_each_reversed());
+    source.rubric.criterion_ids = vec!["completion_fidelity".to_owned()];
+    assert!(encode_packet(&source, cap()).is_err());
+    let mut source = inputs(one_of_each_reversed());
+    source.rubric.criterion_ids.reverse();
+    assert!(encode_packet(&source, cap()).is_err());
 }

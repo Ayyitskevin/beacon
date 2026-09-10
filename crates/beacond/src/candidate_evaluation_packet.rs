@@ -53,6 +53,25 @@ const MAX_MISSION_ITEMS: u32 = 64;
 const MAX_RUBRIC_BYTES: usize = 65_536;
 const MAX_CAPABILITIES: u32 = 7;
 const MAX_GAPS: u32 = 6;
+/// The Ruling stored-row floor (`migrations/0022_candidates.sql:168`: BETWEEN 17 AND 65536).
+const MIN_RULING_BYTES: usize = 17;
+const RULING_V1: &str = "beacon.ruling.v1";
+const RULING_V2: &str = "beacon.ruling.v2";
+const SPEND_V1: &str = "beacon.spend.v1";
+const SPEND_V2: &str = "beacon.spend.v2";
+
+/// Every canonicalizer this grammar pins, checked in BOTH directions so the encoder and the decoder
+/// cannot disagree about what fits (`artifact.rs:337-338`'s rule, kept).
+fn require_canonicalizer(
+    digest: &WireDigest,
+    admitted: &[&str],
+) -> Result<(), MalformedFidelityPacket> {
+    if admitted.contains(&digest.canonicalizer.as_str()) {
+        Ok(())
+    } else {
+        Err(MalformedFidelityPacket::CanonicalizerNotAdmitted)
+    }
+}
 
 // Section tags. Assigned explicitly, never renumbered, and none is `0x00`.
 const SECTION_HEADER: u8 = 0x01;
@@ -689,6 +708,21 @@ fn activation_state_tag(state: LocalModelActivationState) -> u8 {
     }
 }
 
+/// S5 carries the four criteria the resource declares, exactly, in ITS file order. A packet with
+/// three, or with the four reordered, describes a rubric this build does not have.
+fn require_four_criteria(ids: &[String]) -> Result<(), MalformedFidelityPacket> {
+    let expected = crate::candidate_evaluation_result::CRITERION_IDS;
+    if ids.len() != expected.len()
+        || ids
+            .iter()
+            .zip(expected)
+            .any(|(supplied, want)| supplied != want)
+    {
+        return Err(MalformedFidelityPacket::EntryCount);
+    }
+    Ok(())
+}
+
 /// Everything one packet is built from. The collector fills this; this module encodes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PacketInputs {
@@ -829,6 +863,11 @@ fn encode_charged(
 
     // ---- S2 subject ------------------------------------------------------------------------
     let frame = encoder.open_frame(SECTION_SUBJECT);
+    require_canonicalizer(
+        &inputs.subject.record_digest,
+        &[crate::artifact::CANONICALIZER],
+    )?;
+    require_canonicalizer(&inputs.subject.content_digest, &[RAW_CANONICALIZER])?;
     encoder.digest(&inputs.subject.record_digest)?;
     encoder.blob(&inputs.subject.record_bytes, MAX_ARTIFACT_RECORD_BYTES)?;
     encoder.digest(&inputs.subject.content_digest)?;
@@ -844,6 +883,11 @@ fn encode_charged(
         return Err(MalformedFidelityPacket::CanonicalizerNotAdmitted);
     }
     encoder.digest(&inputs.recipe.manifest_digest)?;
+    if inputs.recipe.renderer_version != crate::outcome::RENDERER_V1 {
+        // Equality, not merely a length check: `renderer_version` owns the escaping function, and
+        // an unknown version is refused rather than defaulted (`outcome.rs:50-52`).
+        return Err(MalformedFidelityPacket::CanonicalizerNotAdmitted);
+    }
     encoder.text(&inputs.recipe.renderer_version, MAX_TOKEN_BYTES)?;
     encoder.close_frame(frame)?;
 
@@ -870,6 +914,7 @@ fn encode_charged(
 
     // ---- S5 rubric -------------------------------------------------------------------------
     let frame = encoder.open_frame(SECTION_RUBRIC);
+    require_four_criteria(&inputs.rubric.criterion_ids)?;
     encoder.blob(&inputs.rubric.bytes, MAX_RUBRIC_BYTES)?;
     encoder.u32(
         u32::try_from(inputs.rubric.criterion_ids.len())
@@ -948,6 +993,18 @@ fn encode_entry_body(
             }
         }
         EntryBody::Record { digest, bytes } => {
+            match entry.kind {
+                // Two grammars, both first-class (`0022_candidates.sql:160-163`), and the stored
+                // row is 17..65_536 (`:168`) -- a bound this codec carries rather than assumes.
+                EntryKind::Ruling => {
+                    require_canonicalizer(digest, &[RULING_V1, RULING_V2])?;
+                    if bytes.len() < MIN_RULING_BYTES {
+                        return Err(MalformedFidelityPacket::OverLimitLength);
+                    }
+                }
+                EntryKind::Spend => require_canonicalizer(digest, &[SPEND_V1, SPEND_V2])?,
+                _ => {}
+            }
             encoder.digest(digest)?;
             encoder.blob(bytes, MAX_OWNER_RECORD_BYTES)?;
         }
@@ -957,6 +1014,8 @@ fn encode_entry_body(
             content_digest,
             content_bytes,
         } => {
+            require_canonicalizer(record_digest, &[crate::artifact::CANONICALIZER])?;
+            require_canonicalizer(content_digest, &[RAW_CANONICALIZER])?;
             encoder.digest(record_digest)?;
             encoder.blob(record_bytes, MAX_ARTIFACT_RECORD_BYTES)?;
             encoder.digest(content_digest)?;
@@ -986,6 +1045,450 @@ fn encode_entry_body(
 }
 
 // ---------------------------------------------------------------------------------------------
+// The decoder: the ONLY reader, and the only place the framing refusals are raised (R74/F3)
+// ---------------------------------------------------------------------------------------------
+
+/// A packet read back from its bytes: the inputs it carries and the ordinal index it implies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedPacket {
+    inputs: PacketInputs,
+    entries: Vec<EntryIndexRow>,
+}
+
+impl DecodedPacket {
+    pub fn inputs(&self) -> &PacketInputs {
+        &self.inputs
+    }
+
+    pub fn entries(&self) -> &[EntryIndexRow] {
+        &self.entries
+    }
+}
+
+/// Reads canonical bytes. Self-delimiting: every field proves it fits within the remaining input
+/// and its own limit before any of it is consumed, and no declared length reserves capacity
+/// (`artifact.rs:377-378`'s rule, kept).
+struct Decoder<'a> {
+    input: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> Decoder<'a> {
+    fn new(input: &'a [u8]) -> Self {
+        Self { input, offset: 0 }
+    }
+
+    fn remaining(&self) -> usize {
+        self.input.len() - self.offset
+    }
+
+    fn take(&mut self, count: usize) -> Result<&'a [u8], MalformedFidelityPacket> {
+        if count > self.remaining() {
+            return Err(MalformedFidelityPacket::Truncated);
+        }
+        let slice = &self.input[self.offset..self.offset + count];
+        self.offset += count;
+        Ok(slice)
+    }
+
+    fn tag(&mut self) -> Result<u8, MalformedFidelityPacket> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u32(&mut self) -> Result<u32, MalformedFidelityPacket> {
+        let mut value = [0_u8; 4];
+        value.copy_from_slice(self.take(4)?);
+        Ok(u32::from_be_bytes(value))
+    }
+
+    fn u64(&mut self) -> Result<u64, MalformedFidelityPacket> {
+        let mut value = [0_u8; 8];
+        value.copy_from_slice(self.take(8)?);
+        Ok(u64::from_be_bytes(value))
+    }
+
+    fn uuid(&mut self) -> Result<Uuid, MalformedFidelityPacket> {
+        let mut value = [0_u8; 16];
+        value.copy_from_slice(self.take(16)?);
+        Ok(Uuid::from_bytes(value))
+    }
+
+    fn raw32(&mut self) -> Result<[u8; 32], MalformedFidelityPacket> {
+        let mut value = [0_u8; 32];
+        value.copy_from_slice(self.take(32)?);
+        Ok(value)
+    }
+
+    fn blob(&mut self, limit: usize) -> Result<Vec<u8>, MalformedFidelityPacket> {
+        let length = self.u64()?;
+        if length > limit as u64 {
+            return Err(MalformedFidelityPacket::OverLimitLength);
+        }
+        let length = usize::try_from(length).map_err(|_| MalformedFidelityPacket::Truncated)?;
+        Ok(self.take(length)?.to_vec())
+    }
+
+    fn text(&mut self, limit: usize) -> Result<String, MalformedFidelityPacket> {
+        let bytes = self.blob(limit)?;
+        String::from_utf8(bytes).map_err(|_| MalformedFidelityPacket::InvalidUtf8)
+    }
+
+    fn digest(&mut self, admitted: &[&str]) -> Result<WireDigest, MalformedFidelityPacket> {
+        if self.text(MAX_TOKEN_BYTES)? != DIGEST_ALGORITHM {
+            return Err(MalformedFidelityPacket::DigestEnvelope);
+        }
+        let canonicalizer = self.text(MAX_TOKEN_BYTES)?;
+        let digest = WireDigest {
+            canonicalizer,
+            value: self.raw32()?,
+        };
+        if admitted.is_empty() {
+            if digest.canonicalizer.is_empty() {
+                return Err(MalformedFidelityPacket::DigestEnvelope);
+            }
+        } else {
+            require_canonicalizer(&digest, admitted)?;
+        }
+        Ok(digest)
+    }
+
+    /// Opens one section frame, proving its tag is the expected section.
+    fn open_section(&mut self, expected: u8) -> Result<Decoder<'a>, MalformedFidelityPacket> {
+        if self.tag()? != expected {
+            // Sections appear exactly once, in ascending order. A repeated, missing or reordered
+            // section tag is ONE refusal, because in a positional grammar it is one fault.
+            return Err(MalformedFidelityPacket::SectionOrder);
+        }
+        self.open_body()
+    }
+
+    fn open_body(&mut self) -> Result<Decoder<'a>, MalformedFidelityPacket> {
+        let declared = self.u64()?;
+        let declared = usize::try_from(declared).map_err(|_| MalformedFidelityPacket::Truncated)?;
+        Ok(Decoder::new(self.take(declared)?))
+    }
+
+    /// A section's body must be consumed exactly. Slack INSIDE a section is its own fault, distinct
+    /// from a field running off the end (`Truncated`) and from slack after the last section
+    /// (`TrailingBytes`) -- three faults, three names.
+    fn finish_section(self) -> Result<(), MalformedFidelityPacket> {
+        if self.remaining() == 0 {
+            Ok(())
+        } else {
+            Err(MalformedFidelityPacket::SectionLengthMismatch)
+        }
+    }
+
+    fn finish(self) -> Result<(), MalformedFidelityPacket> {
+        if self.remaining() == 0 {
+            Ok(())
+        } else {
+            Err(MalformedFidelityPacket::TrailingBytes)
+        }
+    }
+}
+
+fn capability_from_tag(tag: u8) -> Result<BeaconCapability, MalformedFidelityPacket> {
+    Ok(match tag {
+        0x01 => BeaconCapability::WorkCreateMission,
+        0x02 => BeaconCapability::WorkFormTeam,
+        0x03 => BeaconCapability::WorkCoordinateMission,
+        0x04 => BeaconCapability::WorkAssignWork,
+        0x05 => BeaconCapability::ArtifactProduce,
+        0x06 => BeaconCapability::ArtifactEvaluate,
+        0x07 => BeaconCapability::EvidenceDevelop,
+        _ => return Err(MalformedFidelityPacket::UnknownTag),
+    })
+}
+
+fn gap_from_tag(tag: u8) -> Result<PacketGap, MalformedFidelityPacket> {
+    Ok(match tag {
+        0x01 => PacketGap::ResidentNotActive,
+        0x02 => PacketGap::ConfigurationCleared,
+        0x03 => PacketGap::ConfigurationChanged,
+        0x04 => PacketGap::MissingArtifactEvaluate,
+        0x05 => PacketGap::ActivationSuperseded,
+        0x06 => PacketGap::ActivationInactive,
+        _ => return Err(MalformedFidelityPacket::UnknownTag),
+    })
+}
+
+fn kind_from_tag(tag: u8) -> Result<EntryKind, MalformedFidelityPacket> {
+    Ok(match tag {
+        0x01 => EntryKind::Mission,
+        0x02 => EntryKind::Completion,
+        0x03 => EntryKind::Artifact,
+        0x04 => EntryKind::Proposal,
+        0x05 => EntryKind::Ruling,
+        0x06 => EntryKind::Evaluation,
+        0x07 => EntryKind::Policy,
+        0x08 => EntryKind::Spend,
+        0x09 => EntryKind::Receipt,
+        _ => return Err(MalformedFidelityPacket::UnknownTag),
+    })
+}
+
+fn decode_sorted_tags<T>(
+    section: &mut Decoder<'_>,
+    limit: u32,
+    from_tag: impl Fn(u8) -> Result<T, MalformedFidelityPacket>,
+) -> Result<Vec<T>, MalformedFidelityPacket> {
+    let count = section.u32()?;
+    if count > limit || u64::from(count) > section.remaining() as u64 {
+        return Err(MalformedFidelityPacket::EntryCount);
+    }
+    let mut values = Vec::with_capacity(count as usize);
+    let mut previous: Option<u8> = None;
+    for _ in 0..count {
+        let tag = section.tag()?;
+        if previous.is_some_and(|before| before >= tag) {
+            return Err(MalformedFidelityPacket::EntryOrder);
+        }
+        previous = Some(tag);
+        values.push(from_tag(tag)?);
+    }
+    Ok(values)
+}
+
+fn decode_entry_body(
+    body: &mut Decoder<'_>,
+    kind: EntryKind,
+) -> Result<EntryBody, MalformedFidelityPacket> {
+    Ok(match kind {
+        EntryKind::Mission => {
+            let mission_id = body.uuid()?;
+            let project_id = body.uuid()?;
+            let desired_outcome = body.text(MAX_MISSION_TEXT_BYTES)?;
+            let mut lists: Vec<Vec<String>> = Vec::with_capacity(3);
+            for _ in 0..3 {
+                let count = body.u32()?;
+                // Each item costs at least its 8-byte length prefix, checked before reserving.
+                if count > MAX_MISSION_ITEMS || u64::from(count) * 8 > body.remaining() as u64 {
+                    return Err(MalformedFidelityPacket::EntryCount);
+                }
+                let mut items = Vec::with_capacity(count as usize);
+                for _ in 0..count {
+                    items.push(body.text(MAX_MISSION_TEXT_BYTES)?);
+                }
+                lists.push(items);
+            }
+            let mut lists = lists.into_iter();
+            EntryBody::Mission {
+                mission_id,
+                project_id,
+                desired_outcome,
+                success_conditions: lists.next().expect("three lists"),
+                constraints: lists.next().expect("three lists"),
+                prohibitions: lists.next().expect("three lists"),
+            }
+        }
+        EntryKind::Artifact => EntryBody::Artifact {
+            record_digest: body.digest(&[crate::artifact::CANONICALIZER])?,
+            record_bytes: body.blob(MAX_ARTIFACT_RECORD_BYTES)?,
+            content_digest: body.digest(&[RAW_CANONICALIZER])?,
+            content_bytes: body.blob(MAX_ARTIFACT_CONTENT_BYTES)?,
+        },
+        EntryKind::Receipt => {
+            let run_uuid = body.uuid()?;
+            let version = body.u32()?;
+            if !(1..=4).contains(&version) {
+                return Err(MalformedFidelityPacket::ReceiptVersion);
+            }
+            let checksum_label = body.text(MAX_TOKEN_BYTES)?;
+            if checksum_label != crate::outcome::RECEIPT_CHECKSUM_LABEL {
+                return Err(MalformedFidelityPacket::CanonicalizerNotAdmitted);
+            }
+            EntryBody::Receipt {
+                run_uuid,
+                version,
+                checksum_label,
+                checksum: body.raw32()?,
+                receipt_json: body.blob(MAX_RECEIPT_JSON_BYTES)?,
+            }
+        }
+        EntryKind::Ruling => {
+            let digest = body.digest(&[RULING_V1, RULING_V2])?;
+            let bytes = body.blob(MAX_OWNER_RECORD_BYTES)?;
+            if bytes.len() < MIN_RULING_BYTES {
+                return Err(MalformedFidelityPacket::OverLimitLength);
+            }
+            EntryBody::Record { digest, bytes }
+        }
+        EntryKind::Spend => EntryBody::Record {
+            digest: body.digest(&[SPEND_V1, SPEND_V2])?,
+            bytes: body.blob(MAX_OWNER_RECORD_BYTES)?,
+        },
+        EntryKind::Completion | EntryKind::Proposal | EntryKind::Evaluation | EntryKind::Policy => {
+            EntryBody::Record {
+                digest: body.digest(&[])?,
+                bytes: body.blob(MAX_OWNER_RECORD_BYTES)?,
+            }
+        }
+    })
+}
+
+/// Read a packet back from its bytes. This is the ONLY read path, and the only place
+/// `SectionOrder`, `SectionLengthMismatch`, `InvalidUtf8`, `TrailingBytes` and the decoder's
+/// `EntryCount` are raised.
+pub fn decode_packet(bytes: &[u8]) -> Result<DecodedPacket, MalformedFidelityPacket> {
+    let mut decoder = Decoder::new(bytes);
+    if decoder
+        .take(MAGIC.len())
+        .map_err(|_| MalformedFidelityPacket::Magic)?
+        != MAGIC
+    {
+        return Err(MalformedFidelityPacket::Magic);
+    }
+
+    let mut section = decoder.open_section(SECTION_HEADER)?;
+    let workspace_id = section.uuid()?;
+    let manifest_digest = section.raw32()?;
+    let candidate_record_digest = section.raw32()?;
+    let rubric_id = section.text(MAX_TOKEN_BYTES)?;
+    let rubric_version = section.u32()?;
+    if section.text(MAX_TOKEN_BYTES)? != RAW_CANONICALIZER {
+        return Err(MalformedFidelityPacket::CanonicalizerNotAdmitted);
+    }
+    let rubric_digest = section.raw32()?;
+    let admitted = Evaluator {
+        resident_id: section.uuid()?,
+        configuration_id: section.uuid()?,
+    };
+    let current_lifecycle = match section.tag()? {
+        0x01 => ResidentLifecycle::Inactive,
+        0x02 => ResidentLifecycle::Active,
+        0x03 => ResidentLifecycle::Suspended,
+        0x04 => ResidentLifecycle::Retired,
+        _ => return Err(MalformedFidelityPacket::UnknownTag),
+    };
+    let current_configuration_id = section.uuid()?;
+    let current_configuration_state = match section.tag()? {
+        0x01 => ResidentConfigurationState::Configured,
+        0x02 => ResidentConfigurationState::Cleared,
+        _ => return Err(MalformedFidelityPacket::UnknownTag),
+    };
+    let capabilities = decode_sorted_tags(&mut section, MAX_CAPABILITIES, capability_from_tag)?;
+    let activation = match section.tag()? {
+        TAG_ACTIVATION_NONE => None,
+        TAG_ACTIVATION_SOME => Some(ActivationFacts {
+            configured_activation_id: section.uuid()?,
+            latest_activation_id: section.uuid()?,
+            latest_state: match section.tag()? {
+                0x01 => LocalModelActivationState::Active,
+                0x02 => LocalModelActivationState::Inactive,
+                _ => return Err(MalformedFidelityPacket::UnknownTag),
+            },
+        }),
+        _ => return Err(MalformedFidelityPacket::UnknownTag),
+    };
+    let gaps = decode_sorted_tags(&mut section, MAX_GAPS, gap_from_tag)?;
+    if section.tag()? != 0x01 {
+        return Err(MalformedFidelityPacket::UnknownTag);
+    }
+    section.finish_section()?;
+
+    let mut section = decoder.open_section(SECTION_SUBJECT)?;
+    let subject = SubjectFacts {
+        record_digest: section.digest(&[crate::artifact::CANONICALIZER])?,
+        record_bytes: section.blob(MAX_ARTIFACT_RECORD_BYTES)?,
+        content_digest: section.digest(&[RAW_CANONICALIZER])?,
+        content_bytes: section.blob(MAX_ARTIFACT_CONTENT_BYTES)?,
+        creation_event_seq: section.u64()?,
+    };
+    section.finish_section()?;
+
+    let mut section = decoder.open_section(SECTION_RECIPE)?;
+    let manifest_bytes = section.blob(MAX_MANIFEST_BYTES)?;
+    let recipe_digest = section.digest(&[crate::outcome::CANONICALIZER])?;
+    let renderer_version = section.text(MAX_TOKEN_BYTES)?;
+    if renderer_version != crate::outcome::RENDERER_V1 {
+        return Err(MalformedFidelityPacket::CanonicalizerNotAdmitted);
+    }
+    section.finish_section()?;
+
+    let mut section = decoder.open_section(SECTION_EVIDENCE)?;
+    let declared = section.u32()?;
+    // Checked against the remaining input using the smallest possible entry, BEFORE the vectors
+    // below reserve anything for it.
+    admits_entry_count(declared, section.remaining() as u64)?;
+    let mut evidence = Vec::with_capacity(declared as usize);
+    let mut index = Vec::with_capacity(declared as usize);
+    let mut previous: Option<(u8, EntryKey)> = None;
+    for ordinal in 0..declared {
+        let kind = kind_from_tag(section.tag()?)?;
+        let mut body = section.open_body()?;
+        let entry = EvidenceEntry {
+            kind,
+            body: decode_entry_body(&mut body, kind)?,
+        };
+        body.finish_section()?;
+        let key = (kind.tag(), entry.key()?);
+        if let Some(before) = &previous
+            && *before >= key
+        {
+            // The frozen sort is a property of the BYTES, so a reader PROVES it rather than
+            // trusting that whoever wrote them sorted.
+            return Err(MalformedFidelityPacket::EntryOrder);
+        }
+        previous = Some(key);
+        index.push(EntryIndexRow {
+            ordinal,
+            kind,
+            label: ordinal.to_string(),
+        });
+        evidence.push(entry);
+    }
+    section.finish_section()?;
+
+    let mut section = decoder.open_section(SECTION_RUBRIC)?;
+    let rubric_bytes = section.blob(MAX_RUBRIC_BYTES)?;
+    let criterion_count = section.u32()?;
+    if criterion_count as usize != crate::candidate_evaluation_result::CRITERION_IDS.len() {
+        return Err(MalformedFidelityPacket::EntryCount);
+    }
+    let mut criterion_ids = Vec::with_capacity(criterion_count as usize);
+    for _ in 0..criterion_count {
+        criterion_ids.push(section.text(MAX_TOKEN_BYTES)?);
+    }
+    require_four_criteria(&criterion_ids)?;
+    section.finish_section()?;
+
+    decoder.finish()?;
+
+    Ok(DecodedPacket {
+        inputs: PacketInputs {
+            header: HeaderFacts {
+                workspace_id,
+                manifest_digest,
+                candidate_record_digest,
+                rubric_id,
+                rubric_version,
+                rubric_digest,
+                admitted,
+                current_lifecycle,
+                current_configuration_id,
+                current_configuration_state,
+                capabilities,
+                activation,
+                gaps,
+            },
+            subject,
+            recipe: RecipeFacts {
+                manifest_bytes,
+                manifest_digest: recipe_digest,
+                renderer_version,
+            },
+            evidence,
+            rubric: RubricFacts {
+                bytes: rubric_bytes,
+                criterion_ids,
+            },
+        },
+        entries: index,
+    })
+}
+
+// ---------------------------------------------------------------------------------------------
 // C8: the measured minima
 // ---------------------------------------------------------------------------------------------
 
@@ -995,7 +1498,12 @@ fn encode_entry_body(
 /// legal entry of every kind through the real encoder and asserts each figure equals the result,
 /// so a change to the encoder moves the test before it can move the guard. The hand-computed
 /// figures this codebase replaced were all too LOW (`outcome.rs:88-95`).
-pub const MIN_ENTRY_BYTES: [u64; 9] = [61, 72, 135, 72, 72, 72, 72, 72, 111];
+///
+/// These are the ADMITTED minima. The fixtures use the canonicalizers this grammar PINS, so
+/// Artifact, Ruling and Spend are larger than a loose encoder suggests and Ruling carries its
+/// stored-row floor; measuring against placeholder tokens described the encoder, not the domain
+/// (astra's F3).
+pub const MIN_ENTRY_BYTES: [u64; 9] = [61, 72, 164, 72, 104, 72, 72, 86, 111];
 
 /// The smallest an entry of `kind` can be, for the count-before-reserve guard.
 pub fn min_entry_bytes(kind: EntryKind) -> u64 {
@@ -1017,7 +1525,8 @@ pub fn admits_entry_count(declared: u32, remaining: u64) -> Result<(), Malformed
         .checked_mul(u64::from(declared))
         .ok_or(MalformedFidelityPacket::EntryCount)?;
     if smallest > remaining {
-        return Err(MalformedFidelityPacket::Truncated);
+        // T:C8 names this EntryCount: the fault is the DECLARED count, not the input's length.
+        return Err(MalformedFidelityPacket::EntryCount);
     }
     Ok(())
 }
@@ -1092,9 +1601,9 @@ mod tests {
                 prohibitions: Vec::new(),
             },
             EntryKind::Artifact => EntryBody::Artifact {
-                record_digest: digest("x"),
+                record_digest: digest(crate::artifact::CANONICALIZER),
                 record_bytes: Vec::new(),
-                content_digest: digest("x"),
+                content_digest: digest(RAW_CANONICALIZER),
                 content_bytes: Vec::new(),
             },
             EntryKind::Receipt => EntryBody::Receipt {
@@ -1103,6 +1612,14 @@ mod tests {
                 checksum_label: crate::outcome::RECEIPT_CHECKSUM_LABEL.to_owned(),
                 checksum: [0_u8; 32],
                 receipt_json: Vec::new(),
+            },
+            EntryKind::Ruling => EntryBody::Record {
+                digest: digest(RULING_V1),
+                bytes: vec![0_u8; MIN_RULING_BYTES],
+            },
+            EntryKind::Spend => EntryBody::Record {
+                digest: digest(SPEND_V1),
+                bytes: Vec::new(),
             },
             _ => EntryBody::Record {
                 digest: digest("x"),
