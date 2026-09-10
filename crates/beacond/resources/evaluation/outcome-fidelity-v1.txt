@@ -1,0 +1,17 @@
+Outcome fidelity — maintainer-authored draft rubric, version 1
+
+This proposed profile is not accepted product Policy and grants no authority.
+Evaluate the exact candidate against its frozen owner-verified sources. The candidate alone
+is insufficient evidence to apply this rubric. Do not infer that checks ran or work succeeded.
+
+completion_fidelity: Does the document faithfully represent the recorded completion,
+its disposition, and each declared success condition without inventing a new success verdict?
+
+evidence_fidelity: Are the document's evidence and delivered-Artifact claims supported
+by the exact frozen source records and their cited identities?
+
+honesty_states: Does the document preserve verified, absent, broken and not-evaluated
+states without converting missing or inconclusive evidence into a positive or negative judgment?
+
+limitations_and_authority: Does the document retain recorded unfinished work and uncertainty,
+state the limits of its evidence, and avoid treating Evaluation or publication as permission?
