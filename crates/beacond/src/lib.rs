@@ -113,7 +113,7 @@ pub use candidate::{
     Candidate, CandidateDigest, CandidateEntry, CandidateError, CandidateImages, CandidateService,
     CandidateV1, InconsistentCandidate, MalformedCandidate, enumerate_candidates,
 };
-pub use candidate_evaluation_collector::{Citation, collect_entry_within};
+pub use candidate_evaluation_collector::{Citation, collect_entry_within, collect_within};
 pub use candidate_evaluation_packet::{
     ActivationFacts, DecodedPacket, EntryBody, EntryIndexRow, EntryKind, EvidenceEntry,
     FidelityPacketRefusal, HeaderFacts, MIN_ENTRY_BYTES, MalformedFidelityPacket, PacketCap,
@@ -125,7 +125,7 @@ pub use candidate_evaluation_result::{
     CRITERION_IDS, Conflicts as ResultConflicts, CriterionVerdict,
     FindingSeverity as ResultFindingSeverity, IncoherentObservation, Judgment, MalformedCode,
     NotTerminal, OVER_LIMIT_WITNESS, PROFILE, RESPONSE_CEILING, ResultFinding, ResultOutcome,
-    TerminalObservation, Verdict as ResultVerdict, classify, parse_result,
+    TerminalObservation, Verdict as ResultVerdict, classify,
 };
 #[cfg(debug_assertions)]
 #[doc(hidden)]

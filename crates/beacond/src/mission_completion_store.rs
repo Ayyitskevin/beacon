@@ -1369,31 +1369,67 @@ pub(crate) fn verified_completion_with_event_bytes(
         .canonical_bytes()
         .map_err(|_| CompletionEventProof::DivergentEvidence)?;
 
+    // The strongest scoped reader counts both directions by Mission before selecting the row.
+    let mission = crate::mission::verified_mission_admission(
+        connection,
+        workspace_id,
+        completion.mission_id,
+    )
+    .map_err(|_| CompletionEventProof::DivergentEvidence)?;
+    if mission.is_none() {
+        return Err(CompletionEventProof::DivergentEvidence);
+    }
+    let row_count: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM mission_completions
+             WHERE workspace_id = ?1 AND mission_id = ?2",
+            rusqlite::params![workspace_id.to_string(), completion.mission_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(|_| CompletionEventProof::DivergentEvidence)?;
+    let event_count: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM events
+             WHERE workspace_id = ?1 AND kind = 'mission.completed'
+               AND json_extract(payload_json, '$.missionId') = ?2",
+            rusqlite::params![workspace_id.to_string(), completion.mission_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(|_| CompletionEventProof::DivergentEvidence)?;
+    if row_count != 1 || event_count != 1 {
+        return Err(CompletionEventProof::DivergentEvidence);
+    }
+
     let mut statement = connection
         .prepare(
-            "SELECT payload_json FROM events
+            "SELECT payload_json, occurred_at_ms FROM events
              WHERE workspace_id = ?1 AND kind = 'mission.completed'
                AND json_extract(payload_json, '$.digestValue') = ?2",
         )
         .map_err(|_| CompletionEventProof::RecordingEventUnaccounted)?;
-    let payloads: Vec<String> = statement
+    let payloads: Vec<(String, i64)> = statement
         .query_map(
             rusqlite::params![workspace_id.to_string(), digest_value],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
         )
         .map_err(|_| CompletionEventProof::RecordingEventUnaccounted)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| CompletionEventProof::RecordingEventUnaccounted)?;
-    let [payload_json] = payloads.as_slice() else {
+    let [(payload_json, occurred_at_ms)] = payloads.as_slice() else {
         return Err(CompletionEventProof::RecordingEventUnaccounted);
     };
+    let occurred_at_ms =
+        u64::try_from(*occurred_at_ms).map_err(|_| CompletionEventProof::DivergentEvidence)?;
 
     verify_completion_event(connection, workspace_id, payload_json)
         .map_err(|_| CompletionEventProof::DivergentEvidence)?;
     let redundant: MissionCompletedPayload =
         serde_json::from_str(payload_json).map_err(|_| CompletionEventProof::DivergentEvidence)?;
-    if redundant.digest_value != *digest_value
+    if redundant.mission_id != completion.mission_id
+        || redundant.completion_id != completion.completion_id
+        || redundant.digest_value != *digest_value
         || redundant.canonical_bytes_base64 != data_encoding::BASE64.encode(&bytes)
+        || occurred_at_ms != completion.completed_at_ms
     {
         return Err(CompletionEventProof::DivergentEvidence);
     }

@@ -10,7 +10,7 @@
 use std::fmt;
 
 use data_encoding::HEXLOWER;
-use serde::de::{MapAccess, Visitor};
+use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
 use crate::candidate_evaluation_packet::VerifiedEvaluationPacket;
@@ -347,32 +347,102 @@ pub fn classify(
 // The strict parser
 // ---------------------------------------------------------------------------------------------
 
-/// Every key/value pair as it appeared, duplicates INCLUDED.
+/// A JSON tree that preserves every object pair at every depth, duplicates included.
 ///
-/// `serde_json::Map` keeps the last of a duplicated key, so a parse through it cannot see the
-/// duplicate at all. `MapAccess::next_entry` yields every pair, which is the only exact way to
-/// catch one.
-struct KeyedPairs(Vec<(String, serde_json::Value)>);
+/// `serde_json::Value` inserts nested keys into a map and therefore loses a duplicate before the
+/// profile can reject it. This tree keeps maps as ordered pair vectors recursively.
+enum JsonNode {
+    Scalar,
+    String(String),
+    Array(Vec<JsonNode>),
+    Object(Vec<(String, JsonNode)>),
+}
 
-impl<'de> Deserialize<'de> for KeyedPairs {
+impl JsonNode {
+    fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::String(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    fn as_array(&self) -> Option<&[Self]> {
+        match self {
+            Self::Array(values) => Some(values),
+            _ => None,
+        }
+    }
+
+    fn as_object(&self) -> Option<&[(String, Self)]> {
+        match self {
+            Self::Object(pairs) => Some(pairs),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for JsonNode {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct PairVisitor;
-        impl<'de> Visitor<'de> for PairVisitor {
-            type Value = KeyedPairs;
+        struct NodeVisitor;
+        impl<'de> Visitor<'de> for NodeVisitor {
+            type Value = JsonNode;
 
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a JSON object")
+                formatter.write_str("a JSON value")
             }
 
-            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<KeyedPairs, A::Error> {
+            fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+                Ok(JsonNode::Scalar)
+            }
+
+            fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+                Ok(JsonNode::Scalar)
+            }
+
+            fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+                Ok(JsonNode::Scalar)
+            }
+
+            fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+                Ok(JsonNode::Scalar)
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(JsonNode::Scalar)
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E> {
+                Ok(JsonNode::Scalar)
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(JsonNode::String(value.to_owned()))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+                Ok(JsonNode::String(value))
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(
+                self,
+                mut sequence: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut values = Vec::new();
+                while let Some(value) = sequence.next_element::<JsonNode>()? {
+                    values.push(value);
+                }
+                Ok(JsonNode::Array(values))
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<JsonNode, A::Error> {
                 let mut pairs = Vec::new();
-                while let Some(pair) = map.next_entry::<String, serde_json::Value>()? {
+                while let Some(pair) = map.next_entry::<String, JsonNode>()? {
                     pairs.push(pair);
                 }
-                Ok(KeyedPairs(pairs))
+                Ok(JsonNode::Object(pairs))
             }
         }
-        deserializer.deserialize_map(PairVisitor)
+        deserializer.deserialize_any(NodeVisitor)
     }
 }
 
@@ -380,12 +450,39 @@ fn digest_matches(supplied: &str, held: &[u8; 32]) -> bool {
     supplied.len() == 64 && supplied == HEXLOWER.encode(held)
 }
 
-fn text(value: &serde_json::Value) -> Result<&str, MalformedCode> {
+fn text(value: &JsonNode) -> Result<&str, MalformedCode> {
     value.as_str().ok_or(MalformedCode::Shape)
 }
 
-/// Parse a complete body under the strict profile. Every refusal is a closed code.
-pub fn parse_result(
+fn exact_object<'a>(
+    value: &'a JsonNode,
+    required: &[&str],
+    wrong_shape: MalformedCode,
+) -> Result<&'a [(String, JsonNode)], MalformedCode> {
+    let pairs = value.as_object().ok_or(wrong_shape)?;
+    let mut seen: Vec<&str> = pairs.iter().map(|(key, _)| key.as_str()).collect();
+    seen.sort_unstable();
+    let mut expected = required.to_vec();
+    expected.sort_unstable();
+    if seen != expected {
+        return Err(MalformedCode::UnknownOrDuplicateField);
+    }
+    Ok(pairs)
+}
+
+fn field<'a>(pairs: &'a [(String, JsonNode)], name: &str) -> &'a JsonNode {
+    &pairs
+        .iter()
+        .find(|(key, _)| key == name)
+        .expect("key set already proved equal")
+        .1
+}
+
+/// Parse one already-bounded complete body under the strict profile.
+///
+/// Private: `classify` owns the public RESPONSE_CEILING boundary, so no caller can parse an
+/// unbounded provider response by bypassing the classifier.
+fn parse_result(
     bytes: &[u8],
     packet: &VerifiedEvaluationPacket,
     held_rubric_digest: &[u8; 32],
@@ -396,24 +493,11 @@ pub fn parse_result(
     // 2. Syntax and root shape. Malformed JSON syntax — a lone `{`, an unterminated string, a
     //    trailing comma — is `Shape`, the same code as a well-formed document of the wrong shape,
     //    because both mean "these complete bytes are not a result".
-    let pairs: KeyedPairs = serde_json::from_str(text_body).map_err(|_| MalformedCode::Shape)?;
+    let root: JsonNode = serde_json::from_str(text_body).map_err(|_| MalformedCode::Shape)?;
 
     // 3. Exactly the eight required keys, each exactly once.
-    let mut seen: Vec<&str> = pairs.0.iter().map(|(key, _)| key.as_str()).collect();
-    seen.sort_unstable();
-    let mut required: Vec<&str> = REQUIRED_KEYS.to_vec();
-    required.sort_unstable();
-    if seen != required {
-        return Err(MalformedCode::UnknownOrDuplicateField);
-    }
-    let get = |name: &str| -> &serde_json::Value {
-        &pairs
-            .0
-            .iter()
-            .find(|(key, _)| key == name)
-            .expect("key set already proved equal")
-            .1
-    };
+    let pairs = exact_object(&root, &REQUIRED_KEYS, MalformedCode::Shape)?;
+    let get = |name: &str| field(pairs, name);
 
     // 4. Identity: compared against HELD values, never adopted from the reply.
     if text(get("profile"))? != PROFILE {
@@ -441,20 +525,15 @@ pub fn parse_result(
     }
     let mut criteria = Vec::with_capacity(CRITERION_IDS.len());
     for (index, entry) in criteria_value.iter().enumerate() {
-        let object = entry.as_object().ok_or(MalformedCode::Criteria)?;
-        if object.len() != 2 {
-            return Err(MalformedCode::Criteria);
-        }
-        let id = object
-            .get("id")
-            .and_then(serde_json::Value::as_str)
+        let object = exact_object(entry, &["id", "verdict"], MalformedCode::Criteria)?;
+        let id = field(object, "id")
+            .as_str()
             .ok_or(MalformedCode::Criteria)?;
         if id != CRITERION_IDS[index] {
             return Err(MalformedCode::Criteria);
         }
-        let verdict = object
-            .get("verdict")
-            .and_then(serde_json::Value::as_str)
+        let verdict = field(object, "verdict")
+            .as_str()
             .ok_or(MalformedCode::Verdict)?;
         criteria.push(CriterionVerdict {
             id: id.to_owned(),
@@ -474,25 +553,23 @@ pub fn parse_result(
     let mut findings = Vec::with_capacity(findings_value.len());
     let mut references = 0_usize;
     for entry in findings_value {
-        let object = entry.as_object().ok_or(MalformedCode::Finding)?;
-        if object.len() != 4 {
-            return Err(MalformedCode::Finding);
-        }
-        let criterion = object
-            .get("criterion")
-            .and_then(serde_json::Value::as_str)
+        let object = exact_object(
+            entry,
+            &["criterion", "severity", "summary", "evidence"],
+            MalformedCode::Finding,
+        )?;
+        let criterion = field(object, "criterion")
+            .as_str()
             .ok_or(MalformedCode::Finding)?;
         if !CRITERION_IDS.contains(&criterion) {
             return Err(MalformedCode::Finding);
         }
-        let severity = object
-            .get("severity")
-            .and_then(serde_json::Value::as_str)
+        let severity = field(object, "severity")
+            .as_str()
             .ok_or(MalformedCode::Finding)?;
         let severity = FindingSeverity::parse(severity).ok_or(MalformedCode::Finding)?;
-        let summary = object
-            .get("summary")
-            .and_then(serde_json::Value::as_str)
+        let summary = field(object, "summary")
+            .as_str()
             .ok_or(MalformedCode::Finding)?;
         // Enforced at PARSE, not only at record. Without this a leading-space or empty summary is
         // `Valid` here and refused by `evaluation.rs:1184-1186` at `record` — a valid, paid-for,
@@ -500,9 +577,8 @@ pub fn parse_result(
         if !is_human_text(summary, MAX_SUMMARY_SCALARS) {
             return Err(MalformedCode::Finding);
         }
-        let evidence_value = object
-            .get("evidence")
-            .and_then(serde_json::Value::as_array)
+        let evidence_value = field(object, "evidence")
+            .as_array()
             .ok_or(MalformedCode::Finding)?;
         let mut evidence = Vec::with_capacity(evidence_value.len());
         for reference in evidence_value {
@@ -525,19 +601,26 @@ pub fn parse_result(
     }
 
     // 8. Conflicts: absence is a value, so it encodes as one.
-    let conflicts_object = get("conflicts")
+    let conflicts_value = get("conflicts");
+    let conflicts_pairs = conflicts_value
         .as_object()
         .ok_or(MalformedCode::Conflict)?;
-    let state = conflicts_object
-        .get("state")
-        .and_then(serde_json::Value::as_str)
+    if conflicts_pairs.iter().filter(|(key, _)| key == "state").count() != 1 {
+        return Err(MalformedCode::UnknownOrDuplicateField);
+    }
+    let state = field(conflicts_pairs, "state")
+        .as_str()
         .ok_or(MalformedCode::Conflict)?;
     let conflicts = match state {
-        "none" if conflicts_object.len() == 1 => Conflicts::None,
-        "declared" if conflicts_object.len() == 2 => {
-            let declared = conflicts_object
-                .get("text")
-                .and_then(serde_json::Value::as_str)
+        "none" => {
+            exact_object(conflicts_value, &["state"], MalformedCode::Conflict)?;
+            Conflicts::None
+        }
+        "declared" => {
+            let object =
+                exact_object(conflicts_value, &["state", "text"], MalformedCode::Conflict)?;
+            let declared = field(object, "text")
+                .as_str()
                 .ok_or(MalformedCode::Conflict)?;
             if !is_human_text(declared, MAX_TEXT_SCALARS) {
                 return Err(MalformedCode::Conflict);

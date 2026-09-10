@@ -35,7 +35,7 @@ pub const CANONICALIZER: &str = "beacon.outcome-fidelity.input.v1";
 const MAGIC: &[u8] = b"beacon.outcome-fidelity.input.v1\0";
 const DIGEST_ALGORITHM: &str = "sha256";
 /// The rubric's content canonicalizer, pinned (`candidate_evaluation.rs:368-373`).
-const RAW_CANONICALIZER: &str = "beacon.raw.v1";
+pub(crate) const RAW_CANONICALIZER: &str = "beacon.raw.v1";
 
 /// Bounds a declared token length before any of it is read (`outcome.rs:74`'s rule, kept).
 const MAX_TOKEN_BYTES: usize = 64;
@@ -43,12 +43,12 @@ const MAX_TOKEN_BYTES: usize = 64;
 const MAX_ENTRIES: u32 = 256;
 /// Owner ceilings, each cited in the table's §A.2/§A.4 and repeated here because this grammar owns
 /// its own bounds; a bound borrowed from another module drifts when that module changes.
-const MAX_ARTIFACT_RECORD_BYTES: usize = 4 * 1024;
-const MAX_ARTIFACT_CONTENT_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_ARTIFACT_RECORD_BYTES: usize = 4 * 1024;
+pub(crate) const MAX_ARTIFACT_CONTENT_BYTES: usize = 1024 * 1024;
 const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
-const MAX_OWNER_RECORD_BYTES: usize = 65_536;
-const MAX_RECEIPT_JSON_BYTES: usize = 65_536;
-const MAX_MISSION_TEXT_BYTES: usize = 65_536;
+pub(crate) const MAX_OWNER_RECORD_BYTES: usize = 65_536;
+pub(crate) const MAX_RECEIPT_JSON_BYTES: usize = 65_536;
+pub(crate) const MAX_MISSION_TEXT_BYTES: usize = 65_536;
 const MAX_MISSION_ITEMS: u32 = 64;
 const MAX_RUBRIC_BYTES: usize = 65_536;
 const MAX_CAPABILITIES: u32 = 7;
@@ -743,11 +743,96 @@ pub fn encode_packet(
     inputs: &PacketInputs,
     cap: PacketCap,
 ) -> Result<VerifiedEvaluationPacket, FidelityPacketRefusal> {
+    validate_owner_bounds(inputs)?;
     charge_packet(inputs, cap)?;
     encode_charged(inputs).map_err(FidelityPacketRefusal::from)
 }
 
+fn validate_owner_bounds(inputs: &PacketInputs) -> Result<(), FidelityPacketRefusal> {
+    for entry in &inputs.evidence {
+        let over = match (&entry.kind, &entry.body) {
+            (
+                EntryKind::Mission,
+                EntryBody::Mission {
+                    desired_outcome,
+                    success_conditions,
+                    constraints,
+                    prohibitions,
+                    ..
+                },
+            ) => {
+                desired_outcome.len() > MAX_MISSION_TEXT_BYTES
+                    || [success_conditions, constraints, prohibitions]
+                        .into_iter()
+                        .flatten()
+                        .any(|item| item.len() > MAX_MISSION_TEXT_BYTES)
+            }
+            (
+                EntryKind::Completion
+                | EntryKind::Proposal
+                | EntryKind::Ruling
+                | EntryKind::Evaluation
+                | EntryKind::Policy
+                | EntryKind::Spend,
+                EntryBody::Record { bytes, .. },
+            ) => bytes.len() > MAX_OWNER_RECORD_BYTES,
+            (
+                EntryKind::Artifact,
+                EntryBody::Artifact {
+                    record_bytes,
+                    content_bytes,
+                    ..
+                },
+            ) => {
+                record_bytes.len() > MAX_ARTIFACT_RECORD_BYTES
+                    || content_bytes.len() > MAX_ARTIFACT_CONTENT_BYTES
+            }
+            (EntryKind::Receipt, EntryBody::Receipt { receipt_json, .. }) => {
+                receipt_json.len() > MAX_RECEIPT_JSON_BYTES
+            }
+            _ => return Err(MalformedFidelityPacket::UnknownTag.into()),
+        };
+        if over {
+            return Err(FidelityPacketRefusal::SourceOverOwnerCeiling {
+                kind: entry.kind.as_str(),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn charge_packet(inputs: &PacketInputs, cap: PacketCap) -> Result<(), FidelityPacketRefusal> {
+    charge_packet_parts(
+        inputs,
+        inputs
+            .evidence
+            .iter()
+            .map(|entry| entry.charge().map_err(FidelityPacketRefusal::from)),
+        cap,
+    )
+}
+
+/// Charge a not-yet-materialized S4 from owner-declared body lengths.
+pub(crate) fn charge_declared_packet(
+    inputs: &PacketInputs,
+    evidence_body_bytes: &[u64],
+    cap: PacketCap,
+) -> Result<(), FidelityPacketRefusal> {
+    if !inputs.evidence.is_empty() {
+        return Err(FidelityPacketRefusal::ScopeMismatch);
+    }
+    charge_packet_parts(
+        inputs,
+        evidence_body_bytes.iter().copied().map(Ok),
+        cap,
+    )
+}
+
+fn charge_packet_parts(
+    inputs: &PacketInputs,
+    evidence_body_bytes: impl IntoIterator<Item = Result<u64, FidelityPacketRefusal>>,
+    cap: PacketCap,
+) -> Result<(), FidelityPacketRefusal> {
     let mut charge = Charge::new(cap);
     charge.add(MAGIC.len() as u64)?;
     charge.add(5 * FRAME_HEADER_BYTES)?;
@@ -780,9 +865,9 @@ fn charge_packet(inputs: &PacketInputs, cap: PacketCap) -> Result<(), FidelityPa
 
     // S4: the count, then every occurrence including byte-equal duplicates.
     charge.add(4)?;
-    for entry in &inputs.evidence {
+    for body_bytes in evidence_body_bytes {
         charge.add(FRAME_HEADER_BYTES)?;
-        charge.add(entry.charge().map_err(FidelityPacketRefusal::from)?)?;
+        charge.add(body_bytes?)?;
     }
 
     // S5.
@@ -792,6 +877,10 @@ fn charge_packet(inputs: &PacketInputs, cap: PacketCap) -> Result<(), FidelityPa
         charge.add_len_prefixed(id.len())?;
     }
     Ok(())
+}
+
+pub(crate) fn digest_charge(canonicalizer_bytes: u64) -> u64 {
+    8 + DIGEST_ALGORITHM.len() as u64 + 8 + canonicalizer_bytes + 32
 }
 
 fn encode_charged(
