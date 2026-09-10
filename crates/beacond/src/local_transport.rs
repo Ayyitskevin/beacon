@@ -5066,6 +5066,13 @@ mod tests {
         TeamError::Account
     );
     domain_cases!(
+        completion_command_cases,
+        LocalTransportError::MissionCompletionCommand,
+        completion_command_rows,
+        "R42S2.TRANSPORT.MissionCompletionCommand",
+        crate::CompletionCommandError::Account
+    );
+    domain_cases!(
         mission_cases,
         LocalTransportError::Mission,
         mission_rows,
@@ -5375,6 +5382,9 @@ mod tests {
                 "R42S2.TRANSPORT.SampleProject" => sample_cases(&mut cases),
                 "R42S2.TRANSPORT.Team" => team_cases(&mut cases),
                 "R42S2.TRANSPORT.Mission" => mission_cases(&mut cases),
+                "R42S2.TRANSPORT.MissionCompletionCommand" => {
+                    completion_command_cases(&mut cases)
+                }
                 "R42S2.TRANSPORT.ResourceDiscovery" => discovery_cases(&mut cases),
                 "R42S2.TRANSPORT.LocalModelActivation" => activation_cases(&mut cases),
                 "R42S2.TRANSPORT.Supervisor" => {
@@ -5532,9 +5542,10 @@ mod tests {
             3,
             "R42S2.TRANSPORT.CARDINALITY.InvalidDraft"
         );
+        // Counted at THIS source: 63 before this slice, plus the eight completion codes.
         assert_eq!(
             code_rows().len(),
-            63,
+            71,
             "R42S2.TRANSPORT.CARDINALITY.LocalErrorCode"
         );
         assert_eq!(
@@ -5546,7 +5557,9 @@ mod tests {
         // cause-bearing Supervisor parents (including the two nested classification
         // vocabularies), 18 account faults at each of 14 wrappers, the three draft reasons, both
         // charter-revision pairs, and slice 1's 83-case Outcome tree.
-        assert_eq!(cases.len(), 878, "R42S2.TRANSPORT.CARDINALITY.CASES");
+        // 878 before this slice. The completion-command carrier adds its ten direct arms and
+        // expands its `Account` arm over all eighteen account rows: 878 + 10 + 18 = 906.
+        assert_eq!(cases.len(), 906, "R42S2.TRANSPORT.CARDINALITY.CASES");
         assert_eq!(
             supervisor_rows().len(),
             75,
@@ -7107,6 +7120,30 @@ mod tests {
             !accepts_completion_sized_request(&LocalCommand::Status),
             "C4.FAMILY.OLD_COMMAND_IS_OUT"
         );
+
+        // Constructing all 55 commands here would be a fixture, not a witness -- and a command added
+        // tomorrow would not be in it. The predicate's own source is read instead, so ANY arm that
+        // appears in it and is not one of the two held names fails by name. A mutant that adds
+        // `LocalCommand::Projects` to the predicate is caught here, where the constructed rows above
+        // never reach it.
+        let held = ["PreviewMissionCompletion", "RecordMissionCompletion"];
+        let predicate = include_str!("local_transport.rs")
+            .split(concat!("fn accepts_completion", "_sized_request(command: &LocalCommand) -> bool {"))
+            .nth(1)
+            .expect("the family predicate is a function in this file")
+            .split("\n}")
+            .next()
+            .expect("the function closes");
+        let named: Vec<String> = wire_command_arms()
+            .into_iter()
+            .filter(|arm| predicate.contains(&format!("LocalCommand::{arm}")))
+            .collect();
+        assert_eq!(named, held, "C4.FAMILY.PREDICATE_NAMES_EXACTLY_THE_TWO");
+        assert!(
+            wire_command_arms().len() >= 55,
+            "C4.FAMILY.ARMS_FOUND: {}",
+            wire_command_arms().len()
+        );
     }
 
     #[test]
@@ -7144,10 +7181,13 @@ mod tests {
     /// hand list -- a hand list would need editing exactly when nobody edits it.
     ///
     /// The needles are assembled with `concat!` so this parser does not match its own source text.
-    #[test]
-    fn every_command_states_its_response_domain() {
+    /// Every arm of the wire vocabulary, read from this file's own source.
+    ///
+    /// A hand-written list would need editing exactly when nobody edits it -- when a command is
+    /// added. The needles are assembled with `concat!` so this parser does not match its own text.
+    fn wire_command_arms() -> Vec<String> {
         let source = include_str!("local_transport.rs");
-        let arms: Vec<String> = source
+        source
             .split(concat!("enum ", "LocalCommand {"))
             .nth(1)
             .expect("the wire vocabulary is an enum in this file")
@@ -7163,7 +7203,13 @@ mod tests {
                 name.chars().next().is_some_and(char::is_uppercase)
                     && name.chars().all(char::is_alphanumeric)
             })
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn every_command_states_its_response_domain() {
+        let source = include_str!("local_transport.rs");
+        let arms = wire_command_arms();
         assert!(arms.len() >= 55, "C4.RESPONSE.TABLE.ARMS_FOUND: {}", arms.len());
 
         let table = source
@@ -7240,6 +7286,17 @@ mod tests {
         assert!(
             preview_upper <= MAX_COMPLETION_PREVIEW_RESPONSE_BYTES,
             "C4.BOUND.PREVIEW_CEILING_COVERS_THE_GRAMMAR"
+        );
+
+        // The constants themselves, held independently. Proving only that the calculated bound is
+        // `<=` them would leave a widening free: 161 KiB also covers 147,921.
+        assert_eq!(
+            MAX_COMPLETION_REQUEST_BYTES, 163_840,
+            "C4.BOUND.REQUEST_CEILING_IS_EXACTLY_160_KIB"
+        );
+        assert_eq!(
+            MAX_COMPLETION_PREVIEW_RESPONSE_BYTES, 196_608,
+            "C4.BOUND.PREVIEW_CEILING_IS_EXACTLY_192_KIB"
         );
 
         // The old domain is untouched, and the new ones are strictly above it.
