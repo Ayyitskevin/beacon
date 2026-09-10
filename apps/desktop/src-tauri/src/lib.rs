@@ -14,7 +14,7 @@ use beacond::{
     LiveDataEncryptionReport, LocalErrorCode, LocalModelActivation, LocalModelActivationReview,
     LocalModelDiscoveryReport, LocalSupervisorClient, LocalTransportError, MissionDraft,
     MissionView, OperatorSessionPolicy, OperatorSessionStatus, PlatformSessionMonitorStatus,
-    PreflightReceipt, PreparedOutcomeCandidateDto, ProjectCharter, ProjectCharterDraft,
+    PreflightReceipt, OutcomeCandidateDocumentDto, PreparedOutcomeCandidateDto, ProjectCharter, ProjectCharterDraft,
     ProjectDraft, ProjectPolicy, ProjectPolicyDraft, ProjectRepository, ProjectSummary,
     ProjectView, ProviderFeature, PublicationSummary, RecentReceiptPage, RepositoryDraft,
     ResidentAgentView, ResidentConfiguration, ReviewedIntent, SampleProjectInstallResult,
@@ -475,6 +475,26 @@ impl From<LocalTransportError> for CommandError {
                 code: LocalErrorCode::NotAuthenticated,
                 ..
             } => ("not_authenticated", "Unlock Beacon to continue.", None),
+            // C7's two, each carrying its own code so `session.ts`'s matching `case` is reachable
+            // -- the same reason the Policy and Mission arms are split out above. The not-found
+            // sentence deliberately says "not available in this Workspace" rather than "does not
+            // exist": a foreign Workspace's real manifest answers with these exact bytes too.
+            LocalTransportError::Remote {
+                code: LocalErrorCode::OutcomeCandidateNotFound,
+                ..
+            } => (
+                "outcome_candidate_not_found",
+                "That Outcome candidate is not available in this Workspace.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::OutcomeCandidateUnavailable,
+                ..
+            } => (
+                "outcome_candidate_unavailable",
+                "Beacon could not verify this Outcome candidate.",
+                None,
+            ),
             LocalTransportError::Remote {
                 code: LocalErrorCode::OutcomeAbsent,
                 ..
@@ -762,6 +782,7 @@ impl From<LocalTransportError> for CommandError {
             | LocalTransportError::MissionImpactClassification(_)
             | LocalTransportError::OutcomePreparation(_)
             | LocalTransportError::OutcomePreparationAfterCommit(_)
+            | LocalTransportError::OutcomeCandidateDocument(_)
             | LocalTransportError::CheckPreflight(_)
             | LocalTransportError::RecentReceipt(_)
             | LocalTransportError::SampleProject(_)
@@ -1229,6 +1250,20 @@ fn prepare_outcome_candidate_value(
     state
         .supervisor
         .prepare_outcome_candidate(mission_id, appendix_request)
+        .map_err(Into::into)
+}
+
+/// Read one prepared candidate's stored document.
+///
+/// A READ. It writes nothing, prepares nothing and evaluates nothing, and the bytes it returns are the
+/// exact stored content -- base64-encoded, not re-rendered.
+fn read_outcome_candidate_document_value(
+    state: &DesktopState,
+    manifest_digest: String,
+) -> Result<OutcomeCandidateDocumentDto, CommandError> {
+    state
+        .supervisor
+        .read_outcome_candidate_document(&manifest_digest)
         .map_err(Into::into)
 }
 
@@ -1753,6 +1788,14 @@ fn prepare_outcome_candidate(
 }
 
 #[tauri::command]
+fn read_outcome_candidate_document(
+    state: State<'_, DesktopState>,
+    manifest_digest: String,
+) -> Result<OutcomeCandidateDocumentDto, CommandError> {
+    read_outcome_candidate_document_value(&state, manifest_digest)
+}
+
+#[tauri::command]
 fn classify_mission_impact(
     state: State<'_, DesktopState>,
     request: ClassificationIntentRequest,
@@ -2087,6 +2130,7 @@ pub fn run() {
             classify_mission_impact,
             get_mission_classification,
             prepare_outcome_candidate,
+            read_outcome_candidate_document,
             mission,
             admit_mission,
             mission_publications,
@@ -2438,6 +2482,7 @@ mod tests {
                 "allow-classify-mission-impact",
                 "allow-get-mission-classification",
                 "allow-prepare-outcome-candidate",
+                "allow-read-outcome-candidate-document",
                 "allow-missions",
                 "allow-mission",
                 "allow-admit-mission",
@@ -3394,6 +3439,11 @@ mod tests {
         "OUTCOME_NOT_CLASSIFIED" | OutcomeNotClassified => ("outcome_not_classified", "This Mission has no impact classification.", None);
         "OUTCOME_NO_CLASSIFICATION_AT_COMPLETION" | OutcomeNoClassificationAtCompletion => ("outcome_no_classification_at_completion", "This Mission was classified only after completion. This completion cannot be prepared as an Outcome, and another classification will not change its boundary.", None);
         "OUTCOME_PREPARATION_UNAVAILABLE" | OutcomePreparationUnavailable => ("outcome_preparation_unavailable", "Beacon could not verify the records needed to prepare this Outcome candidate.", None);
+        // C7's two, transcribed from `OutcomeCandidateDocument.tsx`'s own copy table, not from the
+        // Rust enum. "Not available in this Workspace" is deliberately not "does not exist": this
+        // answer is also what a foreign Workspace's real manifest returns.
+        "OUTCOME_CANDIDATE_NOT_FOUND" | OutcomeCandidateNotFound => ("outcome_candidate_not_found", "That Outcome candidate is not available in this Workspace.", None);
+        "OUTCOME_CANDIDATE_UNAVAILABLE" | OutcomeCandidateUnavailable => ("outcome_candidate_unavailable", "Beacon could not verify this Outcome candidate.", None);
         "SETUP_NOT_STARTED" | SetupNotStarted => ("local_request_failed", "Beacon could not complete that local request.", None);
         "ACCOUNT_ALREADY_EXISTS" | AccountAlreadyExists => ("local_request_failed", "Beacon could not complete that local request.", None);
         "ACCOUNT_MISSING" | AccountMissing => ("local_request_failed", "Beacon could not complete that local request.", None);
@@ -3442,6 +3492,18 @@ mod tests {
             LocalTransportError::OutcomePreparationAfterCommit(
                 beacond::PostPreparationFault::Identity {
                     field: "manifestId",
+                    expected: needle_text(),
+                    observed: needle_text(),
+                },
+            ), &[NEEDLE_A];
+        // C7's read. Like every other transport carrier, it reaches a DESKTOP caller only as the
+        // generic local-request failure: the candidate codes above are `Remote` answers from the
+        // supervisor, and a carrier that arrived here instead would be a local fault, not a refusal
+        // the Operator can act on. The sample carries a needle at BOTH stages' shape.
+        "OUTCOME_CANDIDATE_DOCUMENT" | LocalTransportError::OutcomeCandidateDocument(_) => ("local_request_failed", "Beacon could not complete that local request."),
+            LocalTransportError::OutcomeCandidateDocument(
+                beacond::CandidateDocumentFault::Identity {
+                    field: "manifestDigest",
                     expected: needle_text(),
                     observed: needle_text(),
                 },
@@ -3545,9 +3607,12 @@ mod tests {
         // Counted at THIS source: 71 + the nine classification codes, 23 + the one classification
         // carrier, and their sum.
         // Counted at THIS source: 80 + the four preparation codes, 24 + the two preparation carriers.
-        assert_eq!(remote_rows().len(), 84, "R42S1.DESKTOP.CARDINALITY.REMOTE");
-        assert_eq!(local_rows().len(), 26, "R42S1.DESKTOP.CARDINALITY.LOCAL");
-        assert_eq!(cases.len(), 110, "R42S1.DESKTOP.CARDINALITY.CASES");
+        // 84 before C7, plus its two candidate-document codes.
+        assert_eq!(remote_rows().len(), 86, "R42S1.DESKTOP.CARDINALITY.REMOTE");
+        // 26 before C7, plus its `OutcomeCandidateDocument` carrier.
+        assert_eq!(local_rows().len(), 27, "R42S1.DESKTOP.CARDINALITY.LOCAL");
+        // 110 before C7: two new Remote codes and the new local carrier.
+        assert_eq!(cases.len(), 113, "R42S1.DESKTOP.CARDINALITY.CASES");
         let ids: std::collections::BTreeSet<&str> =
             cases.iter().map(|case| case.id.as_str()).collect();
         assert_eq!(ids.len(), cases.len(), "R42S1.DESKTOP.CASE_IDS_UNIQUE");
