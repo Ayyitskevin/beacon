@@ -50,6 +50,7 @@
     "allow-get-mission-completion-intent",
     "allow-classify-mission-impact",
     "allow-get-mission-classification",
+    "allow-prepare-outcome-candidate",
         "allow-missions",
     "allow-mission",
     "allow-admit-mission",

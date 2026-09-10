@@ -13,18 +13,19 @@ use std::thread;
 use std::time::Duration;
 
 use beacond::{
-    AccessOrigin, AutonomyProfile, BeaconCapability, BudgetBoundary, ClassificationIntentRequest,
-    CompletionPreview, DeclaredCheck, DiscoveryStatus, LiveDataEncryption, LocalErrorCode,
-    LocalModelActivationState, LocalModelEndpoint, LocalServerConfig, LocalSupervisorClient,
-    LocalSupervisorServer, LocalTransportError, MAX_RECENT_RUN_WINDOW, MissionAdmissionActor,
-    MissionCompletionCommandService, MissionDraft, MissionLifecycle, MissionMemberDraft,
-    ModelActivation, OperatorAccountService, OperatorSessionPhase, PlatformMonitorState,
-    PolicyAuthor, ProjectCharterDraft, ProjectDraft, ProjectPolicyDraft, ProviderFeature,
-    RepositoryAuthor, RepositoryDraft, RepositorySourceKind, ResidentConfigurationState,
-    ResidentLifecycle, SecretString, StarterOrganizationDecision, StarterResidentDraft,
-    StarterRole, SupersedesDto, TeamDraft, TeamFormationActor, TeamIneligibilityReason,
-    TeamLeadAmbiguityRule, TeamLeadAvailabilityRule, TeamLeadConflictRule, TeamLeadSelectionPolicy,
-    TeamMemberDraft, TrackRecordEvidenceKind, TrackRecordRequirement, initialize_local_auth_token,
+    AccessOrigin, AppendixRequestDto, AutonomyProfile, BeaconCapability, BudgetBoundary,
+    ClassificationIntentRequest, CompletionPreview, DeclaredCheck, DiscoveryStatus,
+    LiveDataEncryption, LocalErrorCode, LocalModelActivationState, LocalModelEndpoint,
+    LocalServerConfig, LocalSupervisorClient, LocalSupervisorServer, LocalTransportError,
+    MAX_RECENT_RUN_WINDOW, MissionAdmissionActor, MissionCompletionCommandService, MissionDraft,
+    MissionLifecycle, MissionMemberDraft, ModelActivation, OperatorAccountService,
+    OperatorSessionPhase, OutcomeService, PlatformMonitorState, PolicyAuthor, ProjectCharterDraft,
+    ProjectDraft, ProjectPolicyDraft, ProviderFeature, RepositoryAuthor, RepositoryDraft,
+    RepositorySourceKind, ResidentConfigurationState, ResidentLifecycle, SecretString,
+    StarterOrganizationDecision, StarterResidentDraft, StarterRole, SupersedesDto, TeamDraft,
+    TeamFormationActor, TeamIneligibilityReason, TeamLeadAmbiguityRule, TeamLeadAvailabilityRule,
+    TeamLeadConflictRule, TeamLeadSelectionPolicy, TeamMemberDraft, TrackRecordEvidenceKind,
+    TrackRecordRequirement, initialize_local_auth_token,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -1413,6 +1414,563 @@ fn wide_completion_request(
         spend: beacond::SpendDto::NotMeasured("r".repeat(500)),
         summary: "y".repeat(2_000),
     }
+}
+
+/// The whole prepared Mission, end to end on a real store and socket, with every receipt field
+/// compared against separately retained owner records.
+///
+/// The fixture mints everything through the public services, in the order the owner requires: a
+/// published Policy, then the classification, then the completion — a classification AFTER the
+/// completion cannot be prepared, which is the sequencing the refusal bars below prove from the other
+/// side.
+#[test]
+fn a_prepared_candidate_receipt_equals_the_owners_own_records() {
+    let runtime = TestRuntime::new("c6live");
+    let address = serve_ollama_inspections(2);
+    let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+    let prepared_mission = prepare_c6_fixture(&client);
+
+    // Policy default on a HIGH-impact Mission: the request is `policy_default` and the resolved mode
+    // is `included`, which is exactly the pair that must not be conflated.
+    let receipt = client
+        .prepare_outcome_candidate(
+            prepared_mission.mission_id,
+            AppendixRequestDto::PolicyDefault,
+        )
+        .unwrap_or_else(|error| panic!("C6T.PREPARE.THE_OWNER_ACCEPTS_THE_REQUEST: {error}"));
+
+    // The owner's own records, read independently of the transport on a second authenticated service.
+    let accounts = Arc::new(OperatorAccountService::open(&runtime.store).unwrap());
+    accounts
+        .authenticate_password(
+            SecretString::new("a long local passphrase".to_owned()),
+            AccessOrigin::SameMachine,
+        )
+        .unwrap();
+    let outcomes = OutcomeService::new(Arc::clone(&accounts), prepared_mission.workspace_id);
+    let stored = outcomes
+        .manifest(&receipt.manifest_digest.value)
+        .expect("C6T.PREPARE.THE_MANIFEST_IS_READABLE");
+    let record = outcomes
+        .candidate(&receipt.manifest_digest.value)
+        .expect("C6T.PREPARE.THE_CANDIDATE_IS_READABLE");
+
+    assert_eq!(
+        receipt.mission_id, prepared_mission.mission_id,
+        "C6T.RECEIPT.MISSION_ID"
+    );
+    assert_eq!(
+        receipt.manifest_id,
+        stored.manifest_id(),
+        "C6T.RECEIPT.MANIFEST_ID_IS_THE_OWNERS"
+    );
+    assert_eq!(
+        (
+            receipt.manifest_digest.algorithm.as_str(),
+            receipt.manifest_digest.canonicalizer.as_str(),
+            receipt.manifest_digest.value.as_str(),
+        ),
+        (
+            stored.digest().algorithm.as_str(),
+            stored.digest().canonicalizer.as_str(),
+            stored.digest().value.as_str(),
+        ),
+        "C6T.RECEIPT.MANIFEST_DIGEST_ENVELOPE_IS_THE_OWNERS"
+    );
+    assert_eq!(
+        (
+            receipt.candidate_artifact_digest.algorithm.as_str(),
+            receipt.candidate_artifact_digest.canonicalizer.as_str(),
+            receipt.candidate_artifact_digest.value.as_str(),
+        ),
+        (
+            record.digest().algorithm.as_str(),
+            record.digest().canonicalizer.as_str(),
+            record.digest().value.as_str(),
+        ),
+        "C6T.RECEIPT.ARTIFACT_RECORD_DIGEST_IS_THE_OWNERS"
+    );
+    let payload = record.payload();
+    assert_eq!(
+        (
+            receipt.candidate_content_digest.algorithm.as_str(),
+            receipt.candidate_content_digest.canonicalizer.as_str(),
+            receipt.candidate_content_digest.value.as_str(),
+        ),
+        (
+            payload.content_digest.algorithm.as_str(),
+            payload.content_digest.canonicalizer.as_str(),
+            payload.content_digest.value.as_str(),
+        ),
+        "C6T.RECEIPT.CONTENT_DIGEST_IS_THE_OWNERS"
+    );
+    // The two digests are DIFFERENT things under DIFFERENT canonicalizers. A caller that verified the
+    // wrong one would be checking the record against content bytes, or the reverse.
+    assert_ne!(
+        receipt.candidate_artifact_digest.value, receipt.candidate_content_digest.value,
+        "C6T.RECEIPT.THE_RECORD_AND_CONTENT_DIGESTS_ARE_NOT_THE_SAME_VALUE"
+    );
+    assert_eq!(
+        receipt.candidate_artifact_digest.canonicalizer, "beacon.artifact.v1",
+        "C6T.RECEIPT.THE_RECORD_DIGEST_CANONICALIZER"
+    );
+    assert_eq!(
+        receipt.candidate_content_digest.canonicalizer, "beacon.raw.v1",
+        "C6T.RECEIPT.THE_CONTENT_DIGEST_CANONICALIZER"
+    );
+    assert_eq!(
+        receipt.manifest_digest.canonicalizer, "beacon.outcome.manifest.v2",
+        "C6T.RECEIPT.THE_MANIFEST_DIGEST_CANONICALIZER"
+    );
+    assert_eq!(
+        receipt.candidate_content_bytes, payload.content_bytes,
+        "C6T.RECEIPT.CONTENT_BYTES_ARE_THE_OWNERS"
+    );
+    assert_eq!(
+        receipt.media_type, payload.media_type,
+        "C6T.RECEIPT.MEDIA_TYPE_IS_THE_OWNERS"
+    );
+    assert_eq!(
+        receipt.media_type, "text/markdown; charset=utf-8",
+        "C6T.RECEIPT.MEDIA_TYPE_IS_MARKDOWN"
+    );
+    assert!(
+        receipt.candidate_content_bytes > 0 && receipt.candidate_content_bytes <= 1_048_576,
+        "C6T.RECEIPT.CONTENT_BYTES_ARE_INSIDE_THE_OWNING_BOUND: {}",
+        receipt.candidate_content_bytes
+    );
+    assert_eq!(
+        serde_json::to_value(receipt.appendix_request).unwrap(),
+        serde_json::Value::from("policy_default"),
+        "C6T.RECEIPT.THE_APPENDIX_REQUEST_IS_WHAT_THE_MANIFEST_HOLDS"
+    );
+    assert_eq!(
+        serde_json::to_value(receipt.appendix_mode).unwrap(),
+        serde_json::Value::from("included"),
+        "C6T.RECEIPT.THE_MODE_IS_THE_MANIFESTS_OWN_RESOLUTION"
+    );
+
+    // The whole receipt, as a daemon response envelope, stays inside the existing 64 KiB domain.
+    let envelope_bytes = serde_json::to_vec(&serde_json::json!({
+        "protocol": 1,
+        "result": { "kind": "prepared_outcome_candidate", "candidate": receipt },
+        "error": null,
+    }))
+    .unwrap()
+    .len();
+    assert!(
+        envelope_bytes < 65_536,
+        "C6T.RECEIPT.THE_RESPONSE_STAYS_IN_THE_OLD_DOMAIN: {envelope_bytes} bytes"
+    );
+
+    // An explicit identical repeat returns the SAME identity and writes nothing: the Artifact's
+    // creation Event sequence is where a second write would show.
+    let first_event_seq = record.creation_event_seq();
+    let repeat = client
+        .prepare_outcome_candidate(
+            prepared_mission.mission_id,
+            AppendixRequestDto::PolicyDefault,
+        )
+        .unwrap_or_else(|error| panic!("C6T.REPEAT.AN_IDENTICAL_REQUEST_IS_ACCEPTED: {error}"));
+    assert_eq!(
+        repeat, receipt,
+        "C6T.REPEAT.THE_SAME_REQUEST_RETURNS_THE_SAME_RECEIPT"
+    );
+    let after = outcomes
+        .candidate(&receipt.manifest_digest.value)
+        .expect("the candidate is still readable");
+    assert_eq!(
+        after.creation_event_seq(),
+        first_event_seq,
+        "C6T.REPEAT.NO_SECOND_WRITE_AND_NO_SECOND_EVENT"
+    );
+
+    // An explicit `include` on the SAME Mission is a DIFFERENT manifest identity, even though this
+    // Mission is high-impact and both requests resolve to `included`: the request is inside the bytes.
+    let included = client
+        .prepare_outcome_candidate(prepared_mission.mission_id, AppendixRequestDto::Include)
+        .unwrap_or_else(|error| panic!("C6T.APPENDIX.AN_EXPLICIT_INCLUDE_IS_ACCEPTED: {error}"));
+    assert_eq!(
+        serde_json::to_value(included.appendix_request).unwrap(),
+        serde_json::Value::from("include"),
+        "C6T.APPENDIX.THE_EXPLICIT_REQUEST_IS_REPORTED"
+    );
+    assert_eq!(
+        serde_json::to_value(included.appendix_mode).unwrap(),
+        serde_json::Value::from("included"),
+        "C6T.APPENDIX.BOTH_RESOLVE_TO_INCLUDED_HERE"
+    );
+    assert_ne!(
+        included.manifest_digest.value, receipt.manifest_digest.value,
+        "C6T.APPENDIX.THE_TWO_REQUESTS_ARE_DISTINCT_IDENTITIES"
+    );
+    assert_ne!(
+        included.manifest_id, receipt.manifest_id,
+        "C6T.APPENDIX.THE_TWO_REQUESTS_ARE_DISTINCT_IDENTITIES"
+    );
+
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
+    thread.join().unwrap().unwrap();
+}
+
+/// Preparing, and re-preparing, leaves the publication relation exactly as it was.
+///
+/// The reachable state here is "no publication", and that is what the bar proves: preparing a
+/// candidate twice adds nothing to the Mission's publication history. Publishing itself needs a real
+/// independent Evaluation, which is a later prerequisite outside this lane, so the already-PUBLISHED
+/// variant of this bar is reported NOT PROBED rather than faked with a planted relation.
+#[test]
+fn preparing_a_candidate_changes_no_publication_history() {
+    let runtime = TestRuntime::new("c6pub");
+    let address = serve_ollama_inspections(2);
+    let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+    let fixture = prepare_c6_fixture(&client);
+
+    let before = client.mission_publications(fixture.mission_id).unwrap();
+    assert!(
+        before.is_empty(),
+        "C6T.PUBLICATION.THE_FIXTURE_HAS_NO_PUBLICATION"
+    );
+
+    client
+        .prepare_outcome_candidate(fixture.mission_id, AppendixRequestDto::PolicyDefault)
+        .unwrap_or_else(|error| panic!("C6T.PUBLICATION.THE_FIRST_PREPARE_IS_ACCEPTED: {error}"));
+    client
+        .prepare_outcome_candidate(fixture.mission_id, AppendixRequestDto::PolicyDefault)
+        .unwrap_or_else(|error| panic!("C6T.PUBLICATION.THE_REPEAT_IS_ACCEPTED: {error}"));
+    client
+        .prepare_outcome_candidate(fixture.mission_id, AppendixRequestDto::Include)
+        .unwrap_or_else(|error| panic!("C6T.PUBLICATION.THE_OTHER_APPENDIX_IS_ACCEPTED: {error}"));
+
+    assert_eq!(
+        client.mission_publications(fixture.mission_id).unwrap(),
+        before,
+        "C6T.PUBLICATION.PREPARING_PUBLISHES_NOTHING"
+    );
+
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
+    thread.join().unwrap().unwrap();
+}
+
+/// The three sequencing refusals, each by its own name, and the opacity of a Mission this Workspace
+/// never admitted.
+#[test]
+fn the_preparation_sequencing_refusals_are_separately_named() {
+    let runtime = TestRuntime::new("c6seq");
+    let address = serve_ollama_inspections(2);
+    let server = runtime.server_with_model_endpoint(LocalModelEndpoint::new(address).unwrap());
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    let client = LocalSupervisorClient::connect(&runtime.socket, &runtime.token).unwrap();
+    let base = prepare_c6_fixture(&client);
+
+    // 1. A Mission with no completion at all.
+    let bare = admit_another_mission(&client, &base, "Ship a second reviewed feature");
+    assert_remote_code(
+        client.prepare_outcome_candidate(bare, AppendixRequestDto::PolicyDefault),
+        LocalErrorCode::OutcomeNotCompleted,
+    );
+
+    // 2. Completed, never classified.
+    let unclassified = admit_another_mission(&client, &base, "Ship a third reviewed feature");
+    complete_mission(&client, &base, unclassified);
+    assert_remote_code(
+        client.prepare_outcome_candidate(unclassified, AppendixRequestDto::PolicyDefault),
+        LocalErrorCode::OutcomeNotClassified,
+    );
+
+    // 3. Classified only AFTER the completion: the boundary cannot be rewritten, and another
+    // classification will not change it.
+    let late = admit_another_mission(&client, &base, "Ship a fourth reviewed feature");
+    complete_mission(&client, &base, late);
+    client
+        .classify_mission_impact(ClassificationIntentRequest {
+            mission_id: late,
+            impact: "high".to_owned(),
+            reason: "Classified after the completion was recorded.".to_owned(),
+            expected_policy_revision: Some(base.policy_revision),
+            supersedes: SupersedesDto::None,
+        })
+        .unwrap_or_else(|error| {
+            panic!("C6T.SEQUENCE.THE_LATE_CLASSIFICATION_IS_RECORDED: {error}")
+        });
+    assert_remote_code(
+        client.prepare_outcome_candidate(late, AppendixRequestDto::PolicyDefault),
+        LocalErrorCode::OutcomeNoClassificationAtCompletion,
+    );
+
+    // 4. A Mission this Workspace never admitted is opaque: it answers exactly as an absent one, and
+    // neither says whether it exists anywhere.
+    let unknown =
+        client.prepare_outcome_candidate(Uuid::new_v4(), AppendixRequestDto::PolicyDefault);
+    let foreign = client.prepare_outcome_candidate(Uuid::new_v4(), AppendixRequestDto::Include);
+    let line = |result: &Result<beacond::PreparedOutcomeCandidateDto, LocalTransportError>| {
+        result.as_ref().err().map(std::string::ToString::to_string)
+    };
+    assert_eq!(
+        line(&unknown),
+        line(&foreign),
+        "C6T.SCOPE.ABSENCE_AND_FOREIGN_ARE_BYTE_IDENTICAL"
+    );
+    assert_remote_code(unknown, LocalErrorCode::OutcomeNotCompleted);
+
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
+    thread.join().unwrap().unwrap();
+}
+
+/// What one C6 fixture holds: the Workspace and Project it minted, the Policy revision in force, the
+/// Resident and configuration every later Mission reuses, and one Mission already classified and
+/// completed in the order the owner requires.
+struct PreparedC6Fixture {
+    workspace_id: Uuid,
+    project_id: Uuid,
+    charter_revision: u32,
+    policy_revision: u32,
+    team_id: Uuid,
+    resident_id: Uuid,
+    configuration_id: Uuid,
+    mission_id: Uuid,
+}
+
+/// Everything through the PUBLIC services, in the owner's required order: Policy, then classification,
+/// then completion. No SQL planting anywhere in this path.
+fn prepare_c6_fixture(client: &LocalSupervisorClient) -> PreparedC6Fixture {
+    client
+        .begin_password_setup(
+            SecretString::new("a long local passphrase".to_owned()),
+            SecretString::new("a long local passphrase".to_owned()),
+        )
+        .unwrap();
+    client.complete_operator_setup(true).unwrap();
+    let resident_id = client
+        .accept_starter_organization(1, vec![draft(StarterRole::Lead, Some("Northstar"))])
+        .unwrap()
+        .residents[0]
+        .id;
+    client.activate_resident(resident_id, None).unwrap();
+    let review = client
+        .inspect_local_model(MODEL_NAME.to_owned(), MODEL_DIGEST.to_owned())
+        .unwrap();
+    let activation = client
+        .activate_local_model(review, vec![ProviderFeature::Completion])
+        .unwrap();
+    let configuration = client
+        .configure_resident(
+            resident_id,
+            None,
+            activation.id,
+            vec![BeaconCapability::WorkCreateMission],
+        )
+        .unwrap();
+    let project = client
+        .create_project(project_draft("Beacon Alpha", AutonomyProfile::Supervised))
+        .unwrap();
+    let policy = client
+        .publish_project_policy(
+            project.id,
+            project.charter.revision,
+            None,
+            ProjectPolicyDraft {
+                team_lead_selection: TeamLeadSelectionPolicy {
+                    required_capabilities: vec![BeaconCapability::WorkCoordinateMission],
+                    availability_rule: TeamLeadAvailabilityRule::CurrentTeamEligibility,
+                    track_record_requirements: vec![TrackRecordRequirement {
+                        evidence_kind: TrackRecordEvidenceKind::MissionOutcome,
+                        minimum_count: 1,
+                    }],
+                    conflict_rule: TeamLeadConflictRule::RequireNoDeclaredConflict,
+                    ambiguity_rule: TeamLeadAmbiguityRule::RequireOperatorDecision,
+                },
+            },
+        )
+        .unwrap();
+    let formed = client
+        .form_team(TeamDraft {
+            project_id: project.id,
+            name: "Alpha Team".to_owned(),
+            members: vec![TeamMemberDraft {
+                resident_id,
+                expected_configuration_id: configuration.id,
+            }],
+        })
+        .unwrap();
+    let fixture = PreparedC6Fixture {
+        workspace_id: project.workspace_id,
+        project_id: project.id,
+        charter_revision: project.charter.revision,
+        policy_revision: policy.revision,
+        team_id: formed.id,
+        resident_id,
+        configuration_id: configuration.id,
+        mission_id: Uuid::nil(),
+    };
+    let mission_id = admit_another_mission(client, &fixture, "Ship one reviewed feature");
+
+    // HIGH impact, so `policy_default` already resolves to `included` -- which is what makes the
+    // distinct-identity bar above meaningful.
+    client
+        .classify_mission_impact(ClassificationIntentRequest {
+            mission_id,
+            impact: "high".to_owned(),
+            reason: "Touches the operator credential path.".to_owned(),
+            expected_policy_revision: Some(policy.revision),
+            supersedes: SupersedesDto::None,
+        })
+        .unwrap_or_else(|error| panic!("C6T.FIXTURE.THE_CLASSIFICATION_IS_RECORDED: {error}"));
+    complete_mission(client, &fixture, mission_id);
+
+    PreparedC6Fixture {
+        mission_id,
+        ..fixture
+    }
+}
+
+fn admit_another_mission(
+    client: &LocalSupervisorClient,
+    fixture: &PreparedC6Fixture,
+    outcome: &str,
+) -> Uuid {
+    client
+        .admit_mission(MissionDraft {
+            project_id: fixture.project_id,
+            expected_charter_revision: fixture.charter_revision,
+            team_id: fixture.team_id,
+            desired_outcome: outcome.to_owned(),
+            success_conditions: vec!["Relevant gates pass".to_owned()],
+            constraints: vec![],
+            prohibitions: vec![],
+            members: vec![MissionMemberDraft {
+                resident_id: fixture.resident_id,
+                expected_configuration_id: fixture.configuration_id,
+            }],
+        })
+        .unwrap()
+        .id
+}
+
+/// Preview, then record with the token the preview returned: the C4 path, unchanged.
+fn complete_mission(client: &LocalSupervisorClient, fixture: &PreparedC6Fixture, mission_id: Uuid) {
+    let request = beacond::CompletionIntentRequest {
+        mission_id,
+        accountable_resident_id: fixture.resident_id,
+        disposition: "concluded".to_owned(),
+        condition_results: vec![beacond::ConditionResultDto {
+            ordinal: 0,
+            outcome: "met".to_owned(),
+            support: Vec::new(),
+            note: None,
+        }],
+        delivered_artifacts: Vec::new(),
+        unfinished_work: Vec::new(),
+        uncertainty: Vec::new(),
+        spend: beacond::SpendDto::NotMeasured("no meter on this Mission".to_owned()),
+        summary: "Shipped it.".to_owned(),
+    };
+    let preview = client
+        .preview_mission_completion(request.clone())
+        .unwrap_or_else(|error| panic!("C6T.FIXTURE.THE_COMPLETION_PREVIEWS: {error}"));
+    client
+        .record_mission_completion(preview.request.clone(), preview.intent_sha256)
+        .unwrap_or_else(|error| panic!("C6T.FIXTURE.THE_COMPLETION_IS_RECORDED: {error}"));
+}
+
+/// C6's preparation command is KNOWN to the wire, for BOTH appendix choices, and answers with the
+/// account's own refusal.
+///
+/// The smallest real socket bar for this slice and the one that must be RED before any wiring exists:
+/// today `prepare_outcome_candidate` does not parse, so the supervisor answers `protocol_error` from
+/// its own `Json` refusal. "No such command" and "that command refused you" are different answers,
+/// and making that difference is exactly what the connection does.
+///
+/// Raw bytes rather than a client method, for the reason the C5 bar used them: at the moment this is
+/// written there is no client method to call, and a test that cannot compile cannot be RED by a named
+/// behaviour. Both closed appendix strings are exercised at the wire seam, because a route that
+/// accepts one spelling and not the other is half a route.
+#[test]
+fn the_preparation_command_is_known_to_the_wire_and_authenticated() {
+    let runtime = TestRuntime::new("c6route");
+    let server = runtime.server();
+    let running = Arc::new(AtomicBool::new(true));
+    let server_running = Arc::clone(&running);
+    let thread = thread::spawn(move || server.serve_until(server_running));
+    // The token is read from its file and never printed: no assertion message below carries it.
+    let token = fs::read_to_string(&runtime.token).unwrap();
+    let mission_id = Uuid::new_v4();
+
+    for appendix_request in ["policy_default", "include"] {
+        let body = serde_json::to_vec(&json!({
+            "protocol": 1,
+            "token": token,
+            "command": {
+                "name": "prepare_outcome_candidate",
+                "mission_id": mission_id,
+                "appendix_request": appendix_request,
+            },
+        }))
+        .unwrap();
+
+        let mut stream = UnixStream::connect(&runtime.socket).unwrap();
+        stream.write_all(&body).unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut answer = Vec::new();
+        stream.read_to_end(&mut answer).unwrap();
+        let answered: serde_json::Value = serde_json::from_slice(&answer).unwrap();
+
+        assert_eq!(
+            answered
+                .pointer("/error/code")
+                .and_then(serde_json::Value::as_str),
+            Some("not_authenticated"),
+            "C6T.ROUTE.IS_A_KNOWN_COMMAND: {appendix_request}"
+        );
+        assert_eq!(
+            answered.get("result"),
+            Some(&serde_json::Value::Null),
+            "C6T.ROUTE.A_REFUSAL_CARRIES_NO_RESULT: {appendix_request}"
+        );
+    }
+
+    // An appendix value outside the closed pair is refused as a malformed envelope, not silently
+    // defaulted: there is no `omit`, no `default` and no third arm on this wire.
+    let widened = serde_json::to_vec(&json!({
+        "protocol": 1,
+        "token": token,
+        "command": {
+            "name": "prepare_outcome_candidate",
+            "mission_id": mission_id,
+            "appendix_request": "omit",
+        },
+    }))
+    .unwrap();
+    let mut stream = UnixStream::connect(&runtime.socket).unwrap();
+    stream.write_all(&widened).unwrap();
+    stream.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut answer = Vec::new();
+    stream.read_to_end(&mut answer).unwrap();
+    let answered: serde_json::Value = serde_json::from_slice(&answer).unwrap();
+    assert_eq!(
+        answered
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str),
+        Some("protocol_error"),
+        "C6T.ROUTE.THE_APPENDIX_CHOICE_IS_A_CLOSED_PAIR"
+    );
+
+    running.store(false, Ordering::Release);
+    UnixStream::connect(&runtime.socket).ok();
+    thread.join().unwrap().unwrap();
 }
 
 /// C5's two commands are KNOWN to the wire, and answer with the account's own refusal.

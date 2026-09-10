@@ -8,17 +8,18 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use beacond::{
-    AccessOrigin, BeaconCapability, BeaconCapabilityDescriptor, ClassificationIntentRequest,
-    ClassificationObservation, ClassificationView, CompletionIntentRequest, CompletionPreview,
-    CompletionView, ExportedOutcome, LiveDataEncryptionReport, LocalErrorCode,
-    LocalModelActivation, LocalModelActivationReview, LocalModelDiscoveryReport,
-    LocalSupervisorClient, LocalTransportError, MissionDraft, MissionView, OperatorSessionPolicy,
-    OperatorSessionStatus, PlatformSessionMonitorStatus, PreflightReceipt, ProjectCharter,
-    ProjectCharterDraft, ProjectDraft, ProjectPolicy, ProjectPolicyDraft, ProjectRepository,
-    ProjectSummary, ProjectView, ProviderFeature, PublicationSummary, RecentReceiptPage,
-    RepositoryDraft, ResidentAgentView, ResidentConfiguration, ReviewedIntent,
-    SampleProjectInstallResult, SampleProjectStatus, SecretString, StarterOrganizationView,
-    StarterResidentDraft, TeamDraft, TeamView, initialize_local_auth_token,
+    AccessOrigin, AppendixRequestDto, BeaconCapability, BeaconCapabilityDescriptor,
+    ClassificationIntentRequest, ClassificationObservation, ClassificationView,
+    CompletionIntentRequest, CompletionPreview, CompletionView, ExportedOutcome,
+    LiveDataEncryptionReport, LocalErrorCode, LocalModelActivation, LocalModelActivationReview,
+    LocalModelDiscoveryReport, LocalSupervisorClient, LocalTransportError, MissionDraft,
+    MissionView, OperatorSessionPolicy, OperatorSessionStatus, PlatformSessionMonitorStatus,
+    PreflightReceipt, PreparedOutcomeCandidateDto, ProjectCharter, ProjectCharterDraft,
+    ProjectDraft, ProjectPolicy, ProjectPolicyDraft, ProjectRepository, ProjectSummary,
+    ProjectView, ProviderFeature, PublicationSummary, RecentReceiptPage, RepositoryDraft,
+    ResidentAgentView, ResidentConfiguration, ReviewedIntent, SampleProjectInstallResult,
+    SampleProjectStatus, SecretString, StarterOrganizationView, StarterResidentDraft, TeamDraft,
+    TeamView, initialize_local_auth_token,
 };
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -654,6 +655,40 @@ impl From<LocalTransportError> for CommandError {
                 "The Mission classification could not be verified.",
                 None,
             ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::OutcomeNotCompleted,
+                ..
+            } => (
+                "outcome_not_completed",
+                "This Mission has no recorded completion to prepare.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::OutcomeNotClassified,
+                ..
+            } => (
+                "outcome_not_classified",
+                "This Mission has no impact classification.",
+                None,
+            ),
+            LocalTransportError::Remote {
+                code: LocalErrorCode::OutcomeNoClassificationAtCompletion,
+                ..
+            } => (
+                "outcome_no_classification_at_completion",
+                "This Mission was classified only after completion. This completion cannot be prepared as an Outcome, and another classification will not change its boundary.",
+                None,
+            ),
+            // Every other preparation failure, INCLUDING a failed post-commit read and an identity
+            // mismatch: the candidate may already exist, so nothing here is definite.
+            LocalTransportError::Remote {
+                code: LocalErrorCode::OutcomePreparationUnavailable,
+                ..
+            } => (
+                "outcome_preparation_unavailable",
+                "Beacon could not verify the records needed to prepare this Outcome candidate.",
+                None,
+            ),
             // The one generic unavailable answer for a completion read OR write. Existing typed
             // session and authentication errors are matched earlier and keep their own semantics.
             LocalTransportError::Remote {
@@ -725,6 +760,8 @@ impl From<LocalTransportError> for CommandError {
             | LocalTransportError::MissionCompletionRead(_)
             | LocalTransportError::MissionCompletionCommand(_)
             | LocalTransportError::MissionImpactClassification(_)
+            | LocalTransportError::OutcomePreparation(_)
+            | LocalTransportError::OutcomePreparationAfterCommit(_)
             | LocalTransportError::CheckPreflight(_)
             | LocalTransportError::RecentReceipt(_)
             | LocalTransportError::SampleProject(_)
@@ -1177,6 +1214,21 @@ fn get_mission_completion_intent_value(
     state
         .supervisor
         .get_mission_completion_intent(mission_id)
+        .map_err(Into::into)
+}
+
+/// Prepare one Outcome candidate from a Mission's recorded completion and evidence.
+///
+/// A mutating owner action. It does not evaluate and does not publish, and the receipt it returns says
+/// nothing about whether anything later did.
+fn prepare_outcome_candidate_value(
+    state: &DesktopState,
+    mission_id: uuid::Uuid,
+    appendix_request: AppendixRequestDto,
+) -> Result<PreparedOutcomeCandidateDto, CommandError> {
+    state
+        .supervisor
+        .prepare_outcome_candidate(mission_id, appendix_request)
         .map_err(Into::into)
 }
 
@@ -1692,6 +1744,15 @@ fn get_mission_completion_intent(
 }
 
 #[tauri::command]
+fn prepare_outcome_candidate(
+    state: State<'_, DesktopState>,
+    mission_id: uuid::Uuid,
+    appendix_request: AppendixRequestDto,
+) -> Result<PreparedOutcomeCandidateDto, CommandError> {
+    prepare_outcome_candidate_value(&state, mission_id, appendix_request)
+}
+
+#[tauri::command]
 fn classify_mission_impact(
     state: State<'_, DesktopState>,
     request: ClassificationIntentRequest,
@@ -2025,6 +2086,7 @@ pub fn run() {
             get_mission_completion_intent,
             classify_mission_impact,
             get_mission_classification,
+            prepare_outcome_candidate,
             mission,
             admit_mission,
             mission_publications,
@@ -2375,6 +2437,7 @@ mod tests {
                 "allow-get-mission-completion-intent",
                 "allow-classify-mission-impact",
                 "allow-get-mission-classification",
+                "allow-prepare-outcome-candidate",
                 "allow-missions",
                 "allow-mission",
                 "allow-admit-mission",
@@ -3327,6 +3390,10 @@ mod tests {
         "CLASSIFICATION_TEXT_OVER_LIMIT" | ClassificationTextOverLimit => ("classification_text_over_limit", "The reason exceeds the supported length.", None);
         "CLASSIFICATION_INVALID_DETAILS" | ClassificationInvalidDetails => ("classification_invalid_details", "Some classification details are invalid. Review them and try again.", None);
         "MISSION_CLASSIFICATION_UNAVAILABLE" | MissionClassificationUnavailable => ("mission_classification_unavailable", "The Mission classification could not be verified.", None);
+        "OUTCOME_NOT_COMPLETED" | OutcomeNotCompleted => ("outcome_not_completed", "This Mission has no recorded completion to prepare.", None);
+        "OUTCOME_NOT_CLASSIFIED" | OutcomeNotClassified => ("outcome_not_classified", "This Mission has no impact classification.", None);
+        "OUTCOME_NO_CLASSIFICATION_AT_COMPLETION" | OutcomeNoClassificationAtCompletion => ("outcome_no_classification_at_completion", "This Mission was classified only after completion. This completion cannot be prepared as an Outcome, and another classification will not change its boundary.", None);
+        "OUTCOME_PREPARATION_UNAVAILABLE" | OutcomePreparationUnavailable => ("outcome_preparation_unavailable", "Beacon could not verify the records needed to prepare this Outcome candidate.", None);
         "SETUP_NOT_STARTED" | SetupNotStarted => ("local_request_failed", "Beacon could not complete that local request.", None);
         "ACCOUNT_ALREADY_EXISTS" | AccountAlreadyExists => ("local_request_failed", "Beacon could not complete that local request.", None);
         "ACCOUNT_MISSING" | AccountMissing => ("local_request_failed", "Beacon could not complete that local request.", None);
@@ -3369,6 +3436,16 @@ mod tests {
             LocalTransportError::Mission(beacond::MissionError::Store(driver_error!())), &[NEEDLE_A];
         "MISSION_COMPLETION_READ" | LocalTransportError::MissionCompletionRead(_) => ("local_request_failed", "Beacon could not complete that local request."),
             LocalTransportError::MissionCompletionRead(beacond::MissionCompletionReadError::Unavailable(beacond::CompletionUnavailable::Store(driver_error!()))), &[NEEDLE_A];
+        "OUTCOME_PREPARATION" | LocalTransportError::OutcomePreparation(_) => ("local_request_failed", "Beacon could not complete that local request."),
+            LocalTransportError::OutcomePreparation(beacond::PrepareRefusal::Render(needle_text())), &[NEEDLE_A];
+        "OUTCOME_PREPARATION_AFTER_COMMIT" | LocalTransportError::OutcomePreparationAfterCommit(_) => ("local_request_failed", "Beacon could not complete that local request."),
+            LocalTransportError::OutcomePreparationAfterCommit(
+                beacond::PostPreparationFault::Identity {
+                    field: "manifestId",
+                    expected: needle_text(),
+                    observed: needle_text(),
+                },
+            ), &[NEEDLE_A];
         "MISSION_IMPACT_CLASSIFICATION" | LocalTransportError::MissionImpactClassification(_) => ("local_request_failed", "Beacon could not complete that local request."),
             LocalTransportError::MissionImpactClassification(
                 beacond::ClassificationCommandError::MalformedRequest(NEEDLE_A),
@@ -3467,9 +3544,10 @@ mod tests {
         // one completion-command carrier.
         // Counted at THIS source: 71 + the nine classification codes, 23 + the one classification
         // carrier, and their sum.
-        assert_eq!(remote_rows().len(), 80, "R42S1.DESKTOP.CARDINALITY.REMOTE");
-        assert_eq!(local_rows().len(), 24, "R42S1.DESKTOP.CARDINALITY.LOCAL");
-        assert_eq!(cases.len(), 104, "R42S1.DESKTOP.CARDINALITY.CASES");
+        // Counted at THIS source: 80 + the four preparation codes, 24 + the two preparation carriers.
+        assert_eq!(remote_rows().len(), 84, "R42S1.DESKTOP.CARDINALITY.REMOTE");
+        assert_eq!(local_rows().len(), 26, "R42S1.DESKTOP.CARDINALITY.LOCAL");
+        assert_eq!(cases.len(), 110, "R42S1.DESKTOP.CARDINALITY.CASES");
         let ids: std::collections::BTreeSet<&str> =
             cases.iter().map(|case| case.id.as_str()).collect();
         assert_eq!(ids.len(), cases.len(), "R42S1.DESKTOP.CASE_IDS_UNIQUE");

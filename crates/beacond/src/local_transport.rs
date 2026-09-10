@@ -160,6 +160,10 @@ pub enum LocalErrorCode {
     ClassificationTextOverLimit,
     ClassificationInvalidDetails,
     MissionClassificationUnavailable,
+    OutcomeNotCompleted,
+    OutcomeNotClassified,
+    OutcomeNoClassificationAtCompletion,
+    OutcomePreparationUnavailable,
     OutcomeAbsent,
     OutcomeUnavailable,
     LocalModelUnavailable,
@@ -201,6 +205,12 @@ pub enum LocalTransportError {
     MissionCompletionRead(crate::MissionCompletionReadError),
     MissionCompletionCommand(crate::CompletionCommandError),
     MissionImpactClassification(crate::ClassificationCommandError),
+    /// A preparation refusal from BEFORE the owner committed. Nothing was written, so the three
+    /// absence/cut codes and the account recursion are all truthful.
+    OutcomePreparation(crate::PrepareRefusal),
+    /// A failure from AFTER `prepare_for_mission` returned. The candidate may already exist, so every
+    /// arm here -- `Account` included -- is `outcome_preparation_unavailable`.
+    OutcomePreparationAfterCommit(PostPreparationFault),
     ResourceDiscovery(ResourceDiscoveryError),
     LocalModelActivation(crate::LocalModelActivationError),
     Outcome(PublishRefusal),
@@ -258,6 +268,42 @@ fn completion_read_tag(error: &crate::MissionCompletionReadError) -> String {
             format!("Account.{}", account_tag(cause))
         }
         crate::MissionCompletionReadError::Unavailable(_) => "Unavailable".to_owned(),
+    }
+}
+
+/// The preparation refusal's NAME for a transport caller, account child included.
+///
+/// Same shape and same reason as its siblings: the owner's `PrepareRefusal` has no `name()`, and its
+/// `Display` is written for whoever owns that row. Every payload -- driver text, paths, digests, the
+/// assembler's and collector's own sentences -- stays in `Debug` and `source`.
+fn prepare_refusal_tag(error: &crate::PrepareRefusal) -> String {
+    match error {
+        crate::PrepareRefusal::Account(cause) => format!("Account.{}", account_tag(cause)),
+        crate::PrepareRefusal::CrossWorkspace => "CrossWorkspace".to_owned(),
+        crate::PrepareRefusal::Manifest(_) => "Manifest".to_owned(),
+        crate::PrepareRefusal::Completion(_) => "Completion".to_owned(),
+        crate::PrepareRefusal::Classification(_) => "Classification".to_owned(),
+        crate::PrepareRefusal::ClassificationAbsent => "ClassificationAbsent".to_owned(),
+        crate::PrepareRefusal::Irreconcilable { .. } => "Irreconcilable".to_owned(),
+        crate::PrepareRefusal::Render(_) => "Render".to_owned(),
+        crate::PrepareRefusal::Artifact(_) => "Artifact".to_owned(),
+        crate::PrepareRefusal::MissionNotCompleted { .. } => "MissionNotCompleted".to_owned(),
+        crate::PrepareRefusal::MissionNotClassified { .. } => "MissionNotClassified".to_owned(),
+        crate::PrepareRefusal::MissionNotClassifiedAtBoundary { .. } => {
+            "MissionNotClassifiedAtBoundary".to_owned()
+        }
+        crate::PrepareRefusal::Collector(_) => "Collector".to_owned(),
+        crate::PrepareRefusal::Assembly(_) => "Assembly".to_owned(),
+        crate::PrepareRefusal::Sources(_) => "Sources".to_owned(),
+    }
+}
+
+/// The post-commit fault's NAME. The phase is part of the name, because the phase is the fact that
+/// decides what a caller may conclude.
+fn post_preparation_tag(fault: &PostPreparationFault) -> String {
+    match fault {
+        PostPreparationFault::Read(refusal) => format!("Read.{}", prepare_refusal_tag(refusal)),
+        PostPreparationFault::Identity { field, .. } => format!("Identity.{field}"),
     }
 }
 
@@ -619,6 +665,20 @@ impl fmt::Display for LocalTransportError {
                     classification_command_tag(error)
                 )
             }
+            Self::OutcomePreparation(error) => {
+                write!(
+                    formatter,
+                    "Outcome preparation failed: {}",
+                    prepare_refusal_tag(error)
+                )
+            }
+            Self::OutcomePreparationAfterCommit(fault) => {
+                write!(
+                    formatter,
+                    "Outcome preparation failed after the candidate was written: {}",
+                    post_preparation_tag(fault)
+                )
+            }
             Self::Mission(error) => {
                 write!(
                     formatter,
@@ -920,6 +980,105 @@ fn accepts_completion_sized_request(command: &LocalCommand) -> bool {
     )
 }
 
+/// The Operator's appendix choice, as a closed pair. There is deliberately no `omit`, no `default`
+/// and no third arm: the owner's `AppendixRequest` has exactly two (`outcome.rs:541-544`), and a wire
+/// vocabulary that admitted more would be offering a choice nothing can honour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum AppendixRequestDto {
+    PolicyDefault,
+    Include,
+}
+
+impl AppendixRequestDto {
+    fn into_owner(self) -> crate::AppendixRequest {
+        match self {
+            Self::PolicyDefault => crate::AppendixRequest::PolicyDefault,
+            Self::Include => crate::AppendixRequest::Include,
+        }
+    }
+
+    /// The OTHER direction, read from the verified manifest rather than echoed from the request: the
+    /// receipt says what the stored manifest holds, not what the caller asked for.
+    fn from_owner(value: crate::AppendixRequest) -> Self {
+        match value {
+            crate::AppendixRequest::PolicyDefault => Self::PolicyDefault,
+            crate::AppendixRequest::Include => Self::Include,
+        }
+    }
+}
+
+/// The resolved appendix mode, derived by the verified manifest's own `appendix_mode()`
+/// (`outcome.rs:640-646`) and never stored. Mapped explicitly in both directions, so a new owner arm
+/// is a compile error here rather than a silent gap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum AppendixModeDto {
+    Included,
+    PolicyStateNotHighImpact,
+}
+
+impl AppendixModeDto {
+    fn from_owner(value: crate::AppendixMode) -> Self {
+        match value {
+            crate::AppendixMode::Included => Self::Included,
+            crate::AppendixMode::PolicyStateNotHighImpact => Self::PolicyStateNotHighImpact,
+        }
+    }
+}
+
+/// A digest envelope, whole. Never a bare hex string: a value without its algorithm and canonicalizer
+/// is not an identity, and the two digests in this receipt are under DIFFERENT canonicalizers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DigestEnvelopeDto {
+    pub algorithm: String,
+    pub canonicalizer: String,
+    pub value: String,
+}
+
+/// What ONE preparation produced, read back through the owner's own verified readers.
+///
+/// Nine fields and nothing else: no bytes, no status, no evaluation or publication flag, no authority
+/// and no generated support. The result arm itself means "prepared"; preparing does not evaluate or
+/// publish, and this receipt says nothing about whether anything later did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PreparedOutcomeCandidateDto {
+    pub mission_id: uuid::Uuid,
+    pub appendix_request: AppendixRequestDto,
+    pub appendix_mode: AppendixModeDto,
+    pub manifest_id: uuid::Uuid,
+    pub manifest_digest: DigestEnvelopeDto,
+    pub candidate_artifact_digest: DigestEnvelopeDto,
+    pub candidate_content_digest: DigestEnvelopeDto,
+    pub candidate_content_bytes: u64,
+    pub media_type: String,
+}
+
+/// Why a preparation failed AFTER `prepare_for_mission` returned.
+///
+/// A phase marker, not a second owner. Both arms retain the real cause for `Debug` and `source`, and
+/// both project to one outward code: once the owner has committed, nothing this transport learns
+/// afterwards can say whether the candidate exists.
+#[derive(Debug)]
+pub enum PostPreparationFault {
+    /// One of the two verified re-reads refused. Its own refusal, carried whole -- including an
+    /// `Account` refusal, which is NOT definite at this phase even though it is before the commit.
+    Read(PublishOrPrepare),
+    /// A re-read succeeded and disagreed with what `prepare_for_mission` returned. Not an owner
+    /// refusal at all, so it gets its own value rather than borrowing one that never happened.
+    Identity {
+        field: &'static str,
+        expected: String,
+        observed: String,
+    },
+}
+
+/// The owner refusal type the preparation readers answer with, named here so
+/// `PostPreparationFault::Read` reads as what it is.
+pub type PublishOrPrepare = crate::PrepareRefusal;
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RequestEnvelope {
@@ -1086,6 +1245,12 @@ enum LocalCommand {
     GetMissionClassification {
         mission_id: uuid::Uuid,
     },
+    /// Prepare one Outcome candidate from a Mission's recorded completion and evidence. A mutating
+    /// owner action; it does not evaluate and does not publish.
+    PrepareOutcomeCandidate {
+        mission_id: uuid::Uuid,
+        appendix_request: AppendixRequestDto,
+    },
     AdmitMission {
         draft: MissionDraft,
     },
@@ -1211,6 +1376,9 @@ enum LocalResult {
     },
     MissionClassificationObservation {
         observation: crate::ClassificationObservation,
+    },
+    PreparedOutcomeCandidate {
+        candidate: PreparedOutcomeCandidateDto,
     },
     Mission {
         mission: MissionView,
@@ -1439,6 +1607,121 @@ impl LocalSupervisorServer {
             });
         }
         Ok(request.command)
+    }
+
+    /// Prepare one candidate, then PROVE the receipt against the owner's own verified readers.
+    ///
+    /// `prepare_for_mission` is called exactly ONCE, with the values the caller supplied. Its three
+    /// identities are then re-read through `manifest` and `candidate`, and every field of the receipt
+    /// is taken from those verified reads -- never from the request, never from a column, never from a
+    /// constant assembled around an unverified string.
+    ///
+    /// The phase distinction is the point of the two error arms. Before the commit, a refusal is
+    /// definite and keeps its own meaning, account refusals included. After it, NOTHING is definite:
+    /// the candidate may already exist, so a failed re-read or a disagreeing identity both answer
+    /// `outcome_preparation_unavailable` with the cause retained in `Debug`. No receipt, no rollback
+    /// claim, no automatic repeat -- the owner's own idempotence is the only repeat mechanism.
+    fn prepare_outcome_candidate(
+        &self,
+        mission_id: uuid::Uuid,
+        appendix_request: AppendixRequestDto,
+    ) -> Result<PreparedOutcomeCandidateDto, LocalTransportError> {
+        let prepared = self
+            .outcomes
+            .prepare_for_mission(mission_id, appendix_request.into_owner())
+            .map_err(LocalTransportError::OutcomePreparation)?;
+
+        // Everything below is AFTER the commit. `?` is deliberately not used on these reads.
+        let after =
+            |fault: PostPreparationFault| LocalTransportError::OutcomePreparationAfterCommit(fault);
+        let stored = self
+            .outcomes
+            .manifest(&prepared.manifest_digest)
+            .map_err(|refusal| after(PostPreparationFault::Read(refusal)))?;
+        let record = self
+            .outcomes
+            .candidate(&prepared.manifest_digest)
+            .map_err(|refusal| after(PostPreparationFault::Read(refusal)))?;
+
+        let mismatch = |field: &'static str, expected: String, observed: String| {
+            after(PostPreparationFault::Identity {
+                field,
+                expected,
+                observed,
+            })
+        };
+        if stored.manifest_id() != prepared.manifest_id {
+            return Err(mismatch(
+                "manifestId",
+                prepared.manifest_id.to_string(),
+                stored.manifest_id().to_string(),
+            ));
+        }
+        if stored.digest().value != prepared.manifest_digest {
+            return Err(mismatch(
+                "manifestDigest",
+                prepared.manifest_digest.clone(),
+                stored.digest().value.clone(),
+            ));
+        }
+        if stored.candidate_artifact_digest() != prepared.candidate_artifact_digest
+            || record.digest().value != prepared.candidate_artifact_digest
+        {
+            return Err(mismatch(
+                "candidateArtifactDigest",
+                prepared.candidate_artifact_digest.clone(),
+                record.digest().value.clone(),
+            ));
+        }
+        let manifest = stored.manifest();
+        if manifest.mission_id != mission_id {
+            return Err(mismatch(
+                "missionId",
+                mission_id.to_string(),
+                manifest.mission_id.to_string(),
+            ));
+        }
+        if manifest.appendix_request != appendix_request.into_owner() {
+            return Err(mismatch(
+                "appendixRequest",
+                format!("{:?}", appendix_request.into_owner()),
+                format!("{:?}", manifest.appendix_request),
+            ));
+        }
+
+        let envelope = |algorithm: &str, canonicalizer: &str, value: &str| DigestEnvelopeDto {
+            algorithm: algorithm.to_owned(),
+            canonicalizer: canonicalizer.to_owned(),
+            value: value.to_owned(),
+        };
+        let payload = record.payload();
+        Ok(PreparedOutcomeCandidateDto {
+            mission_id: manifest.mission_id,
+            // From the VERIFIED manifest, not the request: the receipt reports what was stored.
+            appendix_request: AppendixRequestDto::from_owner(manifest.appendix_request),
+            appendix_mode: AppendixModeDto::from_owner(manifest.appendix_mode()),
+            manifest_id: stored.manifest_id(),
+            manifest_digest: envelope(
+                &stored.digest().algorithm,
+                &stored.digest().canonicalizer,
+                &stored.digest().value,
+            ),
+            // The Artifact RECORD's identity, under the record canonicalizer.
+            candidate_artifact_digest: envelope(
+                &record.digest().algorithm,
+                &record.digest().canonicalizer,
+                &record.digest().value,
+            ),
+            // And the CONTENT's digest, under the raw canonicalizer. Two different envelopes over two
+            // different things; confusing them would make a caller verify the wrong bytes.
+            candidate_content_digest: envelope(
+                &payload.content_digest.algorithm,
+                &payload.content_digest.canonicalizer,
+                &payload.content_digest.value,
+            ),
+            candidate_content_bytes: payload.content_bytes,
+            media_type: payload.media_type.clone(),
+        })
     }
 
     fn dispatch(&self, command: LocalCommand) -> Result<ResponseEnvelope, LocalTransportError> {
@@ -1715,6 +1998,12 @@ impl LocalSupervisorServer {
                     observation: self.impact_classifications.observe(mission_id)?,
                 }
             }
+            LocalCommand::PrepareOutcomeCandidate {
+                mission_id,
+                appendix_request,
+            } => LocalResult::PreparedOutcomeCandidate {
+                candidate: self.prepare_outcome_candidate(mission_id, appendix_request)?,
+            },
             LocalCommand::AdmitMission { draft } => LocalResult::Mission {
                 mission: self.missions.admit(draft)?,
             },
@@ -2202,6 +2491,19 @@ impl LocalSupervisorClient {
         )
     }
 
+    /// Prepare one Outcome candidate. A mutating owner action: it does not evaluate and does not
+    /// publish, and the receipt it returns says nothing about whether anything later did.
+    pub fn prepare_outcome_candidate(
+        &self,
+        mission_id: uuid::Uuid,
+        appendix_request: AppendixRequestDto,
+    ) -> Result<PreparedOutcomeCandidateDto, LocalTransportError> {
+        expect_prepared_outcome_candidate(self.send(LocalCommand::PrepareOutcomeCandidate {
+            mission_id,
+            appendix_request,
+        })?)
+    }
+
     /// Record one Mission impact classification. The Operator's five keys cross unchanged; the owner
     /// derives identity, version, the Policy citation, the actor and the clock.
     pub fn classify_mission_impact(
@@ -2337,6 +2639,9 @@ fn response_max(command: &LocalCommand) -> u64 {
         // neither needs a larger frame and neither widens one.
         LocalCommand::ClassifyMissionImpact { .. }
         | LocalCommand::GetMissionClassification { .. }
+        // C6's receipt is fixed-size metadata -- nine fields, two digest envelopes, no bytes -- so it
+        // stays in the old domain. A 1 MiB candidate's CONTENT deliberately does not cross here.
+        | LocalCommand::PrepareOutcomeCandidate { .. }
         | LocalCommand::Status
         | LocalCommand::SessionPolicy
         | LocalCommand::SetSessionTimeout { .. }
@@ -2606,6 +2911,15 @@ fn expect_mission_completion(
     }
 }
 
+fn expect_prepared_outcome_candidate(
+    result: LocalResult,
+) -> Result<PreparedOutcomeCandidateDto, LocalTransportError> {
+    match result {
+        LocalResult::PreparedOutcomeCandidate { candidate } => Ok(candidate),
+        _ => Err(LocalTransportError::Protocol),
+    }
+}
+
 fn expect_mission_classification(
     result: LocalResult,
 ) -> Result<crate::ClassificationView, LocalTransportError> {
@@ -2735,6 +3049,10 @@ fn response_from_transport_error(error: LocalTransportError) -> ResponseEnvelope
         }
         LocalTransportError::MissionImpactClassification(error) => {
             wire_error_from_classification(error)
+        }
+        LocalTransportError::OutcomePreparation(error) => wire_error_from_preparation(error),
+        LocalTransportError::OutcomePreparationAfterCommit(fault) => {
+            wire_error_from_post_preparation(fault)
         }
         LocalTransportError::ResourceDiscovery(ResourceDiscoveryError::Account(error)) => {
             wire_error_from_account(error)
@@ -3111,6 +3429,52 @@ fn wire_error_from_classification(error: crate::ClassificationCommandError) -> W
     }
 }
 
+/// The preparation family's closed outward answer, BEFORE the commit.
+///
+/// Only the three actual owner variants reach a definite code. Everything else -- broken, unverified,
+/// irreconcilable, render, store, Artifact, collector, assembler, sources -- is unavailable, because
+/// broken evidence is not absence. A cross-Workspace or absent Mission is opaque: it reaches
+/// `MissionNotCompleted` at the owner's own query and gets that code, which confirms nothing about
+/// existence.
+fn wire_error_from_preparation(error: crate::PrepareRefusal) -> WireError {
+    let code = match error {
+        crate::PrepareRefusal::Account(error) => return wire_error_from_account(error),
+        crate::PrepareRefusal::MissionNotCompleted { .. } => LocalErrorCode::OutcomeNotCompleted,
+        crate::PrepareRefusal::MissionNotClassified { .. } => LocalErrorCode::OutcomeNotClassified,
+        crate::PrepareRefusal::MissionNotClassifiedAtBoundary { .. } => {
+            LocalErrorCode::OutcomeNoClassificationAtCompletion
+        }
+        crate::PrepareRefusal::CrossWorkspace
+        | crate::PrepareRefusal::Manifest(_)
+        | crate::PrepareRefusal::Completion(_)
+        | crate::PrepareRefusal::Classification(_)
+        | crate::PrepareRefusal::ClassificationAbsent
+        | crate::PrepareRefusal::Irreconcilable { .. }
+        | crate::PrepareRefusal::Render(_)
+        | crate::PrepareRefusal::Artifact(_)
+        | crate::PrepareRefusal::Collector(_)
+        | crate::PrepareRefusal::Assembly(_)
+        | crate::PrepareRefusal::Sources(_) => LocalErrorCode::OutcomePreparationUnavailable,
+    };
+    WireError {
+        code,
+        retry_after_ms: None,
+    }
+}
+
+/// And AFTER the commit: one code for everything, including an account refusal.
+///
+/// The account recursion is deliberately NOT taken here. A session refusal before the owner ran is a
+/// definite answer a caller may act on; the same refusal from a re-read, after the candidate may
+/// already have been written, is not. Collapsing it is the honest projection, and the cause survives
+/// in the retained fault's `Debug`.
+fn wire_error_from_post_preparation(_fault: PostPreparationFault) -> WireError {
+    WireError {
+        code: LocalErrorCode::OutcomePreparationUnavailable,
+        retry_after_ms: None,
+    }
+}
+
 fn wire_error_from_mission(error: MissionError) -> WireError {
     let code = match error {
         MissionError::Account(error) => return wire_error_from_account(error),
@@ -3211,11 +3575,13 @@ mod tests {
     use super::{
         LocalCommand, LocalErrorCode, LocalServerConfig, LocalSupervisorClient,
         LocalSupervisorServer, LocalTransportError, MAX_COMPLETION_PREVIEW_RESPONSE_BYTES,
-        MAX_COMPLETION_REQUEST_BYTES, MAX_MESSAGE_BYTES, ResponseEnvelope, WireError,
-        accepts_completion_sized_request, initialize_local_auth_token,
-        response_from_transport_error, response_max,
+        MAX_COMPLETION_REQUEST_BYTES, MAX_MESSAGE_BYTES, PostPreparationFault,
+        PreparedOutcomeCandidateDto, ResponseEnvelope, WireError, accepts_completion_sized_request,
+        initialize_local_auth_token, response_from_transport_error, response_max,
     };
     use crate::outcome::MalformedOutcome;
+    use crate::outcome_assembler::{AssemblyRefusal, SourcesRefusal};
+    use crate::outcome_collector::CollectorRefusal;
     use crate::outcome_pdf::PdfRefusal;
     use crate::outcome_store::ManifestStoreRefusal;
     use crate::outcome_typst::TypstRefusal;
@@ -3476,6 +3842,13 @@ mod tests {
     /// The field name a malformed/duplicate completion refusal carries. A needle, not a message: an
     /// outward line or wire code containing it would be the owner's private diagnostic escaping.
     const NEEDLE_FIELD: &str = "R42S2_PRIVATE_FIELD";
+
+    /// A post-commit read that refused on the ACCOUNT. Test scaffolding: the closed tables use it so
+    /// the eighteen account children are exercised THROUGH the post-commit arm rather than asserted
+    /// once, and production has no reason to construct one.
+    fn post_read_account(cause: OperatorAccountError) -> PostPreparationFault {
+        PostPreparationFault::Read(crate::PrepareRefusal::Account(cause))
+    }
     const NEEDLE_B: &str = "R42S2_PRIVATE_B";
 
     /// Approved numeric context, chosen here before any error is built and pairwise distinct so a
@@ -3915,6 +4288,78 @@ mod tests {
     }
 
     closed_table! {
+        expected_preparation / preparation_rows: crate::PrepareRefusal,
+        "Account" | crate::PrepareRefusal::Account(cause)
+            => format!("Account.{}", expected_account(cause).1),
+            crate::PrepareRefusal::Account(OperatorAccountError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "CrossWorkspace" | crate::PrepareRefusal::CrossWorkspace
+            => "CrossWorkspace", crate::PrepareRefusal::CrossWorkspace, &[];
+        "Manifest" | crate::PrepareRefusal::Manifest(_)
+            => "Manifest",
+            crate::PrepareRefusal::Manifest(ManifestStoreRefusal::Store(payload_a())), &[NEEDLE_A];
+        "Completion" | crate::PrepareRefusal::Completion(_)
+            => "Completion",
+            crate::PrepareRefusal::Completion(CompletionReadRefusal::Store(payload_a())), &[NEEDLE_A];
+        "Classification" | crate::PrepareRefusal::Classification(_)
+            => "Classification",
+            crate::PrepareRefusal::Classification(ClassificationStoreError::Store(payload_a())), &[NEEDLE_A];
+        "ClassificationAbsent" | crate::PrepareRefusal::ClassificationAbsent
+            => "ClassificationAbsent", crate::PrepareRefusal::ClassificationAbsent, &[];
+        "Irreconcilable" | crate::PrepareRefusal::Irreconcilable { .. }
+            => "Irreconcilable",
+            crate::PrepareRefusal::Irreconcilable { detail: payload_a() }, &[NEEDLE_A];
+        "Render" | crate::PrepareRefusal::Render(_)
+            => "Render", crate::PrepareRefusal::Render(payload_a()), &[NEEDLE_A];
+        "Artifact" | crate::PrepareRefusal::Artifact(_)
+            => "Artifact",
+            crate::PrepareRefusal::Artifact(ArtifactError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "MissionNotCompleted" | crate::PrepareRefusal::MissionNotCompleted { .. }
+            => "MissionNotCompleted",
+            crate::PrepareRefusal::MissionNotCompleted { mission_id: Uuid::nil() }, &[];
+        "MissionNotClassified" | crate::PrepareRefusal::MissionNotClassified { .. }
+            => "MissionNotClassified",
+            crate::PrepareRefusal::MissionNotClassified { mission_id: Uuid::nil() }, &[];
+        "MissionNotClassifiedAtBoundary" | crate::PrepareRefusal::MissionNotClassifiedAtBoundary { .. }
+            => "MissionNotClassifiedAtBoundary",
+            crate::PrepareRefusal::MissionNotClassifiedAtBoundary {
+                mission_id: Uuid::nil(),
+                boundary_event_seq: 7,
+                classifications_after: 1,
+            }, &[];
+        "Collector" | crate::PrepareRefusal::Collector(_)
+            => "Collector",
+            crate::PrepareRefusal::Collector(CollectorRefusal::Absent {
+                kind: "classification",
+                id: payload_a(),
+            }), &[NEEDLE_A];
+        "Assembly" | crate::PrepareRefusal::Assembly(_)
+            => "Assembly",
+            crate::PrepareRefusal::Assembly(AssemblyRefusal::NoCompletion), &[];
+        "Sources" | crate::PrepareRefusal::Sources(_)
+            => "Sources",
+            crate::PrepareRefusal::Sources(SourcesRefusal::MissionNotAdmitted), &[];
+    }
+
+    // The post-commit vocabulary. `Read.*` repeats the whole pre-commit set under a phase prefix, and
+    // `Identity` is the transport's own: a re-read that disagreed is not an owner refusal.
+    closed_table! {
+        expected_post_preparation / post_preparation_rows: PostPreparationFault,
+        "Account" | PostPreparationFault::Read(crate::PrepareRefusal::Account(cause))
+            => format!("Read.Account.{}", expected_account(cause).1),
+            post_read_account(OperatorAccountError::Store(driver_error(NEEDLE_A))), &[NEEDLE_A];
+        "Read" | PostPreparationFault::Read(refusal)
+            => format!("Read.{}", expected_preparation(refusal).1),
+            PostPreparationFault::Read(crate::PrepareRefusal::ClassificationAbsent), &[];
+        "Identity" | PostPreparationFault::Identity { field, .. }
+            => format!("Identity.{field}"),
+            PostPreparationFault::Identity {
+                field: "manifestId",
+                expected: payload_a(),
+                observed: payload_a(),
+            }, &[NEEDLE_A];
+    }
+
+    closed_table! {
         expected_impact_classification / impact_classification_rows: crate::ClassificationCommandError,
         "Account" | crate::ClassificationCommandError::Account(cause)
             => format!("Account.{}", expected_account(cause).1),
@@ -4142,6 +4587,10 @@ mod tests {
         "ClassificationTextOverLimit" | LocalErrorCode::ClassificationTextOverLimit => "ClassificationTextOverLimit", LocalErrorCode::ClassificationTextOverLimit, &[];
         "ClassificationInvalidDetails" | LocalErrorCode::ClassificationInvalidDetails => "ClassificationInvalidDetails", LocalErrorCode::ClassificationInvalidDetails, &[];
         "MissionClassificationUnavailable" | LocalErrorCode::MissionClassificationUnavailable => "MissionClassificationUnavailable", LocalErrorCode::MissionClassificationUnavailable, &[];
+        "OutcomeNotCompleted" | LocalErrorCode::OutcomeNotCompleted => "OutcomeNotCompleted", LocalErrorCode::OutcomeNotCompleted, &[];
+        "OutcomeNotClassified" | LocalErrorCode::OutcomeNotClassified => "OutcomeNotClassified", LocalErrorCode::OutcomeNotClassified, &[];
+        "OutcomeNoClassificationAtCompletion" | LocalErrorCode::OutcomeNoClassificationAtCompletion => "OutcomeNoClassificationAtCompletion", LocalErrorCode::OutcomeNoClassificationAtCompletion, &[];
+        "OutcomePreparationUnavailable" | LocalErrorCode::OutcomePreparationUnavailable => "OutcomePreparationUnavailable", LocalErrorCode::OutcomePreparationUnavailable, &[];
         "OutcomeAbsent" | LocalErrorCode::OutcomeAbsent => "OutcomeAbsent", LocalErrorCode::OutcomeAbsent, &[];
         "OutcomeUnavailable" | LocalErrorCode::OutcomeUnavailable => "OutcomeUnavailable", LocalErrorCode::OutcomeUnavailable, &[];
         "LocalModelUnavailable" | LocalErrorCode::LocalModelUnavailable => "LocalModelUnavailable", LocalErrorCode::LocalModelUnavailable, &[];
@@ -4215,6 +4664,19 @@ mod tests {
         "R42S2.TRANSPORT.MissionCompletionRead" | LocalTransportError::MissionCompletionRead(error)
             => format!("Mission completion read failed: {}", expected_completion_read(error).1),
             LocalTransportError::MissionCompletionRead(crate::MissionCompletionReadError::Unavailable(crate::CompletionUnavailable::OrphanCompletedEvent)), &[];
+        "R42S2.TRANSPORT.OutcomePreparation" | LocalTransportError::OutcomePreparation(error)
+            => format!("Outcome preparation failed: {}", expected_preparation(error).1),
+            LocalTransportError::OutcomePreparation(crate::PrepareRefusal::ClassificationAbsent), &[];
+        "R42S2.TRANSPORT.OutcomePreparationAfterCommit" | LocalTransportError::OutcomePreparationAfterCommit(fault)
+            => format!(
+                "Outcome preparation failed after the candidate was written: {}",
+                expected_post_preparation(fault).1
+            ),
+            LocalTransportError::OutcomePreparationAfterCommit(PostPreparationFault::Identity {
+                field: "manifestId",
+                expected: payload_a(),
+                observed: payload_a(),
+            }), &[NEEDLE_A];
         "R42S2.TRANSPORT.MissionImpactClassification" | LocalTransportError::MissionImpactClassification(error)
             => format!("Mission impact classification failed: {}", expected_impact_classification(error).1),
             LocalTransportError::MissionImpactClassification(crate::ClassificationCommandError::MalformedRequest(NEEDLE_FIELD)), &[NEEDLE_FIELD];
@@ -5298,6 +5760,20 @@ mod tests {
         TeamError::Account
     );
     domain_cases!(
+        preparation_cases,
+        LocalTransportError::OutcomePreparation,
+        preparation_rows,
+        "R42S2.TRANSPORT.OutcomePreparation",
+        crate::PrepareRefusal::Account
+    );
+    domain_cases!(
+        post_preparation_cases,
+        LocalTransportError::OutcomePreparationAfterCommit,
+        post_preparation_rows,
+        "R42S2.TRANSPORT.OutcomePreparationAfterCommit",
+        post_read_account
+    );
+    domain_cases!(
         impact_classification_cases,
         LocalTransportError::MissionImpactClassification,
         impact_classification_rows,
@@ -5625,6 +6101,10 @@ mod tests {
                 "R42S2.TRANSPORT.MissionImpactClassification" => {
                     impact_classification_cases(&mut cases)
                 }
+                "R42S2.TRANSPORT.OutcomePreparation" => preparation_cases(&mut cases),
+                "R42S2.TRANSPORT.OutcomePreparationAfterCommit" => {
+                    post_preparation_cases(&mut cases)
+                }
                 "R42S2.TRANSPORT.ResourceDiscovery" => discovery_cases(&mut cases),
                 "R42S2.TRANSPORT.LocalModelActivation" => activation_cases(&mut cases),
                 "R42S2.TRANSPORT.Supervisor" => {
@@ -5785,13 +6265,13 @@ mod tests {
         // Counted at THIS source: 63 before this slice, plus the eight completion codes.
         assert_eq!(
             code_rows().len(),
-            80,
+            84,
             "R42S2.TRANSPORT.CARDINALITY.LocalErrorCode"
         );
         // 23 before this slice, plus the `MissionCompletionCommand` carrier.
         assert_eq!(
             transport_rows().len(),
-            25,
+            27,
             "R42S2.TRANSPORT.CARDINALITY.ROOT"
         );
         // 22 roots expanded: 62 Remote codes, 72 Supervisor roots PLUS every child of all 26
@@ -5804,7 +6284,10 @@ mod tests {
         // every account row) = 914.
         // 914 before C5: plus its nine Remote codes, its nine direct arms, and its `Account` arm
         // over all eighteen account rows = 950.
-        assert_eq!(cases.len(), 950, "R42S2.TRANSPORT.CARDINALITY.CASES");
+        // 950 before C6: plus its four Remote codes, the pre-commit domain's fourteen direct arms and
+        // its `Account` arm over all eighteen account rows, and the post-commit domain's two direct
+        // arms plus ITS `Account` arm over the same eighteen = 1006. Counted on this head.
+        assert_eq!(cases.len(), 1006, "R42S2.TRANSPORT.CARDINALITY.CASES");
         assert_eq!(
             supervisor_rows().len(),
             75,
@@ -5931,7 +6414,7 @@ mod tests {
     }
     /// The spec's 153 immediate domain mappings, transcribed. `Account` means "recurse on
     /// the account payload", exactly as the production mapper does.
-    const WIRE_MAP: [(&str, WireExpectation); 174] = [
+    const WIRE_MAP: [(&str, WireExpectation); 192] = [
         (
             "Account.PasswordTooShort",
             WireExpectation::Code("password_too_short"),
@@ -6558,15 +7041,88 @@ mod tests {
             "MissionImpactClassification.Unavailable",
             WireExpectation::Code("mission_classification_unavailable"),
         ),
+        // C6 preparation, BEFORE the commit: only the three actual owner variants are definite, the
+        // account child recurses, and every broken-evidence arm is unavailable.
+        ("OutcomePreparation.Account", WireExpectation::Account),
+        (
+            "OutcomePreparation.CrossWorkspace",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
+        (
+            "OutcomePreparation.Manifest",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
+        (
+            "OutcomePreparation.Completion",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
+        (
+            "OutcomePreparation.Classification",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
+        (
+            "OutcomePreparation.ClassificationAbsent",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
+        (
+            "OutcomePreparation.Irreconcilable",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
+        (
+            "OutcomePreparation.Render",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
+        (
+            "OutcomePreparation.Artifact",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
+        (
+            "OutcomePreparation.MissionNotCompleted",
+            WireExpectation::Code("outcome_not_completed"),
+        ),
+        (
+            "OutcomePreparation.MissionNotClassified",
+            WireExpectation::Code("outcome_not_classified"),
+        ),
+        (
+            "OutcomePreparation.MissionNotClassifiedAtBoundary",
+            WireExpectation::Code("outcome_no_classification_at_completion"),
+        ),
+        (
+            "OutcomePreparation.Collector",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
+        (
+            "OutcomePreparation.Assembly",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
+        (
+            "OutcomePreparation.Sources",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
+        // And AFTER it: one code for all three, `Account` INCLUDED. A session refusal from a re-read
+        // is not definite, because the candidate may already exist.
+        (
+            "OutcomePreparationAfterCommit.Account",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
+        (
+            "OutcomePreparationAfterCommit.Read",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
+        (
+            "OutcomePreparationAfterCommit.Identity",
+            WireExpectation::Code("outcome_preparation_unavailable"),
+        ),
     ];
 
-    /// The 79 code spellings: wire literal and reviewed Remote NAME, both independent.
+    /// The 83 code spellings: wire literal and reviewed Remote NAME, both independent.
     ///
     /// The eight completion rows are transcribed from `C4-interface.md`'s superseding section, not
     /// read off the enum: a spelling that agreed with the code because it was generated from it
     /// would witness nothing. (`MissionCompletionUnavailable` has no row here -- C3 added the code
     /// without a spelling; that gap is C3's to close, not this slice's to edit.)
-    const CODE_SPELLINGS: [(&str, &str, &str); 79] = [
+    const CODE_SPELLINGS: [(&str, &str, &str); 83] = [
         ("PasswordTooShort", "password_too_short", "PasswordTooShort"),
         ("PasswordTooLong", "password_too_long", "PasswordTooLong"),
         (
@@ -6894,6 +7450,26 @@ mod tests {
             "mission_classification_unavailable",
             "MissionClassificationUnavailable",
         ),
+        (
+            "OutcomeNotCompleted",
+            "outcome_not_completed",
+            "OutcomeNotCompleted",
+        ),
+        (
+            "OutcomeNotClassified",
+            "outcome_not_classified",
+            "OutcomeNotClassified",
+        ),
+        (
+            "OutcomeNoClassificationAtCompletion",
+            "outcome_no_classification_at_completion",
+            "OutcomeNoClassificationAtCompletion",
+        ),
+        (
+            "OutcomePreparationUnavailable",
+            "outcome_preparation_unavailable",
+            "OutcomePreparationUnavailable",
+        ),
     ];
 
     // -------------------------------------------------------------------------------------
@@ -6956,8 +7532,8 @@ mod tests {
     /// cannot change a code or a retry without a named failure here.
     #[test]
     fn r42_wire_projection_preserves_the_closed_contract() {
-        assert_eq!(WIRE_MAP.len(), 174, "R42S2.WIRE.CARDINALITY.MAP");
-        assert_eq!(CODE_SPELLINGS.len(), 79, "R42S2.WIRE.CARDINALITY.CODES");
+        assert_eq!(WIRE_MAP.len(), 192, "R42S2.WIRE.CARDINALITY.MAP");
+        assert_eq!(CODE_SPELLINGS.len(), 83, "R42S2.WIRE.CARDINALITY.CODES");
 
         // Lead cases, in the spec's order, so a mutant's first RED is predictable.
         let leads: Vec<(String, LocalTransportError, &'static str, Option<u64>)> = vec![
@@ -7071,7 +7647,7 @@ mod tests {
             }
         }
         // 135 before this slice, plus the completion family's eleven owner arms.
-        assert_eq!(checked, 156, "R42S2.WIRE.CARDINALITY.DOMAIN_ARMS");
+        assert_eq!(checked, 174, "R42S2.WIRE.CARDINALITY.DOMAIN_ARMS");
 
         // All 18 account faults at the root...
         for (variant, account, _) in account_rows() {
@@ -7176,7 +7752,7 @@ mod tests {
             );
         }
 
-        // All 79 Remote codes relay BOTH fields unchanged, including a retry on a code that does
+        // All 83 Remote codes relay BOTH fields unchanged, including a retry on a code that does
         // not otherwise carry one. Existing behaviour, pinned -- not a new promise.
         for (variant, literal, _) in CODE_SPELLINGS {
             let code = code_rows()
@@ -7194,7 +7770,7 @@ mod tests {
         }
     }
 
-    /// R42 slice 2: the wire schema and all 79 code spellings are closed.
+    /// R42 slice 2: the wire schema and all 83 code spellings are closed.
     #[test]
     fn r42_wire_schema_and_code_spellings_are_closed() {
         for (variant, literal, name) in CODE_SPELLINGS {
@@ -7320,6 +7896,16 @@ mod tests {
                 "MissionImpactClassification",
                 LocalTransportError::MissionImpactClassification,
                 impact_classification_rows
+            ),
+            domain!(
+                "OutcomePreparation",
+                LocalTransportError::OutcomePreparation,
+                preparation_rows
+            ),
+            domain!(
+                "OutcomePreparationAfterCommit",
+                LocalTransportError::OutcomePreparationAfterCommit,
+                post_preparation_rows
             ),
             domain!(
                 "ResourceDiscovery",
@@ -7933,6 +8519,228 @@ mod tests {
             }))
             .is_err(),
             "C4.WIRE.A_RECORD_WITHOUT_THE_REVIEWED_TOKEN_IS_REFUSED"
+        );
+    }
+
+    /// The preparation receipt through the NATIVE serializer: nine keys, exactly, and strict on both
+    /// sides.
+    ///
+    /// Every literal is written from the C6 contract, not read off the types.
+    #[test]
+    fn the_preparation_wire_shapes_are_exact_and_strict() {
+        let mission = "99999999-9999-4999-8999-9999999c6000";
+        let hex = "a".repeat(64);
+        let receipt = serde_json::json!({
+            "missionId": mission,
+            "appendixRequest": "policy_default",
+            "appendixMode": "policy_state_not_high_impact",
+            "manifestId": "66666666-6666-4666-8666-666666666666",
+            "manifestDigest": {
+                "algorithm": "sha256",
+                "canonicalizer": "beacon.outcome.manifest.v2",
+                "value": hex,
+            },
+            "candidateArtifactDigest": {
+                "algorithm": "sha256",
+                "canonicalizer": "beacon.artifact.v1",
+                "value": hex,
+            },
+            "candidateContentDigest": {
+                "algorithm": "sha256",
+                "canonicalizer": "beacon.raw.v1",
+                "value": hex,
+            },
+            "candidateContentBytes": 1_048_576_u64,
+            "mediaType": "text/markdown; charset=utf-8",
+        });
+        let decoded: PreparedOutcomeCandidateDto =
+            serde_json::from_value(receipt.clone()).expect("the nine-field receipt decodes");
+        assert_eq!(
+            serde_json::to_value(&decoded).expect("it re-serializes"),
+            receipt,
+            "C6T.WIRE.THE_RECEIPT_ROUND_TRIPS"
+        );
+        assert_eq!(
+            receipt.as_object().expect("an object").len(),
+            9,
+            "C6T.WIRE.THE_RECEIPT_HAS_NINE_KEYS"
+        );
+
+        for absent in [
+            "missionId",
+            "appendixRequest",
+            "appendixMode",
+            "manifestId",
+            "manifestDigest",
+            "candidateArtifactDigest",
+            "candidateContentDigest",
+            "candidateContentBytes",
+            "mediaType",
+        ] {
+            let mut missing = receipt.clone();
+            missing.as_object_mut().expect("an object").remove(absent);
+            assert!(
+                serde_json::from_value::<PreparedOutcomeCandidateDto>(missing).is_err(),
+                "C6T.WIRE.EVERY_RECEIPT_KEY_IS_REQUIRED: {absent}"
+            );
+        }
+        let mut extra = receipt.clone();
+        extra["isPublished"] = serde_json::Value::from(false);
+        assert!(
+            serde_json::from_value::<PreparedOutcomeCandidateDto>(extra).is_err(),
+            "C6T.WIRE.NO_STATUS_OR_PUBLICATION_FIELD_IS_ADMITTED"
+        );
+        let mut partial = receipt.clone();
+        partial["manifestDigest"]
+            .as_object_mut()
+            .expect("an object")
+            .remove("canonicalizer");
+        assert!(
+            serde_json::from_value::<PreparedOutcomeCandidateDto>(partial).is_err(),
+            "C6T.WIRE.A_DIGEST_WITHOUT_ITS_CANONICALIZER_IS_NOT_AN_IDENTITY"
+        );
+
+        // The request seam: a Mission and ONE of two appendix spellings, and nothing else.
+        for spelling in ["policy_default", "include"] {
+            let command = serde_json::json!({
+                "name": "prepare_outcome_candidate",
+                "mission_id": mission,
+                "appendix_request": spelling,
+            });
+            let decoded: LocalCommand =
+                serde_json::from_value(command.clone()).expect("the command decodes");
+            assert_eq!(
+                serde_json::to_value(&decoded).expect("it re-serializes"),
+                command,
+                "C6T.WIRE.THE_COMMAND_ROUND_TRIPS: {spelling}"
+            );
+        }
+        for forbidden in ["omit", "default", "policyDefault", "POLICY_DEFAULT", ""] {
+            assert!(
+                serde_json::from_value::<LocalCommand>(serde_json::json!({
+                    "name": "prepare_outcome_candidate",
+                    "mission_id": mission,
+                    "appendix_request": forbidden,
+                }))
+                .is_err(),
+                "C6T.WIRE.THE_APPENDIX_CHOICE_ADMITS_NOTHING_ELSE: {forbidden:?}"
+            );
+        }
+        for widened in ["manifest_digest", "candidate_artifact_digest", "evidence"] {
+            let mut command = serde_json::json!({
+                "name": "prepare_outcome_candidate",
+                "mission_id": mission,
+                "appendix_request": "include",
+            });
+            command[widened] = serde_json::Value::from("x");
+            assert!(
+                serde_json::from_value::<LocalCommand>(command).is_err(),
+                "C6T.WIRE.THE_REQUEST_ADMITS_NO_OWNER_INPUT: {widened}"
+            );
+        }
+        assert!(
+            serde_json::from_value::<LocalCommand>(serde_json::json!({
+                "name": "prepare_outcome_candidate",
+                "appendix_request": "include",
+            }))
+            .is_err(),
+            "C6T.WIRE.THE_MISSION_IS_REQUIRED"
+        );
+    }
+
+    /// Every account child, count for count: definite BEFORE the commit, never definite after it.
+    ///
+    /// This is a MAPPER witness, not a live interleaving. `serve_until` handles connections
+    /// sequentially (`:1368-1380`), so no second client can lock the session between
+    /// `prepare_for_mission` and the two re-reads; that race is reported NOT PROBED. What is proved
+    /// here is the projection: a retained post-read `Account` cause answers
+    /// `outcome_preparation_unavailable` for all eighteen children, and its cause survives in `Debug`.
+    #[test]
+    fn a_post_commit_account_refusal_is_never_definite() {
+        let before = account_rows();
+        let after = account_rows();
+        assert_eq!(
+            before.len(),
+            18,
+            "C6T.PHASE.THE_ACCOUNT_VOCABULARY_IS_EIGHTEEN"
+        );
+
+        for ((variant, pre_cause, markers), (_, post_cause, _)) in before.into_iter().zip(after) {
+            // Before the commit the account refusal keeps its own meaning -- the frontend's definite
+            // session copy is correct there.
+            let (code, retry) = account_expectation(variant);
+            assert_eq!(
+                envelope_of(LocalTransportError::OutcomePreparation(
+                    crate::PrepareRefusal::Account(pre_cause)
+                )),
+                expected_envelope(code, retry),
+                "C6T.PHASE.BEFORE_THE_COMMIT_AN_ACCOUNT_REFUSAL_IS_ITSELF: {variant}"
+            );
+
+            // After it, the same refusal says nothing definite: the candidate may already exist.
+            let fault = post_read_account(post_cause);
+            let line = LocalTransportError::OutcomePreparationAfterCommit(fault).to_string();
+            let debug = format!(
+                "{:?}",
+                LocalTransportError::OutcomePreparationAfterCommit(post_read_account(
+                    match variant {
+                        "AuthenticationThrottled" =>
+                            OperatorAccountError::AuthenticationThrottled {
+                                retry_after_ms: THROTTLE_MS,
+                            },
+                        "Store" => OperatorAccountError::Store(driver_error(NEEDLE_A)),
+                        _ => OperatorAccountError::NotAuthenticated,
+                    }
+                ))
+            );
+            assert!(
+                line.starts_with(
+                    "Outcome preparation failed after the candidate was written: Read.Account."
+                ),
+                "C6T.PHASE.THE_LINE_NAMES_THE_PHASE_AND_THE_CHILD: {variant}: {line}"
+            );
+            assert!(
+                debug.contains("Account"),
+                "C6T.PHASE.THE_CAUSE_SURVIVES_IN_DEBUG: {variant}"
+            );
+            for needle in markers {
+                assert!(
+                    !line.contains(needle),
+                    "C6T.PHASE.NO_PRIVATE_TEXT_REACHES_THE_LINE: {variant}"
+                );
+            }
+        }
+
+        // And the one code, asserted once more directly so the collapse is not only implied by the loop.
+        assert_eq!(
+            envelope_of(LocalTransportError::OutcomePreparationAfterCommit(
+                post_read_account(OperatorAccountError::NotAuthenticated)
+            )),
+            expected_envelope("outcome_preparation_unavailable", None),
+            "C6T.PHASE.NOT_AUTHENTICATED_AFTER_THE_COMMIT_IS_UNAVAILABLE"
+        );
+        // An identity mismatch takes the same code, and its three compared values stay in Debug.
+        let mismatch =
+            LocalTransportError::OutcomePreparationAfterCommit(PostPreparationFault::Identity {
+                field: "manifestDigest",
+                expected: payload_a(),
+                observed: payload_b(),
+            });
+        let line = mismatch.to_string();
+        assert_eq!(
+            envelope_of(LocalTransportError::OutcomePreparationAfterCommit(
+                PostPreparationFault::Identity {
+                    field: "manifestDigest",
+                    expected: payload_a(),
+                    observed: payload_b(),
+                }
+            )),
+            expected_envelope("outcome_preparation_unavailable", None),
+            "C6T.PHASE.AN_IDENTITY_MISMATCH_IS_UNAVAILABLE"
+        );
+        assert!(
+            !line.contains(NEEDLE_A) && !line.contains(NEEDLE_B),
+            "C6T.PHASE.THE_COMPARED_VALUES_STAY_OUT_OF_THE_LINE: {line}"
         );
     }
 
